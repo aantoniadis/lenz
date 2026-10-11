@@ -2,11 +2,13 @@
 pkgname=lenz-bin
 pkgver=0.0.1
 pkgrel=1
-pkgdesc="IntelliJ-grade side-by-side diff viewer, git client and merge tool"
+pkgdesc="Side-by-side diff viewer, Git client and merge tool with GUI and terminal frontends"
 arch=('x86_64' 'aarch64')
 url="https://github.com/aantoniadis/lenz"
 license=('MIT' 'Apache-2.0')
-depends=('git' 'glibc' 'gcc-libs' 'vulkan-icd-loader' 'libglvnd' 'wayland' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11')
+# vulkan-icd-loader: the GUI renders through Vulkan; wayland, libxcb and libxkbcommon are loaded at runtime for the display
+depends=('git' 'glibc' 'gcc-libs' 'vulkan-icd-loader' 'wayland' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11')
+optdepends=('github-cli: browse and review GitHub pull requests')
 provides=('lenz')
 conflicts=('lenz')
 options=('!debug' '!strip')
@@ -20,7 +22,8 @@ package() {
   install -Dm755 lenz "$pkgdir/usr/bin/lenz"
   install -Dm755 lenz-tui "$pkgdir/usr/bin/lenz-tui"
   install -Dm644 lenz.desktop "$pkgdir/usr/share/applications/lenz.desktop"
-  install -Dm644 lenz-icon.png "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/lenz.png"
+  # one 1024 px PNG: pixmaps is the size-independent location the icon lookup always searches
+  install -Dm644 lenz-icon.png "$pkgdir/usr/share/pixmaps/lenz.png"
   install -Dm644 README.md "$pkgdir/usr/share/doc/lenz/README.md"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/lenz/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/lenz/LICENSE-APACHE"
