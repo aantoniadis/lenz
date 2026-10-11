@@ -38,11 +38,11 @@ Run either with the arguments you'd give `git diff`, or give it two files or two
 
 ## Install
 
-Once releases are published (none yet):
+Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub Releases page](https://github.com/aantoniadis/lenz/releases); the current one is a beta.
 
 - **Homebrew** (macOS arm64, Linux): `brew install aantoniadis/lenz/lenz`, from the tap's formula (`packaging/homebrew/lenz.rb`).
-- **Arch Linux**: the AUR package `lenz-bin` (`packaging/aur/PKGBUILD`), e.g. `paru -S lenz-bin`.
-- **Tarball**: `lenz-<version>-<target>.tar.gz` from GitHub Releases holds `lenz`, `lenz-tui`, this README and the licences; put them on your `PATH`. On macOS the GUI is inside `Lenz.app` (so the Dock shows its icon) and `lenz` is a symlink into it: keep the two together, or link to `Lenz.app/Contents/MacOS/lenz`.
+- **Arch Linux**: the AUR package `lenz-bin` (`packaging/aur/PKGBUILD`, not published yet), e.g. `paru -S lenz-bin`.
+- **Tarball**: `lenz-<version>-<target>.tar.gz` from the [releases](https://github.com/aantoniadis/lenz/releases) holds `lenz`, `lenz-tui`, this README and the licences; put them on your `PATH`. On macOS the GUI is inside `Lenz.app` (so the Dock shows its icon) and `lenz` is a symlink into it: keep the two together, or link to `Lenz.app/Contents/MacOS/lenz`.
 - **From source**: `cargo install --locked --git https://github.com/aantoniadis/lenz lenz` (or `lenz-tui`); see [Build](#build) for the system libraries.
 
 Every package installs both `lenz` and `lenz-tui`. Linux binaries need glibc 2.35 or later.
