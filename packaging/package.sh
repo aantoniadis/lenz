@@ -12,6 +12,13 @@ if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z][0-9A-Za-z.+-]*)?$ ]]
 fi
 target=$(rustc -vV | sed -n 's/^host: //p')
 test -n "$target"
+# A failed build must not leave an older tarball looking like this one.
+rm -f "target/package/lenz-$version-$target.tar.gz" "target/package/lenz-$version-$target.tar.gz.sha256"
+# gpui compiles Metal shaders; the Command Line Tools have no `metal`, so fall back to an installed Xcode (as ci-local.sh).
+if [[ $(uname) == Darwin && -z ${DEVELOPER_DIR:-} ]] && ! xcrun -find metal > /dev/null 2>&1 \
+        && [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
+    export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+fi
 artifact_json=$(mktemp)
 trap 'rm -f "$artifact_json"' EXIT
 # Packaging is host-only; Cargo's reported path also respects CARGO_TARGET_DIR. Each package builds on its own so
