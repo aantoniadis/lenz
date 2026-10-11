@@ -45,7 +45,7 @@ Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub 
 - **Tarball**: `lenz-<version>-<target>.tar.gz` from the [releases](https://github.com/aantoniadis/lenz/releases) holds `lenz`, `lenz-tui`, this README and the licences; put them on your `PATH`. On macOS the GUI is inside `Lenz.app` (so the Dock shows its icon) and `lenz` is a symlink into it: keep the two together, or link to `Lenz.app/Contents/MacOS/lenz`.
 - **From source**: `cargo install --locked --git https://github.com/aantoniadis/lenz lenz` (or `lenz-tui`); see [Build](#build) for the system libraries.
 
-Every package installs both `lenz` and `lenz-tui`. Linux binaries need glibc 2.35 or later.
+Every package installs both `lenz` and `lenz-tui`. Linux binaries need glibc 2.35 or later; the GUI also loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime (Debian/Ubuntu: `libxkbcommon-x11-0 libxcb1 libvulkan1`), which desktop installations already have.
 
 Linux tarballs include the logo and `lenz.desktop`; the AUR and Linux Homebrew packages install them. The launcher opens the repository chooser described below.
 

@@ -1,7 +1,7 @@
 # Homebrew formula for a tap (e.g. a `homebrew-lenz` repository): `brew install <owner>/lenz/lenz`.
 # packaging/bump.sh fills in the version and checksums from a release.
 class Lenz < Formula
-  desc "IntelliJ-grade side-by-side diff viewer, git client and merge tool"
+  desc "Side-by-side diff viewer, Git client and merge tool with GUI and terminal frontends"
   homepage "https://github.com/aantoniadis/lenz"
   version "0.0.1"
   license all_of: ["MIT", "Apache-2.0"]
@@ -38,7 +38,18 @@ class Lenz < Formula
     doc.install "README.md"
     if OS.linux?
       (share/"applications").install "lenz.desktop"
-      (share/"icons/hicolor/1024x1024/apps").install "lenz-icon.png" => "lenz.png"
+      # one 1024 px PNG: pixmaps is the size-independent location the icon lookup always searches
+      (share/"pixmaps").install "lenz-icon.png" => "lenz.png"
+    end
+  end
+
+  def caveats
+    on_linux do
+      <<~EOS
+        The GUI loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime
+        (Debian/Ubuntu: libxkbcommon-x11-0 libxcb1 libvulkan1; Fedora: libxkbcommon-x11 libxcb vulkan-loader).
+        Desktop installations have them; a minimal server image may not. lenz-tui needs none of them.
+      EOS
     end
   end
 
