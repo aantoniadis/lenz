@@ -46,8 +46,17 @@ if not binary.is_file():
 print(binary)
 PY
 }
+# Rust compiles source paths into panic locations: map the checkout and Cargo's home to fixed prefixes so no
+# builder's home directory (and user name) ships in the binaries.
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/lenz --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
 gui=$(build lenz)
 tui=$(build lenz-tui)
+for binary in "$gui" "$tui"; do
+    if grep -qaF "$HOME/" "$binary"; then
+        echo "$binary still contains $HOME/; nothing packaged" >&2
+        exit 1
+    fi
+done
 name="lenz-$version-$target"
 out=target/package
 rm -rf "$out/$name"
@@ -84,7 +93,13 @@ cp README.md LICENSE-MIT "$out/$name/"
 cp crates/engine/LICENSE "$out/$name/LICENSE-APACHE"
 cp crates/engine/NOTICE "$out/$name/NOTICE"
 cp packaging/lenz.desktop assets/lenz-icon.png "$out/$name/"
-tar -C "$out" -czf "$out/$name.tar.gz" "$name"
+# Files owned by root, without the builder's user or (on macOS) extended attributes and ._ files.
+if tar --version 2>/dev/null | grep -q bsdtar; then
+    COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname wheel --no-xattrs --no-mac-metadata \
+        -C "$out" -czf "$out/$name.tar.gz" "$name"
+else
+    tar --owner=0 --group=0 --numeric-owner -C "$out" -czf "$out/$name.tar.gz" "$name"
+fi
 # macOS ships shasum; sha256sum only on recent releases.
 (cd "$out" && if command -v sha256sum >/dev/null; then sha256sum "$name.tar.gz"; else shasum -a 256 "$name.tar.gz"; fi > "$name.tar.gz.sha256")
 echo "$out/$name.tar.gz"

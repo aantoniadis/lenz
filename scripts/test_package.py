@@ -67,6 +67,23 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         for args in calls:
             self.assertEqual(args[args.index('--target') + 1], 'x86_64-test-linux-gnu')
 
+    def test_archives_hide_the_builder_and_binaries_with_their_home_are_refused(self):
+        result = self.package()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        with tarfile.open(self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz') as archive:
+            self.assertTrue(all(m.uid == 0 and m.gid == 0 for m in archive.getmembers()), 'files owned by root')
+            self.assertFalse([n for n in archive.getnames() if '/._' in n])
+        calls = json.loads((self.root / 'calls.json').read_text())
+        self.assertTrue(calls, 'cargo ran')
+        # a binary that still names the builder's home (an unmapped source path) is not packaged
+        self.env['HOME'] = str(self.root / 'home')
+        self.fake('cargo', (self.tools / 'cargo').read_text().split('\n', 1)[1].replace(
+            "b'fresh ' + name.encode()", "('fresh ' + os.environ['HOME'] + '/src/lib.rs').encode()"))
+        result = self.package()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('nothing packaged', result.stderr)
+        self.assertFalse((self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz').exists())
+
     def test_linux_package_has_no_app_bundle(self):
         result = self.package()
         self.assertEqual(result.returncode, 0, result.stderr)
