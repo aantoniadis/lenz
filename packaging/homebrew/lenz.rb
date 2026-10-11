@@ -3,24 +3,24 @@
 class Lenz < Formula
   desc "IntelliJ-grade side-by-side diff viewer, git client and merge tool"
   homepage "https://github.com/aantoniadis/lenz"
-  version "0.0.0"
+  version "0.0.1"
   license all_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "MISSING-aarch64-apple-darwin"
+      sha256 "694f264c9c42b3ed50ed8476a9dc9bafe6b57254fd7890594d676ca4543bd907"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "MISSING-x86_64-unknown-linux-gnu"
+      sha256 "3c30465acfb931c504947695f5090aa45dc68a69d0a4e42bcabd527e4891d7c3"
     end
     on_arm do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "MISSING-aarch64-unknown-linux-gnu"
+      sha256 "492fb85ec187d27631ee77f8b7b5652b36d170d1a497e143a7047690106c03a6"
     end
   end
 

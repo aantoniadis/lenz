@@ -1,6 +1,6 @@
 # AUR package `lenz-bin`: the prebuilt release tarball. packaging/bump.sh fills in pkgver and the checksums.
 pkgname=lenz-bin
-pkgver=0.0.0
+pkgver=0.0.1
 pkgrel=1
 pkgdesc="IntelliJ-grade side-by-side diff viewer, git client and merge tool"
 arch=('x86_64' 'aarch64')
@@ -12,8 +12,8 @@ conflicts=('lenz')
 options=('!debug' '!strip')
 source_x86_64=("$url/releases/download/v$pkgver/lenz-$pkgver-x86_64-unknown-linux-gnu.tar.gz")
 source_aarch64=("$url/releases/download/v$pkgver/lenz-$pkgver-aarch64-unknown-linux-gnu.tar.gz")
-sha256sums_x86_64=('MISSING-x86_64-unknown-linux-gnu')
-sha256sums_aarch64=('MISSING-aarch64-unknown-linux-gnu')
+sha256sums_x86_64=('3c30465acfb931c504947695f5090aa45dc68a69d0a4e42bcabd527e4891d7c3')
+sha256sums_aarch64=('492fb85ec187d27631ee77f8b7b5652b36d170d1a497e143a7047690106c03a6')
 
 package() {
   cd "lenz-$pkgver-$CARCH-unknown-linux-gnu"
