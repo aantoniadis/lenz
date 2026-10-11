@@ -37,6 +37,7 @@ class PackageTests(unittest.TestCase):
         self.fake('cargo', '''import json, os, pathlib, sys
 calls = pathlib.Path(os.environ['LENZ_TEST_CALLS'])
 calls.write_text(json.dumps((json.loads(calls.read_text()) if calls.exists() else []) + [sys.argv[1:]]))
+pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('flags.json').write_text(json.dumps({k: os.environ.get(k) for k in ('RUSTFLAGS', 'CFLAGS', 'CXXFLAGS')}))
 name = sys.argv[sys.argv.index('-p') + 1]
 artifact = pathlib.Path(os.environ['LENZ_TEST_ARTIFACT']).with_name(name)
 artifact.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +83,13 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         result = self.package()
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('nothing packaged', result.stderr)
+        self.assertIn(str(self.root / 'home/src/lib.rs'), result.stderr, 'the offending path is named')
+        # both compilers were told to map the checkout and Cargo's home
+        flags = json.loads((self.root / 'flags.json').read_text())
+        self.assertIn(f'--remap-path-prefix={self.root.resolve()}=/lenz', flags['RUSTFLAGS'])
+        self.assertIn('=/cargo', flags['RUSTFLAGS'])
+        for var in ('CFLAGS', 'CXXFLAGS'):
+            self.assertIn(f'-ffile-prefix-map={self.root.resolve()}=/lenz', flags[var])
         self.assertFalse((self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz').exists())
 
     def test_linux_package_has_no_app_bundle(self):

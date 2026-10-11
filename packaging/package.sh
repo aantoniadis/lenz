@@ -46,14 +46,21 @@ if not binary.is_file():
 print(binary)
 PY
 }
-# Rust compiles source paths into panic locations: map the checkout and Cargo's home to fixed prefixes so no
-# builder's home directory (and user name) ships in the binaries.
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$PWD=/lenz --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+# Source paths end up in the binaries: Rust's panic locations, and C's __FILE__ in the assert messages of
+# tree-sitter and its grammars. Map the checkout and Cargo's home to fixed prefixes in both compilers, so no
+# builder's home directory (and user name) ships. Both flag variables split on whitespace.
+checkout=$(pwd -P)
+cargo_home=${CARGO_HOME:-$HOME/.cargo}
+case "$checkout$cargo_home" in *[[:space:]]*) echo "build paths must not contain whitespace: $checkout, $cargo_home" >&2; exit 1;; esac
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$checkout=/lenz --remap-path-prefix=$cargo_home=/cargo"
+cmap="-ffile-prefix-map=$checkout=/lenz -ffile-prefix-map=$cargo_home=/cargo"
+export CFLAGS="${CFLAGS:+$CFLAGS }$cmap" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$cmap"
 gui=$(build lenz)
 tui=$(build lenz-tui)
 for binary in "$gui" "$tui"; do
     if grep -qaF "$HOME/" "$binary"; then
-        echo "$binary still contains $HOME/; nothing packaged" >&2
+        echo "$binary still contains $HOME/; nothing packaged:" >&2
+        strings -n 8 "$binary" 2>/dev/null | sed -n "s|.*\($HOME/[^\"' ]*\).*|\1|p" | sort | uniq -c | sort -rn | head -10 >&2 || true
         exit 1
     fi
 done

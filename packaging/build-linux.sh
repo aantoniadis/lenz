@@ -26,11 +26,13 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 ENV PATH=/root/.cargo/bin:$PATH
 EOF
-    # Separate target and registry caches per architecture; the source tree is mounted, not copied.
+    # Separate target and registry caches per architecture; the source tree is mounted, not copied. The builder's
+    # home is a distinct path (package.sh refuses binaries that name it; "/root" is also the tail of D-Bus paths).
     "$engine" run --rm --platform "linux/$arch" \
         -v "$PWD:/src" -w /src \
         -v "lenz-cargo-$arch:/root/.cargo/registry" \
         -e CARGO_TARGET_DIR="/src/target/container-$arch" \
-        "$image" bash -c 'git config --global --add safe.directory /src && packaging/package.sh "$0"' "$version"
+        -e HOME=/home/builder -e RUSTUP_HOME=/root/.rustup -e CARGO_HOME=/root/.cargo \
+        "$image" bash -c 'mkdir -p "$HOME" && git config --global --add safe.directory /src && packaging/package.sh "$0"' "$version"
 done
 ls -l target/package/*.tar.gz
