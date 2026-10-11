@@ -1,0 +1,28 @@
+# AUR package `lenz-bin`: the prebuilt release tarball. packaging/bump.sh fills in pkgver and the checksums.
+pkgname=lenz-bin
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="IntelliJ-grade side-by-side diff viewer, git client and merge tool"
+arch=('x86_64' 'aarch64')
+url="https://github.com/aantoniadis/lenz"
+license=('MIT' 'Apache-2.0')
+depends=('git' 'glibc' 'gcc-libs' 'vulkan-icd-loader' 'libglvnd' 'wayland' 'libxcb' 'libxkbcommon' 'libxkbcommon-x11')
+provides=('lenz')
+conflicts=('lenz')
+options=('!debug' '!strip')
+source_x86_64=("$url/releases/download/v$pkgver/lenz-$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$url/releases/download/v$pkgver/lenz-$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('MISSING-x86_64-unknown-linux-gnu')
+sha256sums_aarch64=('MISSING-aarch64-unknown-linux-gnu')
+
+package() {
+  cd "lenz-$pkgver-$CARCH-unknown-linux-gnu"
+  install -Dm755 lenz "$pkgdir/usr/bin/lenz"
+  install -Dm755 lenz-tui "$pkgdir/usr/bin/lenz-tui"
+  install -Dm644 lenz.desktop "$pkgdir/usr/share/applications/lenz.desktop"
+  install -Dm644 lenz-icon.png "$pkgdir/usr/share/icons/hicolor/1024x1024/apps/lenz.png"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/lenz/README.md"
+  install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/lenz/LICENSE-MIT"
+  install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/lenz/LICENSE-APACHE"
+  install -Dm644 NOTICE "$pkgdir/usr/share/licenses/lenz/NOTICE"
+}

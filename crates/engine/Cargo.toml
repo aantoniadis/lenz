@@ -1,0 +1,20 @@
+[package]
+name = "lenz-engine"
+description = "IntelliJ-grade text comparison for Lenz"
+license = "Apache-2.0"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+gix-imara-diff.workspace = true
+
+[dev-dependencies]
+insta = "1.48.0"
+
+[[bench]]
+name = "engine"
+harness = false
+
+[lints]
+workspace = true

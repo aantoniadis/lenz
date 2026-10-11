@@ -1,0 +1,38 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L42..48 R42..43
+-        let[- mut-] two = seed as u32;
+-[-
+-        if two == 0 {
+-            // This value cannot be zero
+-            two = 1;
+-        }-]
++        let two = seed as u32;
+@@ L53..54 R48..53
+-        Self { s, r }
++{+        if s == 0 && r == 0 {
++    +}        Self { s{+: 0+}, r{+: 1 }
++        } else {
++            Self { s, r }
++       +} }
+@@ L97..97 R96..115
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn non_zero_seed_from_u64() {
++        let seed = RngSeed::from_u64(0);
++        assert_eq!(seed.s, 0);
++        assert_eq!(seed.r, 1);
++    }
++
++    #[test]
++    fn non_zero_seed_from_pair() {
++        let seed = RngSeed::from_pair(0, 0);
++        assert_eq!(seed.s, 0);
++        assert_eq!(seed.r, 1);
++    }
++}

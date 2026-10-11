@@ -1,0 +1,39 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L13..15 R13..15
+-    let from = from.as_ref()[-.to_owned()-];
+-    let to = to.as_ref()[-.to_owned()-];
++    let from = from.as_ref();
++    let to = to.as_ref();
+@@ L16..16 R16..45
++    #[cfg(all(
++        tokio_unstable,
++        feature = "io-uring",
++        feature = "rt",
++        feature = "fs",
++        target_os = "linux",
++    ))]
++    {
++        use crate::io::uring::rename::Rename;
++        use crate::runtime::driver::op::Op;
++
++        let handle = crate::runtime::Handle::current();
++        let driver_handle = handle.inner.driver().io();
++
++        type RenameOp = Op<Rename>;
++
++        if driver_handle
++            .check_and_init(io_uring::opcode::RenameAt::CODE)
++            .await?
++        {
++            return RenameOp::rename(from, to)?.await;
++        }
++    }
++
++    rename_blocking(from, to).await
++}
++
++async fn rename_blocking(from: &Path, to: &Path) -> io::Result<()> {
++    let [from, to] = [from, to].map(Path::to_owned);

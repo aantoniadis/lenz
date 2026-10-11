@@ -1,0 +1,16 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L22..23 R22..23
+-/// A [-pairse-] of sparse sets.
++/// A {+pair+} of sparse sets.
+@@ L88..89 R88..89
+-/// reuse sparse sets, so the initial allocation cost is [-bareable-]. However, its
++/// reuse sparse sets, so the initial allocation cost is {+bearable+}. However, its
+@@ L132..133 R132..133
+-            "sparse set capacity cannot [-excced-] {:?}",
++            "sparse set capacity cannot {+exceed+} {:?}",
+@@ L237..238 R237..238
+-        self.0.next().[-map(|&id| id-])
++        self.0.next().{+copied(+})

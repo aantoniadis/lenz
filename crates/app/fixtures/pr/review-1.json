@@ -1,0 +1,151 @@
+{
+  "data": {
+    "repository": {
+      "pullRequest": {
+        "files": {
+          "pageInfo": {
+            "hasNextPage": true,
+            "endCursor": "Y3Vyc29yOjI="
+          },
+          "nodes": [
+            {
+              "path": "pkg/cmd/foo/foo.go",
+              "viewerViewedState": "VIEWED"
+            },
+            {
+              "path": "pkg/cmd/foo/foo_test.go",
+              "viewerViewedState": "DISMISSED"
+            }
+          ]
+        },
+        "reviewThreads": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": "Y3Vyc29yOnYyOpK0MjAyNi0wOS0zMA=="
+          },
+          "nodes": [
+            {
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "pkg/cmd/foo/foo.go",
+              "diffSide": "RIGHT",
+              "line": 42,
+              "startLine": 40,
+              "originalLine": 42,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "williammartin"
+                    },
+                    "body": "Could this reuse `cmdutil.AddJSONFlags`?",
+                    "createdAt": "2026-09-29T10:15:00Z"
+                  },
+                  {
+                    "author": {
+                      "login": "iulia-b"
+                    },
+                    "body": "Good call, done.",
+                    "createdAt": "2026-09-29T11:02:30Z"
+                  }
+                ],
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                }
+              },
+              "id": "thread-0"
+            },
+            {
+              "isResolved": true,
+              "isOutdated": false,
+              "path": "pkg/cmd/foo/foo.go",
+              "diffSide": "LEFT",
+              "line": 10,
+              "startLine": 10,
+              "originalLine": 10,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": null,
+                    "body": "Why was this removed?",
+                    "createdAt": "2026-09-28T09:00:00Z"
+                  }
+                ],
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                }
+              },
+              "id": "thread-1"
+            },
+            {
+              "isResolved": false,
+              "isOutdated": true,
+              "path": "pkg/cmd/foo/foo.go",
+              "diffSide": "RIGHT",
+              "line": null,
+              "startLine": null,
+              "originalLine": 17,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "andyfeller"
+                    },
+                    "body": "nit: typo in the help text",
+                    "createdAt": "2026-09-27T16:20:00Z"
+                  }
+                ],
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                }
+              },
+              "id": "thread-2"
+            },
+            {
+              "isResolved": false,
+              "isOutdated": false,
+              "path": "docs/README.md",
+              "diffSide": "RIGHT",
+              "line": null,
+              "startLine": null,
+              "originalLine": null,
+              "comments": {
+                "nodes": [
+                  {
+                    "author": {
+                      "login": "andyfeller"
+                    },
+                    "body": "Should this file be in the PR at all?",
+                    "createdAt": "2026-09-27T16:25:00Z"
+                  }
+                ],
+                "pageInfo": {
+                  "hasNextPage": false,
+                  "endCursor": null
+                }
+              },
+              "id": "thread-3"
+            }
+          ]
+        },
+        "comments": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        },
+        "reviews": {
+          "pageInfo": {
+            "hasNextPage": false,
+            "endCursor": null
+          },
+          "nodes": []
+        }
+      }
+    }
+  }
+}

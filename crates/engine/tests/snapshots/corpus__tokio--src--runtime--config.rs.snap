@@ -1,0 +1,19 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L37..38 R37..39
+-    /// especially message passing between tasks.
++    /// especially message passing between tasks.{+ However, this LIFO slot is not
++    /// currently stealable.+}
+@@ L39..44 R40..42
+-    /// [-In Tokio versions before 1.51, tasks in-] the LIFO slot [-could not be
+-    /// stolen, which could cause issues in applications with long poll times.
+-    /// As-] a stop-gap, this unstable option lets users disable the LIFO task.
+-[-    /// Now that the LIFO slot is stealable, we may remove this option in a
+-    /// future version.-]
++    /// {+Eventually,+} the LIFO slot {+**will** become stealable, however as+} a{+
++    ///+} stop-gap, this unstable option lets users disable the LIFO task.
+@@ L53..53 R51..54
++    /// How to build schedule latency histograms
++    pub(crate) metrics_schedule_latency_histogram: Option<crate::runtime::HistogramBuilder>,

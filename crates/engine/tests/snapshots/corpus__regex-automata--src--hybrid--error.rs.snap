@@ -1,0 +1,13 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L83..86 R83..85
+-                    "given cache capacity ({}) is smaller than \
+-                     minimum required ({[-})",
+-                    given, -]minimum,
++                    "given cache capacity ({{+given+}}) is smaller than \
++                     minimum required ({minimum{+})"+},
+@@ L92..93 R91..92
+-                write!(f, "unsupported regex feature for DFAs: {[-}", -]msg)
++                write!(f, "unsupported regex feature for DFAs: {msg{+}"+})

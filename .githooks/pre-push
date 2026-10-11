@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Local CI before every push (enable once per clone: git config core.hooksPath .githooks). Skip: git push --no-verify.
+exec "$(git rev-parse --show-toplevel)/scripts/ci-local.sh"

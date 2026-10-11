@@ -1,0 +1,28 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L3..4 R3..3
+-// No `socket` on miri.
+@@ L10..11 R9..9
+-    not(miri)
+@@ L20..20 R18..20
++    const BYTES: &[u8] = b"foo bar baz";
++    #[cfg(not(miri))]
+@@ L21..21 R21..23
++    #[cfg(miri)] // Use a lower iteration count with Miri because it's too slow otherwise.
++    const ITER: usize = 32;
+@@ L27..28 R29..29
+-    let msg = "foo bar baz";
+@@ L33..34 R34..35
+-            assert_ok!(stream.write_all([-msg.as_bytes()-]).await);
++            assert_ok!(stream.write_all({+BYTES+}).await);
+@@ L36..37 R37..38
+-            let mut buf = [0; [-11-]];
++            let mut buf = [0; {+BYTES.len()+}];
+@@ L38..39 R39..40
+-            assert_eq!(&buf[..], [-msg.as_bytes()-]);
++            assert_eq!(&buf[..], {+BYTES+});
+@@ L48..49 R49..50
+-    assert_eq!(n, (ITER * [-msg-].len()) as u64);
++    assert_eq!(n, (ITER * {+BYTES+}.len()) as u64);

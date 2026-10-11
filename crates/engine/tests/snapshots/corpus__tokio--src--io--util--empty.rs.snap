@@ -1,0 +1,25 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L74..75 R74..75
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L83..84 R83..84
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L99..100 R99..100
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L106..107 R106..107
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L113..114 R113..114
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L129..130 R129..130
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());
+@@ L144..145 R144..145
+-        ready!(crate::trace::trace_leaf([-cx-]));
++        ready!(crate::trace::trace_leaf());

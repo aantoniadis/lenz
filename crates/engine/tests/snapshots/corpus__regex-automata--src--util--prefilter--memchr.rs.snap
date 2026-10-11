@@ -1,0 +1,16 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L32..32 R32..36
++    fn name(&self) -> &'static str {
++        "memchr"
++    }
+@@ L93..93 R97..101
++    fn name(&self) -> &'static str {
++        "memchr2"
++    }
+@@ L155..155 R163..167
++    fn name(&self) -> &'static str {
++        "memchr3"
++    }

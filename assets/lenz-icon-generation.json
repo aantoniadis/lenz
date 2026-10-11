@@ -1,0 +1,37 @@
+{
+  "generator": "built-in image_gen",
+  "use_case": "logo-brand",
+  "prompt": "Use case: logo-brand. Asset type: a finished macOS application icon for Lenz, a native side-by-side code comparison and merge tool.\nCreate one original, beautifully restrained icon. A front-facing dark graphite rounded-square tile holds a bold central symbol inspired by two comparison panes and the curved connector between changed blocks. The symbol is formed from two substantial, slightly staggered vertical panels joined by one broad, elegant flowing band across the center. Clear negative space separates the upper and lower portions: a memorable architectural silhouette, not a miniature screenshot. Use the app's existing cool blue and green diff-highlight family: luminous ice-blue on one panel, clear sea-green on the other, with a subtle transition through the connecting band. Keep the design simple enough to recognize at small Dock and toolbar sizes.\nStyle: premium native Mac utility, precise geometry, softly rounded edges, restrained dimensional depth, satin surfaces and subtle light from above. The colored symbol feels like a single carefully crafted object. No busy glass reflections, no neon glow, no extra ornamental layers. Balanced optical centering and generous breathing room. Square 1024-by-1024 composition, tile occupies about 88% of the canvas, equal outer padding. Genuine transparent background outside the tile, clean alpha edges, no surrounding scene. No text, letters, numbers, code, window controls, magnifying glass, camera, arrows, watermark, presentation sheet, or additional icons.",
+  "source_image": "lenz-icon-source.png",
+  "app_icon_png": "lenz-icon.png",
+  "macos_icon": "lenz.icns",
+  "exports": "Original image preserved. macOS sips used only for icon-size resampling; iconutil packaged 16/32/128/256/512-point normal and Retina representations. Transparency preserved.",
+  "about_exports": {
+    "script": "scripts/export-about-assets.py",
+    "source": "lenz-icon.png",
+    "resampling": "Pillow LANCZOS",
+    "pillow_version": "12.3.0",
+    "gui": {
+      "file": "lenz-about.png",
+      "size": [
+        96,
+        96
+      ],
+      "format": "PNG RGBA"
+    },
+    "terminal": {
+      "file": "lenz-about-terminal.rgba",
+      "size": [
+        24,
+        24
+      ],
+      "format": "raw RGBA, row-major; two pixels per terminal half-block cell"
+    },
+    "sha256": {
+      "lenz-icon.png": "1bba6a54bc6d7e68fe3631a27ffcc25cd0db88df35bed897b4f54eb832d5383b",
+      "lenz-about.png": "3cce6faa35f4dd7b9b12486fbc41c0d7a99857b52c33bc4d2a22a4e4f3eebe89",
+      "lenz-about-terminal.rgba": "ed7e85c67f8ea72c0a55d8da7c004a20c7111bd1eb653caa9f87efabba7ee517"
+    },
+    "runtime": "GUI decodes its small PNG only when About opens; TUI uses exported bytes without an image decoder."
+  }
+}

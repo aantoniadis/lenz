@@ -1,0 +1,20 @@
+[
+  {
+    "author": {"id": "MDQ6VXNlcjU4MjE0NjI=", "is_bot": false, "login": "iulia-b", "name": "Iulia B"},
+    "baseRefName": "trunk",
+    "headRefName": "feature/json-output",
+    "isDraft": false,
+    "number": 14130,
+    "title": "Add JSON output to gh foo",
+    "updatedAt": "2026-09-30T14:02:11Z"
+  },
+  {
+    "author": {"id": "BOT_kgDOBp3Fqw", "is_bot": true, "login": "app/dependabot", "name": ""},
+    "baseRefName": "trunk",
+    "headRefName": "dependabot/go_modules/golang.org/x/net-0.45.0",
+    "isDraft": true,
+    "number": 14127,
+    "title": "chore(deps): bump golang.org/x/net from 0.44.0 to 0.45.0",
+    "updatedAt": "2026-09-29T08:41:57Z"
+  }
+]

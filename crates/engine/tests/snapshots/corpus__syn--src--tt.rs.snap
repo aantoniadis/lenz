@@ -1,0 +1,62 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L1..3 R1..4
+-use [-proc_macro2::{Delimiter, TokenStream, TokenTree}-];
+-use [-std-]::hash::{Hash, Hasher};
++use {+alloc::string::ToString+};
++use {+core+}::hash::{Hash, Hasher};
++{+use proc_macro2::{Delimiter, Spacing, TokenStream, TokenTree};+}
+@@ L8..10 R9..9
+-        use proc_macro2::Spacing;
+@@ L20..33 R19..20
+-                [-let s1 = -]g1.stream()[-.into_iter();
+-                let mut s2 = -]g2.stream()[-.into_iter();
+-
+-                for item1 in s1 {
+-                    let item2 = match s2.next() {
+-                        Some(item) => item,
+-                        None => return false,
+-                    };
+-                    if TokenTreeHelper(&item1) != TokenTreeHelper(&item2) {
+-                        return false;
+-                    }
+-                }
+-                s2.next().is_none(-])
++                {+TokenStreamHelper(&+}g1.stream(){+) == TokenStreamHelper(&+}g2.stream())
+@@ L50..52 R37..37
+-        use proc_macro2::Spacing;
+@@ L65..66 R50..51
+-                [-0xffu8-].hash(h); // terminator w/ a variant we don't normally hash
++                {+0xFFu8+}.hash(h); // terminator w/ a variant we don't normally hash
+@@ L85..92 R70..79
+-        let left = self.0.clone().into_iter()[-.collect::<Vec<_>>()-];
+-        let right = other.0.clone().into_iter()[-.collect::<Vec<_>>()-];
+-[-        if-] left[-.len() !=-] right.[-len-]() {
+-            return false[-;-]
+-        }
+-[-        for (a, b) in left.into_iter().zip(right) {
+--]            if TokenTreeHelper(&[-a-]) != TokenTreeHelper(&[-b-]) {
++        let left = self.0.clone().into_iter();
++        let{+ mut+} right = other.0.clone().into_iter();
++{+
++        for item1 in+} left{+ {
++            let item2 = match+} right.{+next+}() {
++           {+     Some(item) => item,
++                None =>+} return false{+,+}
++{+    +}        }{+;+}
++            if TokenTreeHelper(&{+item1+}) != TokenTreeHelper(&{+item2+}) {
+@@ L95..96 R82..84
+-[-        true-]
++{+
++        right.next().is_none()+}
+@@ L101..104 R89..94
+-        let [-tts-] = self.0.clone().into_iter()[-.collect::<Vec<_>>();-]
+-        [-tts.len-]().hash(state);
+-        for tt in [-tts-] {
++        let {+tokens+} = self.0.clone().into_iter(){+;
+++}
++        {+tokens.clone().count+}().hash(state);
++{+
+++}        for tt in {+tokens+} {

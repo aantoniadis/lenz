@@ -1,0 +1,38 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L1..6 R1..1
+-use proc_macro2::{Ident, Span};
+-use std::cmp::Ordering;
+-use std::fmt::{self, Display};
+-use std::hash::{Hash, Hasher};
+@@ L8..8 R3..7
++use core::cmp::Ordering;
++use core::fmt::{self, Display};
++use core::hash::{Hash, Hasher};
++use proc_macro2::{Ident, Span};
+@@ L126..128 R125..128
+-    use [-super::*-];
+-    use crate::parse::{Parse, ParseStream[-, Result-]};
++    use {+crate::error::Result;
++    use crate::lifetime::Lifetime+};
++    use crate::parse::{Parse, ParseStream};
+@@ L129..130 R129..130
+-    #[cfg_attr([-doc_cfg-], doc(cfg(feature = "parsing")))]
++    #[cfg_attr({+docsrs+}, doc(cfg(feature = "parsing")))]
+@@ L143..144 R143..145
+-    use [-super::*-];
++    use {+crate::ext::PunctExt as _;
++    use crate::lifetime::Lifetime+};
+@@ L145..146 R146..147
+-    use quote::{ToTokens, TokenStreamExt};
++    use quote::{ToTokens, TokenStreamExt{+ as _+}};
+@@ L147..148 R148..149
+-    #[cfg_attr([-doc_cfg-], doc(cfg(feature = "printing")))]
++    #[cfg_attr({+docsrs+}, doc(cfg(feature = "printing")))]
+@@ L150..153 R151..152
+-            [-let mut apostrophe = -]Punct::[-new-]('\'', Spacing::Joint[-);
+-            apostrophe.set_span(-]self.apostrophe);
+-[-            tokens.append(apostrophe);-]
++            {+tokens.append(+}Punct::{+new_spanned+}('\'', Spacing::Joint{+, +}self.apostrophe){+)+};

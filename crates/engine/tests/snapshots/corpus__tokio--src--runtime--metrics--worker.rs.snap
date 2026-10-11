@@ -1,0 +1,17 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L68..68 R68..72
++
++    #[cfg(feature = "schedule-latency")]
++    /// If `Some`, tracks the number of times tasks were scheduled by duration range.
++    pub(super) schedule_latency_histogram: Option<Histogram>,
+@@ L96..96 R100..108
++                #[cfg(feature = "schedule-latency")]
++                {
++                    worker_metrics.schedule_latency_histogram = config
++                        .metrics_schedule_latency_histogram
++                        .as_ref()
++                        .map(|histogram_builder| histogram_builder.build());
++                }

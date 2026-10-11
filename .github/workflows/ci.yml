@@ -1,0 +1,71 @@
+name: CI
+
+# Not run on push: the account has no Actions minutes. Run `scripts/ci-local.sh` (the pre-push hook does).
+# Kept for a manual run from the Actions tab if minutes become available.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies (gpui)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+            libx11-xcb-dev libvulkan1 libglib2.0-dev libzstd-dev
+
+      - name: Metal toolchain (gpui compiles shaders at build time)
+        if: runner.os == 'macOS'
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Panic-prone sites stay at or below the baseline
+        if: runner.os == 'Linux'
+        run: python3 scripts/panic-sites.py
+      - run: cargo test --workspace --locked
+      - run: cargo build --release --locked -p lenz
+
+      - name: Stripped release binary ≤ 80 MB (80,000,000 bytes)
+        shell: bash
+        run: |
+          strip -o lenz-stripped target/release/lenz
+          size=$(wc -c < lenz-stripped)
+          echo "stripped lenz: $size bytes"
+          test "$size" -le 80000000
+
+  # The oldest git Lenz supports: Debian bullseye ships git 2.30.2.
+  git-2-30:
+    runs-on: ubuntu-24.04
+    container: debian:bullseye
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: git 2.30 and gpui build dependencies
+        run: |
+          # bullseye is past end of life; use the image's own pinned snapshot of the archive.
+          sed -i -e 's|^deb |# deb |' -e 's|^# deb http://snapshot|deb http://snapshot|' /etc/apt/sources.list
+          apt-get -o Acquire::Check-Valid-Until=false update
+          apt-get install -y git curl build-essential pkg-config libxkbcommon-x11-dev libwayland-dev \
+            libfontconfig-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libzstd-dev
+          git --version | grep -F 'git version 2.30.'
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test -p lenz --locked

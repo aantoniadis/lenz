@@ -1,0 +1,13 @@
+lenz-engine
+Copyright 2026 the Lenz contributors
+
+This crate contains code ported from IntelliJ IDEA Community Edition
+(package com.intellij.diff.comparison, including the three-way merge
+classes ComparisonMergeUtil and MergeResolveUtil; MergeRangeUtil and
+MergeRange from com.intellij.diff.util; DiffUtil.compareThreesideInner),
+developed by JetBrains s.r.o. and licensed under the Apache License,
+Version 2.0.
+Copyright 2000-2026 JetBrains s.r.o. and contributors.
+https://github.com/JetBrains/intellij-community
+
+Ported files are marked as modified from the original.

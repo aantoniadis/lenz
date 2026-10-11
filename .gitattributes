@@ -1,0 +1,6 @@
+# Raw command logs, terminal cells and patch snapshots preserve whitespace exactly.
+docs/user-flow-audit-2026-10-06/**/*.log -whitespace
+docs/user-flow-audit-2026-10-06/**/*.txt -whitespace
+docs/user-flow-followup-2026-10-06/**/*.log -whitespace
+docs/user-flow-followup-2026-10-06/**/*.txt -whitespace
+docs/user-flow-followup-2026-10-06/**/*.diff -whitespace

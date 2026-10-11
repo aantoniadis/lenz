@@ -1,0 +1,53 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L15..17 R15..17
+-pub(crate) struct ShardedList<L[-, T-]> {
+-    lists: Box<[Mutex<LinkedList<L[-, T-]>>]>,
++pub(crate) struct ShardedList<L{+: ShardedListItem+}> {
++    lists: Box<[Mutex<LinkedList<L>>]>,
+@@ L35..36 R35..44
+-impl<L[-, T-]> ShardedList<L[-, T-]> {
++{+/// Used to get the lock of shard.
++pub(crate) struct ShardGuard<'a, L: Link> {
++    lock: MutexGuard<'a, LinkedList<L>>,
++    added: &'a MetricAtomicU64,
++    count: &'a MetricAtomicUsize,
++    id: usize,
++}
++
+++}impl<L{+: ShardedListItem+}> ShardedList<L> {
+@@ L41..45 R49..50
+-        let[- mut-] lists = [-Vec::with_capacity(sharded_size);
+-        for _ in 0..sharded_size {
+-            lists.push-](Mutex::new(LinkedList::[-<L, T>::-]new()))
+-[-        }-]
++        let lists = {+std::iter::repeat_with+}({+|| +}Mutex::new(LinkedList::new())){+;+}
+@@ L46..47 R51..52
+-            lists: lists.[-into_boxed_slice-](),
++            lists: lists.{+take(sharded_size).collect+}(),
+@@ L52..53 R57..57
+-}
+@@ L54..63 R58..58
+-/// Used to get the lock of shard.
+-pub(crate) struct ShardGuard<'a, L, T> {
+-    lock: MutexGuard<'a, LinkedList<L, T>>,
+-    added: &'a MetricAtomicU64,
+-    count: &'a MetricAtomicUsize,
+-    id: usize,
+-}
+-
+-impl<L: ShardedListItem> ShardedList<L, L::Target> {
+@@ L95..96 R90..91
+-    pub(crate) fn lock_shard(&self, val: &L::Handle) -> ShardGuard<'_, L[-, L::Target-]> {
++    pub(crate) fn lock_shard(&self, val: &L::Handle) -> ShardGuard<'_, L> {
+@@ L132..133 R127..128
+-    fn shard_inner(&self, id: usize) -> MutexGuard<'_, LinkedList<L[-, <L as Link>::Target-]>> {
++    fn shard_inner(&self, id: usize) -> MutexGuard<'_, LinkedList<L>> {
+@@ L138..139 R133..134
+-impl<'a, L: ShardedListItem> ShardGuard<'a, L[-, L::Target-]> {
++impl<'a, L: ShardedListItem> ShardGuard<'a, L> {
+@@ L150..151 R145..146
+-    impl<L: ShardedListItem> ShardedList<L[-, L::Target-]> {
++    impl<L: ShardedListItem> ShardedList<L> {

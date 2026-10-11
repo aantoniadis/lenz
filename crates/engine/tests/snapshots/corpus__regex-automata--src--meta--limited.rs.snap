@@ -1,0 +1,26 @@
+---
+source: crates/engine/tests/corpus.rs
+expression: "render(&left, &right, &blocks)"
+---
+@@ L81..84 R81..83
+-                "reached position {} which is before the previous literal \
+-[-				-] match, quitting to avoid quadratic behavior",
+-[-                at,-]
++                "reached position {{+at+}} which is before the previous literal \
++{+                +} match, quitting to avoid quadratic behavior",
+@@ L117..118 R116..117
+-            "reached beginning of search at offset {} without hitting \
++            "reached beginning of search at offset {{+at+}} without hitting \
+@@ L119..120 R118..118
+-            at,
+@@ L164..167 R162..164
+-                "reached position {} which is before the previous literal \
+-[-				-] match, quitting to avoid quadratic behavior",
+-[-                at,-]
++                "reached position {{+at+}} which is before the previous literal \
++{+                +} match, quitting to avoid quadratic behavior",
+@@ L179..180 R176..177
+-            "reached beginning of search at offset {} without hitting \
++            "reached beginning of search at offset {{+at+}} without hitting \
+@@ L181..182 R178..178
+-            at,

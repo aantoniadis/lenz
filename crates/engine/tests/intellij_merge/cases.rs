@@ -1,0 +1,135 @@
+// Golden tests ported from IntelliJ IDEA Community Edition: CharComparisonMergeUtilTest.kt,
+// LineComparisonMergeUtilTest.kt, WordMergeComparisonUtilTest.kt, MergeResolveUtilTest.kt
+// (platform/diff-impl/tests/testSrc/com/intellij/diff/comparison, commit bc34875).
+// Copyright 2000-2018 JetBrains s.r.o. Licensed under the Apache License, Version 2.0.
+// Modified: converted from the Kotlin DSL into a Rust table by convert.py (alongside); `_` in sources is already
+// replaced by newline; texts are ASCII, so IntelliJ's UTF-16 offsets are byte offsets. Greedy-resolver cases dropped.
+// GENERATED — do not edit by hand.
+
+use lenz_engine::WhitespaceMode;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kind { Chars, LinesMerge, LinesDiff, Words }
+
+pub struct Case {
+    pub name: &'static str,
+    pub kind: Kind,
+    /// Left, base, right.
+    pub texts: [&'static str; 3],
+    pub mode: WhitespaceMode,
+    /// `mod(..)` as [left start, left end, base start, base end, right start, right end].
+    pub changes: Option<&'static [[usize; 6]]>,
+    /// Left, base, right; lines for `lines_*`, characters otherwise.
+    pub matching: Option<[&'static str; 3]>,
+}
+
+pub const CASES: &[Case] = &[
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #0 [default]", kind: Kind::Chars, texts: ["", "", ""], mode: WhitespaceMode::Default, changes: Some(&[]), matching: Some(["", "", ""]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #1 [default]", kind: Kind::Chars, texts: ["xyz", "xyz", "xyz"], mode: WhitespaceMode::Default, changes: Some(&[]), matching: Some(["   ", "   ", "   "]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #2 [default]", kind: Kind::Chars, texts: ["", "", "x"], mode: WhitespaceMode::Default, changes: Some(&[[0, 0, 0, 0, 0, 1]]), matching: Some(["", "", "-"]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #3 [default]", kind: Kind::Chars, texts: ["x", "yx", "x"], mode: WhitespaceMode::Default, changes: None, matching: Some([" ", "- ", " "]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #4 [default]", kind: Kind::Chars, texts: ["x", "xy", "x"], mode: WhitespaceMode::Default, changes: None, matching: Some([" ", " -", " "]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #5 [default]", kind: Kind::Chars, texts: ["xyz", "xYz", "xyz"], mode: WhitespaceMode::Default, changes: None, matching: Some([" - ", " - ", " - "]) },
+    Case { name: "CharComparisonMergeUtil: testSimpleCases #6 [default]", kind: Kind::Chars, texts: ["xyz", "XyZ", "xyz"], mode: WhitespaceMode::Default, changes: None, matching: Some(["- -", "- -", "- -"]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #0 [default]", kind: Kind::Chars, texts: ["abcd", "abcd", "abXcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "    ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #1 [default]", kind: Kind::Chars, texts: ["abXcd", "abcd", "abXcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  -  ", "    ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #2 [default]", kind: Kind::Chars, texts: ["abcd", "abXcd", "abXcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "  -  ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #3 [default]", kind: Kind::Chars, texts: ["abcd", "abXcd", "abcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "  -  ", "    "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #4 [default]", kind: Kind::Chars, texts: ["abcd", "abXcd", "abYcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "  -  ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #5 [default]", kind: Kind::Chars, texts: ["abXcd", "abXcd", "abYcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  -  ", "  -  ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #6 [default]", kind: Kind::Chars, texts: ["abYcd", "abXcd", "abYcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  -  ", "  -  ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #7 [default]", kind: Kind::Chars, texts: ["abYcd", "abXcd", "abZcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  -  ", "  -  ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testConflictTYpes #8 [default]", kind: Kind::Chars, texts: ["abXcd", "abcd", "abYcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  -  ", "    ", "  -  "]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #0 [default]", kind: Kind::Chars, texts: ["abcd", "abcd", "abcdx"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "    ", "    -"]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #1 [default]", kind: Kind::Chars, texts: ["abcd", "abcdx", "abcdx"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "    -", "    -"]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #2 [default]", kind: Kind::Chars, texts: ["abcd", "abcdx", "abcdy"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "    -", "    -"]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #3 [default]", kind: Kind::Chars, texts: ["abcdz", "abcdx", "abcdy"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    -", "    -", "    -"]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #4 [default]", kind: Kind::Chars, texts: ["xabcd", "abcd", "abcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-    ", "    ", "    "]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #5 [default]", kind: Kind::Chars, texts: ["xabcd", "yabcd", "abcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-    ", "-    ", "    "]) },
+    Case { name: "CharComparisonMergeUtil: testBoundaryConflicts #6 [default]", kind: Kind::Chars, texts: ["abcd", "yabcd", "abcd"], mode: WhitespaceMode::Default, changes: None, matching: Some(["    ", "-    ", "    "]) },
+    Case { name: "CharComparisonMergeUtil: testMultipleChanges #0 [default]", kind: Kind::Chars, texts: ["XXbXcXXeX", "XyXzXXnXkX", "XqXXeXrXX"], mode: WhitespaceMode::Default, changes: None, matching: Some(["  - -  - ", " - -  - - ", " -  - -  "]) },
+    Case { name: "CharComparisonMergeUtil: testMultipleChanges #1 [default]", kind: Kind::Chars, texts: ["Ax", "z", "zA"], mode: WhitespaceMode::Default, changes: None, matching: Some(["--", "-", "--"]) },
+    Case { name: "CharComparisonMergeUtil: testMultipleChanges #2 [default]", kind: Kind::Chars, texts: ["ayz", "xyz", "xyq"], mode: WhitespaceMode::Default, changes: None, matching: Some(["- -", "- -", "- -"]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #0 [default]", kind: Kind::LinesMerge, texts: ["", "", ""], mode: WhitespaceMode::Default, changes: Some(&[]), matching: Some(["", "", ""]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #1 [default]", kind: Kind::LinesMerge, texts: ["x\ny\nz", "x\ny\nz", "x\ny\nz"], mode: WhitespaceMode::Default, changes: Some(&[]), matching: Some([" _ _ ", " _ _ ", " _ _ "]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #2 [default]", kind: Kind::LinesMerge, texts: ["", "", "x"], mode: WhitespaceMode::Default, changes: Some(&[[0, 1, 0, 1, 0, 1]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #3 [default]", kind: Kind::LinesMerge, texts: ["", "", "\nx"], mode: WhitespaceMode::Default, changes: Some(&[[1, 1, 1, 1, 1, 2]]), matching: Some(["", "", "_-"]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #4 [default]", kind: Kind::LinesMerge, texts: ["x", "y", "x"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-", "-", "-"]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #5 [default]", kind: Kind::LinesMerge, texts: ["x", "x\ny", "x"], mode: WhitespaceMode::Default, changes: None, matching: Some([" ", " _-", " "]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #6 [default]", kind: Kind::LinesMerge, texts: ["x", "y\nx", "x"], mode: WhitespaceMode::Default, changes: None, matching: Some([" ", "-_ ", " "]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #7 [default]", kind: Kind::LinesMerge, texts: ["x\ny\nz", "x\nY\nz", "x\ny\nz"], mode: WhitespaceMode::Default, changes: None, matching: Some([" _-_ ", " _-_ ", " _-_ "]) },
+    Case { name: "LineComparisonMergeUtil: testSimpleCases #8 [default]", kind: Kind::LinesMerge, texts: ["x\ny\nz", "X\ny\nZ", "x\ny\nz"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-_ _-", "-_ _-", "-_ _-"]) },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #0 [ignore]", kind: Kind::LinesDiff, texts: ["x\n y \nz", "x\ny\nz", "x\n  y\n  z"], mode: WhitespaceMode::Ignore, changes: Some(&[]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #1 [ignore]", kind: Kind::LinesMerge, texts: ["x\n y \nz", "x\ny\nz", "x\n  y\n  z"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 3, 1, 3, 1, 3]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #2 [ignore]", kind: Kind::LinesDiff, texts: ["x\n y \nz", "x\nY\nz", "x\n  y\n  z"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 2, 1, 2, 1, 2]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #3 [ignore]", kind: Kind::LinesMerge, texts: ["x\n y \nz", "x\nY\nz", "x\n  y\n  z"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 2, 1, 2, 1, 2], [2, 3, 2, 3, 2, 3]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #4 [ignore]", kind: Kind::LinesMerge, texts: ["x\n y \nz", "x\nY\nz", "x\n  y\nz"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 2, 1, 2, 1, 2]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #5 [ignore]", kind: Kind::LinesMerge, texts: ["x\n y \nz", "x\ny\nz", "x\n  y\nz"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 2, 1, 2, 1, 2]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #6 [ignore]", kind: Kind::LinesMerge, texts: [" x \ny\nz", "x\ny\nz", "x\ny\n  z"], mode: WhitespaceMode::Ignore, changes: Some(&[[0, 1, 0, 1, 0, 1], [2, 3, 2, 3, 2, 3]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #7 [ignore]", kind: Kind::LinesDiff, texts: [" x\nnew\ny\nz", "x\n y \nz", "x\ny\nnew\n z"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 2, 1, 1, 1, 1], [3, 3, 2, 2, 2, 3]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #8 [ignore]", kind: Kind::LinesMerge, texts: [" x\nnew\ny\nz", "x\n y \nz", "x\ny\nnew\n z"], mode: WhitespaceMode::Ignore, changes: Some(&[[0, 1, 0, 1, 0, 1], [1, 2, 1, 1, 1, 1], [2, 3, 1, 2, 1, 2], [3, 3, 2, 2, 2, 3], [3, 4, 2, 3, 3, 4]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #9 [ignore]", kind: Kind::LinesDiff, texts: [" x\nnew\ny1\nz", "x\n y \nz", "x\ny2\nnew\n z"], mode: WhitespaceMode::Ignore, changes: Some(&[[1, 3, 1, 2, 1, 3]]), matching: None },
+    Case { name: "LineComparisonMergeUtil: testIgnoreWhitespaces #10 [ignore]", kind: Kind::LinesMerge, texts: [" x\nnew\ny1\nz", "x\n y \nz", "x\ny2\nnew\n z"], mode: WhitespaceMode::Ignore, changes: Some(&[[0, 1, 0, 1, 0, 1], [1, 3, 1, 2, 1, 3], [3, 4, 2, 3, 3, 4]]), matching: None },
+    Case { name: "WordMergeComparisonUtil: testSimple #0 [default]", kind: Kind::Words, texts: ["", "", ""], mode: WhitespaceMode::Default, changes: None, matching: Some(["", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #0 [trim]", kind: Kind::Words, texts: ["", "", ""], mode: WhitespaceMode::Trim, changes: None, matching: Some(["", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #0 [ignore]", kind: Kind::Words, texts: ["", "", ""], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #1 [default]", kind: Kind::Words, texts: ["", "X", ""], mode: WhitespaceMode::Default, changes: None, matching: Some(["", "-", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #1 [trim]", kind: Kind::Words, texts: ["", "X", ""], mode: WhitespaceMode::Trim, changes: None, matching: Some(["", "-", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #1 [ignore]", kind: Kind::Words, texts: ["", "X", ""], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["", "-", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #2 [default]", kind: Kind::Words, texts: ["X", "", ""], mode: WhitespaceMode::Default, changes: None, matching: Some(["-", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #2 [trim]", kind: Kind::Words, texts: ["X", "", ""], mode: WhitespaceMode::Trim, changes: None, matching: Some(["-", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #2 [ignore]", kind: Kind::Words, texts: ["X", "", ""], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["-", "", ""]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #3 [default]", kind: Kind::Words, texts: ["a b", "a b", "a b"], mode: WhitespaceMode::Default, changes: None, matching: Some(["   ", "   ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #3 [trim]", kind: Kind::Words, texts: ["a b", "a b", "a b"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["   ", "   ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #3 [ignore]", kind: Kind::Words, texts: ["a b", "a b", "a b"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["   ", "   ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #4 [default]", kind: Kind::Words, texts: ["A b c", "a b c", "a b C"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-   -", "-   -", "-   -"]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #4 [trim]", kind: Kind::Words, texts: ["A b c", "a b c", "a b C"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["-   -", "-   -", "-   -"]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #4 [ignore]", kind: Kind::Words, texts: ["A b c", "a b c", "a b C"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["-   -", "-   -", "-   -"]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #5 [default]", kind: Kind::Words, texts: ["a c", "a c", "a X c"], mode: WhitespaceMode::Default, changes: None, matching: Some(["   ", "   ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #5 [trim]", kind: Kind::Words, texts: ["a c", "a c", "a X c"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["   ", "   ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #5 [ignore]", kind: Kind::Words, texts: ["a c", "a c", "a X c"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["   ", "   ", "  -  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #6 [default]", kind: Kind::Words, texts: ["a X c", "a X c", "a c"], mode: WhitespaceMode::Default, changes: None, matching: Some([" --  ", " --  ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #6 [trim]", kind: Kind::Words, texts: ["a X c", "a X c", "a c"], mode: WhitespaceMode::Trim, changes: None, matching: Some([" --  ", " --  ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #6 [ignore]", kind: Kind::Words, texts: ["a X c", "a X c", "a c"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["  -  ", "  -  ", "   "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #7 [default]", kind: Kind::Words, texts: ["a X c", "a c", "a Y c"], mode: WhitespaceMode::Default, changes: None, matching: Some([" --  ", "   ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #7 [trim]", kind: Kind::Words, texts: ["a X c", "a c", "a Y c"], mode: WhitespaceMode::Trim, changes: None, matching: Some([" --  ", "   ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #7 [ignore]", kind: Kind::Words, texts: ["a X c", "a c", "a Y c"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["  -  ", "   ", "  -  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #8 [default]", kind: Kind::Words, texts: ["a c", "a X c", "a Y c"], mode: WhitespaceMode::Default, changes: None, matching: Some(["   ", " --  ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #8 [trim]", kind: Kind::Words, texts: ["a c", "a X c", "a Y c"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["   ", " --  ", " --  "]) },
+    Case { name: "WordMergeComparisonUtil: testSimple #8 [ignore]", kind: Kind::Words, texts: ["a c", "a X c", "a Y c"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["   ", "  -  ", "  -  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #0 [default]", kind: Kind::Words, texts: ["i", "i\n", "\ni"], mode: WhitespaceMode::Default, changes: None, matching: Some(["-", "--", "--"]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #0 [trim]", kind: Kind::Words, texts: ["i", "i\n", "\ni"], mode: WhitespaceMode::Trim, changes: None, matching: Some([" ", "  ", "  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #0 [ignore]", kind: Kind::Words, texts: ["i", "i\n", "\ni"], mode: WhitespaceMode::Ignore, changes: None, matching: Some([" ", "  ", "  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #1 [default]", kind: Kind::Words, texts: ["\ni", "i\n", "i"], mode: WhitespaceMode::Default, changes: None, matching: Some(["--", "--", "-"]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #1 [trim]", kind: Kind::Words, texts: ["\ni", "i\n", "i"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["  ", "  ", " "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #1 [ignore]", kind: Kind::Words, texts: ["\ni", "i\n", "i"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["  ", "  ", " "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #2 [default]", kind: Kind::Words, texts: ["i", "\ni", "i\n"], mode: WhitespaceMode::Default, changes: None, matching: Some([" ", "- ", " -"]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #2 [trim]", kind: Kind::Words, texts: ["i", "\ni", "i\n"], mode: WhitespaceMode::Trim, changes: None, matching: Some([" ", "  ", "  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #2 [ignore]", kind: Kind::Words, texts: ["i", "\ni", "i\n"], mode: WhitespaceMode::Ignore, changes: None, matching: Some([" ", "  ", "  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #3 [default]", kind: Kind::Words, texts: ["\ni", "i", "i\n"], mode: WhitespaceMode::Default, changes: None, matching: Some(["- ", " ", " -"]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #3 [trim]", kind: Kind::Words, texts: ["\ni", "i", "i\n"], mode: WhitespaceMode::Trim, changes: None, matching: Some(["  ", " ", "  "]) },
+    Case { name: "WordMergeComparisonUtil: testNewlines #3 [ignore]", kind: Kind::Words, texts: ["\ni", "i", "i\n"], mode: WhitespaceMode::Ignore, changes: None, matching: Some(["  ", " ", "  "]) },
+];
+
+/// MergeResolveUtilTest: `tryResolve(left, base, right)`; `None` = can't resolve.
+pub struct Resolve { pub name: &'static str, pub base: &'static str, pub left: &'static str, pub right: &'static str, pub expected: Option<&'static str> }
+
+pub const RESOLVE: &[Resolve] = &[
+    Resolve { name: "testSimple #0", base: "", left: "", right: "", expected: Some("") },
+    Resolve { name: "testSimple #1", base: "x x x", left: "x x x", right: "x x x", expected: Some("x x x") },
+    Resolve { name: "testSimple #2", base: "x x x", left: "x Y x", right: "x x x", expected: Some("x Y x") },
+    Resolve { name: "testSimple #3", base: "x x", left: "x x", right: "x Y x", expected: Some("x Y x") },
+    Resolve { name: "testSimple #4", base: "x X x", left: "x x", right: "x X x", expected: Some("x x") },
+    Resolve { name: "testSameModification #0", base: "x x x", left: "x Y x", right: "x Y x", expected: Some("x Y x") },
+    Resolve { name: "testSameModification #1", base: "x x", left: "x Y x", right: "x Y x", expected: Some("x Y x") },
+    Resolve { name: "testSameModification #2", base: "x X x", left: "x x", right: "x x", expected: Some("x x") },
+    Resolve { name: "testNonConflictingChanges #0", base: "x x x", left: "x Y x x", right: "x x Z x", expected: Some("x Y x Z x") },
+    Resolve { name: "testNonConflictingChanges #1", base: "x", left: "x Y", right: "Z x", expected: Some("Z x Y") },
+    Resolve { name: "testNonConflictingChanges #2", base: "x x", left: "x", right: "Z x x", expected: Some("Z x") },
+    Resolve { name: "testFailure #0", base: "x x x", left: "x Y x", right: "x Z x", expected: None },
+    Resolve { name: "testFailure #1", base: "x x", left: "x Y x", right: "x Z x", expected: None },
+    Resolve { name: "testConfusingConflicts #0", base: "version: 1.0.0", left: "version: 2.0.0", right: "version: 1.0.4", expected: Some("version: 2.0.4") },
+    Resolve { name: "testRegressions #0", base: "i\n", left: "i", right: "\ni", expected: Some("i") },
+    Resolve { name: "testRegressions #1", base: "Y X Y", left: "Y C\nX\nC Y", right: "Y \nX\n Y", expected: Some("Y \nC\nX\nC Y") },
+    Resolve { name: "testRegressions #2", base: "\n  public static class ChangeData {\n    @NotNull public final ChangeKind kind;\n    public final int otherPath;\n\n    public ChangeData(@NotNull ChangeKind kind, int otherPath) {\n      this.kind = kind;\n      this.otherPath = otherPath;\n    }\n\n    public boolean isRename() {\n      return kind.equals(ChangeKind.RENAMED_FROM) || kind.equals(ChangeKind.RENAMED_TO);\n    }\n\n    @Override\n    public int hashCode() {\n      return Objects.hash(kind, otherPath);\n    }\n  }\n\n  private enum ChangeKind {\n    MODIFIED((byte)0),\n    RENAMED_FROM((byte)1),\n    RENAMED_TO((byte)2);", left: "\n  public enum ChangeKind {\n    NOT_CHANGED((byte)-1),\n    MODIFIED((byte)0),\n    ADDED((byte)1),\n    REMOVED((byte)2);", right: "\n  public static class ChangeData {\n  @NotNull public final ChangeKind kind;\n  public final int otherPath;\n\n  public ChangeData(@NotNull ChangeKind kind, int otherPath) {\n    this.kind = kind;\n    this.otherPath = otherPath;\n  }\n\n  public boolean isRename() {\n    return kind.equals(ChangeKind.RENAMED_FROM) || kind.equals(ChangeKind.RENAMED_TO);\n  }\n\n  @Override\n  public int hashCode() {\n    return Objects.hash(kind, otherPath);\n  }\n}\n\nprivate enum ChangeKind {\n  MODIFIED((byte)0),\n  RENAMED_FROM((byte)1),\n  RENAMED_TO((byte)2);", expected: Some("\n  public enum ChangeKind {\n    NOT_CHANGED((byte)-1),\n  MODIFIED((byte)0),\n  ADDED((byte)1),\n  REMOVED((byte)2);") },
+];
