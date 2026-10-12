@@ -163,7 +163,7 @@ impl App {
         if let Some(repo)=&mut self.repository {
             changed|=repo.poll();
             if let Some((set,spec))=repo.take_change_set(){self.swap_at=Some(std::time::Instant::now());let preserve=repo.core.take_refresh_placement();if self.session.has_dirty(){let refused=spec!=*self.session.spec()||!preserve;self.session.replace_set(set,spec,preserve);if refused{self.navigator.focused=false;repo.core.execute(lenz::repository_session::RepositoryCommand::Focus(lenz::repository_session::Pane::Diff));}}else if preserve{self.session.replace_set(set,spec,true);}else{let name=self.comparison_name.clone();let line=self.initial_line.take();let mut next=Session::from_set_named(set,spec,self.session.options(),self.session.view().mode(),name,line);next.markdown_inherit_presentation(&self.session);self.session=next;}self.visual_revision=None;self.selection=None;self.set_search=None;self.pending_hit=None;changed=true;}
-            let path=self.session.comparisons().get(self.session.current()).map_or("",|c|c.path.as_str());repo.set_current(self.session.current(),path);
+            let (path,history)=self.session.comparisons().get(self.session.current()).map_or(("",""),|c|(c.path.as_str(),c.repository_path()));repo.set_current(self.session.current(),path,history);
             let effects=repo.take_effects();for effect in effects{self.repository_effect(effect);changed=true;}
         }
         if self.auto_repository && !self.session.loading(){self.auto_repository=false;

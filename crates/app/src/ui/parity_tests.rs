@@ -4398,3 +4398,34 @@ fn gui_a_click_in_the_find_bar_over_sticky_lines_does_not_jump(cx: &mut TestAppC
     click(cx, &f, x, y);
     assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.frame().right_top), top, "no jump");
 }
+
+#[gpui::test]
+fn gui_committed_zip_opens_as_a_folder_whose_files_show_their_changes_read_only(cx:&mut TestAppContext) {
+    use crate::archive::testing::zip;
+    let f=fixture(cx,"old\n","new\n");let root=f.dir.path();workflow_git(root,&["init","-q","-b","main"]);
+    std::fs::write(root.join("bundle.zip"),zip(&[("src/main.rs",b"fn main() {\n    old();\n}\n"),("gone.txt",b"bye\n")])).unwrap();
+    workflow_git(root,&["add","bundle.zip"]);workflow_git(root,&["commit","-qm","Add bundle"]);
+    let v2=zip(&[("src/main.rs",b"fn main() {\n    new_call();\n}\n"),("added.txt",b"hi\n")]);
+    std::fs::write(root.join("bundle.zip"),&v2).unwrap();workflow_git(root,&["commit","-qam","Change bundle"]);
+    let spec=Spec::Git{cached:false,revs:vec!["HEAD~".into(),"HEAD".into()],paths:Vec::new(),untracked:false};
+    let set=Arc::new(ChangeSet::load(&spec,root).unwrap());let c=&set.comparisons[0];
+    let doc=Arc::new(Doc::load(&set,0,Path::new(&c.old_path),Path::new(&c.path),false).unwrap());let view=doc.view(&doc.line_diff(&Options::default()),30.);
+    f.viewer.update(cx,|v,cx|{*v=Viewer::new(set,spec,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.layout.set_files(true);});
+    // the Files list groups the archive's members under it, as folders
+    let dirs=f.viewer.read_with(cx,|v,_|v.nav.iter().filter_map(|r|if let NavRow::Dir(d)=r{Some(d.clone())}else{None}).collect::<Vec<_>>());
+    assert_eq!(dirs,["bundle.zip","bundle.zip/src"]);
+    // a click on the member opens its comparison: both versions of the file inside the archive
+    let y=f.viewer.read_with(cx,|v,_|v.top()+v.nav.iter().position(|r|matches!(r,NavRow::File{index,..}if v.set.comparisons[*index].path=="bundle.zip/src/main.rs")).unwrap()as f32*line_h()+2.);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.picker_w()+80.),y);
+    workflow_wait(cx,&f,|v|v.set.comparisons.get(v.current).is_some_and(|c|c.path=="bundle.zip/src/main.rs")&&v.doc().is_some()&&v.comparison.diffed==v.comparison.generation);
+    f.viewer.read_with(cx,|v,_|{let d=v.doc().unwrap();assert!(d.text(Side::Left).contains("old();")&&d.text(Side::Right).contains("new_call();"));});
+    // Apply is refused with the reason, and nothing is written
+    for _ in 0..8 {if f.viewer.read_with(cx,|v,_|!v.nav_focused&&!v.panel_focused){break;}key(cx,&f,"tab",false,false,false);}
+    key(cx,&f,"right",false,true,true);
+    assert!(f.viewer.read_with(cx,|v,_|v.write_error.as_ref().is_some_and(|e|e.contains("inside an archive"))),"{:?}",f.viewer.read_with(cx,|v,_|v.write_error.clone()));
+    assert_eq!(std::fs::read(root.join("bundle.zip")).unwrap(),v2);
+    // Show file history follows the archive git knows
+    run(cx,&f,crate::catalog::Action::File(crate::file_actions::FileAction::History));
+    workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|!r.busy()&&r.picker.file_paths.is_some()));
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().picker.file_paths.as_ref().unwrap().0.clone()),"bundle.zip");
+}

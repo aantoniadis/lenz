@@ -17,6 +17,7 @@ pub fn editable(content: &Content, temp: &Path) -> Result<(), &'static str> {
         Content::Empty => return Err("absent"),
         Content::Symlink(_) => return Err("a symlink"),
         Content::Submodule(_) => return Err("a submodule"),
+        Content::Archived { .. } => return Err("inside an archive"),
     };
     let temp = fs::canonicalize(temp).unwrap_or_else(|_| temp.to_path_buf());
     let in_temp = |p: &Path| fs::canonicalize(p).is_ok_and(|p| p.starts_with(&temp));

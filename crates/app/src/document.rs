@@ -170,7 +170,7 @@ impl TextDocument {
         let shown = |d: &encoding::Decoded| d.shown_in_header().then(|| d.label());
         doc.encodings = [shown(&dl), shown(&dr)];
         doc.notes.extend(encoding::describe(&dl, &dr));
-        doc.notes.extend(set.skipped_driver(index).map(str::to_owned));
+        doc.notes.extend(set.note(index).map(str::to_owned));
         if dl.lossy || dr.lossy {
             doc.notes.push(encoding::LOSSY_NOTICE.into());
         }

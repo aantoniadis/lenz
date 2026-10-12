@@ -61,7 +61,7 @@ impl Viewer {
                 cx,
             ),
             FileAction::History => {
-                let path = c.path.clone();
+                let path = c.repository_path().to_owned();
                 if self.repo.is_none()
                     && let Some(root) = set.git_root()
                 {

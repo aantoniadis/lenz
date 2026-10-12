@@ -990,3 +990,53 @@ fn commit_context_menu_compares_with_a_branch_and_opens_the_commit_in_a_new_view
     let (request, _) = app.new_view.take().expect("a new view for the commit");
     assert!(matches!(&request.spec, Spec::Git { revs, .. } if revs.last() == Some(&head) && revs.len() == 2));
 }
+
+/// A zip of `files` (path, content) made by `git archive`, which every test machine has.
+fn git_zip(files: &[(&str, &str)]) -> Vec<u8> {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-q"]);
+    for (path, content) in files {
+        let path = source.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    git(source.path(), &["add", "-A"]);
+    git(source.path(), &["commit", "-qm", "archive"]);
+    let out = Command::new("git").args(["archive", "--format=zip", "HEAD"]).current_dir(source.path()).output().unwrap();
+    assert!(out.status.success());
+    out.stdout
+}
+
+#[test]
+fn committed_zip_opens_as_a_folder_whose_files_show_their_changes_read_only() {
+    let dir = repository();
+    std::fs::write(dir.path().join("bundle.zip"), git_zip(&[("src/main.rs", "fn main() {\n    old();\n}\n"), ("gone.txt", "bye\n")])).unwrap();
+    git(dir.path(), &["add", "bundle.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add bundle"]);
+    let v2 = git_zip(&[("src/main.rs", "fn main() {\n    new_call();\n}\n"), ("added.txt", "hi\n")]);
+    std::fs::write(dir.path().join("bundle.zip"), &v2).unwrap();
+    git(dir.path(), &["commit", "-qam", "Change bundle"]);
+    let mut app = open(dir.path(), &["HEAD~", "HEAD"]);
+    let visible = screen(&draw(&mut app, 160, 30));
+    for row in ["bundle.zip/src", "main.rs", "added.txt", "gone.txt"] {
+        assert!(visible.contains(row), "{row} in {visible}");
+    }
+    // ] steps to the member's comparison, which shows both versions of the file inside the archive
+    while app.session.labels().1 != "bundle.zip/src/main.rs" {
+        key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+        ready(&mut app);
+    }
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("old();") && visible.contains("new_call();"), "{visible}");
+    // Apply is refused with the reason, and nothing is written
+    key(&mut app, KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert!(app.session.notice().is_some_and(|n| n.contains("inside an archive")), "{:?}", app.session.notice());
+    assert_eq!(std::fs::read(dir.path().join("bundle.zip")).unwrap(), v2);
+    // Show file history follows the archive git knows
+    key(&mut app, KeyCode::F(10), KeyModifiers::NONE);
+    text(&mut app, "show file history");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    let followed = app.repository.as_ref().and_then(|r| r.core.picker.file_paths.as_ref()).map(|(path, _)| path.clone());
+    assert_eq!(followed.as_deref(), Some("bundle.zip"));
+}

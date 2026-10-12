@@ -70,11 +70,19 @@ pub fn open(root: &Path, target: Option<&str>) -> Result<Opened, pr::PrError> {
     })
 }
 
-/// The id of the version a Viewed Mark is keyed on: the right Side's blob (the left one for a deleted file).
+/// The id of the version a Viewed Mark is keyed on: the right Side's blob (the left one for a deleted file). A file
+/// inside an archive is keyed on the archive's blob, so a changed archive clears its members' marks.
 fn blob(c: &crate::changeset::Comparison) -> Option<String> {
+    fn id(content: &Content) -> Option<&String> {
+        match content {
+            Content::Blob(id) => Some(id),
+            Content::Archived { archive, .. } => id(archive),
+            _ => None,
+        }
+    }
     match (&c.right, &c.left) {
-        (Content::Blob(id), _) | (Content::Empty, Content::Blob(id)) => Some(id.clone()),
-        _ => None,
+        (Content::Empty, left) => id(left).cloned(),
+        (right, _) => id(right).cloned(),
     }
 }
 

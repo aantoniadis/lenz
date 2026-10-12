@@ -64,6 +64,10 @@ Writes use the same snapshots, encoding and line-ending preservation, read-only 
 
 Images draw as colored half-block cells. `m` cycles the modes; `0` fits and `1` shows 1:1; `+`/`-` zoom; arrows pan; `,` / `.` change the opacity or Swipe split; `n`/`p` step through changed regions. Every image command, including copying paths and opening the original externally, is also in the palette.
 
+### Archives
+
+A changed zip or tarball appears in Files as a folder (`bundle.zip/src`) of its changed files, with the same keys as any other file. They are read-only, and Show file history follows the archive. The GUI behaves the same way; the [README](../README.md#editing-and-saving) lists the formats and limits.
+
 ### Markdown Preview
 
 **Source | Inline | Side by side** sit in the pane header of eligible Markdown comparisons and in the palette; the [Markdown Preview guide](markdown.md) covers what is rendered and the source-fidelity rules. Terminal specifics:

@@ -19,6 +19,10 @@ _Avoid_: patch, diff
 **Source**:
 Where a **Side** comes from: a git revision (commit, branch, index, working tree) or a plain file on disk.
 
+**Archive Member**:
+A file inside a changed zip or tar archive, shown as its own read-only **Comparison** under the archive's path, as if the archive were a folder.
+_Avoid_: entry (tar/zip jargon)
+
 **Change Block**:
 A contiguous run of lines that differ between the two **Sides** — inserted, deleted, or modified.
 _Avoid_: hunk (hunk includes context lines in unified-diff format)

@@ -37,6 +37,8 @@ pub struct Repository {
     pub(crate) pr_dialog:crate::pr_details::Dialog,
     current: usize,
     current_path: String,
+    /// The repository path git follows for the file on screen: the archive's for a file inside one.
+    history_path: String,
     size: (u16, u16),
     bounds:Rect,
     effects: Vec<RepositoryEffect>,
@@ -64,6 +66,7 @@ impl Repository {
             overlay_scroll: 0,pr_dialog:Default::default(),
             current: 0,
             current_path: String::new(),
+            history_path: String::new(),
             size: (80, 24),
             bounds:Rect::new(0,0,80,24),
             effects: Vec::new(),held_log:None,palette_request:false,interaction:None,
@@ -88,9 +91,10 @@ impl Repository {
         effects.append(&mut self.effects);
         effects
     }
-    pub fn set_current(&mut self, index: usize, path: &str) {
+    pub fn set_current(&mut self, index: usize, path: &str, history_path: &str) {
         self.current = index;
         self.current_path = path.into();
+        self.history_path = history_path.into();
     }
     pub fn area(&self, area: Rect) -> Rect {
         let picker = &self.core.picker;
@@ -202,7 +206,7 @@ impl Repository {
             "compare-tips" => self.compare(false, false),
             "compare-selected" => self.compare(false, true),
             "parent" => self.execute(Command::Parent(self.core.picker.merge_parent + 1)),
-            "follow" => self.execute(Command::FileHistory(self.current_path.clone())),
+            "follow" => self.execute(Command::FileHistory(self.history_path.clone())),
             "graph" => self.execute(Command::WriteGraph),
             "hash" => self.execute(Command::CopyHash),
             "subject" => self.execute(Command::CopySubject),
@@ -240,7 +244,7 @@ impl Repository {
             u32::from(y-area.y-1)+picker.scroll.floor()as u32
         }else{if picker.focus!=Pane::Log{return None;}picker.pane_search.current().map(|i|i as u32).unwrap_or(picker.anchor)};
         if row>=picker.rows(){return None;}self.context_row=Some(row);
-        Some(RepositorySession::log_context_commands(row,&self.current_path))
+        Some(RepositorySession::log_context_commands(row,&self.history_path))
     }
     /// A sidebar row's right-click entries under `point` (the open PR's Refresh).
     pub(crate) fn source_menu(&self,(x,y):(u16,u16))->Option<Vec<(&'static str,lenz::catalog::Action)>>{
@@ -1481,7 +1485,7 @@ mod pr_adapter_tests {
         state.marks=Some(ViewedMarks::open(dir.path()).unwrap());
         state.review=Some(Review{discussion:Vec::new(),files:Vec::new(),placed:[(("file".into(),lenz::view::Side::Right,2),vec![thread])].into(),listed:[("file".into(),vec![outdated])].into(),..Default::default()});
         repository.core.pr=Some(state);
-        repository.set_current(0, "file");
+        repository.set_current(0, "file", "file");
         repository.core.execute(Command::Focus(Pane::Diff));
         let mut terminal = Terminal::new(TestBackend::new(100, 25)).unwrap();
         let draw = |repository: &mut Repository, terminal: &mut Terminal<TestBackend>| {

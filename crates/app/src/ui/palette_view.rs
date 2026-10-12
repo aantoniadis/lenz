@@ -62,7 +62,7 @@ impl Viewer {
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
                 |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::ToggleMessage))=>{
-                let path=self.set.comparisons.get(self.comparison.current).map_or(String::new(),|c|c.path.clone());
+                let path=self.set.comparisons.get(self.comparison.current).map_or(String::new(),|c|c.repository_path().to_owned());
                 match self.repo.as_ref().map(|r|r.action_command(action,&path)) {
                     Some(Ok(Some(command)))=>self.repository_command(command,cx),
                     Some(Err(why))=>self.toast(why.into(),cx),
@@ -223,7 +223,7 @@ impl Availability for Viewer {
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
                 |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::OpenWorktree|RepoAction::ToggleMessage))=>{
-                let path=self.set.comparisons.get(self.comparison.current).map_or("",|c|c.path.as_str());
+                let path=self.set.comparisons.get(self.comparison.current).map_or("",|c|c.repository_path());
                 self.repo.as_ref().and_then(|r|r.action_command(action,path).err()).map(Cow::Borrowed)
             }
             Action::Repository(RepoAction::Back)=>(!self.repo.as_ref().is_some_and(|r|r.can_go_back())).then_some(Cow::Borrowed("Nowhere to go back to")),

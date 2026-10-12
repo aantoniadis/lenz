@@ -292,7 +292,7 @@ impl Viewer {
             return false;
         }
         let (pw, lh) = (self.picker_w(), self.log_h());
-        let file = self.set.comparisons.get(self.comparison.current).map(|c| c.path.clone()).unwrap_or_default();
+        let file = self.set.comparisons.get(self.comparison.current).map(|c| c.repository_path().to_owned()).unwrap_or_default();
         let Some(p) = self.repo.as_mut().map(|r| &mut r.picker) else { return false;
         };
         let mut items = Vec::new();

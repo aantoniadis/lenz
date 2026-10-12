@@ -32,6 +32,7 @@ Run either with the arguments you'd give `git diff`, or give it two files or two
 - **Browse** the repository: commit log with branch graph, file history (`--follow`), Change Set search and read-only GitHub pull requests with descriptions and review threads.
 - **Merge**: a three-way Merge View, a Conflict List for whole merges/rebases/cherry-picks, and a Version Picker for binary files. The Merge View applies every non-conflicting change as soon as it opens and never drops a conflict.
 - **Images**: two-up, swipe, onion skin and difference modes, with zoom and opacity.
+- **Archives as folders**: a changed `.zip` or tarball (`.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) is listed as a folder of the files that changed inside it, each with its own comparison. Archives inside archives open too. RAR is shown as a binary file.
 - **Markdown Preview**: an Obsidian-like reading view (callouts, properties, highlights, tags, wiki links, footnotes, local images), Inline with removed words struck in place or Side by side, with change bars beside each changed block; every source change stays reachable. The terminal app shows it too, with images as real pixels in kitty and Ghostty.
 - **Themes**: Darcula, Light, Catppuccin, Tokyo Night and Gruvbox, system/Omarchy following and custom TOML themes.
 - **Safe writes**: atomic, keeping encoding, BOM, line endings and file mode, and never over a file that changed on disk since Lenz read it.
@@ -171,6 +172,8 @@ The terminal frontend has the same toolbar, menus and palette, with terminal-spe
 Editable text comparisons keep **Undo**, **Redo** and **Save** directly accessible, with **Discard unsaved changes** in the Edit menu. Hunk moves stay pending until **Ctrl/Cmd+S** (Ctrl-S in the TUI comparison pane). **Revert hunk** restores the left version on the right working-tree side. Drafts survive file switches and repository refresh, and Lenz asks before closing or changing comparisons with unsaved drafts.
 
 **Discard file** is a separate confirmed Git action: it restores the index version, preserves staged changes, restores tracked deletions, and offers **Undo Git discard**.
+
+Files inside an archive are read-only: Apply, Revert hunk and Discard are refused with the reason, and **Show file history** follows the archive itself. Lenz reads archives in memory and never extracts them to disk. Members are compared by size and CRC-32 (zip's own record). An archive over 512 MiB, or one that cannot be read, stays one binary file with a note saying why. So does one whose files are all unchanged and only its packing differs.
 
 ### Merging
 

@@ -6,6 +6,7 @@ pub mod perf;
 mod perf_tests;
 #[cfg(any(test, feature = "perf-probe"))]
 pub use lenz_content::memory_probe;
+pub mod archive;
 pub mod blame;
 pub mod changeset;
 pub mod cli;
