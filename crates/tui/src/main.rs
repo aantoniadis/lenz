@@ -64,10 +64,10 @@ struct Screens {themes:lenz::theme::ThemeService,chooser:Option<themes::Chooser>
 impl Screens {
     fn open(request:Request,cwd:std::path::PathBuf)->Self{
         #[cfg(test)] {
-            let scratch=tempfile::tempdir().unwrap();let paths=lenz::theme::ThemePaths{config_home:scratch.path().join("config"),state_home:scratch.path().join("state")};
-            let mut screens=Self::open_with_theme(request,cwd,lenz::theme::ThemeService::new_deferred(paths,lenz::theme::ThemeOverrides::from_env(),true));screens._theme_scratch=Some(scratch);screens
+            let scratch=tempfile::tempdir().unwrap();let paths=lenz::theme::ThemePaths::under(&scratch.path().join("config"),&scratch.path().join("state"),"lenz");
+            let mut screens=Self::open_with_theme(request,cwd,lenz::theme::ThemeService::new_deferred(paths,lenz::theme::overrides_from_env(),true));screens._theme_scratch=Some(scratch);screens
         }
-        #[cfg(not(test))] {let mut screens=Self::open_with_theme(request,cwd,lenz::theme::ThemeService::new_deferred(lenz::theme::ThemePaths::from_env(),lenz::theme::ThemeOverrides::from_env(),true));screens.kitty=md_images::kitty_supported(|name|std::env::var(name).ok());screens}
+        #[cfg(not(test))] {let mut screens=Self::open_with_theme(request,cwd,lenz::theme::ThemeService::new_deferred(lenz::theme::paths_from_env(),lenz::theme::overrides_from_env(),true));screens.kitty=md_images::kitty_supported(|name|std::env::var(name).ok());screens}
     }
     fn open_with_theme(request:Request,cwd:std::path::PathBuf,mut themes:lenz::theme::ThemeService)->Self{
         // one notice line: settings problems first
@@ -170,7 +170,7 @@ fn restore_input_modes() {
 
 /// Outside a repository: the repository picker, before any comparison opens. `None` when the user quits.
 fn choose_repository(terminal:&mut ratatui::DefaultTerminal,cwd:std::path::PathBuf)->io::Result<Option<std::path::PathBuf>>{
-    let themes=lenz::theme::ThemeService::new_deferred(lenz::theme::ThemePaths::from_env(),lenz::theme::ThemeOverrides::from_env(),true);
+    let themes=lenz::theme::ThemeService::new_deferred(lenz::theme::paths_from_env(),lenz::theme::overrides_from_env(),true);
     let palette=themes.snapshot().palette;
     let mut view=repo_picker::View::new(lenz::repo_picker::RepoPicker::new(cwd));
     loop {

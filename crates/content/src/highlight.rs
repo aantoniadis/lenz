@@ -1,4 +1,4 @@
-//! Syntax highlighting: tree-sitter parses a Side in the background, then its compact highlight
+//! Syntax highlighting: tree-sitter parses a document in the background, then its compact highlight
 //! spans are kept instead of the much larger syntax tree. Painting only copies visible spans.
 //! gpui-free and synchronous; mapping a [`Capture`] to a colour is the UI's job.
 //!
@@ -140,7 +140,7 @@ pub enum Capture {
     Link,
 }
 
-/// One Side's highlights. No syntax tree or duplicate source text survives the background job.
+/// One document's highlights. No syntax tree or duplicate source text survives the background job.
 pub struct Parsed {
     offsets: Vec<usize>,
     spans: Vec<Span>,
@@ -152,11 +152,11 @@ struct Span {
     capture: Capture,
 }
 
-/// Only lives while a Side's highlights are being built.
+/// Only lives while a document's highlights are being built.
 struct SyntaxTree<'a> {
     lang: Language,
     text: &'a str,
-    /// Byte offset of each line's start; lines split on `\n` exactly like `lenz_engine::split_lines`.
+    /// [`crate::lines::line_starts`] of `text`.
     line_starts: Vec<usize>,
     tree: Tree,
 }
@@ -343,29 +343,37 @@ pub fn parse(lang: Language, text: &str) -> Parsed {
 
 /// Called off the UI thread. Obsolete documents leave the queue (or stop parsing) promptly.
 pub fn parse_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Parsed> {
-    type Request = (Language, Arc<str>, Box<dyn Fn() -> bool + Send>, mpsc::SyncSender<Option<Parsed>>);
+    on_worker(move || parse_now(lang, &text, &current))
+}
+
+/// Run one parse job on the syntax pool and wait for its answer.
+fn on_worker<R: Send + 'static>(job: impl FnOnce() -> Option<R> + Send + 'static) -> Option<R> {
+    type Job = Box<dyn FnOnce() + Send>;
     // A small pool, so a merge's three panes or a comparison's two sides parse at once. Each worker hands its
     // freed tree back to the system after every parse, so an idle worker keeps no peak resident.
-    static WORKERS: OnceLock<mpsc::Sender<Request>> = OnceLock::new();
+    static WORKERS: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
     let workers = WORKERS.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Request>();
+        let (tx, rx) = mpsc::channel::<Job>();
         let rx = Arc::new(std::sync::Mutex::new(rx));
         let count = std::thread::available_parallelism().map_or(1, |n| n.get()).clamp(1, SYNTAX_WORKERS);
         for i in 0..count {
             let rx = rx.clone();
             std::thread::Builder::new().name(format!("lenz-highlight-{i}")).spawn(move || loop {
-                let request = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv();
-                let Ok((lang, text, current, reply)) = request else { break };
-                // A panic while parsing (in an unwinding build) answers "no highlights", and the worker lives on.
-                let parsed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| parse_now(lang, &text, &*current)));
-                let _ = reply.send(parsed.unwrap_or(None));
+                let job = rx.lock().unwrap_or_else(std::sync::PoisonError::into_inner).recv();
+                let Ok(job) = job else { break };
+                job();
                 release_freed_memory();
             }).expect("start syntax worker");
         }
         tx
     });
     let (tx, rx) = mpsc::sync_channel(1);
-    if workers.send((lang, text, Box::new(current), tx)).is_err() {
+    let job: Job = Box::new(move || {
+        // A panic while parsing (in an unwinding build) answers "nothing", and the worker lives on.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        let _ = tx.send(result.unwrap_or(None));
+    });
+    if workers.send(job).is_err() {
         return None; // no worker left: plain text, not a second panic
     }
     rx.recv().ok().flatten()
@@ -398,7 +406,7 @@ fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Option<P
         None,
         Some(ParseOptions::new().progress_callback(&mut progress)),
     )?;
-    let line_starts = std::iter::once(0).chain(text.match_indices('\n').map(|(i, _)| i + 1)).collect();
+    let line_starts = crate::lines::line_starts(text);
     let syntax = SyntaxTree { lang, text, line_starts, tree };
     let n = syntax.line_starts.len();
     let mut parsed = Parsed { offsets: Vec::with_capacity(n + 1), spans: Vec::new() };
@@ -474,12 +482,8 @@ impl SyntaxTree<'_> {
         paint.into_iter().map(runs).collect()
     }
 
-    /// Line `l`'s byte range, without its `\n` and a trailing `\r`.
     fn line(&self, l: usize) -> Range<usize> {
-        let start = self.line_starts[l];
-        let end = self.line_starts.get(l + 1).map_or(self.text.len(), |next| next - 1);
-        let end = if self.text.as_bytes()[start..end].ends_with(b"\r") { end - 1 } else { end };
-        start..end
+        crate::lines::line_range(self.text, &self.line_starts, l)
     }
 }
 
@@ -494,6 +498,237 @@ fn runs(paint: Vec<Option<Capture>>) -> Vec<(Range<usize>, Capture)> {
         }
     }
     out
+}
+
+/// What a declaration is, by syntax. A syntactic candidate, not proof of what a reference resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeclKind {
+    Module,
+    /// Struct, class, enum, object, type alias.
+    Type,
+    /// Trait, interface.
+    Interface,
+    Function,
+    Method,
+    /// A function or constant whose name starts with a capital letter in JS/TS (a UI component by convention).
+    Component,
+    Constant,
+    Macro,
+    /// An HTML element with an `id`.
+    Element,
+    /// A CSS rule's selectors.
+    Selector,
+}
+
+impl DeclKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Module => "module",
+            Self::Type => "type",
+            Self::Interface => "interface",
+            Self::Function => "function",
+            Self::Method => "method",
+            Self::Component => "component",
+            Self::Constant => "constant",
+            Self::Macro => "macro",
+            Self::Element => "element",
+            Self::Selector => "selector",
+        }
+    }
+}
+
+/// One declaration, compact: no tree, no copy of the source beyond its name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Declaration {
+    pub kind: DeclKind,
+    /// The name as written, at most [`NAME_CHARS`] characters.
+    pub name: Box<str>,
+    /// Byte ranges of the name and of the whole declaration.
+    pub name_range: Range<u32>,
+    pub range: Range<u32>,
+    /// Declarations enclosing this one.
+    pub depth: u16,
+}
+
+impl Declaration {
+    /// Memory this record holds, for index budgets.
+    pub fn bytes(&self) -> usize {
+        size_of::<Self>() + self.name.len()
+    }
+}
+
+/// A document's declarations, in source order, and whether its syntax had errors (so the list may be partial).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Declarations {
+    pub items: Vec<Declaration>,
+    pub syntax_errors: bool,
+}
+
+/// Characters of a declaration's name kept.
+pub const NAME_CHARS: usize = 120;
+
+/// Kotlin's definitions (from ast-grep's tags.scm, MIT, which the crate does not export).
+const KOTLIN_TAGS: &str = r#"
+(class_declaration "class" (type_identifier) @name) @definition.class
+(class_declaration "interface" (type_identifier) @name) @definition.interface
+(object_declaration (type_identifier) @name) @definition.class
+(function_declaration (simple_identifier) @name) @definition.function
+(source_file (property_declaration (variable_declaration (simple_identifier) @name)) @definition.constant)
+(class_body (property_declaration (variable_declaration (simple_identifier) @name)) @definition.constant)
+(enum_entry (simple_identifier) @name) @definition.constant
+(type_alias (type_identifier) @name) @definition.type
+(companion_object (type_identifier) @name) @definition.class
+"#;
+/// HTML elements with an `id`, by that id.
+const HTML_TAGS: &str = "
+(element (start_tag (attribute (attribute_name) @_attr (quoted_attribute_value (attribute_value) @name)) (#eq? @_attr \"id\"))) @definition.element
+(element (self_closing_tag (attribute (attribute_name) @_attr (quoted_attribute_value (attribute_value) @name)) (#eq? @_attr \"id\"))) @definition.element
+";
+/// TypeScript `namespace` blocks, which the upstream tags query omits.
+const TS_NAMESPACES: &str = "(internal_module name: (_) @name) @definition.module";
+/// CSS rules, by their selectors.
+const CSS_TAGS: &str = "(rule_set (selectors) @name) @definition.selector";
+
+struct Tags {
+    query: Query,
+    name: u32,
+    /// Per capture index: the kind a `@definition.*` capture declares.
+    kinds: Vec<Option<DeclKind>>,
+}
+
+/// Whether [`declarations_while`] supports `lang`.
+pub fn has_declarations(lang: Language) -> bool {
+    tags_queries(lang).is_some()
+}
+
+fn tags_queries(lang: Language) -> Option<&'static [&'static str]> {
+    use Language::*;
+    Some(match lang {
+        Rust => &[tree_sitter_rust::TAGS_QUERY],
+        Python => &[tree_sitter_python::TAGS_QUERY],
+        Ruby => &[tree_sitter_ruby::TAGS_QUERY],
+        Java => &[tree_sitter_java::TAGS_QUERY],
+        Kotlin => &[KOTLIN_TAGS],
+        JavaScript => &[tree_sitter_javascript::TAGS_QUERY],
+        TypeScript | Tsx => &[tree_sitter_typescript::TAGS_QUERY, tree_sitter_javascript::TAGS_QUERY, TS_NAMESPACES],
+        Html => &[HTML_TAGS],
+        Css => &[CSS_TAGS],
+        _ => return None,
+    })
+}
+
+/// The tags query for `lang`, compiled once outside any syntax arena (it outlives every parse).
+fn tags(lang: Language) -> Option<&'static Tags> {
+    static TAGS: [OnceLock<Option<Tags>>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
+    crate::syntax_arena::install();
+    TAGS[lang as usize]
+        .get_or_init(|| {
+            let queries = tags_queries(lang)?;
+            // A query that does not compile means no declarations for the language (a test checks they all do).
+            let query = Query::new(&config(lang).language, &queries.join("\n")).ok()?;
+            let name = query.capture_index_for_name("name")?;
+            let kinds = query
+                .capture_names()
+                .iter()
+                .map(|c| {
+                    Some(match c.strip_prefix("definition.")? {
+                        "module" | "namespace" => DeclKind::Module,
+                        "class" | "type" | "enum" | "struct" | "union" => DeclKind::Type,
+                        "interface" | "trait" => DeclKind::Interface,
+                        "function" => DeclKind::Function,
+                        "method" => DeclKind::Method,
+                        "constant" => DeclKind::Constant,
+                        "macro" => DeclKind::Macro,
+                        "element" => DeclKind::Element,
+                        "selector" => DeclKind::Selector,
+                        _ => return None,
+                    })
+                })
+                .collect();
+            Some(Tags { query, name, kinds })
+        })
+        .as_ref()
+}
+
+/// `text`'s declarations, parsed on the syntax pool inside its arena; `None` when `lang` has none, or once `current`
+/// says the work is obsolete.
+pub fn declarations_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Declarations> {
+    tags(lang)?;
+    on_worker(move || declarations_now(lang, &text, &current))
+}
+
+fn declarations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Option<Declarations> {
+    let tags = tags(lang)?;
+    if !current() {
+        return None;
+    }
+    let language = &config(lang).language;
+    // Declared before the parser, tree and query cursors, so it is dropped after all of them.
+    let _arena = crate::syntax_arena::Scope::begin(text.len());
+    let mut parser = Parser::new();
+    parser.set_language(language).ok()?;
+    let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
+    let tree = parser.parse_with_options(
+        &mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(),
+        None,
+        Some(ParseOptions::new().progress_callback(&mut progress)),
+    )?;
+    let mut found: Vec<Declaration> = Vec::new();
+    {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&tags.query, tree.root_node(), text.as_bytes());
+        let mut seen = 0usize;
+        while let Some(m) = matches.next() {
+            seen += 1;
+            if seen.is_multiple_of(4096) && !current() {
+                return None;
+            }
+            let (Some(name), Some((decl, kind))) = (
+                m.captures().iter().find(|c| c.index == tags.name).map(|c| c.node.byte_range()),
+                m.captures().iter().find_map(|c| tags.kinds[c.index as usize].map(|k| (c.node, k))),
+            ) else {
+                continue;
+            };
+            // Rust's upstream query calls every function in a `{ … }` item list a method; only `impl` and `trait`
+            // bodies hold methods (a `mod` body holds functions).
+            let kind = match (lang, kind) {
+                (Language::Rust, DeclKind::Method)
+                    if decl.parent().and_then(|list| list.parent()).is_some_and(|owner| !matches!(owner.kind(), "impl_item" | "trait_item")) =>
+                {
+                    DeclKind::Function
+                }
+                _ => kind,
+            };
+            let decl = decl.byte_range();
+            let Some(name_text) = text.get(name.clone()) else { continue };
+            let name_text: Box<str> = name_text.chars().take(NAME_CHARS).collect::<String>().into();
+            // JS/TS components: capitalised function or constant declarations, by convention.
+            let component = matches!(lang, Language::JavaScript | Language::TypeScript | Language::Tsx)
+                && matches!(kind, DeclKind::Function | DeclKind::Constant)
+                && name_text.starts_with(|c: char| c.is_uppercase());
+            found.push(Declaration {
+                kind: if component { DeclKind::Component } else { kind },
+                name: name_text,
+                name_range: name.start as u32..name.end as u32,
+                range: decl.start as u32..decl.end as u32,
+                depth: 0,
+            });
+        }
+    }
+    let syntax_errors = tree.root_node().has_error();
+    drop(tree);
+    // Source order; one record per name (combined queries may match a declaration twice); nesting depth.
+    found.sort_by_key(|d| (d.name_range.start, d.name_range.end));
+    found.dedup_by(|b, a| a.name_range == b.name_range);
+    found.sort_by_key(|d| (d.range.start, std::cmp::Reverse(d.range.end)));
+    let mut open: Vec<u32> = Vec::new();
+    for d in &mut found {
+        open.retain(|&end| end > d.range.start);
+        d.depth = open.len() as u16;
+        open.push(d.range.end);
+    }
+    found.shrink_to_fit();
+    Some(Declarations { items: found, syntax_errors })
 }
 
 #[cfg(test)]
@@ -518,6 +753,21 @@ mod tests {
         let after = crate::memory_probe::footprint_mib().unwrap();
         // Concurrent tests add noise of a few MiB; without the arena this retained over 100 MiB.
         assert!(after - before < 24.0, "retained {:.1} MiB after two parses (held {:.1} with the spans, spans {spans_mib:.1})", after - before, held - before);
+    }
+    /// Declaration extraction parses inside the same arena: its tree leaves the process too, and only the compact
+    /// records stay.
+    #[test]
+    #[ignore = "process-wide memory: other tests skew it; scripts/ci-local.sh runs it alone"]
+    fn declaration_extraction_returns_the_trees_memory_to_the_system() {
+        let text: Arc<str> = (0..60_000).map(|i| format!("pub fn compute_{i}(a: u32) -> u32 {{ a + {i} }}\n")).collect::<String>().into();
+        let _warm = declarations_while(Rust, "fn a() {}\n".into(), || true);
+        let before = crate::memory_probe::footprint_mib().expect("memory probe");
+        let found = declarations_while(Rust, text, || true).unwrap();
+        assert_eq!(found.items.len(), 60_000);
+        let records = found.items.iter().map(Declaration::bytes).sum::<usize>() as f64 / (1024.0 * 1024.0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after = crate::memory_probe::footprint_mib().unwrap();
+        assert!(after - before < records + 16.0, "retained {:.1} MiB for {records:.1} MiB of records", after - before);
     }
     use Capture::{Comment, Escape, Function, Heading, Keyword, Number, Property, Tag, TypeBuiltin};
     use Language::*;
@@ -673,6 +923,116 @@ mod tests {
     }
 
     #[test]
+    fn every_language_survives_empty_unicode_crlf_and_lossy_text() {
+        let samples = ["", "\n", "é \u{FFFD}\u{FFFD} 日本 🦀\r\n\"\u{FFFD}\r\n", "\r\n\r\n", "(\u{FFFD}"];
+        for lang in Language::ALL {
+            for src in samples {
+                let p = parse(lang, src);
+                let starts = crate::lines::line_starts(src);
+                let spans = p.spans(0..starts.len());
+                assert_eq!(spans.len(), starts.len(), "{lang:?} {src:?}");
+                for (l, line) in spans.iter().enumerate() {
+                    let r = crate::lines::line_range(src, &starts, l);
+                    let text = &src[r.clone()];
+                    for (span, _) in line {
+                        assert!(span.end <= text.len() && text.is_char_boundary(span.start) && text.is_char_boundary(span.end), "{lang:?} {src:?} line {l}: {span:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lossy_decoded_crlf_text_highlights_in_source_coordinates() {
+        let decoded = crate::encoding::decode(b"// \xFF\r\nfn caf\xC3\xA9() {}\r\n", Some("utf-8"));
+        assert!(decoded.lossy);
+        let src = decoded.text.as_str();
+        let p = parse(Rust, src);
+        assert_eq!(tokens(&p, src, 0), vec![("// \u{FFFD}".to_string(), Comment)]);
+        assert!(has(&tokens(&p, src, 1), "café", Function), "{:?}", tokens(&p, src, 1));
+    }
+
+
+    fn decls(lang: Language, src: &str) -> (Vec<(DeclKind, String, u16)>, bool) {
+        let d = declarations_while(lang, src.into(), || true).unwrap();
+        for x in &d.items {
+            assert_eq!(&src[x.name_range.start as usize..x.name_range.end as usize], &*x.name, "{lang:?}: the name range is the name");
+            assert!(x.range.start <= x.name_range.start && x.name_range.end <= x.range.end, "{lang:?}: {x:?}");
+        }
+        (d.items.into_iter().map(|x| (x.kind, x.name.into(), x.depth)).collect(), d.syntax_errors)
+    }
+
+    fn decl(found: &[(DeclKind, String, u16)], kind: DeclKind, name: &str, depth: u16) -> bool {
+        found.iter().any(|(k, n, d)| *k == kind && n == name && *d == depth)
+    }
+
+    #[test]
+    fn rust_modules_types_traits_and_functions_nest() {
+        let src = "mod outer {\n    pub struct Café;\n    pub trait Greet { fn hi(&self); }\n    impl Café { pub fn new() -> Self { Café } }\n    fn helper() {}\n}\nmacro_rules! m { () => {} }\nfn helper() {}\n";
+        let (found, errors) = decls(Rust, src);
+        assert!(!errors);
+        assert!(decl(&found, DeclKind::Module, "outer", 0));
+        assert!(decl(&found, DeclKind::Type, "Café", 1), "{found:?}");
+        assert!(decl(&found, DeclKind::Interface, "Greet", 1));
+        assert!(decl(&found, DeclKind::Method, "new", 1), "an impl is not a declaration: {found:?}");
+        assert!(decl(&found, DeclKind::Function, "helper", 1) && decl(&found, DeclKind::Function, "helper", 0), "duplicate names stay apart");
+        assert!(decl(&found, DeclKind::Macro, "m", 0));
+    }
+
+    #[test]
+    fn python_ruby_java_and_kotlin_declarations() {
+        let (py, _) = decls(Python, "class Ä:\n    def m(self):\n        def inner(): pass\n\ndef f(): pass\n");
+        assert!(decl(&py, DeclKind::Type, "Ä", 0) && decl(&py, DeclKind::Function, "m", 1) && decl(&py, DeclKind::Function, "inner", 2) && decl(&py, DeclKind::Function, "f", 0), "{py:?}");
+        let (rb, _) = decls(Ruby, "module M\n  class C\n    def go; end\n    def self.make; end\n  end\nend\n");
+        assert!(decl(&rb, DeclKind::Module, "M", 0) && decl(&rb, DeclKind::Type, "C", 1) && decl(&rb, DeclKind::Method, "go", 2) && decl(&rb, DeclKind::Method, "make", 2), "{rb:?}");
+        let (java, _) = decls(Java, "interface I { void a(); }\nclass C implements I {\n  public void a() {}\n  class Inner {}\n}\n");
+        assert!(decl(&java, DeclKind::Interface, "I", 0) && decl(&java, DeclKind::Type, "C", 0) && decl(&java, DeclKind::Method, "a", 1) && decl(&java, DeclKind::Type, "Inner", 1), "{java:?}");
+        let (kt, _) = decls(Kotlin, "class Box(val x: Int) {\n  fun open() {}\n  companion object Factory { fun make() = Box(1) }\n  val size = 2\n}\nobject Single\ntypealias B = Box\nval top = 1\ninterface Shape { fun area(): Int }\nfun f() { val local = 1 }\n");
+        assert!(decl(&kt, DeclKind::Type, "Box", 0) && decl(&kt, DeclKind::Function, "open", 1) && decl(&kt, DeclKind::Type, "Single", 0) && decl(&kt, DeclKind::Type, "B", 0) && decl(&kt, DeclKind::Constant, "top", 0), "{kt:?}");
+        assert!(kt.iter().any(|(_, n, _)| n == "make"), "{kt:?}");
+        assert!(decl(&kt, DeclKind::Interface, "Shape", 0) && decl(&kt, DeclKind::Constant, "size", 1), "{kt:?}");
+        assert!(!kt.iter().any(|(_, n, _)| n == "local"), "a function's locals are not declarations: {kt:?}");
+    }
+
+    #[test]
+    fn javascript_typescript_and_tsx_with_named_components() {
+        let (js, _) = decls(JavaScript, "class A { run() {} }\nfunction helper() {}\nconst Button = () => <b/>;\nfunction App() { return <Button/>; }\n");
+        assert!(decl(&js, DeclKind::Type, "A", 0) && decl(&js, DeclKind::Method, "run", 1) && decl(&js, DeclKind::Function, "helper", 0), "{js:?}");
+        assert!(decl(&js, DeclKind::Component, "Button", 0) && decl(&js, DeclKind::Component, "App", 0), "{js:?}");
+        let (ts, _) = decls(TypeScript, "interface Shape { area(): number }\nnamespace Geo { export function circle() {} }\nclass Sq implements Shape { area() { return 1 } }\n");
+        assert!(decl(&ts, DeclKind::Interface, "Shape", 0) && decl(&ts, DeclKind::Module, "Geo", 0) && decl(&ts, DeclKind::Function, "circle", 1) && decl(&ts, DeclKind::Type, "Sq", 0), "{ts:?}");
+        let (tsx, _) = decls(Tsx, "export function Card(): JSX.Element { return <div/>; }\nconst useThing = () => 1;\n");
+        assert!(decl(&tsx, DeclKind::Component, "Card", 0) && decl(&tsx, DeclKind::Function, "useThing", 0), "{tsx:?}");
+    }
+
+    #[test]
+    fn html_ids_and_css_selectors() {
+        let (html, _) = decls(Html, "<main id=\"app\"><section id=\"größe\"><p>x</p></section><img id=\"logo\"/></main>\n");
+        let ids: Vec<&str> = html.iter().map(|(_, n, _)| n.as_str()).collect();
+        assert_eq!(ids, ["app", "größe", "logo"]);
+        assert!(decl(&html, DeclKind::Element, "größe", 1));
+        let (css, _) = decls(Css, ".a, .b > p { color: red }\n@media (min-width: 1px) { #main { x: y } }\n");
+        assert!(decl(&css, DeclKind::Selector, ".a, .b > p", 0) && css.iter().any(|(k, n, _)| *k == DeclKind::Selector && n == "#main"), "{css:?}");
+    }
+
+    #[test]
+    fn every_declaration_query_compiles() {
+        for lang in Language::ALL.into_iter().filter(|&l| has_declarations(l)) {
+            assert!(tags(lang).is_some(), "{lang:?} tags query");
+        }
+    }
+
+    #[test]
+    fn incomplete_source_still_yields_what_parsed_and_says_so() {
+        let (found, errors) = decls(Rust, "fn ok() {}\nfn broken( {\nstruct After;\n");
+        assert!(errors);
+        assert!(decl(&found, DeclKind::Function, "ok", 0), "{found:?}");
+        assert!(declarations_while(Markdown, "# x".into(), || true).is_none(), "unsupported languages say so");
+        assert!(!has_declarations(Markdown) && has_declarations(Css));
+        assert!(declarations_while(Rust, "fn a() {}".into(), || false).is_none(), "obsolete work stops");
+    }
+
+    #[test]
     fn parsed_is_send() {
         fn assert_send<T: Send>() {}
         assert_send::<Parsed>();
@@ -680,11 +1040,12 @@ mod tests {
 
     /// The text of each span on `line`, with its capture.
     fn tokens(p: &Parsed, text: &str, line: usize) -> Vec<(String, Capture)> {
-        let lines = lenz_engine::split_lines(text);
+        let starts = crate::lines::line_starts(text);
+        let line_text = &text[crate::lines::line_range(text, &starts, line)];
         p.spans(line..line + 1)
             .remove(0)
             .into_iter()
-            .map(|(r, c)| (lines[line][r].to_string(), c))
+            .map(|(r, c)| (line_text[r].to_string(), c))
             .collect()
     }
 
@@ -767,12 +1128,12 @@ mod tests {
     fn window_matches_whole_file_restricted() {
         let src = big_rust(300);
         let p = parse(Rust, &src);
-        let n = lenz_engine::split_lines(&src).len();
+        let n = crate::lines::line_starts(&src).len();
         let mut parser = Parser::new();
         parser.set_language(&config(Rust).language).unwrap();
         let tree = SyntaxTree {
             lang: Rust, text: &src, tree: parser.parse(&src, None).unwrap(),
-            line_starts: std::iter::once(0).chain(src.match_indices('\n').map(|(i, _)| i + 1)).collect(),
+            line_starts: crate::lines::line_starts(&src),
         };
         let whole = tree.spans(0..n);
         assert_eq!(p.spans(0..n), whole, "chunk boundaries preserve the original full-tree highlighting");
@@ -791,7 +1152,7 @@ mod tests {
         assert!(parse_while(Rust, "fn current() {}".into(), || true).is_some());
     }
 
-    /// `cargo test --release -p lenz -- --ignored --nocapture perf`
+    /// `cargo test --release -p lenz-content -- --ignored --nocapture perf`
     #[test]
     #[ignore]
     fn perf() {
@@ -800,7 +1161,7 @@ mod tests {
             Ok(path) => std::fs::read_to_string(path).unwrap(),
             Err(_) => big_rust(100_000 / 9 + 1),
         };
-        let n = lenz_engine::split_lines(&src).len();
+        let n = crate::lines::line_starts(&src).len();
         let t = Instant::now();
         config(Rust);
         let compile = t.elapsed();

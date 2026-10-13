@@ -96,3 +96,8 @@ custom themes fall back while retaining their saved ID.
 `LENZ_APPEARANCE=light|dark` is a legacy override when LENZ_THEME is unset.
 Unknown overrides report a notice and use the saved/default selection. Explicit
 menu selection supersedes the environment override and saves normally.
+
+The theme format, built-in themes, selection and Omarchy following live in the
+shared `lenz-content` crate, which the code reader also uses. Each product passes
+its own directories, selection file and overrides, so the reader's choice and
+user themes never change Lenz's.

@@ -36,7 +36,8 @@ fn rgb(value: &toml::Value, key: &str) -> Result<u32, ThemeError> {
     }
     u32::from_str_radix(&s[1..], 16).map_err(|_| invalid(key))
 }
-pub(crate) fn read_bounded(path: &Path) -> Result<Vec<u8>, ThemeError> {
+/// A regular file of at most 64 KiB, opened without blocking on a FIFO.
+pub fn read_bounded(path: &Path) -> Result<Vec<u8>, ThemeError> {
     if !std::fs::metadata(path)?.is_file() {
         return Err(ThemeError("Theme input is not a regular file".into()));
     }

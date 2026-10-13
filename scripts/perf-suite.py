@@ -19,7 +19,7 @@ from perf_support import compare, metrics, run, tail_growth, cargo_executable, i
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / 'scripts'
 SCHEMA = 1
-WORKLOAD_VERSION = 5
+WORKLOAD_VERSION = 6
 
 
 def command_text(args, env):
@@ -147,6 +147,7 @@ def main():
         artifacts = {}
         for label, command in [
             ('build-tests',['cargo','test','--locked','--release','-p','lenz','--no-run','--message-format=json']),
+            ('build-content-tests',['cargo','test','--locked','--release','-p','lenz-content','--no-run','--message-format=json']),
             ('build-engine',['cargo','bench','--locked','-p','lenz-engine','--bench','engine','--no-run','--message-format=json']),
             ('build-app',['cargo','build','--locked','--release','-p','lenz','--message-format=json']),
             ('build-tui',['cargo','build','--locked','--release','-p','lenz-tui','--message-format=json']),
@@ -157,6 +158,7 @@ def main():
                 raise RuntimeError(f'{label} failed; see {row["log"]}')
             kind,name,test = {
                 'build-tests':('lib','lenz',True),
+                'build-content-tests':('lib','lenz_content',True),
                 'build-engine':('bench','engine',True),
                 'build-app':('bin','lenz',False),
                 'build-tui':('bin','lenz-tui',False),
@@ -169,19 +171,19 @@ def main():
         (out/'sources.json').write_text(json.dumps(sources,indent=2)+'\n')
         result['source_manifest_sha256'] = hashlib.sha256(json.dumps(sources,sort_keys=True).encode()).hexdigest()
         tests = [
-            ('view','view::tests::view_model_perf_on_a_100k_line_pair',True),
-            ('refine-poll','view::tests::refinement_polling_perf_5000_blocks',True),
-            ('merge','ui::merge_view::tests::merge_view_perf',True),
-            ('syntax','highlight::tests::perf',True),
-            ('search','find::tests::search_perf',True),
-            ('search-session','search_session::scheduler_perf::search_session_perf_stream_cancel_and_retained_rows',True),
-            ('images','images::tests::image_perf',True),
-            ('history','history::tests::layout_a_million_synthetic_commits',True),
-            ('decode','encoding::tests::timings',False),
+            ('view','view::tests::view_model_perf_on_a_100k_line_pair',True,'build-tests'),
+            ('refine-poll','view::tests::refinement_polling_perf_5000_blocks',True,'build-tests'),
+            ('merge','ui::merge_view::tests::merge_view_perf',True,'build-tests'),
+            ('syntax','highlight::tests::perf',True,'build-content-tests'),
+            ('search','find::tests::search_perf',True,'build-tests'),
+            ('search-session','search_session::scheduler_perf::search_session_perf_stream_cancel_and_retained_rows',True,'build-tests'),
+            ('images','images::tests::image_perf',True,'build-tests'),
+            ('history','history::tests::layout_a_million_synthetic_commits',True,'build-tests'),
+            ('decode','encoding::tests::timings',False,'build-content-tests'),
         ]
         if opt.profile != 'quick':
-            tests.append(('blame','blame::tests::blame_timing_on_a_long_history',True))
-            tests.append(('blame-fragmented','annotation_session::tests::annotation_perf_fragmented_polling',True))
+            tests.append(('blame','blame::tests::blame_timing_on_a_long_history',True,'build-tests'))
+            tests.append(('blame-fragmented','annotation_session::tests::annotation_perf_fragmented_polling',True,'build-tests'))
         # Warm a fresh process for each component, excluded from results. Builds are never timed as workloads.
         for trial in range(0, opt.runs+1):
             prefix = 'warmup-' if trial == 0 else ''
@@ -201,7 +203,7 @@ def main():
                             '--lines','1000' if opt.profile == 'quick' else '100000',
                             '--rounds','500' if opt.profile == 'stress' else '30']),
             ]
-            for name, command in [('engine',engine_cmd), *[(name,[artifacts['build-tests'],test,'--exact','--nocapture',*(['--ignored'] if ignored else [])]) for name,test,ignored in tests], *terminal_cases]:
+            for name, command in [('engine',engine_cmd), *[(name,[artifacts[binary],test,'--exact','--nocapture',*(['--ignored'] if ignored else [])]) for name,test,ignored,binary in tests], *terminal_cases]:
                 row, text = collect(prefix+name,command,trial=trial,parse=trial>0)
                 if name == 'engine' and 'skipped:' in text and trial == 1:
                     skip('optional-tokio-corpus',next(line for line in text.splitlines() if 'skipped:' in line))

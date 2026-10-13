@@ -8,10 +8,10 @@ publish.workspace = true
 
 [features]
 default = ["gui"]
-gui = ["dep:gpui", "dep:gpui_platform", "dep:unicode-segmentation", "dep:x11rb", "dep:raw-window-handle", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
+gui = ["dep:gpui", "dep:lenz-gpui", "dep:gpui_platform", "dep:unicode-segmentation", "dep:x11rb", "dep:raw-window-handle", "dep:objc2", "dep:objc2-foundation", "dep:objc2-app-kit"]
 gui-test = ["gui", "gpui/test-support"]
 # In-process memory probe for the benchmark and test targets of every frontend; never in shipping binaries.
-perf-probe = []
+perf-probe = ["lenz-content/perf-probe"]
 
 [[bin]]
 name = "lenz"
@@ -22,13 +22,16 @@ test = false
 [dependencies]
 unicode-segmentation = { version = "1.13.3", optional = true }
 lenz-engine = { path = "../engine" }
+# Decoding, line offsets and syntax highlighting, shared with the code reader.
+lenz-content = { path = "../content" }
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 gpui = { workspace = true, optional = true }
+# Single-pane text presentation shared with the code reader.
+lenz-gpui = { path = "../gpui", optional = true }
 # Zero-width detection for the combining-mark cap (src/document.rs); the TUI already builds it.
 unicode-width = "0.2"
-# Per-Side decoding (src/encoding.rs).
+# Encoding names for writing files back (src/write.rs); decoding is in lenz-content.
 encoding_rs = "0.8.42"
-chardetng = "1.0.0"
 # Image decoding (src/images.rs). Same version and a subset of the features gpui already enables, so it unifies: nothing new to compile.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # SVG rasterising (src/images.rs); the version gpui already builds, so nothing new to compile.
@@ -37,36 +40,13 @@ resvg = { version = "0.46", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8.23"
-notify = "8.2.0"
 # Private, exclusively created files for atomic saves and Git merge inputs.
 tempfile = "3"
 async-channel = "2.5.0"
-# Syntax highlighting: runtime + one crate per bundled grammar (see src/highlight/LANGUAGES.md).
-tree-sitter = "0.27"
-tree-sitter-bash = "0.25.1"
-tree-sitter-c = "0.24.2"
-tree-sitter-c-sharp = "0.23.5"
-tree-sitter-containerfile = "0.9.2"
-tree-sitter-cpp = "0.23.4"
-tree-sitter-css = "0.25.0"
-tree-sitter-go = "0.25.0"
-tree-sitter-html = "0.23.2"
-tree-sitter-java = "0.23.5"
-tree-sitter-javascript = "0.25.0"
-tree-sitter-json = "0.24.8"
-tree-sitter-kotlin-sg = "0.4.1"
-tree-sitter-lua = "0.5.0"
-tree-sitter-make = "1.1.1"
-tree-sitter-md = "0.5.3"
-tree-sitter-php = "0.24.2"
-tree-sitter-python = "0.25.0"
-tree-sitter-ruby = "0.23.1"
-tree-sitter-rust = "0.24.2"
-tree-sitter-sequel = "0.3.11"
-tree-sitter-toml-ng = "0.7.0"
-tree-sitter-typescript = "0.23.2"
-tree-sitter-yaml = "0.7.2"
-tree-sitter-zig = "1.1.2"
+
+[dev-dependencies]
+# The in-process memory probe for this crate's tests.
+lenz-content = { path = "../content", features = ["perf-probe"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, optional = true, features = ["font-kit"] }

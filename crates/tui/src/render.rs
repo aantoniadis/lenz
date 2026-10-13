@@ -125,7 +125,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         for row in rows {
             if row.y < 0.0 || row.y >= f32::from(body_h) { continue; }
             let y = pane.y + row.y as u16;
-            let tint = color(row.tint.map_or(palette.bg, |(kind, ignored)| palette.change_color(kind,ignored,&palette.block)));
+            let tint = color(row.tint.map_or(palette.bg, |(kind, ignored)| lenz::theme::change_color(palette,kind,ignored,&palette.block)));
             let style = base(palette).bg(tint);
             frame.buffer_mut().set_style(Rect::new(pane.x, y, pane.width, 1), style);
             match row.content {
@@ -147,7 +147,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
                         let selection=selected.and_then(|s|s.on_line(line,text.len()));
                         let caret=selected.filter(|s|s.head.line==line).map(|s|s.head.col);
                         let source=app.source_rect(side);
-                        let inline_color=row.tint.map(|(kind,ignored)|palette.change_color(kind,ignored,&palette.inline));
+                        let inline_color=row.tint.map(|(kind,ignored)|lenz::theme::change_color(palette,kind,ignored,&palette.inline));
                         rich_source(palette,frame.buffer_mut(), Rect::new(source.x, y, source.width, 1), text, app.horizontal[app.pane_side(side) as usize], style, Decorations{inline:&row.inline,inline_color,hits:&hits,syntax:&syntax,selection,caret});
                     }
                 }

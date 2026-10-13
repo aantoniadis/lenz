@@ -1,7 +1,7 @@
 //! GUI controls; selection and I/O belong to the shared theme service.
 use super::*;
 use crate::theme::{
-    ThemeCommand, ThemeEntry, ThemeOverrides, ThemePaths, ThemeSelection, ThemeService,
+    ThemeCommand, ThemeEntry, ThemeSelection, ThemeService,
 };
 pub(crate) struct GuiThemes(
     pub ThemeService,
@@ -18,16 +18,13 @@ pub(crate) fn install(cx: &mut App) {
     #[cfg(test)]
     let scratch = tempfile::tempdir().unwrap();
     #[cfg(test)]
-    let paths = ThemePaths {
-        config_home: scratch.path().join("config"),
-        state_home: scratch.path().join("state"),
-    };
+    let paths = crate::theme::ThemePaths::under(&scratch.path().join("config"), &scratch.path().join("state"), "lenz");
     #[cfg(not(test))]
-    let paths = ThemePaths::from_env();
+    let paths = crate::theme::paths_from_env();
     #[cfg(test)]
-    let overrides = ThemeOverrides::default();
+    let overrides = crate::theme::ThemeOverrides::default();
     #[cfg(not(test))]
-    let overrides = ThemeOverrides::from_env();
+    let overrides = crate::theme::overrides_from_env();
     let mut service = ThemeService::new(paths, overrides, true);
     let rx = service.updates();
     let notice = service.take_notices().into_iter().next();

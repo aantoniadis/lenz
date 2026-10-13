@@ -3155,14 +3155,14 @@ name = "lenz"
 version = "0.0.1"
 dependencies = [
  "async-channel",
- "chardetng",
  "encoding_rs",
  "gpui",
  "gpui_platform",
  "image",
+ "lenz-content",
  "lenz-engine",
+ "lenz-gpui",
  "libc",
- "notify",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -3170,6 +3170,27 @@ dependencies = [
  "raw-window-handle",
  "resvg",
  "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+ "unicode-segmentation",
+ "unicode-width",
+ "x11rb",
+]
+
+[[package]]
+name = "lenz-content"
+version = "0.0.1"
+dependencies = [
+ "async-channel",
+ "chardetng",
+ "encoding_rs",
+ "image",
+ "lenz-engine",
+ "libc",
+ "notify",
+ "pulldown-cmark",
+ "resvg",
  "serde_json",
  "tempfile",
  "toml 0.8.23",
@@ -3198,9 +3219,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "tree-sitter-zig",
- "unicode-segmentation",
  "unicode-width",
- "x11rb",
 ]
 
 [[package]]
@@ -3209,6 +3228,14 @@ version = "0.0.1"
 dependencies = [
  "gix-imara-diff",
  "insta",
+]
+
+[[package]]
+name = "lenz-gpui"
+version = "0.0.1"
+dependencies = [
+ "gpui",
+ "lenz-content",
 ]
 
 [[package]]

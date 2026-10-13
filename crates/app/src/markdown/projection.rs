@@ -758,27 +758,3 @@ impl Projection {
         found
     }
 }
-
-impl MarkdownDocument {
-    /// Translate decoded bytes (including CRLF) to the source view's raw position.
-    pub fn source_pos(&self, byte: usize) -> Option<crate::selection::Pos> {
-        if !self.source.is_char_boundary(byte) {
-            return None;
-        }
-        let line = self
-            .line_starts
-            .partition_point(|&start| start <= byte)
-            .saturating_sub(1);
-        let start = *self.line_starts.get(line)?;
-        let end = self
-            .line_starts
-            .get(line + 1)
-            .copied()
-            .unwrap_or(self.source.len());
-        let len = self.source[start..end].trim_end_matches(['\r', '\n']).len();
-        Some(crate::selection::Pos::new(
-            line as u32,
-            (byte - start).min(len),
-        ))
-    }
-}

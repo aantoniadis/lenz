@@ -5,10 +5,9 @@ pub(super) struct About {pub image:Arc<gpui::RenderImage>,pub scroll:usize}
 impl About {
     pub fn open()->Self {
         // This small, checked-in PNG is trusted and tested; no filesystem reads.
-        let mut pixels=image::load_from_memory(include_bytes!("../../../../assets/lenz-about.png"))
+        let pixels=image::load_from_memory(include_bytes!("../../../../assets/lenz-about.png"))
             .map_or_else(|_|image::RgbaImage::new(1,1),|image|image.into_rgba8());
-        for pixel in pixels.pixels_mut(){pixel.0.swap(0,2);}
-        Self{image:Arc::new(gpui::RenderImage::new(vec![image::Frame::new(pixels)])),scroll:0}
+        Self{image:lenz_gpui::image::texture(pixels),scroll:0}
     }
     /// Whether a point lies on the About box.
     pub fn contains(viewport:gpui::Size<Pixels>,at:gpui::Point<Pixels>)->bool{

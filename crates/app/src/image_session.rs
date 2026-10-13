@@ -62,12 +62,7 @@ impl ImageDoc {
             if bytes.is_empty() {
                 return Some(None); // an absent Side
             }
-            let name = path.to_string_lossy();
-            let svg = name.to_ascii_lowercase().ends_with(".svg");
-            (binary || svg)
-                .then(|| images::detect(&name, bytes))
-                .flatten()
-                .map(Some)
+            images::detect_file(&path.to_string_lossy(), bytes, binary).map(Some)
         };
         let (fl, fr) = (format(left)?, format(right)?);
         if fl.is_none() && fr.is_none() {

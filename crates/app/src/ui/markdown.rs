@@ -1,11 +1,12 @@
 //! Native Markdown geometry. Semantic selection and source mapping stay in the core.
 use super::*;
+use crate::markdown::SourcePos as _;
 use crate::markdown::{
     BlockKind, MarkdownCommand, PresentationMode, Projection, RenderSelection, SourceAnchor,
     TableAlignment,
 };
-use super::reading_style::{ReadingStyle, sans_family};
 use gpui::RenderImage;
+use lenz_gpui::markdown::{LIST_STEP, ReadingStyle, indent, quotes, sans_family, shape, shape_with};
 use unicode_segmentation::UnicodeSegmentation;
 
 // Wrapping queries the same native line many times. GPUI's helpers scan from the
@@ -207,55 +208,8 @@ impl CodeSyntax {
         let job = has_code.then(|| {
             crate::work::submit(weak.clone(), move || {
                 std::array::from_fn(|i| {
-                    let doc = &pair.sides[i];
-                    let mut blocks = HashMap::new();
-                    for (index, block) in doc.blocks.iter().enumerate() {
-                        if weak.strong_count() == 0 {
-                            break;
-                        }
-                        let BlockKind::Code {
-                            language: Some(language),
-                        } = &block.kind
-                        else {
-                            continue;
-                        };
-                        let extension = match language.as_str() {
-                            "rust" => "rs",
-                            "python" => "py",
-                            "javascript" => "js",
-                            "typescript" => "ts",
-                            "bash" => "sh",
-                            other => other,
-                        };
-                        let Some(language) =
-                            highlight::detect(Path::new(&format!("code.{extension}")), "")
-                        else {
-                            continue;
-                        };
-                        let cancel = weak.clone();
-                        let text = &doc.text[block.text.clone()];
-                        let Some(parsed) =
-                            highlight::parse_while(language, Arc::from(text), move || {
-                                cancel.strong_count() > 0
-                            })
-                        else {
-                            continue;
-                        };
-                        let starts: Vec<_> = std::iter::once(block.text.start)
-                            .chain(
-                                text.match_indices('\n')
-                                    .map(|(b, _)| block.text.start + b + 1),
-                            )
-                            .collect();
-                        let mut spans = Vec::new();
-                        for (line, items) in parsed.spans(0..starts.len()).into_iter().enumerate() {
-                            for (r, capture) in items {
-                                spans.push((starts[line] + r.start..starts[line] + r.end, capture));
-                            }
-                        }
-                        blocks.insert(index, spans);
-                    }
-                    blocks
+                    let cancel = weak.clone();
+                    crate::markdown::code_syntax(&pair.sides[i], move || cancel.strong_count() > 0)
                 })
             })
         });
@@ -367,170 +321,14 @@ pub(super) struct ImageCache {
 }
 /// A local image file as a texture and its size; `None` when it is not a readable image.
 fn decode_image(path: &Path) -> Option<Decoded> {
-    let mut pixels = crate::markdown::decode_image(path)?;
+    let pixels = crate::markdown::decode_image(path)?;
     let size = [pixels.width(), pixels.height()];
-    crate::images::swap_rb(&mut pixels);
-    Some((Arc::new(RenderImage::new(vec![image::Frame::new(pixels)])), size))
+    Some((lenz_gpui::image::texture(pixels), size))
 }
 fn pane(i: usize) -> Side {
     if i == 0 { Side::Left } else { Side::Right }
 }
 // Native shaping needs both semantic ranges and the active typography/palette.
-/// Quotes that are not callouts.
-fn quotes(block: &crate::markdown::Block) -> u16 {
-    block.quote_depth.saturating_sub(u16::from(block.callout.is_some()))
-}
-/// Where a block's text starts: inside callout padding, quote bars and list levels.
-fn indent(style: &ReadingStyle, left: f32, block: &crate::markdown::Block) -> f32 {
-    let pad = if block.callout.is_some() { style.size } else { 0. };
-    // a footnote's number hangs in front of its text
-    let note = if matches!(block.kind, BlockKind::Footnote { .. }) { style.size * 1.6 } else { 0. };
-    left + pad + note + quotes(block) as f32 * style.size + block.list_depth as f32 * LIST_STEP
-}
-/// Width of one list level.
-const LIST_STEP: f32 = 22.;
-#[allow(clippy::too_many_arguments)]
-fn shape(
-    doc: &crate::markdown::MarkdownDocument,
-    block: &crate::markdown::Block,
-    range: Range<usize>,
-    font_size: f32,
-    style: &ReadingStyle,
-    p: &theme::Palette,
-    text_system: &gpui::WindowTextSystem,
-    syntax: &[(Range<usize>, Capture)],
-    color: Option<u32>,
-) -> ShapedLine {
-    shape_with(doc, block, range, font_size, style, p, text_system, syntax, color, false)
-}
-/// [`shape`], struck through and muted when `struck` (Inline's removed text).
-#[allow(clippy::too_many_arguments)]
-fn shape_with(
-    doc: &crate::markdown::MarkdownDocument,
-    block: &crate::markdown::Block,
-    range: Range<usize>,
-    font_size: f32,
-    style: &ReadingStyle,
-    p: &theme::Palette,
-    text_system: &gpui::WindowTextSystem,
-    syntax: &[(Range<usize>, Capture)],
-    color: Option<u32>,
-    struck: bool,
-) -> ShapedLine {
-    // a list item's synthetic marker is muted; a task's `[ ] ` is drawn as a checkbox instead
-    let (marker_end, task) = match &block.kind {
-        BlockKind::ListItem { marker, checked } => {
-            let m = block.text.start + marker.len() + 1;
-            (m, checked.map(|_| m..m + 4))
-        }
-        _ => (block.text.start, None),
-    };
-    let mut cuts = vec![range.start, range.end];
-    for at in [Some(marker_end), task.as_ref().map(|t| t.end)].into_iter().flatten() {
-        if range.contains(&at) {
-            cuts.push(at);
-        }
-    }
-    let start = block.runs.partition_point(|r| r.text.end <= range.start);
-    for run in block.runs[start..]
-        .iter()
-        .take_while(|r| r.text.start < range.end)
-    {
-        if run.text.start < range.end && run.text.end > range.start {
-            cuts.push(run.text.start.max(range.start));
-            cuts.push(run.text.end.min(range.end));
-        }
-    }
-    for (r, _) in syntax
-        .iter()
-        .skip(syntax.partition_point(|(r, _)| r.end <= range.start))
-        .take_while(|(r, _)| r.start < range.end)
-    {
-        cuts.push(r.start.max(range.start));
-        cuts.push(r.end.min(range.end));
-    }
-    cuts.sort_unstable();
-    cuts.dedup();
-    let runs: Vec<_> = cuts
-        .windows(2)
-        .map(|r| {
-            let run = block
-                .runs
-                .get(block.runs.partition_point(|s| s.text.end <= r[0]))
-                .filter(|s| s.text.start <= r[0] && s.text.end >= r[1])
-                .map(|s| s.style)
-                .unwrap_or_default();
-            let inline_code = run.code && !matches!(block.kind, BlockKind::Code { .. } | BlockKind::Literal | BlockKind::Properties);
-            let mono = inline_code || matches!(block.kind, BlockKind::Code { .. } | BlockKind::Literal);
-            let mut f = if mono { style.mono.clone() } else { style.body.clone() };
-            if run.strong
-                || run.callout_title
-                || run.footnote
-                || matches!(block.kind, BlockKind::Heading(_) | BlockKind::TableRow { header: true, .. })
-            {
-                f.weight = gpui::FontWeight::BOLD;
-            }
-            if run.emphasis {
-                f.style = gpui::FontStyle::Italic;
-            }
-            let done = matches!(block.kind, BlockKind::ListItem { checked: Some(true), .. });
-            let syntax_color = || {
-                syntax
-                    .get(syntax.partition_point(|(s, _)| s.end <= r[0]))
-                    .filter(|(s, _)| s.start <= r[0])
-                    .map(|(_, c)| p.syntax_color(*c))
-            };
-            let color = if let Some(c) = color {
-                c
-            } else if struck || r[0] < marker_end {
-                style.muted
-            } else if run.callout_title {
-                block.callout.map_or(style.text, |c| style.callout(p, c.kind).1)
-            } else if run.tag {
-                style.tag_fg
-            } else if run.link && run.external {
-                style.external
-            } else if run.link || run.footnote {
-                style.link
-            } else if inline_code {
-                style.code_fg
-            } else if let Some(c) = syntax_color() {
-                c
-            } else if done || matches!(block.kind, BlockKind::Footnote { .. }) {
-                style.muted
-            } else if matches!(block.kind, BlockKind::Heading(_)) {
-                style.heading_color
-            } else {
-                style.text
-            };
-            TextRun {
-                len: r[1] - r[0],
-                font: f,
-                color: if task.as_ref().is_some_and(|t| t.contains(&r[0])) || matches!(block.kind, BlockKind::Rule) {
-                    gpui::transparent_black()
-                } else {
-                    rgb(color).into()
-                },
-                background_color: run.highlight.then(|| rgb(style.highlight).into()),
-                underline: (run.link && run.external).then_some(gpui::UnderlineStyle {
-                    thickness: px(1.),
-                    color: None,
-                    wavy: false,
-                }),
-                strikethrough: (struck || run.strike || (done && r[0] >= task.as_ref().map_or(0, |t| t.end))).then_some(gpui::StrikethroughStyle {
-                    thickness: px(1.),
-                    color: None,
-                }),
-            }
-        })
-        .collect();
-    text_system.shape_line(
-        crate::document::show_bidi(&doc.text[range]).into_owned().into(),
-        px(font_size),
-        &runs,
-        None,
-    )
-}
 /// Inline spans of one block, placed left to right and wrapped at word boundaries into rows of pane `pane`.
 /// Spans of the block's own side start at `from` (after a callout title).
 /// Slicing: offsets come from span ranges, `find('\n')`, char-boundary checks and grapheme indices.

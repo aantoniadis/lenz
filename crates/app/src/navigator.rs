@@ -80,45 +80,7 @@ pub fn badge(status: &Status) -> &'static str {
     }
 }
 
-/// Fuzzy match score: a file name starting with the query beats one merely containing it, which
-/// beats a substring anywhere in the path, which beats
-/// a scattered subsequence; `None` when `query` isn't a subsequence of `path` at all.
-pub fn score(query: &str, path: &str) -> Option<i64> {
-    if query.is_empty() {
-        return Some(0);
-    }
-    let (q, p) = (query.to_lowercase(), path.to_lowercase());
-    let name_start = p.rfind('/').map_or(0, |i| i + 1);
-    let mut s: i64 = 0;
-    let mut prev: Option<usize> = None;
-    let mut from = 0;
-    for qc in q.chars() {
-        let at = from + p[from..].find(qc)?;
-        s += if at >= name_start { 10 } else { 1 };
-        if prev.is_some_and(|pr| pr + 1 == at) {
-            s += 6;
-        }
-        prev = Some(at);
-        from = at + qc.len_utf8();
-    }
-    let substring = if p[name_start..].starts_with(&q) {
-        30_000
-    } else if p[name_start..].contains(&q) {
-        20_000
-    } else if p.contains(&q) {
-        10_000
-    } else {
-        0
-    };
-    Some(substring + s * 100 - path.len() as i64)
-}
-
-/// Indices of `paths` matching `query`, best first (ties keep Navigator order).
-pub fn rank(query: &str, paths: &[&str]) -> Vec<usize> {
-    let mut hits: Vec<(i64, usize)> = paths.iter().enumerate().filter_map(|(i, p)| score(query, p).map(|s| (s, i))).collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-    hits.into_iter().map(|(_, i)| i).collect()
-}
+pub use lenz_content::fuzzy::{rank, score};
 
 /// Split a switcher query like `driver:120` into the file part and a 1-based line.
 pub fn query_line(query: &str) -> (&str, Option<u32>) {

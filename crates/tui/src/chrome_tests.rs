@@ -1,6 +1,7 @@
 //! Real event and cell checks for the GUI-like terminal chrome.
 use crate::app::{App, tests::{pair, ready}};
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use lenz::markdown::SourcePos as _;
 use ratatui::{Terminal, backend::TestBackend, buffer::Buffer};
 
 fn draw(app: &mut App, width: u16, height: u16) -> Buffer {

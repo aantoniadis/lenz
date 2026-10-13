@@ -882,7 +882,7 @@ pub(crate) mod gui_tests {
             assert!(
                 frame.panes[1]
                     .iter()
-                    .any(|row| row.inline.iter().any(|(_, color)| *color == v.palette.found_bg)),
+                    .any(|row| row.line.as_ref().is_some_and(|l| l.bg.iter().any(|(_, color)| *color == v.palette.found_bg))),
                 "visible GUI result rows must show find highlights"
             );
         });
