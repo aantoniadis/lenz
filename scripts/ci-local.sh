@@ -25,7 +25,8 @@ cargo test -p lenz-content --lib --locked -- --ignored --exact --test-threads=1 
     highlight::tests::concurrent_parses_return_the_trees_memory_to_the_system \
     highlight::tests::declaration_extraction_returns_the_trees_memory_to_the_system \
     highlight::tests::fold_parses_return_the_trees_memory_to_the_system \
-    highlight::tests::selection_steps_return_the_trees_memory_to_the_system
+    highlight::tests::selection_steps_return_the_trees_memory_to_the_system \
+    syntax_arena::tests::ending_a_scope_returns_touched_pages
 step "GUI adapter tests"
 cargo test -p lenz --features gui-test --locked gui_
 step "collector tests"

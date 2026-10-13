@@ -269,6 +269,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "process-wide memory: other tests skew it; scripts/ci-local.sh runs it alone"]
     fn ending_a_scope_returns_touched_pages() {
         let before = crate::memory_probe::footprint_mib().unwrap();
         let scope = Scope::begin(4 << 20); // 256 MiB reserved
