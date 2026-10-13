@@ -1,29 +1,27 @@
-#![deny(unsafe_code)] // audited FFI only: `highlight.rs`, `syntax_arena.rs`, `dock_icon.rs`, `large_blocks.rs` and the test-only `memory_probe.rs`
+#![deny(unsafe_code)] // audited FFI only: `dock_icon.rs` and `large_blocks.rs` (lenz-content audits its own)
 #[cfg(test)]
 #[path = "../../../benches/support.rs"]
 pub mod perf;
 #[cfg(all(test, feature = "gui"))]
 mod perf_tests;
 #[cfg(any(test, feature = "perf-probe"))]
-pub mod memory_probe;
+pub use lenz_content::memory_probe;
 pub mod blame;
 pub mod changeset;
 pub mod cli;
 pub mod conflicts;
-pub mod encoding;
+pub use lenz_content::{encoding, highlight};
 pub mod document;
 pub mod find;
 pub mod git;
 #[cfg(all(target_os = "macos", feature = "gui"))]
 pub mod dock_icon;
-pub mod highlight;
 #[cfg(target_os = "macos")]
 pub mod large_blocks;
 /// The core tests run on the binaries' allocator.
 #[cfg(all(test, target_os = "macos"))]
 #[global_allocator]
 static ALLOCATOR: large_blocks::LargeBlocks = large_blocks::LargeBlocks;
-mod syntax_arena;
 pub mod history;
 pub mod images;
 pub mod markdown;

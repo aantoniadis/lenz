@@ -16,7 +16,8 @@ pub(super) struct Seed {
     pub cyan: u32,
     pub magenta: u32,
 }
-pub(super) const fn blend(a: u32, b: u32, percent: u32) -> u32 {
+/// `a` weighted `percent`% against `b`, per channel, in integers (palette derivation and faded diff colours).
+pub const fn blend(a: u32, b: u32, percent: u32) -> u32 {
     let mut out = 0;
     let mut shift = 0;
     while shift <= 16 {

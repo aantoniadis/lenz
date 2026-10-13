@@ -1255,9 +1255,9 @@ fn gui_parity_real_options_and_find_select_exact_unicode_bytes_and_painted_range
             v.sel.as_ref(),
             &v.found(Side::Right, &v.comparison.view.frame().right),
         );
-        assert!(rows.iter().any(|r| {
+        assert!(rows.iter().filter_map(|r| r.line.as_ref()).any(|r| {
             r.selected == Some(0..5)
-                && r.inline
+                && r.bg
                     .iter()
                     .any(|(range, color)| *range == (0..5) && *color == v.palette.found_bg)
         }));

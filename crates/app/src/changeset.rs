@@ -294,12 +294,7 @@ impl ChangeSet {
     }
 }
 
-/// git's `buffer_is_binary`: a NUL in the first 8000 bytes. UTF-16 with a BOM is the exception: git calls it binary,
-/// Lenz decodes it as text (a UTF-32 BOM stays binary).
-pub(crate) fn looks_binary(bytes: &[u8]) -> bool {
-    let utf16 = bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE]) && !bytes.starts_with(&[0xFF, 0xFE, 0, 0]);
-    !utf16 && bytes[..bytes.len().min(8000)].contains(&0)
-}
+pub(crate) use lenz_content::encoding::looks_binary;
 
 /// Runs a textconv `command` on a working-tree file as git does: through the shell, the file's path appended.
 fn textconv_file(root: &Path, command: &str, file: &Path) -> Result<Vec<u8>, String> {

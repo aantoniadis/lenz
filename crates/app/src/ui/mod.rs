@@ -10,7 +10,6 @@ mod palette_view;
 mod toolbar;
 use panes::PaneSizes;
 mod markdown;
-mod reading_style;
 mod pr_details;
 mod present;
 #[cfg(all(test,feature="gui-test"))]
@@ -71,6 +70,7 @@ use crate::{moves,write::{self,Snapshot}};
 #[cfg(test)]
 use lenz_engine::Budget;
 use crate::document::{TextDocument, LONG_LINE};
+use lenz_gpui::{clip, fill};
 
 /// Text is shared with the terminal adapter; image renderer resources stay in GPUI.
 pub struct Doc {
@@ -145,28 +145,6 @@ fn status_color(palette: &theme::Palette, status: &Status) -> u32 {
     }
 }
 
-/// Expand tabs to 4 spaces, mapping each raw byte offset to its display offset.
-fn expand_tabs(line: &str) -> (String, Vec<usize>) {
-    let mut out = String::with_capacity(line.len());
-    let mut map = Vec::with_capacity(line.len() + 1);
-    let mut marks = 0;
-    for (i, ch) in line.char_indices() {
-        map.resize(i + 1, out.len());
-        if !crate::document::shows_mark(ch, &mut marks) {
-            continue; // past the cap: maps to where the next drawn character goes
-        }
-        if ch == '\t' {
-            out.push_str("    ");
-        } else if crate::document::hides_text(ch) {
-            out.push('\u{FFFD}');
-        } else {
-            out.push(ch);
-        }
-    }
-    map.resize(line.len() + 1, out.len());
-    (out, map)
-}
-
 fn syntax_color(palette: &theme::Palette, capture: Capture) -> u32 { palette.syntax_color(capture) }
 
 
@@ -227,34 +205,15 @@ fn status_text(options: &Options, mode: ScrollMode, line_endings: Option<(LineEn
     parts.join(" · ")
 }
 
-const MONO_CANDIDATES: &[&str] = &[
-    "JetBrains Mono",
-    "JetBrainsMono Nerd Font",
-    "Menlo",
-    "SF Mono",
-    "DejaVu Sans Mono",
-    "Noto Sans Mono",
-    "Liberation Mono",
-    "Ubuntu Mono",
-];
-
-/// The configured family when installed, else the first installed of the built-in list (gpui's own fallback
-/// stack when none is); with a notice when the configured one is missing.
-fn mono_family<'a>(configured: Option<&'a str>, installed: &'a [String]) -> (&'a str, Option<String>) {
-    let has = |name: &str| installed.iter().any(|f| f == name);
-    if let Some(name) = configured.filter(|n| has(n)) {
-        return (name, None);
-    }
-    let fallback = MONO_CANDIDATES.iter().copied().find(|c| has(c)).unwrap_or("monospace");
-    (fallback, configured.map(|n| format!("Font “{n}” is not installed; using {fallback}")))
-}
-
 /// The GUI's monospace font from the settings file and the installed fonts, and a notice when the configured
 /// family is missing.
 pub fn pick_mono(cx: &App) -> (Font, Option<String>) {
-    let installed = cx.text_system().all_font_names();
-    let (family, notice) = mono_family(crate::settings::get().gui.font_family.as_deref(), &installed);
-    (font(family.to_string()), notice)
+    lenz_gpui::pick_mono(cx, crate::settings::get().gui.font_family.as_deref())
+}
+
+/// The shared pane geometry for `font` at the configured size.
+fn metrics(font: &Font) -> lenz_gpui::Metrics<'_> {
+    lenz_gpui::Metrics { font, font_size: font_size(), line_h: line_h(), num_w: num_w() }
 }
 
 /// A loaded Comparison. Revisiting it updates recency; cold entries can be loaded again.
@@ -407,7 +366,7 @@ pub struct Viewer {
     /// Zoom, pan and mode of an image Comparison.
     iview: ImageView,
     /// Render textures belonging to the current image, released on switch or replacement.
-    image_uploads: Vec<Arc<gpui::RenderImage>>,
+    image_uploads: lenz_gpui::image::Uploads,
     /// The pull request under review.
     pr_dialog:Option<pr_details::Dialog>,
     /// The Merge View, shown instead of the 2-way panes.
@@ -803,7 +762,7 @@ impl Viewer {
             repo_polling: false,
             nothing: None,
             iview: ImageView::fresh(),
-            image_uploads: Vec::new(),
+            image_uploads: Default::default(),
             pr_dialog:None,
             merge: None,
             picker_v: None,
@@ -1960,13 +1919,7 @@ impl Viewer {
     /// The caret position under the pointer: `line` of `side`, `x` from the text start.
     fn pos_at(&self, window: &Window, side: Side, line: u32, x: f32) -> Pos {
         let raw = self.raw(side).get(line as usize).map_or("", String::as_str);
-        let raw = &raw[..raw.char_indices().nth(LONG_LINE).map_or(raw.len(), |(b, _)| b)];
-        let (shown, map) = expand_tabs(raw);
-        let run = TextRun { len: shown.len(), font: self.font.clone(), color: Hsla::default(), background_color: None, underline: None, strikethrough: None };
-        let shaped = window.text_system().shape_line(SharedString::from(shown), px(font_size()), &[run], None);
-        let d = shaped.closest_index_for_x(px(x.max(0.0)));
-        let col = raw.char_indices().map(|(i, _)| i).chain([raw.len()]).rfind(|&i| map[i] <= d).unwrap_or(0);
-        Pos::new(line, col)
+        Pos::new(line, lenz_gpui::column_at(window, metrics(&self.font), raw, x))
     }
 
     fn menu_item(&mut self,menu:&Menu,i:usize,_window:&mut Window,cx:&mut Context<Self>){
@@ -3142,16 +3095,11 @@ fn paint_switcher(palette: &theme::Palette,
 /// One painted row with its text resolved.
 struct Painted {
     y: f32,
-    number: Option<u32>,
-    text: String,
+    /// A numbered source line: syntax colours (`fg`) and Inline Changes and find hits (`bg`) as display ranges.
+    line: Option<lenz_gpui::TextRow>,
+    /// Folded Change Block or Collapsed Region text.
+    label: String,
     tint: Option<(Kind, bool)>,
-    /// Syntax colours as display byte ranges.
-    syntax: Vec<(Range<usize>, u32)>,
-    /// Inline Change backgrounds as display byte ranges.
-    inline: Vec<(Range<usize>, u32)>,
-    /// Selected display byte range and the caret's display offset.
-    selected: Option<Range<usize>>,
-    caret: Option<usize>,
     /// Blame Annotation: its text (at the start of a same-commit run) and age shade.
     ann: Option<(Option<String>, u32)>,
     /// A PR review thread sits on this line.
@@ -3177,16 +3125,12 @@ fn visible_find_hits(hits: &[(u32, Range<usize>)], rows: &[Row], raw: &[String])
     let mut visible = Vec::new();
     for row in rows {
         let Content::Line(line) = row.content else { continue };
-        let cut = displayed_bytes(&raw[line as usize]);
+        let cut = lenz_content::display::displayed_bytes(&raw[line as usize]);
         let start = hits.partition_point(|h| h.0 < line);
         let end = hits.partition_point(|h| h.0 < line || (h.0 == line && h.1.start < cut));
         visible.extend_from_slice(&hits[start..end]);
     }
     visible
-}
-
-fn displayed_bytes(line: &str) -> usize {
-    line.char_indices().nth(LONG_LINE).map_or(line.len(), |(b, _)| b)
 }
 
 /// `found`: find matches on this Side as (line, byte range), sorted by line.
@@ -3200,11 +3144,8 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
             Content::Line(i) => {
                 let full = raw[i as usize].as_str();
                 // very long lines are cut short on screen (shaping them every frame is the cost); copy has them whole
-                let cut = displayed_bytes(full);
-                let (mut text, map) = expand_tabs(&full[..cut]);
-                if cut < full.len() {
-                    text += &format!("  … {} more characters", full[cut..].chars().count());
-                }
+                let (text, map) = lenz_content::display::display_line(full);
+                let cut = map.len() - 1; // the drawn prefix
                 let at = |b: usize| map[b.min(map.len() - 1)];
                 let syntax: Vec<(Range<usize>, u32)> = spans
                     .iter()
@@ -3214,7 +3155,7 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
                     .unwrap_or_default();
                 let inline: Vec<(Range<usize>, u32)> = match r.tint {
                     Some((kind, ignored)) => {
-                        r.inline.iter().filter(|range| range.start < cut).map(|range| (at(range.start)..at(range.end), palette.change_color(kind, ignored, &palette.inline))).collect()
+                        r.inline.iter().filter(|range| range.start < cut).map(|range| (at(range.start)..at(range.end), crate::theme::change_color(palette, kind, ignored, &palette.inline))).collect()
                     }
                     None => Vec::new(),
                 };
@@ -3231,10 +3172,11 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
                 let first = found.partition_point(|h| h.0 < i);
                 let found = found[first..].iter().take_while(|h| h.0 == i).filter(|h| h.1.start < cut).map(|h| (at(h.1.start)..at(h.1.end), palette.found_bg));
                 let inline = found.chain(inline).collect();
-                Painted { y: r.y, number: Some(i + 1), text, tint: r.tint, syntax, inline, selected, caret, ann: None, thread: false }
+                let line = lenz_gpui::TextRow { y: r.y, number: i + 1, text, fg: syntax, bg: inline, selected, caret };
+                Painted { y: r.y, line: Some(line), label: String::new(), tint: r.tint, ann: None, thread: false }
             }
             Content::Filler => {
-                Painted { y: r.y, number: None, text: String::new(), tint: r.tint, syntax: Vec::new(), inline: Vec::new(), selected: None, caret: None, ann: None, thread: false }
+                Painted { y: r.y, line: None, label: String::new(), tint: r.tint, ann: None, thread: false }
             }
             Content::Folded { left, right, .. } => {
                 let lines = |n: u32| format!("{n} line{}", if n == 1 { "" } else { "s" });
@@ -3243,17 +3185,13 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
                     Some(Kind::Deleted) => format!("▸ deleted: {}", lines(left)),
                     _ => format!("▸ modified: {} → {}", lines(left), lines(right)),
                 };
-                Painted { y: r.y, number: None, text, tint: r.tint, syntax: Vec::new(), inline: Vec::new(), selected: None, caret: None, ann: None, thread: false }
+                Painted { y: r.y, line: None, label: text, tint: r.tint, ann: None, thread: false }
             }
             Content::Fold { hidden, .. } => Painted {
                 y: r.y,
-                number: None,
-                text: format!("⋯  {hidden} unchanged lines"),
+                line: None,
+                label: format!("⋯  {hidden} unchanged lines"),
                 tint: None,
-                syntax: vec![(0..usize::MAX, palette.dim)],
-                inline: Vec::new(),
-                selected: None,
-                caret: None,
                 ann: None,
                 thread: false,
             },
@@ -3335,7 +3273,7 @@ impl Render for Viewer {
         let threads = self.thread_lines();
         for (rows, lines) in [(&mut left, &threads[0]), (&mut right, &threads[1])] {
             for row in rows.iter_mut() {
-                row.thread = row.number.is_some_and(|n| lines.contains(&(n - 1)));
+                row.thread = row.line.as_ref().is_some_and(|l| lines.contains(&(l.number - 1)));
             }
         }
         let ann_w = [self.ann_w(Side::Left), self.ann_w(Side::Right)];
@@ -3345,7 +3283,7 @@ impl Render for Viewer {
             let fit = ((ann_w[side as usize] - 12.0).max(0.0) / self.char_w.max(1.0)) as usize;
             let mut prev: Option<&str> = None;
             for row in rows.iter_mut() {
-                let Some(n) = row.number else {
+                let Some(n) = row.line.as_ref().map(|l| l.number) else {
                     prev = None;
                     continue;
                 };
@@ -3786,10 +3724,6 @@ fn paint_raised(window: &mut Window, x: f32, y: f32, w: f32, h: f32, palette: &t
     fill(window, x, y, w, h, bg);
 }
 
-fn fill(window: &mut Window, x: f32, y: f32, w: f32, h: f32, color: u32) {
-    fill_hsla(window, x, y, w, h, Hsla::from(rgb(color)));
-}
-
 fn fill_hsla(window: &mut Window, x: f32, y: f32, w: f32, h: f32, color: Hsla) {
     window.paint_quad(quad(
         Bounds { origin: point(px(x), px(y)), size: size(px(w.max(0.0)), px(h.max(0.0))) },
@@ -3799,10 +3733,6 @@ fn fill_hsla(window: &mut Window, x: f32, y: f32, w: f32, h: f32, color: Hsla) {
         gpui::transparent_black(),
         Default::default(),
     ));
-}
-
-fn clip(bounds: Bounds<Pixels>, x: f32, w: f32) -> ContentMask<Pixels> {
-    ContentMask { bounds: Bounds { origin: point(px(x), bounds.origin.y), size: size(px(w.max(0.0)), bounds.size.height) } }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3836,7 +3766,7 @@ fn paint_side(palette: &theme::Palette,
         let (x, w) = (x + ann_w, w - ann_w);
         for row in rows {
             let y = y0 + row.y * line_h();
-            match (row.tint, row.number) {
+            match (row.tint, row.line.as_ref().map(|l| l.number)) {
                 (Some((kind, ignored)), Some(_)) => fill(window, x, y, w, line_h(), shade(palette, kind, ignored, tint)),
                 // Filler Rows: a lighter wash of the block's tint
                 (Some((kind, ignored)), None) => {
@@ -3844,8 +3774,8 @@ fn paint_side(palette: &theme::Palette,
                 }
                 _ => {}
             }
-            if let Some(n) = row.number {
-                text(window, cx, font, x + 6.0, y, &format!("{n:>6}"), palette.num_fg);
+            if let Some(line) = &row.line {
+                lenz_gpui::paint_row(window, cx, metrics(font), palette, bounds, x, w, hscroll, line);
                 if row.thread {
                     // a PR review thread: click the number to read it
                     window.paint_quad(quad(
@@ -3857,24 +3787,14 @@ fn paint_side(palette: &theme::Palette,
                         Default::default(),
                     ));
                 }
-                // text scrolls sideways under the line numbers
-                window.with_content_mask(Some(clip(bounds, x + num_w() + 4.0, w - num_w() - 4.0)), |window| {
-                    let tx = x + num_w() + 8.0 - hscroll;
-                    let bg: Vec<_> = row.selected.iter().map(|r| (r.clone(), palette.sel_bg)).chain(row.inline.iter().cloned()).collect();
-                    let shaped = colored_text(palette, window, cx, font, tx, y, &row.text, &row.syntax, &bg);
-                    if let Some(at) = row.caret {
-                        let cx_ = shaped.map_or(0.0, |l| f32::from(l.x_for_index(at)));
-                        fill(window, tx + cx_, y + 1.0, 2.0, line_h() - 2.0, palette.caret);
-                    }
-                });
-            } else if let (Some((kind, ignored)), false) = (row.tint, row.text.is_empty()) {
+            } else if let (Some((kind, ignored)), false) = (row.tint, row.label.is_empty()) {
                 // Folded Change Block: one row in the block's tint
                 fill(window, x, y, w, line_h(), shade(palette, kind, ignored, tint));
-                text(window, cx, font, x + num_w() + 8.0, y, &row.text, palette.fg);
-            } else if !row.text.is_empty() {
+                text(window, cx, font, x + num_w() + 8.0, y, &row.label, palette.fg);
+            } else if !row.label.is_empty() {
                 // Collapsed Region: a quiet band with its line count
                 fill(window, x, y + 2.0, w, line_h() - 4.0, palette.fold_bg);
-                text(window, cx, font, x + num_w() + 8.0, y, &row.text, palette.dim);
+                text(window, cx, font, x + num_w() + 8.0, y, &row.label, palette.dim);
             }
         }
     });
@@ -3981,57 +3901,11 @@ fn colored_text(palette: &theme::Palette,
     fg: &[(Range<usize>, u32)],
     bg: &[(Range<usize>, u32)],
 ) -> Option<ShapedLine> {
-    if s.is_empty() {
-        return None;
-    }
-    let mut cuts = vec![0, s.len()];
-    for (r, _) in fg.iter().chain(bg) {
-        cuts.extend([r.start.min(s.len()), r.end.min(s.len())]);
-    }
-    cuts.sort_unstable();
-    cuts.dedup();
-    let covering = |spans: &[(Range<usize>, u32)], a: usize, b: usize| {
-        spans.iter().find(|(r, _)| r.start <= a && b <= r.end).map(|(_, c)| *c)
-    };
-    let runs: Vec<TextRun> = cuts
-        .windows(2)
-        .filter(|w| w[0] < w[1] && s.is_char_boundary(w[0]) && s.is_char_boundary(w[1]))
-        .map(|w| TextRun {
-            len: w[1] - w[0],
-            font: font.clone(),
-            color: Hsla::from(rgb(covering(fg, w[0], w[1]).unwrap_or(palette.fg))),
-            background_color: covering(bg, w[0], w[1]).map(|c| Hsla::from(rgb(c))),
-            underline: None,
-            strikethrough: None,
-        })
-        .collect();
-    if runs.iter().map(|r| r.len).sum::<usize>() != s.len() {
-        text(window, cx, font, x, y, s, palette.fg); // malformed spans: plain text rather than a panic
-        return None;
-    }
-    let line = window.text_system().shape_line(SharedString::from(crate::document::show_bidi(s).into_owned()), px(font_size()), &runs, None);
-    let o = point(px(x), px(y));
-    let _ = line.paint_background(o, px(line_h()), TextAlign::Left, None, window, cx);
-    let _ = line.paint(o, px(line_h()), TextAlign::Left, None, window, cx);
-    Some(line)
+    lenz_gpui::colored_text(window, cx, metrics(font), palette.fg, x, y, s, fg, bg)
 }
 
 fn text(window: &mut Window, cx: &mut App, font: &Font, x: f32, y: f32, s: &str, color: u32) {
-    if s.is_empty() {
-        return;
-    }
-    let run = TextRun {
-        len: s.len(),
-        font: font.clone(),
-        color: Hsla::from(rgb(color)),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let s = crate::document::cap_marks(s);
-    let run = TextRun { len: s.len(), ..run };
-    let line = window.text_system().shape_line(SharedString::from(crate::document::show_bidi(&s).into_owned()), px(font_size()), &[run], None);
-    let _ = line.paint(point(px(x), px(y)), px(line_h()), TextAlign::Left, None, window, cx);
+    lenz_gpui::text(window, cx, metrics(font), x, y, s, color)
 }
 
 #[cfg(test)]
@@ -4104,13 +3978,13 @@ mod tests {
     fn folded_syntax_queries_only_visible_runs_and_keeps_multiline_context() {
         let raw = ["/* start", "hidden", "still hidden", "end */", "let n = 42;"]
             .map(str::to_string);
-        let parsed = highlight::parse(Language::Rust, &raw.join("\n"));
+        let parsed = highlight::parse_while(Language::Rust, raw.join("\n").into(), || true).unwrap();
         let row = |line| Row { y: 0.0, content: Content::Line(line), tint: None, inline: Vec::new() };
         let rows = [row(0), row(3), row(4)];
         assert_eq!(visible_runs(&rows), [0..1, 3..5]);
         let painted = resolve(&theme::DARCULA, &rows, &raw, Some(&parsed), None, &[]);
-        assert_eq!(painted[1].syntax, vec![(0..6, syntax_color(&theme::DARCULA, Capture::Comment))]);
-        assert!(painted[2].syntax.contains(&(0..3, syntax_color(&theme::DARCULA, Capture::Keyword))));
+        assert_eq!(painted[1].line.as_ref().unwrap().fg, vec![(0..6, syntax_color(&theme::DARCULA, Capture::Comment))]);
+        assert!(painted[2].line.as_ref().unwrap().fg.contains(&(0..3, syntax_color(&theme::DARCULA, Capture::Keyword))));
         // The gap's size cannot make the amount of highlighted text grow.
         assert_eq!(visible_runs(&[row(0), row(99_999)]), [0..1, 99_999..100_000]);
     }
@@ -4132,17 +4006,17 @@ mod tests {
     fn changed_words_keep_readable_syntax_colors_over_their_highlight() {
         let raw = vec!["let a = \"changed\";".to_string()];
         let lang = crate::highlight::detect(std::path::Path::new("a.rs"), "").unwrap();
-        let parsed = crate::highlight::parse(lang, &raw[0]);
+        let parsed = crate::highlight::parse_while(lang, raw[0].as_str().into(), || true).unwrap();
         let word = 9..16;
         let rows = [Row { y: 0.0, content: Content::Line(0), tint: Some((Kind::Modified, false)), inline: vec![word.clone()] }];
         for theme in theme::builtin_entries() {
             let palette=&theme.palette;
             let painted = resolve(palette, &rows, &raw, Some(&parsed), None, &[]);
-            let color_at = |at: usize| painted[0].syntax.iter().find(|(r, _)| r.contains(&at)).map(|(_, c)| *c);
+            let color_at = |at: usize| painted[0].line.as_ref().unwrap().fg.iter().find(|(r, _)| r.contains(&at)).map(|(_, c)| *c);
             let fill = palette.inline[2];
             assert_eq!(color_at(word.start), Some(palette.readable_on(palette.syntax.string, fill)), "the changed word keeps its color where it reads");
             assert_eq!(color_at(0), Some(palette.syntax.keyword), "unchanged code keeps its syntax colors");
-            assert!(painted[0].inline.iter().any(|(r, color)| *r == word&&*color==palette.inline[2]), "the word keeps its highlight");
+            assert!(painted[0].line.as_ref().unwrap().bg.iter().any(|(r, color)| *r == word&&*color==palette.inline[2]), "the word keeps its highlight");
         }
     }
 
@@ -4153,8 +4027,8 @@ mod tests {
         let found = find::in_lines(&raw, "e");
         assert_eq!(visible_find_hits(&found, &rows, &raw).len(), LONG_LINE / 2);
         let painted = resolve(&theme::DARCULA, &rows, &raw, None, None, &found);
-        assert_eq!(painted[0].inline.len(), LONG_LINE / 2);
-        assert!(painted[0].inline.iter().all(|(r, _)| !r.is_empty() && r.end <= LONG_LINE));
+        assert_eq!(painted[0].line.as_ref().unwrap().bg.len(), LONG_LINE / 2);
+        assert!(painted[0].line.as_ref().unwrap().bg.iter().all(|(r, _)| !r.is_empty() && r.end <= LONG_LINE));
     }
 
     #[test]
@@ -4210,35 +4084,4 @@ mod tests {
         assert_eq!(scaled(8.0, 20.0), 20.0 * 8.0 / 13.0);
     }
 
-    #[test]
-    fn a_configured_font_family_is_used_only_when_installed() {
-        let installed = ["DejaVu Sans Mono".to_string(), "Iosevka".to_string()];
-        assert_eq!(mono_family(Some("Iosevka"), &installed), ("Iosevka", None));
-        let (family, notice) = mono_family(Some("Nope Mono"), &installed);
-        assert_eq!(family, "DejaVu Sans Mono");
-        assert!(notice.unwrap().contains("Nope Mono"));
-        assert_eq!(mono_family(None, &installed), ("DejaVu Sans Mono", None));
-    }
-
-    #[test]
-    fn tab_expansion_maps_raw_offsets_to_display_offsets() {
-        let (shown, map) = expand_tabs("\tlet x = \"a\tb\";");
-        assert_eq!(shown, "    let x = \"a    b\";");
-        // `let` starts at raw byte 1, display byte 4
-        assert_eq!(&shown[map[1]..map[4]], "let");
-        // the string literal spans raw 9..14 and keeps its inner tab expanded
-        assert_eq!(&shown[map[9]..map[14]], "\"a    b\"");
-        assert_eq!(map[15], shown.len());
-        // controls and bidi overrides show as U+FFFD, and the map still covers every raw byte
-        let (shown, map) = expand_tabs("a\u{202E}b\x1bc");
-        assert_eq!(shown, "a\u{FFFD}b\u{FFFD}c");
-        assert_eq!(&shown[map[1]..map[4]], "\u{FFFD}");
-        assert_eq!(map[7], shown.len());
-        // combining marks past the cap are not drawn, and their bytes map to the next drawn character
-        let line = format!("a{}b", "\u{300}".repeat(40));
-        let (shown, map) = expand_tabs(&line);
-        assert_eq!(shown, format!("a{}b", "\u{300}".repeat(crate::document::MAX_MARKS)));
-        assert_eq!(map[line.len() - 1], shown.len() - 1);
-        assert_eq!(map[line.len()], shown.len());
-    }
 }

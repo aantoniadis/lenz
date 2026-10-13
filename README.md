@@ -245,4 +245,4 @@ Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, t
 
 ## Licence
 
-The app (`crates/app`) is MIT; the diff engine (`crates/engine`) is Apache-2.0 and contains ported IntelliJ Community code (see its NOTICE). Darcula and Light follow IntelliJ's schemes (JetBrains, Apache-2.0); additional base colors are adapted from Omarchy's MIT palettes. See [theme attribution](docs/themes.md).
+The app (`crates/app`) and its shared content crate (`crates/content`: decoding, line offsets, syntax highlighting, themes) are MIT; the diff engine (`crates/engine`) is Apache-2.0 and contains ported IntelliJ Community code (see its NOTICE). Darcula and Light follow IntelliJ's schemes (JetBrains, Apache-2.0); additional base colors are adapted from Omarchy's MIT palettes. See [theme attribution](docs/themes.md).

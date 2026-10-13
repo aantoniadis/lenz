@@ -991,7 +991,7 @@ impl Merger {
                                     },
                                 );
                                 let tint=block.and_then(|i|m.tint(p,i));
-                                let bg=tint.map_or(palette.bg,|(kind,ignored)|palette.change_color(kind,ignored,&palette.block));
+                                let bg=tint.map_or(palette.bg,|(kind,ignored)|lenz::theme::change_color(palette,kind,ignored,&palette.block));
                                 let style=crate::chrome::style_with(palette).bg(crate::chrome::color(bg));
                                 let prefix = if block == m.current && block.is_some() {
                                     ">"
@@ -1016,7 +1016,7 @@ impl Merger {
                                     style,
                                     &syntax,
                                     &r.inline,
-                                    tint.map(|(kind,ignored)|palette.change_color(kind,ignored,&palette.inline)),
+                                    tint.map(|(kind,ignored)|lenz::theme::change_color(palette,kind,ignored,&palette.inline)),
                                     &m.find_ranges(p, n),
                                 ));
                                 lines.push(Line::from(spans));
@@ -1324,7 +1324,7 @@ mod tests {
                 assert_eq!(buf[at].bg,crate::chrome::color(if resolved{palette.block[2]}else{palette.inline[3]}),"{} resolved={resolved}",theme.id);
                 assert_eq!(buf[at].fg,crate::chrome::color(palette.fg));assert!(!buf[at].modifier.contains(Modifier::UNDERLINED));
                 let theirs=(app.merge_panes()[2].x+14,at.1);assert_eq!(buf[theirs].symbol(),"3");
-                assert_eq!(buf[theirs].bg,crate::chrome::color(if resolved{palette.change_color(lenz::view::Kind::Modified,true,&palette.inline)}else{palette.inline[3]}));
+                assert_eq!(buf[theirs].bg,crate::chrome::color(if resolved{lenz::theme::change_color(palette,lenz::view::Kind::Modified,true,&palette.inline)}else{palette.inline[3]}));
             }
         }
     }

@@ -5,13 +5,21 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
+/// Where one product keeps its themes. Give each product its own selection file and user-theme directory
+/// ([`ThemePaths::xdg`] with its own `app`); the Omarchy directories are meant to be shared.
 #[derive(Clone, Debug)]
 pub struct ThemePaths {
-    pub config_home: PathBuf,
-    pub state_home: PathBuf,
+    /// User themes, one `<name>.toml` per `user:<name>` ID.
+    pub themes: PathBuf,
+    /// The saved selection (`{"version":1,"theme":ID}`); other fields in it are preserved.
+    pub selection: PathBuf,
+    /// Omarchy `current` directories the System theme follows, first found wins.
+    pub omarchy: [PathBuf; 2],
 }
 impl ThemePaths {
-    pub fn from_env() -> Self {
+    /// The XDG layout for `app`: `$XDG_CONFIG_HOME/<app>/themes`, `$XDG_CONFIG_HOME/<app>/appearance.json`, and
+    /// Omarchy's `current` under `$XDG_STATE_HOME`, then `$XDG_CONFIG_HOME`. Relative XDG values are ignored.
+    pub fn xdg(app: &str) -> Self {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|p| p.is_absolute())
@@ -22,37 +30,44 @@ impl ThemePaths {
                 .filter(|p| p.is_absolute())
                 .unwrap_or_else(|| home.join(default))
         };
+        Self::under(&path("XDG_CONFIG_HOME", ".config"), &path("XDG_STATE_HOME", ".local/state"), app)
+    }
+    /// [`ThemePaths::xdg`] with the config and state homes given.
+    pub fn under(config_home: &Path, state_home: &Path, app: &str) -> Self {
         Self {
-            config_home: path("XDG_CONFIG_HOME", ".config"),
-            state_home: path("XDG_STATE_HOME", ".local/state"),
+            themes: config_home.join(app).join("themes"),
+            selection: config_home.join(app).join("appearance.json"),
+            omarchy: [state_home.join("omarchy/current"), config_home.join("omarchy/current")],
         }
     }
     pub fn theme_path(&self, id: &str) -> Option<PathBuf> {
         id.strip_prefix("user:")
             .filter(|_| valid_id(id))
-            .map(|stem| {
-                self.config_home
-                    .join("lenz/themes")
-                    .join(format!("{stem}.toml"))
-            })
-    }
-    pub fn omarchy(&self) -> [PathBuf; 2] {
-        [
-            self.state_home.join("omarchy/current"),
-            self.config_home.join("omarchy/current"),
-        ]
+            .map(|stem| self.themes.join(format!("{stem}.toml")))
     }
 }
-#[derive(Clone, Debug, Default)]
+/// A product's override of the saved selection: `theme` (an ID or `system`) wins over `appearance` (`light` or
+/// `dark`). The labels name them in notices, e.g. the environment variables they came from.
+#[derive(Clone, Debug)]
 pub struct ThemeOverrides {
     pub theme: Option<String>,
     pub appearance: Option<String>,
+    pub theme_label: &'static str,
+    pub appearance_label: &'static str,
+}
+impl Default for ThemeOverrides {
+    fn default() -> Self {
+        Self { theme: None, appearance: None, theme_label: "theme override", appearance_label: "appearance override" }
+    }
 }
 impl ThemeOverrides {
-    pub fn from_env() -> Self {
+    /// The overrides in the environment variables `theme_var` and `appearance_var`, labelled by their names.
+    pub fn from_env(theme_var: &'static str, appearance_var: &'static str) -> Self {
         Self {
-            theme: std::env::var("LENZ_THEME").ok(),
-            appearance: std::env::var("LENZ_APPEARANCE").ok(),
+            theme: std::env::var(theme_var).ok(),
+            appearance: std::env::var(appearance_var).ok(),
+            theme_label: theme_var,
+            appearance_label: appearance_var,
         }
     }
 }
@@ -95,8 +110,8 @@ pub fn read_selection(
     overrides: &ThemeOverrides,
 ) -> (ThemeSelection, Vec<String>) {
     let mut notices = Vec::new();
-    let file = paths.config_home.join("lenz/appearance.json");
-    let saved = match read_bounded(&file) {
+    let file = &paths.selection;
+    let saved = match read_bounded(file) {
         Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(v) if v["version"] == 1 => v["theme"]
                 .as_str()
@@ -123,22 +138,22 @@ pub fn read_selection(
         if let Some(selection) = ThemeSelection::from_id(id) {
             return (selection, notices);
         }
-        notices.push(format!("Unknown LENZ_THEME: {id}"));
+        notices.push(format!("Unknown {}: {id}", overrides.theme_label));
     } else if let Some(a) = &overrides.appearance {
         match a.as_str() {
             "light" => return (ThemeSelection::Named("light".into()), notices),
             "dark" => return (ThemeSelection::Named("darcula".into()), notices),
-            _ => notices.push(format!("Unknown LENZ_APPEARANCE: {a}")),
+            _ => notices.push(format!("Unknown {}: {a}", overrides.appearance_label)),
         }
     }
     (saved, notices)
 }
 pub fn save_selection(paths: &ThemePaths, selection: &ThemeSelection) -> Result<(), ThemeError> {
-    let dir = paths.config_home.join("lenz");
-    std::fs::create_dir_all(&dir)?;
-    let file = dir.join("appearance.json");
+    let file = &paths.selection;
+    let dir = file.parent().ok_or_else(|| ThemeError("Invalid appearance settings path".into()))?;
+    std::fs::create_dir_all(dir)?;
     let mut value = if file.exists() {
-        let bytes = read_bounded(&file)?;
+        let bytes = read_bounded(file)?;
         serde_json::from_slice::<serde_json::Value>(&bytes)
             .ok()
             .filter(|v| v.is_object() && v["version"] == 1)
@@ -161,15 +176,14 @@ pub fn save_selection(paths: &ThemePaths, selection: &ThemeSelection) -> Result<
             .open(&temp)?;
         f.write_all(&serde_json::to_vec_pretty(&value).map_err(|e| ThemeError(e.to_string()))?)?;
         f.sync_all()?;
-        std::fs::rename(&temp, &file)?;
+        std::fs::rename(&temp, file)?;
         Ok(())
     })();
     let _ = std::fs::remove_file(temp);
     result
 }
 pub fn discover_themes(paths: &ThemePaths) -> (Vec<ThemeEntry>, Vec<String>) {
-    let dir = paths.config_home.join("lenz/themes");
-    let iter = match std::fs::read_dir(dir) {
+    let iter = match std::fs::read_dir(&paths.themes) {
         Ok(i) => i,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
         Err(e) => return (Vec::new(), vec![e.to_string()]),

@@ -11,7 +11,7 @@ pub(super) fn read_system(paths: &ThemePaths) -> (Option<LoadedTheme>, Option<St
         return (None, None);
     }
     let mut error = None;
-    for dir in paths.omarchy() {
+    for dir in &paths.omarchy {
         let file = dir.join("theme/colors.toml");
         if !file.exists() {
             continue;
@@ -47,7 +47,7 @@ impl Watches {
         pending: Arc<Mutex<Pending>>,
         wake: SyncSender<()>,
     ) -> Result<Self, notify::Error> {
-        let targets = paths.omarchy();
+        let targets = paths.omarchy.clone();
         let watched_targets = targets.clone();
         let watcher =
             notify::recommended_watcher(move |result: Result<notify::Event, notify::Error>| {

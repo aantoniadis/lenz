@@ -18,10 +18,7 @@ fn fixture() -> (tempfile::TempDir, Screens) {
     )
     .unwrap();
     let service = ThemeService::new(
-        ThemePaths {
-            config_home: d.path().join("config"),
-            state_home: d.path().join("state"),
-        },
+        ThemePaths::under(&d.path().join("config"), &d.path().join("state"), "lenz"),
         ThemeOverrides::default(),
         true,
     );

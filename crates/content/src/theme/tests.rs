@@ -74,23 +74,21 @@ fn theme_reads_are_bounded_and_regular() {
     }
 }
 fn paths(dir: &std::path::Path) -> ThemePaths {
-    ThemePaths {
-        config_home: dir.join("config"),
-        state_home: dir.join("state"),
-    }
+    ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz")
 }
 #[test]
 fn theme_store_preserves_fields_and_override_precedence() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    std::fs::create_dir_all(p.config_home.join("lenz")).unwrap();
-    let file = p.config_home.join("lenz/appearance.json");
+    std::fs::create_dir_all(p.selection.parent().unwrap()).unwrap();
+    let file = p.selection.clone();
     std::fs::write(&file, r#"{"version":1,"theme":"gruvbox","other":42}"#).unwrap();
     let (s, n) = read_selection(
         &p,
         &ThemeOverrides {
             theme: None,
             appearance: Some("light".into()),
+            ..Default::default()
         },
     );
     assert_eq!(s, ThemeSelection::Named("light".into()));
@@ -100,6 +98,7 @@ fn theme_store_preserves_fields_and_override_precedence() {
         &ThemeOverrides {
             theme: Some("system".into()),
             appearance: Some("light".into()),
+            ..Default::default()
         },
     );
     assert_eq!(s, ThemeSelection::System);
@@ -108,6 +107,7 @@ fn theme_store_preserves_fields_and_override_precedence() {
         &ThemeOverrides {
             theme: Some("missing".into()),
             appearance: None,
+            ..Default::default()
         },
     );
     assert_eq!(s, ThemeSelection::Named("gruvbox".into()));
@@ -121,7 +121,7 @@ fn theme_store_preserves_fields_and_override_precedence() {
 fn theme_discovery_is_bounded_ordered_and_validated() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let folder = p.config_home.join("lenz/themes");
+    let folder = p.themes.clone();
     std::fs::create_dir_all(&folder).unwrap();
     for n in (0..260).rev() {
         std::fs::write(folder.join(format!("{n:03}.toml")), CUSTOM).unwrap();
@@ -161,14 +161,15 @@ fn theme_controller_revisions_and_fixed_selection() {
 fn theme_invalid_settings_are_untouched_and_atomic_saves_are_complete() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    std::fs::create_dir_all(p.config_home.join("lenz")).unwrap();
-    let f = p.config_home.join("lenz/appearance.json");
+    std::fs::create_dir_all(p.selection.parent().unwrap()).unwrap();
+    let f = p.selection.clone();
     std::fs::write(&f, r#"{"version":9,"theme":"light"}"#).unwrap();
     let (_, n) = read_selection(
         &p,
         &ThemeOverrides {
             theme: None,
             appearance: None,
+            ..Default::default()
         },
     );
     assert!(!n.is_empty());
@@ -223,7 +224,7 @@ fn theme_staged_replacement_burst_retains_last_valid_palette() {
     };
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let current = p.state_home.join("omarchy/current");
+    let current = p.omarchy[0].clone();
     fs::create_dir_all(current.join("theme")).unwrap();
     fs::write(current.join("theme/colors.toml"), CUSTOM).unwrap();
     let mut s = ThemeService::new(p, ThemeOverrides::default(), true);
@@ -274,7 +275,7 @@ fn theme_late_creation_below_deep_missing_xdg_roots() {
     let p = paths(&deep);
     let mut s = ThemeService::new(p.clone(), ThemeOverrides::default(), true);
     settle_initial_scan(&mut s);
-    let current = p.state_home.join("omarchy/current/theme");
+    let current = p.omarchy[0].join("theme");
     std::fs::create_dir_all(&current).unwrap();
     std::fs::write(current.join("colors.toml"), CUSTOM).unwrap();
     wait_theme(&mut s, 0x1e1e2e);
@@ -284,7 +285,7 @@ fn theme_late_creation_below_deep_missing_xdg_roots() {
 fn theme_live_omarchy_replacement_repair_and_manual_override() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let current = p.state_home.join("omarchy/current");
+    let current = p.omarchy[0].clone();
     std::fs::create_dir_all(current.join("theme")).unwrap();
     std::fs::write(current.join("theme/colors.toml"), CUSTOM).unwrap();
     std::fs::write(current.join("theme.name"), "catppuccin").unwrap();
@@ -333,7 +334,7 @@ fn theme_live_legacy_late_creation_and_stale_results() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
     let mut s = ThemeService::new(p.clone(), ThemeOverrides::default(), true);
-    let current = p.config_home.join("omarchy/current");
+    let current = p.omarchy[1].clone();
     std::fs::create_dir_all(current.join("theme")).unwrap();
     std::fs::write(current.join("theme/colors.toml"), CUSTOM).unwrap();
     wait_theme(&mut s, 0x1e1e2e);
@@ -357,7 +358,7 @@ fn theme_custom_selection_revalidates_and_missing_saved_id_is_retained() {
     );
     assert_eq!(s.snapshot().palette.bg, 0x2b2b2b);
     assert!(!s.take_notices().is_empty());
-    let folder = p.config_home.join("lenz/themes");
+    let folder = p.themes.clone();
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("missing.toml"), CUSTOM).unwrap();
     s.execute(ThemeCommand::OpenChooser);
@@ -394,7 +395,7 @@ fn theme_custom_selection_revalidates_and_missing_saved_id_is_retained() {
 fn theme_failed_custom_selection_keeps_following_system() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let current = p.state_home.join("omarchy/current/theme");
+    let current = p.omarchy[0].join("theme");
     std::fs::create_dir_all(&current).unwrap();
     std::fs::write(current.join("colors.toml"), CUSTOM).unwrap();
     let mut s = ThemeService::new(p, ThemeOverrides::default(), true);
@@ -438,10 +439,10 @@ fn theme_failed_custom_selection_keeps_following_system() {
 fn theme_removed_custom_registry_resumes_live_fallback() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let folder = p.config_home.join("lenz/themes");
+    let folder = p.themes.clone();
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("chosen.toml"), CUSTOM).unwrap();
-    let current = p.state_home.join("omarchy/current/theme");
+    let current = p.omarchy[0].join("theme");
     std::fs::create_dir_all(&current).unwrap();
     std::fs::write(
         current.join("colors.toml"),
@@ -492,9 +493,9 @@ fn theme_explicit_current_choice_supersedes_override_and_repairs_invalid_setting
             save_selection(&p, &ThemeSelection::Named("light".into())).unwrap();
             ThemeSelection::Named("darcula".into())
         } else {
-            std::fs::create_dir_all(p.config_home.join("lenz")).unwrap();
+            std::fs::create_dir_all(p.selection.parent().unwrap()).unwrap();
             std::fs::write(
-                p.config_home.join("lenz/appearance.json"),
+                p.selection.clone(),
                 r#"{"version":9,"theme":"light"}"#,
             )
             .unwrap();
@@ -503,6 +504,7 @@ fn theme_explicit_current_choice_supersedes_override_and_repairs_invalid_setting
         let overrides = ThemeOverrides {
             theme: override_theme.then(|| "darcula".into()),
             appearance: None,
+            ..Default::default()
         };
         let mut s = ThemeService::new(p.clone(), overrides, true);
         assert_eq!(s.snapshot().selection, chosen);
@@ -510,7 +512,7 @@ fn theme_explicit_current_choice_supersedes_override_and_repairs_invalid_setting
         drop(s);
         assert_eq!(read_selection(&p, &ThemeOverrides::default()).0, chosen);
         let json: serde_json::Value = serde_json::from_slice(
-            &std::fs::read(p.config_home.join("lenz/appearance.json")).unwrap(),
+            &std::fs::read(p.selection.clone()).unwrap(),
         )
         .unwrap();
         assert_eq!(json["version"], 1);
@@ -522,7 +524,7 @@ fn theme_read_notifications_do_not_trigger_more_reads() {
     use std::sync::{Arc, Mutex, mpsc};
     let d = tempfile::tempdir().unwrap();
     let paths = paths(d.path());
-    let targets = paths.omarchy();
+    let targets = paths.omarchy.clone();
     let mut state = super::service::Pending::default();
     state.follow = true;
     let pending = Arc::new(Mutex::new(state));
@@ -563,7 +565,7 @@ fn theme_read_notifications_do_not_trigger_more_reads() {
 fn theme_deferred_service_resolves_before_start_and_converges_on_activation() {
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let folder = p.state_home.join("omarchy/current/theme");
+    let folder = p.omarchy[0].join("theme");
     std::fs::create_dir_all(&folder).unwrap();
     std::fs::write(folder.join("colors.toml"), CUSTOM).unwrap();
     let mut s = ThemeService::new_deferred(p.clone(), ThemeOverrides::default(), true);
@@ -591,7 +593,7 @@ fn theme_live_symlink_swap_rewatches_the_new_target() {
     use std::os::unix::fs::symlink;
     let d = tempfile::tempdir().unwrap();
     let p = paths(d.path());
-    let current = p.state_home.join("omarchy/current");
+    let current = p.omarchy[0].clone();
     std::fs::create_dir_all(&current).unwrap();
     for (name, color) in [("first", "#123456"), ("second", "#654321")] {
         let dir = d.path().join(name);
@@ -627,20 +629,6 @@ fn raised_surfaces_stand_out_in_every_builtin_theme() {
     }
 }
 
-#[test]
-fn extras_colours_follow_the_hue_of_each_kind() {
-    use crate::markdown::CalloutKind;
-    for p in [&DARCULA, &LIGHT] {
-        assert_ne!(callout_color(p, CalloutKind::Warning), callout_color(p, CalloutKind::Note));
-        assert_eq!(callout_color(p, CalloutKind::Quote), p.dim);
-        assert_ne!(highlight_bg(p), p.bg);
-        let (hue, _) = hue_saturation(highlight_bg(p));
-        assert!((25. ..75.).contains(&hue), "highlights are amber, never red like a removal: {:x}", highlight_bg(p));
-        assert_eq!(callout_icon(CalloutKind::Warning), "⚠");
-        let (hue, saturation) = hue_saturation(removed_color(p));
-        assert!(saturation > 0.25 && !(30. ..330.).contains(&hue), "removed text is red even where the theme greys deletions: {:x}", removed_color(p));
-    }
-}
 #[test]
 fn preview_resolves_a_palette_without_selecting_or_saving() {
     use std::time::{Duration, Instant};
@@ -682,4 +670,84 @@ fn changed_words_keep_syntax_colors_that_stay_readable_on_their_highlight() {
     }
     println!("syntax colors kept on changed-word highlights: {kept} of {total}");
     assert!(kept * 2 > total, "most syntax colors read on the highlights: {kept} of {total}");
+}
+
+#[test]
+fn lenz_layout_is_unchanged() {
+    let p = ThemePaths::under(std::path::Path::new("/c"), std::path::Path::new("/s"), "lenz");
+    assert_eq!(p.themes, std::path::Path::new("/c/lenz/themes"));
+    assert_eq!(p.selection, std::path::Path::new("/c/lenz/appearance.json"));
+    assert_eq!(p.omarchy, [std::path::PathBuf::from("/s/omarchy/current"), "/c/omarchy/current".into()]);
+    assert_eq!(p.theme_path("user:mine"), Some("/c/lenz/themes/mine.toml".into()));
+    assert_eq!(p.theme_path("user:../x"), None);
+}
+
+#[test]
+fn override_notices_name_their_source() {
+    let d = tempfile::tempdir().unwrap();
+    let p = paths(d.path());
+    let named = ThemeOverrides { theme: Some("nope".into()), appearance: None, theme_label: "LENZ_THEME", appearance_label: "LENZ_APPEARANCE" };
+    assert_eq!(read_selection(&p, &named).1, ["Unknown LENZ_THEME: nope"]);
+    let appearance = ThemeOverrides { appearance: Some("dim".into()), ..named.clone() };
+    let appearance = ThemeOverrides { theme: None, ..appearance };
+    assert_eq!(read_selection(&p, &appearance).1, ["Unknown LENZ_APPEARANCE: dim"]);
+    let unnamed = ThemeOverrides { theme: Some("nope".into()), ..Default::default() };
+    assert_eq!(read_selection(&p, &unnamed).1, ["Unknown theme override: nope"]);
+}
+
+/// Two products in one process, sharing a config home: one's selection and user themes never reach the other.
+#[test]
+fn independent_configurations_do_not_share_selection_or_user_themes() {
+    use std::time::{Duration, Instant};
+    let d = tempfile::tempdir().unwrap();
+    let (config, state) = (d.path().join("config"), d.path().join("state"));
+    let (pa, pb) = (ThemePaths::under(&config, &state, "lenz"), ThemePaths::under(&config, &state, "reader"));
+    std::fs::create_dir_all(&pa.themes).unwrap();
+    std::fs::write(pa.themes.join("mine.toml"), CUSTOM).unwrap();
+    let mut a = ThemeService::new(pa.clone(), ThemeOverrides::default(), true);
+    let mut b = ThemeService::new(pb.clone(), ThemeOverrides::default(), true);
+    settle_initial_scan(&mut a);
+    settle_initial_scan(&mut b);
+    let before = b.snapshot();
+    let listed = |s: &mut ThemeService, id: &str| {
+        s.execute(ThemeCommand::OpenChooser);
+        let until = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Ok(update) = s.updates().try_recv() {
+                let registry = matches!(update, ThemeUpdate::Registry { .. });
+                s.apply(update);
+                if registry { break; }
+            }
+            assert!(Instant::now() < until, "registry not delivered");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        s.entries().iter().any(|e| e.id == id)
+    };
+    assert!(listed(&mut a, "user:mine"));
+    assert!(!listed(&mut b, "user:mine"), "another product's user themes are not listed");
+    std::fs::create_dir_all(&pb.themes).unwrap();
+    std::fs::write(pb.themes.join("theirs.toml"), CUSTOM).unwrap();
+    assert!(listed(&mut b, "user:theirs"));
+    assert!(!listed(&mut a, "user:theirs"), "either direction");
+    a.execute(ThemeCommand::Select(ThemeSelection::Named("gruvbox".into())));
+    drop(a); // the worker saves before it stops
+    assert_eq!(read_selection(&pa, &ThemeOverrides::default()).0, ThemeSelection::Named("gruvbox".into()));
+    assert!(!pb.selection.exists(), "the other product's selection file is untouched");
+    let after = b.snapshot();
+    assert_eq!((after.selection, after.revision, *after.palette), (before.selection, before.revision, *before.palette));
+    assert_eq!(read_selection(&pb, &ThemeOverrides::default()).0, ThemeSelection::System);
+}
+
+#[test]
+fn dropping_the_service_joins_its_worker_and_closes_updates() {
+    use std::time::{Duration, Instant};
+    let d = tempfile::tempdir().unwrap();
+    let mut s = ThemeService::new(paths(d.path()), ThemeOverrides::default(), true);
+    settle_initial_scan(&mut s);
+    s.execute(ThemeCommand::OpenChooser);
+    let updates = s.updates();
+    let started = Instant::now();
+    drop(s); // joins the worker, which owns the watcher
+    assert!(started.elapsed() < Duration::from_secs(2), "worker stopped promptly");
+    assert!(updates.is_closed());
 }

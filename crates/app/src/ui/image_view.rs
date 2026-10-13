@@ -21,15 +21,7 @@ impl std::ops::Deref for ImageDoc {
         &self.core
     }
 }
-/// An RGBA image as a gpui texture, converted in place.
-fn render(mut img: RgbaImage) -> Arc<RenderImage> {
-    images::swap_rb(&mut img);
-    bgra(img)
-}
-/// Pixels already in gpui's BGRA order.
-fn bgra(img: RgbaImage) -> Arc<RenderImage> {
-    Arc::new(RenderImage::new(vec![image::Frame::new(img)]))
-}
+use lenz_gpui::image::{bgra_texture as bgra, checker, texture as render};
 impl ImageDoc {
     pub fn from_core(core: crate::image_session::ImageDoc) -> Self {
         let renders = [
@@ -354,11 +346,7 @@ impl Viewer {
 
     /// Dropping RenderImage's Arc only frees CPU pixels; GPUI's atlas needs an explicit removal.
     fn keep_image_uploads(&mut self, keep: Vec<Arc<RenderImage>>, window: &mut Window) {
-        for old in std::mem::replace(&mut self.image_uploads, keep) {
-            if !self.image_uploads.iter().any(|r| r.id == old.id) {
-                let _ = window.drop_image(old);
-            }
-        }
+        self.image_uploads.keep(keep, window);
     }
 }
 
@@ -377,44 +365,6 @@ pub(super) struct ImageFrame {
     label: String,
 }
 
-/// Checkerboard behind transparent pixels, inside `clip`.
-fn checker(window: &mut Window, clip: Bounds<Pixels>, area: (f32, f32, f32, f32)) {
-    const CELL: f32 = 12.0;
-    let (ax, ay, aw, ah) = area;
-    let (cx0, cy0) = (f32::from(clip.origin.x), f32::from(clip.origin.y));
-    let (cx1, cy1) = (
-        cx0 + f32::from(clip.size.width),
-        cy0 + f32::from(clip.size.height),
-    );
-    let (x0, y0, x1, y1) = (
-        ax.max(cx0),
-        ay.max(cy0),
-        (ax + aw).min(cx1),
-        (ay + ah).min(cy1),
-    );
-    if x0 >= x1 || y0 >= y1 {
-        return;
-    }
-    fill(window, x0, y0, x1 - x0, y1 - y0, 0x3A3A3A);
-    let mut y = (y0 / CELL).floor() * CELL;
-    while y < y1 {
-        let mut x = (x0 / CELL).floor() * CELL
-            + if ((y / CELL) as i64) % 2 == 0 {
-                0.0
-            } else {
-                CELL
-            };
-        while x < x1 {
-            let (l, t) = (x.max(x0), y.max(y0));
-            let (r, b) = ((x + CELL).min(x1), (y + CELL).min(y1));
-            if r > l && b > t {
-                fill(window, l, t, r - l, b - t, 0x4A4A4A);
-            }
-            x += 2.0 * CELL;
-        }
-        y += CELL;
-    }
-}
 
 /// Paint the image Comparison on the stage `(x0, y0, w, h)`.
 pub(super) fn paint_images(palette: &theme::Palette,

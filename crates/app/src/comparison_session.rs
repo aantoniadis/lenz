@@ -1,4 +1,5 @@
 //! Shared text-comparison state and transitions; adapters own resources and scheduling.
+use crate::markdown::SourcePos as _;
 use std::{collections::HashMap, sync::Arc};
 use lenz_engine::{Budget, Options};
 use crate::{changeset::Comparison, commands::{self, Command, Effect}, document::TextDocument,

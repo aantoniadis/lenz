@@ -1,4 +1,4 @@
-//! Per-Side decoding of raw bytes to text.
+//! Single-document decoding of raw bytes to text.
 //!
 //! Pipeline: a BOM (UTF-8, UTF-16LE/BE) wins, then a declared label (git's
 //! `working-tree-encoding`, supplied by the caller), then valid UTF-8, then a
@@ -7,12 +7,11 @@
 //!
 //! Crates: `encoding_rs` ((Apache-2.0 OR MIT) AND BSD-3-Clause for the WHATWG
 //! index data) and `chardetng` (Apache-2.0 OR MIT).
-#![allow(dead_code)] // ponytail: wired into the UI in ticket 12
 
 use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
 use encoding_rs::{Encoding, UTF_8};
 
-/// One Side's text and how it was decoded.
+/// One document's text and how it was decoded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decoded {
     /// The text, BOM stripped.
@@ -24,7 +23,7 @@ pub struct Decoded {
     pub lossy: bool,
 }
 
-/// Decodes one Side. `declared` is a git `working-tree-encoding` label; unknown labels are ignored.
+/// Decodes one document. `declared` is a git `working-tree-encoding` label; unknown labels are ignored.
 pub fn decode(bytes: &[u8], declared: Option<&str>) -> Decoded {
     let bom = Encoding::for_bom(bytes);
     let declared = declared.and_then(|label| Encoding::for_label_no_replacement(label.as_bytes()));
@@ -56,13 +55,23 @@ impl Decoded {
         if self.had_bom { format!("{} BOM", self.encoding) } else { self.encoding.to_string() }
     }
 
-    /// Whether the Comparison header names this Side's encoding: anything but UTF-8 without a BOM.
+    /// Whether a header names this encoding: anything but UTF-8 without a BOM.
     pub fn shown_in_header(&self) -> bool {
         self.encoding != "UTF-8" || self.had_bom
     }
 }
 
-/// The file-level notice when the two Sides' encodings differ.
+/// The notice for a [`Decoded::lossy`] document.
+/// git's `buffer_is_binary`: a NUL in the first 8000 bytes. UTF-16 with a BOM is the exception: git calls it binary,
+/// Lenz decodes it as text (a UTF-32 BOM stays binary).
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    let utf16 = bytes.starts_with(&[0xFE, 0xFF]) || bytes.starts_with(&[0xFF, 0xFE]) && !bytes.starts_with(&[0xFF, 0xFE, 0, 0]);
+    !utf16 && bytes[..bytes.len().min(8000)].contains(&0)
+}
+
+pub const LOSSY_NOTICE: &str = "undecodable bytes shown as �";
+
+/// The file-level notice when two documents' encodings differ (a comparison's Sides).
 pub fn describe(a: &Decoded, b: &Decoded) -> Option<String> {
     let (a, b) = (a.label(), b.label());
     (a != b).then(|| format!("encodings differ: {a} vs {b}"))

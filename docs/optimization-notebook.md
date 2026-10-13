@@ -864,3 +864,95 @@ the untried next step. The first paired run hung for 30 minutes on a baseline TU
 (`E`): a macOS process exiting with unread terminal output waits for it to drain, and the probe had
 stopped reading. `TerminalProbe.close` now drains while it waits and hangs up the terminal as a last
 resort; a collector test reproduces the hang.
+
+## 2026-10-12 lenz-content extraction (code-reader ticket 01)
+
+Decoding, line offsets, highlighting and the syntax arena moved unchanged into `crates/content`; `lenz` re-exports them. Full suite, Linux (Ryzen AI MAX+ 395), `--ui off` for lack of Xvfb, before = `main` 12b682b in a separate worktree, after = the extraction, run back to back on an idle machine (`target/perf/01-before`, `target/perf/01-after`, workload version 5 for both).
+
+| Finding | Evidence |
+|---|---|
+| No change from the extraction itself | `syntax/parse` +1.8%, `syntax/query-compile` +3.5% (three samples each, overlapping), `syntax/retained` identical, `syntax/visible-spans` −19% (microsecond-scale), `decode/*` −2%; TUI PTY peak/settled RSS +0.5%/+0.2%; stress RSS timeline −0.5%. n=3 TUI workflow rows moved ±5–28% with overlapping ranges, and `tui/merge/cancel-queued-200` was already bimodal before (0.4, 0.6, 164 ms). |
+| `image/4k-blend` +24% is code layout, not code | Six alternating runs of each test binary reproduced it (before 20–28 ms, after 29–35 ms). `perf stat`: identical instructions (4.654 G) and page faults (~4.4 k). `images::blend` is byte-identical in both binaries but starts at 16 vs 48 mod 64. Rebuilt both with `-C llvm-args=-align-loops=64`: before 28.4–34.4 ms, after 29.7–33.7 ms. The baseline's layout was the fortunate one; any unrelated change can move it. |
+| Small TUI test-binary residency shift | `tui/about/reopen-resident` 10.9 → 11.4 MiB in six alternating runs (≈ +0.3–0.4 MiB); the shipping TUI's PTY RSS did not move beyond noise. Not attributed further. |
+
+Unverified: GUI startup and interaction workloads (no private Xvfb installed), native macOS. On macOS the moved syntax/decode workloads and the arena memory test now run on the system allocator rather than `LargeBlocks` (workload version 6).
+
+## 2026-10-12 shared themes (code-reader ticket 02)
+
+Themes moved into `lenz-content` with caller-supplied paths and overrides; no theme logic changed. Full suite, Linux, `--ui off` (no Xvfb), before = ticket 01's tip 81b90d6 in a separate worktree, after = the extraction, back to back (`target/perf/02-before`, `target/perf/02-after`, workload version 6).
+
+| Finding | Evidence |
+|---|---|
+| No change from the extraction | TUI render, chrome, About, PTY and memory rows within noise or overlapping; theme colour helpers now cross a crate boundary without LTO in `release`, with no visible render cost. Stripped `lenz` +136 KB (67.03 MB). |
+| `image/4k-blend` +37% and `search_session.paint_100_visible_lines_linear` +10% are layout | Both in untouched code. Blend: identical instructions (4.654 G); `images::blend` starts at 0 mod 64 before, 48 after (48 was also the slow layout in ticket 01). With `-C llvm-args=-align-loops=64` in both trees: blend 29.1–34.9 vs 29.5–35.0 ms, paint 0.320–0.374 vs 0.336–0.367 ms. The same before-binary source measured slow in ticket 01's after-run from a different directory, so the 4K blend median is layout-bound to ±30% on this machine. |
+
+Unverified: GUI startup, interaction and theme-switch timings (no private Xvfb); native macOS.
+
+## 2026-10-12 shared pane presentation (code-reader ticket 03)
+
+`lenz-gpui` takes the comparison pane's numbered-row painting, line shaping and pointer hit-testing; the
+display transforms (tabs, hidden characters, mark cap, long-line cut) move to `lenz-content::display`. Full
+suite, Linux, `--ui off` (no Xvfb), before = 818a972 in a separate worktree, after = 2ffea44 and again at
+15d9514 (one scan for a drawn line's cut instead of two), back to back (`target/perf/03-before`, `03-after`,
+`03-after-final`).
+
+| Finding | Evidence |
+|---|---|
+| No change from the extraction in the measured workloads | Every row overlaps the baseline or moved within noise. The GUI paint path itself is not measured without a private display. Stripped `lenz` 67.04 MB (+5 KB). |
+| `syntax/parse` +4% in the first after-run is layout | `lenz-content`'s test binary: 279–285 vs 291–303 ms in five alternating runs, identical instructions (4.840 G), L1 i-cache misses 2.0–2.2 M → 6.0 M. Tree-sitter's code moved when `display.rs` was linked in; no parse code changed. |
+| `merge/open` +12% (n=3) in the final run is noise | Six alternating runs: 149.1–161.6 ms before, 149.6–162.7 after, same instruction counts. |
+
+Unverified: GUI startup, interaction and paint timings (no private Xvfb); native macOS.
+
+## 2026-10-13 shared fuzzy ranking (code-reader ticket 04)
+
+`navigator::score`/`rank` moved to `lenz-content::fuzzy` unchanged (plus `score_lowered` for the reader's
+pre-lowercased inventory). Full suite, Linux, `--ui off`, compared with `03-after-final` (identical prior code,
+measured the day before on the same machine): every row overlaps except `syntax/parse` +4.4% (282–292 → 295–302
+ms) and `syntax/visible-spans` −6.6%, both in `lenz-content`'s test binary. This is the layout effect recorded for
+ticket 03: adding a module to that crate moves tree-sitter's code, with identical instruction counts. The shipped
+binaries are linked differently and their workloads did not move. Unverified: GUI timings (no Xvfb), native
+macOS.
+
+## 2026-10-13 compact declarations (code-reader ticket 08)
+
+`lenz-content::highlight` gained `declarations_while`, run on the existing three syntax workers (the worker
+loop is now generic over the job's result; panic, reply and `release_freed_memory` behaviour unchanged). Only
+compact records leave the arena; the ignored test
+`declaration_extraction_returns_the_trees_memory_to_the_system` runs alone in `ci-local.sh`. Full suite,
+Linux, `--ui off`, `08-after` against `04-after`: interquartile-separated shifts were `tui/tabs/close-ready`
+0.94 → 6.7 ms and `tui/tabs/open-4k-ready` 52.5 → 66.9 ms (image tabs; no syntax code involved). Interleaved
+reruns of the `d5971fb` and `e1a2b2b` test binaries gave the same values for both (open 62–72, close 6.0–8.2
+ms), so this is machine state since the baseline, not the change; a later baseline should be re-recorded.
+`image/4k-blend` +72%, `search_session.paint_100_visible_lines_linear` +11% and
+`tui/pty/workflow/repository-ready` +10% stay within the `03-before` range (the layout effect recorded for
+ticket 03). The follow-up `f5b7bc5` touches only declaration queries, which no suite workload runs.
+Unverified: GUI timings (no Xvfb), native macOS.
+
+## 2026-10-13 shared single-image decoding (code-reader ticket 17)
+
+Single-image detection/decoding moved to `lenz-content::image` and texture/checkerboard/atlas-release helpers
+to `lenz-gpui::image`; Lenz keeps comparisons. `image`/`resvg` were already built (same versions, a subset of
+GPUI's features), so nothing new compiles. A fresh baseline (`17-before`, same machine, the earlier image-tab
+drift gone) against `17-after`: improvements or overlapping rows, except three interquartile-separated shifts,
+each checked with the previous and new release binaries interleaved: `image/4k-difference-image` +15% (n=3;
+interleaved 3.76–4.45 vs 3.89–4.54 ms: noise); `tui/scroll-render-100k` +6% (interleaved 0.186–0.191 vs
+0.191–0.198 ms, a consistent ~2%, with identical instruction counts, 3.512e9 both: code layout, as recorded for
+ticket 03); `tui/pty/settled-rss` +5% (bimodal ~50.6 or ~53.3 MiB in both builds: high in 6 of 10 runs before
+and 5 of 10 after: noise). The follow-up sharing `looks_binary`/`detect_file` changes no measured path.
+Unverified: GUI timings and atlas memory (no Xvfb), native macOS.
+
+## 2026-10-13 shared single-document Markdown (code-reader ticket 18)
+
+Single-document parsing, source mapping, front matter, local-image validation/decoding and code-block syntax
+moved to `lenz-content::markdown` (`parse` now refuses a source over `bytes_per_side` itself, as `parse_pair`
+already did per side); callout/removed/highlight colours to `lenz-content::theme`; `ReadingStyle`, block
+shaping and indentation to `lenz-gpui::markdown`. Lenz keeps pairing, source diffs, projection and Preview
+state. `pulldown-cmark` was already built for the app (same version, now without default features in
+`lenz-content`), so nothing new compiles. Full release suite, two candidate runs (`18-after`, `18-after-2`)
+against `17-after`: the rows over +10% differ between the two runs (`blame/HEAD~100/first`, `image/4k-diff`,
+`syntax/visible-spans` in the first; `tui/tabs/*`, `tui/images/decode-diff-4k`, `search_session` first batch in
+the second), and each overlaps an earlier run's samples: `image/4k-diff` 35.8–42.4 ms vs 33.9–41.2 ms;
+`blame/HEAD~100/first` 2.19–3.02 vs 2.35–3.73 ms; `tui/tabs/close-ready` is bimodal (~1 or ~7 ms, all ~7 at
+`17-before`, mixed at `18-after-2`). No code on those paths changed: noise. Unverified: GUI timings (no Xvfb),
+native macOS.

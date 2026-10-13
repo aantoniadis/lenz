@@ -1,0 +1,72 @@
+[package]
+name = "lenz-content"
+description = "Single-document decoding, line offsets, syntax highlighting and themes shared by Lenz and its code reader"
+license = "MIT"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+# In-process memory probe for benchmark and test targets; never in shipping binaries.
+perf-probe = []
+
+[dependencies]
+# Zero-width detection for the combining-mark cap (src/display.rs).
+unicode-width = "0.2"
+# Decoding (src/encoding.rs).
+encoding_rs = "0.8.42"
+chardetng = "1.0.0"
+# Syntax highlighting: runtime + one crate per bundled grammar (see src/highlight.rs).
+tree-sitter = "0.27"
+tree-sitter-bash = "0.25.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-c-sharp = "0.23.5"
+tree-sitter-containerfile = "0.9.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-css = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-html = "0.23.2"
+tree-sitter-java = "0.23.5"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-kotlin-sg = "0.4.1"
+tree-sitter-lua = "0.5.0"
+tree-sitter-make = "1.1.1"
+tree-sitter-md = "0.5.3"
+tree-sitter-php = "0.24.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-rust = "0.24.2"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"
+tree-sitter-zig = "1.1.2"
+
+# Images (src/image.rs): the version and a subset of the features gpui already enables, so it unifies: nothing new
+# to compile in either product.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
+# SVG rasterising (src/image.rs); the version gpui already builds.
+resvg = { version = "0.46", default-features = false }
+
+# Markdown (src/markdown): parsing only; the exact version Lenz pinned.
+pulldown-cmark = { version = "=0.13.4", default-features = false }
+
+# Themes (src/theme): user theme files, the saved selection, following Omarchy's current theme.
+toml = "0.8.23"
+serde_json = "1"
+notify = "8.2.0"
+async-channel = "2.5.0"
+
+# The syntax arena's mapping and `malloc_trim` (src/syntax_arena.rs, src/highlight.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Disposable theme directories.
+tempfile = "3"
+# Tests check line offsets against the comparison engine's split; the engine never depends on this crate.
+lenz-engine = { path = "../engine" }
+
+[lints]
+workspace = true

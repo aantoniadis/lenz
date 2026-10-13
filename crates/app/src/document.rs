@@ -78,54 +78,8 @@ impl PreparedDocument {
 
 /// Sides bigger than this ask before they're read and diffed.
 pub const LARGE: u64 = 20 << 20;
-/// Lines longer than this are cut short on screen.
-pub const LONG_LINE: usize = 10_000;
+pub use lenz_content::display::{LONG_LINE, MAX_MARKS, cap_marks, hides_text, show_bidi, shows_mark};
 
-/// A character that would hide or reorder what a reviewer sees: a C0/C1 control, or one of the Unicode
-/// bidirectional embedding, override and isolate controls of "Trojan Source" (CVE-2021-42574), which make
-/// a terminal or text shaper display source in an order the compiler never sees. Both frontends show U+FFFD
-/// instead. Joiners, variation selectors and marks are not included: they are part of emoji and scripts.
-pub fn hides_text(c: char) -> bool {
-    c.is_control() || is_bidi_control(c)
-}
-
-fn is_bidi_control(c: char) -> bool {
-    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
-}
-
-/// Zero-width characters (combining marks, joiners) drawn on one character: Unicode calls a run longer than 30
-/// abnormal (UAX #15, stream-safe text). Thousands stacked on one letter cost the GUI's shaper ~7 ms a line,
-/// 381 ms a screenful, and draw over neighbouring rows; past this many, the rest are not drawn. Copy is unchanged.
-pub const MAX_MARKS: usize = 30;
-
-/// Whether `c` is drawn, given `run`: the zero-width characters drawn since the last visible one (updated).
-pub fn shows_mark(c: char, run: &mut usize) -> bool {
-    if unicode_width::UnicodeWidthChar::width(c) != Some(0) {
-        *run = 0;
-        return true;
-    }
-    *run += 1;
-    *run <= MAX_MARKS
-}
-
-/// `text` without the zero-width characters past [`MAX_MARKS`] on one character.
-pub fn cap_marks(text: &str) -> std::borrow::Cow<'_, str> {
-    let mut run = 0;
-    if text.chars().all(|c| shows_mark(c, &mut run)) {
-        return text.into();
-    }
-    let mut run = 0;
-    text.chars().filter(|&c| shows_mark(c, &mut run)).collect::<String>().into()
-}
-
-/// `text` with its bidi controls shown as U+FFFD. Both are three UTF-8 bytes, so every byte offset into `text`
-/// (styles, selections, glyph maps) stays valid: for text shaped as it is, where the offsets are already fixed.
-pub fn show_bidi(text: &str) -> std::borrow::Cow<'_, str> {
-    if !text.contains(is_bidi_control) {
-        return text.into();
-    }
-    text.chars().map(|c| if is_bidi_control(c) { '\u{FFFD}' } else { c }).collect::<String>().into()
-}
 pub(crate) enum ReadSides { Large(u64), Bytes([SideBytes; 2]) }
 
 pub(crate) fn read_sides(set: &ChangeSet, index: usize, force: bool) -> Result<ReadSides, String> {
@@ -218,7 +172,7 @@ impl TextDocument {
         doc.notes.extend(encoding::describe(&dl, &dr));
         doc.notes.extend(set.skipped_driver(index).map(str::to_owned));
         if dl.lossy || dr.lossy {
-            doc.notes.push("undecodable bytes shown as �".into());
+            doc.notes.push(encoding::LOSSY_NOTICE.into());
         }
         if l.textconv || r.textconv {
             doc.notes.push("shown through a textconv driver".into());
