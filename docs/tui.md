@@ -66,7 +66,9 @@ Images draw as colored half-block cells. `m` cycles the modes; `0` fits and `1` 
 
 ### Archives
 
-A changed zip or tarball appears in Files as a folder (`bundle.zip/src`) of its changed files, with the same keys as any other file. They are read-only, and Show file history follows the archive. The GUI behaves the same way; the [README](../README.md#editing-and-saving) lists the formats and limits.
+A changed zip or tarball appears in Files as a folder (`bundle.zip/src`) of its changed files, collapsed at first with its file count. They are read-only, and Show file history follows the archive. The GUI behaves the same way; the [README](../README.md#editing-and-saving) lists the formats and limits.
+
+Folder headings in Files collapse and expand: click the ▾/▸ arrow (the heading's first two cells), or use the keys. Up/Down walk files and headings; on a heading the **Folder Summary** shows in the diff area, Left collapses it, Right expands it and Enter toggles it; Left on a file moves to its folder's heading. A click on a heading's name shows its summary too. Click the summary, or Esc out of Files, to give it the keyboard: Up/Down select a file, Enter or a click opens it, Left/Right collapse or expand the folder, and Esc returns to the file behind it. The palette lists the same folder commands as the GUI.
 
 ### Markdown Preview
 

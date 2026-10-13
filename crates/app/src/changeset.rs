@@ -79,6 +79,19 @@ impl Comparison {
         matches!(self.left, Content::Archived { .. }) || matches!(self.right, Content::Archived { .. })
     }
 
+    /// The outermost archive's folder in `path`, for a file inside an archive: where its rows sit.
+    pub fn archive_root(&self) -> Option<&str> {
+        let mut content = if matches!(self.right, Content::Empty) { &self.left } else { &self.right };
+        let mut path = self.path.as_str();
+        let mut root = None;
+        while let Content::Archived { archive, member, .. } = content {
+            path = path.strip_suffix(member.as_str()).and_then(|p| p.strip_suffix('/'))?;
+            root = Some(path);
+            content = archive;
+        }
+        root
+    }
+
     /// The repository path git knows: the outermost archive's path for a file inside an archive, else `path`.
     pub fn repository_path(&self) -> &str {
         let mut content = if matches!(self.right, Content::Empty) { &self.left } else { &self.right };
@@ -102,10 +115,16 @@ pub struct ChangeSet {
     attrs: HashMap<String, DiffAttr>,
     /// Each listed path's `working-tree-encoding`, where set.
     encodings: HashMap<String, String>,
+    /// The last compressed tar streams read whole, decompressed, so reading their members one by one doesn't
+    /// decompress them again; see [`ChangeSet::unpacked`].
+    unpacked: std::sync::Arc<Mutex<Vec<Unpacked>>>,
     /// Why a path may not look as `git diff` shows it: a repository-config textconv or filter driver Lenz did not
     /// run, or an archive Lenz could not show as a folder.
     notes: HashMap<String, String>,
 }
+
+/// A compressed tar archive's Content and its decompressed stream.
+type Unpacked = (Content, std::sync::Arc<[u8]>);
 
 /// The adapters behind a Change Set.
 #[derive(Clone)]
@@ -158,7 +177,7 @@ impl ChangeSet {
     /// Lists the Change Set; `cwd` is where the user ran Lenz. Synchronous: call it off the UI thread.
     pub fn load(spec: &Spec, cwd: &Path) -> Result<ChangeSet, String> {
         match spec {
-            Spec::Empty => Ok(ChangeSet{comparisons:Vec::new(),groups:Vec::new(),source:Source::Plain,attrs:Default::default(),encodings:Default::default(),notes:Default::default()}),
+            Spec::Empty => Ok(ChangeSet{comparisons:Vec::new(),groups:Vec::new(),source:Source::Plain,attrs:Default::default(),encodings:Default::default(),unpacked:Default::default(),notes:Default::default()}),
             Spec::Git { cached, revs, paths, untracked } => {
                 let root = toplevel(cwd)?;
                 let list = list_git(cwd, &root, *cached, revs, paths, *untracked)?;
@@ -171,7 +190,7 @@ impl ChangeSet {
                 let mut comparisons = list_plain(cwd, left, right)?;
                 sort_for_navigator(&mut comparisons);
                 let (attrs, encodings, notes) = Default::default();
-                let mut set = ChangeSet { comparisons, groups: Vec::new(), source: Source::Plain, attrs, encodings, notes };
+                let mut set = ChangeSet { comparisons, groups: Vec::new(), source: Source::Plain, attrs, encodings, unpacked: Default::default(), notes };
                 set.expand_archives();
                 Ok(set)
             }
@@ -198,7 +217,7 @@ impl ChangeSet {
         }
         let (attrs, encodings, notes) = diff_attrs(&root, &comparisons)?;
         let source = Source::Git { root, cat_file: std::sync::Arc::new(Mutex::new(None)), check: std::sync::Arc::new(Mutex::new(None)) };
-        let mut set = ChangeSet { comparisons, groups, source, attrs, encodings, notes };
+        let mut set = ChangeSet { comparisons, groups, source, attrs, encodings, unpacked: Default::default(), notes };
         set.expand_archives();
         Ok(set)
     }
@@ -220,8 +239,33 @@ impl ChangeSet {
             }
             Content::Submodule(sha) => Ok(format!("Subproject commit {sha}\n").into_bytes()),
             Content::Blob(name) => self.blob(name, "--batch", |p| p.get(name)),
-            Content::Archived { archive, kind, member } => archive::extract(*kind, &self.read(archive)?, member),
+            Content::Archived { archive, kind, member } => match self.unpacked(archive, *kind)? {
+                Some(tar) => archive::extract(archive::Kind::Tar(archive::Compression::None), &tar, member),
+                None => archive::extract(*kind, &self.read(archive)?, member),
+            },
         }
+    }
+
+    /// A compressed tar archive's stream, decompressed once and kept for its next member (two archives, up to
+    /// 64 MiB each); `None` for any other archive, or one too large to keep.
+    fn unpacked(&self, archive: &Content, kind: archive::Kind) -> Result<Option<std::sync::Arc<[u8]>>, String> {
+        const KEEP: u64 = 64 << 20;
+        let archive::Kind::Tar(compression) = kind else { return Ok(None) };
+        if compression == archive::Compression::None {
+            return Ok(None);
+        }
+        let cached = |c: &Vec<Unpacked>| c.iter().find(|(key, _)| key == archive).map(|(_, tar)| tar.clone());
+        if let Some(tar) = cached(&self.unpacked.lock().unwrap_or_else(PoisonError::into_inner)) {
+            return Ok(Some(tar));
+        }
+        let Some(tar) = archive::unpack(compression, &self.read(archive)?, KEEP)? else { return Ok(None) };
+        let tar: std::sync::Arc<[u8]> = tar.into();
+        let mut cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.len() == 2 {
+            cache.remove(0);
+        }
+        cache.push((archive.clone(), tar.clone()));
+        Ok(Some(tar))
     }
 
     /// The repository's top directory, for a git Change Set.
@@ -297,7 +341,10 @@ impl ChangeSet {
         match content {
             Content::File(path) => fs::metadata(path).map(|m| m.len()).map_err(io_error(path)),
             Content::Blob(name) => self.blob(name, "--batch-check", |p| p.size(name)).map(|s| s as u64),
-            Content::Archived { archive, kind, member } => archive::size(*kind, &self.read(archive)?, member),
+            Content::Archived { archive, kind, member } => match self.unpacked(archive, *kind)? {
+                Some(tar) => archive::size(archive::Kind::Tar(archive::Compression::None), &tar, member),
+                None => archive::size(*kind, &self.read(archive)?, member),
+            },
             _ => self.read(content).map(|b| b.len() as u64),
         }
     }
@@ -1515,6 +1562,34 @@ mod tests {
         assert_eq!(set.comparisons.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["a.zip/f.txt", "b.txt", "a.zip/f.txt", "a.zip/g.txt"]);
         assert_eq!(set.texts(0).unwrap(), ("1\n".into(), "2\n".into()));
         assert_eq!(set.texts(2).unwrap(), ("2\n".into(), "3\n".into()));
+    }
+
+    #[test]
+    fn compressed_tar_streams_are_decompressed_once_and_at_most_two_are_kept() {
+        let r = repo();
+        let tgz = |files: &[(&str, &[u8])]| archive_testing::tar(files, Compression::Gzip);
+        write(r.path(), "a.tgz", tgz(&[("1.txt", b"a\n"), ("2.txt", b"b\n")]));
+        write(r.path(), "b.tgz", tgz(&[("1.txt", b"a\n")]));
+        commit_all(r.path(), "1");
+        write(r.path(), "a.tgz", tgz(&[("1.txt", b"A\n"), ("2.txt", b"B\n")]));
+        write(r.path(), "b.tgz", tgz(&[("1.txt", b"A\n")]));
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
+        assert_eq!(set.comparisons.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["a.tgz/1.txt", "a.tgz/2.txt", "b.tgz/1.txt"]);
+        let kept = |set: &ChangeSet| set.unpacked.lock().unwrap().iter().map(|(c, tar)| (c.clone(), tar.clone())).collect::<Vec<_>>();
+        assert!(kept(&set).is_empty(), "listing reads archives whole, without keeping them");
+        assert_eq!(set.texts(0).unwrap(), ("a\n".into(), "A\n".into()));
+        let first = kept(&set);
+        assert_eq!(first.len(), 2, "both Sides of a.tgz");
+        // the next member of the same archives reads the kept streams
+        assert_eq!(set.texts(1).unwrap(), ("b\n".into(), "B\n".into()));
+        let again = kept(&set);
+        assert!(first.iter().zip(&again).all(|((c1, t1), (c2, t2))| c1 == c2 && std::sync::Arc::ptr_eq(t1, t2)));
+        // another archive replaces the oldest: never more than two
+        assert_eq!(set.texts(2).unwrap(), ("a\n".into(), "A\n".into()));
+        let after = kept(&set);
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|(c, _)| !first.iter().any(|(old, _)| old == c)), "b.tgz's Sides replaced a.tgz's");
     }
 
     #[test]

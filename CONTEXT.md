@@ -23,6 +23,9 @@ Where a **Side** comes from: a git revision (commit, branch, index, working tree
 A file inside a changed zip or tar archive, shown as its own read-only **Comparison** under the archive's path, as if the archive were a folder.
 _Avoid_: entry (tar/zip jargon)
 
+**Folder Summary**:
+A folder's changed files with the lines each added and removed, shown in place of a **Comparison** when a folder heading is chosen.
+
 **Change Block**:
 A contiguous run of lines that differ between the two **Sides** — inserted, deleted, or modified.
 _Avoid_: hunk (hunk includes context lines in unified-diff format)

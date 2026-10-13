@@ -46,6 +46,7 @@ impl App {
             Action::Interaction(lenz::commands::Interaction::Find) => { self.handle(Event::Key(crossterm::event::KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL))); }
             Action::Interaction(command) => self.interaction(command),
             Action::Edit(command) => self.edit_menu(command),
+            Action::Folder(folder) => { self.close_pr_details(); self.session.folder_action(folder); }
             Action::File(file) => { if let Some(why) = Availability::disabled(&*self, action) { self.session.set_notice(why); } else { self.file_action(file, self.session.current()); } }
             Action::Image(index) => if let Some(entry) = lenz::image_session::image_commands().get(index) { self.visual.image_execute(entry.command, self.image_area()); },
             Action::Repository(RepoAction::Refresh) => self.reload(),
@@ -153,6 +154,7 @@ impl Availability for App {
             Action::Comparison(command) => self.session.disabled(command).map(Cow::Borrowed),
             Action::Interaction(command) => self.interaction_disabled(command).map(Cow::Borrowed),
             Action::Edit(command) => self.session.edit_disabled(command).map(Cow::Owned),
+            Action::Folder(folder) => self.session.folder_disabled(folder).map(Cow::Borrowed),
             Action::File(file) => {
                 let why = if file == lenz::file_actions::FileAction::UndoLenz { self.session.markdown_edit_disabled() } else { None };
                 why.or_else(|| self.file_disabled(file, self.session.current())).map(Cow::Borrowed)

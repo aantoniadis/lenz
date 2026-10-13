@@ -39,6 +39,8 @@ pub enum Action {
     /// Index into `image_session::image_commands()`.
     Image(usize),
     Repository(RepoAction), Pr(PrAction), Merge(Act), Pick(PickAct), Layout(LayoutCommand), Help(HelpAction),
+    /// Collapsed folders and the Folder Summary of the File Navigator.
+    Folder(crate::folders::FolderAction),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +171,10 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
             } else if !scope.image {
                 out.extend(EditMenuCommand::ALL.iter().map(|&e| entry(Action::Edit(e), e.label(), G::Edit, match e {
                     EditMenuCommand::Undo => Some("ctrl-z"), EditMenuCommand::Redo => Some("ctrl-shift-z"), EditMenuCommand::Save => Some("ctrl-s"), _ => None })));
+            }
+            if scope.surface == Surface::Comparison {
+                use crate::folders::FolderAction as F;
+                out.extend(F::ALL.map(|a| entry(Action::Folder(a), a.label(), G::Navigate, match a { F::Summary => Some("left"), _ => None })));
             }
             out.extend([Interaction::Copy, Interaction::CopyMarkdownSource, Interaction::CopyPath, Interaction::CopyReference,
                         Interaction::CopyLeftChange, Interaction::CopyRightChange, Interaction::SelectAll].map(|x| i(x, G::Copy, None)));

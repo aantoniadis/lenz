@@ -883,9 +883,14 @@ fn gui_files_pane_keys_move_files_and_never_move_the_diff_caret() {
     let (x, y) = f.viewer.read_with(&cx, |v, _| (v.diff_x() + num_w() + 30., v.top() + line_h() / 2.));
     click(&mut cx, &f, x, y);
     let caret = f.viewer.read_with(&cx, |v, _| v.sel.unwrap());
-    click(&mut cx, &f, 20., y);
+    // a click on the first file's row (under the "." heading) gives Files the keyboard
+    click(&mut cx, &f, 20., y + line_h());
+    // Left goes to the file's folder heading (its summary) and Down back to the file: the caret never moves
     key(&mut cx, &f, "left", false, false, false);
     assert_eq!(f.viewer.read_with(&cx, |v, _| v.sel), Some(caret));
+    assert!(f.viewer.read_with(&cx, |v, _| v.comparison.folders.summary().is_some()));
+    key(&mut cx, &f, "down", false, false, false);
+    assert_eq!(f.viewer.read_with(&cx, |v, _| (v.comparison.current, v.comparison.folders.summary().is_none())), (0, true));
     key(&mut cx, &f, "down", false, false, false);
     assert_eq!(f.viewer.read_with(&cx, |v, _| v.comparison.current), 1);
     key(&mut cx, &f, "up", false, false, false);
@@ -4411,9 +4416,14 @@ fn gui_committed_zip_opens_as_a_folder_whose_files_show_their_changes_read_only(
     let set=Arc::new(ChangeSet::load(&spec,root).unwrap());let c=&set.comparisons[0];
     let doc=Arc::new(Doc::load(&set,0,Path::new(&c.old_path),Path::new(&c.path),false).unwrap());let view=doc.view(&doc.line_diff(&Options::default()),30.);
     f.viewer.update(cx,|v,cx|{*v=Viewer::new(set,spec,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.layout.set_files(true);});
-    // the Files list groups the archive's members under it, as folders
-    let dirs=f.viewer.read_with(cx,|v,_|v.nav.iter().filter_map(|r|if let NavRow::Dir(d)=r{Some(d.clone())}else{None}).collect::<Vec<_>>());
-    assert_eq!(dirs,["bundle.zip","bundle.zip/src"]);
+    let dirs=|cx:&mut TestAppContext|f.viewer.read_with(cx,|v,_|v.nav.iter().filter_map(|r|if let NavRow::Dir{path,collapsed,files,..}=r{Some((path.clone(),*collapsed,*files))}else{None}).collect::<Vec<_>>());
+    // the archive starts collapsed, and with nothing else changed its summary covers the first file
+    assert_eq!(dirs(cx),[("bundle.zip".to_string(),true,3)]);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|(s.folder.clone(),s.files.len()))),Some(("bundle.zip".into(),3)));
+    // a click on the heading's arrow expands it: the Files list groups the archive's members under it, as folders
+    let y=f.viewer.read_with(cx,|v,_|v.nav_top()+2.);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.nav_x()+12.),y);
+    assert_eq!(dirs(cx),[("bundle.zip".to_string(),false,0),("bundle.zip/src".to_string(),false,0)]);
     // a click on the member opens its comparison: both versions of the file inside the archive
     let y=f.viewer.read_with(cx,|v,_|v.top()+v.nav.iter().position(|r|matches!(r,NavRow::File{index,..}if v.set.comparisons[*index].path=="bundle.zip/src/main.rs")).unwrap()as f32*line_h()+2.);
     click(cx,&f,f.viewer.read_with(cx,|v,_|v.picker_w()+80.),y);
@@ -4428,4 +4438,200 @@ fn gui_committed_zip_opens_as_a_folder_whose_files_show_their_changes_read_only(
     run(cx,&f,crate::catalog::Action::File(crate::file_actions::FileAction::History));
     workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|!r.busy()&&r.picker.file_paths.is_some()));
     assert_eq!(f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().picker.file_paths.as_ref().unwrap().0.clone()),"bundle.zip");
+}
+
+/// A repository whose last commit changes `file.rs` and the members of `bundle.zip`, open on `HEAD~ HEAD`.
+fn archive_folders_fixture(cx:&mut TestAppContext)->Fixture {
+    use crate::archive::testing::zip;
+    let f=fixture(cx,"old\n","new\n");let root=f.dir.path();workflow_git(root,&["init","-q","-b","main"]);
+    std::fs::write(root.join("file.rs"),"first\n").unwrap();
+    std::fs::write(root.join("bundle.zip"),zip(&[("src/main.rs",b"fn main() {\n    old();\n}\n"),("gone.txt",b"bye\n")])).unwrap();
+    workflow_git(root,&["add","file.rs","bundle.zip"]);workflow_git(root,&["commit","-qm","Add bundle"]);
+    std::fs::write(root.join("bundle.zip"),zip(&[("src/main.rs",b"fn main() {\n    new_call();\n    more();\n}\n"),("added.txt",b"hi\n")])).unwrap();
+    std::fs::write(root.join("file.rs"),"third\n").unwrap();workflow_git(root,&["commit","-qam","Change bundle"]);
+    let spec=Spec::Git{cached:false,revs:vec!["HEAD~".into(),"HEAD".into()],paths:Vec::new(),untracked:false};
+    let set=Arc::new(ChangeSet::load(&spec,root).unwrap());let c=&set.comparisons[0];
+    let doc=Arc::new(Doc::load(&set,0,Path::new(&c.old_path),Path::new(&c.path),false).unwrap());let view=doc.view(&doc.line_diff(&Options::default()),30.);
+    f.viewer.update(cx,|v,cx|{*v=Viewer::new(set,spec,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.layout.set_files(true);});
+    workflow_wait(cx,&f,|v|v.doc().is_some()&&v.comparison.diffed==v.comparison.generation);
+    f
+}
+
+fn nav_labels(cx:&mut TestAppContext,f:&Fixture)->Vec<String> {
+    f.viewer.read_with(cx,|v,_|v.sidebar_rows().iter().map(|r|r.parts.iter().map(|p|p.0.as_str()).collect::<String>().trim().to_string()).collect())
+}
+
+/// The y of Files row `row`, for a click.
+fn nav_row_y(cx:&mut TestAppContext,f:&Fixture,row:usize)->f32 { f.viewer.read_with(cx,|v,_|v.nav_top()+(row as f32-v.nav_scroll+0.5)*line_h()) }
+
+#[gpui::test]
+fn gui_archive_folders_start_collapsed_and_show_a_summary_of_their_changed_files(cx:&mut TestAppContext) {
+    use crate::folders::{FolderAction,Stat};
+    let f=archive_folders_fixture(cx);
+    // the archive is one collapsed heading with its file count; the plain file is shown
+    assert_eq!(nav_labels(cx,&f),["▾ .","M file.rs","▸ bundle.zip · 3 files"]);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.set.comparisons[v.comparison.current].path.clone()),"file.rs");
+    // ] skips the hidden files
+    key(cx,&f,"]",false,false,false);
+    f.viewer.read_with(cx,|v,_|{assert_eq!(v.set.comparisons[v.comparison.current].path,"file.rs");assert!(v.toast.as_ref().is_some_and(|t|t.0.contains("No later visible file")));});
+    // a click on the heading's name shows the summary, its counts filled in the background
+    let y=nav_row_y(cx,&f,2);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.nav_x()+80.),y);
+    let summary=f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().cloned()).expect("the summary shows");
+    assert_eq!(summary.folder,"bundle.zip");
+    workflow_wait(cx,&f,|v|summary.files.iter().all(|&i|v.comparison.folders.stat(i).is_some()));
+    let main=f.viewer.read_with(cx,|v,_|summary.files.iter().copied().find(|&i|v.set.comparisons[i].path.ends_with("src/main.rs")).unwrap());
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.stat(main).cloned()),Some(Stat::Lines{added:2,removed:1}));
+    // the heading is the Files row marked, and the summary covers the comparison: no placeholder or file labels
+    f.viewer.update(cx,|v,_|{assert!(v.sidebar_rows()[2].current&&!v.sidebar_rows()[1].current);let frame=v.summary_frame().unwrap();assert_eq!(frame.rows_text(),[("A added.txt".to_string(),"+1".to_string()),("D gone.txt".into(),"−1".into()),("M src/main.rs".into(),"+2 −1".into())]);});
+    // a click on the summary's heading gives it the keyboard; down to main.rs, Enter opens it, and the archive expands
+    let (rx,ry,_,_)=f.viewer.read_with(cx,|v,_|v.pr_pane());
+    click(cx,&f,rx+40.,ry+4.);
+    assert!(!f.viewer.read_with(cx,|v,_|v.nav_focused));
+    for _ in 0..summary.files.len() { if f.viewer.read_with(cx,|v,_|v.comparison.folders.selected_file())==Some(main){break;} key(cx,&f,"down",false,false,false); }
+    key(cx,&f,"enter",false,false,false);
+    workflow_wait(cx,&f,|v|v.doc().is_some()&&v.comparison.diffed==v.comparison.generation);
+    f.viewer.read_with(cx,|v,_|{assert!(v.comparison.folders.summary().is_none());assert_eq!(v.set.comparisons[v.comparison.current].path,"bundle.zip/src/main.rs");});
+    assert!(nav_labels(cx,&f).contains(&"▾ bundle.zip".to_string()));
+    // Collapse all archives from the palette hides the file on screen, so its folder's summary takes its place
+    run(cx,&f,crate::catalog::Action::Folder(FolderAction::CollapseArchives));
+    f.viewer.read_with(cx,|v,_|{assert!(v.comparison.folders.collapsed("bundle.zip"));assert_eq!(v.comparison.folders.summary().map(|s|s.folder.as_str()),Some("bundle.zip/src"));});
+    // Esc goes back to the file, its folders expanded again
+    for _ in 0..8 {if f.viewer.read_with(cx,|v,_|!v.nav_focused&&!v.panel_focused){break;}key(cx,&f,"tab",false,false,false);}
+    key(cx,&f,"escape",false,false,false);
+    f.viewer.read_with(cx,|v,_|{assert!(v.comparison.folders.summary().is_none()&&!v.comparison.folders.collapsed("bundle.zip"));assert_eq!(v.set.comparisons[v.comparison.current].path,"bundle.zip/src/main.rs");});
+    // with nothing collapsed, the palette says why
+    use crate::catalog::Availability;
+    assert!(f.viewer.read_with(cx,|v,_|v.disabled(crate::catalog::Action::Folder(FolderAction::ExpandAll))).is_some_and(|why|why.contains("No folder is collapsed")));
+}
+
+#[gpui::test]
+fn gui_files_keys_walk_folder_headings_as_a_tree(cx:&mut TestAppContext) {
+    let f=archive_folders_fixture(cx);
+    // a click on the file gives Files the keyboard; Down reaches the archive's heading: its summary shows
+    let y=nav_row_y(cx,&f,1);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.nav_x()+80.),y);
+    assert!(f.viewer.read_with(cx,|v,_|v.nav_focused));
+    key(cx,&f,"down",false,false,false);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|s.folder.clone())),Some("bundle.zip".into()));
+    // Right expands it, Down walks into it and opens its first file
+    key(cx,&f,"right",false,false,false);
+    assert!(!f.viewer.read_with(cx,|v,_|v.comparison.folders.collapsed("bundle.zip")));
+    key(cx,&f,"down",false,false,false);
+    workflow_wait(cx,&f,|v|v.doc().is_some()&&v.comparison.diffed==v.comparison.generation);
+    f.viewer.read_with(cx,|v,_|{assert_eq!(v.set.comparisons[v.comparison.current].path,"bundle.zip/added.txt");assert!(v.comparison.folders.summary().is_none());});
+    // Left on a file goes to its folder's heading; Left there collapses it
+    key(cx,&f,"left",false,false,false);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|s.folder.clone())),Some("bundle.zip".into()));
+    key(cx,&f,"left",false,false,false);
+    assert!(f.viewer.read_with(cx,|v,_|v.comparison.folders.collapsed("bundle.zip")));
+    assert_eq!(nav_labels(cx,&f).last().map(String::as_str),Some("▸ bundle.zip · 3 files"));
+}
+
+/// A repository whose last commit changes all 60 files inside `big.zip`, open on `HEAD~ HEAD` (on the zip's summary).
+fn big_archive_fixture(cx:&mut TestAppContext)->Fixture {
+    use crate::archive::testing::zip;
+    let f=fixture(cx,"old\n","new\n");let root=f.dir.path();workflow_git(root,&["init","-q","-b","main"]);
+    let files=|v:&str|(0..60).map(|i|(format!("dir/f{i:02}.txt"),format!("{v} {i}\n"))).collect::<Vec<_>>();
+    let write=|v:&str|{let files=files(v);let pairs:Vec<(&str,&[u8])>=files.iter().map(|(p,c)|(p.as_str(),c.as_bytes())).collect();std::fs::write(root.join("big.zip"),zip(&pairs)).unwrap();};
+    write("old");workflow_git(root,&["add","big.zip"]);workflow_git(root,&["commit","-qm","Add big"]);
+    write("new");workflow_git(root,&["commit","-qam","Change big"]);
+    let spec=Spec::Git{cached:false,revs:vec!["HEAD~".into(),"HEAD".into()],paths:Vec::new(),untracked:false};
+    let set=Arc::new(ChangeSet::load(&spec,root).unwrap());let c=&set.comparisons[0];
+    let doc=Arc::new(Doc::load(&set,0,Path::new(&c.old_path),Path::new(&c.path),false).unwrap());let view=doc.view(&doc.line_diff(&Options::default()),30.);
+    f.viewer.update(cx,|v,cx|{*v=Viewer::new(set,spec,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.layout.set_files(true);});
+    f
+}
+
+/// The summary rows painted now, and which of them has the keyboard.
+fn summary_rows(cx:&mut TestAppContext,f:&Fixture)->(Vec<String>,Option<String>) {
+    f.viewer.update(cx,|v,_|{let frame=v.summary_frame().expect("the summary shows");let rows=frame.rows_text();(rows.iter().map(|r|r.0.clone()).collect(),frame.selected_text())})
+}
+
+#[gpui::test]
+fn gui_a_long_summary_scrolls_with_its_keyboard_row_at_every_size_and_esc_leaves_it(cx:&mut TestAppContext) {
+    let f=big_archive_fixture(cx);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|s.files.len())),Some(60));
+    cx.simulate_window_resize(f.window.into(),size(px(1200.0),px(400.0)));cx.executor().run_until_parked();
+    let (rx,ry,_,_)=f.viewer.read_with(cx,|v,_|v.pr_pane());
+    click(cx,&f,rx+40.,ry+4.);
+    // End then Up: the keyboard row is always painted
+    key(cx,&f,"end",false,false,false);
+    assert_eq!(summary_rows(cx,&f).1.as_deref(),Some("M dir/f59.txt"));
+    key(cx,&f,"up",false,false,false);
+    let (rows,selected)=summary_rows(cx,&f);
+    assert_eq!(selected.as_deref(),Some("M dir/f58.txt"));
+    assert!(!rows.contains(&"M dir/f00.txt".to_string()),"{rows:?}");
+    // the wheel scrolls away from it, and the next key brings it back
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx+60.),px(ry+80.)),delta:ScrollDelta::Lines(point(0.,30.)),..Default::default()},w,cx)).unwrap();
+    let (rows,selected)=summary_rows(cx,&f);
+    assert!(rows.contains(&"M dir/f00.txt".to_string())&&selected.is_none(),"{rows:?}");
+    key(cx,&f,"up",false,false,false);
+    assert_eq!(summary_rows(cx,&f).1.as_deref(),Some("M dir/f57.txt"));
+    // small windows keep the selection painted
+    for (w,h) in [(400.,240.),(160.,120.),(60.,60.),(1200.,400.)] {
+        cx.simulate_window_resize(f.window.into(),size(px(w),px(h)));cx.executor().run_until_parked();
+        key(cx,&f,"end",false,false,false);key(cx,&f,"up",false,false,false);
+        assert_eq!(summary_rows(cx,&f).1.as_deref(),Some("M dir/f58.txt"),"{w}x{h}");
+    }
+    // Esc from the scrolled summary returns to the file behind it, its folders expanded
+    key(cx,&f,"escape",false,false,false);
+    f.viewer.read_with(cx,|v,_|{assert!(v.comparison.folders.summary().is_none()&&!v.comparison.folders.collapsed("big.zip"));assert_eq!(v.set.comparisons[v.comparison.current].path,"big.zip/dir/f00.txt");});
+}
+
+#[gpui::test]
+fn gui_dialogs_over_the_summary_take_its_keys(cx:&mut TestAppContext) {
+    let f=big_archive_fixture(cx);
+    let (rx,ry,_,_)=f.viewer.read_with(cx,|v,_|v.pr_pane());
+    click(cx,&f,rx+40.,ry+4.);
+    key(cx,&f,"down",false,false,false);
+    let selected=f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|s.selected));
+    assert_eq!(selected,Some(1));
+    // the palette and help consume the arrows and Enter; the summary keeps its row and stays open
+    key(cx,&f,"p",true,true,false);
+    assert!(f.viewer.read_with(cx,|v,_|v.command_palette.is_some()));
+    key(cx,&f,"down",false,false,false);key(cx,&f,"escape",false,false,false);
+    assert!(f.viewer.read_with(cx,|v,_|v.command_palette.is_none()));
+    key(cx,&f,"?",false,false,false);
+    assert!(f.viewer.read_with(cx,|v,_|v.help));
+    key(cx,&f,"down",false,false,false);key(cx,&f,"end",false,false,false);key(cx,&f,"escape",false,false,false);
+    f.viewer.read_with(cx,|v,_|{assert!(!v.help);assert_eq!(v.comparison.folders.summary().map(|s|s.selected),selected);assert_eq!(v.comparison.current,0);});
+}
+
+#[gpui::test]
+fn gui_a_summary_and_a_pr_details_tab_never_share_the_diff_area(cx:&mut TestAppContext) {
+    use crate::{catalog::{Action,PrAction},folders::FolderAction,pr_session::DetailsTab};
+    let f=big_archive_fixture(cx);
+    f.viewer.update(cx,|v,_|{
+        let pr:crate::pr::PullRequest=serde_json::from_str(include_str!("../../fixtures/pr/view.json")).unwrap();
+        let mut state=crate::pr_session::PrState::new(pr,crate::pr::Fetched{number:14130,merge_base:"base".into(),head:"head".into()});
+        state.marks=None;
+        v.repo.get_or_insert_with(||crate::repository_session::RepositorySession::with_picker(Picker::new(f.dir.path().into(),false))).pr=Some(state);
+    });
+    assert!(f.viewer.read_with(cx,|v,_|v.summary_shown()));
+    // a details tab, however it opens, closes the summary
+    run(cx,&f,Action::Pr(PrAction::Details(DetailsTab::Conversation)));
+    assert_eq!(pr_tab(cx,&f),Some(DetailsTab::Conversation));
+    assert!(!f.viewer.read_with(cx,|v,_|v.summary_shown()));
+    // and the summary closes the tab
+    run(cx,&f,Action::Folder(FolderAction::Summary));
+    assert_eq!(pr_tab(cx,&f),None);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().map(|s|s.folder.clone())),Some("big.zip/dir".into()));
+}
+
+#[gpui::test]
+fn gui_a_heading_in_each_group_shows_that_group_only(cx:&mut TestAppContext) {
+    use crate::archive::testing::zip;
+    let f=fixture(cx,"old\n","new\n");let root=f.dir.path();workflow_git(root,&["init","-q","-b","main"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"1\n")])).unwrap();workflow_git(root,&["add","a.zip"]);workflow_git(root,&["commit","-qm","Add a.zip"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"2\n")])).unwrap();workflow_git(root,&["add","a.zip"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"3\n"),("g.txt",b"g\n")])).unwrap();
+    let set=crate::repo::local_changes(root,false).unwrap();
+    f.viewer.update(cx,|v,cx|{v.spec=crate::repository_session::local_spec();v.show_change_set(set,cx);v.layout.set_files(true);});
+    assert_eq!(nav_labels(cx,&f)[..4],["STAGED · 1","▸ a.zip · 1 file","UNSTAGED · 2","▸ a.zip · 2 files"]);
+    // a click on the Unstaged heading's name summarizes only that group
+    let y=nav_row_y(cx,&f,3);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.nav_x()+80.),y);
+    f.viewer.read_with(cx,|v,_|{let s=v.comparison.folders.summary().expect("the summary shows");
+        assert_eq!(s.files.iter().map(|&i|v.set.comparisons[i].path.as_str()).collect::<Vec<_>>(),["a.zip/f.txt","a.zip/g.txt"]);assert_eq!(s.range,v.set.groups[1].1);});
 }

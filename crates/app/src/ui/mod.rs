@@ -11,6 +11,7 @@ mod toolbar;
 use panes::PaneSizes;
 mod markdown;
 mod pr_details;
+mod folder_summary;
 mod present;
 #[cfg(all(test,feature="gui-test"))]
 mod parity_tests;
@@ -279,6 +280,13 @@ pub struct Viewer {
     theme_preview: Option<Arc<theme::Palette>>,
     comparison: crate::comparison_session::ComparisonSession,
     markdown_poll_task: Option<gpui::Task<()>>,
+    /// The Folders revision `nav` was built from.
+    nav_revision: u64,
+    /// The Folder Summary's first row, and whether the wheel moved it away from the keyboard row.
+    summary_scroll: f32,
+    summary_free: bool,
+    /// Polls the summary's counting while it runs.
+    folders_task: Option<gpui::Task<()>>,
     markdown: markdown::Adapter,
     /// Local images of the Markdown Preview, kept across layouts of one document.
     markdown_images: markdown::ImageCache,
@@ -724,6 +732,10 @@ impl Viewer {
             theme_preview: None,
             comparison,
             markdown_poll_task: None,
+            nav_revision: 0,
+            summary_scroll: 0.0,
+            summary_free: false,
+            folders_task: None,
             markdown: markdown::Adapter::default(),
             markdown_images: markdown::ImageCache::default(),
             #[cfg(all(test, feature="gui-test"))]
@@ -791,10 +803,15 @@ impl Viewer {
             write_error: None,
             conflicts: None,
         };
-        viewer.nav = navigator::grouped_rows(&viewer.set.comparisons, &viewer.set.groups);
+        viewer.sync_nav();
+        // archives start collapsed: the first visible file, or the summary over file 0
+        let start = viewer.comparison.folders.start(&viewer.set);
+        viewer.sync_nav();
         viewer.layout.set_files(viewer.set.comparisons.len() > 1);
         if !viewer.set.comparisons.is_empty(){viewer.loaded.insert(0, Loaded::new(doc, 0));}else{viewer.nothing=Some("No comparison open".into());}
         viewer.ensure_blame(cx);
+        if start != 0 { viewer.open(start, Place::FirstChange, cx); }
+        viewer.poll_folders(cx);
         if let Some(notice)=cx.global::<themes::GuiThemes>().1.clone(){viewer.notice(notice,cx);}
         viewer
     }
@@ -914,8 +931,8 @@ impl Viewer {
         self.comparison.folds.clear();
         self.edits = crate::edit_session::EditSession::default();
         self.blames.clear();
-        self.nav = navigator::grouped_rows(&self.set.comparisons, &self.set.groups);
         self.nav_scroll = 0.0;
+        self.sync_nav();
         self.sel = None;
         self.comparison.find = None;
         self.popup = None;
@@ -927,7 +944,11 @@ impl Viewer {
         }
         if let Some(doc) = first { self.loaded.insert(0, Loaded::new(doc, self.comparison.generation)); }
         self.comparison.current = usize::MAX; // so open() treats file 0 as new
-        self.open(0, Place::FirstChange, cx);
+        let start = self.comparison.folders.start(&self.set);
+        // with every file in a collapsed archive, the archive's summary covers file 0
+        if self.summary_shown() { self.show_file(start, Place::FirstChange, cx); } else { self.open(start, Place::FirstChange, cx); }
+        self.sync_nav();
+        self.poll_folders(cx);
         cx.notify();
     }
 
@@ -1135,8 +1156,8 @@ impl Viewer {
             }
             Tool::PrevChange => self.step_change(false, cx),
             Tool::NextChange => self.step_change(true, cx),
-            Tool::PrevFile => self.open(self.comparison.current.wrapping_sub(1), Place::Top, cx),
-            Tool::NextFile => self.open(self.comparison.current + 1, Place::Top, cx),
+            Tool::PrevFile => self.step_file(false, cx),
+            Tool::NextFile => self.step_file(true, cx),
             Tool::Layout(command)=>self.layout_command(command,cx),
             #[cfg(all(test,feature="gui-test"))]
             Tool::About=>self.interaction(commands::Interaction::About,cx),
@@ -1377,8 +1398,18 @@ impl Viewer {
         (named(&c.old_path), named(&c.path))
     }
 
-    /// Show Comparison `index`: its text as soon as it's read, its Change Blocks once diffed.
+    /// Show Comparison `index` in place of any Folder Summary, its folders expanded so Files has its row.
     fn open(&mut self, index: usize, place: Place, cx: &mut Context<Self>) {
+        if index >= self.set.comparisons.len() {
+            return;
+        }
+        if self.summary_shown() { self.comparison.folders.open(&self.set, index); } else { self.comparison.folders.reveal(&self.set.comparisons, index); }
+        self.sync_nav();
+        self.show_file(index, place, cx);
+    }
+
+    /// Show Comparison `index`: its text as soon as it's read, its Change Blocks once diffed.
+    fn show_file(&mut self, index: usize, place: Place, cx: &mut Context<Self>) {
         if index >= self.set.comparisons.len() {
             return;
         }
@@ -1547,7 +1578,7 @@ impl Viewer {
                 if viewer.comparison.generation != generation {
                     return; // the user moved on, or it took too long
                 }
-                if let Some(next) = viewer.comparison.complete(generation, view, budget, place, viewer.set.comparisons.len()) {
+                if let Some(next) = viewer.comparison.complete(generation, view, budget, place, &viewer.set.comparisons) {
                     viewer.open(next, place, cx);
                 } else { viewer.refresh_markdown(cx); }
                 cx.notify();
@@ -1731,7 +1762,13 @@ impl Viewer {
 
     /// Scroll the File Navigator so the current file's row is visible.
     fn reveal_in_nav(&mut self) {
-        let Some(row) = self.nav.iter().position(|r| matches!(r, NavRow::File { index, .. } if *index == self.comparison.current)) else {
+        // the shown summary's heading, else the current file
+        let summary = self.comparison.folders.summary().map(|s| s.folder.as_str());
+        let Some(row) = self.nav.iter().position(|r| match (r, summary) {
+            (NavRow::Dir { path, .. }, Some(folder)) => path == folder,
+            (NavRow::File { index, .. }, None) => *index == self.comparison.current,
+            _ => false,
+        }) else {
             return;
         };
         let visible = self.comparison.view.viewport_rows() - 1.0 - self.message_h() / line_h();
@@ -1741,21 +1778,50 @@ impl Viewer {
         }
     }
 
+    /// ] / [: the next or previous file a collapsed folder doesn't hide.
+    fn step_file(&mut self, forward: bool, cx: &mut Context<Self>) {
+        match self.comparison.folders.step(&self.set.comparisons, self.comparison.current, forward) {
+            Some(index) => self.open(index, Place::Top, cx),
+            None => self.toast(format!("No {} visible file", if forward { "later" } else { "earlier" }), cx),
+        }
+    }
+
     /// Movement belongs to the File Navigator while it owns keyboard focus.
     fn nav_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         if !self.layout.files() || !self.nav_focused { return false; }
-        let current = self.comparison.current;
-        let last = self.set.comparisons.len().saturating_sub(1);
-        let page = (self.comparison.view.viewport_rows() - 1.0).max(1.0) as usize;
-        let target = match ev.keystroke.key.as_str() {
-            "up" if current == 0 && self.enter_message_from_files(cx) => return true,
-            "up" => current.saturating_sub(1),
-            "down" => current.saturating_add(1).min(last),
-            "pageup" => current.saturating_sub(page),
-            "pagedown" | "space" => current.saturating_add(page).min(last),
-            "home" => 0,
-            "end" => last,
+        // the keys walk files and folder headings, as a tree; the cursor is the shown summary's heading, else the file
+        let summary = self.comparison.folders.summary().map(|s| s.folder.clone());
+        let cursor = match &summary {
+            Some(folder) => self.nav.iter().position(|r| matches!(r, NavRow::Dir { path, .. } if path == folder)),
+            None => self.nav.iter().position(|r| matches!(r, NavRow::File { index, .. } if *index == self.comparison.current)),
+        };
+        let walkable: Vec<usize> = (0..self.nav.len()).filter(|&r| !matches!(self.nav[r], NavRow::Group(..))).collect();
+        let at = cursor.and_then(|row| walkable.iter().position(|&r| r == row));
+        let step = |delta: isize| walkable.get(at.map_or(0, |a| a.saturating_add_signed(delta).min(walkable.len().saturating_sub(1)))).copied();
+        let heading = cursor.and_then(|row| match &self.nav[row] { NavRow::Dir { path, collapsed, .. } => Some((path.clone(), *collapsed)), _ => None });
+        let page = (self.comparison.view.viewport_rows() - 1.0).max(1.0) as isize;
+        let plain = !ev.keystroke.modifiers.modified();
+        let row = match ev.keystroke.key.as_str() {
+            // ↑ from the first file gives the commit message panel the keyboard, headings above it or not
+            "up" if summary.is_none() && self.nav.iter().find_map(|r| if let NavRow::File { index, .. } = r { Some(*index) } else { None }) == Some(self.comparison.current) && self.enter_message_from_files(cx) => return true,
+            "up" => step(-1),
+            "down" => step(1),
+            "pageup" => step(-page),
+            "pagedown" | "space" => step(page),
+            "home" => walkable.first().copied(),
+            "end" => walkable.last().copied(),
+            // on a heading Left collapses and Right expands it; Left on a file goes to its folder's heading
+            "left" if plain => {
+                match heading {
+                    Some((path, false)) => self.toggle_folder(&path, cx),
+                    Some(_) => {}
+                    None => { self.comparison.folders.show_summary_of(&self.set, self.comparison.current); self.summary_scroll = 0.0; self.after_folders(cx); }
+                }
+                return true;
+            }
+            "right" if plain => { if let Some((path, true)) = heading { self.toggle_folder(&path, cx); } return true; }
             "left" | "right" if !(ev.keystroke.modifiers.alt && ev.keystroke.modifiers.shift) => return true,
+            "enter" if heading.is_some() => { if let Some((path, _)) = heading { self.toggle_folder(&path, cx); } return true; }
             "enter" if self.repo.is_some() && !self.layout.focused(self.repo.as_ref()) => {
                 self.nav_focused = false;
                 self.layout_command(crate::layout::LayoutCommand::ToggleFocus, cx);
@@ -1764,9 +1830,19 @@ impl Viewer {
             "enter" | "escape" => { self.nav_focused = false; cx.notify(); return true; }
             _ => return false,
         };
-        if self.pr_details_shown() { self.pr_command(crate::pr_session::PrCommand::Close, cx); }
-        self.open(target, Place::Top, cx);
-        self.reveal_in_nav();
+        let Some(row) = row else { return true };
+        match self.nav.get(row).cloned() {
+            Some(NavRow::File { index, .. }) => {
+                if self.pr_details_shown() { self.pr_command(crate::pr_session::PrCommand::Close, cx); }
+                self.open(index, Place::Top, cx);
+                self.reveal_in_nav();
+            }
+            Some(NavRow::Dir { path, .. }) => {
+                let group = self.nav[..row].iter().filter(|r| matches!(r, NavRow::Group(..))).count().checked_sub(1);
+                self.show_summary(&path, group, cx);
+            }
+            _ => {}
+        }
         cx.notify();
         true
     }
@@ -2110,6 +2186,7 @@ impl Viewer {
         }
         // a details tab takes clicks over the diff area once every overlay has had its turn
         if self.switcher.is_none() && self.goto.is_none() && self.pr_dialog_click(ev, cx) {return;}
+        if self.switcher.is_none() && self.goto.is_none() && self.summary_click(f32::from(ev.position.x), f32::from(ev.position.y), cx) {return;}
         if self.switcher.is_none() && self.goto.is_none() && self.picker_click(x, y, ev, cx) {
             self.nav_focused = false;
             self.panel_focused = false;
@@ -2163,6 +2240,15 @@ impl Viewer {
                     self.layout_command(crate::layout::LayoutCommand::ToggleFocus, cx);
                 }
                 cx.notify();
+            } else if let Some(NavRow::Dir { path, .. }) = self.nav.get(row) {
+                // the arrow collapses or expands; the name shows the folder's summary
+                let path = path.clone();
+                if x < self.nav_x() + 8.0 + (2.0 * self.char_w).max(16.0) {
+                    self.toggle_folder(&path, cx);
+                } else {
+                    let group = self.nav[..row].iter().filter(|r| matches!(r, NavRow::Group(..))).count().checked_sub(1);
+                    self.show_summary(&path, group, cx);
+                }
             }
             return;
         }
@@ -2817,6 +2903,7 @@ impl Viewer {
             return;
         }
         if !self.help && self.popup.is_none() && !pane_modal && !self.nav_focused && !self.panel_focused && self.pr_dialog_key(ev, cx) { return; }
+        if !self.help && self.popup.is_none() && !pane_modal && !self.nav_focused && !self.panel_focused && self.summary_key(ev, cx) { return; }
         if !self.help && self.popup.is_none() && !pane_modal && ev.keystroke.key == "tab" {
             if !self.search.as_ref().is_some_and(|s| s.editing) && self.comparison.find.is_none() {
                 self.cycle_pane(ev.keystroke.modifiers.shift, cx);
@@ -2940,8 +3027,8 @@ impl Viewer {
             },
             "z" if cmd => self.undo(shift, cx),
             // file stepping visits every file, changed or not
-            "]" => self.open(self.comparison.current + 1, Place::Top, cx),
-            "[" => self.open(self.comparison.current.wrapping_sub(1), Place::Top, cx),
+            "]" => self.step_file(true, cx),
+            "[" => self.step_file(false, cx),
             "right" if alt => self.navigate(true, cx),
             "left" if alt => self.navigate(false, cx),
             "n" | "down" if alt || ev.keystroke.key == "n" => self.step_change(true, cx),
@@ -3009,6 +3096,7 @@ impl Viewer {
         };
         if let Some(menu)=self.menu.as_mut(){let at=menu.hover.unwrap_or(0) as f32;menu.hover=Some((at+rows).clamp(0.0,menu.items.len().saturating_sub(1)as f32)as usize);cx.notify();return;}
         if self.menu.is_none() && self.command_palette.is_none() && self.diff_options.is_none() && self.pr_dialog_wheel(ev,cx){return;}
+        if self.menu.is_none() && self.command_palette.is_none() && self.diff_options.is_none() && self.summary_wheel(f32::from(ev.position.x),rows,cx){return;}
         let (x, sw) = (f32::from(ev.position.x), self.diff_x());
         let y = f32::from(ev.position.y);
         if y < toolbar_h() { return; }
@@ -3085,12 +3173,15 @@ impl Viewer {
     }
 
     fn sidebar_rows(&self) -> Vec<SideRow> {
-        let candidate=self.file_search.current().unwrap_or(self.comparison.current);
+        // a shown Folder Summary marks its heading, not the file behind it
+        let summary=self.comparison.folders.summary().map(|s|s.folder.as_str());
+        let candidate=self.file_search.current().or(if summary.is_some(){None}else{Some(self.comparison.current)}).unwrap_or(usize::MAX);
         let mut rows:Vec<SideRow>=self.nav
             .iter()
             .map(|row| match row {
                 NavRow::Group(name, n) => SideRow { parts: vec![(format!("{} · {n}", name.to_uppercase()), self.palette.accent)], indent: 0.0, current: false, found:Vec::new() },
-                NavRow::Dir(dir) => SideRow { parts: vec![(format!("▾ {dir}"), self.palette.dim)], indent: 0.0, current: false, found:Vec::new() },
+                NavRow::Dir { path, collapsed: false, .. } => SideRow { parts: vec![(format!("▾ {path}"), self.palette.dim)], indent: 0.0, current: summary==Some(path.as_str()), found:Vec::new() },
+                NavRow::Dir { path, files, .. } => SideRow { parts: vec![(format!("▸ {path}"), self.palette.dim), (format!(" · {files} file{}", if *files == 1 { "" } else { "s" }), self.palette.num_fg)], indent: 0.0, current: summary==Some(path.as_str()), found:Vec::new() },
                 NavRow::File { index, name, from } => {
                     if let Some(parts) = self.conflict_row(*index) {
                         return SideRow { parts, indent: 16.0, current: *index == candidate, found:Vec::new() };
@@ -3331,6 +3422,9 @@ impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_and_record_place(cx);
         self.markdown_release_images(window);
+        // a PR details tab, however it opened, closes a Folder Summary: they share the diff area
+        if self.pr_details_shown() && self.summary_shown() { self.comparison.folders.close_summary(); self.comparison.folders.reveal(&self.set.comparisons, self.comparison.current); }
+        self.sync_nav();
         // the content ends above the bottom bar
         self.panes.viewport=[f32::from(window.viewport_size().width).max(0.0),(f32::from(window.viewport_size().height)-footer_h()).max(0.0)];
         self.palette = self.theme_preview.clone().filter(|_| self.theme_chooser.is_some()).unwrap_or_else(|| cx.global::<themes::GuiThemes>().0.snapshot().palette);
@@ -3620,6 +3714,9 @@ impl Render for Viewer {
         let discard_overlay=self.discard_overlay(cx);
         let theme_overlay=self.theme_overlay(window,cx);
         let pr_details=self.pr_details_frame();
+        let summary_frame=self.summary_frame();
+        // the summary covers the comparison behind it, with its loading and placeholder lines
+        let (placeholder,loading)=if summary_frame.is_some(){(None,false)}else{(placeholder,loading)};
         let about_overlay=self.about.clone().map(|about|{let font=self.font.clone();div().absolute().size_full()
             .on_mouse_down(MouseButton::Left,cx.listener(|this,ev,window,cx|{this.on_mouse_down(ev,window,cx);cx.stop_propagation();}))
             .on_mouse_down(MouseButton::Right,|_,_,cx|cx.stop_propagation())
@@ -3740,6 +3837,7 @@ impl Render for Viewer {
                         if let Some((page, scroll, sel, rect, char_w)) = &pr_details {
                             pr_details::Dialog { page: page.clone(), scroll: *scroll, sel: *sel, ..Default::default() }.paint(&palette, *rect, &font, *char_w, window, cx);
                         }
+                        if let Some(summary) = &summary_frame { summary.paint(&palette, &font, char_w, window, cx); }
                         if let Some(message) = &toast {
                             let tw = message.chars().count() as f32 * 7.8 + 24.0;
                             let (tx, ty) = (x0 + (w - tw) / 2.0, y0 + h - line_h() * 3.0);

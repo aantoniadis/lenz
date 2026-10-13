@@ -186,19 +186,22 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     let row=panes.first().zip(panes.last()).map(|(&(_,a),&(_,b))|Rect::new(a.x,area.y+1,b.right().saturating_sub(a.x),1));
     header_switch(app,frame,row,palette);
     // a PR tab covers both panes: no split line over it
-    if !narrow && app.visual.image().is_none() && !app.pr_details_shown() {
+    if !narrow && app.visual.image().is_none() && !app.pr_details_shown() && app.session.folders.summary().is_none() {
         for y in area.y+1..area.y+area.height.saturating_sub(2) { frame.buffer_mut().set_string(area.x+left_w, y, "│", base(palette).fg(color(palette.dim))); }
     }
     if app.visual.image().is_some(){app.visual.draw_image(frame.buffer_mut(),Rect::new(area.x,area.y+2,area.width,body_h),palette);}
+    // a Folder Summary covers the comparison behind it
+    let summary=app.session.folders.summary().is_some();
+    if summary&&let Some(set)=app.session.change_set(){let pane=app.pr_pane();app.summary.draw(frame,pane,&set,&app.session.folders,palette);}
     let placeholder = app.session.document().and_then(|d| d.placeholder_kind()).map(|p| match p {
         Placeholder::Binary { sizes, differ } => format!("Binary / image comparison: {} and {} bytes · {}. No decodable image.", sizes[0], sizes[1], if *differ { "different" } else { "identical" }),
         Placeholder::Large { bytes } => format!("Oversized comparison ({:.1} MiB). Enter to load.", *bytes as f64 / (1 << 20) as f64),
         Placeholder::Unreadable(e) => e.clone(),
     });
-    if let Some(message) = placeholder.as_deref().filter(|_|app.visual.image().is_none()).or_else(|| app.session.loading().then_some("Loading comparison…  q quits; file navigation remains available")) {
+    if let Some(message) = placeholder.as_deref().filter(|_|app.visual.image().is_none()).or_else(|| app.session.loading().then_some("Loading comparison…  q quits; file navigation remains available")).filter(|_|!summary) {
         label(palette,frame, Rect::new(area.x+1, area.y+3.min(area.height - 1), area.width.saturating_sub(2), 1), message, base(palette).fg(color(palette.accent)));
     }
-    for (i,record) in app.session.applied().iter().rev().take(applied_rows).collect::<Vec<_>>().into_iter().rev().enumerate(){
+    for (i,record) in app.session.applied().iter().rev().take(if summary{0}else{applied_rows}).collect::<Vec<_>>().into_iter().rev().enumerate(){
         let message=format!("{} · {} · A history",record.label(),app.session.applied_undo_disabled(record).unwrap_or("[Undo] click or A"));label(palette,frame,Rect::new(area.x,area.y+3+body_h+i as u16,area.width,1),&message,base(palette).fg(color(palette.accent)));
     }
     let status=format!("F2 details · {}",status_text(app));

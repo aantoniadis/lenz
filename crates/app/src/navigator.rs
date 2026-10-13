@@ -25,8 +25,8 @@ pub fn cycle_pane(current: InputPane, panes: &[Option<InputPane>], backwards: bo
 pub enum NavRow {
     /// A group heading (Staged, Unstaged, …) and its file count.
     Group(String, usize),
-    /// A directory heading (`"."` for the root).
-    Dir(String),
+    /// A folder heading (`"."` for the top level); a collapsed one hides its files and folders and counts the files.
+    Dir { path: String, collapsed: bool, files: usize, archive: bool },
     /// Comparison index, its file name, and the old path when a rename changed directory or name.
     File { index: usize, name: String, from: Option<String> },
 }
@@ -60,7 +60,7 @@ fn rows_of(comparisons: &[Comparison], range: std::ops::Range<usize>) -> Vec<Nav
         let c = &comparisons[index];
         let (dir, name) = split(&c.path);
         if last_dir != Some(dir) {
-            out.push(NavRow::Dir(if dir.is_empty() { ".".into() } else { dir.into() }));
+            out.push(NavRow::Dir { path: if dir.is_empty() { ".".into() } else { dir.into() }, collapsed: false, files: 0, archive: false });
             last_dir = Some(dir);
         }
         let from = matches!(c.status, Status::Renamed { .. }).then(|| c.old_path.clone());
@@ -156,12 +156,12 @@ mod tests {
         assert_eq!(
             rows(&set),
             vec![
-                NavRow::Dir(".".into()),
+                NavRow::Dir { path: ".".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 0, name: "README.md".into(), from: None },
-                NavRow::Dir("src".into()),
+                NavRow::Dir { path: "src".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 1, name: "a.rs".into(), from: None },
                 NavRow::File { index: 2, name: "b.rs".into(), from: Some("old/b.rs".into()) },
-                NavRow::Dir("src/io".into()),
+                NavRow::Dir { path: "src/io".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 3, name: "c.rs".into(), from: None },
             ]
         );
@@ -179,13 +179,13 @@ mod tests {
             grouped_rows(&set, &groups),
             vec![
                 NavRow::Group("Staged".into(), 1),
-                NavRow::Dir("src".into()),
+                NavRow::Dir { path: "src".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 0, name: "a.rs".into(), from: None },
                 NavRow::Group("Unstaged".into(), 1),
-                NavRow::Dir("src".into()),
+                NavRow::Dir { path: "src".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 1, name: "a.rs".into(), from: None },
                 NavRow::Group("Untracked".into(), 1),
-                NavRow::Dir(".".into()),
+                NavRow::Dir { path: ".".into(), collapsed: false, files: 0, archive: false },
                 NavRow::File { index: 2, name: "new.txt".into(), from: None },
             ]
         );

@@ -4,6 +4,17 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## 2026-10-13 archives as folders and Folder Summary
+
+Quick suite (`perf-suite.py --profile quick`, one run, Linux, rustc 1.99.0) on `main` (`12b682b`) against the branch, then repeated alternating pairs for the outliers. Raw results were kept only in the session scratchpad.
+
+| Change | Evidence | Status |
+|---|---|---|
+| Archive readers (zip with deflate, deflate64, bzip2, lzma and xz; tar with gzip, bzip2, xz and zstd), all pure Rust | Stripped `lenz-tui` 40.70 → 41.41 MB (`.text` +0.5 MB). Every terminal process +0.7–0.9 MiB RSS (`tui/pty/settled-rss` 10.9 → 11.7 MiB; large workloads under 1%). `/proc` split: anonymous +36 kB, file-backed code +0.93 MiB. Page attribution: about 130 kB of resident archive code (lzma 68, zip 40, zstd 16 kB) faulted in next to hot code; the rest is existing core/std/lenz code spread over more pages by the new layout | **Kept; the maintainer accepted the cost.** Clean, shared, reclaimable code pages, not heap. Revisit with symbol ordering, or by dropping rare zip codecs (deflate64, bzip2, lzma/xz inside zip), if baseline RSS matters more. |
+| Speed of existing workloads | Quick-run outliers did not reproduce in alternating pairs: `tui/scroll-render-100k` base 0.305–0.307 ms vs branch 0.269–0.307 ms (3 pairs); `tui/merge/render-100k` 0.876–0.884 vs 0.864–0.906 ms; PTY `history-filter` 0.22–0.28 vs 0.18–0.28 ms and `view-switch` 2.01–2.30 vs 2.04–2.09 ms (2 pairs). `resize-first-byte` already ranged 0.09–0.64 ms within the base run | **No reproducible regression.** |
+| Change Set load and Files rows | Non-archive sets add one file-name suffix check per Comparison; `Folders::rows` keeps the 10k-file navigator workload (`tui/chrome`) within noise | **Kept.** Archive loads read each changed archive whole (≤ 512 MiB) and decompress tar streams to fingerprint members; no large-archive workload exists yet. |
+| Folder Summary counts | Counted on the shared document worker, 8 files per batch, keyboard rows first, cancelled on close or a new Change Set; at most two decompressed tar streams of ≤ 64 MiB are kept for member reads | **Kept**; not benchmarked. A workload with thousands of members is the next measurement. |
+
 ## 2026-10-11 code review fixes
 
 | Change | Evidence | Status |

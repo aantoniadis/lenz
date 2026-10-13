@@ -1182,7 +1182,7 @@ impl Merger {
             Action::Help(HelpAction::Shortcuts) => self.help = Some(0),
             Action::Help(HelpAction::Settings) => self.workspace.notice = Some(crate::palette::open_settings()),
             Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
-            | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) => match &mut self.diff {
+            | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) | Action::Folder(_) => match &mut self.diff {
                 Some(app) => app.run_action(action),
                 None => self.workspace.notice = Some("No comparison here".into()),
             },
@@ -1201,7 +1201,7 @@ impl lenz::catalog::Availability for Merger {
             Action::Interaction(I::ChangeTheme | I::About | I::ResetPaneSizes | I::ReportLastError) | Action::Help(HelpAction::Shortcuts | HelpAction::Settings) => None,
             Action::Interaction(I::FindCase | I::FindWord | I::FindRegex) if let Some(FileView::Merge(m)) = &self.workspace.file => (!m.find_editing()).then_some(Cow::Borrowed("No find is open")),
             Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
-            | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) =>
+            | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) | Action::Folder(_) =>
                 self.diff.as_ref().map_or(Some(Cow::Borrowed("No comparison here")), |app| lenz::catalog::Availability::disabled(app, action)),
         }
     }

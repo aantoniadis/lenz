@@ -44,6 +44,7 @@ impl Viewer {
             Action::Comparison(command)=>self.comparison_command(command,cx),
             Action::Interaction(command)=>self.interaction(command,cx),
             Action::Edit(command)=>self.edit_menu(command,cx),
+            Action::Folder(action)=>self.folder_action(action,cx),
             Action::File(file)=>{let set=self.set.clone();self.file_action(file,self.comparison.current,&set,cx);},
             Action::Image(index)=>if let Some(entry)=crate::image_session::image_commands().get(index){let viewport=self.image_viewport(window);if let Some(doc)=self.image_doc(){self.iview.command(&doc,entry.command,viewport);}},
             Action::Repository(RepoAction::Refresh)=>self.refresh_repository(cx),
@@ -212,6 +213,7 @@ impl Availability for Viewer {
             Action::Comparison(crate::commands::Command::SetDiffLayout(crate::commands::DiffLayout::Unified))=>self.unified_disabled().map(Cow::Borrowed),
             Action::Comparison(command)=>crate::commands::disabled(command,&self.comparison.view,self.doc().is_none(),self.comparison.current,self.set.comparisons.len(),self.large()).map(Cow::Borrowed),
             Action::Interaction(command)=>self.interaction_disabled(command).map(Cow::Borrowed),
+            Action::Folder(action)=>self.comparison.folders.disabled(action,Some(&self.set),self.comparison.current).map(Cow::Borrowed),
             Action::Edit(command)=>self.edit_disabled(command).map(Cow::Owned),
             Action::File(file)=>{
                 let why=if file==crate::file_actions::FileAction::UndoLenz{self.comparison.markdown_edit_disabled().map(str::to_string)}else{None};

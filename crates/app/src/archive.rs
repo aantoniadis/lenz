@@ -185,20 +185,32 @@ pub(crate) fn size(kind: Kind, bytes: &[u8], name: &str) -> Result<u64, String> 
     }
 }
 
+/// A compressed tar stream decompressed whole, to read many members from without decompressing it again; `None` past
+/// `limit` bytes.
+pub(crate) fn unpack(compression: Compression, bytes: &[u8], limit: u64) -> Result<Option<Vec<u8>>, String> {
+    let error = Kind::Tar(compression).error();
+    let mut out = Vec::new();
+    stream(compression, bytes).map_err(&error)?.take(limit + 1).read_to_end(&mut out).map_err(|e| error(e.to_string()))?;
+    Ok((out.len() as u64 <= limit).then_some(out))
+}
+
+fn stream(compression: Compression, bytes: &[u8]) -> Result<Box<dyn Read + '_>, String> {
+    Ok(match compression {
+        Compression::None => Box::new(bytes),
+        Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(bytes)),
+        Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(bytes)),
+        Compression::Xz => Box::new(lzma_rust2::XzReader::new(bytes, true)),
+        Compression::Zstd => Box::new(ruzstd::decoding::StreamingDecoder::new(bytes).map_err(|e| e.to_string())?),
+    })
+}
+
 /// Calls `visit` with each member file's normalized path and content, in archive order.
 fn each_tar(
     compression: Compression,
     bytes: &[u8],
     mut visit: impl FnMut(String, &mut dyn Read) -> io::Result<()>,
 ) -> Result<(), String> {
-    let stream: Box<dyn Read + '_> = match compression {
-        Compression::None => Box::new(bytes),
-        Compression::Gzip => Box::new(flate2::read::MultiGzDecoder::new(bytes)),
-        Compression::Bzip2 => Box::new(bzip2::read::MultiBzDecoder::new(bytes)),
-        Compression::Xz => Box::new(lzma_rust2::XzReader::new(bytes, true)),
-        Compression::Zstd => Box::new(ruzstd::decoding::StreamingDecoder::new(bytes).map_err(|e| e.to_string())?),
-    };
-    let mut archive = tar::Archive::new(Limit { inner: stream, left: MAX_UNPACKED });
+    let mut archive = tar::Archive::new(Limit { inner: stream(compression, bytes)?, left: MAX_UNPACKED });
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let Some(name) = normalize(&String::from_utf8_lossy(&entry.path_bytes())) else { continue };
@@ -338,6 +350,10 @@ mod tests {
             assert_eq!(list["a.txt"], Fingerprint::of(b"two\n"));
             assert_eq!(extract(kind, &tar, "a.txt").unwrap(), b"two\n");
             assert_eq!(size(kind, &tar, "sub/b.bin").unwrap(), 2);
+            // unpacked once, the plain stream reads the same members
+            let plain = unpack(compression, &tar, 1 << 20).unwrap().unwrap();
+            assert_eq!(extract(Kind::Tar(Compression::None), &plain, "a.txt").unwrap(), b"two\n");
+            assert_eq!(unpack(compression, &tar, 16).unwrap(), None, "past the limit");
         }
     }
 
