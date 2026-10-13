@@ -195,8 +195,12 @@ impl Files {
         for (row,item) in self.rows.iter().enumerate().skip(self.scroll).take(height) {
             let(label,fg,selected)=match item {
                 NavRow::Group(name,count)=>(format!("{name} ({count})"),palette.fg,false),
-                NavRow::Dir{path,collapsed:false,..}=>(format!("▾ {path}"),palette.dim,self.summary.as_deref()==Some(path.as_str())),
-                NavRow::Dir{path,files,..}=>(format!("▸ {path} · {files} file{}",if *files==1{""}else{"s"}),palette.dim,self.summary.as_deref()==Some(path.as_str())),
+                // the heading whose summary shows reads as the current row, in the text colour
+                NavRow::Dir{path,collapsed,files,..}=>{
+                    let current=self.summary.as_deref()==Some(path.as_str());
+                    let label=if *collapsed{format!("▸ {path} · {files} file{}",if *files==1{""}else{"s"})}else{format!("▾ {path}")};
+                    (label,if current{palette.fg}else{palette.dim},current)
+                }
                 NavRow::File{index,name,from}=>{
                     let c=&set.comparisons[*index];let kind=match navigator::badge(&c.status){"A"=>0,"D"=>1,"M"=>2,"R"=>3,_=>4};
                     (format!(" {} {}{}",navigator::badge(&c.status),if self.search.active(){c.path.as_str()}else{name.as_str()},from.as_ref().map_or(String::new(),|p|format!(" ← {p}"))),palette.status[kind],*index==if self.search.active(){self.selected}else{self.current}&&(self.search.active()||self.summary.is_none()))

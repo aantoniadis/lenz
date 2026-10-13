@@ -4470,6 +4470,8 @@ fn gui_archive_folders_start_collapsed_and_show_a_summary_of_their_changed_files
     let f=archive_folders_fixture(cx);
     // the archive is one collapsed heading with its file count; the plain file is shown
     assert_eq!(nav_labels(cx,&f),["▾ .","M file.rs","▸ bundle.zip · 3 files"]);
+    // the header counts the files in collapsed folders too
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.nav_header()),"4 changed files");
     assert_eq!(f.viewer.read_with(cx,|v,_|v.set.comparisons[v.comparison.current].path.clone()),"file.rs");
     // ] skips the hidden files
     key(cx,&f,"]",false,false,false);

@@ -57,7 +57,7 @@ impl Viewer {
             let widths=self.merge_widths(width);
             for i in 0..2 {let edge=self.diff_x()+widths[..=i].iter().sum::<f32>()+i as f32*GUTTER_W+GUTTER_W/2.0;
                 handles.push((Divider::Merge(i),edge-HANDLE,top,2.0*HANDLE,(content_bottom-top).max(0.0)));}
-        } else if (self.image_doc().is_none()||self.iview.mode()==image_view::Mode::TwoUp)&&!self.markdown_inline()&&!self.pr_details_shown() {
+        } else if (self.image_doc().is_none()||self.iview.mode()==image_view::Mode::TwoUp)&&!self.markdown_inline()&&!self.pr_details_shown()&&!self.summary_shown() {
             let edge=self.diff_x()+self.comparison_widths(width)[0]+GUTTER_W/2.0;
             handles.push((Divider::Comparison,edge-HANDLE,top,2.0*HANDLE,(content_bottom-top).max(0.0)));
         }

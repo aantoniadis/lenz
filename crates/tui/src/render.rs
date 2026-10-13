@@ -204,7 +204,8 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     for (i,record) in app.session.applied().iter().rev().take(if summary{0}else{applied_rows}).collect::<Vec<_>>().into_iter().rev().enumerate(){
         let message=format!("{} · {} · A history",record.label(),app.session.applied_undo_disabled(record).unwrap_or("[Undo] click or A"));label(palette,frame,Rect::new(area.x,area.y+3+body_h+i as u16,area.width,1),&message,base(palette).fg(color(palette.accent)));
     }
-    let status=format!("F2 details · {}",status_text(app));
+    // the separator only before a message
+    let status=match status_text(app){text if text.is_empty()=>"F2 details".to_string(),text=>format!("F2 details · {text}")};
     label(palette,frame, Rect::new(area.x, area.y+area.height - 2, area.width, 1), &status, base(palette).fg(color(palette.accent)));
     let lists=app.navigator.focused||app.repository.as_ref().is_some_and(|r|r.core.picker.shown&&r.core.picker.focus==lenz::repository_session::Pane::Log);
     let footer=if lists{" Type to find  ↑/↓ or F3 matches  Enter open  Esc cancel  F10 commands  Ctrl-Q quit"}else{" n/p changes  [/] files  / find  f files  F10 commands  ? help  q quit"};

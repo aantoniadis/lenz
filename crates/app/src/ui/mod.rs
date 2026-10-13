@@ -3180,8 +3180,9 @@ impl Viewer {
             .iter()
             .map(|row| match row {
                 NavRow::Group(name, n) => SideRow { parts: vec![(format!("{} · {n}", name.to_uppercase()), self.palette.accent)], indent: 0.0, current: false, found:Vec::new() },
-                NavRow::Dir { path, collapsed: false, .. } => SideRow { parts: vec![(format!("▾ {path}"), self.palette.dim)], indent: 0.0, current: summary==Some(path.as_str()), found:Vec::new() },
-                NavRow::Dir { path, files, .. } => SideRow { parts: vec![(format!("▸ {path}"), self.palette.dim), (format!(" · {files} file{}", if *files == 1 { "" } else { "s" }), self.palette.num_fg)], indent: 0.0, current: summary==Some(path.as_str()), found:Vec::new() },
+                // the heading whose summary shows reads as the current row, in the text colour
+                NavRow::Dir { path, collapsed: false, .. } => { let current = summary==Some(path.as_str()); SideRow { parts: vec![(format!("▾ {path}"), if current { self.palette.fg } else { self.palette.dim })], indent: 0.0, current, found:Vec::new() } }
+                NavRow::Dir { path, files, .. } => { let current = summary==Some(path.as_str()); SideRow { parts: vec![(format!("▸ {path}"), if current { self.palette.fg } else { self.palette.dim }), (format!(" · {files} file{}", if *files == 1 { "" } else { "s" }), self.palette.num_fg)], indent: 0.0, current, found:Vec::new() } }
                 NavRow::File { index, name, from } => {
                     if let Some(parts) = self.conflict_row(*index) {
                         return SideRow { parts, indent: 16.0, current: *index == candidate, found:Vec::new() };
