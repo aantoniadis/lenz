@@ -1,3 +1,6 @@
 #!/usr/bin/env bash
 # Local CI before every push (enable once per clone: git config core.hooksPath .githooks). Skip: git push --no-verify.
-exec "$(git rev-parse --show-toplevel)/scripts/ci-local.sh"
+toplevel=$(git rev-parse --show-toplevel)
+# Git exports GIT_DIR and friends to hooks; the tests' scratch repositories must not inherit them.
+unset $(git rev-parse --local-env-vars)
+exec "$toplevel/scripts/ci-local.sh"
