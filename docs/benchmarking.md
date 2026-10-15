@@ -87,7 +87,7 @@ Build time is recorded separately. Tests run as prebuilt executables, sequential
 | Refinement polling with 5,000 mostly offscreen blocks, all scroll modes | Yes | Yes | Yes |
 | Terminal About open/close and tiny resize, 300 cycles per trial | Yes | Yes | Yes |
 | Merge opening and accept/rebuild | Yes | Yes | Yes |
-| Syntax query compile, parse, visible spans, retained bytes | Yes | Yes | Yes |
+| Syntax query compile, parse, parse with folds and declarations, sticky lookup, visible spans, retained bytes | Yes | Yes | Yes |
 | Find: absent, ordinary and very frequent matches; capped Change Set search | Yes | Yes | Yes |
 | 4K image blend and difference computation | Yes | Yes | Yes |
 | Million-commit graph layout, visible queries, resident growth | Yes | Yes | Yes |

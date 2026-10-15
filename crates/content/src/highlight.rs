@@ -343,12 +343,32 @@ pub fn parse(lang: Language, text: &str) -> Parsed {
 
 /// Called off the UI thread. Obsolete documents leave the queue (or stop parsing) promptly.
 pub fn parse_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Parsed> {
-    on_worker(move || parse_now(lang, &text, &current, false).map(|(p, _)| p))
+    parse_with(lang, text, Want::default(), current).map(|s| s.parsed)
 }
 
 /// As [`parse_while`], also returning the document's fold regions, found in the same tree.
 pub fn parse_folded_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<(Parsed, Folds)> {
-    on_worker(move || parse_now(lang, &text, &current, true).map(|(p, f)| (p, f.unwrap_or_default())))
+    parse_with(lang, text, Want { folds: true, declarations: false }, current).map(|s| (s.parsed, s.folds.unwrap_or_default()))
+}
+
+/// What a parse finds besides the highlight spans, from the same tree.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Want {
+    pub folds: bool,
+    /// Declarations, for languages that have them ([`has_declarations`]).
+    pub declarations: bool,
+}
+
+/// One parse's results: the spans, and what [`Want`] asked for.
+pub struct Syntax {
+    pub parsed: Parsed,
+    pub folds: Option<Folds>,
+    pub declarations: Option<Declarations>,
+}
+
+/// As [`parse_while`], also returning what `want` asks for, found in the same tree.
+pub fn parse_with(lang: Language, text: Arc<str>, want: Want, current: impl Fn() -> bool + Send + 'static) -> Option<Syntax> {
+    on_worker(move || parse_now(lang, &text, &current, want))
 }
 
 /// Run one parse job on the syntax pool and wait for its answer.
@@ -398,9 +418,10 @@ fn release_freed_memory() {
     }
 }
 
-fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, folds: bool) -> Option<(Parsed, Option<Folds>)> {
+fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, want: Want) -> Option<Syntax> {
     if !current() { return None; }
     let language = &config(lang).language; // compiled outside the arena: queries outlive every parse
+    let tags = if want.declarations { tags(lang) } else { None }; // the same, for the tags query
     // Declared before the parser, tree and query cursors, so it is dropped after all of them.
     let _arena = crate::syntax_arena::Scope::begin(text.len());
     let mut parser = Parser::new();
@@ -424,10 +445,14 @@ fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, folds: bool
         }
     }
     parsed.offsets.push(parsed.spans.len());
-    let folds = if folds { Some(syntax.folds(current)?) } else { None };
+    let folds = if want.folds { Some(syntax.folds(current)?) } else { None };
+    let declarations = match tags {
+        Some(tags) => Some(declarations_in(tags, lang, text, &syntax.tree, current)?),
+        None => None,
+    };
     drop(syntax);
     parsed.spans.shrink_to_fit();
-    Some((parsed, folds))
+    Some(Syntax { parsed, folds, declarations })
 }
 
 impl Parsed {
@@ -731,6 +756,10 @@ pub enum DeclKind {
     Element,
     /// A CSS rule's selectors.
     Selector,
+    /// A Rust `impl` block, named by its header (`impl<T> Show for S`).
+    Impl,
+    /// A Markdown section, named by its heading; it runs to the next heading of the same or a higher level.
+    Heading,
 }
 
 impl DeclKind {
@@ -746,6 +775,8 @@ impl DeclKind {
             Self::Macro => "macro",
             Self::Element => "element",
             Self::Selector => "selector",
+            Self::Impl => "impl",
+            Self::Heading => "heading",
         }
     }
 }
@@ -759,8 +790,13 @@ pub struct Declaration {
     /// Byte ranges of the name and of the whole declaration.
     pub name_range: Range<u32>,
     pub range: Range<u32>,
+    /// The declaration's first and last source lines (0-based; a range ending at a line's start ends on the line before).
+    pub first_line: u32,
+    pub last_line: u32,
     /// Declarations enclosing this one.
     pub depth: u16,
+    /// The innermost enclosing declaration's index in [`Declarations::items`].
+    pub parent: Option<u32>,
 }
 
 impl Declaration {
@@ -779,6 +815,87 @@ pub struct Declarations {
 
 /// Characters of a declaration's name kept.
 pub const NAME_CHARS: usize = 120;
+
+/// A node's first and last lines; an end at a line's start (after its newline) belongs to the line before.
+fn lines_of(node: tree_sitter::Node<'_>) -> (u32, u32) {
+    let (start, end) = (node.start_position(), node.end_position());
+    let last = if end.column == 0 && end.row > start.row { end.row - 1 } else { end.row };
+    (start.row as u32, last as u32)
+}
+
+/// One pinned header: the declaration's index in [`Declarations::items`], its first line, and the row (0 = top) it is
+/// drawn on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sticky {
+    pub index: u32,
+    pub line: u32,
+    pub row: u32,
+}
+
+impl Declarations {
+    /// The declarations containing byte `at`, outermost first.
+    pub fn enclosing(&self, at: u32) -> Vec<&Declaration> {
+        let start = self.items.partition_point(|d| d.range.start <= at).checked_sub(1);
+        self.refs(self.chain(start, |d| d.range.start <= at && at < d.range.end))
+    }
+
+    /// The declarations spanning source line `line`, outermost first.
+    pub fn enclosing_line(&self, line: u32) -> Vec<&Declaration> {
+        self.refs(self.line_chain(line))
+    }
+
+    fn line_chain(&self, line: u32) -> Vec<u32> {
+        let start = self.items.partition_point(|d| d.first_line <= line).checked_sub(1);
+        self.chain(start, |d| d.first_line <= line && line <= d.last_line)
+    }
+
+    /// From item `at` up through its parents, the ones `holds` accepts, outermost first.
+    fn chain(&self, at: Option<usize>, holds: impl Fn(&Declaration) -> bool) -> Vec<u32> {
+        let mut out = Vec::new();
+        let mut at = at.map(|i| i as u32);
+        while let Some(i) = at {
+            let Some(d) = self.items.get(i as usize) else { break };
+            if holds(d) {
+                out.push(i);
+            }
+            at = d.parent;
+        }
+        out.reverse();
+        out
+    }
+
+    fn refs(&self, ids: Vec<u32>) -> Vec<&Declaration> {
+        ids.into_iter().filter_map(|i| self.items.get(i as usize)).collect()
+    }
+
+    /// The headers to pin when `top` is the first shown line (`partial`: only its continuation rows are shown): the
+    /// declarations around `top` whose first line is above it, outermost on row 0, at most `max`, innermost kept. A
+    /// header whose scope ends within the stack moves up to end on its last line; one that would share a row with an
+    /// outer header is dropped.
+    pub fn sticky(&self, top: u32, partial: bool, max: usize) -> Vec<Sticky> {
+        self.sticky_rows(top, partial, max, |line| line.saturating_sub(top))
+    }
+
+    /// As [`Declarations::sticky`], for a view that does not show every line below `top` on its own row (folds,
+    /// wrapped lines): `row_of(line)` is the row (0 = top) where source line `line` starts, `u32::MAX` past the view.
+    pub fn sticky_rows(&self, top: u32, partial: bool, max: usize, row_of: impl Fn(u32) -> u32) -> Vec<Sticky> {
+        let ids: Vec<u32> = self
+            .line_chain(top)
+            .into_iter()
+            .filter(|&i| self.items.get(i as usize).is_some_and(|d| d.last_line > d.first_line && (d.first_line < top || partial && d.first_line == top)))
+            .collect();
+        let mut out: Vec<Sticky> = Vec::with_capacity(ids.len().min(max));
+        for (slot, &index) in ids.iter().skip(ids.len().saturating_sub(max)).enumerate() {
+            let Some(d) = self.items.get(index as usize) else { continue };
+            let row = (slot as u32).min(row_of(d.last_line));
+            if out.last().is_some_and(|s| s.row >= row) {
+                continue;
+            }
+            out.push(Sticky { index, line: d.first_line, row });
+        }
+        out
+    }
+}
 
 /// Kotlin's definitions (from ast-grep's tags.scm, MIT, which the crate does not export).
 const KOTLIN_TAGS: &str = r#"
@@ -801,6 +918,13 @@ const HTML_TAGS: &str = "
 const TS_NAMESPACES: &str = "(internal_module name: (_) @name) @definition.module";
 /// CSS rules, by their selectors.
 const CSS_TAGS: &str = "(rule_set (selectors) @name) @definition.selector";
+/// Rust `impl` blocks, which the upstream tags query omits; named by their header.
+const RUST_IMPLS: &str = "(impl_item type: (_) @name) @definition.impl";
+/// Markdown sections, by their heading's text.
+const MARKDOWN_TAGS: &str = "
+(section (atx_heading heading_content: (_) @name)) @definition.heading
+(section (setext_heading heading_content: (_) @name)) @definition.heading
+";
 
 struct Tags {
     query: Query,
@@ -817,7 +941,7 @@ pub fn has_declarations(lang: Language) -> bool {
 fn tags_queries(lang: Language) -> Option<&'static [&'static str]> {
     use Language::*;
     Some(match lang {
-        Rust => &[tree_sitter_rust::TAGS_QUERY],
+        Rust => &[tree_sitter_rust::TAGS_QUERY, RUST_IMPLS],
         Python => &[tree_sitter_python::TAGS_QUERY],
         Ruby => &[tree_sitter_ruby::TAGS_QUERY],
         Java => &[tree_sitter_java::TAGS_QUERY],
@@ -826,6 +950,7 @@ fn tags_queries(lang: Language) -> Option<&'static [&'static str]> {
         TypeScript | Tsx => &[tree_sitter_typescript::TAGS_QUERY, tree_sitter_javascript::TAGS_QUERY, TS_NAMESPACES],
         Html => &[HTML_TAGS],
         Css => &[CSS_TAGS],
+        Markdown => &[MARKDOWN_TAGS],
         _ => return None,
     })
 }
@@ -854,6 +979,8 @@ fn tags(lang: Language) -> Option<&'static Tags> {
                         "macro" => DeclKind::Macro,
                         "element" => DeclKind::Element,
                         "selector" => DeclKind::Selector,
+                        "impl" => DeclKind::Impl,
+                        "heading" => DeclKind::Heading,
                         _ => return None,
                     })
                 })
@@ -886,6 +1013,11 @@ fn declarations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> O
         None,
         Some(ParseOptions::new().progress_callback(&mut progress)),
     )?;
+    declarations_in(tags, lang, text, &tree, current)
+}
+
+/// The declarations in `tree`, a parse of `text`; `None` once `current` says the work is obsolete.
+fn declarations_in(tags: &Tags, lang: Language, text: &str, tree: &tree_sitter::Tree, current: &dyn Fn() -> bool) -> Option<Declarations> {
     let mut found: Vec<Declaration> = Vec::new();
     {
         let mut cursor = QueryCursor::new();
@@ -912,8 +1044,21 @@ fn declarations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> O
                 }
                 _ => kind,
             };
+            let (first_line, last_line) = lines_of(decl);
+            let name = match kind {
+                // The header up to the body: `impl<T> Show for S`.
+                DeclKind::Impl => decl.start_byte()..decl.child_by_field_name("body").map_or(decl.end_byte(), |b| b.start_byte()),
+                _ => name,
+            };
             let decl = decl.byte_range();
+            // Headings and impl headers carry surrounding spaces: their name range covers the trimmed text, and the name
+            // joins the header's lines with single spaces. Other names stay as written.
+            let header = matches!(kind, DeclKind::Impl | DeclKind::Heading);
+            let Some(raw) = text.get(name.clone()) else { continue };
+            let lead = if header { raw.len() - raw.trim_start().len() } else { 0 };
+            let name = name.start + lead..name.start + lead + if header { raw.trim().len() } else { raw.len() };
             let Some(name_text) = text.get(name.clone()) else { continue };
+            let name_text: String = if header { name_text.split_whitespace().collect::<Vec<_>>().join(" ") } else { name_text.to_owned() };
             let name_text: Box<str> = name_text.chars().take(NAME_CHARS).collect::<String>().into();
             // JS/TS components: capitalised function or constant declarations, by convention.
             let component = matches!(lang, Language::JavaScript | Language::TypeScript | Language::Tsx)
@@ -924,21 +1069,24 @@ fn declarations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> O
                 name: name_text,
                 name_range: name.start as u32..name.end as u32,
                 range: decl.start as u32..decl.end as u32,
+                first_line,
+                last_line,
                 depth: 0,
+                parent: None,
             });
         }
     }
     let syntax_errors = tree.root_node().has_error();
-    drop(tree);
-    // Source order; one record per name (combined queries may match a declaration twice); nesting depth.
+    // Source order; one record per name (combined queries may match a declaration twice); nesting depth and parent.
     found.sort_by_key(|d| (d.name_range.start, d.name_range.end));
     found.dedup_by(|b, a| a.name_range == b.name_range);
     found.sort_by_key(|d| (d.range.start, std::cmp::Reverse(d.range.end)));
-    let mut open: Vec<u32> = Vec::new();
-    for d in &mut found {
-        open.retain(|&end| end > d.range.start);
+    let mut open: Vec<(u32, u32)> = Vec::new();
+    for (i, d) in found.iter_mut().enumerate() {
+        open.retain(|&(end, _)| end > d.range.start);
         d.depth = open.len() as u16;
-        open.push(d.range.end);
+        d.parent = open.last().map(|&(_, p)| p);
+        open.push((d.range.end, i as u32));
     }
     found.shrink_to_fit();
     Some(Declarations { items: found, syntax_errors })
@@ -1208,6 +1356,85 @@ mod tests {
         found.iter().any(|(k, n, d)| *k == kind && n == name && *d == depth)
     }
 
+    fn sticky_names(lang: Language, src: &str, top: u32, partial: bool) -> Vec<(String, u32, u32)> {
+        let s = parse_with(lang, src.into(), Want { folds: false, declarations: true }, || true).unwrap();
+        let d = s.declarations.unwrap();
+        d.sticky(top, partial, 5).iter().map(|k| (d.items[k.index as usize].name.to_string(), k.line, k.row)).collect()
+    }
+
+    #[test]
+    fn other_names_keep_their_text_as_written() {
+        let (found, _) = decls(Css, ".wide,\n.tall { color: red }\n");
+        assert!(decl(&found, DeclKind::Selector, ".wide,\n.tall", 0), "{found:?}");
+    }
+
+    #[test]
+    fn rust_impl_blocks_are_declarations_that_hold_their_methods() {
+        let src = "struct S;\nimpl<T> Show for S {\n    fn show(&self) {\n        1;\n    }\n}\n";
+        let (found, _) = decls(Rust, src);
+        assert!(decl(&found, DeclKind::Impl, "impl<T> Show for S", 0), "{found:?}");
+        assert!(decl(&found, DeclKind::Method, "show", 1), "{found:?}");
+    }
+
+    #[test]
+    fn markdown_headings_nest_by_level() {
+        let src = "# One\n\ntext\n\n## Two\n\nmore\n\n# Three\n";
+        let (found, _) = decls(Markdown, src);
+        assert!(decl(&found, DeclKind::Heading, "One", 0), "{found:?}");
+        assert!(decl(&found, DeclKind::Heading, "Two", 1), "{found:?}");
+        assert!(decl(&found, DeclKind::Heading, "Three", 0), "{found:?}");
+    }
+
+    #[test]
+    fn a_header_sticks_once_its_first_line_scrolls_past() {
+        let src = "mod m {\n    fn f() {\n        a;\n        b;\n    }\n}\n";
+        assert_eq!(sticky_names(Rust, src, 0, false), vec![], "the top line is the header itself");
+        assert_eq!(sticky_names(Rust, src, 0, true), vec![("m".into(), 0, 0)], "wrapped continuation rows of the header");
+        assert_eq!(sticky_names(Rust, src, 2, false), vec![("m".into(), 0, 0), ("f".into(), 1, 1)]);
+    }
+
+    #[test]
+    fn a_header_is_pushed_up_by_its_scopes_end() {
+        let src = "mod m {\n    fn f() {\n        a;\n    }\n    fn g() {}\n}\n";
+        // Top line 3 is f's closing line: f would move up to row 3 - 3 = 0, which m holds, so f is dropped.
+        assert_eq!(sticky_names(Rust, src, 3, false), vec![("m".into(), 0, 0)]);
+        assert_eq!(sticky_names(Rust, src, 2, false), vec![("m".into(), 0, 0), ("f".into(), 1, 1)]);
+    }
+
+    #[test]
+    fn deep_nesting_keeps_the_innermost_five() {
+        let mut src = String::new();
+        for i in 0..7 {
+            src += &format!("{}mod m{i} {{\n", "    ".repeat(i));
+        }
+        src += &format!("{}x;\n", "    ".repeat(7)).repeat(10); // a body taller than the stack, so no header is pushed up
+        for i in (0..7).rev() {
+            src += &format!("{}}}\n", "    ".repeat(i));
+        }
+        let names: Vec<String> = sticky_names(Rust, &src, 7, false).into_iter().map(|(n, _, _)| n).collect();
+        assert_eq!(names, ["m2", "m3", "m4", "m5", "m6"]);
+    }
+
+    #[test]
+    fn enclosing_walks_outermost_first() {
+        let src = "mod m {\n    fn f() {\n        a;\n    }\n}\n";
+        let s = parse_with(Rust, src.into(), Want { folds: false, declarations: true }, || true).unwrap();
+        let d = s.declarations.unwrap();
+        let at = src.find("a;").unwrap() as u32;
+        let names: Vec<&str> = d.enclosing(at).iter().map(|x| &*x.name).collect();
+        assert_eq!(names, ["m", "f"]);
+        assert_eq!(d.enclosing_line(2).len(), 2);
+        assert!(d.enclosing(0).iter().map(|x| &*x.name).eq(["m"]));
+    }
+
+    #[test]
+    fn declarations_are_off_unless_asked_and_crlf_lines_count() {
+        let src = "mod m {\r\n    fn f() {\r\n        a;\r\n    }\r\n}\r\n";
+        let off = parse_with(Rust, src.into(), Want { folds: true, declarations: false }, || true).unwrap();
+        assert!(off.declarations.is_none() && off.folds.is_some());
+        assert_eq!(sticky_names(Rust, src, 2, false), vec![("m".into(), 0, 0), ("f".into(), 1, 1)]);
+    }
+
     #[test]
     fn rust_modules_types_traits_and_functions_nest() {
         let src = "mod outer {\n    pub struct Café;\n    pub trait Greet { fn hi(&self); }\n    impl Café { pub fn new() -> Self { Café } }\n    fn helper() {}\n}\nmacro_rules! m { () => {} }\nfn helper() {}\n";
@@ -1216,7 +1443,7 @@ mod tests {
         assert!(decl(&found, DeclKind::Module, "outer", 0));
         assert!(decl(&found, DeclKind::Type, "Café", 1), "{found:?}");
         assert!(decl(&found, DeclKind::Interface, "Greet", 1));
-        assert!(decl(&found, DeclKind::Method, "new", 1), "an impl is not a declaration: {found:?}");
+        assert!(decl(&found, DeclKind::Impl, "impl Café", 1) && decl(&found, DeclKind::Method, "new", 2), "an impl holds its methods: {found:?}");
         assert!(decl(&found, DeclKind::Function, "helper", 1) && decl(&found, DeclKind::Function, "helper", 0), "duplicate names stay apart");
         assert!(decl(&found, DeclKind::Macro, "m", 0));
     }
@@ -1269,8 +1496,8 @@ mod tests {
         let (found, errors) = decls(Rust, "fn ok() {}\nfn broken( {\nstruct After;\n");
         assert!(errors);
         assert!(decl(&found, DeclKind::Function, "ok", 0), "{found:?}");
-        assert!(declarations_while(Markdown, "# x".into(), || true).is_none(), "unsupported languages say so");
-        assert!(!has_declarations(Markdown) && has_declarations(Css));
+        assert!(declarations_while(Json, "{}".into(), || true).is_none(), "unsupported languages say so");
+        assert!(!has_declarations(Json) && has_declarations(Css) && has_declarations(Markdown));
         assert!(declarations_while(Rust, "fn a() {}".into(), || false).is_none(), "obsolete work stops");
     }
 
@@ -1420,6 +1647,21 @@ mod tests {
         crate::perf::record("syntax/parse", "ms", &[parsed.as_secs_f64() * 1000.0]);
         crate::perf::record("syntax/visible-spans", "ms", &[per_window.as_secs_f64() * 1000.0]);
         crate::perf::record("syntax/retained", "MiB", &[p.bytes() as f64 / (1 << 20) as f64]);
+        // The same parse with folds and declarations (sticky headers), and sticky lookups over the result.
+        let t = Instant::now();
+        let full = parse_with(Rust, src.as_str().into(), Want { folds: true, declarations: true }, || true).unwrap();
+        let with_declarations = t.elapsed();
+        let d = full.declarations.unwrap_or_default();
+        let t = Instant::now();
+        let mut pinned = 0;
+        for top in (0..n as u32).step_by((n / 1000).max(1)) {
+            pinned += d.sticky(top, false, 5).len();
+        }
+        let per_lookup = t.elapsed() / 1000;
+        crate::perf::record("syntax/parse-declarations", "ms", &[with_declarations.as_secs_f64() * 1000.0]);
+        crate::perf::record("syntax/sticky-lookup", "us", &[per_lookup.as_secs_f64() * 1e6]);
+        eprintln!("parse with folds and {} declarations {with_declarations:?}, sticky lookup {per_lookup:?} ({pinned} pinned)", d.items.len());
+        crate::perf::check(per_lookup.as_micros() < 50, "sticky lookup exceeds 50 us");
         eprintln!(
             "{n} lines, {} KB: query compile {compile:?}, parse {parsed:?}, spans(60 lines) {per_window:?} ({count} spans over 100 windows)",
             src.len() / 1024

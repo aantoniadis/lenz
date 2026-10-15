@@ -222,6 +222,8 @@ struct Loaded {
     columns: [Option<usize>; 2],
     /// Compact highlights per Side, filled in by a background parse after first paint.
     parsed: [Option<Arc<Parsed>>; 2],
+    /// Declarations per Side, from the same parse, while sticky scroll is on.
+    declarations: [Option<Arc<crate::highlight::Declarations>>; 2],
     parsing: bool,
     parse_id: Arc<()>,
     used: u64,
@@ -229,11 +231,12 @@ struct Loaded {
 
 impl Loaded {
     fn new(doc: Arc<Doc>, used: u64) -> Self {
-        Self { doc, columns: [None; 2], parsed: [None, None], parsing: false, parse_id: Arc::new(()), used }
+        Self { doc, columns: [None; 2], parsed: [None, None], declarations: [None, None], parsing: false, parse_id: Arc::new(()), used }
     }
 
     fn release_syntax(&mut self) {
         self.parsed = [None, None];
+        self.declarations = [None, None];
         self.parsing = false;
         self.parse_id = Arc::new(());
     }
@@ -243,6 +246,7 @@ impl Loaded {
         let d = &self.doc;
         2 * (d.text_left.len() + d.text_right.len()) + 96 * (d.raw_left.len() + d.raw_right.len())
             + self.parsed.iter().flatten().map(|p| p.bytes()).sum::<usize>()
+            + self.declarations.iter().flatten().flat_map(|d| &d.items).map(|d| d.bytes()).sum::<usize>()
             // both Sides decoded and as textures, and the Difference texture once shown: five 4-byte buffers
             + d.image.as_ref().map_or(0, |i| i.size.0 as usize * i.size.1 as usize * 20)
     }
@@ -347,6 +351,9 @@ pub struct Viewer {
     text_w: [f32; 2],
     spec: Spec,
     blame_on: bool,
+    /// Sticky scroll: pin the enclosing declarations at the top of each pane (for this run; the settings file sets
+    /// the start).
+    sticky_on: bool,
     blames: HashMap<BlameKey, Blame>,
     popup: Option<CommitPopup>,
     /// Blame Annotation under the pointer: Side, line, pointer position.
@@ -536,6 +543,7 @@ const KEYMAP: &[(&str, &str)] = &[
     ("o / shift-o", "Open the file in your editor at the line / with the default app"),
     ("w / i / h / s", "Whitespace Mode / Ignore Case / Highlight Level / Scroll Mode"),
     ("alt-b", "Blame Annotation"),
+    ("palette: View: Sticky Scroll;  click a pinned line", "Pin the enclosing declarations at the top of each pane / jump to one"),
     ("alt-1 / alt-2 / alt-3", "Files / Branches / History: show or hide (leaves Focus)"),
     ("f,  Enter (in the log without a search) / Esc", "Focus: the diff alone (Branches, History and Files hidden) / restore the panels"),
     ("type in Files or Commits; ↑ ↓ / Enter / Esc", "Find candidates / open candidate / cancel search"),
@@ -762,6 +770,7 @@ impl Viewer {
             panes: PaneSizes::default(),
             spec,
             blame_on: blame,
+            sticky_on: crate::settings::get().view.sticky_scroll,
             blames: HashMap::new(),
             popup: None,
             help: false,help_scroll:0,about:None,report_request:Default::default(),
@@ -1197,7 +1206,7 @@ impl Viewer {
         use commands::Interaction::*;
         if command==Find {self.find_focused(cx);return;}
         if let Some(reason)=self.interaction_disabled(command){self.toast(reason.into(),cx);return;}
-        match command{FindCase|FindWord|FindRegex=>{if let Some(option)=command.find_option(){self.toggle_find_option(option);}},ResetPaneSizes=>self.reset_pane_sizes(),ScrollLeft|ScrollRight if self.markdown_active()=>self.markdown_horizontal(self.diff_focus,if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ScrollLeft|ScrollRight=>self.scroll_horizontal(self.sel.map_or(self.diff_focus,|s|s.side),if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ChangeTheme=>self.open_themes(cx),ReportLastError=>self.report_last_error(cx),About=>{self.help=false;self.menu=None;self.command_palette=None;self.diff_options=None;self.about=Some(about::About::open());},Find=>self.open_find(),FindSet=>{let(query,changed)=self.search.as_ref().map_or((String::new(),false),|s|(s.query.clone(),s.changed_only));self.search=Some(SetSearch::new(query,changed,self.comparison.find_options));},GoToLine=>self.goto=Some(String::new()),Copy|CopyMarkdownSource|CopyPath|CopyReference|CopyLeftChange|CopyRightChange=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};if let Some(doc)=self.doc(){match self.comparison.copy_text(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){Ok(text)=>cx.write_to_clipboard(ClipboardItem::new_string(text)),Err(reason)=>self.toast(reason.into(),cx)}}},SelectAll if self.markdown_active()=>self.markdown_select_all(),SelectAll=>{let side=self.sel.map_or(Side::Right,|s|s.side);self.sel=Some(Selection::all(side,self.raw(side)));self.selection_to_primary(cx);},Editor|DefaultApp=>self.open_focused(command==DefaultApp,cx),Blame=>self.toggle_blame(cx),InspectBlame=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};match self.comparison.markdown_inspection_position(side){Ok(mapped)=>{let line=mapped.map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as u32,|s|s.head.line),|p|p.line);self.open_commit(side,line,cx);},Err(reason)=>self.toast(reason.into(),cx)}},Reload=>self.reload(cx)}
+        match command{StickyScroll=>self.toggle_sticky(cx),FindCase|FindWord|FindRegex=>{if let Some(option)=command.find_option(){self.toggle_find_option(option);}},ResetPaneSizes=>self.reset_pane_sizes(),ScrollLeft|ScrollRight if self.markdown_active()=>self.markdown_horizontal(self.diff_focus,if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ScrollLeft|ScrollRight=>self.scroll_horizontal(self.sel.map_or(self.diff_focus,|s|s.side),if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ChangeTheme=>self.open_themes(cx),ReportLastError=>self.report_last_error(cx),About=>{self.help=false;self.menu=None;self.command_palette=None;self.diff_options=None;self.about=Some(about::About::open());},Find=>self.open_find(),FindSet=>{let(query,changed)=self.search.as_ref().map_or((String::new(),false),|s|(s.query.clone(),s.changed_only));self.search=Some(SetSearch::new(query,changed,self.comparison.find_options));},GoToLine=>self.goto=Some(String::new()),Copy|CopyMarkdownSource|CopyPath|CopyReference|CopyLeftChange|CopyRightChange=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};if let Some(doc)=self.doc(){match self.comparison.copy_text(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){Ok(text)=>cx.write_to_clipboard(ClipboardItem::new_string(text)),Err(reason)=>self.toast(reason.into(),cx)}}},SelectAll if self.markdown_active()=>self.markdown_select_all(),SelectAll=>{let side=self.sel.map_or(Side::Right,|s|s.side);self.sel=Some(Selection::all(side,self.raw(side)));self.selection_to_primary(cx);},Editor|DefaultApp=>self.open_focused(command==DefaultApp,cx),Blame=>self.toggle_blame(cx),InspectBlame=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};match self.comparison.markdown_inspection_position(side){Ok(mapped)=>{let line=mapped.map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as u32,|s|s.head.line),|p|p.line);self.open_commit(side,line,cx);},Err(reason)=>self.toast(reason.into(),cx)}},Reload=>self.reload(cx)}
         cx.notify();
     }
 
@@ -1278,6 +1287,7 @@ impl Viewer {
                     _ => side_changed,
                 };
                 loaded.parsed[1 - side as usize] = self.loaded.get(&index).and_then(|l| l.parsed[1 - side as usize].clone());
+                loaded.declarations[1 - side as usize] = self.loaded.get(&index).and_then(|l| l.declarations[1 - side as usize].clone());
                 self.loaded.insert(index, loaded);
                 for (i,c) in self.set.comparisons.iter().enumerate().filter(|&(i,_)| i != index && command==EditCommand::Save) {
                     if !self.edits.dirty(i) && [&c.left,&c.right].into_iter().any(|s| matches!(s, Source::File(p) if written_paths.contains(p))) {
@@ -1595,24 +1605,29 @@ impl Viewer {
     }
 
     fn parse_in_background(&mut self, index: usize, cx: &mut Context<Self>) {
+        let sticky = self.sticky_on;
         let Some(loaded) = self.loaded.get_mut(&index).filter(|l| !l.parsing) else { return };
         loaded.parsing = true;
         let doc = loaded.doc.clone();
         let source = Arc::downgrade(&loaded.parse_id);
         for (side, lang) in [(0, doc.lang_left), (1, doc.lang_right)] {
-            if loaded.parsed[side].is_some() { continue; }
             let Some(lang) = lang else { continue };
+            let declarations = sticky && crate::highlight::has_declarations(lang);
+            if loaded.parsed[side].is_some() && (!declarations || loaded.declarations[side].is_some()) { continue; }
             let text = if side == 0 { doc.text_left.clone() } else { doc.text_right.clone() };
             if text.is_empty() { continue; }
             let source = source.clone();
             cx.spawn(async move |this, cx| {
                 let current = source.clone();
-                let parsed = cx.background_executor().spawn(async move {
-                    highlight::parse_while(lang, text, move || current.strong_count() > 0).map(Arc::new)
+                let want = highlight::Want { folds: false, declarations };
+                let syntax = cx.background_executor().spawn(async move {
+                    highlight::parse_with(lang, text, want, move || current.strong_count() > 0)
                 }).await;
                 this.update(cx, |viewer: &mut Viewer, cx| {
                     if let Some(loaded) = viewer.loaded.get_mut(&index).filter(|l| source.ptr_eq(&Arc::downgrade(&l.parse_id))) {
+                        let (parsed, declarations) = syntax.map_or((None, None), |s| (Some(Arc::new(s.parsed)), s.declarations.map(Arc::new)));
                         loaded.parsed[side] = parsed;
+                        loaded.declarations[side] = declarations;
                         trim_loaded(&mut viewer.loaded, &mut viewer.comparison.cache, viewer.comparison.current, LOADED_CACHE_BYTES);
                         viewer.trim_blames();
                         cx.notify();
@@ -1622,6 +1637,41 @@ impl Viewer {
             })
             .detach();
         }
+    }
+
+    /// Sticky scroll on or off; turning it on parses the shown file again when its declarations are missing.
+    fn toggle_sticky(&mut self, cx: &mut Context<Self>) {
+        self.sticky_on = !self.sticky_on;
+        let index = self.comparison.current;
+        // A side parsed without declarations is parsed again (spans come back with them), as the terminal does.
+        if self.sticky_on && let Some(l) = self.loaded.get_mut(&index) {
+            let langs = [l.doc.lang_left, l.doc.lang_right];
+            let missing = (0..2).any(|s| langs[s].is_some_and(crate::highlight::has_declarations) && l.declarations[s].is_none());
+            if missing {
+                l.release_syntax();
+                self.parse_in_background(index, cx);
+            }
+        }
+    }
+
+    /// The sticky line under a point in a text pane, as (its Side, its 0-based line).
+    fn sticky_at(&self, window: &Window, x: f32, y: f32) -> Option<(Side, u32)> {
+        let (pane, _) = self.pane_at(window, x)?;
+        let row = ((y - self.top()) / line_h()).floor();
+        if row < 0.0 { return None; }
+        let lines = self.sticky_lines();
+        let pane = self.pane_side(pane) as usize;
+        lines.get(pane)?.iter().find(|s| s.row as f32 == row).map(|s| (s.side, s.line))
+    }
+
+    /// The header lines each pane pins (index 0 left, 1 right; Unified: index 1), while sticky scroll is on.
+    fn sticky_lines(&self) -> [Vec<crate::sticky::StickyLine>; 2] {
+        let Some(l) = self.loaded.get(&self.comparison.current).filter(|l| self.sticky_on && self.merge.is_none() && l.doc.placeholder.is_none()) else {
+            return Default::default();
+        };
+        let rows = self.comparison.view.viewport_rows().max(0.0) as usize;
+        let declarations = [l.declarations[0].as_deref(), l.declarations[1].as_deref()];
+        crate::sticky::lines(&self.comparison.view.frame(), self.comparison.view.unified(), declarations, crate::sticky::cap(rows))
     }
 
     /// Next/previous Change Block; at the edge of the file a second press crosses into the
@@ -2120,6 +2170,11 @@ impl Viewer {
         self.panel_focused = false;
         if self.markdown_click(ev,window,cx){return;}
         if self.image_doc().is_some() && self.image_drag(x, y, true, window, cx) {
+            return;
+        }
+        if let Some((side, line)) = self.sticky_at(window, x, y) {
+            self.comparison.view.go_to_line(side, line + 1);
+            cx.notify();
             return;
         }
         let Some((side, tx)) = self.pane_at(window, x).map(|(side, tx)| (self.side_at(side, y), tx)) else {
@@ -3343,6 +3398,16 @@ impl Render for Viewer {
             None => (Vec::new(), Vec::new(), None),
         };
         let (mut left, mut right) = (left, right);
+        // Sticky lines: each pane's rows, painted over its top rows (syntax colours only).
+        let sticky: [Vec<Painted>; 2] = match loaded.filter(|_| markdown_frame.is_none()) {
+            Some(l) => self.sticky_lines().map(|lines| {
+                let Some(side) = lines.first().map(|s| s.side) else { return Vec::new() };
+                let rows: Vec<Row> = lines.iter().map(|s| Row { y: s.row as f32, content: Content::Line(s.line), tint: None, inline: Vec::new() }).collect();
+                let (raw, parsed) = if side == Side::Left { (&l.doc.raw_left, l.parsed[0].as_deref()) } else { (&l.doc.raw_right, l.parsed[1].as_deref()) };
+                resolve(&palette, &rows, raw, parsed, None, &[])
+            }),
+            None => Default::default(),
+        };
         let threads = self.thread_lines();
         for (rows, lines) in [(&mut left, &threads[0]), (&mut right, &threads[1])] {
             for row in rows.iter_mut() {
@@ -3652,10 +3717,13 @@ impl Render for Viewer {
                             // one column: deleted rows (left) and the rest (right) interleave by row
                             paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &left);
                             paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &right);
+                            paint_sticky(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &sticky[1]);
                             fill(window, gx, y0, GUTTER_W, h, palette.bg);
                         } else {
                             paint_side(&palette, window, cx, &font, bounds, x0, pane_w, hscroll[0], ann_w[0], &left);
                             paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &right);
+                            paint_sticky(&palette, window, cx, &font, bounds, x0, pane_w, hscroll[0], ann_w[0], &sticky[0]);
+                            paint_sticky(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &sticky[1]);
                             fill(window, gx, y0, GUTTER_W, h, palette.gutter_bg);
                             paint_connectors(&palette, window, bounds, x0, widths, &connectors, arrows);
                         }
@@ -3819,6 +3887,17 @@ fn fill_hsla(window: &mut Window, x: f32, y: f32, w: f32, h: f32, color: Hsla) {
         gpui::transparent_black(),
         Default::default(),
     ));
+}
+
+/// A pane's sticky lines over its top rows: the header background, the lines, and a border under them.
+#[allow(clippy::too_many_arguments)]
+fn paint_sticky(palette: &theme::Palette, window: &mut Window, cx: &mut App, font: &Font, bounds: Bounds<Pixels>, x: f32, w: f32, hscroll: f32, ann_w: f32, rows: &[Painted]) {
+    let Some(n) = rows.iter().map(|r| r.y + 1.0).reduce(f32::max) else { return };
+    let y0 = f32::from(bounds.origin.y);
+    let area = Bounds { origin: bounds.origin, size: size(bounds.size.width, px(n * line_h())) };
+    fill(window, x, y0, w, n * line_h(), palette.header_bg);
+    paint_side(palette, window, cx, font, area, x, w, hscroll, ann_w, rows);
+    fill(window, x, y0 + n * line_h() - 1.0, w, 1.0, palette.border);
 }
 
 #[allow(clippy::too_many_arguments)]

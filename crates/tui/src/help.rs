@@ -13,7 +13,7 @@ pub const COMPARISON:&[Row]=&[
     ("","Selection and editing"),("Click / drag","Select text; double/triple click word/line"),("Shift-arrows / Ctrl-A","Extend selection / select all"),
     ("Right click / Shift-F10","Text, file or commit actions"),("y / Ctrl-Shift-C","Copy selection via terminal OSC 52"),("Alt-Shift-Left/Right","Apply hunk to draft on left / right"),("Ctrl-Z / Ctrl-Y","Undo / redo draft edits"),("Ctrl-S","Save current draft to disk"),("Discard unsaved","Discard draft; keep saved file"),("Revert hunk","Restore selected right hunk from left into draft"),("A","Applied history and selective Undo"),
     ("","Images"),("m","Cycle 2-up, Swipe, Onion skin, Difference"),("0 / 1, + / -","Fit / actual size, zoom in / out"),("Arrows / , .","Pan / adjust opacity or split"),
-    ("F2","Full status or selected action details; arrows scroll"),("Nerd Font icons","Optional ☰ setting; plain labels stay visible"),("","Other actions"),("b / B","Blame / inspect commit"),("o / O","Open editor / default application"),("F5","Reload comparison"),(":","All commands and disabled reasons"),
+    ("F2","Full status or selected action details; arrows scroll"),("Nerd Font icons","Optional ☰ setting; plain labels stay visible"),("","Other actions"),("b / B","Blame / inspect commit"),(": Sticky Scroll","Pin the enclosing declarations at the top of each pane; click one to jump"),("o / O","Open editor / default application"),("F5","Reload comparison"),(":","All commands and disabled reasons"),
     ("F8 / Shift-F8","Switch independent views"),("q / Ctrl-C","Close current view / quit"),
 ];
 pub const REPOSITORY:&[Row]=&[
