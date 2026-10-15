@@ -343,7 +343,12 @@ pub fn parse(lang: Language, text: &str) -> Parsed {
 
 /// Called off the UI thread. Obsolete documents leave the queue (or stop parsing) promptly.
 pub fn parse_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Parsed> {
-    on_worker(move || parse_now(lang, &text, &current))
+    on_worker(move || parse_now(lang, &text, &current, false).map(|(p, _)| p))
+}
+
+/// As [`parse_while`], also returning the document's fold regions, found in the same tree.
+pub fn parse_folded_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<(Parsed, Folds)> {
+    on_worker(move || parse_now(lang, &text, &current, true).map(|(p, f)| (p, f.unwrap_or_default())))
 }
 
 /// Run one parse job on the syntax pool and wait for its answer.
@@ -393,7 +398,7 @@ fn release_freed_memory() {
     }
 }
 
-fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Option<Parsed> {
+fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, folds: bool) -> Option<(Parsed, Option<Folds>)> {
     if !current() { return None; }
     let language = &config(lang).language; // compiled outside the arena: queries outlive every parse
     // Declared before the parser, tree and query cursors, so it is dropped after all of them.
@@ -419,9 +424,10 @@ fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Option<P
         }
     }
     parsed.offsets.push(parsed.spans.len());
+    let folds = if folds { Some(syntax.folds(current)?) } else { None };
     drop(syntax);
     parsed.spans.shrink_to_fit();
-    Some(parsed)
+    Some((parsed, folds))
 }
 
 impl Parsed {
@@ -498,6 +504,213 @@ fn runs(paint: Vec<Option<Capture>>) -> Vec<(Range<usize>, Capture)> {
         }
     }
     out
+}
+
+/// What a fold region holds: code, a run of comments, or a run of imports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FoldKind {
+    Block,
+    Comment,
+    Imports,
+}
+
+/// Lines `first..=last` (0-based) that fold into `first`; `closes`: the last line is only closing punctuation, so a
+/// collapsed region can show it after its placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fold {
+    pub first: u32,
+    pub last: u32,
+    pub kind: FoldKind,
+    pub closes: bool,
+}
+
+/// A document's fold regions, sorted by first line, at most one per first line (the outermost).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Folds {
+    pub regions: Vec<Fold>,
+}
+
+impl Folds {
+    pub fn bytes(&self) -> usize {
+        self.regions.capacity() * size_of::<Fold>()
+    }
+
+    /// The region starting on `line`.
+    pub fn starting(&self, line: usize) -> Option<Fold> {
+        let i = self.regions.partition_point(|f| (f.first as usize) < line);
+        self.regions.get(i).filter(|f| f.first as usize == line).copied()
+    }
+}
+
+/// Node kinds that import or include something, across the bundled grammars.
+const IMPORT_KINDS: &[&str] = &[
+    "use_declaration",
+    "extern_crate_declaration",
+    "import_statement",
+    "import_from_statement",
+    "future_import_statement",
+    "import_declaration",
+    "preproc_include",
+    "using_directive",
+    "import_header",
+    "namespace_use_declaration",
+];
+
+/// Per node kind id of `lang`'s grammar: whether it is a comment or an import, built once (cheaper than comparing each
+/// node's kind name).
+fn run_kinds(lang: Language) -> &'static [Option<FoldKind>] {
+    static KINDS: [OnceLock<Vec<Option<FoldKind>>>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
+    KINDS[lang as usize].get_or_init(|| {
+        let language = &config(lang).language;
+        (0..language.node_kind_count() as u16)
+            .map(|id| {
+                let kind = language.node_kind_for_id(id).unwrap_or_default();
+                if kind.contains("comment") {
+                    Some(FoldKind::Comment)
+                } else if IMPORT_KINDS.contains(&kind) {
+                    Some(FoldKind::Imports)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    })
+}
+
+impl SyntaxTree<'_> {
+    /// Every named node spanning two lines or more (the outermost per first line), with consecutive comment lines and
+    /// consecutive import lines merged into one region each. `None` once `current` says the work is obsolete.
+    fn folds(&self, current: &dyn Fn() -> bool) -> Option<Folds> {
+        let mut found: Vec<Fold> = Vec::new();
+        // Comments and imports, merged into runs afterwards: (first, last, kind).
+        let mut runs: Vec<(u32, u32, FoldKind)> = Vec::new();
+        let runs_by_kind = run_kinds(self.lang);
+        let mut cursor = self.tree.walk();
+        let mut seen = 0usize;
+        'walk: loop {
+            let node = cursor.node();
+            seen += 1;
+            if seen.is_multiple_of(4096) && !current() {
+                return None;
+            }
+            let run = runs_by_kind.get(usize::from(node.kind_id())).copied().flatten();
+            let first = node.start_position().row as u32;
+            let end = node.end_position();
+            // A node ending at a line's start (its line ending included) ends on the line before.
+            let last = if end.column == 0 && end.row > 0 { end.row - 1 } else { end.row } as u32;
+            // Not the root (depth 0): it spans the whole text.
+            if node.is_named() && cursor.depth() > 0 {
+                // A comment or import joins a run only when it starts its line (a trailing comment is part of the code).
+                let leads = || self.text.get(self.line_starts[first as usize]..node.start_byte()).is_some_and(|b| b.trim().is_empty());
+                match run {
+                    Some(k) if leads() => runs.push((first, last, k)),
+                    Some(_) => {}
+                    None if last > first => found.push(Fold { first, last, kind: FoldKind::Block, closes: self.closes(last as usize) }),
+                    None => {}
+                }
+            }
+            // Comments and imports fold as a whole; a node on one line holds no region (nor a comment alone on a line).
+            if run.is_none() && last > first && cursor.goto_first_child() {
+                continue;
+            }
+            loop {
+                if cursor.goto_next_sibling() {
+                    continue 'walk;
+                }
+                if !cursor.goto_parent() {
+                    break 'walk;
+                }
+            }
+        }
+        // Runs on consecutive lines of one kind merge; a single multi-line comment is a region on its own.
+        runs.sort_unstable_by_key(|r| (r.0, r.1));
+        let mut merged: Vec<(u32, u32, FoldKind)> = Vec::new();
+        for r in runs {
+            match merged.last_mut() {
+                Some(m) if m.2 == r.2 && r.0 <= m.1 + 1 => m.1 = m.1.max(r.1),
+                _ => merged.push(r),
+            }
+        }
+        found.extend(merged.into_iter().filter(|r| r.1 > r.0).map(|(first, last, kind)| Fold { first, last, kind, closes: self.closes(last as usize) }));
+        // The outermost region per first line: by first line, widest first, the first of each line kept.
+        found.sort_unstable_by_key(|f| (f.first, Reverse(f.last)));
+        found.dedup_by_key(|f| f.first);
+        found.shrink_to_fit();
+        Some(Folds { regions: found })
+    }
+
+    /// Whether line `l` holds only closing punctuation (`}`, `)`, `]`, then `;` or `,`) or `end`.
+    fn closes(&self, l: usize) -> bool {
+        let t = self.text.get(self.line(l)).unwrap_or_default().trim().trim_end_matches([';', ',']);
+        t == "end" || (!t.is_empty() && t.chars().all(|c| matches!(c, '}' | ')' | ']')))
+    }
+}
+
+/// Bracket and quote pairs whose inside is a selection step before the whole node.
+const PAIRS: &[(&str, &str)] = &[("{", "}"), ("(", ")"), ("[", "]"), ("\"", "\""), ("'", "'"), ("`", "`"), ("string_start", "string_end")];
+
+/// The ranges a selection grows through from `range`, smallest first: the word at a caret, a string's or bracketed
+/// block's inside before the whole, then each enclosing node with a different range, up to the whole text. One parse
+/// on the syntax pool, inside its arena; no tree outlives the call. `None` once `current` says the work is obsolete.
+pub fn selection_steps_while(lang: Language, text: Arc<str>, range: Range<usize>, current: impl Fn() -> bool + Send + 'static) -> Option<Vec<Range<usize>>> {
+    on_worker(move || steps_now(lang, &text, range, &current))
+}
+
+fn steps_now(lang: Language, text: &str, range: Range<usize>, current: &dyn Fn() -> bool) -> Option<Vec<Range<usize>>> {
+    if !current() {
+        return None;
+    }
+    let range = range.start.min(text.len())..range.end.min(text.len());
+    let mut out: Vec<Range<usize>> = Vec::new();
+    // Kept only when it strictly holds the last step (or the starting range).
+    let mut push = |r: Range<usize>| {
+        let last = out.last().cloned().unwrap_or(range.clone());
+        if r.start <= last.start && r.end >= last.end && r != last {
+            out.push(r);
+        }
+    };
+    // The word at, or just before, a caret.
+    if range.is_empty() {
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let (before, after) = (text.get(..range.start).unwrap_or_default(), text.get(range.start..).unwrap_or_default());
+        let start = before.char_indices().rev().take_while(|(_, c)| word(*c)).last().map_or(range.start, |(i, _)| i);
+        let end = after.char_indices().take_while(|(_, c)| word(*c)).last().map_or(range.start, |(i, c)| range.start + i + c.len_utf8());
+        if start < end {
+            push(start..end);
+        }
+    }
+    let language = &config(lang).language; // compiled outside the arena
+    {
+        // Declared before the parser and tree, so it is dropped after both.
+        let _arena = crate::syntax_arena::Scope::begin(text.len());
+        let mut parser = Parser::new();
+        parser.set_language(language).ok()?;
+        let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
+        let tree = parser.parse_with_options(
+            &mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(),
+            None,
+            Some(ParseOptions::new().progress_callback(&mut progress)),
+        )?;
+        let mut node = tree.root_node().descendant_for_byte_range(range.start, range.end);
+        while let Some(n) = node {
+            let count = n.child_count();
+            if count >= 2
+                && let (Some(open), Some(close)) = (n.child(0), n.child(count - 1))
+                && PAIRS.iter().any(|(a, b)| open.kind() == *a && close.kind() == *b)
+                && open.end_byte() <= close.start_byte()
+            {
+                let inside = text.get(open.end_byte()..close.start_byte()).unwrap_or_default();
+                let (s, e) = (open.end_byte() + inside.len() - inside.trim_start().len(), close.start_byte() - (inside.len() - inside.trim_end().len()));
+                if s < e {
+                    push(s..e);
+                }
+            }
+            push(n.byte_range());
+            node = n.parent();
+        }
+    }
+    push(0..text.len());
+    Some(out)
 }
 
 /// What a declaration is, by syntax. A syntactic candidate, not proof of what a reference resolves to.
@@ -768,6 +981,35 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(50));
         let after = crate::memory_probe::footprint_mib().unwrap();
         assert!(after - before < records + 16.0, "retained {:.1} MiB for {records:.1} MiB of records", after - before);
+    }
+    /// Fold regions come from the highlight parse inside its arena: the tree leaves the process, only the compact
+    /// regions stay.
+    #[test]
+    #[ignore = "process-wide memory: other tests skew it; scripts/ci-local.sh runs it alone"]
+    fn fold_parses_return_the_trees_memory_to_the_system() {
+        let text: Arc<str> = (0..60_000).map(|i| format!("fn compute_{i}(a: u32) -> u32 {{\n    a + {i}\n}}\n")).collect::<String>().into();
+        let _warm = parse_folded_while(Rust, "fn a() {\n}\n".into(), || true);
+        let before = crate::memory_probe::footprint_mib().expect("memory probe");
+        let (parsed, folds) = parse_folded_while(Rust, text, || true).unwrap();
+        assert_eq!(folds.regions.len(), 60_000);
+        let kept = (parsed.bytes() + folds.bytes()) as f64 / (1024.0 * 1024.0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after = crate::memory_probe::footprint_mib().unwrap();
+        assert!(after - before < kept + 16.0, "retained {:.1} MiB for {kept:.1} MiB of spans and regions", after - before);
+    }
+    /// Selection steps parse inside the arena too: repeated expansions keep only their short chains.
+    #[test]
+    #[ignore = "process-wide memory: other tests skew it; scripts/ci-local.sh runs it alone"]
+    fn selection_steps_return_the_trees_memory_to_the_system() {
+        let text: Arc<str> = (0..60_000).map(|i| format!("fn compute_{i}(a: u32) -> u32 {{\n    (a + {i}) * 2\n}}\n")).collect::<String>().into();
+        let _warm = selection_steps_while(Rust, "fn a() {}\n".into(), 3..3, || true);
+        let before = crate::memory_probe::footprint_mib().expect("memory probe");
+        for at in [100, 500_000, 1_500_000] {
+            assert!(selection_steps_while(Rust, text.clone(), at..at, || true).is_some_and(|s| s.len() < 64));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let after = crate::memory_probe::footprint_mib().unwrap();
+        assert!(after - before < 16.0, "retained {:.1} MiB after three expansions", after - before);
     }
     use Capture::{Comment, Escape, Function, Heading, Keyword, Number, Property, Tag, TypeBuiltin};
     use Language::*;
@@ -1185,5 +1427,111 @@ mod tests {
         eprintln!("retained highlights: {:.1} MiB", p.bytes() as f64 / (1 << 20) as f64);
         assert!(p.bytes() < src.len() * 5, "highlight cache must stay compact");
         crate::perf::check(per_window.as_micros() < 250, "visible syntax lookup exceeds 250 us");
+    }
+
+    fn folds(lang: Language, src: &str) -> Vec<(u32, u32, FoldKind, bool)> {
+        let (_, f) = parse_folded_while(lang, src.into(), || true).unwrap();
+        f.regions.iter().map(|r| (r.first, r.last, r.kind, r.closes)).collect()
+    }
+
+    #[test]
+    fn rust_blocks_comments_and_imports_fold_outermost_per_line() {
+        let src = "use a::b;\nuse c::d;\n\n// one\n// two\nfn f() {\n    let x = [\n        1,\n    ];\n}\nfn g() {}\n";
+        assert_eq!(folds(Rust, src), vec![
+            (0, 1, FoldKind::Imports, false),
+            (3, 4, FoldKind::Comment, false),
+            (5, 9, FoldKind::Block, true),
+            (6, 8, FoldKind::Block, true),
+        ]);
+    }
+
+    #[test]
+    fn comments_after_code_never_fold_the_code() {
+        assert_eq!(folds(Rust, "fn f() {\n    let a = 1; // x\n    let b = 2; // y\n    let c = 3;\n}\n"), vec![(0, 4, FoldKind::Block, true)]);
+        assert_eq!(folds(Python, "x = 1  # a\ny = 2  # b\n"), vec![]);
+        assert_eq!(folds(Rust, "let a = 1; // x\n// y\n// z\n"), vec![(1, 2, FoldKind::Comment, false)]);
+    }
+
+    #[test]
+    fn a_multi_line_import_closes_like_a_block() {
+        assert_eq!(folds(Rust, "use a::{\n    b,\n};\nfn f() {}\n"), vec![(0, 2, FoldKind::Imports, true)]);
+    }
+
+    #[test]
+    fn python_bodies_fold_without_a_closing_line() {
+        let src = "import os\nimport sys\ndef f():\n    a = 1\n    return a\n";
+        // The body is a region of its own (its first statement line folds the rest), as every multi-line node is.
+        assert_eq!(folds(Python, src), vec![(0, 1, FoldKind::Imports, false), (2, 4, FoldKind::Block, false), (3, 4, FoldKind::Block, false)]);
+    }
+
+    #[test]
+    fn json_objects_and_arrays_fold() {
+        let src = "{\n  \"a\": [\n    1\n  ],\n  \"b\": 2\n}\n";
+        assert_eq!(folds(Json, src), vec![(0, 5, FoldKind::Block, true), (1, 3, FoldKind::Block, true)]);
+    }
+
+    #[test]
+    fn folds_handle_crlf_and_no_final_newline() {
+        assert_eq!(folds(Rust, "fn f() {\r\n    1\r\n}"), vec![(0, 2, FoldKind::Block, true)]);
+        assert_eq!(folds(Rust, "fn f() {}\r\n"), vec![]);
+        assert_eq!(folds(Rust, ""), vec![]);
+    }
+
+    #[test]
+    fn multi_line_strings_and_block_comments_fold() {
+        let src = "/* a\n   b */\nconst S: &str = \"x\ny\";\n";
+        assert_eq!(folds(Rust, src), vec![(0, 1, FoldKind::Comment, false), (2, 3, FoldKind::Block, false)]);
+    }
+
+    #[test]
+    fn obsolete_fold_parses_stop() {
+        assert!(parse_folded_while(Rust, "fn a() {\n}\n".into(), || false).is_none());
+    }
+
+    fn steps(lang: Language, src: &str, at: Range<usize>) -> Vec<&str> {
+        selection_steps_while(lang, src.into(), at, || true).unwrap().into_iter().map(|r| &src[r]).collect()
+    }
+
+    #[test]
+    fn steps_grow_from_a_caret_in_a_name_to_the_whole_text() {
+        let src = "fn f() {\n    let total = a + b;\n}\n";
+        let at = src.find("total").unwrap() + 2;
+        let s = steps(Rust, src, at..at);
+        assert_eq!(s[0], "total");
+        let stmt = s.iter().position(|t| *t == "let total = a + b;").expect("the statement is a step");
+        assert!(stmt < s.iter().position(|t| t.starts_with('{')).unwrap(), "{s:?}");
+        assert_eq!(*s.last().unwrap(), src);
+    }
+
+    #[test]
+    fn strings_and_blocks_select_their_inside_first() {
+        let src = "fn f() {\n    g(\"hello world\");\n}\n";
+        let at = src.find("world").unwrap() + 1;
+        let s = steps(Rust, src, at..at);
+        assert_eq!(&s[..3], &["world", "hello world", "\"hello world\""]);
+        let body = s.iter().position(|t| *t == "g(\"hello world\");").unwrap();
+        assert_eq!(s[body + 1], "{\n    g(\"hello world\");\n}", "a block's inside equals its only statement, so the braces come next");
+    }
+
+    #[test]
+    fn steps_strictly_grow_and_contain_the_start() {
+        let src = "def f(x):\n    return [x, 2]\n";
+        let at = src.find('2').unwrap();
+        let s = selection_steps_while(Python, src.into(), at..at + 1, || true).unwrap();
+        for w in s.windows(2) {
+            assert!(w[1].start <= w[0].start && w[1].end >= w[0].end && w[1] != w[0], "{s:?}");
+        }
+        assert!(s[0].start <= at && s[0].end > at && s[0] != (at..at + 1));
+        assert_eq!(s.last(), Some(&(0..src.len())));
+    }
+
+    #[test]
+    fn steps_on_empty_text_and_edges() {
+        assert_eq!(selection_steps_while(Rust, "".into(), 0..0, || true), Some(vec![]));
+        let src = "fn f() {}\n";
+        assert_eq!(selection_steps_while(Rust, src.into(), 0..src.len(), || true), Some(vec![]));
+        let end = selection_steps_while(Rust, src.into(), src.len()..src.len(), || true).unwrap();
+        assert_eq!(end.last(), Some(&(0..src.len())));
+        assert!(selection_steps_while(Rust, src.into(), 0..0, || false).is_none());
     }
 }
