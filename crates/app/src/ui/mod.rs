@@ -420,6 +420,14 @@ impl std::ops::DerefMut for Viewer {
 
 /// `ctrl-f`: find in one Side of the shown Comparison.
 use crate::find::Find as FindBar;
+use lenz_content::find::FindOption;
+
+/// The find option toggles as they read in every find input.
+const TOGGLES: &str = "Aa  W  .*";
+/// Each toggle's option, start and length (in chars) within [`TOGGLES`].
+fn toggle_spans() -> [(FindOption, usize, usize); 3] {
+    [(FindOption::Case, 0, 2), (FindOption::Word, 4, 1), (FindOption::Regex, 7, 2)]
+}
 
 /// `ctrl-shift-f`: shared Change Set search; adapters own pixel layout.
 use crate::search_session::{ChangeSetSearch as SetSearch, PanelRow};
@@ -514,7 +522,8 @@ const KEYMAP: &[(&str, &str)] = &[
     ("ctrl-g  (macOS cmd-l)", "Go to line[:column]"),
     ("ctrl-f;  F3 / Enter,  shift-F3", "Find in focused Files, Commits or text Side; next / previous match"),
     ("ctrl-shift-p,  F10,  : in the diff", "Command palette: type to filter, arrows and Enter run, Esc closes"),
-    ("ctrl-shift-f  (alt-c: changed lines only)", "Find across the Change Set"),
+    ("ctrl-shift-f  (alt-o: changed lines only)", "Find across the Change Set"),
+    ("alt-c / alt-w / alt-r", "Find options: match case / whole word / regular expression"),
     ("arrows / shift-arrows", "Move the caret / extend the selection"),
     ("ctrl-a / ctrl-c", "Select all / copy"),
     ("Home / End;  ctrl-Home / ctrl-End", "Line start / end; file start / end"),
@@ -1157,7 +1166,7 @@ impl Viewer {
         let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};
         let mapped=self.comparison.markdown_inspection_position(side);
         if matches!(command,commands::Interaction::Editor|commands::Interaction::DefaultApp|commands::Interaction::InspectBlame) && let Err(reason)=mapped { return Some(reason); }
-        let line=mapped.ok().flatten().map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(doc)=self.doc()&&let Some(reason)=self.comparison.copy_disabled(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){return Some(reason);}command.disabled(&commands::InteractionContext{document:self.doc().is_some(),text:self.image_doc().is_none()&&self.doc().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.sel.is_some_and(|s|!s.is_empty()),repository:self.set.git_root().is_some(),annotation:self.blame_key(side).and_then(|k|self.blames.get(&k)).and_then(|b|b.line(line)).is_some()})}
+        let line=mapped.ok().flatten().map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(doc)=self.doc()&&let Some(reason)=self.comparison.copy_disabled(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.doc().is_some(),text:self.image_doc().is_none()&&self.doc().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.sel.is_some_and(|s|!s.is_empty()),repository:self.set.git_root().is_some(),annotation:self.blame_key(side).and_then(|k|self.blames.get(&k)).and_then(|b|b.line(line)).is_some()})}
     fn report_last_error(&mut self, cx: &mut Context<Self>) {
         match self.report_request.start() {
             Ok(false) => return,
@@ -1188,7 +1197,7 @@ impl Viewer {
         use commands::Interaction::*;
         if command==Find {self.find_focused(cx);return;}
         if let Some(reason)=self.interaction_disabled(command){self.toast(reason.into(),cx);return;}
-        match command{ResetPaneSizes=>self.reset_pane_sizes(),ScrollLeft|ScrollRight if self.markdown_active()=>self.markdown_horizontal(self.diff_focus,if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ScrollLeft|ScrollRight=>self.scroll_horizontal(self.sel.map_or(self.diff_focus,|s|s.side),if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ChangeTheme=>self.open_themes(cx),ReportLastError=>self.report_last_error(cx),About=>{self.help=false;self.menu=None;self.command_palette=None;self.diff_options=None;self.about=Some(about::About::open());},Find=>self.open_find(),FindSet=>{let(query,changed)=self.search.as_ref().map_or((String::new(),false),|s|(s.query.clone(),s.changed_only));self.search=Some(SetSearch::new(query,changed));},GoToLine=>self.goto=Some(String::new()),Copy|CopyMarkdownSource|CopyPath|CopyReference|CopyLeftChange|CopyRightChange=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};if let Some(doc)=self.doc(){match self.comparison.copy_text(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){Ok(text)=>cx.write_to_clipboard(ClipboardItem::new_string(text)),Err(reason)=>self.toast(reason.into(),cx)}}},SelectAll if self.markdown_active()=>self.markdown_select_all(),SelectAll=>{let side=self.sel.map_or(Side::Right,|s|s.side);self.sel=Some(Selection::all(side,self.raw(side)));self.selection_to_primary(cx);},Editor|DefaultApp=>self.open_focused(command==DefaultApp,cx),Blame=>self.toggle_blame(cx),InspectBlame=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};match self.comparison.markdown_inspection_position(side){Ok(mapped)=>{let line=mapped.map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as u32,|s|s.head.line),|p|p.line);self.open_commit(side,line,cx);},Err(reason)=>self.toast(reason.into(),cx)}},Reload=>self.reload(cx)}
+        match command{FindCase|FindWord|FindRegex=>{if let Some(option)=command.find_option(){self.toggle_find_option(option);}},ResetPaneSizes=>self.reset_pane_sizes(),ScrollLeft|ScrollRight if self.markdown_active()=>self.markdown_horizontal(self.diff_focus,if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ScrollLeft|ScrollRight=>self.scroll_horizontal(self.sel.map_or(self.diff_focus,|s|s.side),if command==ScrollLeft{-4.0*self.char_w}else{4.0*self.char_w}),ChangeTheme=>self.open_themes(cx),ReportLastError=>self.report_last_error(cx),About=>{self.help=false;self.menu=None;self.command_palette=None;self.diff_options=None;self.about=Some(about::About::open());},Find=>self.open_find(),FindSet=>{let(query,changed)=self.search.as_ref().map_or((String::new(),false),|s|(s.query.clone(),s.changed_only));self.search=Some(SetSearch::new(query,changed,self.comparison.find_options));},GoToLine=>self.goto=Some(String::new()),Copy|CopyMarkdownSource|CopyPath|CopyReference|CopyLeftChange|CopyRightChange=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};if let Some(doc)=self.doc(){match self.comparison.copy_text(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){Ok(text)=>cx.write_to_clipboard(ClipboardItem::new_string(text)),Err(reason)=>self.toast(reason.into(),cx)}}},SelectAll if self.markdown_active()=>self.markdown_select_all(),SelectAll=>{let side=self.sel.map_or(Side::Right,|s|s.side);self.sel=Some(Selection::all(side,self.raw(side)));self.selection_to_primary(cx);},Editor|DefaultApp=>self.open_focused(command==DefaultApp,cx),Blame=>self.toggle_blame(cx),InspectBlame=>{let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};match self.comparison.markdown_inspection_position(side){Ok(mapped)=>{let line=mapped.map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as u32,|s|s.head.line),|p|p.line);self.open_commit(side,line,cx);},Err(reason)=>self.toast(reason.into(),cx)}},Reload=>self.reload(cx)}
         cx.notify();
     }
 
@@ -1849,27 +1858,39 @@ impl Viewer {
     pub(super) fn pane_side(&self, side: Side) -> Side { if self.comparison.view.unified() { Side::Right } else { side } }
 
     /// The Ctrl+F bar's text and the Side it searches.
-    fn find_bar(&self) -> Option<(String, Side)> {
+    /// The text font's character width, measured on the first frame (7.8 px until then).
+    fn text_char_w(&self) -> f32 {
+        if self.char_w > 0.0 { self.char_w } else { 7.8 }
+    }
+    pub(super) fn find_bar(&self) -> Option<(String, Side)> {
         let f = self.comparison.find.as_ref()?;
-        let count = match (f.at, f.hits.len()) {
-            (_, 0) if !f.query.is_empty() => "no matches".to_string(),
-            (Some(i), n) => format!("{}/{n}", i + 1),
+        let count = match (f.error(), f.at, f.hits.len()) {
+            (Some(e), _, _) => e.to_string(),
+            (None, _, 0) if !f.query.is_empty() => "no matches".to_string(),
+            (None, Some(i), n) => format!("{}/{n}", i + 1),
             _ => String::new(),
         };
-        Some((format!("Find: {}▏  {count}", f.query), f.side))
+        Some((format!("Find: {}▏  {TOGGLES}  {count}", f.query), f.side))
+    }
+    /// The find bar's option toggles as painted: which option, and its box (x, y, width, height).
+    pub(super) fn find_toggles(&self) -> Vec<(FindOption, (f32, f32, f32, f32))> {
+        let (Some(f), Some((bx, by, _, bh))) = (self.comparison.find.as_ref(), self.find_bar_box()) else { return Vec::new() };
+        let lead = "Find: ".chars().count() + f.query.chars().count() + "▏  ".chars().count();
+        toggle_spans().into_iter().map(|(o, at, len)| (o, (bx + 12.0 + (lead + at) as f32 * self.text_char_w() - 2.0, by + 2.0, len as f32 * self.text_char_w() + 4.0, bh - 4.0))).collect()
     }
     /// The Ctrl+F bar's box as painted: x, y, width, height.
     pub(super) fn find_bar_box(&self) -> Option<(f32, f32, f32, f32)> {
         let (bar, side) = self.find_bar()?;
-        let bw = (bar.chars().count() as f32 * 7.8 + 24.0).max(240.0);
+        let bw = (bar.chars().count() as f32 * self.text_char_w() + 24.0).max(240.0);
         let right = if side == Side::Left { self.diff_x() + self.comparison_widths(self.panes.viewport[0] - self.diff_x())[0] } else { self.panes.viewport[0] };
         Some((right - bw - 8.0, self.top() + 3.0, bw, line_h() + 10.0))
     }
     /// The Find in Change Set prompt while the query is typed.
-    fn search_prompt(&self) -> Option<String> {
+    pub(super) fn search_prompt(&self) -> Option<String> {
         self.search.as_ref().filter(|s| s.editing).map(|s| {
             let only = if s.changed_only { "on" } else { "off" };
-            format!("Find in Change Set: {}▏   alt-c changed lines only: {only}", s.query)
+            let error = s.query_error().map_or(String::new(), |e| format!("   {e}"));
+            format!("Find in Change Set: {}▏   {TOGGLES}   alt-o changed lines only: {only}{error}", s.query)
         })
     }
 
@@ -1881,6 +1902,18 @@ impl Viewer {
     }
 
     /// Whether a point lies on the open Go to file or Go to line box (as painted).
+    /// The Change Set search prompt's option toggles as painted: which option, and its box (x, y, width, height).
+    pub(super) fn search_toggles(&self) -> Vec<(FindOption, (f32, f32, f32, f32))> {
+        let (Some(prompt), None) = (self.search_prompt(), self.goto_prompt()) else { return Vec::new() };
+        let Some(s) = self.search.as_ref() else { return Vec::new() };
+        let [vw, _] = self.panes.viewport;
+        let (x0, w) = (self.diff_x(), vw - self.diff_x());
+        let bw = prompt.chars().count() as f32 * self.text_char_w() + 24.0;
+        let (bx, by) = (x0 + (w - bw) / 2.0, toolbar_h() + self.log_h() + 60.0);
+        let lead = "Find in Change Set: ".chars().count() + s.query.chars().count() + "▏   ".chars().count();
+        toggle_spans().into_iter().map(|(o, at, len)| (o, (bx + 12.0 + (lead + at) as f32 * self.text_char_w() - 2.0, by + 2.0, len as f32 * self.text_char_w() + 4.0, line_h() + 8.0))).collect()
+    }
+
     fn prompt_box_contains(&self, x: f32, y: f32) -> bool {
         let [vw, _] = self.panes.viewport;
         let top = toolbar_h() + self.log_h();
@@ -1890,7 +1923,7 @@ impl Viewer {
             (x0 + (w - bw) / 2.0, top + 60.0, bw, (s.hits.len() as f32 + 1.0) * line_h() + 16.0)
         } else if let Some(prompt) = self.goto_prompt().or_else(|| self.search_prompt()) {
             let (x0, w) = (self.diff_x(), vw - self.diff_x());
-            let bw = prompt.chars().count() as f32 * 7.8 + 24.0;
+            let bw = prompt.chars().count() as f32 * self.text_char_w() + 24.0;
             (x0 + (w - bw) / 2.0, top + 60.0, bw, line_h() + 12.0)
         } else {
             return false;
@@ -1956,6 +1989,12 @@ impl Viewer {
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let outside_find = self.find_bar_box().is_some_and(|(bx, by, bw, bh)| !(x >= bx && x < bx + bw && y >= by && y < by + bh));
+        // A find option toggle in the find bar or the Change Set search prompt flips that option; either stays.
+        if ev.button == MouseButton::Left && matches!(self.modal(), Some(Modal::Find | Modal::SearchEditing)) && let Some(option) = self.search_toggles().into_iter().chain(self.find_toggles()).find(|(_, (tx, ty, tw, th))| x >= *tx && x < tx + tw && y >= *ty && y < ty + th).map(|(o, _)| o) {
+            self.toggle_find_option(option);
+            cx.notify();
+            return;
+        }
         // a press on the panel takes the keyboard back
         (self.message_focused, self.message_press) = (false, None);
         if ev.button == MouseButton::Left { self.message_sel = None; }
@@ -2428,8 +2467,28 @@ impl Viewer {
         let side = self.diff_focus;
         let seed = if self.markdown_active(){self.comparison.markdown_selection().and_then(|selection|self.comparison.markdown_projection()?.copy_visible(selection).ok()).filter(|s|!s.is_empty()&&!s.contains('\n'))}else{self.sel.filter(|s| s.side == side && !s.is_empty() && s.anchor.line == s.head.line).map(|s| s.text(self.raw(side)))};
         let query = seed.or_else(|| self.comparison.find.as_ref().map(|f| f.query.clone())).unwrap_or_default();
-        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None });
+        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None, error: None });
         self.refind();
+    }
+
+    /// A find, merge find or Change Set search input is open: the find option toggles apply to it.
+    pub(super) fn find_open(&self) -> bool {
+        self.comparison.find.is_some() || self.search.as_ref().is_some_and(|s| s.editing) || self.merge.as_ref().is_some_and(|m| m.find_editing())
+    }
+
+    /// Flip one find option for the open input (Change Set search, merge find or the find bar); the window keeps it.
+    pub(super) fn toggle_find_option(&mut self, option: FindOption) {
+        if let Some(s) = self.search.as_mut().filter(|s| s.editing) {
+            s.toggle_option(option);
+            self.comparison.find_options = s.options();
+        } else if let Some(m) = self.merge.as_mut().filter(|m| m.find_editing()) {
+            self.comparison.find_options = m.toggle_find_option(option);
+        } else if let Some(doc) = self.doc().cloned() && self.comparison.find.is_some() {
+            let side = self.comparison.find.as_ref().map_or(Side::Right, |f| f.side);
+            if let Some((line, range)) = self.comparison.toggle_find_option(&doc, option) { self.select_hit(side, line, range); }
+        } else {
+            self.comparison.find_options = self.comparison.find_options.toggled(option);
+        }
     }
 
     /// Recompute the find bar's hits and show the first at or after the caret.
@@ -2496,7 +2555,12 @@ impl Viewer {
                 "backspace" => {
                     let mut query=s.query.clone();query.pop();s.execute(crate::search_session::SearchCommand::Query(query),&self.set,PANEL_ROWS);
                 }
-                "c" if ev.keystroke.modifiers.alt => {s.execute(crate::search_session::SearchCommand::ToggleChangedOnly,&self.set,PANEL_ROWS);},
+                "o" if ev.keystroke.modifiers.alt => {s.execute(crate::search_session::SearchCommand::ToggleChangedOnly,&self.set,PANEL_ROWS);},
+                "c" | "w" | "r" if ev.keystroke.modifiers.alt => {
+                    let option = match key { "c" => FindOption::Case, "w" => FindOption::Word, _ => FindOption::Regex };
+                    s.toggle_option(option);
+                    self.comparison.find_options = s.options();
+                },
                 _ => match Self::typed(ev) {
                     Some(t) => {let mut query=s.query.clone();query.push_str(&t);s.execute(crate::search_session::SearchCommand::Query(query),&self.set,PANEL_ROWS);},
                     None => return true,
@@ -2506,6 +2570,12 @@ impl Viewer {
             return true;
         }
         if self.nav_focused || self.repo.as_ref().map(|r| &r.picker).is_some_and(|p|p.shown && p.focus!=Pane::Diff) {return false;}
+        if self.comparison.find.is_none() { return false; }
+        if ev.keystroke.modifiers.alt && let Some(option) = match key { "c" => Some(FindOption::Case), "w" => Some(FindOption::Word), "r" => Some(FindOption::Regex), _ => None } {
+            self.toggle_find_option(option);
+            cx.notify();
+            return true;
+        }
         let Some(f) = self.comparison.find.as_mut() else { return false };
         match key {
             "escape" => self.comparison.find = None,
@@ -2598,10 +2668,8 @@ impl Viewer {
             }
             "enter" => {
                 let query = self.goto.take().unwrap_or_default();
-                let mut parts = query.splitn(2, ':').map(|p| p.trim().parse::<u32>().ok());
-                let (line, col) = (parts.next().flatten(), parts.next().flatten());
-                match line {
-                    Some(line) if line > 0 => {
+                match lenz_content::goto::parse_line_column(&query).map(|at| (at.line, at.column)) {
+                    Ok((line, col)) => {
                         let side = if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right, |s| s.side)};
                         self.comparison.go_to_line(side, line);
                         if self.markdown_active(){cx.notify();return true;}
@@ -2611,10 +2679,10 @@ impl Viewer {
                         let byte = text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i);
                         self.sel = Some(Selection::caret(side, Pos::new(line, byte)));
                     }
-                    _ => self.toast("Go to line: expected line or line:column".into(), cx),
+                    Err(e) => self.toast(format!("Go to line: {e}"), cx),
                 }
             }
-            k if k.len() == 1 && (k.as_bytes()[0].is_ascii_digit() || k == ":") => query.push_str(k),
+            k if k.len() == 1 && (k.as_bytes()[0].is_ascii_digit() || k == ":" || k == ",") => query.push_str(k),
             _ => {}
         }
         cx.notify();
@@ -2763,6 +2831,11 @@ impl Viewer {
         if !cmd && !alt && self.image_doc().is_some() && self.image_key(&ev.keystroke.key_char.clone().unwrap_or_else(|| key.to_string()), window, cx) {
             return;
         }
+        // Find option toggles (they say why when no find is open), never the plain letters.
+        if alt && !cmd && !shift && let Some(toggle) = match key { "c" => Some(commands::Interaction::FindCase), "w" => Some(commands::Interaction::FindWord), "r" => Some(commands::Interaction::FindRegex), _ => None } {
+            self.interaction(toggle, cx);
+            return;
+        }
         if self.markdown_key(key,cmd,shift,alt,window,cx){return;}
         let lead = self.sel.map_or(self.diff_focus, |s| s.side);
         if cmd && alt && !shift && matches!(key,"left"|"right") && self.image_doc().is_none(){
@@ -2778,7 +2851,7 @@ impl Viewer {
             "f" if cmd && shift => {
                 let (query, changed_only) =
                     self.search.as_ref().map_or((String::new(), false), |s| (s.query.clone(), s.changed_only));
-                self.search = Some(SetSearch::new(query, changed_only));
+                self.search = Some(SetSearch::new(query, changed_only, self.comparison.find_options));
             }
             "f" if cmd => self.open_find(),
             "b" if alt => self.toggle_blame(cx),
@@ -3394,7 +3467,12 @@ impl Render for Viewer {
         });
         let goto = self.goto_prompt();
         let find_bar = self.find_bar();
+        // Each toggle in the find bar: offset from the bar's left, width, and whether it is on.
+        let bar_x = self.find_bar_box().map_or(0.0, |b| b.0);
+        let find_marks: Vec<(f32, f32, bool)> = self.find_toggles().into_iter().map(|(o, (x, _, w, _))| (x - bar_x, w, self.comparison.find_options.get(o))).collect();
         let search_prompt = self.search_prompt();
+        let search_x = self.search_prompt().map_or(0.0, |p| { let [vw, _] = self.panes.viewport; self.diff_x() + (vw - self.diff_x() - (p.chars().count() as f32 * self.text_char_w() + 24.0)) / 2.0 });
+        let search_marks: Vec<(f32, f32, bool)> = self.search_toggles().into_iter().map(|(o, (x, _, w, _))| (x - search_x, w, self.search.as_ref().is_some_and(|s| s.options().get(o)))).collect();
         let panel = self.search.as_ref().filter(|s| !s.editing).map(|s| {
             let files = s.rows().iter().filter(|r| matches!(r, PanelRow::File(..))).count();
             let state = match s.ended {
@@ -3609,10 +3687,14 @@ impl Render for Viewer {
                             text(window, cx, &font, x0 + 12.0, y0 + 4.0, message, palette.fg);
                         }
                         if let Some((bar, side)) = &find_bar {
-                            let bw = (bar.chars().count() as f32 * 7.8 + 24.0).max(240.0);
+                            let bw = (bar.chars().count() as f32 * char_w + 24.0).max(240.0);
                             let px_ = if *side == Side::Left { x0 + pane_w } else { x0 + w } - bw - 8.0;
                             fill(window, px_ - 1.0, y0 + 3.0, bw + 2.0, line_h() + 10.0, palette.border);
                             fill(window, px_, y0 + 4.0, bw, line_h() + 8.0, palette.status_bg);
+                            for (dx, mw, on) in &find_marks {
+                                fill(window, px_ + dx, y0 + 5.0, *mw, line_h() + 6.0, palette.border);
+                                fill(window, px_ + dx + 1.0, y0 + 6.0, mw - 2.0, line_h() + 4.0, if *on { palette.selected_bg } else { palette.status_bg });
+                            }
                             text(window, cx, &font, px_ + 12.0, y0 + 8.0, bar, palette.fg);
                         }
                         if let Some((head, rows)) = &panel {
@@ -3632,14 +3714,18 @@ impl Render for Viewer {
                             });
                         }
                         if let Some(prompt) = &search_prompt {
-                            let bw = prompt.chars().count() as f32 * 7.8 + 24.0;
+                            let bw = prompt.chars().count() as f32 * char_w + 24.0;
                             let (bx, by) = (x0 + (w - bw) / 2.0, top + 60.0);
                             fill(window, bx - 1.0, by - 1.0, bw + 2.0, line_h() + 14.0, palette.border);
                             fill(window, bx, by, bw, line_h() + 12.0, palette.status_bg);
+                            for (dx, mw, on) in &search_marks {
+                                fill(window, bx + dx, by + 2.0, *mw, line_h() + 8.0, palette.border);
+                                fill(window, bx + dx + 1.0, by + 3.0, mw - 2.0, line_h() + 6.0, if *on { palette.selected_bg } else { palette.status_bg });
+                            }
                             text(window, cx, &font, bx + 12.0, by + 6.0, prompt, palette.fg);
                         }
                         if let Some(prompt) = &goto {
-                            let bw = prompt.chars().count() as f32 * 7.8 + 24.0;
+                            let bw = prompt.chars().count() as f32 * char_w + 24.0;
                             let (bx, by) = (x0 + (w - bw) / 2.0, top + 60.0);
                             fill(window, bx - 1.0, by - 1.0, bw + 2.0, line_h() + 14.0, palette.border);
                             fill(window, bx, by, bw, line_h() + 12.0, palette.status_bg);
@@ -4024,7 +4110,7 @@ mod tests {
     fn long_line_find_highlights_stop_at_the_displayed_prefix() {
         let raw = vec!["e ".repeat(LONG_LINE * 10)];
         let rows = [Row { y: 0.0, content: Content::Line(0), tint: None, inline: Vec::new() }];
-        let found = find::in_lines(&raw, "e");
+        let found = find::in_lines(&raw, &lenz_content::find::Matcher::new(&lenz_content::find::Query { text: "e".into(), ..Default::default() }).unwrap());
         assert_eq!(visible_find_hits(&found, &rows, &raw).len(), LONG_LINE / 2);
         let painted = resolve(&theme::DARCULA, &rows, &raw, None, None, &found);
         assert_eq!(painted[0].line.as_ref().unwrap().bg.len(), LONG_LINE / 2);

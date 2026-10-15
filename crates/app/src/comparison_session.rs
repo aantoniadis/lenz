@@ -30,6 +30,8 @@ pub struct ComparisonSession {
     pub(crate) collapse: bool,
     pub(crate) press_again: PressAgain,
     pub(crate) find: Option<Find>,
+    /// Case, whole word, regex: this window's find options (comparison find, merge find, Change Set search).
+    pub find_options: lenz_content::find::FindOptions,
     pub(crate) generation: u64,
     pub(crate) work_id: Arc<()>,
     pub(crate) diffed: u64,
@@ -48,7 +50,7 @@ pub struct ComparisonSession {
 
 impl ComparisonSession {
     pub fn new(view: View, options: Options) -> Self {
-        Self { current: 0, view, options, collapse: true, press_again: PressAgain::default(), find: None,
+        Self { current: 0, view, options, collapse: true, press_again: PressAgain::default(), find: None, find_options: Default::default(),
             generation: 0, work_id: Arc::new(()), diffed: 0, refining: false, budget: Budget::default(),
             #[cfg(feature="gui")]
             cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None }
@@ -308,9 +310,17 @@ impl ComparisonSession {
         if let Some((options,hashes,saved,_))=self.positions.get(&self.current) && *options==self.options && *hashes==[crate::moves::fingerprint(doc.text(Side::Left)),crate::moves::fingerprint(doc.text(Side::Right))]{self.view.restore_presentation(saved);}
     }
     pub fn search(&mut self, doc: &TextDocument, query: String, side: Side, from: Pos) -> Option<(u32, std::ops::Range<usize>)> {
-        self.find = Some(Find::new(query, side, doc.lines_on(side), from));
+        self.find = Some(Find::new(query, self.find_options, side, doc.lines_on(side), from));
         self.anchor_find();
         self.find.as_ref().and_then(|f| f.at.map(|i| f.hits[i].clone()))
+    }
+    /// Flip one find option and re-run the open find with it, from its current match.
+    pub fn toggle_find_option(&mut self, doc: &TextDocument, option: lenz_content::find::FindOption) -> Option<(u32, std::ops::Range<usize>)> {
+        self.find_options = self.find_options.toggled(option);
+        let f = self.find.as_ref()?;
+        let from = f.at.and_then(|i| f.hits.get(i)).map_or(Pos::new(0, 0), |(l, r)| Pos::new(*l, r.start));
+        let (query, side) = (f.query.clone(), f.side);
+        self.search(doc, query, side, from)
     }
     pub fn search_step(&mut self, forward: bool) -> Option<(Side, u32, std::ops::Range<usize>, bool)> {
         let find = self.find.as_mut()?;

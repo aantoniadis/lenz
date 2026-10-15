@@ -35,6 +35,7 @@ pub struct Metrics<'a> {
 pub struct TextRow {
     /// Row offset from the pane's top, in rows (fractional while scrolling).
     pub y: f32,
+    /// 1-based; 0 draws no number (a soft-wrapped line's continuation row).
     pub number: u32,
     pub text: String,
     pub fg: Vec<(Range<usize>, u32)>,
@@ -152,7 +153,9 @@ pub fn colored_text(
 #[allow(clippy::too_many_arguments)]
 pub fn paint_row(window: &mut Window, cx: &mut App, m: Metrics, palette: &Palette, bounds: Bounds<Pixels>, x: f32, w: f32, hscroll: f32, row: &TextRow) {
     let y = f32::from(bounds.origin.y) + row.y * m.line_h;
-    text(window, cx, m, x + 6.0, y, &format!("{:>6}", row.number), palette.num_fg);
+    if row.number > 0 {
+        text(window, cx, m, x + 6.0, y, &format!("{:>6}", row.number), palette.num_fg); // 0: a wrapped line's next row
+    }
     window.with_content_mask(Some(clip(bounds, x + m.num_w + 4.0, w - m.num_w - 4.0)), |window| {
         let tx = text_x(m, x, hscroll);
         let bg: Vec<_> = row.selected.iter().map(|r| (r.clone(), palette.sel_bg)).chain(row.bg.iter().cloned()).collect();

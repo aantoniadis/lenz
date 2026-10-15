@@ -12,7 +12,7 @@ impl Viewer {
         let markdown=self.comparison.presentation_disabled(crate::markdown::PresentationMode::Rendered,self.doc().map(|d|&d.text))!=Some("Not a Markdown comparison");
         Scope{surface,unified:self.comparison.view.unified(),repository:self.repo.is_some(),focused:self.layout.focused(self.repo.as_ref()),pr_tab:self.repo.as_ref().and_then(|r|r.pr.as_ref()).and_then(|p|p.details()).map(|d|d.tab),pr:self.repo.as_ref().is_some_and(|r|r.pr.is_some()),image:self.image_doc().is_some(),markdown,
               options:self.comparison.options,scroll:self.comparison.view.mode(),presentation:self.comparison.markdown_mode(),
-              context_hidden:self.comparison.collapse,blame:self.blame_on,image_mode:self.iview.state().mode(),markdown_layout:self.comparison.markdown_layout()}
+              context_hidden:self.comparison.collapse,blame:self.blame_on,image_mode:self.iview.state().mode(),markdown_layout:self.comparison.markdown_layout(),find:self.find_open().then_some(self.comparison.find_options)}
     }
 
     pub(super) fn open_palette(&mut self,cx:&mut Context<Self>){

@@ -270,7 +270,7 @@ def repository_workflow(app, root, lines, rounds):
             if sample['rss_mib'] is not None:
                 workflow.metrics.setdefault('search-stress-rss', []).append(sample['rss_mib'])
         workflow.menu('Find in Change Set', 'Find in Change Set:')
-        workflow.key(b'\x1bc', 'changed lines only: on')
+        workflow.key(b'\x1bo', 'changed lines only: on')
         workflow.key(b'needle\r', '4 matches', 'changed lines only', metric='changed-only-search')
         workflow.close_overlay()
         # Commit modal can be reopened after stress; cancelled work must not corrupt it.

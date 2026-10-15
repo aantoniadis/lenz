@@ -70,13 +70,15 @@ pub struct Scope {
     pub unified: bool,
     pub options: Options, pub scroll: ScrollMode, pub presentation: PresentationMode, pub context_hidden: bool, pub blame: bool,
     pub image_mode: crate::image_session::Mode, pub markdown_layout: MarkdownLayout,
+    /// The find options while a find or Change Set search input is open (`None`: none is).
+    pub find: Option<lenz_content::find::FindOptions>,
 }
 impl Scope {
     /// A plain text comparison with default options.
     pub fn comparison() -> Self {
         Self { surface: Surface::Comparison, repository: false, pr: false, focused: false, pr_tab: None, unified: false, image: false, markdown: false, options: Options::default(),
                scroll: ScrollMode::Shared, presentation: PresentationMode::Source, context_hidden: true, blame: false,
-               image_mode: crate::image_session::Mode::TwoUp, markdown_layout: MarkdownLayout::Inline }
+               image_mode: crate::image_session::Mode::TwoUp, markdown_layout: MarkdownLayout::Inline, find: None }
     }
 }
 
@@ -137,6 +139,9 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
             let m = |act: Act, group| entry(Action::Merge(act), act.label(), group, None);
             out.extend([Act::PrevChange, Act::NextChange, Act::PrevConflict, Act::NextConflict].map(|a| m(a, G::Navigate)));
             out.extend([Act::Find, Act::NextMatch, Act::PreviousMatch, Act::NextPane, Act::ClearFind].map(|a| m(a, G::Search)));
+            let o = scope.find.unwrap_or_default();
+            out.extend([(Interaction::FindCase, "alt-c", o.case), (Interaction::FindWord, "alt-w", o.word), (Interaction::FindRegex, "alt-r", o.regex)]
+                .map(|(command, key, on)| Entry { current: on, ..i(command, G::Search, Some(key)) }));
             out.extend([Act::Undo, Act::Redo, Act::Save, Act::Done, Act::Cancel, Act::Reload].map(|a| m(a, G::Edit)));
             out.extend([Act::ResolveSimple, Act::ApplyNonConflicting, Act::AllFrom(Pick::Ours), Act::AllFrom(Pick::Theirs), Act::StartOver, Act::MarkResolved].map(|a| m(a, G::Merge)));
             out.extend([Act::ToggleBase, Act::Whitespace, Act::Scroll].map(|a| m(a, G::View)));
@@ -151,6 +156,9 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
                 i(Interaction::GoToLine, G::Navigate, Some("ctrl-g")), i(Interaction::ScrollLeft, G::Navigate, None), i(Interaction::ScrollRight, G::Navigate, None),
                 i(Interaction::Find, G::Search, Some("ctrl-f")), i(Interaction::FindSet, G::Search, Some("ctrl-shift-f")),
             ]);
+            let o = scope.find.unwrap_or_default();
+            out.extend([(Interaction::FindCase, "alt-c", o.case), (Interaction::FindWord, "alt-w", o.word), (Interaction::FindRegex, "alt-r", o.regex)]
+                .map(|(command, key, on)| Entry { current: on, ..i(command, G::Search, Some(key)) }));
             if scope.surface == Surface::VersionPicker {
                 out.extend(PickAct::ALL.iter().map(|&a| entry(Action::Pick(a), a.label(), G::Edit, None)));
             } else if !scope.image {
@@ -277,6 +285,21 @@ pub fn app_menu() -> Vec<Entry> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn find_toggles_are_listed_with_their_state_and_need_an_open_find() {
+        use lenz_content::find::FindOptions;
+        let mut scope = Scope::comparison();
+        scope.find = Some(FindOptions { case: true, ..Default::default() });
+        let rows = entries(&scope);
+        let case = rows.iter().find(|e| e.action == Action::Interaction(Interaction::FindCase)).unwrap();
+        assert!(case.current && case.label == "Find: Match Case" && case.shortcut == Some("alt-c"));
+        let word = rows.iter().find(|e| e.action == Action::Interaction(Interaction::FindWord)).unwrap();
+        assert!(!word.current);
+        let ctx = commands::InteractionContext { document: true, text: true, ..Default::default() };
+        assert_eq!(Interaction::FindWord.disabled(&ctx), Some("No find is open"));
+        assert_eq!(Interaction::FindWord.disabled(&commands::InteractionContext { find_open: true, ..ctx }), None);
+    }
+
     use super::*;
 
     fn has(entries: &[Entry], action: Action) -> bool { entries.iter().any(|e| e.action == action) }

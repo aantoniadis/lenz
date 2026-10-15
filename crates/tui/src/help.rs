@@ -9,7 +9,7 @@ pub const COMPARISON:&[Row]=&[
     ("z / x / X","Context / fold change / unfold all"),("s / w / h / i","Scroll / whitespace / highlight / ignore case"),
     ("","Navigation and search"),(": / F10 / Alt-F10","Command palette / focus toolbar"),("☰ / ⚙ / PR / ⋯","App menu / diff options / pull request / all commands"),("F6","Cycle repository, log, files and comparison"),
     ("Alt-1 / Alt-2 / Alt-3","Show / hide Files / Branches / History"),("Alt-0, Esc","Focus: the diff alone / restore the panels"),("Alt-Left / Alt-Right","Back / forward (repository views)"),("f / Ctrl-P","Find file (name:line)"),("g","Go to line or line:column"),
-    ("/ / Ctrl-F","Find in focused side"),("F3 / Shift-F3","Next / previous match"),("Ctrl-Shift-F","Find across Change Set"),
+    ("/ / Ctrl-F","Find in focused side"),("F3 / Shift-F3","Next / previous match"),("Ctrl-Shift-F","Find across Change Set (Alt-O: changed lines only)"),("Alt-C / Alt-W / Alt-R","Find options: match case / whole word / regex"),
     ("","Selection and editing"),("Click / drag","Select text; double/triple click word/line"),("Shift-arrows / Ctrl-A","Extend selection / select all"),
     ("Right click / Shift-F10","Text, file or commit actions"),("y / Ctrl-Shift-C","Copy selection via terminal OSC 52"),("Alt-Shift-Left/Right","Apply hunk to draft on left / right"),("Ctrl-Z / Ctrl-Y","Undo / redo draft edits"),("Ctrl-S","Save current draft to disk"),("Discard unsaved","Discard draft; keep saved file"),("Revert hunk","Restore selected right hunk from left into draft"),("A","Applied history and selective Undo"),
     ("","Images"),("m","Cycle 2-up, Swipe, Onion skin, Difference"),("0 / 1, + / -","Fit / actual size, zoom in / out"),("Arrows / , .","Pan / adjust opacity or split"),

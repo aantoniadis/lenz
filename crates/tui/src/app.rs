@@ -343,14 +343,24 @@ impl App {
     pub(crate) fn interaction_disabled(&self,command:commands::Interaction)->Option<&'static str>{
         let mapped=self.session.markdown_inspection_position(self.focus);
         if matches!(command,commands::Interaction::Editor|commands::Interaction::DefaultApp|commands::Interaction::InspectBlame) && let Err(reason)=mapped {return Some(reason);}
-        if matches!(command,commands::Interaction::Copy|commands::Interaction::CopyMarkdownSource) && (self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered || command==commands::Interaction::CopyMarkdownSource) {return self.session.copy_disabled(command,self.selection,self.focus);}let line=mapped.ok().flatten().map_or_else(||self.selection.filter(|s|s.side==self.focus).map_or(self.session.view().anchor_line_on(self.focus)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(reason)=self.session.copy_disabled(command,self.selection,self.focus){return Some(reason);}command.disabled(&commands::InteractionContext{document:self.session.document().is_some(),text:self.visual.image().is_none()&&self.session.document().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.selection.is_some_and(|s|!s.is_empty()),repository:self.session.change_set().is_some_and(|s|s.git_root().is_some()),annotation:self.visual.annotation(self.focus,line).is_some()})}
+        if matches!(command,commands::Interaction::Copy|commands::Interaction::CopyMarkdownSource) && (self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered || command==commands::Interaction::CopyMarkdownSource) {return self.session.copy_disabled(command,self.selection,self.focus);}let line=mapped.ok().flatten().map_or_else(||self.selection.filter(|s|s.side==self.focus).map_or(self.session.view().anchor_line_on(self.focus)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(reason)=self.session.copy_disabled(command,self.selection,self.focus){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.session.document().is_some(),text:self.visual.image().is_none()&&self.session.document().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.selection.is_some_and(|s|!s.is_empty()),repository:self.session.change_set().is_some_and(|s|s.git_root().is_some()),annotation:self.visual.annotation(self.focus,line).is_some()})}
     pub(crate) fn reload(&mut self){if let Some(repo)=&mut self.repository{repo.core.execute(lenz::repository_session::RepositoryCommand::RefreshRepository);self.session.reload_set();}else{self.session.reload();}}
-    fn open_set_search(&mut self){self.navigator.focused=false;if let Some(search)=&mut self.set_search{search.edit();}else if let Some(set)=self.session.change_set(){self.set_search=Some(crate::search::Search::open(set,false));}}
+    /// A find prompt or Change Set search input is open: the find option toggles apply to it.
+    /// The 1-based line and character column a Line prompt asks for (column 1 when none is given).
+    pub(crate) fn find_open(&self)->bool{self.prompt==Some(Prompt::Search)||self.set_search.as_ref().is_some_and(|s|s.model.editing())}
+    /// Flip one find option for the open input; the window keeps it (Change Set search shares it).
+    pub(crate) fn toggle_find_option(&mut self,option:lenz::find::FindOption){
+        if let Some(search)=self.set_search.as_mut().filter(|s|s.model.editing()){search.model.toggle_option(option);if self.session.find_options()!=search.model.options(){self.session.toggle_find_option(option);}return;}
+        self.session.toggle_find_option(option);
+        if self.prompt==Some(Prompt::Search)&&self.session.markdown_edit_disabled().is_none()&&let Some(selection)=self.session.find_selection(){self.selection=Some(selection);}
+    }
+    fn open_set_search(&mut self){self.navigator.focused=false;if let Some(search)=&mut self.set_search{search.edit();}else if let Some(set)=self.session.change_set(){self.set_search=Some(crate::search::Search::open(set,false,self.session.find_options()));}}
     pub(crate) fn interaction(&mut self,command:commands::Interaction){
         use commands::Interaction::*;
         if let Some(reason)=self.interaction_disabled(command){self.session.set_notice(reason);return;}
         match command {
             ScrollLeft|ScrollRight=>self.scroll_horizontal(self.focus,if command==ScrollLeft{-4}else{4}),
+            FindCase|FindWord|FindRegex=>{if let Some(option)=command.find_option(){self.toggle_find_option(option);}},
             Find=>self.begin(Prompt::Search),FindSet=>self.open_set_search(),GoToLine=>self.begin(Prompt::Line),
             Copy|CopyMarkdownSource|CopyPath|CopyReference|CopyLeftChange|CopyRightChange=>{match self.session.copy_text(command,self.selection,self.focus){Ok(text)=>self.copy(&text),Err(reason)=>self.session.set_notice(reason)}},SelectAll=>{if self.session.markdown_loading(){if let Some(reason)=self.session.markdown_edit_disabled(){self.session.set_notice(reason);}}else if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered{self.markdown_select_all();}else if let Some(doc)=self.session.document(){self.selection=Some(lenz::selection::Selection::all(self.focus,doc.lines_on(self.focus)));}},
             Editor|DefaultApp=>self.open_editor(command==DefaultApp),Blame=>{self.blame[self.focus as usize]= !self.blame[self.focus as usize];self.visual.toggle_blame(self.focus);},
@@ -622,7 +632,7 @@ impl App {
             return true;
         }
         // Search entry is modal: a focused File Navigator must not consume its Enter or clicks.
-        if self.prompt.is_none() && self.repository.as_ref().is_none_or(|r|!r.modal()) && let Some(search)=&mut self.set_search && search.model.editing() && (search.handle(event.clone()) || matches!(event,Event::Mouse(_) | Event::Key(_) | Event::Paste(_))){return true;}
+        if self.prompt.is_none() && self.repository.as_ref().is_none_or(|r|!r.modal()) && let Some(search)=&mut self.set_search && search.model.editing() && (search.handle(event.clone()) || matches!(event,Event::Mouse(_) | Event::Key(_) | Event::Paste(_))){self.session.set_find_options(search.model.options());return true;}
         if self.prompt.is_none() && self.repository.as_ref().is_none_or(|r|!r.modal()) && !self.visual.commit_visible(){
             if matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers.contains(KeyModifiers::ALT)&&k.code==KeyCode::Char('1')){self.layout_command(lenz::layout::LayoutCommand::ToggleFiles);return true;}
             if let Event::Key(k)=event&&k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::ALT&&let KeyCode::Char(c @ ('0'|'2'|'3'))=k.code {
@@ -753,12 +763,16 @@ impl App {
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 if control && matches!(key.code, KeyCode::Char('c' | 'q')) { self.request_quit(); return true; }
                 if let Some(prompt) = self.prompt {
+                    if prompt == Prompt::Search && key.modifiers.contains(KeyModifiers::ALT) && let KeyCode::Char(c @ ('c' | 'w' | 'r')) = key.code {
+                        self.toggle_find_option(match c { 'c' => lenz::find::FindOption::Case, 'w' => lenz::find::FindOption::Word, _ => lenz::find::FindOption::Regex });
+                        return true;
+                    }
                     match key.code {
                         KeyCode::Esc => { self.prompt = None; if prompt == Prompt::Search { self.session.clear_find(); } }
                         KeyCode::Enter => {
                             match prompt {
                                 Prompt::Search => self.search_input(),
-                                Prompt::Line=>{let mut parts=self.input.splitn(2,':');if let Some(line)=parts.next().and_then(|n|n.parse::<u32>().ok()).filter(|n|*n>0){self.session.go_to_line(self.focus,line);let raw=line.saturating_sub(1);let col=parts.next().and_then(|n|n.parse::<usize>().ok()).unwrap_or(1).saturating_sub(1);if self.session.markdown_edit_disabled().is_none() && let Some(text)=self.session.document().and_then(|d|d.lines_on(self.focus).get(raw as usize)){let byte=text.char_indices().nth(col).map_or(text.len(),|(i,_)|i);self.selection=Some(lenz::selection::Selection::caret(self.focus,lenz::selection::Pos::new(raw,byte)));}}},
+                                Prompt::Line=>{match lenz_line(&self.input){Err(e)=>self.session.set_notice(e.to_string()),Ok((line,col))=>{self.session.go_to_line(self.focus,line);let raw=line.saturating_sub(1);let col=col.saturating_sub(1);if self.session.markdown_edit_disabled().is_none() && let Some(text)=self.session.document().and_then(|d|d.lines_on(self.focus).get(raw as usize)){let byte=text.char_indices().nth(col).map_or(text.len(),|(i,_)|i);self.selection=Some(lenz::selection::Selection::caret(self.focus,lenz::selection::Pos::new(raw,byte)));}}}},
                                 Prompt::Files => {
                                     if let Some(&index) = self.files().get(self.selected) {
                                         self.session.open_file(index);
@@ -795,7 +809,12 @@ impl App {
                     return true;
                 }
                 let page = (self.session.view().viewport_rows() - 2.0).max(1.0);
+                let alt=key.modifiers.contains(KeyModifiers::ALT);
                 match key.code {
+                    // Find option toggles (they say why when no find is open), never the plain letters.
+                    KeyCode::Char('c') if alt => self.interaction(commands::Interaction::FindCase),
+                    KeyCode::Char('w') if alt => self.interaction(commands::Interaction::FindWord),
+                    KeyCode::Char('r') if alt => self.interaction(commands::Interaction::FindRegex),
                     KeyCode::Char('q') => self.request_quit(),
                     KeyCode::Char('/') => self.interaction(commands::Interaction::Find),
                     KeyCode::Char('f') if control => self.interaction(commands::Interaction::Find),
@@ -1037,7 +1056,7 @@ mod tests {
         let before=app.navigator.area;let current=app.session.current();
         pane_mouse(&mut app,MouseEventKind::Down(MouseButton::Left),before.right()-1,before.y+2);pane_mouse(&mut app,MouseEventKind::Drag(MouseButton::Left),44,before.y+2);pane_mouse(&mut app,MouseEventKind::Up(MouseButton::Left),44,before.y+2);
         screen(&mut app,160,40);assert_eq!(app.navigator.area.width,45);assert_eq!(app.session.current(),current);
-        let set=app.session.change_set().unwrap();let mut search=crate::search::Search::open(set.clone(),false);
+        let set=app.session.change_set().unwrap();let mut search=crate::search::Search::open(set.clone(),false,Default::default());
         search.model.execute(lenz::search_session::SearchCommand::Query("beta".into()),&set,6.0);search.model.execute(lenz::search_session::SearchCommand::Start,&set,6.0);app.set_search=Some(search);ready(&mut app);screen(&mut app,160,40);
         let grip=app.set_search.as_ref().unwrap().resizer.grips[0];let initial_height=app.diff_area.height;
         pane_mouse(&mut app,MouseEventKind::Down(MouseButton::Left),grip.area.x+2,grip.area.y);pane_mouse(&mut app,MouseEventKind::Drag(MouseButton::Left),grip.area.x+2,grip.area.y-5);pane_mouse(&mut app,MouseEventKind::Up(MouseButton::Left),grip.area.x+2,grip.area.y-5);
@@ -1165,6 +1184,58 @@ mod tests {
         assert!(!app.session.view().folded(0));
     }
 
+    fn alt(app: &mut App, ch: char) { app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT))); }
+
+    #[test]
+    fn find_prompt_shows_and_toggles_options() {
+        let (_dir, mut app) = pair("x\n", "Foo foo food\n");
+        key(&mut app, KeyCode::Char('/'));
+        for ch in "foo".chars() { key(&mut app, KeyCode::Char(ch)); }
+        assert_eq!(app.session.find().unwrap().hits().len(), 3);
+        alt(&mut app, 'c');
+        assert_eq!(app.session.find().unwrap().hits(), [(0, 4..7), (0, 8..11)]);
+        alt(&mut app, 'w');
+        assert_eq!(app.session.find().unwrap().hits(), [(0, 4..7)], "the same matches as the window's find bar");
+        assert!(crate::render::status_text(&app).starts_with("Find [Aa W] foo"), "{}", crate::render::status_text(&app));
+        alt(&mut app, 'r');
+        key(&mut app, KeyCode::Char('('));
+        assert!(crate::render::status_text(&app).ends_with("unclosed group"), "{}", crate::render::status_text(&app));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.prompt.is_none(), "a lone Escape still closes the prompt");
+        let ws = app.session.options().whitespace;
+        key(&mut app, KeyCode::Char('w'));
+        ready(&mut app);
+        assert_ne!(app.session.options().whitespace, ws, "a plain w after Escape is the normal key");
+        assert!(app.session.find_options().word && app.session.find_options().regex, "options stay for the window");
+    }
+
+    #[test]
+    fn go_to_line_reports_bad_input() {
+        let (_dir, mut app) = pair("a\nb\n", "a\nc\n");
+        key(&mut app, KeyCode::Char('g'));
+        for ch in "x1".chars() { key(&mut app, KeyCode::Char(ch)); }
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.session.notice(), Some("expected line or line:column"));
+        key(&mut app, KeyCode::Char('g'));
+        for ch in "2,1".chars() { key(&mut app, KeyCode::Char(ch)); }
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.selection.map(|s| s.head.line), Some(1));
+    }
+
+    #[test]
+    fn change_set_search_takes_options_and_changed_only_is_alt_o() {
+        let (_dir, mut app) = pair("needle Needle\n", "needle\n");
+        app.interaction(commands::Interaction::FindSet);
+        for ch in "Needle".chars() { key(&mut app, KeyCode::Char(ch)); }
+        alt(&mut app, 'c');
+        let search = app.set_search.as_ref().unwrap();
+        assert!(search.model.options().case && app.session.find_options().case);
+        assert!(search.prompt_text().contains("[Aa]"), "{}", search.prompt_text());
+        alt(&mut app, 'o');
+        assert!(app.set_search.as_ref().unwrap().model.changed_only());
+        assert!(app.set_search.as_ref().unwrap().prompt_text().contains("Alt-O changed lines only: on"));
+    }
+
     #[test]
     fn search_and_options_use_shared_behavior() {
         let (_dir, mut app) = pair("café\nother\ncafé\n", "CAFÉ\nother\nCAFÉ\n");
@@ -1198,7 +1269,7 @@ mod tests {
     fn ordinary_find_navigation_takes_priority_over_change_set_search() {
         let (_dir, mut app) = pair("word\nword\n", "word\nword\nword\n");
         let set=app.session.change_set().unwrap();
-        let mut search=crate::search::Search::open(set.clone(),false);
+        let mut search=crate::search::Search::open(set.clone(),false,Default::default());
         search.model.execute(lenz::search_session::SearchCommand::Query("word".into()),&set,6.0);
         search.model.execute(lenz::search_session::SearchCommand::Start,&set,6.0);
         for _ in 0..1000 {search.poll();if !search.busy(){break;}std::thread::sleep(std::time::Duration::from_millis(1));}
@@ -1402,3 +1473,8 @@ mod tests {
 #[cfg(test)]
 #[path = "chrome_tests.rs"]
 mod chrome_tests;
+
+/// The line and 1-based character column a Line prompt asks for (column 1 when none is given).
+fn lenz_line(input: &str) -> Result<(u32, usize), lenz::goto::GotoError> {
+    lenz::goto::parse_line_column(input).map(|at| (at.line, at.column.unwrap_or(1) as usize))
+}

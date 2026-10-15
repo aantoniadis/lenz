@@ -84,10 +84,8 @@ pub use lenz_content::fuzzy::{rank, score};
 
 /// Split a switcher query like `driver:120` into the file part and a 1-based line.
 pub fn query_line(query: &str) -> (&str, Option<u32>) {
-    match query.rsplit_once(':') {
-        Some((file, line)) if !line.is_empty() && line.chars().all(|c| c.is_ascii_digit()) => (file, line.parse().ok()),
-        _ => (query, None),
-    }
+    let (name, at) = lenz_content::goto::split_path_line(query);
+    (name, at.map(|a| a.line))
 }
 
 /// IntelliJ's "press again to go to the next file" at the edge of a file's Change Blocks.
@@ -215,6 +213,7 @@ mod tests {
         assert_eq!(query_line("driver"), ("driver", None));
         assert_eq!(query_line("c:/odd"), ("c:/odd", None));
         assert_eq!(query_line("driver:"), ("driver:", None));
+        assert_eq!(query_line("driver:120:4"), ("driver", Some(120)));
     }
 
     #[test]

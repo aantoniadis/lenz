@@ -1095,7 +1095,7 @@ fn gui_result_panel_movement_does_not_move_the_diff_caret() {
     click(&mut cx, &f, x, y);
     let caret = f.viewer.read_with(&cx, |v, _| v.sel.unwrap());
     f.viewer.update(&mut cx, |v, _| {
-        let mut search = SetSearch::new(String::new(), false);
+        let mut search = SetSearch::new(String::new(), false, Default::default());
         search.editing = false;
         v.search = Some(search);
     });
@@ -2554,7 +2554,7 @@ fn gui_find_modals_cancel_existing_pane_drag(cx: &mut TestAppContext) {
     viewer.update(cx,|v,cx| {
         let widths=v.merge_widths(v.panes.viewport[0]-v.diff_x());
         let edge=v.diff_x()+widths[0]+GUTTER_W/2.0;let y=v.top()-hdr_h()/2.0;
-        assert!(v.begin_resize(edge,y));v.merge.as_mut().unwrap().begin_find();
+        assert!(v.begin_resize(edge,y));v.merge.as_mut().unwrap().begin_find(Default::default());
         assert!(!v.resize_move(edge+80.,y,true,cx));assert!(v.panes.drag.is_none());
         assert!(!v.begin_resize(edge,y));
     });
@@ -4233,4 +4233,101 @@ fn gui_pr_tabs_copy_text_hide_files_keep_their_place_and_sit_in_the_middle(cx:&m
     f.viewer.read_with(cx,|v,_|{let pr=v.repo.as_ref().unwrap().pr.as_ref().unwrap();assert_eq!(pr.shown_commit,None);assert_eq!(pr.details().map(|d|d.tab),Some(DetailsTab::Commits));});
     paint(cx);
     assert_eq!(f.viewer.read_with(cx,|v,_|v.pr_dialog.as_ref().unwrap().scroll),scrolled,"the list as it was");
+}
+
+fn type_keys(cx: &mut TestAppContext, f: &Fixture, text: &str) {
+    for ch in text.chars() { key(cx, f, &ch.to_string(), false, false, false); }
+}
+fn find_hits(cx: &mut TestAppContext, f: &Fixture) -> Vec<(u32, std::ops::Range<usize>)> {
+    f.viewer.read_with(cx, |v, _| v.comparison.find.as_ref().map(|x| x.hits.clone()).unwrap_or_default())
+}
+
+#[gpui::test]
+fn gui_find_options_toggle_by_key_and_click_and_report_bad_expressions(cx: &mut TestAppContext) {
+    let f = fixture(cx, "Foo foo food\n", "x\n");
+    f.viewer.update(cx, |v, _| v.diff_focus = Side::Left);
+    key(cx, &f, "f", true, false, false);
+    type_keys(cx, &f, "foo");
+    assert_eq!(find_hits(cx, &f).len(), 3);
+    key(cx, &f, "c", false, false, true);
+    assert_eq!(find_hits(cx, &f), [(0, 4..7), (0, 8..11)]);
+    key(cx, &f, "w", false, false, true);
+    assert_eq!(find_hits(cx, &f), [(0, 4..7)]);
+    // A click on the regex toggle, then an unclosed group.
+    let (_, (x, y, w, h)) = f.viewer.read_with(cx, |v, _| v.find_toggles()[2]);
+    click(cx, &f, x + w / 2.0, y + h / 2.0);
+    assert!(f.viewer.read_with(cx, |v, _| v.comparison.find_options.regex));
+    key(cx, &f, "backspace", false, false, false);
+    key(cx, &f, "backspace", false, false, false);
+    key(cx, &f, "backspace", false, false, false);
+    key(cx, &f, "(", false, false, false);
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.find.as_ref().and_then(|x| x.error().map(String::from))), Some("unclosed group".into()));
+    assert!(f.viewer.read_with(cx, |v, _| v.find_bar().unwrap().0.ends_with("unclosed group")), "the bar shows the reason instead of the count");
+    key(cx, &f, "f3", false, false, false);
+    assert!(find_hits(cx, &f).is_empty());
+}
+
+#[gpui::test]
+fn gui_change_set_search_takes_options_and_changed_only_moved_to_alt_o(cx: &mut TestAppContext) {
+    let f = fixture(cx, "needle Needle\n", "needle\n");
+    key(cx, &f, "f", true, true, false);
+    type_keys(cx, &f, "Needle");
+    key(cx, &f, "c", false, false, true);
+    assert!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().options().case && v.comparison.find_options.case));
+    assert!(f.viewer.read_with(cx, |v, _| v.search_prompt().unwrap().contains("alt-o changed lines only")));
+    let (_, (x, y, w, h)) = f.viewer.read_with(cx, |v, _| v.search_toggles()[1]);
+    click(cx, &f, x + w / 2.0, y + h / 2.0);
+    assert!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().options().word), "a click on W");
+    click(cx, &f, x + w / 2.0, y + h / 2.0);
+    key(cx, &f, "o", false, false, true);
+    assert!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().changed_only));
+    key(cx, &f, "o", false, false, true);
+    key(cx, &f, "enter", false, false, false);
+    let until = Instant::now() + std::time::Duration::from_secs(10);
+    while !f.viewer.read_with(cx, |v, _| v.search.as_ref().is_some_and(|s| s.ended.is_some())) {
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.executor().run_until_parked();
+        assert!(Instant::now() < until, "search did not finish");
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().hits.len()), 1, "case-sensitive: only Needle");
+}
+
+#[gpui::test]
+fn gui_go_to_accepts_a_comma_column(cx: &mut TestAppContext) {
+    let f = fixture(cx, "a\nbcdef\n", "a\nbcdeX\n");
+    key(cx, &f, "g", true, false, false);
+    type_keys(cx, &f, "2,3");
+    key(cx, &f, "enter", false, false, false);
+    let s = f.viewer.read_with(cx, |v, _| v.sel.unwrap());
+    assert_eq!((s.head.line, s.head.col), (1, 2));
+}
+
+#[gpui::test]
+fn gui_find_toggle_boxes_follow_the_measured_character_width(cx: &mut TestAppContext) {
+    let f = fixture(cx, "Foo foo food\n", "x\n");
+    f.viewer.update(cx, |v, _| { v.diff_focus = Side::Left; v.char_w = 9.6; }); // a 16 px font
+    key(cx, &f, "f", true, false, false);
+    type_keys(cx, &f, "a long query here x");
+    let (bar_x, lead, toggles) = f.viewer.read_with(cx, |v, _| {
+        let lead = "Find: ".chars().count() + v.comparison.find.as_ref().unwrap().query.chars().count() + "▏  ".chars().count();
+        (v.find_bar_box().unwrap().0, lead, v.find_toggles())
+    });
+    // "Aa" is drawn at the bar's text start plus `lead` characters of the real width.
+    let aa = bar_x + 12.0 + (lead as f32 + 1.0) * 9.6;
+    let (_, (x, _, w, _)) = toggles[0];
+    assert!((x..x + w).contains(&aa), "the Aa box {x}..{} covers the drawn Aa at {aa}", x + w);
+}
+
+#[gpui::test]
+fn gui_an_open_dialog_takes_clicks_over_the_find_toggles(cx: &mut TestAppContext) {
+    let f = fixture(cx, "Foo foo food\n", "x\n");
+    f.viewer.update(cx, |v, _| v.diff_focus = Side::Left);
+    key(cx, &f, "f", true, false, false);
+    type_keys(cx, &f, "foo");
+    let (_, (x, y, w, h)) = f.viewer.read_with(cx, |v, _| v.find_toggles()[0]);
+    f.viewer.update(cx, |v, _| v.help = true); // as `?` with the Files list focused opens it
+    assert!(f.viewer.read_with(cx, |v, _| v.modal() == Some(Modal::Help)), "help is open over the find bar");
+    click(cx, &f, x + w / 2.0, y + h / 2.0);
+    assert!(!f.viewer.read_with(cx, |v, _| v.comparison.find_options.case), "the click went to the help dialog");
 }

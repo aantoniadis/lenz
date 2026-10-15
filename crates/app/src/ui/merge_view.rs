@@ -5,6 +5,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use super::*;
+use lenz_content::find::FindOption;
 use crate::merge::{BlockState, Pick};
 
 /// The process exit code under `git mergetool`: 0 only after Done, so closing or cancelling makes git restore
@@ -445,6 +446,11 @@ impl Viewer {
             .current
             .or_else(|| (0..s.m.blocks().len()).find(|&i| s.m.state(i) == BlockState::Unresolved));
         let mergetool = s.mergetool;
+        if s.ask.is_none() && s.find_editing() && alt && !ctrl && let Some(option) = match key { "c" => Some(FindOption::Case), "w" => Some(FindOption::Word), "r" => Some(FindOption::Regex), _ => None } {
+            self.comparison.find_options = s.toggle_find_option(option);
+            cx.notify();
+            return true;
+        }
         if s.ask.is_none() && s.find_editing() {
             match (key, ctrl) {
                 ("escape", _) => {
@@ -475,7 +481,7 @@ impl Viewer {
         }
         if (key == "/" && !ctrl && !alt) || (key == "f" && ctrl && !shift) {
             self.comparison.find = None;
-            s.begin_find();
+            s.begin_find(self.comparison.find_options);
             cx.notify();
             return true;
         }

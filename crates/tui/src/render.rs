@@ -218,10 +218,19 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     }).filter(|r|r.width==12).unwrap_or_default();
 }
 
+/// The find options that are on, as " [Aa W .*]" (empty when none is).
+pub(crate) fn option_marks(o: lenz::find::FindOptions) -> String {
+    let marks: Vec<&str> = [(o.case, "Aa"), (o.word, "W"), (o.regex, ".*")].into_iter().filter(|(on, _)| *on).map(|(_, m)| m).collect();
+    if marks.is_empty() { String::new() } else { format!(" [{}]", marks.join(" ")) }
+}
+
 pub(crate) fn status_text(app:&App)->String {
     let rendered=app.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
     let status = if let Some(prompt) = app.prompt.filter(|p| matches!(p, Prompt::Search | Prompt::Line)) {
-        format!("{}{}", if prompt == Prompt::Search { "Find: " } else { "Line: " }, app.input)
+        if prompt == Prompt::Search {
+            let tail = app.session.find().map_or(String::new(), |f| f.error().map_or_else(|| format!("{}/{}", f.at().map_or(0, |i| i + 1), f.hits().len()), str::to_owned));
+            format!("Find{} {}  {tail}", option_marks(app.session.find_options()), app.input)
+        } else { format!("Line: {}", app.input) }
     } else if let Some(notice) = app.session.notice().or_else(||app.visual.notice()) { notice.into() }
     else if let Some(find) = app.session.find() { format!("Find: {}  {}/{}", find.query(), find.at().map_or(0, |i| i + 1), find.hits().len()) }
     else if !app.session.applied().is_empty(){format!("{} applied records · A history / Undo · Ctrl-Z undo · Alt-Shift-←/→ apply",app.session.applied().len())}

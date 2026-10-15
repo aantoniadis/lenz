@@ -91,6 +91,8 @@ type SyntaxWork = (
 pub struct MergeSession {
     pub m: MergeResult,
     find: Option<MergeFind>,
+    /// Case, whole word, regex for merge find (seeded from the window when find starts).
+    find_options: lenz_content::find::FindOptions,
     focus_pane: usize,
     /// Ours ⟷ Result and Result ⟷ Theirs.
     pub views: [View; 2],
@@ -476,6 +478,7 @@ impl MergeSession {
         let mut s = MergeSession {
             m: o.result,
             find: None,
+            find_options: Default::default(),
             focus_pane: 1,
             views,
             labels: o.labels,
@@ -1053,7 +1056,7 @@ impl MergeSession {
                     cross = (!s.mergetool).then_some(act == Act::NextConflict);
                 }
             }
-            Act::Find => s.begin_find(),
+            Act::Find => s.begin_find(s.find_options),
             Act::NextMatch => {
                 if !s.find_step(true) {
                     toast = Some("No find matches".into());
@@ -1441,19 +1444,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn merge_find_takes_and_returns_the_window_options() {
+        use lenz_content::find::{FindOption, FindOptions};
+        let (_dir, mut s) = state("base (x\n", "ours (x\n", "theirs (x\n");
+        s.begin_find(FindOptions { case: true, ..Default::default() });
+        s.type_find("(");
+        assert_eq!(s.find_error(), None, "literal");
+        assert_eq!(s.toggle_find_option(FindOption::Regex), FindOptions { case: true, regex: true, word: false });
+        assert_eq!(s.find_error(), Some("unclosed group"));
+        assert_eq!(s.find_count(), 0);
+        assert_eq!(s.find_options(), FindOptions { case: true, regex: true, word: false });
+        let notice = s.find_notice().unwrap();
+        assert!(notice.starts_with("Find Result [Aa .*]: (") && notice.contains("· unclosed group ·"), "{notice}");
+    }
+
+    #[test]
     fn merge_find_tracks_result_choices_unicode_and_base_without_copying_documents() {
         let (_dir, mut s) = state(
             "base\nÄrger base\n",
             "ours\nÄrger ours\n",
             "theirs\nÄrger theirs\n",
         );
-        s.begin_find();
+        s.begin_find(Default::default());
         s.type_find("ärGER");
         assert_eq!(s.find_pane(), 1);
         assert_eq!(s.find_ranges(1, 1), vec![0..6]);
         s.finish_find();
         s.execute(Act::AllFrom(Pick::Theirs));
-        s.begin_find();
+        s.begin_find(Default::default());
         s.clear_find_query();
         s.type_find("theirs");
         assert_eq!(s.find_count(), 2);
@@ -2032,16 +2050,31 @@ impl MergeSession {
     pub fn find_editing(&self) -> bool {
         self.find.as_ref().is_some_and(|f| f.editing)
     }
+    pub fn find_options(&self) -> lenz_content::find::FindOptions {
+        self.find_options
+    }
+    /// Why merge find's query cannot be matched, if it cannot.
+    pub fn find_error(&self) -> Option<&str> {
+        self.find.as_ref().and_then(|f| f.search.error())
+    }
+    /// Flip one find option and re-run merge find; returns the options for the window to keep.
+    pub fn toggle_find_option(&mut self, option: lenz_content::find::FindOption) -> lenz_content::find::FindOptions {
+        self.find_options = self.find_options.toggled(option);
+        self.refind();
+        self.find_options
+    }
     pub fn find_count(&self) -> usize {
         self.find.as_ref().map_or(0, |f| f.search.hits.len())
     }
-    pub fn begin_find(&mut self) {
+    pub fn begin_find(&mut self, options: lenz_content::find::FindOptions) {
+        self.find_options = options;
         if let Some(f) = &mut self.find {
             f.editing = true;
         } else {
             self.find = Some(MergeFind {
                 search: crate::find::Find::new(
                     String::new(),
+                    options,
                     Side::Right,
                     &[],
                     crate::selection::Pos::new(0, 0),
@@ -2114,9 +2147,10 @@ impl MergeSession {
             _ => self.m.side(Some(Pick::Theirs)),
         };
         let from = crate::selection::Pos::new(0, 0);
-        let (hits, at) = crate::find::Find::search(lines, &query, from);
+        let query = lenz_content::find::Query { text: query, options: self.find_options };
+        let found = crate::find::Find::search(lines, &query, from);
         if let Some(f) = &mut self.find {
-            (f.search.hits, f.search.at) = (hits, at);
+            (f.search.hits, f.search.at, f.search.error) = match found { Ok((hits, at)) => (hits, at, None), Err(e) => (Vec::new(), None, Some(e)) };
         }
         self.show_find_hit();
     }
@@ -2182,11 +2216,14 @@ impl MergeSession {
             _ => "Theirs",
         };
         let at = f.search.at.map_or(0, |i| i + 1);
+        let o = self.find_options;
+        let marks: Vec<&str> = [(o.case, "Aa"), (o.word, "W"), (o.regex, ".*")].into_iter().filter(|(on, _)| *on).map(|(_, m)| m).collect();
+        let marks = if marks.is_empty() { String::new() } else { format!(" [{}]", marks.join(" ")) };
+        let count = f.search.error().map_or_else(|| format!("{at}/{} matches", f.search.hits.len()), str::to_owned);
         Some(format!(
-            "Find {pane}: {}{} · {at}/{} matches · Tab pane · F3 next · Esc clear",
+            "Find {pane}{marks}: {}{} · {count} · Tab pane · F3 next · Alt+C/W/R options · Esc clear",
             f.search.query,
             if f.editing { "▎" } else { "" },
-            f.search.hits.len()
         ))
     }
 }

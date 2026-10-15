@@ -13,6 +13,8 @@ perf-probe = []
 [dependencies]
 # Zero-width detection for the combining-mark cap (src/display.rs).
 unicode-width = "0.2"
+# In-document find (src/find.rs); already linked through tree-sitter.
+regex = "1.13"
 # Decoding (src/encoding.rs).
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"

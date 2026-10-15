@@ -13,6 +13,8 @@ pub mod conflicts;
 pub use lenz_content::{encoding, highlight};
 pub mod document;
 pub mod find;
+/// Go-to-line input, from the shared content crate.
+pub use lenz_content::goto;
 pub mod git;
 #[cfg(all(target_os = "macos", feature = "gui"))]
 pub mod dock_icon;

@@ -43,7 +43,7 @@ impl Viewer {
         if cmd && !alt && key == "f" && shift {
             if log {self.repo.as_mut().map(|r| &mut r.picker).unwrap().filter_editing=false;}
             let (query, changed) = self.search.as_ref().map_or((String::new(), false), |s|(s.query.clone(),s.changed_only));
-            self.search = Some(SetSearch::new(query, changed));
+            self.search = Some(SetSearch::new(query, changed, self.comparison.find_options));
         } else if cmd && !alt && key == "f" {
             if log {self.repo.as_mut().map(|r| &mut r.picker).unwrap().filter_editing=false;}
             // A diff find bar from a different pane must not steal list typing.
