@@ -46,6 +46,7 @@ cargo build --locked --release -p lenz-tui
 | Save | Ctrl-S (in the Sources pane of a repository view Ctrl-S toggles the sidebar; use the toolbar or palette) |
 | Applied history / selective undo | A; choose a record and Enter, or click it |
 | Blame / commit details | b / B; click an annotation |
+| Sticky scroll | command menu “View: Sticky Scroll”, `[view] sticky_scroll` in settings; click a pinned line to jump |
 | Editor / default application / reload | o / O / F5 |
 | Independent views | F8 / Shift-F8 switch; q closes the current view |
 

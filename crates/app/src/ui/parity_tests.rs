@@ -4331,3 +4331,70 @@ fn gui_an_open_dialog_takes_clicks_over_the_find_toggles(cx: &mut TestAppContext
     click(cx, &f, x + w / 2.0, y + h / 2.0);
     assert!(!f.viewer.read_with(cx, |v, _| v.comparison.find_options.case), "the click went to the help dialog");
 }
+
+/// A Rust file whose `fn f` body is taller than the window, inside `mod m`.
+fn nested_rust() -> String {
+    format!("mod m {{\n    fn f() {{\n{}    }}\n}}\n", "        a;\n".repeat(80))
+}
+
+fn sticky_fixture(cx: &mut TestAppContext) -> Fixture {
+    let src = nested_rust();
+    let f = fixture_named(cx, &src, &src.replacen("        a;\n", "        b;\n", 1), "rs");
+    f.window.update(cx, |v, w, cx| { let _ = v.render(w, cx); }).unwrap(); // the first render starts the parse
+    cx.executor().run_until_parked();
+    f.viewer.update(cx, |v, _| v.comparison.view.scroll_by(10.0, Side::Right));
+    f
+}
+
+#[gpui::test]
+fn gui_sticky_headers_pin_and_jump(cx: &mut TestAppContext) {
+    let f = sticky_fixture(cx);
+    let lines = f.viewer.read_with(cx, |v, _| v.sticky_lines());
+    assert_eq!(lines[1].iter().map(|s| (s.line, s.row)).collect::<Vec<_>>(), vec![(0, 0), (1, 1)], "mod m, then fn f");
+    assert_eq!(lines[0].iter().map(|s| s.line).collect::<Vec<_>>(), vec![0, 1], "the left side too");
+    let (x, y) = f.window.update(cx, |v, w, cx| {
+        let _ = v.render(w, cx);
+        (v.diff_x() + v.comparison_widths(f32::from(w.viewport_size().width) - v.diff_x())[0] + GUTTER_W + 80.0, v.top() + 1.5 * line_h())
+    }).unwrap();
+    click(cx, &f, x, y);
+    let top = f.viewer.read_with(cx, |v, _| v.comparison.view.frame().right_top);
+    assert!(top <= 1.0, "the click on fn f's sticky line shows fn f: top {top}");
+}
+
+#[gpui::test]
+fn gui_sticky_scroll_toggles_off_and_on(cx: &mut TestAppContext) {
+    let f = sticky_fixture(cx);
+    run(cx, &f, crate::catalog::Action::Interaction(crate::commands::Interaction::StickyScroll));
+    assert!(f.viewer.read_with(cx, |v, _| v.sticky_lines()).iter().all(Vec::is_empty), "off");
+    run(cx, &f, crate::catalog::Action::Interaction(crate::commands::Interaction::StickyScroll));
+    cx.executor().run_until_parked();
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.sticky_lines())[1].len(), 2, "on again");
+}
+
+#[gpui::test]
+fn gui_sticky_scroll_turned_on_after_a_parse_without_declarations(cx: &mut TestAppContext) {
+    let src = nested_rust();
+    let f = fixture_named(cx, &src, &src.replacen("        a;\n", "        b;\n", 1), "rs");
+    f.viewer.update(cx, |v, _| v.sticky_on = false); // as `[view] sticky_scroll = false` starts it
+    f.window.update(cx, |v, w, cx| { let _ = v.render(w, cx); }).unwrap();
+    cx.executor().run_until_parked();
+    f.viewer.update(cx, |v, _| v.comparison.view.scroll_by(10.0, Side::Right));
+    run(cx, &f, crate::catalog::Action::Interaction(crate::commands::Interaction::StickyScroll));
+    f.window.update(cx, |v, w, cx| { let _ = v.render(w, cx); }).unwrap();
+    cx.executor().run_until_parked();
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.sticky_lines())[1].len(), 2, "the declarations are parsed when it turns on");
+}
+
+#[gpui::test]
+fn gui_a_click_in_the_find_bar_over_sticky_lines_does_not_jump(cx: &mut TestAppContext) {
+    let f = sticky_fixture(cx);
+    key(cx, &f, "f", true, false, false);
+    let (x, y, top) = f.window.update(cx, |v, w, cx| {
+        let _ = v.render(w, cx);
+        let (bx, by, bw, bh) = v.find_bar_box().expect("the find bar is open");
+        (bx + bw / 2.0, by + bh / 2.0, v.comparison.view.frame().right_top)
+    }).unwrap();
+    assert!(f.viewer.read_with(cx, |v, _| !v.sticky_lines()[1].is_empty()), "the bar sits over the sticky band");
+    click(cx, &f, x, y);
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.frame().right_top), top, "no jump");
+}

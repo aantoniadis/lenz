@@ -120,6 +120,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         let model=model.as_ref().expect("source frame");
         // Unified: both Sides' rows in this one pane, each drawn from its own Side
         let lists=if unified {vec![(Side::Left,&model.left),(Side::Right,&model.right)]} else {vec![(side,if side == Side::Left { &model.left } else { &model.right })]};
+        let pane_side=side;
         for (side,rows) in lists {
         let lines = app.session.document().map(|d| d.lines_on(side)).unwrap_or_default();
         for row in rows {
@@ -156,6 +157,26 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
                 Content::Filler => {}
             }
         }
+        }
+        // Sticky lines over the pane's top rows, syntax colours only, and a rule under them
+        let sticky=app.sticky_lines();
+        let pinned=&sticky[if unified {1} else {pane_side as usize}];
+        let style=base(palette).bg(color(palette.header_bg));
+        for s in pinned {
+            let y=pane.y+s.row as u16;
+            frame.buffer_mut().set_style(Rect::new(pane.x,y,pane.width,1),style);
+            let gutter=pane.width.min(7);
+            label(palette,frame,Rect::new(pane.x,y,gutter,1),&format!("{:>5} ",s.line+1),style.fg(color(palette.dim)));
+            let lines=app.session.document().map(|d|d.lines_on(s.side)).unwrap_or_default();
+            if let Some(text)=lines.get(s.line as usize){
+                let syntax=app.visual.syntax(s.side,s.line as usize);
+                let source=app.source_rect(s.side);
+                rich_source(palette,frame.buffer_mut(),Rect::new(source.x,y,source.width,1),text,app.horizontal[app.pane_side(s.side) as usize],style,Decorations{inline:&[],inline_color:None,hits:&[],syntax:&syntax,selection:None,caret:None});
+            }
+        }
+        if let Some(n)=pinned.iter().map(|s|s.row+1).max(){
+            let y=pane.y+n as u16;
+            if y<pane.y+body_h{frame.buffer_mut().set_string(pane.x,y,"─".repeat(pane.width as usize),base(palette).fg(color(palette.dim)));}
         }
     }
     if rendered {app.markdown_draw(frame.buffer_mut(),&panes);}

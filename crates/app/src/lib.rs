@@ -41,6 +41,7 @@ pub mod commit_message;
 pub mod rich;
 pub mod pr_conversation;
 pub mod settings;
+pub mod sticky;
 pub mod theme;
 #[cfg(feature = "gui")]
 mod ui;

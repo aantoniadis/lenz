@@ -15,7 +15,7 @@ pub struct Settings { pub gui: Gui, pub view: View, pub tools: Tools, pub sessio
 pub struct Gui { pub font_family: Option<String>, pub font_size: f32, pub reading_font: Option<String> }
 impl Default for Gui { fn default() -> Self { Gui { font_family: None, font_size: 13.0, reading_font: None } } }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct View {
     pub whitespace: WhitespaceMode,
     pub ignore_case: bool,
@@ -26,6 +26,23 @@ pub struct View {
     pub markdown_layout: crate::markdown::MarkdownLayout,
     /// Start in the one-column Unified layout (GUI).
     pub unified: bool,
+    /// Pin the enclosing declarations' first lines at the top of each pane.
+    pub sticky_scroll: bool,
+}
+impl Default for View {
+    fn default() -> Self {
+        View {
+            whitespace: WhitespaceMode::default(),
+            ignore_case: false,
+            highlight: HighlightLevel::default(),
+            scroll: ScrollMode::default(),
+            blame: false,
+            markdown: PresentationMode::default(),
+            markdown_layout: crate::markdown::MarkdownLayout::default(),
+            unified: false,
+            sticky_scroll: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +82,7 @@ pub const TEMPLATE: &str = "\
 # markdown = \"source\"              # source | preview
 # markdown_layout = \"inline\"       # inline | side-by-side (Preview)
 # layout = \"split\"                # split | unified (GUI)
+# sticky_scroll = true             # pin the enclosing declarations at the top of each pane
 
 [tools]
 # editor = \"nvim --clean\"
@@ -190,6 +208,7 @@ pub fn parse(text: &str, home: Option<&Path>) -> (Settings, Vec<String>) {
                     _ => bad("must be shared, aligned, padded or independent"),
                 },
                 ("view", "blame") => match flag() { Some(b) => s.view.blame = b, None => bad("must be true or false") },
+                ("view", "sticky_scroll") => match flag() { Some(b) => s.view.sticky_scroll = b, None => bad("must be true or false") },
                 ("view", "layout") => match text() {
                     Some("split") => s.view.unified = false,
                     Some("unified") => s.view.unified = true,
@@ -240,6 +259,7 @@ mod tests {
         let (parsed, notices) = parse(TEMPLATE, None);
         assert!(notices.is_empty(), "{notices:?}");
         assert_eq!(format!("{parsed:?}"), format!("{:?}", Settings::default()));
+        assert!(parsed.view.sticky_scroll, "sticky scroll is on by default");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lenz/settings.toml");
         ensure_template_at(&path).unwrap();
@@ -299,6 +319,7 @@ mod tests {
             scroll = "padded"
             blame = true
             layout = "unified"
+            sticky_scroll = false
             markdown = "rendered"
             markdown_layout = "side-by-side"
             [tools]
@@ -312,6 +333,7 @@ mod tests {
         assert_eq!((s.gui.font_family.as_deref(), s.gui.font_size), (Some("Iosevka"), 15.0));
         assert_eq!(s.gui.reading_font.as_deref(), Some("Inter"));
         assert!(s.view.unified, "layout = unified");
+        assert!(!s.view.sticky_scroll, "sticky_scroll = false");
         assert_eq!((s.view.whitespace, s.view.ignore_case, s.view.highlight), (WhitespaceMode::IgnoreTrimChunks, true, HighlightLevel::Char));
         assert_eq!((s.view.scroll, s.view.blame, s.view.markdown), (crate::view::ScrollMode::Padded, true, crate::markdown::PresentationMode::Rendered));
         assert_eq!((s.tools.editor.as_deref(), s.tools.icons), (Some("nvim --clean"), Some(Icons::Nerd)));

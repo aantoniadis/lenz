@@ -88,7 +88,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), quit: false, repository:None, visual:Default::default(),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -293,6 +293,19 @@ impl App {
     /// One full-width column holding both Sides (Source only; images and the Preview keep their layouts).
     pub(crate) fn unified(&self)->bool {self.session.view().unified()&&self.visual.image().is_none()&&self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered}
     pub(crate) fn unified_disabled(&self)->Option<&'static str> {lenz::commands::unified_disabled(self.visual.image().is_some(),self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered)}
+    /// The header lines each pane pins (index 0 left, 1 right; Unified: index 1), while sticky scroll is on.
+    pub(crate) fn sticky_lines(&self)->[Vec<lenz::sticky::StickyLine>;2]{
+        let rendered=self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
+        if !self.visual.sticky||rendered||self.visual.image().is_some()||self.session.document().is_none_or(|d|d.placeholder_kind().is_some()){return Default::default();}
+        let rows=self.session.view().viewport_rows().max(0.0) as usize;
+        lenz::sticky::lines(&self.session.view().frame(),self.unified(),[self.visual.declarations(Side::Left),self.visual.declarations(Side::Right)],lenz::sticky::cap(rows))
+    }
+    /// The sticky line under the pointer, as (its Side, its 0-based line).
+    fn sticky_at(&self,column:u16,row:u16)->Option<(Side,u32)>{
+        let area=self.diff_area;if !area.contains((column,row).into())||row<area.y+2{return None;}
+        let visible=u32::from(row-area.y-2);let pane=if self.unified(){1}else{self.pointer_side(column) as usize};
+        self.sticky_lines().get(pane)?.iter().find(|s|s.row==visible).map(|s|(s.side,s.line))
+    }
     /// The Side whose geometry (pane, horizontal scroll) applies: Unified paints both in one pane.
     pub(crate) fn pane_side(&self,side:Side)->Side {if self.unified(){Side::Right}else{side}}
     /// Where `side`'s text starts and how wide it is.
@@ -359,6 +372,7 @@ impl App {
         use commands::Interaction::*;
         if let Some(reason)=self.interaction_disabled(command){self.session.set_notice(reason);return;}
         match command {
+            StickyScroll=>{self.visual.sticky = !self.visual.sticky;if self.visual.sticky&&let Some(doc)=self.session.document_arc(){self.visual.reparse_for_sticky(doc);}},
             ScrollLeft|ScrollRight=>self.scroll_horizontal(self.focus,if command==ScrollLeft{-4}else{4}),
             FindCase|FindWord|FindRegex=>{if let Some(option)=command.find_option(){self.toggle_find_option(option);}},
             Find=>self.begin(Prompt::Search),FindSet=>self.open_set_search(),GoToLine=>self.begin(Prompt::Line),
@@ -749,6 +763,7 @@ impl App {
                     MouseEventKind::ScrollUp if mouse.modifiers.contains(KeyModifiers::SHIFT)=>self.scroll_horizontal(side,-4),
                     MouseEventKind::ScrollDown => self.session.scroll(3.0, side),
                     MouseEventKind::ScrollUp => self.session.scroll(-3.0, side),
+                    MouseEventKind::Down(MouseButton::Left) if let Some((side,line))=self.sticky_at(mouse.column,mouse.row) => {self.focus=self.pane_side(side);self.session.go_to_line(side,line+1);}
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some((side,pos,annotation))=self.mouse_position(mouse.column,mouse.row){self.focus=side;if annotation{self.visual.inspect_blame(side,pos.line as usize);}else if mouse.modifiers.contains(KeyModifiers::SHIFT)&&let Some(selection)=self.selection.as_mut().filter(|s|s.side==side){selection.head=pos;}else{let now=std::time::Instant::now();let count=self.mouse_click.filter(|(time,old_side,old_pos,_)|now.duration_since(*time)<std::time::Duration::from_millis(400)&&*old_side==side&&*old_pos==pos).map_or(1,|(_,_,_,count)|count%3+1);self.mouse_click=Some((now,side,pos,count));let lines=self.session.document().map_or(&[][..],|d|d.lines_on(side));self.selection=Some(match count{2=>lenz::selection::Selection::word(side,lines,pos),3=>lenz::selection::Selection::line(side,lines,pos.line),_=>lenz::selection::Selection::caret(side,pos)});}}else{self.focus=side;if mouse.row>=self.diff_area.y+2{self.session.expand(side,mouse.row-self.diff_area.y-2);}}
                     }
@@ -1019,6 +1034,67 @@ mod tests {
 
     fn pane_mouse(app:&mut App,kind:MouseEventKind,x:u16,y:u16) {
         app.handle(Event::Mouse(crossterm::event::MouseEvent{kind,column:x,row:y,modifiers:KeyModifiers::NONE}));
+    }
+
+    /// A Rust comparison: `fn f` (renamed on the right) with a body taller than the screen, inside `mod m`.
+    fn sticky_pair() -> (tempfile::TempDir, App) {
+        // Every fourth body line differs, so no unchanged run is long enough to collapse.
+        let body = |changed: &str| (0..80).map(|i| if i % 4 == 0 { format!("        {changed}{i};\n") } else { "        a;\n".to_string() }).collect::<String>();
+        let (left, right) = (format!("mod m {{\n    fn old() {{\n{}    }}\n}}\n", body("x")), format!("mod m {{\n    fn new() {{\n{}    }}\n}}\n", body("y")));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("left.rs"), left).unwrap();
+        std::fs::write(dir.path().join("right.rs"), right).unwrap();
+        let args = vec!["--no-index".into(), "left.rs".into(), "right.rs".into()];
+        let mut app = App::new(Session::open(lenz::cli::parse(&args, dir.path()).unwrap(), dir.path().into()));
+        ready(&mut app);
+        app.session.scroll(10.0, Side::Right);
+        (dir, app)
+    }
+    fn screen_rows(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        terminal.backend().buffer().content.chunks(width as usize).map(|row| row.iter().map(|c| c.symbol()).collect()).collect()
+    }
+    #[test]
+    fn sticky_headers_pin_in_each_pane_and_a_click_jumps() {
+        let (_dir, mut app) = sticky_pair();
+        let rows = screen_rows(&mut app, 120, 30);
+        let body = (app.diff_area.y + 2) as usize;
+        assert!(rows[body].contains("mod m {"), "{rows:#?}");
+        assert!(rows[body + 1].contains("fn old() {") && rows[body + 1].contains("fn new() {"), "each side from its own text: {rows:#?}");
+        assert!(rows[body + 2].contains("───"), "a rule under the sticky lines: {rows:#?}");
+        assert_eq!(app.sticky_lines().map(|l| l.iter().map(|s| (s.line, s.row)).collect::<Vec<_>>()), [vec![(0, 0), (1, 1)], vec![(0, 0), (1, 1)]]);
+        let (x, y) = (app.diff_area.x + app.left_width() + 12, app.diff_area.y + 3);
+        pane_mouse(&mut app, MouseEventKind::Down(MouseButton::Left), x, y);
+        assert!(app.session.view().frame().right_top <= 1.0, "the click on fn new's sticky line shows it");
+    }
+    #[test]
+    fn sticky_scroll_turned_on_after_a_parse_without_declarations() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = |changed: &str| (0..80).map(|i| if i % 4 == 0 { format!("        {changed}{i};\n") } else { "        a;\n".to_string() }).collect::<String>();
+        std::fs::write(dir.path().join("left.rs"), format!("mod m {{\n    fn old() {{\n{}    }}\n}}\n", body("x"))).unwrap();
+        std::fs::write(dir.path().join("right.rs"), format!("mod m {{\n    fn new() {{\n{}    }}\n}}\n", body("y"))).unwrap();
+        let args = vec!["--no-index".into(), "left.rs".into(), "right.rs".into()];
+        let mut app = App::new(Session::open(lenz::cli::parse(&args, dir.path()).unwrap(), dir.path().into()));
+        app.visual.sticky = false; // as `[view] sticky_scroll = false` starts it
+        ready(&mut app);
+        app.session.scroll(10.0, Side::Right);
+        app.interaction(commands::Interaction::StickyScroll);
+        ready(&mut app);
+        assert_eq!(app.sticky_lines()[1].len(), 2, "the declarations are parsed when it turns on");
+    }
+    #[test]
+    fn sticky_scroll_toggles_and_tiny_panes_pin_nothing() {
+        let (_dir, mut app) = sticky_pair();
+        app.interaction(commands::Interaction::StickyScroll);
+        assert!(app.sticky_lines().iter().all(Vec::is_empty));
+        let rows = screen_rows(&mut app, 120, 30);
+        assert!(!rows[(app.diff_area.y + 2) as usize].contains("mod m {"), "off");
+        app.interaction(commands::Interaction::StickyScroll);
+        ready(&mut app);
+        assert_eq!(app.sticky_lines()[1].len(), 2, "on again");
+        let rows = screen_rows(&mut app, 120, 8);
+        assert!(!rows.iter().any(|r| r.contains("mod m {")), "a pane under 6 rows pins nothing: {rows:#?}");
     }
     #[test]
     fn pane_drag_source_capture_unequal_hit_testing_reset_and_modal_guard() {

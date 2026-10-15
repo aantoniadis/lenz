@@ -12,7 +12,7 @@ impl App {
     /// What the comparison shows now, for the catalog.
     pub(crate) fn scope(&self) -> Scope {
         let markdown = self.session.disabled(lenz::commands::Command::SetPresentation(lenz::markdown::PresentationMode::Rendered)) != Some("Not a Markdown comparison");
-        Scope { surface: Surface::Comparison, unified: self.session.view().unified(), repository: self.repository.is_some(), focused: self.layout.focused(self.repository.as_ref().map(|r| &r.core)), pr_tab: self.repository.as_ref().and_then(|r| r.core.pr.as_ref()).and_then(|p| p.details()).map(|d| d.tab), pr: self.repository.as_ref().is_some_and(|r| r.core.pr.is_some()),
+        Scope { surface: Surface::Comparison, sticky: self.visual.sticky, unified: self.session.view().unified(), repository: self.repository.is_some(), focused: self.layout.focused(self.repository.as_ref().map(|r| &r.core)), pr_tab: self.repository.as_ref().and_then(|r| r.core.pr.as_ref()).and_then(|p| p.details()).map(|d| d.tab), pr: self.repository.as_ref().is_some_and(|r| r.core.pr.is_some()),
                 image: self.visual.image().is_some(), markdown, options: self.session.options(), scroll: self.session.view().mode(),
                 presentation: self.session.markdown_mode(), context_hidden: self.session.context_hidden(), blame: self.blame[self.focus as usize],
                 image_mode: self.visual.image_state().mode(), markdown_layout: self.session.markdown_layout(), find: self.find_open().then(|| self.session.find_options()) }

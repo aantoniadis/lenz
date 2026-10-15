@@ -977,3 +977,21 @@ Full suite (`--profile full`, three runs) against the base: `search_session.comp
 moved both ways and did not reproduce: `tui/pty/input-first-byte` +93% in the suite, but 0.49–0.64 ms new vs
 0.54–0.82 base with the order alternated; `startup/*/load_ms` 3 → 4 ms is the 1 ms resolution;
 `ui/merge/undo-keep-base` +33% beside `accept-theirs` −19%. Unverified: native macOS.
+
+## 2026-10-15 sticky scroll: declarations from the highlight parse
+
+Sticky scroll asks the background highlight parse for declarations (the tags query on the same tree) while it is on
+(the default). Release build, same machine, against `main` (230393a):
+
+| Experiment | Outcome |
+|---|---|
+| Tags query compiled lazily inside the parse's syntax arena | **Rejected.** The query's memory lived in the arena and tree-sitter aborted (`query.c` pattern map assertion) in the `syntax/*` workload; the query is now compiled before the arena, as `declarations_while` already did. |
+| Declarations in the same parse (100k-line Rust, folds on) | **Kept.** `syntax/parse` 271–275 ms, `syntax/parse-declarations` 380–399 ms (three runs): about 110 ms more, off the UI thread, only while sticky scroll is on. Tags query compile on first use: Rust 14 ms, TypeScript 35 ms, Python 5 ms. |
+| Sticky lookup per frame (11,112 declarations) | **Kept.** `syntax/sticky-lookup` 0.38–0.40 µs (binary search plus nesting depth). |
+
+Full suite (`--profile full`, three runs) against the `main` run of 2026-10-14: rows over 15% moved both ways
+(e.g. `ui/merge/keep-base/first-damage` −39%, `tui/merge/cancel-queued-200` +98% at 0.3 → 0.6 ms). The startup CPU
+rows (`startup/warm/small/cpu_seconds` 0.54 → 0.75 s) did not reproduce with the order alternated (three rounds, three
+runs each): small files 0.42–1.06 s on both; 100k-line Rust first paint 179–199 ms on both, background CPU median
+2.28 → 2.43 s and RSS +1–2 MiB (the declarations). The background parse cost was accepted by the user as the
+feature's tradeoff. Unverified: native macOS.

@@ -5,7 +5,7 @@ use lenz::{
     blame::{self, BlameLine, Version},
     changeset::{ChangeSet, Spec},
     document::{Placeholder, TextDocument},
-    highlight::{self, Capture, Parsed},
+    highlight::{self, Capture, Declarations, Parsed},
     image_session::{ImageCommand, ImageDoc, ImageState, Mode, Viewport},
     view::Side,
     work,
@@ -27,7 +27,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 type ImageResult = Option<Result<ImageDoc, String>>;
-type SyntaxResult = [Option<Parsed>; 2];
+type SyntaxResult = [Option<(Parsed, Option<Declarations>)>; 2];
 type AnnotationContext = (Arc<ChangeSet>, usize, [Option<Version>; 2], [usize; 2]);
 #[derive(Default)]
 pub struct Visual {
@@ -38,6 +38,10 @@ pub struct Visual {
     image: Option<Arc<ImageDoc>>,
     state: ImageState,
     syntax: [Option<Parsed>; 2],
+    /// Declarations per Side, from the same parse, while sticky scroll is on.
+    declarations: [Option<Declarations>; 2],
+    /// Sticky scroll is on: parses also find declarations. Kept by [`Visual::clear`].
+    pub(crate) sticky: bool,
     annotations: [Annotations; 2],
     inspection: CommitInspection,
     context: Option<AnnotationContext>,
@@ -57,7 +61,10 @@ pub enum BlameEffect {
 }
 impl Visual {
     pub fn clear(&mut self) {
-        *self = Self::default();
+        *self = Self::with_sticky(self.sticky);
+    }
+    pub fn with_sticky(sticky: bool) -> Self {
+        Self { sticky, ..Self::default() }
     }
     #[cfg(test)]
     pub(crate) fn cancellation_weak(&self) -> Option<std::sync::Weak<()>> {
@@ -121,28 +128,7 @@ impl Visual {
                 )
             }));
         }
-        if doc.placeholder_kind().is_none()
-            && [Side::Left, Side::Right]
-                .iter()
-                .any(|&side| doc.language(side).is_some())
-        {
-            let current = Arc::downgrade(&token);
-            self.syntax_job = Some(work::detached(current.clone(), move || {
-                // Both sides at once: the syntax pool parses them in parallel.
-                std::thread::scope(|scope| {
-                    let parse = |side: Side| {
-                        let (doc, weak) = (&doc, current.clone());
-                        scope.spawn(move || {
-                            doc.language(side).and_then(|lang| {
-                                highlight::parse_while(lang, doc.text_arc(side), move || weak.strong_count() > 0)
-                            })
-                        })
-                    };
-                    let (left, right) = (parse(Side::Left), parse(Side::Right));
-                    [left.join().ok().flatten(), right.join().ok().flatten()]
-                })
-            }));
-        }
+        self.start_syntax(doc, &token);
         if let Some(Some(image)) = prepared {
             match image {
                 Ok(image) => self.image = Some(image),
@@ -150,6 +136,39 @@ impl Visual {
             }
         }
         self.generation = Some(token);
+    }
+    /// Parse both Sides in the background (with declarations while sticky scroll is on).
+    fn start_syntax(&mut self, doc: Arc<TextDocument>, token: &Arc<()>) {
+        if doc.placeholder_kind().is_some() || ![Side::Left, Side::Right].iter().any(|&side| doc.language(side).is_some()) {
+            return;
+        }
+        let (current, sticky) = (Arc::downgrade(token), self.sticky);
+        self.syntax_job = Some(work::detached(current.clone(), move || {
+            // Both sides at once: the syntax pool parses them in parallel.
+            std::thread::scope(|scope| {
+                let parse = |side: Side| {
+                    let (doc, weak) = (&doc, current.clone());
+                    scope.spawn(move || {
+                        doc.language(side).and_then(|lang| {
+                            let want = highlight::Want { folds: false, declarations: sticky && highlight::has_declarations(lang) };
+                            highlight::parse_with(lang, doc.text_arc(side), want, move || weak.strong_count() > 0).map(|s| (s.parsed, s.declarations))
+                        })
+                    })
+                };
+                let (left, right) = (parse(Side::Left), parse(Side::Right));
+                [left.join().ok().flatten(), right.join().ok().flatten()]
+            })
+        }));
+    }
+    /// Sticky scroll was turned on: parse `doc` again when its declarations are missing.
+    pub fn reparse_for_sticky(&mut self, doc: Arc<TextDocument>) {
+        let missing = [Side::Left, Side::Right].iter().any(|&side| doc.language(side).is_some_and(highlight::has_declarations) && self.declarations[side as usize].is_none());
+        if let Some(token) = self.generation.clone().filter(|_| missing && self.syntax_job.is_none()) {
+            self.start_syntax(doc, &token);
+        }
+    }
+    pub fn declarations(&self, side: Side) -> Option<&Declarations> {
+        self.declarations[side as usize].as_ref()
     }
     pub fn busy(&self) -> bool {
         self.image_job.is_some()
@@ -180,8 +199,10 @@ impl Visual {
         }
         if let Some(rx) = &self.syntax_job {
             match rx.try_recv() {
-                Ok(Some(syntax)) => {
-                    self.syntax = syntax;
+                Ok(Some([left, right])) => {
+                    let (l, r) = (left.map_or((None, None), |(p, d)| (Some(p), d)), right.map_or((None, None), |(p, d)| (Some(p), d)));
+                    self.syntax = [l.0, r.0];
+                    self.declarations = [l.1, r.1];
                     self.syntax_job = None;
                     changed = true;
                 }

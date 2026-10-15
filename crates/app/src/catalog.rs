@@ -72,13 +72,15 @@ pub struct Scope {
     pub image_mode: crate::image_session::Mode, pub markdown_layout: MarkdownLayout,
     /// The find options while a find or Change Set search input is open (`None`: none is).
     pub find: Option<lenz_content::find::FindOptions>,
+    /// Sticky scroll is on.
+    pub sticky: bool,
 }
 impl Scope {
     /// A plain text comparison with default options.
     pub fn comparison() -> Self {
         Self { surface: Surface::Comparison, repository: false, pr: false, focused: false, pr_tab: None, unified: false, image: false, markdown: false, options: Options::default(),
                scroll: ScrollMode::Shared, presentation: PresentationMode::Source, context_hidden: true, blame: false,
-               image_mode: crate::image_session::Mode::TwoUp, markdown_layout: MarkdownLayout::Inline, find: None }
+               image_mode: crate::image_session::Mode::TwoUp, markdown_layout: MarkdownLayout::Inline, find: None, sticky: true }
     }
 }
 
@@ -120,7 +122,10 @@ pub fn diff_options(scope: &Scope) -> Vec<OptionRow> {
         OptionRow { label: "Whitespace", choices: whitespace },
         OptionRow { label: "Highlight", choices: highlight },
         OptionRow { label: "Scroll", choices: scroll },
-        OptionRow { label: "Show", choices: vec![toggle(Action::Comparison(Command::ToggleContext), "Only changes", scope.context_hidden)] },
+        OptionRow { label: "Show", choices: vec![
+            toggle(Action::Comparison(Command::ToggleContext), "Only changes", scope.context_hidden),
+            toggle(Action::Interaction(Interaction::StickyScroll), "Sticky scroll", scope.sticky),
+        ] },
         OptionRow { label: "Compare", choices: vec![
             toggle(Action::Comparison(Command::ToggleCase), "Ignore case", scope.options.ignore_case),
             toggle(Action::Interaction(Interaction::Blame), "Blame", scope.blame),
@@ -181,6 +186,7 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
                 out.extend(diff_layout_menu(scope).into_iter().map(|e| Entry { label: format!("Diff layout: {}", e.label).into(), ..e }));
                 out.extend([c(Command::ToggleContext, G::Diff, None), c(Command::ToggleCase, G::Diff, None)]);
                 out.extend([i(Interaction::Blame, G::Diff, None), i(Interaction::InspectBlame, G::Diff, None)]);
+                out.push(Entry { current: scope.sticky, ..i(Interaction::StickyScroll, G::Diff, None) });
                 out.push(entry(Action::Help(HelpAction::DiffOptions), "Diff options…", G::Diff, None));
             }
             if scope.repository { out.extend([l(LayoutCommand::ToggleBranches, Some("alt-2")), l(LayoutCommand::ToggleHistory, Some("alt-3"))]); }
@@ -301,6 +307,7 @@ mod tests {
     }
 
     use super::*;
+    use crate::commands::InteractionContext;
 
     fn has(entries: &[Entry], action: Action) -> bool { entries.iter().any(|e| e.action == action) }
 
@@ -482,5 +489,15 @@ mod tests {
         assert_eq!(rows[2].choices.len(), 3);
         assert_eq!(rows[3].choices.len(), 4);
         assert!(rows[5].choices.iter().any(|c| c.action == Action::Interaction(Interaction::Blame) && c.current));
+    }
+
+    #[test]
+    fn sticky_scroll_is_a_view_toggle_with_its_state() {
+        for on in [true, false] {
+            let rows = diff_options(&Scope { sticky: on, ..Scope::comparison() });
+            assert!(rows.iter().flat_map(|r| &r.choices).any(|c| c.action == Action::Interaction(Interaction::StickyScroll) && c.current == on));
+        }
+        assert_eq!(Interaction::StickyScroll.label(), "View: Sticky Scroll");
+        assert_eq!(Interaction::StickyScroll.disabled(&InteractionContext::default()), None, "a view setting, even while loading");
     }
 }
