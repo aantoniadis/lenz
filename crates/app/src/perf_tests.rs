@@ -42,8 +42,9 @@ fn workload_stress() {
         let dead = Arc::downgrade(&token);
         drop(token);
         assert!(work::document(dead, || panic!("obsolete work ran")).is_none());
-        assert_eq!(find::in_lines(&lines, "CAFÉ").len(), 100_000);
-        assert_eq!(find::in_lines(&lines, "absent").len(), 0);
+        let plain = |text: &str| lenz_content::find::Matcher::new(&lenz_content::find::Query { text: text.into(), ..Default::default() }).expect("literal query");
+        assert_eq!(find::in_lines(&lines, &plain("CAFÉ")).len(), 100_000);
+        assert_eq!(find::in_lines(&lines, &plain("absent")).len(), 0);
         let image = images::blend(&old, &new, 0.5);
         assert_eq!(*image.get_pixel(2000, 2000), image::Rgba([120, 90, 100, 255]));
         assert!(merge.accept(0, Pick::Theirs));

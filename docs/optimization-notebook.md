@@ -956,3 +956,24 @@ the second), and each overlaps an earlier run's samples: `image/4k-diff` 35.8–
 `blame/HEAD~100/first` 2.19–3.02 vs 2.35–3.73 ms; `tui/tabs/close-ready` is bimodal (~1 or ~7 ms, all ~7 at
 `17-before`, mixed at `18-after-2`). No code on those paths changed: noise. Unverified: GUI timings (no Xvfb),
 native macOS.
+
+## 2026-10-14 find options and the shared matcher
+
+Find, merge find and Find in Change Set moved from the hand-written case-insensitive matcher to
+`lenz-content::find::Matcher` (`regex`, already linked through tree-sitter) for case / whole-word / regex
+options. In-process find over 100k lines, release, interleaved with the base build (`bc8f5bf`):
+
+| Experiment | Outcome |
+|---|---|
+| Every query through `Regex::find_iter`, one iterator chain (`Filter<Chain<Flatten…>>`) per line | **Rejected.** `search/find/needle` 4.8 → 8.4 ms, `e` 8.2 → 14.6, `absent` 3.9 → 2.4 (three alternating rounds agreed). The per-line call and the adapter chain dominated short lines with many matches. |
+| ASCII literal queries on ASCII lines compared byte-wise (the old algorithm), in the same chain | **Rejected.** 6.2 / 6.0 / 11.3 ms: the chain (`Filter`/`Chain`/`Flatten` over `Option`s) was ~30% of the profile. |
+| One concrete `Ranges` iterator (enum: ASCII bytes, expression, done) still holding `regex::Matches` | **Rejected.** 5.7 / 4.7 / 9.5 ms: the large `Matches` value made every line's iterator big. |
+| Same iterator, expression searched with `find_at` from a stored offset | **Kept.** 4.9–5.0 / 3.9 / 8.4 ms vs base 4.8 / 3.9 / 8.2 (noise); regex `search/find-regex` 11.0 ms (new). A test pins the byte path to the expression's matches. |
+| Literal queries compile their expression only for the first non-ASCII line (a Unicode case-insensitive expression takes about 1 ms to build) | **Kept** (no measurable effect on the suite's workloads, which are ASCII; saves the build per keystroke and per Change Set start). |
+
+Full suite (`--profile full`, three runs) against the base: `search_session.complete_96k_lines` 3.6 → 4.9 ms
+(+30%), reproduced in three interleaved rounds; the profile shows the background search's per-line matcher
+(4.4% → 6.4% of samples). Accepted by the user as a deliberate tradeoff (4.9 ms absolute). Other rows over 20%
+moved both ways and did not reproduce: `tui/pty/input-first-byte` +93% in the suite, but 0.49–0.64 ms new vs
+0.54–0.82 base with the order alternated; `startup/*/load_ms` 3 → 4 ms is the 1 ms resolution;
+`ui/merge/undo-keep-base` +33% beside `accept-theirs` −19%. Unverified: native macOS.

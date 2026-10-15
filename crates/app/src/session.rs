@@ -233,6 +233,15 @@ impl Session {
     pub fn search_at(&mut self,query:String,side:Side,from:Pos){if let Some(doc)=&self.document
         && let Some((line,_))=self.state.search(doc,query,side,from){self.state.view.go_to_line(side,line+1);}}
     pub fn clear_find(&mut self){self.state.find=None;}
+    pub fn find_options(&self)->lenz_content::find::FindOptions{self.state.find_options}
+    /// Keep the options another find input (Change Set search) changed, for this window.
+    pub fn set_find_options(&mut self,options:lenz_content::find::FindOptions){self.state.find_options=options;}
+    /// Flip one find option for this window; an open find re-runs with it and shows its match.
+    pub fn toggle_find_option(&mut self,option:lenz_content::find::FindOption){
+        let Some(doc)=self.document.clone() else {self.state.find_options=self.state.find_options.toggled(option);return};
+        let side=self.state.find.as_ref().map(|f|f.side);
+        if let Some((line,_))=self.state.toggle_find_option(&doc,option)&&let Some(side)=side{self.state.view.go_to_line(side,line+1);}
+    }
     pub fn find_step(&mut self,forward:bool){if let Some((side,line,_,wrapped))=self.state.search_step(forward){self.notice=wrapped.then(||"Search wrapped".into());self.state.view.go_to_line(side,line+1);}}
 }
 
@@ -386,4 +395,26 @@ mod markdown_action_tests {
         assert!(session.edit_disabled(EditMenuCommand::Discard).is_none());session.edit(EditCommand::Discard);settle(&mut session);assert_eq!(session.document().unwrap().text(Side::Right),"**draft**\n");assert!(!session.has_dirty());assert_eq!(std::fs::read_to_string(&right).unwrap(),"**draft**\n");
     }
 
+}
+
+#[cfg(test)]
+mod find_option_tests {
+    use super::*;
+    use lenz_content::find::FindOption;
+    #[test]
+    fn toggling_a_find_option_refinds_with_it() {
+        let root=std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let dir=tempfile::tempdir_in(root).unwrap();
+        std::fs::write(dir.path().join("left.txt"),"Foo foo\n").unwrap();
+        std::fs::write(dir.path().join("right.txt"),"x\n").unwrap();
+        let request=crate::cli::parse(&["--no-index","left.txt","right.txt"].map(str::to_owned),dir.path()).unwrap();
+        let mut s=Session::open(request,dir.path().into());
+        let until=Instant::now()+std::time::Duration::from_secs(15);
+        while s.busy() { s.poll(); assert!(Instant::now()<until); std::thread::yield_now(); }
+        s.search("foo".into(),Side::Left);
+        assert_eq!(s.find().unwrap().hits().len(),2);
+        s.toggle_find_option(FindOption::Case);
+        assert_eq!(s.find().unwrap().hits(),[(0,4..7)]);
+        assert!(s.find_options().case);
+    }
 }

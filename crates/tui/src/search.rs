@@ -1,5 +1,6 @@
 //! Terminal Change Set search adapter. The shared model owns jobs, cancellation and navigation.
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
+use lenz::find::FindOption;
 use lenz::{
     changeset::ChangeSet,
     find::{Ended, Hit},
@@ -25,9 +26,20 @@ pub struct Search {
     pub(crate) resizer:crate::panes::Resizer,
 }
 impl Search {
-    pub fn open(set: Arc<ChangeSet>, changed_only: bool) -> Self {
+    /// The query prompt: the options on, the query, then the reason a bad one cannot search, and the keys.
+    pub(crate) fn prompt_text(&self) -> String {
+        let changed = if self.model.changed_only() { "on" } else { "off" };
+        let error = self.model.query_error().map_or(String::new(), |e| format!(" · {e}"));
+        format!(
+            "Find in Change Set{}: {}▏{error}\nAlt-O changed lines only: {changed} · Alt-C/W/R case, word, regex · Enter searches · Esc closes",
+            crate::render::option_marks(self.model.options()),
+            safe(self.model.query())
+        )
+    }
+
+    pub fn open(set: Arc<ChangeSet>, changed_only: bool, options: lenz::find::FindOptions) -> Self {
         Self {
-            model: ChangeSetSearch::new(String::new(), changed_only),
+            model: ChangeSetSearch::new(String::new(), changed_only, options),
             closed: false,
             focused: true,
             set,
@@ -150,7 +162,8 @@ impl Search {
                             query.pop();
                             self.execute(SearchCommand::Query(query));
                         }
-                        KeyCode::Char('c') if alt => self.execute(SearchCommand::ToggleChangedOnly),
+                        KeyCode::Char('o') if alt => self.execute(SearchCommand::ToggleChangedOnly),
+                        KeyCode::Char(c @ ('c' | 'w' | 'r')) if alt => self.model.toggle_option(match c { 'c' => FindOption::Case, 'w' => FindOption::Word, _ => FindOption::Regex }),
                         KeyCode::Char(character) if !ctrl && !alt => {
                             self.type_text(&character.to_string())
                         }
@@ -183,7 +196,7 @@ impl Search {
                         self.panel(self.size).height.saturating_sub(2) as f32,
                     ),
                     KeyCode::Char('/') => self.edit(),
-                    KeyCode::Char('c') if alt => {
+                    KeyCode::Char('o') if alt => {
                         self.execute(SearchCommand::ToggleChangedOnly);
                         self.execute(SearchCommand::Start);
                     }
@@ -213,15 +226,7 @@ impl Search {
                 area.width.saturating_sub(2),
                 4.min(area.height.saturating_sub(2)),
             );
-            let changed = if self.model.changed_only() {
-                "on"
-            } else {
-                "off"
-            };
-            let text = format!(
-                "Find in Change Set: {}▏\nAlt-C changed lines only: {changed} · Enter searches · Esc closes",
-                safe(self.model.query())
-            );
+            let text = self.prompt_text();
             frame.render_widget(Clear, popup);
             frame.render_widget(
                 Paragraph::new(text).block(Block::default().borders(Borders::ALL)),
@@ -335,7 +340,7 @@ mod tests {
             dir.path(),
         )
         .unwrap();
-        (dir, Search::open(Arc::new(set), false))
+        (dir, Search::open(Arc::new(set), false, Default::default()))
     }
     fn key(search: &mut Search, key: KeyCode, modifiers: KeyModifiers) {
         assert!(search.handle(Event::Key(KeyEvent::new(key, modifiers))));
@@ -385,7 +390,7 @@ mod tests {
     fn changed_only_and_query_editing_share_gui_rules() {
         let (_dir, mut search) = fixture();
         search.handle(Event::Paste("needle".into()));
-        key(&mut search, KeyCode::Char('c'), KeyModifiers::ALT);
+        key(&mut search, KeyCode::Char('o'), KeyModifiers::ALT);
         assert!(screen(&mut search).contains("only: on"));
         key(&mut search, KeyCode::Enter, KeyModifiers::NONE);
         ready(&mut search);

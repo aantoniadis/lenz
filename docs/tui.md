@@ -38,9 +38,9 @@ cargo build --locked --release -p lenz-tui
 | Scroll / focused pane | Arrows, j/k, PageUp/PageDown, Home/End; Tab/Shift-Tab |
 | Context / fold / unfold | z / x / X; click a folded row |
 | Scroll / whitespace / highlight / case modes | s / w / h / i |
-| File finder / go to position | f or Ctrl-P (`name:line`); g (`line:column`) |
-| Find / next / previous | / or Ctrl-F; F3 / Shift-F3 |
-| Find across the Change Set | Ctrl-Shift-F searches both sides; Alt-C limits to changed lines; Enter searches |
+| File finder / go to position | f or Ctrl-P (`name:line[:column]`); g (`line:column` or `line,column`; bad input is reported) |
+| Find / next / previous | / or Ctrl-F; F3 / Shift-F3; Alt-C / Alt-W / Alt-R match case, whole word, regular expression (shown as `[Aa W .*]`; a bad expression shows its reason) |
+| Find across the Change Set | Ctrl-Shift-F searches both sides; Alt-O limits to changed lines; Alt-C / Alt-W / Alt-R as in find; Enter searches |
 | Select / copy | Click or drag, double/triple click for word/line, Shift-arrows, Ctrl-A; y or Ctrl-Shift-C |
 | Apply left/right / undo / redo | Alt-Shift-Left/Right; Ctrl-Z; Ctrl-Y or Ctrl-Shift-Z |
 | Save | Ctrl-S (in the Sources pane of a repository view Ctrl-S toggles the sidebar; use the toolbar or palette) |
@@ -110,7 +110,7 @@ The Merge View's toolbar matches the GUI's: ☰, ↑ ↓ changes, ⇡ ⇣ unreso
 | Apply non-conflicting / resolve simple | `a` / `m` |
 | Changes / unresolved conflicts / files | n/p / N/P / [ / ] |
 | Base or Result / whitespace / scroll mode | `b` / `w` / `s` (Shared or Padded) |
-| Find / focus panes | `/`, F3; Tab, Shift-Tab (including a visible conflict-file list) |
+| Find / focus panes | `/`, F3, Alt-C / Alt-W / Alt-R; Tab, Shift-Tab (including a visible conflict-file list) |
 | Undo / redo / start over | Ctrl-Z / Ctrl-Y / Ctrl-Shift-R |
 | Save / finish / cancel or dismiss / close | Ctrl-S / Ctrl-Enter / Esc / `q` |
 | Reload a changed file | `r` |

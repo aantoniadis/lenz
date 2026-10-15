@@ -624,6 +624,7 @@ impl Merger {
                             m.find_step(!shift);
                         }
                         KeyCode::Char('a') if ctrl => m.clear_find_query(),
+                        KeyCode::Char(c @ ('c' | 'w' | 'r')) if alt && !ctrl => { m.toggle_find_option(match c { 'c' => lenz::find::FindOption::Case, 'w' => lenz::find::FindOption::Word, _ => lenz::find::FindOption::Regex }); }
                         KeyCode::Char(c) if !ctrl && !alt => m.type_find(&c.to_string()),
                         _ => return false,
                     }
@@ -673,7 +674,7 @@ impl Merger {
                 match (key.code, ctrl, shift, alt) {
                     (KeyCode::Char('/'), false, _, _) | (KeyCode::Char('f'), true, false, _) => {
                         if let Some(FileView::Merge(m)) = &mut self.workspace.file {
-                            m.begin_find();
+                            m.begin_find(m.find_options());
                         }
                     }
                     (KeyCode::F(3), _, _, _) => {
@@ -1142,6 +1143,7 @@ impl Merger {
         use lenz::catalog::{Scope, Surface};
         match &self.workspace.file {
             Some(FileView::Picker(_)) => Scope { surface: Surface::VersionPicker, repository: false, pr: false, ..self.diff.as_ref().map_or_else(Scope::comparison, crate::app::App::scope) },
+            Some(FileView::Merge(m)) => Scope { surface: Surface::Merge, find: m.find_editing().then(|| m.find_options()), ..Scope::comparison() },
             _ => Scope { surface: Surface::Merge, ..Scope::comparison() },
         }
     }
@@ -1160,6 +1162,16 @@ impl Merger {
         match action {
             Action::Merge(act) => self.action(act),
             Action::Pick(act) => self.pick(act),
+            // Merge find's options (the comparison's own find goes to the diff below).
+            Action::Interaction(toggle @ (I::FindCase | I::FindWord | I::FindRegex)) if matches!(&self.workspace.file, Some(FileView::Merge(_))) => {
+                if let (Some(FileView::Merge(m)), Some(option)) = (&mut self.workspace.file, toggle.find_option()) {
+                    if m.find_editing() {
+                        m.toggle_find_option(option);
+                    } else {
+                        self.workspace.notice = Some("No find is open".into());
+                    }
+                }
+            }
             Action::Interaction(I::ChangeTheme) => self.request_theme(),
             Action::Interaction(I::About) => self.about = Some(Default::default()),
             Action::Interaction(I::ResetPaneSizes) => self.reset_pane_sizes(),
@@ -1187,6 +1199,7 @@ impl lenz::catalog::Availability for Merger {
             Action::Merge(act) => match &self.workspace.file { Some(FileView::Merge(m)) => m.disabled(act).map(Cow::Borrowed), _ => Some(Cow::Borrowed("Open a conflicted file first")) },
             Action::Pick(act) => match &self.workspace.file { Some(FileView::Picker(p)) => p.disabled(act).map(Cow::Borrowed), _ => Some(Cow::Borrowed("Only in the Version Picker")) },
             Action::Interaction(I::ChangeTheme | I::About | I::ResetPaneSizes | I::ReportLastError) | Action::Help(HelpAction::Shortcuts | HelpAction::Settings) => None,
+            Action::Interaction(I::FindCase | I::FindWord | I::FindRegex) if let Some(FileView::Merge(m)) = &self.workspace.file => (!m.find_editing()).then_some(Cow::Borrowed("No find is open")),
             Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
             | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) =>
                 self.diff.as_ref().map_or(Some(Cow::Borrowed("No comparison here")), |app| lenz::catalog::Availability::disabled(app, action)),
@@ -2428,6 +2441,16 @@ mod tests {
             key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
         assert!(screen(&mut app).contains("Find Result: needle"));
+        key(&mut app, KeyCode::Char('w'), KeyModifiers::ALT);
+        assert!(screen(&mut app).contains("Find Result [W]: needle"), "Alt+W in merge find");
+        key(&mut app, KeyCode::Char('w'), KeyModifiers::ALT);
+        // The command menu's toggles act on merge find too.
+        let case = lenz::catalog::Action::Interaction(lenz::commands::Interaction::FindCase);
+        assert_eq!(lenz::catalog::Availability::disabled(&app, case), None);
+        assert!(app.scope().find.is_some(), "the menu shows the toggles' state");
+        app.run_action(case);
+        assert!(screen(&mut app).contains("Find Result [Aa]: needle"), "Find: Match Case from the menu");
+        app.run_action(case);
         let mut terminal = Terminal::new(TestBackend::new(120, 18)).unwrap();
         terminal.draw(|f| app.render(f)).unwrap();
         assert!(

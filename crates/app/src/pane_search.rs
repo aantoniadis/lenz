@@ -83,8 +83,45 @@ impl PaneSearch {
     }
 }
 
-pub fn contains(text: &str, query: &str) -> bool { crate::find::match_ranges(text, query).next().is_some() }
-pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> { crate::find::match_ranges(text, query).collect() }
+pub fn contains(text: &str, query: &str) -> bool { match_ranges(text, query).next().is_some() }
+pub fn ranges(text: &str, query: &str) -> Vec<Range<usize>> { match_ranges(text, query).collect() }
+
+/// Yield matches so a capped search never allocates every hit in a very long line.
+fn match_ranges<'a>(line: &'a str, query: &'a str) -> impl Iterator<Item = Range<usize>> + 'a {
+    let ascii = line.is_ascii() && query.is_ascii();
+    let mut from = 0;
+    std::iter::from_fn(move || {
+        if query.is_empty() { return None; }
+        if ascii {
+            let at = line.as_bytes()[from..].windows(query.len()).position(|s| s.eq_ignore_ascii_case(query.as_bytes()))?;
+            let start = from + at;
+            from = start + query.len();
+            return Some(start..from);
+        }
+        while from < line.len() {
+            if let Some(len) = match_len(&line[from..], query) {
+                let start = from;
+                from += len;
+                return Some(start..from);
+            }
+            from += line[from..].chars().next().map_or(1, char::len_utf8);
+        }
+        None
+    })
+}
+
+/// Length in bytes of `text`'s prefix matching `query` case-insensitively.
+fn match_len(text: &str, query: &str) -> Option<usize> {
+    let mut t = text.char_indices();
+    for q in query.chars() {
+        let (_, c) = t.next()?;
+        if c != q && !c.to_lowercase().eq(q.to_lowercase()) {
+            return None;
+        }
+    }
+    Some(t.next().map_or(text.len(), |(i, _)| i))
+}
+
 
 #[cfg(test)]
 mod tests {

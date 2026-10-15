@@ -3,6 +3,7 @@ use crate::{
     changeset::ChangeSet,
     find::{self, Ended, Hit},
 };
+use lenz_content::find::{FindOption, FindOptions, Matcher, Query};
 use std::sync::{
     Arc, Mutex, OnceLock,
     atomic::{AtomicBool, Ordering},
@@ -47,6 +48,9 @@ struct Inbox {
 pub struct ChangeSetSearch {
     pub(crate) query: String,
     pub(crate) changed_only: bool,
+    pub(crate) options: FindOptions,
+    /// Why the query cannot be matched (a bad regular expression): Start is refused.
+    error: Option<String>,
     pub(crate) editing: bool,
     pub(crate) hits: Vec<Hit>,
     pub(crate) ended: Option<Ended>,
@@ -60,10 +64,13 @@ pub struct ChangeSetSearch {
     notice: Option<&'static str>,
 }
 impl ChangeSetSearch {
-    pub fn new(query: String, changed_only: bool) -> Self {
+    pub fn new(query: String, changed_only: bool, options: FindOptions) -> Self {
+        let error = query_error(&query, options);
         Self {
             query,
             changed_only,
+            options,
+            error,
             editing: true,
             hits: Vec::new(),
             ended: None,
@@ -75,6 +82,21 @@ impl ChangeSetSearch {
             heading: None,
             notice: None,
         }
+    }
+    pub fn options(&self) -> FindOptions {
+        self.options
+    }
+    /// Why the query cannot be matched, if it cannot.
+    pub fn query_error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+    /// Flip one option; results of the old query are dropped and the query is edited again.
+    pub fn toggle_option(&mut self, option: FindOption) {
+        self.cancel();
+        self.options = self.options.toggled(option);
+        self.error = query_error(&self.query, self.options);
+        self.clear_results();
+        self.editing = true;
     }
     pub fn query(&self) -> &str {
         &self.query
@@ -132,6 +154,7 @@ impl ChangeSetSearch {
     pub fn disabled(&self, command: &SearchCommand) -> Option<&'static str> {
         match command {
             SearchCommand::Start if self.query.is_empty() => Some("Enter search text"),
+            SearchCommand::Start if self.error.is_some() => Some("Fix the regular expression"),
             SearchCommand::Select(index) if *index >= self.hits.len() => {
                 Some("No result at that position")
             }
@@ -153,6 +176,7 @@ impl ChangeSetSearch {
             SearchCommand::Query(query) => {
                 self.cancel();
                 self.query = query;
+                self.error = query_error(&self.query, self.options);
                 self.clear_results();
                 self.editing = true;
                 self.notice = None;
@@ -237,10 +261,14 @@ impl ChangeSetSearch {
             self.ended = Some(Ended::Done);
             return;
         }
+        // Start is refused while the query is bad; a bad one here searches nothing.
+        let Ok(matcher) = Matcher::new(&Query { text: self.query.clone(), options: self.options }) else {
+            self.ended = Some(Ended::Done);
+            return;
+        };
         let inbox: Arc<Mutex<Inbox>> = Default::default();
         self.inbox = Some(inbox.clone());
-        let (query, changed_only, cancel) =
-            (self.query.clone(), self.changed_only, self.cancel.clone());
+        let (changed_only, cancel) = (self.changed_only, self.cancel.clone());
         type Job = Box<dyn FnOnce() + Send>;
         static WORKER: OnceLock<mpsc::Sender<Job>> = OnceLock::new();
         let worker = WORKER.get_or_init(|| {
@@ -262,7 +290,7 @@ impl ChangeSetSearch {
                 }
                 let ended = find::in_change_set_cancellable(
                     &set,
-                    &query,
+                    &matcher,
                     changed_only,
                     || cancel.load(Ordering::Relaxed),
                     |hits| {
@@ -323,6 +351,17 @@ impl Drop for ChangeSetSearch {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn change_set_search_reports_a_bad_expression_and_does_not_start() {
+        use lenz_content::find::{FindOption, FindOptions};
+        let mut search = ChangeSetSearch::new("(".into(), false, FindOptions { regex: true, ..Default::default() });
+        assert_eq!(search.query_error(), Some("unclosed group"));
+        assert_eq!(search.disabled(&SearchCommand::Start), Some("Fix the regular expression"));
+        search.toggle_option(FindOption::Regex);
+        assert_eq!(search.query_error(), None);
+        assert!(!search.options().regex);
+    }
+
     use super::*;
     use crate::{changeset::Spec, view::Side};
     fn pair_set(left: &str, right: &str) -> (tempfile::TempDir, Arc<ChangeSet>) {
@@ -350,7 +389,7 @@ mod tests {
     #[test]
     fn streamed_real_file_results_have_both_sides_groups_and_nonwrapping_navigation() {
         let (_dir, set) = pair_set("common\nneedle old\n", "common\nneedle new\n");
-        let mut search = ChangeSetSearch::new("needle".into(), false);
+        let mut search = ChangeSetSearch::new("needle".into(), false, Default::default());
         search.start(set.clone());
         ready(&mut search);
         assert_eq!(search.hits.len(), 2);
@@ -376,7 +415,7 @@ mod tests {
     #[test]
     fn changed_only_excludes_unchanged_lines_and_cap_is_observable() {
         let (_dir, set) = pair_set("needle common\nold\n", "needle common\nneedle new\n");
-        let mut search = ChangeSetSearch::new("needle".into(), true);
+        let mut search = ChangeSetSearch::new("needle".into(), true, Default::default());
         search.start(set);
         ready(&mut search);
         assert_eq!(search.hits.len(), 1);
@@ -411,7 +450,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let mut search = ChangeSetSearch::new("k".into(), false);
+        let mut search = ChangeSetSearch::new("k".into(), false, Default::default());
         search.start(set);
         ready(&mut search);
         let actual: Vec<_> = search
@@ -466,7 +505,7 @@ mod tests {
     #[test]
     fn replacement_and_drop_cancel_obsolete_work_without_publishing_stale_hits() {
         let (_dir, set) = pair_set("", &"old query\n".repeat(50_000));
-        let mut search = ChangeSetSearch::new("old".into(), false);
+        let mut search = ChangeSetSearch::new("old".into(), false, Default::default());
         search.start(set.clone());
         let cancelled = search.cancel.clone();
         search.execute(SearchCommand::Query("missing".into()), &set, 5.0);
@@ -521,7 +560,7 @@ mod scheduler_perf {
             )
             .unwrap(),
         );
-        let mut search = ChangeSetSearch::new(String::new(), false);
+        let mut search = ChangeSetSearch::new(String::new(), false, Default::default());
         let (mut complete, mut first, mut cancel, mut row_queries) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut rss = Vec::new();
@@ -654,4 +693,8 @@ mod scheduler_perf {
             crate::perf::record("search_session.sustained_rss", "MiB", &rss);
         }
     }
+}
+
+fn query_error(text: &str, options: FindOptions) -> Option<String> {
+    Matcher::new(&Query { text: text.into(), options }).err().map(|e| e.to_string())
 }
