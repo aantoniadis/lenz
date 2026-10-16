@@ -990,6 +990,168 @@ fn tags(lang: Language) -> Option<&'static Tags> {
         .as_ref()
 }
 
+/// A subtype–supertype pair written in source: `impl Show for S`, `trait Fancy: Show`, `class A(B)`,
+/// `class A extends B implements I`, `class A : B(), I`, `class A < B` / `include M`. Byte ranges into the text:
+/// each type's last plain name (`a::Show<T>` → `Show`) and the header it is written in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Relation {
+    pub sub: Range<usize>,
+    pub sup: Range<usize>,
+    /// The declaration or impl header holding the relation (to its body).
+    pub site: Range<usize>,
+    /// [`DeclKind::Impl`] for a Rust impl, [`DeclKind::Interface`] for a trait or interface, else [`DeclKind::Type`].
+    pub sub_kind: DeclKind,
+    /// [`DeclKind::Interface`] for a trait bound, an implemented interface or a mixin, else [`DeclKind::Type`].
+    pub sup_kind: DeclKind,
+}
+
+const RUST_RELATIONS: &str = "
+(impl_item
+  trait: [(type_identifier) @sup.interface
+          (scoped_type_identifier name: (type_identifier) @sup.interface)
+          (generic_type type: [(type_identifier) @sup.interface (scoped_type_identifier name: (type_identifier) @sup.interface)])]
+  type: [(type_identifier) @sub
+         (scoped_type_identifier name: (type_identifier) @sub)
+         (generic_type type: [(type_identifier) @sub (scoped_type_identifier name: (type_identifier) @sub)])]) @site
+(trait_item
+  name: (type_identifier) @sub
+  bounds: (trait_bounds [(type_identifier) @sup.interface
+                         (scoped_type_identifier name: (type_identifier) @sup.interface)
+                         (generic_type type: [(type_identifier) @sup.interface (scoped_type_identifier name: (type_identifier) @sup.interface)])])) @site
+";
+
+const PYTHON_RELATIONS: &str = "
+(class_definition
+  name: (identifier) @sub
+  superclasses: (argument_list [(identifier) @sup (attribute attribute: (identifier) @sup) (subscript value: [(identifier) @sup (attribute attribute: (identifier) @sup)])])) @site
+";
+
+const TS_RELATIONS: &str = "
+([(class_declaration name: (type_identifier) @sub (class_heritage (extends_clause value: [(identifier) @sup (member_expression property: (property_identifier) @sup)])))
+  (abstract_class_declaration name: (type_identifier) @sub (class_heritage (extends_clause value: [(identifier) @sup (member_expression property: (property_identifier) @sup)])))]) @site
+([(class_declaration name: (type_identifier) @sub (class_heritage (implements_clause [(type_identifier) @sup.interface (generic_type name: [(type_identifier) @sup.interface (nested_type_identifier name: (type_identifier) @sup.interface)]) (nested_type_identifier name: (type_identifier) @sup.interface)])))
+  (abstract_class_declaration name: (type_identifier) @sub (class_heritage (implements_clause [(type_identifier) @sup.interface (generic_type name: [(type_identifier) @sup.interface (nested_type_identifier name: (type_identifier) @sup.interface)]) (nested_type_identifier name: (type_identifier) @sup.interface)])))]) @site
+(interface_declaration name: (type_identifier) @sub
+  (extends_type_clause type: [(type_identifier) @sup.interface (generic_type name: [(type_identifier) @sup.interface (nested_type_identifier name: (type_identifier) @sup.interface)]) (nested_type_identifier name: (type_identifier) @sup.interface)])) @site
+";
+
+const JS_RELATIONS: &str = "
+(class_declaration name: (identifier) @sub
+  (class_heritage [(identifier) @sup (member_expression property: (property_identifier) @sup)])) @site
+";
+
+const JAVA_RELATIONS: &str = "
+(class_declaration name: (identifier) @sub
+  superclass: (superclass [(type_identifier) @sup (generic_type (type_identifier) @sup) (scoped_type_identifier (type_identifier) @sup .)])) @site
+(class_declaration name: (identifier) @sub
+  interfaces: (super_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)]))) @site
+(interface_declaration name: (identifier) @sub
+  (extends_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (scoped_type_identifier (type_identifier) @sup.interface .)]))) @site
+";
+
+const KOTLIN_RELATIONS: &str = "
+([(class_declaration (type_identifier) @sub (delegation_specifier [(constructor_invocation [(user_type (type_identifier) @sup .) (user_type (type_identifier) @sup . (type_arguments) .)]) (user_type (type_identifier) @sup.interface .) (user_type (type_identifier) @sup.interface . (type_arguments) .)]))
+  (object_declaration (type_identifier) @sub (delegation_specifier [(constructor_invocation [(user_type (type_identifier) @sup .) (user_type (type_identifier) @sup . (type_arguments) .)]) (user_type (type_identifier) @sup.interface .) (user_type (type_identifier) @sup.interface . (type_arguments) .)]))]) @site
+";
+
+const RUBY_RELATIONS: &str = "
+(class name: [(constant) @sub (scope_resolution name: (constant) @sub)]
+  superclass: (superclass [(constant) @sup (scope_resolution name: (constant) @sup)])) @site
+(class name: [(constant) @sub (scope_resolution name: (constant) @sub)]
+  body: (body_statement (call method: (identifier) @_include arguments: (argument_list [(constant) @sup.interface (scope_resolution name: (constant) @sup.interface)]) (#eq? @_include \"include\")))) @site
+";
+
+struct Relations {
+    query: Query,
+    sub: u32,
+    sup: u32,
+    sup_interface: u32,
+    site: u32,
+}
+
+fn relations_query(lang: Language) -> Option<&'static str> {
+    use Language::*;
+    Some(match lang {
+        Rust => RUST_RELATIONS,
+        Python => PYTHON_RELATIONS,
+        TypeScript | Tsx => TS_RELATIONS,
+        JavaScript => JS_RELATIONS,
+        Java => JAVA_RELATIONS,
+        Kotlin => KOTLIN_RELATIONS,
+        Ruby => RUBY_RELATIONS,
+        _ => return None,
+    })
+}
+
+/// The relations query for `lang`, compiled once outside any syntax arena.
+fn relations(lang: Language) -> Option<&'static Relations> {
+    static RELATIONS: [OnceLock<Option<Relations>>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
+    crate::syntax_arena::install();
+    RELATIONS[lang as usize]
+        .get_or_init(|| {
+            let query = Query::new(&config(lang).language, relations_query(lang)?).ok()?;
+            let index = |name: &str| query.capture_index_for_name(name);
+            let (sub, sup, site) = (index("sub")?, index("sup").unwrap_or(u32::MAX), index("site")?);
+            let sup_interface = index("sup.interface").unwrap_or(u32::MAX);
+            Some(Relations { query, sub, sup, sup_interface, site })
+        })
+        .as_ref()
+}
+
+/// Whether [`type_relations_while`] supports `lang`.
+pub fn has_type_relations(lang: Language) -> bool {
+    relations(lang).is_some()
+}
+
+/// `text`'s subtype–supertype pairs, parsed on the syntax pool inside its arena; `None` when `lang` has none, or
+/// once `current` says the work is obsolete.
+pub fn type_relations_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Vec<Relation>> {
+    relations(lang)?;
+    on_worker(move || relations_now(lang, &text, &current))
+}
+
+fn relations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Option<Vec<Relation>> {
+    let rel = relations(lang)?;
+    if !current() {
+        return None;
+    }
+    let _arena = crate::syntax_arena::Scope::begin(text.len());
+    let mut parser = Parser::new();
+    parser.set_language(&config(lang).language).ok()?;
+    let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
+    let tree = parser.parse_with_options(&mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(), None, Some(ParseOptions::new().progress_callback(&mut progress)))?;
+    let mut out = Vec::new();
+    {
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&rel.query, tree.root_node(), text.as_bytes());
+        while let Some(m) = matches.next() {
+            let node = |index: u32| m.captures().iter().find(|c| c.index == index).map(|c| c.node);
+            let (Some(sub), Some(site)) = (node(rel.sub), node(rel.site)) else { continue };
+            let (sup, sup_kind) = match (node(rel.sup), node(rel.sup_interface)) {
+                (Some(n), _) => (n, DeclKind::Type),
+                (None, Some(n)) => (n, DeclKind::Interface),
+                (None, None) => continue,
+            };
+            let mut walk = site.walk();
+            let interface_kw = site.children(&mut walk).any(|c| c.kind() == "interface");
+            let sub_kind = match site.kind() {
+                "impl_item" => DeclKind::Impl,
+                "trait_item" | "interface_declaration" => DeclKind::Interface,
+                _ if interface_kw => DeclKind::Interface,
+                _ => DeclKind::Type,
+            };
+            // The header: the site up to its body.
+            let mut walk = site.walk();
+            let body = site.child_by_field_name("body").or_else(|| site.children(&mut walk).find(|c| c.kind().ends_with("body") || c.kind() == "declaration_list"));
+            let site = site.start_byte()..body.map_or(site.end_byte(), |b| b.start_byte());
+            out.push(Relation { sub: sub.byte_range(), sup: sup.byte_range(), site, sub_kind, sup_kind });
+        }
+    }
+    out.sort_by_key(|r| (r.sup.start, r.sub.start));
+    out.dedup();
+    current().then_some(out)
+}
+
 /// `text`'s declarations, parsed on the syntax pool inside its arena; `None` when `lang` has none, or once `current`
 /// says the work is obsolete.
 pub fn declarations_while(lang: Language, text: Arc<str>, current: impl Fn() -> bool + Send + 'static) -> Option<Declarations> {
@@ -1775,5 +1937,105 @@ mod tests {
         let end = selection_steps_while(Rust, src.into(), src.len()..src.len(), || true).unwrap();
         assert_eq!(end.last(), Some(&(0..src.len())));
         assert!(selection_steps_while(Rust, src.into(), 0..0, || false).is_none());
+    }
+
+    fn relations(lang: Language, text: &str) -> Vec<(String, String, DeclKind, DeclKind)> {
+        type_relations_while(lang, text.into(), || true)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|r| (text[r.sub].to_owned(), text[r.sup].to_owned(), r.sub_kind, r.sup_kind))
+            .collect()
+    }
+
+    fn pairs(lang: Language, text: &str) -> Vec<(String, String)> {
+        relations(lang, text).into_iter().map(|(a, b, ..)| (a, b)).collect()
+    }
+
+    fn p(sub: &str, sup: &str) -> (String, String) {
+        (sub.to_owned(), sup.to_owned())
+    }
+
+    #[test]
+    fn rust_relations_use_the_last_plain_name() {
+        let text = "trait Show {}\ntrait Fancy: Show + a::Loud<u8> {}\nimpl Show for S {}\nimpl<T> a::Show for b::Wrap<T> {}\nimpl S {}\n// impl Show for Comment {}\nfn f() { let s = \"impl Show for Str {}\"; }\n";
+        let mut got = pairs(Language::Rust, text);
+        got.sort();
+        assert_eq!(got, vec![p("Fancy", "Loud"), p("Fancy", "Show"), p("S", "Show"), p("Wrap", "Show")]);
+        let kinds = relations(Language::Rust, text);
+        assert!(kinds.iter().any(|(s, _, k, sk)| s == "S" && *k == DeclKind::Impl && *sk == DeclKind::Interface));
+        assert!(kinds.iter().any(|(s, _, k, _)| s == "Fancy" && *k == DeclKind::Interface));
+    }
+
+    #[test]
+    fn python_bases_skip_keyword_arguments() {
+        let mut got = pairs(Language::Python, "class A(B, mod.C, metaclass=M):\n    pass\nclass D:\n    pass\n");
+        got.sort();
+        assert_eq!(got, vec![p("A", "B"), p("A", "C")]);
+    }
+
+    #[test]
+    fn typescript_and_javascript_extends_and_implements() {
+        let ts = "class A extends B implements I, ns.J<T> {}\ninterface K extends I, L<T> {}\nabstract class M extends N {}\n";
+        let mut got = pairs(Language::TypeScript, ts);
+        got.sort();
+        assert_eq!(got, vec![p("A", "B"), p("A", "I"), p("A", "J"), p("K", "I"), p("K", "L"), p("M", "N")]);
+        assert_eq!(pairs(Language::Tsx, ts).len(), 6);
+        assert_eq!(pairs(Language::JavaScript, "class A extends mod.B {}\nclass C {}\n"), vec![p("A", "B")]);
+    }
+
+    #[test]
+    fn java_kotlin_and_ruby_supertypes() {
+        let mut java = pairs(Language::Java, "class A extends B implements I, p.J<T> {}\ninterface K extends I {}\n");
+        java.sort();
+        assert_eq!(java, vec![p("A", "B"), p("A", "I"), p("A", "J"), p("K", "I")]);
+        let mut kt = relations(Language::Kotlin, "class A : B(), I {}\ninterface K : I\nobject O : I\n");
+        kt.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        assert_eq!(kt.iter().map(|(a, b, ..)| p(a, b)).collect::<Vec<_>>(), vec![p("A", "B"), p("A", "I"), p("K", "I"), p("O", "I")]);
+        assert!(kt.iter().any(|(a, b, _, sk)| a == "A" && b == "B" && *sk == DeclKind::Type));
+        assert!(kt.iter().any(|(a, b, _, sk)| a == "A" && b == "I" && *sk == DeclKind::Interface));
+        let mut rb = pairs(Language::Ruby, "class A < Base\n  include Mixin\n  include Mod::Other\nend\nclass B::C < D::E\nend\n");
+        rb.sort();
+        assert_eq!(rb, vec![p("A", "Base"), p("A", "Mixin"), p("A", "Other"), p("C", "E")]);
+    }
+
+    #[test]
+    fn relations_span_lines_and_other_languages_have_none() {
+        let text = "class A(\n    B,\n):\n    pass\n";
+        let r = type_relations_while(Language::Python, text.into(), || true).unwrap();
+        assert_eq!((&text[r[0].sub.clone()], &text[r[0].sup.clone()], r[0].site.start), ("A", "B", 0));
+        assert!(!has_type_relations(Language::Go) && type_relations_while(Language::Go, "type A struct{}".into(), || true).is_none());
+        for lang in [Language::Rust, Language::Python, Language::TypeScript, Language::Tsx, Language::JavaScript, Language::Java, Language::Kotlin, Language::Ruby] {
+            assert!(has_type_relations(lang), "{lang:?}: its query compiles");
+        }
+        assert!(type_relations_while(Language::Rust, "impl A for B {}".into(), || false).is_none(), "obsolete: nothing");
+    }
+
+    #[test]
+    #[ignore = "timing; run in release"]
+    fn type_relations_perf() {
+        let samples = [
+            (Language::Rust, "trait T{} impl T for S{} struct S;\n"),
+            (Language::Python, "class A(B):\n    pass\n"),
+            (Language::TypeScript, "class A extends B implements I {}\n"),
+            (Language::Java, "class A extends B implements I {}\n"),
+            (Language::Kotlin, "class A : B(), I {}\n"),
+            (Language::Ruby, "class A < B\nend\n"),
+        ];
+        for (lang, line) in samples {
+            let text: Arc<str> = line.repeat(10_000 / line.matches('\n').count()).into();
+            let t = std::time::Instant::now();
+            let n = type_relations_while(lang, text, || true).map_or(0, |r| r.len());
+            println!("{lang:?}: {n} relations in {:?}", t.elapsed());
+        }
+    }
+
+    #[test]
+    fn generic_bases_count_in_kotlin_and_python() {
+        let mut kt = pairs(Language::Kotlin, "class A : Comparable<A>\nclass B : ArrayList<String>()\nclass C : p.Base<Int>(), q.I<C>\n");
+        kt.sort();
+        assert_eq!(kt, vec![p("A", "Comparable"), p("B", "ArrayList"), p("C", "Base"), p("C", "I")]);
+        let mut py = pairs(Language::Python, "class A(Generic[T]):\n    pass\nclass B(mod.Base[int], Protocol):\n    pass\n");
+        py.sort();
+        assert_eq!(py, vec![p("A", "Generic"), p("B", "Base"), p("B", "Protocol")]);
     }
 }
