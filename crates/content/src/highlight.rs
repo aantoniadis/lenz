@@ -999,7 +999,8 @@ pub struct Relation {
     pub sup: Range<usize>,
     /// The declaration or impl header holding the relation (to its body).
     pub site: Range<usize>,
-    /// [`DeclKind::Impl`] for a Rust impl, [`DeclKind::Interface`] for a trait or interface, else [`DeclKind::Type`].
+    /// [`DeclKind::Impl`] for a Rust impl, [`DeclKind::Interface`] for a trait or interface, [`DeclKind::Module`] for
+    /// a Ruby module, else [`DeclKind::Type`].
     pub sub_kind: DeclKind,
     /// [`DeclKind::Interface`] for a trait bound, an implemented interface or a mixin, else [`DeclKind::Type`].
     pub sup_kind: DeclKind,
@@ -1012,7 +1013,10 @@ const RUST_RELATIONS: &str = "
           (generic_type type: [(type_identifier) @sup.interface (scoped_type_identifier name: (type_identifier) @sup.interface)])]
   type: [(type_identifier) @sub
          (scoped_type_identifier name: (type_identifier) @sub)
-         (generic_type type: [(type_identifier) @sub (scoped_type_identifier name: (type_identifier) @sub)])]) @site
+         (generic_type type: [(type_identifier) @sub (scoped_type_identifier name: (type_identifier) @sub)])
+         (reference_type type: [(type_identifier) @sub
+                                (scoped_type_identifier name: (type_identifier) @sub)
+                                (generic_type type: [(type_identifier) @sub (scoped_type_identifier name: (type_identifier) @sub)])])]) @site
 (trait_item
   name: (type_identifier) @sub
   bounds: (trait_bounds [(type_identifier) @sup.interface
@@ -1042,11 +1046,15 @@ const JS_RELATIONS: &str = "
 
 const JAVA_RELATIONS: &str = "
 (class_declaration name: (identifier) @sub
-  superclass: (superclass [(type_identifier) @sup (generic_type (type_identifier) @sup) (scoped_type_identifier (type_identifier) @sup .)])) @site
-(class_declaration name: (identifier) @sub
-  interfaces: (super_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)]))) @site
+  superclass: (superclass [(type_identifier) @sup (generic_type (type_identifier) @sup) (generic_type (scoped_type_identifier (type_identifier) @sup .)) (scoped_type_identifier (type_identifier) @sup .)])) @site
+([(class_declaration name: (identifier) @sub
+    interfaces: (super_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)])))
+  (enum_declaration name: (identifier) @sub
+    interfaces: (super_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)])))
+  (record_declaration name: (identifier) @sub
+    interfaces: (super_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)])))]) @site
 (interface_declaration name: (identifier) @sub
-  (extends_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (scoped_type_identifier (type_identifier) @sup.interface .)]))) @site
+  (extends_interfaces (type_list [(type_identifier) @sup.interface (generic_type (type_identifier) @sup.interface) (generic_type (scoped_type_identifier (type_identifier) @sup.interface .)) (scoped_type_identifier (type_identifier) @sup.interface .)]))) @site
 ";
 
 const KOTLIN_RELATIONS: &str = "
@@ -1058,6 +1066,8 @@ const RUBY_RELATIONS: &str = "
 (class name: [(constant) @sub (scope_resolution name: (constant) @sub)]
   superclass: (superclass [(constant) @sup (scope_resolution name: (constant) @sup)])) @site
 (class name: [(constant) @sub (scope_resolution name: (constant) @sub)]
+  body: (body_statement (call method: (identifier) @_include arguments: (argument_list [(constant) @sup.interface (scope_resolution name: (constant) @sup.interface)]) (#eq? @_include \"include\")))) @site
+(module name: [(constant) @sub (scope_resolution name: (constant) @sub)]
   body: (body_statement (call method: (identifier) @_include arguments: (argument_list [(constant) @sup.interface (scope_resolution name: (constant) @sup.interface)]) (#eq? @_include \"include\")))) @site
 ";
 
@@ -1127,6 +1137,19 @@ fn relations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Opti
         while let Some(m) = matches.next() {
             let node = |index: u32| m.captures().iter().find(|c| c.index == index).map(|c| c.node);
             let (Some(sub), Some(site)) = (node(rel.sub), node(rel.site)) else { continue };
+            if site.kind() == "impl_item" {
+                // `impl !Send for S` says S is not one; in `impl<T> Show for T` the type is any type, not a declaration.
+                let mut walk = site.walk();
+                let negative = site.children(&mut walk).any(|c| c.kind() == "!");
+                let name = sub.utf8_text(text.as_bytes()).ok();
+                let blanket = site.child_by_field_name("type_parameters").is_some_and(|params| {
+                    let mut walk = params.walk();
+                    params.named_children(&mut walk).filter_map(|p| p.child_by_field_name("name")).any(|n| n.utf8_text(text.as_bytes()).ok() == name)
+                });
+                if negative || blanket {
+                    continue;
+                }
+            }
             let (sup, sup_kind) = match (node(rel.sup), node(rel.sup_interface)) {
                 (Some(n), _) => (n, DeclKind::Type),
                 (None, Some(n)) => (n, DeclKind::Interface),
@@ -1137,6 +1160,7 @@ fn relations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Opti
             let sub_kind = match site.kind() {
                 "impl_item" => DeclKind::Impl,
                 "trait_item" | "interface_declaration" => DeclKind::Interface,
+                "module" => DeclKind::Module,
                 _ if interface_kw => DeclKind::Interface,
                 _ => DeclKind::Type,
             };
@@ -1996,6 +2020,57 @@ mod tests {
         let mut rb = pairs(Language::Ruby, "class A < Base\n  include Mixin\n  include Mod::Other\nend\nclass B::C < D::E\nend\n");
         rb.sort();
         assert_eq!(rb, vec![p("A", "Base"), p("A", "Mixin"), p("A", "Other"), p("C", "E")]);
+    }
+
+    #[test]
+    fn java_qualified_generic_supertypes() {
+        let mut got = pairs(Language::Java, "class A extends p.B<T> {}\ninterface K extends q.I<T>, J {}\n");
+        got.sort();
+        assert_eq!(got, vec![p("A", "B"), p("K", "I"), p("K", "J")]);
+    }
+
+    #[test]
+    fn java_enum_and_record_implement_interfaces() {
+        let text = "enum E implements I, p.J<T> { X }\nrecord R(int x) implements K {}\n";
+        let mut got = pairs(Language::Java, text);
+        got.sort();
+        assert_eq!(got, vec![p("E", "I"), p("E", "J"), p("R", "K")]);
+        assert!(relations(Language::Java, text).iter().all(|(_, _, k, sk)| *k == DeclKind::Type && *sk == DeclKind::Interface));
+    }
+
+    #[test]
+    fn rust_blanket_impl_has_no_subtype() {
+        let text = "trait Show {}\nimpl<T> Show for T {}\nimpl<T: Debug> Show for &T {}\nimpl<U> Show for U where U: Debug {}\nimpl<T: Show> Show for Box<T> {}\nimpl<'a, U> Show for Wrap<'a, U> {}\n";
+        let mut got = pairs(Language::Rust, text);
+        got.sort();
+        assert_eq!(got, vec![p("Box", "Show"), p("Wrap", "Show")]);
+    }
+
+    #[test]
+    fn rust_negative_impl_has_no_subtype() {
+        assert_eq!(pairs(Language::Rust, "impl !Send for S {}\nimpl Show for S {}\n"), vec![p("S", "Show")]);
+    }
+
+    #[test]
+    fn rust_impl_for_a_reference_names_the_type() {
+        let mut got = pairs(Language::Rust, "impl Show for &S {}\nimpl<'a> Show for &'a mut b::T<u8> {}\n");
+        got.sort();
+        assert_eq!(got, vec![p("S", "Show"), p("T", "Show")]);
+    }
+
+    #[test]
+    fn rust_impl_for_dyn_has_no_subtype_and_keeps_the_rest() {
+        let text = "impl Show for dyn Other {}\nimpl Show for &dyn Other {}\nimpl Show for Plain {}\n";
+        assert_eq!(pairs(Language::Rust, text), vec![p("Plain", "Show")]);
+    }
+
+    #[test]
+    fn ruby_include_in_a_module() {
+        let text = "module Greeter\n  include Mixin\n  include Mod::Other\nend\nclass A\n  include Kind\nend\n";
+        let mut got = relations(Language::Ruby, text);
+        got.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+        let got: Vec<(String, String, DeclKind)> = got.into_iter().map(|(a, b, k, _)| (a, b, k)).collect();
+        assert_eq!(got, vec![("A".into(), "Kind".into(), DeclKind::Type), ("Greeter".into(), "Mixin".into(), DeclKind::Module), ("Greeter".into(), "Other".into(), DeclKind::Module)]);
     }
 
     #[test]
