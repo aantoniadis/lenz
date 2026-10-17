@@ -17,6 +17,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy --workspace --all-targets --locked --features lenz/gui-test -- -D warnings
 step "panic-prone sites"
 python3 scripts/panic-sites.py
+python3 scripts/panic-sites.py --reader
 step "tests"
 cargo test --workspace --locked
 # They read the whole process's memory, which concurrent tests' allocations skew.
@@ -29,6 +30,7 @@ cargo test -p lenz-content --lib --locked -- --ignored --exact --test-threads=1 
     syntax_arena::tests::ending_a_scope_returns_touched_pages
 step "GUI adapter tests"
 cargo test -p lenz --features gui-test --locked gui_
+cargo test -p reader-gui --features test-support --locked
 step "collector tests"
 python3 -m unittest discover -s scripts -p 'test_*.py'
 step "release build and stripped size (≤ 80,000,000 bytes)"

@@ -751,3 +751,87 @@ fn dropping_the_service_joins_its_worker_and_closes_updates() {
     assert!(started.elapsed() < Duration::from_secs(2), "worker stopped promptly");
     assert!(updates.is_closed());
 }
+
+#[test]
+fn shared_appearance_falls_back_read_only_and_canonical_wins() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ThemePaths::shared_under(d.path(), d.path());
+    let legacy = ThemePaths::under(d.path(), d.path(), "lenz-reader");
+    std::fs::create_dir_all(&legacy.themes).unwrap();
+    let old = r#"{"version":1,"theme":"user:mine","reader":42}"#;
+    std::fs::write(&legacy.selection, old).unwrap();
+    std::fs::write(legacy.themes.join("mine.toml"), CUSTOM).unwrap();
+    assert_eq!(read_selection(&p, &ThemeOverrides::default()).0.id(), "user:mine");
+    assert_eq!(p.theme_path("user:mine"), Some(legacy.themes.join("mine.toml")));
+    assert!(discover_themes(&p).0.iter().any(|e| e.id == "user:mine"));
+    assert!(!p.selection.exists(), "reading never migrates configuration");
+    save_selection(&p, &ThemeSelection::Named("light".into())).unwrap();
+    assert_eq!(read_selection(&p, &ThemeOverrides::default()).0.id(), "light");
+    assert_eq!(std::fs::read_to_string(&legacy.selection).unwrap(), old);
+    std::fs::write(&p.selection, "broken").unwrap();
+    let (s, n) = read_selection(&p, &ThemeOverrides::default());
+    assert_eq!(s, ThemeSelection::System);
+    assert!(!n.is_empty(), "invalid canonical selection must be reported");
+    std::fs::create_dir_all(&p.themes).unwrap();
+    std::fs::write(p.themes.join("mine.toml"), "broken").unwrap();
+    assert_eq!(p.theme_path("user:mine"), Some(p.themes.join("mine.toml")));
+    let (entries, notices) = discover_themes(&p);
+    assert!(!entries.iter().any(|e| e.id == "user:mine"));
+    assert!(!notices.is_empty(), "invalid canonical theme must not be hidden by fallback");
+}
+
+#[test]
+fn shared_appearance_preserves_unknown_canonical_fields() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ThemePaths::shared_under(d.path(), d.path());
+    std::fs::create_dir_all(p.selection.parent().unwrap()).unwrap();
+    std::fs::write(&p.selection, r#"{"version":1,"theme":"light","future":{"size":19}}"#).unwrap();
+    save_selection(&p, &ThemeSelection::System).unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&p.selection).unwrap()).unwrap();
+    assert_eq!(v["future"]["size"], 19);
+}
+
+#[test]
+fn shared_legacy_selection_resolves_and_explicit_reselection_saves_canonical() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ThemePaths::shared_under(d.path(), d.path());
+    let old = d.path().join("lenz-reader/appearance.json");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    let bytes = r#"{"version":1,"theme":"light"}"#;
+    std::fs::write(&old, bytes).unwrap();
+    let mut service = ThemeService::new_deferred(p.clone(), ThemeOverrides::default(), true);
+    assert_eq!(service.snapshot().selection.id(), "light");
+    assert_eq!(*service.snapshot().palette, LIGHT);
+    assert!(!p.selection.exists());
+    service.execute(ThemeCommand::Select(ThemeSelection::Named("light".into())));
+    drop(service);
+    assert!(p.selection.exists(), "an explicit choice writes only the canonical settings");
+    assert_eq!(std::fs::read_to_string(old).unwrap(), bytes);
+}
+
+#[test]
+fn shared_override_environment_priority_and_notice_sources() {
+    const EXPECTED: &str = "LENZ_TEST_SHARED_OVERRIDE_EXPECTED";
+    if let Ok(expected) = std::env::var(EXPECTED) {
+        let d = tempfile::tempdir().unwrap();
+        let (selected, notices) = read_selection(&paths(d.path()), &ThemeOverrides::shared_from_env());
+        assert_eq!(selected.id(), expected);
+        if expected == "system" { assert!(notices[0].contains("LENZ_THEME")); }
+        else { assert!(notices.is_empty(), "{notices:?}"); }
+        return;
+    }
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[("LENZ_READER_APPEARANCE", "light")], "light"),
+        (&[("LENZ_READER_THEME", "gruvbox"), ("LENZ_READER_APPEARANCE", "light")], "gruvbox"),
+        (&[("LENZ_APPEARANCE", "dark"), ("LENZ_READER_THEME", "light")], "darcula"),
+        (&[("LENZ_THEME", "catppuccin"), ("LENZ_APPEARANCE", "light"), ("LENZ_READER_THEME", "gruvbox")], "catppuccin"),
+        (&[("LENZ_THEME", "broken"), ("LENZ_READER_THEME", "light")], "system"),
+    ];
+    for (vars, expected) in cases {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child.args(["--exact", "theme::tests::shared_override_environment_priority_and_notice_sources", "--nocapture"]);
+        for name in ["LENZ_THEME", "LENZ_APPEARANCE", "LENZ_READER_THEME", "LENZ_READER_APPEARANCE"] { child.env_remove(name); }
+        let output = child.envs(vars.iter().copied()).env(EXPECTED, expected).output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
+    }
+}

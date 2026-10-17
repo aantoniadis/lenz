@@ -89,6 +89,7 @@ impl Viewer {
     pub(super) fn repository_command(&mut self, command: crate::repository_session::RepositoryCommand, cx: &mut Context<Self>) {
         let Some(r) = self.repo.as_mut() else { return };
         r.execute(command);
+        if r.message_collapsed() { self.message_focused=false; self.message_press=None; self.message_sel=None; }
         self.present_repository(cx);
         self.poll_repository(cx);
         cx.notify();

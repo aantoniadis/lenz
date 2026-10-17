@@ -11,9 +11,7 @@ use crate::{markdown::PresentationMode, view::ScrollMode};
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Settings { pub gui: Gui, pub view: View, pub tools: Tools, pub session: SessionSettings }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct Gui { pub font_family: Option<String>, pub font_size: f32, pub reading_font: Option<String> }
-impl Default for Gui { fn default() -> Self { Gui { font_family: None, font_size: 13.0, reading_font: None } } }
+pub use lenz_content::appearance::FontPreferences as Gui;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct View {
@@ -55,14 +53,7 @@ pub struct Tools { pub editor: Option<String>, pub icons: Option<Icons>, pub cra
 pub struct SessionSettings { pub restore_place: bool }
 impl Default for SessionSettings { fn default() -> Self { SessionSettings { restore_place: true } } }
 
-pub const FONT_SIZES: std::ops::RangeInclusive<f32> = 8.0..=32.0;
-
-/// `$XDG_CONFIG_HOME/lenz/settings.toml`, else `~/.config/lenz/settings.toml`.
-pub fn path() -> Option<PathBuf> {
-    let config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from).filter(|p| p.is_absolute()).map(|h| h.join(".config")))?;
-    Some(config.join("lenz/settings.toml"))
-}
+pub use lenz_content::appearance::{FONT_SIZES, path};
 
 /// Every setting, commented out: what **Settings…** creates when there is no file yet.
 pub const TEMPLATE: &str = "\
@@ -173,18 +164,8 @@ pub fn parse(text: &str, home: Option<&Path>) -> (Settings, Vec<String>) {
             let text = || value.as_str();
             let flag = || value.as_bool();
             match (section.as_str(), key.as_str()) {
-                ("gui", "font_family") => match text().map(str::trim).filter(|t| !t.is_empty() && t.len() <= 128) {
-                    Some(t) => s.gui.font_family = Some(t.to_string()),
-                    None => bad("must be a font name"),
-                },
-                ("gui", "reading_font") => match text().map(str::trim).filter(|t| !t.is_empty() && t.len() <= 128) {
-                    Some(t) => s.gui.reading_font = Some(t.to_string()),
-                    None => bad("must be a font name"),
-                },
-                ("gui", "font_size") => match value.as_float().or_else(|| value.as_integer().map(|i| i as f32 as f64)) {
-                    Some(n) if FONT_SIZES.contains(&(n as f32)) => s.gui.font_size = n as f32,
-                    Some(_) => bad("must be between 8 and 32"),
-                    None => bad("must be a number"),
+                ("gui", "font_family" | "reading_font" | "font_size") => {
+                    if let Some(Err(why)) = s.gui.apply_field(key, value) { bad(why); }
                 },
                 ("view", "whitespace") => match text() {
                     Some("default") => s.view.whitespace = WhitespaceMode::Default,

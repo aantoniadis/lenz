@@ -41,7 +41,8 @@ impl Viewer {
     pub(super) fn log_rows(&self) -> f32 { (self.log_h()/line_h()-1.0).max(0.0) }
     pub(super) fn panel_rows(&self) -> f32 { (self.panel_h()/line_h()-1.0).max(0.0) }
     fn pane_handles(&self) -> Vec<(Divider,f32,f32,f32,f32)> {
-        let [w,h]=self.panes.viewport;
+        let [w,_]=self.panes.viewport;
+        let h=self.content_bottom();
         let top=toolbar_h()+self.log_h();
         let bottom=(h-self.panel_h()).max(top);
         let mut handles=Vec::new();
@@ -114,7 +115,8 @@ impl Viewer {
         if self.resize_blocked(){self.panes.drag=None;return false;}
         let Some(drag)=self.panes.drag else{return false;};
         if !pressed{self.panes.drag=None;return false;}
-        let [w,h]=self.panes.viewport;
+        let [w,_]=self.panes.viewport;
+        let h=self.content_bottom();
         let px=x-drag.offset;
         let py=y-drag.offset;
         match drag.divider {

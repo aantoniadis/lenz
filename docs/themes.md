@@ -1,6 +1,6 @@
 # Themes
 
-Lenz shares semantic chrome, syntax and diff colors between its GUI and TUI.
+Lenz shares semantic chrome, syntax and diff colors between its GUI, TUI and Reader.
 Bundled themes are Darcula (`darcula`), Light (`light`), Catppuccin Mocha
 (`catppuccin`), Catppuccin Latte (`catppuccin-latte`), Tokyo Night (`tokyo-night`)
 and Gruvbox (`gruvbox`).
@@ -93,11 +93,24 @@ effect even when saving fails, with a notice that it was not saved. Missing
 custom themes fall back while retaining their saved ID.
 
 `LENZ_THEME=system|<id>` overrides saved settings for that launch.
-`LENZ_APPEARANCE=light|dark` is a legacy override when LENZ_THEME is unset.
+`LENZ_APPEARANCE=light|dark` is read when LENZ_THEME is unset. Both products also
+accept the old Reader variables with lower priority: `LENZ_THEME`, then
+`LENZ_APPEARANCE`, then `LENZ_READER_THEME`, then `LENZ_READER_APPEARANCE`.
 Unknown overrides report a notice and use the saved/default selection. Explicit
 menu selection supersedes the environment override and saves normally.
 
 The theme format, built-in themes, selection and Omarchy following live in the
-shared `lenz-content` crate, which the code reader also uses. Each product passes
-its own directories, selection file and overrides, so the reader's choice and
-user themes never change Lenz's.
+shared `lenz-content` crate. Reader and Diff use the same `lenz/appearance.json`
+and `lenz/themes`. If the canonical selection file is absent, both read
+`lenz-reader/appearance.json`; a missing canonical user-theme file can fall back to
+`lenz-reader/themes/<name>.toml`. Existing canonical files always win, including
+invalid files, which produce a notice. Legacy files are never rewritten or
+migrated; explicit choices save to `lenz/appearance.json` and preserve its unknown
+JSON fields. Separate processes read the shared selection at their next launch;
+they do not synchronize menu choices live. Follow system still watches Omarchy
+changes live.
+
+Both GUIs also read `[gui] font_family`, `font_size` (8–32, default 13) and
+`reading_font` from `lenz/settings.toml` at startup. Font changes take effect on
+the next launch. Reader's other settings, recent roots, providers and document
+state remain independent from Diff.

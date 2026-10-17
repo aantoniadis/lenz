@@ -2184,7 +2184,7 @@ impl MergeSession {
         let query = lenz_content::find::Query { text: query, options: self.find_options };
         let found = crate::find::Find::search(lines, &query, from);
         if let Some(f) = &mut self.find {
-            (f.search.hits, f.search.at, f.search.error) = match found { Ok((hits, at)) => (hits, at, None), Err(e) => (Vec::new(), None, Some(e)) };
+            (f.search.hits, f.search.at, f.search.capped, f.search.error) = match found { Ok((hits, at, capped)) => (hits, at, capped, None), Err(e) => (Vec::new(), None, false, Some(e)) };
         }
         self.show_find_hit();
     }
@@ -2249,11 +2249,10 @@ impl MergeSession {
             1 => "Result",
             _ => "Theirs",
         };
-        let at = f.search.at.map_or(0, |i| i + 1);
         let o = self.find_options;
         let marks: Vec<&str> = [(o.case, "Aa"), (o.word, "W"), (o.regex, ".*")].into_iter().filter(|(on, _)| *on).map(|(_, m)| m).collect();
         let marks = if marks.is_empty() { String::new() } else { format!(" [{}]", marks.join(" ")) };
-        let count = f.search.error().map_or_else(|| format!("{at}/{} matches", f.search.hits.len()), str::to_owned);
+        let count = f.search.counter();
         Some(format!(
             "Find {pane}{marks}: {}{} · {count} · Tab pane · F3 next · Alt+C/W/R options · Esc clear",
             f.search.query,

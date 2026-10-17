@@ -1,42 +1,45 @@
-//! Focus's commit message panel, between the Files header and its list; the repository session owns what it shows.
+//! Focus's commit message panel, below Files and the diff; the repository session owns what it shows.
 use super::*;
 use crate::commit_message::{Line, LineKind};
 use crate::repository_session::RepositoryCommand as R;
 
 impl Viewer {
-    /// The panel's lines at the Files column's width; none outside Focus or without a message.
+    /// The panel's lines at the combined Files and diff width; none outside Focus or without a message.
     pub(super) fn message_lines(&self) -> Vec<Line> {
-        if !self.layout.focused(self.repo.as_ref()) || !self.layout.files() { return Vec::new(); }
-        let columns = ((self.sidebar_w() - 16.0) / self.char_w.max(1.0)).floor().max(1.0) as usize;
+        if !self.layout.focused(self.repo.as_ref()) { return Vec::new(); }
+        let columns = ((self.panes.viewport[0] - self.nav_x() - 16.0) / self.char_w.max(1.0)).floor().max(1.0) as usize;
         // ponytail: rewrapped on each call (messages are capped at 16 KiB); cache by (columns, message) if a long range shows up in profiles
         self.repo.as_ref().and_then(|r| r.message_lines(columns)).unwrap_or_default()
     }
-    /// Rows the panel shows of `lines`: all of them, up to a third of the column.
+    /// Rows the panel shows of `lines`: all of them, up to a third of the content height.
     fn message_rows(&self, lines: usize) -> f32 {
-        let column = (self.panes.viewport[1] - self.top() - footer_h()).max(0.0);
-        (lines as f32).min((column / 3.0 / line_h()).floor().max(1.0))
+        let column = (self.panes.viewport[1] - self.top()).max(0.0);
+        (lines as f32).min((column / 3.0 / line_h()).floor())
     }
     /// The panel's height, its border included; 0 while hidden.
     pub(super) fn message_h(&self) -> f32 {
-        match self.message_lines().len() { 0 => 0.0, n => self.message_rows(n) * line_h() + 1.0 }
+        let rows = self.message_rows(self.message_lines().len());
+        if rows > 0.0 { rows * line_h() + 1.0 } else { 0.0 }
     }
     /// Window y where the Files list's rows start.
-    pub(super) fn nav_top(&self) -> f32 { self.top() + self.message_h() }
+    pub(super) fn nav_top(&self) -> f32 { self.top() }
+    /// Content ends above the full-width commit panel.
+    pub(super) fn content_bottom(&self) -> f32 { self.panes.viewport[1] - self.message_h() }
     /// The scroll within the panel's current lines: a resize or a shorter message can leave it past the end.
     fn message_scroll_in(&self, lines: usize) -> f32 { self.message_scroll.clamp(0.0, (lines as f32 - self.message_rows(lines)).max(0.0)) }
-    fn clamp_message_scroll(&mut self, lines: usize) { self.message_scroll = self.message_scroll_in(lines); }
+    pub(super) fn clamp_message_scroll(&mut self, lines: usize) { self.message_scroll = self.message_scroll_in(lines); }
     fn message_line_at(&self, x: f32, y: f32) -> Option<(usize, Line)> {
-        if !self.in_nav(x) || !(self.top()..self.nav_top() - 1.0).contains(&y) { return None; }
+        if !self.in_message(x, y) { return None; }
         let lines = self.message_lines();
-        let row = ((y - self.top()) / line_h() + self.message_scroll_in(lines.len())) as usize;
+        let row = ((y - self.content_bottom() - 1.0) / line_h() + self.message_scroll_in(lines.len())) as usize;
         lines.into_iter().nth(row).map(|l| (row, l))
     }
-    fn in_message(&self, x: f32, y: f32) -> bool { self.in_nav(x) && (self.top()..self.nav_top()).contains(&y) }
+    fn in_message(&self, x: f32, y: f32) -> bool { x >= self.nav_x() && x < self.panes.viewport[0] && (self.content_bottom()..self.panes.viewport[1]).contains(&y) }
     /// The panel line and character under a point, the row clamped into the panel for drags past its edges.
     fn message_pos(&self, x: f32, y: f32) -> Option<(usize, usize)> {
         let lines = self.message_lines();
         let rows = self.message_rows(lines.len());
-        let row = (((y - self.top()) / line_h()).clamp(0.0, (rows - 1.0).max(0.0)) + self.message_scroll_in(lines.len())) as usize;
+        let row = (((y - self.content_bottom() - 1.0) / line_h()).clamp(0.0, (rows - 1.0).max(0.0)) + self.message_scroll_in(lines.len())) as usize;
         let line = lines.get(row)?;
         let col = ((x - self.nav_x() - 8.0) / self.char_w.max(1.0)).round().max(0.0) as usize;
         Some((row, col.min(line.text.chars().count())))
@@ -120,7 +123,7 @@ impl Viewer {
             "up" => K::Up,
             "down" => K::Down,
             "enter" | "space" => K::Enter,
-            "escape" => { self.message_focused = false; self.message_sel = None; self.nav_focused = true; cx.notify(); return true; }
+            "escape" => { self.message_focused = false; self.message_sel = None; self.nav_focused = self.layout.files(); cx.notify(); return true; }
             _ => return false,
         };
         match self.repo.as_ref().and_then(|r| r.message_key(key)) {
@@ -128,17 +131,17 @@ impl Viewer {
             None => {
                 let max = (lines as f32 - self.message_rows(lines)).max(0.0);
                 match key {
-                    K::Up => self.message_scroll = (self.message_scroll - 1.0).max(0.0),
+                    K::Up if self.message_scroll > 0.0 => self.message_scroll = (self.message_scroll - 1.0).max(0.0),
                     K::Down if self.message_scroll < max => self.message_scroll += 1.0,
                     // past the end: back to the list
-                    _ => { self.message_focused = false; self.message_sel = None; self.nav_focused = true; }
+                    _ => { self.message_focused = false; self.message_sel = None; self.nav_focused = self.layout.files(); }
                 }
                 cx.notify();
             }
         }
         true
     }
-    /// ↑ on Files' first file moves the keyboard into the panel.
+    /// ↓ on Files' last file moves the keyboard into the panel.
     pub(super) fn enter_message_from_files(&mut self, cx: &mut Context<Self>) -> bool {
         if self.message_lines().is_empty() { return false; }
         self.message_focused = true;
@@ -149,7 +152,7 @@ impl Viewer {
     }
     /// A right click on the panel: copy the message or the hash of the commit under the pointer.
     pub(super) fn message_menu(&mut self, x: f32, y: f32, cx: &mut Context<Self>) -> bool {
-        if !self.in_nav(x) || !(self.top()..self.nav_top()).contains(&y) { return false; }
+        if !self.in_message(x, y) { return false; }
         let Some((row, _)) = self.message_line_at(x, y) else { return true };
         let lines = self.message_lines();
         // the commit a line belongs to: the nearest commit line at or above it, else the only one
@@ -164,14 +167,14 @@ impl Viewer {
     }
     /// The wheel over the panel scrolls the panel.
     pub(super) fn message_wheel(&mut self, x: f32, y: f32, rows: f32, cx: &mut Context<Self>) -> bool {
-        if !self.in_nav(x) || !(self.top()..self.nav_top()).contains(&y) { return false; }
+        if !self.in_message(x, y) { return false; }
         self.message_scroll += rows;
         let n = self.message_lines().len();
         self.clamp_message_scroll(n);
         cx.notify();
         true
     }
-    /// What `paint_sidebar` draws for the panel, and its height: each visible line with its color, the selected span
+    /// What the bottom panel draws for the panel, and its height: each visible line with its color, the selected span
     /// (x offset and width from the text start) and whether the keyboard's commit is on it.
     pub(super) fn message_paint(&self) -> (Vec<MessageRow>, f32) {
         let lines = self.message_lines();

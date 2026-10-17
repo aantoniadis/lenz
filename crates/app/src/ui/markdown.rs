@@ -1693,7 +1693,7 @@ impl Viewer {
 
     pub(super) fn markdown_height(&self, window: &Window) -> f32 {
         let _ = window;
-        (self.panes.viewport[1]
+        (self.content_bottom()
             - self.top()
             - self.panel_h()
             - self.picker_v_height())

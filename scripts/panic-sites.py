@@ -6,14 +6,16 @@
 
 Counts clippy's `unwrap_used`, `expect_used`, `panic`, `unreachable` and `string_slice` over the workspace's
 libraries and binaries (tests excluded), each site once. Linux only: the counts include platform code.
+Use --reader for the imported Reader's separate baseline, preserving the existing Diff budget.
 """
 import json, pathlib, subprocess, sys
 
 LINTS = ["unwrap_used", "expect_used", "panic", "unreachable", "string_slice"]
 BASELINE = pathlib.Path(__file__).with_name("panic-sites.txt")
 
-def current() -> dict[str, int]:
-    cmd = ["cargo", "clippy", "--locked", "--workspace", "--lib", "--bins", "--message-format=json", "--"]
+def current(reader=False) -> dict[str, int]:
+    packages = ["-p", "reader-core", "-p", "reader-gui"] if reader else ["--workspace", "--exclude", "reader-core", "--exclude", "reader-gui"]
+    cmd = ["cargo", "clippy", "--locked", *packages, "--lib", "--bins", "--message-format=json", "--"]
     cmd += [f"-Wclippy::{lint}" for lint in LINTS]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
     sites = {lint: set() for lint in LINTS}
@@ -26,12 +28,14 @@ def current() -> dict[str, int]:
     return {lint: len(found) for lint, found in sites.items()}
 
 def main() -> int:
-    counts = current()
+    reader = "--reader" in sys.argv
+    baseline_path = BASELINE.with_name("panic-sites-reader.txt") if reader else BASELINE
+    counts = current(reader)
     if "--update" in sys.argv:
-        BASELINE.write_text("".join(f"{lint} {n}\n" for lint, n in counts.items()))
-        print(f"wrote {BASELINE}")
+        baseline_path.write_text("".join(f"{lint} {n}\n" for lint, n in counts.items()))
+        print(f"wrote {baseline_path}")
         return 0
-    baseline = {k: int(v) for k, v in (line.split() for line in BASELINE.read_text().splitlines() if line.strip())}
+    baseline = {k: int(v) for k, v in (line.split() for line in baseline_path.read_text().splitlines() if line.strip())}
     failed = False
     for lint, n in counts.items():
         allowed = baseline.get(lint, 0)

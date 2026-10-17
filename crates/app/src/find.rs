@@ -9,7 +9,7 @@ use lenz_engine::{Options, compare_lines, split_lines};
 use crate::{changeset::ChangeSet, view::Side};
 
 /// Change Set search stops here and says so.
-pub const MAX_HITS: usize = 10_000;
+pub const MAX_HITS: usize = lenz_content::find::MATCH_LIMIT;
 /// Files bigger than this (per Side) are skipped.
 const MAX_BYTES: usize = 20 << 20;
 
@@ -22,6 +22,7 @@ pub struct Find {
     pub(crate) side: Side,
     pub(crate) hits: Vec<(u32, Range<usize>)>,
     pub(crate) at: Option<usize>,
+    pub(crate) capped: bool,
     /// Why the query cannot be matched (a bad regular expression); no hits while set.
     pub(crate) error: Option<String>,
 }
@@ -29,21 +30,22 @@ pub struct Find {
 impl Find {
     pub fn new(query: String, options: FindOptions, side: Side, lines: &[String], from: crate::selection::Pos) -> Self {
         let query = Query { text: query, options };
-        let (hits, at, error) = match Self::search(lines, &query, from) { Ok((hits, at)) => (hits, at, None), Err(e) => (Vec::new(), None, Some(e)) };
-        Self { query: query.text, side, hits, at, error }
+        let (hits, at, capped, error) = match Self::search(lines, &query, from) { Ok((hits, at, capped)) => (hits, at, capped, None), Err(e) => (Vec::new(), None, false, Some(e)) };
+        Self { query: query.text, side, hits, at, capped, error }
     }
-    pub fn search(lines: &[String], query: &Query, from: crate::selection::Pos) -> Result<(Hits, Option<usize>), String> {
+    pub fn search(lines: &[String], query: &Query, from: crate::selection::Pos) -> Result<(Hits, Option<usize>, bool), String> {
         let matcher = Matcher::new(query).map_err(|e| e.to_string())?;
-        let hits = in_lines(lines, &matcher);
-        let at = hits.iter().position(|(l, r)| crate::selection::Pos::new(*l, r.start) >= from).or((!hits.is_empty()).then_some(0));
-        Ok((hits, at))
+        let (hits, capped) = lenz_content::find::collect_matches(&matcher, lines.iter().enumerate().map(|(i, line)| (i as u32, line.as_str())), || true).unwrap_or_default();
+        let at = lenz_content::find::at_or_after(&hits, from.line, from.col);
+        Ok((hits, at, capped))
     }
     pub fn next_index(&self, forward: bool) -> Option<(usize, bool)> {
-        let n = self.hits.len();
-        if n == 0 { return None; }
-        let i = match self.at { Some(i) if forward => (i + 1) % n, Some(i) => (i + n - 1) % n, None => 0 };
-        Some((i, self.at.is_some() && (forward && i == 0 || !forward && i == n - 1)))
+        lenz_content::find::next_index(self.hits.len(), self.at, forward)
     }
+    pub fn counter(&self) -> String {
+        lenz_content::find::counter(&self.query, self.hits.len(), self.at, self.capped, false, self.error())
+    }
+    pub fn capped(&self) -> bool { self.capped }
     pub fn query(&self) -> &str { &self.query }
     pub fn side(&self) -> Side { self.side }
     pub fn hits(&self) -> &[(u32, Range<usize>)] { &self.hits }
@@ -146,6 +148,19 @@ mod tests {
     /// Plain find: literal, case ignored.
     fn matches(line: &str, query: &str) -> Vec<Range<usize>> {
         m(query, FindOptions::default()).ranges(line).collect()
+    }
+
+    #[test]
+    fn interactive_find_bounds_dense_results() {
+        let lines = vec!["x ".repeat(MAX_HITS + 1)];
+        let f = Find::new("x".into(), FindOptions::default(), Side::Left, &lines, Pos::new(0, 0));
+        assert_eq!(f.hits().len(), MAX_HITS);
+        assert!(f.capped());
+        assert_eq!(f.counter(), "1/10,000+");
+        let exact = vec!["x ".repeat(MAX_HITS)];
+        let f = Find::new("x".into(), FindOptions::default(), Side::Left, &exact, Pos::new(0, 0));
+        assert!(!f.capped());
+        assert_eq!(f.counter(), "1/10000");
     }
 
     #[test]

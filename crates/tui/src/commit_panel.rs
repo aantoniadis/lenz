@@ -1,4 +1,4 @@
-//! Focus's commit message panel above the Files list; the repository session owns what it shows.
+//! Focus's commit message panel below Files and the diff; the repository session owns what it shows.
 use crate::chrome::{color, style_with};
 use crossterm::event::{Event, MouseButton, MouseEventKind};
 use lenz::commit_message::{Line, LineKind};
@@ -13,7 +13,7 @@ pub(crate) struct CommitPanel {
 }
 
 impl CommitPanel {
-    /// Take the panel's rows off the top of the Files box; `lines` is `None` outside Focus or without a message.
+    /// Take the panel's rows off the bottom of the combined Files and diff area; `lines` is `None` outside Focus or without a message.
     /// `current` is the keyboard's line (a range's commit, or the first line of one commit) and `cursor` its commit.
     pub(crate) fn place(&mut self, files: &mut Rect, lines: Option<Vec<Line>>, title: String, current: LineKind, cursor: usize) {
         self.lines = lines.unwrap_or_default();
@@ -21,8 +21,7 @@ impl CommitPanel {
         self.current = Some(current);
         if self.lines.is_empty() || files.width < 3 || files.height < 8 { self.area = Rect::default(); self.focused = false; return; }
         let h = u16::try_from(self.lines.len()).unwrap_or(u16::MAX).saturating_add(2).min(files.height / 3).max(3);
-        self.area = Rect::new(files.x, files.y, files.width, h);
-        files.y += h;
+        self.area = Rect::new(files.x, files.bottom() - h, files.width, h);
         files.height -= h;
         // the keyboard's commit moved: bring it into view
         if std::mem::replace(&mut self.cursor, cursor) != cursor && let Some(row) = self.lines.iter().position(|l| l.kind == current) {
@@ -33,7 +32,7 @@ impl CommitPanel {
     /// Scroll a single commit's message by a row; `false` when ↓ is already at the end (the keyboard goes to Files).
     pub(crate) fn scroll_by(&mut self, down: bool) -> bool {
         let max = self.lines.len().saturating_sub(self.rows());
-        if down && self.scroll >= max { return false; }
+        if down && self.scroll >= max || !down && self.scroll == 0 { return false; }
         self.scroll = if down { self.scroll + 1 } else { self.scroll.saturating_sub(1) };
         true
     }
@@ -87,7 +86,7 @@ impl CommitPanel {
 }
 
 impl crate::app::App {
-    /// Keys for the commit message panel: ↑ on Files' first file enters it; there ↑/↓ walk a range's commits (or scroll
+    /// Keys for the commit message panel: ↓ on Files' last file enters it; there ↑/↓ walk a range's commits (or scroll
     /// one commit's message), Enter opens the commit, Esc or ↓ past the end give the keyboard back to Files.
     pub(crate) fn commit_panel_key(&mut self, event: &Event) -> bool {
         use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
@@ -95,8 +94,8 @@ impl crate::app::App {
         let Event::Key(k) = event else { return false };
         if k.kind == KeyEventKind::Release || !k.modifiers.is_empty() && k.modifiers != KeyModifiers::SHIFT || self.commit_panel.area.height == 0 { return false; }
         if self.navigator.focused {
-            // Files' first file
-            if k.code == KeyCode::Up && !self.navigator.search.active() && self.navigator.on_first_file() {
+            // Files' last file
+            if k.code == KeyCode::Down && !self.navigator.search.active() && self.navigator.on_last_file() {
                 (self.navigator.focused, self.commit_panel.focused) = (false, true);
                 return true;
             }
@@ -108,14 +107,14 @@ impl crate::app::App {
             KeyCode::Up => K::Up,
             KeyCode::Down => K::Down,
             KeyCode::Enter | KeyCode::Char(' ') => K::Enter,
-            KeyCode::Esc => { (self.navigator.focused, self.commit_panel.focused) = (true, false); return true; }
+            KeyCode::Esc => { (self.navigator.focused, self.commit_panel.focused) = (self.navigator.shown(), false); return true; }
             _ => return false,
         };
         match self.repository.as_ref().and_then(|r| r.core.message_key(key)) {
             Some(command) => self.repository_command(command),
             None if self.commit_panel.scroll_by(key == K::Down) => {}
             // ↓ past the end: back to Files
-            None => (self.navigator.focused, self.commit_panel.focused) = (true, false),
+            None => (self.navigator.focused, self.commit_panel.focused) = (self.navigator.shown(), false),
         }
         true
     }

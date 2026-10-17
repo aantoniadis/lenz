@@ -1,4 +1,4 @@
-//! Lenz's themes: the shared implementation in [`lenz_content::theme`], Lenz's paths and environment overrides,
+//! Lenz's themes: the shared implementation in [`lenz_content::theme`], canonical paths and environment overrides,
 //! and diff colour mapping. The Markdown preview's colours are shared too.
 
 pub use lenz_content::theme::*;
@@ -6,12 +6,12 @@ pub use lenz_content::theme::*;
 /// Lenz's theme files: `$XDG_CONFIG_HOME/lenz/themes`, `$XDG_CONFIG_HOME/lenz/appearance.json`, and Omarchy's
 /// current theme.
 pub fn paths_from_env() -> ThemePaths {
-    ThemePaths::xdg("lenz")
+    ThemePaths::shared()
 }
 
-/// `LENZ_THEME` (a theme ID or `system`) wins over `LENZ_APPEARANCE` (`light` or `dark`).
+/// Shared overrides: LENZ_THEME > LENZ_APPEARANCE > LENZ_READER_THEME > LENZ_READER_APPEARANCE.
 pub fn overrides_from_env() -> ThemeOverrides {
-    ThemeOverrides::from_env("LENZ_THEME", "LENZ_APPEARANCE")
+    ThemeOverrides::shared_from_env()
 }
 
 /// The shared change colors, fading ignored changes halfway towards the background.

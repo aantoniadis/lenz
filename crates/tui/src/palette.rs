@@ -104,6 +104,7 @@ impl App {
         let Some(repo) = &mut self.repository else { return };
         if let Some(why) = repo.core.disabled(&command) { self.session.set_notice(why); return; }
         repo.core.execute(command);
+        if repo.core.message_collapsed() { self.commit_panel.focused=false; }
     }
 
     /// Branches…: the repository sidebar, shown and focused.

@@ -53,7 +53,7 @@ pub struct App {
     /// The pane header's mode cells as last drawn.
     pub(crate) header_switch: Vec<(ratatui::layout::Rect,lenz::catalog::Action)>,
     /// The bottom line's panel switches, as last drawn.
-    pub(crate) panel_switch: Vec<(ratatui::layout::Rect,lenz::layout::LayoutCommand)>,
+    pub(crate) panel_switch: Vec<(ratatui::layout::Rect,lenz::catalog::Action)>,
     /// The bottom bar's "F10 commands": a click opens the palette, as the GUI's "Commands" does.
     pub(crate) palette_hint: ratatui::layout::Rect,
     /// Repository views: the comparison's cells as last drawn, and when a new Change Set replaced it, so the old one
@@ -71,7 +71,7 @@ pub struct App {
     mouse_click:Option<(std::time::Instant,Side,lenz::selection::Pos,u8)>,
     /// The last file clicked in Files, for a double click.
     files_click:Option<(std::time::Instant,usize)>,
-    /// Focus's commit message panel, above the Files list.
+    /// Focus's commit message panel, below Files and the diff.
     pub(crate) commit_panel:crate::commit_panel::CommitPanel,
     pending_hit:Option<lenz::find::Hit>,
     #[cfg_attr(test,allow(dead_code))]
@@ -607,7 +607,7 @@ impl App {
             Some(Outcome::Taken) => {}
             None => return false,
         }
-        if matches!(event, Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left)) { self.navigator.focused = false; }
+        if matches!(event, Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left)) { self.navigator.focused = false; self.commit_panel.focused = false; }
         true
     }
     fn pr_tab_event(&mut self, event: &Event) -> bool {
@@ -694,14 +694,14 @@ impl App {
             let (handled,action)=self.toolbar.handle(&event);
             if let Some(action)=action{self.toolbar_action(action);}
             if handled{return true;}
-            if let Event::Mouse(m)=event&&m.kind==MouseEventKind::Down(MouseButton::Left)&&let Some(&(_,command))=self.panel_switch.iter().find(|(cell,_)|cell.contains((m.column,m.row).into())){self.layout_command(command);return true;}
+            if let Event::Mouse(m)=event&&m.kind==MouseEventKind::Down(MouseButton::Left)&&let Some(&(_,command))=self.panel_switch.iter().find(|(cell,_)|cell.contains((m.column,m.row).into())){self.run_action(command);return true;}
             if let Event::Mouse(m)=event&&m.kind==MouseEventKind::Down(MouseButton::Left)&&self.palette_hint.contains((m.column,m.row).into()){self.open_palette();return true;}
             if let Event::Mouse(m)=event&&m.kind==MouseEventKind::Down(MouseButton::Left)&&let Some(&(_,action))=self.header_switch.iter().find(|(cell,_)|cell.contains((m.column,m.row).into()))
                 // the cells are from the last frame: only a mode the comparison shown now offers
                 &&lenz::catalog::header_switch(&self.scope()).iter().any(|e|e.action==action){self.run_action(action);return true;}
             // a details tab takes its keys (Tab switches its sections) and the pointer over it
             if !self.navigator.focused && self.pr_tab_event(&event) {return true;}
-            if (!self.navigator.focused || matches!(event, Event::Mouse(_))) && self.summary_event(&event) {return true;}
+            if ((!self.navigator.focused && !self.commit_panel.focused) || matches!(event, Event::Mouse(_))) && self.summary_event(&event) {return true;}
             if let Event::Key(k) = event && k.kind != KeyEventKind::Release
                 && matches!(k.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::F(6)) {
                 if k.code == KeyCode::F(6) && let Some(repo) = &mut self.repository && !repo.core.picker.shown {
@@ -916,21 +916,21 @@ impl App {
         // the bottom row is a full-width bar (panel switches and keys), as in the GUI: side panels end above it
         let footer_row=1.min(body.height);
         let panels=ratatui::layout::Rect{height:body.height-footer_row,..body};
-        let repo_area=self.repository.as_ref().map_or(panels,|r|r.area(panels));
+        let mut repo_area=self.repository.as_ref().map_or(panels,|r|r.area(panels));
         let repository_shown=self.repository.as_ref().is_some_and(|r|r.core.picker.shown);
-        // a PR's Conversation and Commits read without the file list; Files changed has it
-        self.navigator.suppressed=self.pr_details_shown();
-        let comparison=self.navigator.prepare(self.session.change_set(),&self.session.folders,self.session.current(),repository_shown,repo_area);
-        // the comparison keeps its last row, which the full-width bar draws over
-        let comparison=ratatui::layout::Rect{height:comparison.height+footer_row,..comparison};
         let core=self.repository.as_ref().map(|r|&r.core).filter(|c|self.layout.focused(Some(c)));
-        let lines=core.and_then(|c|c.message_lines(crate::commit_panel::CommitPanel::columns(self.navigator.area)));
+        let lines=core.and_then(|c|c.message_lines(crate::commit_panel::CommitPanel::columns(repo_area)));
         let title=core.and_then(|c|c.selection_title()).map_or_else(String::new,|t|t.text);
         let cursor=core.map_or(0,|c|c.message_cursor());
         // a range walks its commits; one commit (or a collapsed panel) has the keyboard on its first line
         let range=core.is_some_and(|c|!c.message_collapsed()&&matches!(c.message_panel(),Some(lenz::repository_session::MessagePanel::Ready(m))if matches!(m.query,lenz::commit_message::Query::Range(_))));
         let current=if range{lenz::commit_message::LineKind::Commit(cursor)}else{lenz::commit_message::LineKind::Toggle};
-        self.commit_panel.place(&mut self.navigator.area,lines,title,current,cursor);
+        self.commit_panel.place(&mut repo_area,lines,title,current,cursor);
+        // a PR's Conversation and Commits read without the file list; Files changed has it
+        self.navigator.suppressed=self.pr_details_shown();
+        let comparison=self.navigator.prepare(self.session.change_set(),&self.session.folders,self.session.current(),repository_shown,repo_area);
+        // the comparison keeps its last row, which the full-width bar draws over
+        let comparison=ratatui::layout::Rect{height:comparison.height+footer_row,..comparison};
         self.diff_area=self.set_search.as_ref().map_or(comparison,|s|s.area(comparison));
         self.visual.pane_ratio=Some(self.pane_ratio);
         self.resizer.grips.clear();
@@ -1300,6 +1300,20 @@ mod tests {
     }
 
     fn alt(app: &mut App, ch: char) { app.handle(Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT))); }
+
+    #[test]
+    fn find_prompt_uses_the_shared_truncated_counter_and_wraps() {
+        let (_dir, mut app) = pair("other\n", &"x ".repeat(lenz::find::MAX_HITS + 1));
+        key(&mut app, KeyCode::Char('/'));
+        key(&mut app, KeyCode::Char('x'));
+        assert_eq!(app.session.find().unwrap().hits().len(), lenz::find::MAX_HITS);
+        assert!(screen(&mut app, 80, 20).contains("1/10,000+"));
+        key(&mut app, KeyCode::Enter);
+        app.handle(Event::Key(KeyEvent::new(KeyCode::F(3), KeyModifiers::SHIFT)));
+        assert_eq!(app.session.find().unwrap().at(), Some(lenz::find::MAX_HITS - 1));
+        assert_eq!(app.session.find().unwrap().counter(), "10000/10,000+");
+        assert_eq!(app.session.notice(), Some("Search wrapped"));
+    }
 
     #[test]
     fn find_prompt_shows_and_toggles_options() {

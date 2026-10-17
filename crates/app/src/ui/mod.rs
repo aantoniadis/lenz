@@ -1773,7 +1773,7 @@ impl Viewer {
         let Some(row) = row else {
             return;
         };
-        let visible = self.comparison.view.viewport_rows() - 1.0 - self.message_h() / line_h();
+        let visible = self.comparison.view.viewport_rows() - 1.0;
         let row = row as f32;
         if row < self.nav_scroll || row > self.nav_scroll + visible {
             self.nav_scroll = (row - visible / 3.0).max(0.0);
@@ -1805,8 +1805,8 @@ impl Viewer {
         let page = (self.comparison.view.viewport_rows() - 1.0).max(1.0) as isize;
         let plain = !ev.keystroke.modifiers.modified();
         let row = match ev.keystroke.key.as_str() {
-            // ↑ from the first file gives the commit message panel the keyboard, headings above it or not
-            "up" if summary.is_none() && self.nav.iter().find_map(|r| if let NavRow::File { index, .. } = r { Some(*index) } else { None }) == Some(self.comparison.current) && self.enter_message_from_files(cx) => return true,
+            // ↓ from the last file gives the commit message panel the keyboard, headings above it or not
+            "down" if summary.is_none() && self.nav.iter().rev().find_map(|r| if let NavRow::File { index, .. } = r { Some(*index) } else { None }) == Some(self.comparison.current) && self.enter_message_from_files(cx) => return true,
             "up" => step(-1),
             "down" => step(1),
             "pageup" => step(-page),
@@ -1991,28 +1991,26 @@ impl Viewer {
     fn text_char_w(&self) -> f32 {
         if self.char_w > 0.0 { self.char_w } else { 7.8 }
     }
-    pub(super) fn find_bar(&self) -> Option<(String, Side)> {
+    fn find_control(&self) -> Option<lenz_gpui::find::FindBox> {
         let f = self.comparison.find.as_ref()?;
-        let count = match (f.error(), f.at, f.hits.len()) {
-            (Some(e), _, _) => e.to_string(),
-            (None, _, 0) if !f.query.is_empty() => "no matches".to_string(),
-            (None, Some(i), n) => format!("{}/{n}", i + 1),
-            _ => String::new(),
-        };
-        Some((format!("Find: {}▏  {TOGGLES}  {count}", f.query), f.side))
+        let side = self.pane_side(f.side);
+        let widths = self.comparison_widths(self.panes.viewport[0] - self.diff_x());
+        let x = if side == Side::Left { self.diff_x().min(self.panes.viewport[0]) } else { self.panes.viewport[0] - widths[1] };
+        let pane = Bounds { origin: point(px(x), px(self.top())), size: size(px(widths[side as usize]), px((self.content_bottom() - self.top()).max(0.0))) };
+        let o = self.comparison.find_options;
+        Some(lenz_gpui::find::FindBox {
+            bounds: Bounds::default(), toggles: [(FindOption::Case, Bounds::default()); 3],
+            on: [o.case, o.word, o.regex], query: f.query.clone(), counter: f.counter(),
+            error: f.error().is_some(), focused: self.modal() == Some(Modal::Find),
+        }.layout(pane, line_h(), self.text_char_w()))
     }
-    /// The find bar's option toggles as painted: which option, and its box (x, y, width, height).
+    #[cfg(all(test, feature = "gui-test"))]
     pub(super) fn find_toggles(&self) -> Vec<(FindOption, (f32, f32, f32, f32))> {
-        let (Some(f), Some((bx, by, _, bh))) = (self.comparison.find.as_ref(), self.find_bar_box()) else { return Vec::new() };
-        let lead = "Find: ".chars().count() + f.query.chars().count() + "▏  ".chars().count();
-        toggle_spans().into_iter().map(|(o, at, len)| (o, (bx + 12.0 + (lead + at) as f32 * self.text_char_w() - 2.0, by + 2.0, len as f32 * self.text_char_w() + 4.0, bh - 4.0))).collect()
+        self.find_control().map_or_else(Vec::new, |b| b.toggles.into_iter().filter(|(_, b)| b.size.width > px(0.0)).map(|(o, b)| (o, (f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)))).collect())
     }
-    /// The Ctrl+F bar's box as painted: x, y, width, height.
     pub(super) fn find_bar_box(&self) -> Option<(f32, f32, f32, f32)> {
-        let (bar, side) = self.find_bar()?;
-        let bw = (bar.chars().count() as f32 * self.text_char_w() + 24.0).max(240.0);
-        let right = if side == Side::Left { self.diff_x() + self.comparison_widths(self.panes.viewport[0] - self.diff_x())[0] } else { self.panes.viewport[0] };
-        Some((right - bw - 8.0, self.top() + 3.0, bw, line_h() + 10.0))
+        let b = self.find_control()?.bounds;
+        Some((f32::from(b.origin.x), f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height)))
     }
     /// The Find in Change Set prompt while the query is typed.
     pub(super) fn search_prompt(&self) -> Option<String> {
@@ -2119,9 +2117,12 @@ impl Viewer {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let outside_find = self.find_bar_box().is_some_and(|(bx, by, bw, bh)| !(x >= bx && x < bx + bw && y >= by && y < by + bh));
         // A find option toggle in the find bar or the Change Set search prompt flips that option; either stays.
-        if ev.button == MouseButton::Left && matches!(self.modal(), Some(Modal::Find | Modal::SearchEditing)) && let Some(option) = self.search_toggles().into_iter().chain(self.find_toggles()).find(|(_, (tx, ty, tw, th))| x >= *tx && x < tx + tw && y >= *ty && y < ty + th).map(|(o, _)| o) {
+        if ev.button == MouseButton::Left && matches!(self.modal(), Some(Modal::Find | Modal::SearchEditing)) && let Some(option) = self.find_control().and_then(|b| b.option_at(ev.position)).or_else(|| self.search_toggles().into_iter().find(|(_, (tx, ty, tw, th))| x >= *tx && x < tx + tw && y >= *ty && y < ty + th).map(|(o, _)| o)) {
             self.toggle_find_option(option);
             cx.notify();
+            return;
+        }
+        if self.modal() == Some(Modal::Find) && self.find_control().is_some_and(|b| b.bounds.contains(&ev.position)) {
             return;
         }
         // a press on the panel takes the keyboard back
@@ -2144,11 +2145,11 @@ impl Viewer {
             if help_close_bounds(window.viewport_size()).contains(&ev.position)||!(px_>=hx&&px_<hx+hw&&py_>=hy&&py_<hy+hh){self.help=false;cx.notify();}return;}
         if self.palette_click(f32::from(ev.position.x),f32::from(ev.position.y),window,cx)||self.diff_options_click(f32::from(ev.position.x),f32::from(ev.position.y),window,cx){return;}
         if self.modal().is_none()&&self.header_switch_click(f32::from(ev.position.x),f32::from(ev.position.y),window,cx){return;}
-        if self.modal().is_none()&&self.panel_switch_click(f32::from(ev.position.x),f32::from(ev.position.y),cx){return;}
+        if self.modal().is_none()&&self.panel_switch_click(f32::from(ev.position.x),f32::from(ev.position.y),window,cx){return;}
         if self.merge.as_ref().is_some_and(|s| s.ask.is_some()) || self.picker_v.as_ref().is_some_and(|s| s.ask.is_some()){return;}
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         if self.begin_resize(x,y) { cx.notify(); return; }
-        let band_top = self.panes.viewport[1] - self.panel_h() - self.picker_v_height();
+        let band_top = self.content_bottom() - self.panel_h() - self.picker_v_height();
         if self.picker_v.is_some() && self.menu.is_none() && x >= self.diff_x() && y >= band_top && self.picker_v_click(y - band_top, cx) {
             return;
         }
@@ -2187,6 +2188,11 @@ impl Viewer {
             }
             return;
         }
+        if self.message_click(x, y, cx) {
+            self.nav_focused = false;
+            self.panel_focused = false;
+            return;
+        }
         // a details tab takes clicks over the diff area once every overlay has had its turn
         if self.switcher.is_none() && self.goto.is_none() && self.pr_dialog_click(ev, cx) {return;}
         if self.switcher.is_none() && self.goto.is_none() && self.summary_click(f32::from(ev.position.x), f32::from(ev.position.y), cx) {return;}
@@ -2211,17 +2217,12 @@ impl Viewer {
             }
             return;
         }
-        let panel_top = self.panes.viewport[1] - self.panel_h();
+        let panel_top = self.content_bottom() - self.panel_h();
         if y >= panel_top {
             self.nav_focused = false;
             self.panel_focused = self.panel_h() > 0.0;
             self.panel_click(y, panel_top, cx);
             cx.notify();
-            return;
-        }
-        if self.message_click(x, y, cx) {
-            self.nav_focused = false;
-            self.panel_focused = false;
             return;
         }
         if self.in_nav(x) {
@@ -2413,6 +2414,9 @@ impl Viewer {
         // the diff under a details tab is hidden: no menu for it
         if self.pr_dialog_menu(ev, cx){return;}
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        if self.switcher.is_none() && self.message_menu(x, y, cx) {
+            return;
+        }
         if self.merge.is_some() && x >= self.diff_x() && y >= self.top() {
             if let Some(items) = self.merge_menu(x - self.diff_x(), y - self.top()) {
                 self.show_menu(Menu { x, y, items, hover: None });
@@ -2421,9 +2425,6 @@ impl Viewer {
             return;
         }
         if self.picker_menu(x, y, cx) {
-            return;
-        }
-        if self.switcher.is_none() && self.message_menu(x, y, cx) {
             return;
         }
         if self.in_nav(x) && y >= self.nav_top() && self.switcher.is_none() {
@@ -2538,7 +2539,7 @@ impl Viewer {
                 }
             }
             // past an edge of the pane, the view keeps scrolling while the button is held
-            let bottom = self.panes.viewport[1] - self.panel_h() - self.picker_v_height();
+            let bottom = self.content_bottom() - self.panel_h() - self.picker_v_height();
             let (start, end) = self.pane_span(window, sel.side);
             let top = self.top();
             let rows = (if y < top { y - top } else if y > bottom { y - bottom } else { 0.0 }) / line_h();
@@ -2550,7 +2551,7 @@ impl Viewer {
             }
             return;
         }
-        let hover = (self.in_nav(x) && y >= self.nav_top()).then(|| ((y - self.nav_top()) / line_h() + self.nav_scroll) as usize);
+        let hover = (self.in_nav(x) && y >= self.nav_top() && y < self.content_bottom()).then(|| ((y - self.nav_top()) / line_h() + self.nav_scroll) as usize);
         if hover != self.nav_hover {
             self.nav_hover = hover;
             cx.notify();
@@ -2611,7 +2612,7 @@ impl Viewer {
         let side = self.diff_focus;
         let seed = if self.markdown_active(){self.comparison.markdown_selection().and_then(|selection|self.comparison.markdown_projection()?.copy_visible(selection).ok()).filter(|s|!s.is_empty()&&!s.contains('\n'))}else{self.sel.filter(|s| s.side == side && !s.is_empty() && s.anchor.line == s.head.line).map(|s| s.text(self.raw(side)))};
         let query = seed.or_else(|| self.comparison.find.as_ref().map(|f| f.query.clone())).unwrap_or_default();
-        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None, error: None });
+        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None, error: None, capped: false });
         self.refind();
     }
 
@@ -2777,7 +2778,7 @@ impl Viewer {
     }
 
     fn panel_h(&self) -> f32 {
-        if self.search.as_ref().is_some_and(|s| !s.editing) || !self.edits.applied(self.comparison.current).is_empty() { crate::pane_layout::clamp_size((self.panes.viewport[1]-self.top()).max(0.0),self.panes.panel,2.0*line_h(),2.0*line_h()) } else { 0.0 }
+        if self.search.as_ref().is_some_and(|s| !s.editing) || !self.edits.applied(self.comparison.current).is_empty() { crate::pane_layout::clamp_size((self.content_bottom()-self.top()).max(0.0),self.panes.panel,2.0*line_h(),2.0*line_h()) } else { 0.0 }
     }
 
     /// Click in the results panel: a hit opens its file at the match.
@@ -2906,7 +2907,7 @@ impl Viewer {
             return;
         }
         if !self.help && self.popup.is_none() && !pane_modal && !self.nav_focused && !self.panel_focused && self.pr_dialog_key(ev, cx) { return; }
-        if !self.help && self.popup.is_none() && !pane_modal && !self.nav_focused && !self.panel_focused && self.summary_key(ev, cx) { return; }
+        if !self.help && self.popup.is_none() && !pane_modal && !self.nav_focused && !self.panel_focused && !self.message_focused && self.summary_key(ev, cx) { return; }
         if !self.help && self.popup.is_none() && !pane_modal && ev.keystroke.key == "tab" {
             if !self.search.as_ref().is_some_and(|s| s.editing) && self.comparison.find.is_none() {
                 self.cycle_pane(ev.keystroke.modifiers.shift, cx);
@@ -3098,6 +3099,7 @@ impl Viewer {
             ScrollDelta::Lines(l) => (-l.x * 3.0 * self.char_w, -l.y * 3.0),
         };
         if let Some(menu)=self.menu.as_mut(){let at=menu.hover.unwrap_or(0) as f32;menu.hover=Some((at+rows).clamp(0.0,menu.items.len().saturating_sub(1)as f32)as usize);cx.notify();return;}
+        if self.message_wheel(f32::from(ev.position.x), f32::from(ev.position.y), rows, cx) { return; }
         if self.menu.is_none() && self.command_palette.is_none() && self.diff_options.is_none() && self.pr_dialog_wheel(ev,cx){return;}
         if self.menu.is_none() && self.command_palette.is_none() && self.diff_options.is_none() && self.summary_wheel(f32::from(ev.position.x),rows,cx){return;}
         let (x, sw) = (f32::from(ev.position.x), self.diff_x());
@@ -3108,7 +3110,7 @@ impl Viewer {
             return;
         }
         let visible=self.panel_rows();
-        let panel_top = self.panes.viewport[1] - self.panel_h();
+        let panel_top = self.content_bottom() - self.panel_h();
         if f32::from(ev.position.y) >= panel_top {
             if let Some(s) = self.search.as_mut() {
                 let max = (s.rows().len() as f32 - visible).max(0.0);
@@ -3120,11 +3122,8 @@ impl Viewer {
             }
             return;
         }
-        if self.message_wheel(x, y, rows, cx) {
-            return;
-        }
         if self.in_nav(x) {
-            let max = (self.nav.len() as f32 - self.comparison.view.viewport_rows() + self.message_h() / line_h() + 1.0).max(0.0);
+            let max = (self.nav.len() as f32 - self.comparison.view.viewport_rows() + 1.0).max(0.0);
             self.nav_scroll = (self.nav_scroll + rows).clamp(0.0, max);
             cx.notify();
             return;
@@ -3232,7 +3231,6 @@ fn paint_sidebar(palette: &theme::Palette,
     bounds: Bounds<Pixels>,
     sidebar_w: f32,
     (rows, header): &(Vec<SideRow>, String),
-    (message, message_h): &(Vec<message_panel::MessageRow>, f32),
     scroll: f32,
     tooltip: Option<&(usize, String)>,
 ) {
@@ -3241,22 +3239,11 @@ fn paint_sidebar(palette: &theme::Palette,
     fill(window, x0, top, sidebar_w, h, palette.sidebar_bg);
     fill(window, x0, top, sidebar_w, hdr_h(), palette.header_bg);
     window.with_content_mask(Some(clip(bounds, x0, sidebar_w - 1.0)), |window| text(window, cx, font, x0 + 8.0, top + 2.0, header, palette.dim));
-    // the commit message panel, between the header and the list
-    let panel = Bounds { origin: point(px(x0), px(top + hdr_h())), size: size(px(sidebar_w - 1.0), px(*message_h)) };
-    window.with_content_mask(Some(ContentMask { bounds: panel }), |window| {
-        for (i, row) in message.iter().enumerate() {
-            let y = top + hdr_h() + i as f32 * line_h();
-            if row.current { fill(window, x0, y, sidebar_w, line_h(), palette.selected_bg); }
-            if let Some((at, w)) = row.span { fill(window, x0 + 8.0 + at, y, w, line_h(), palette.sel_bg); }
-            text(window, cx, font, x0 + 8.0, y, &row.text, row.color);
-        }
-    });
-    if *message_h > 0.0 { fill(window, x0, top + hdr_h() + message_h - 1.0, sidebar_w, 1.0, palette.border); }
-    let list_top = top + hdr_h() + message_h;
-    let list = Bounds { origin: point(px(x0), px(list_top)), size: size(px(sidebar_w), px((h - hdr_h() - message_h).max(0.0))) };
+    let list_top = top + hdr_h();
+    let list = Bounds { origin: point(px(x0), px(list_top)), size: size(px(sidebar_w), px((h - hdr_h()).max(0.0))) };
     window.with_content_mask(Some(ContentMask { bounds: list }), |window| {
         let first = scroll.floor() as usize;
-        for (i, row) in rows.iter().enumerate().skip(first).take(((h - hdr_h() - message_h) / line_h()) as usize + 2) {
+        for (i, row) in rows.iter().enumerate().skip(first).take(((h - hdr_h()) / line_h()) as usize + 2) {
             let y = list_top + (i as f32 - scroll) * line_h();
             if row.current {
                 fill(window, x0, y, sidebar_w, line_h(), palette.selected_bg);
@@ -3440,14 +3427,18 @@ impl Render for Viewer {
         self.panes.viewport=[f32::from(window.viewport_size().width).max(0.0),(f32::from(window.viewport_size().height)-footer_h()).max(0.0)];
         self.palette = self.theme_preview.clone().filter(|_| self.theme_chooser.is_some()).unwrap_or_else(|| cx.global::<themes::GuiThemes>().0.snapshot().palette);
         let palette = self.palette.clone();
+        let message_lines = self.message_lines().len();
+        self.clamp_message_scroll(message_lines);
+        if self.message_h() == 0.0 { self.message_focused=false; self.message_press=None; self.message_sel=None; }
         let panel_h = self.panel_h();
         let visible=self.panel_rows();
         let log_rows=self.log_rows();
         if let Some(picker)=self.repo.as_mut().map(|r| &mut r.picker) {picker.scroll=picker.scroll.min((picker.rows() as f32-log_rows).max(0.0));}
         if let Some(search)=&mut self.search {search.scroll_by(0.0,visible);}
         self.applied_scroll=self.applied_scroll.min((self.edits.applied(self.comparison.current).len() as f32-visible).max(0.0));
-        let rows = ((self.panes.viewport[1] - self.top() - panel_h - self.picker_v_height()) / line_h()).max(0.0);
+        let rows = ((self.content_bottom() - self.top() - panel_h - self.picker_v_height()) / line_h()).max(0.0);
         self.comparison.view.set_viewport_rows(rows);
+        self.nav_scroll=self.nav_scroll.clamp(0.0,(self.nav.len() as f32-rows+1.0).max(0.0));
         self.poll_pane_search(window, cx);
         // A paused log resumes once scrolling or selection nears its end (the poll loop stopped at the pause).
         let log_rows = self.log_rows();
@@ -3636,10 +3627,7 @@ impl Render for Viewer {
             (x,y,width,m.items.iter().skip(start).take(rows).map(|i|i.0.clone()).collect::<Vec<_>>(),m.hover.map(|i|i-start),start, m.items.len())
         });
         let goto = self.goto_prompt();
-        let find_bar = self.find_bar();
-        // Each toggle in the find bar: offset from the bar's left, width, and whether it is on.
-        let bar_x = self.find_bar_box().map_or(0.0, |b| b.0);
-        let find_marks: Vec<(f32, f32, bool)> = self.find_toggles().into_iter().map(|(o, (x, _, w, _))| (x - bar_x, w, self.comparison.find_options.get(o))).collect();
+        let find_control = self.find_control();
         let search_prompt = self.search_prompt();
         let search_x = self.search_prompt().map_or(0.0, |p| { let [vw, _] = self.panes.viewport; self.diff_x() + (vw - self.diff_x() - (p.chars().count() as f32 * self.text_char_w() + 24.0)) / 2.0 });
         let search_marks: Vec<(f32, f32, bool)> = self.search_toggles().into_iter().map(|(o, (x, _, w, _))| (x - search_x, w, self.search.as_ref().is_some_and(|s| s.options().get(o)))).collect();
@@ -3768,12 +3756,26 @@ impl Render for Viewer {
                         if let Some(f) = &sidebar_frame {
                             picker::paint_picker_sidebar(&palette, window, cx, &font, ox, oy, oh, picker_w, f);
                         }
-                        let bounds = Bounds { origin: point(px(ox + picker_w), px(oy + log_h)), size: size(px((ow - picker_w).max(0.0)), px((oh - log_h).max(0.0))) };
+                        let bounds = Bounds { origin: point(px(ox + picker_w), px(oy + log_h)), size: size(px((ow - picker_w).max(0.0)), px((oh - log_h - message.1).max(0.0))) };
+                        if message.1 > 0.0 {
+                            let (mx, my, mw) = (ox + picker_w, oy + oh - message.1, (ow - picker_w).max(0.0));
+                            let panel = Bounds { origin: point(px(mx), px(my)), size: size(px(mw), px(message.1)) };
+                            fill(window, mx, my, mw, message.1, palette.sidebar_bg);
+                            fill(window, mx, my, mw, 1.0, palette.border);
+                            window.with_content_mask(Some(ContentMask { bounds: panel }), |window| {
+                                for (i, row) in message.0.iter().enumerate() {
+                                    let y = my + 1.0 + i as f32 * line_h();
+                                    if row.current { fill(window, mx, y, mw, line_h(), palette.selected_bg); }
+                                    if let Some((at, w)) = row.span { fill(window, mx + 8.0 + at, y, w, line_h(), palette.sel_bg); }
+                                    text(window, cx, &font, mx + 8.0, y, &row.text, row.color);
+                                }
+                            });
+                        }
                         let full_w = f32::from(bounds.size.width);
                         let h = f32::from(bounds.size.height);
                         let (left_edge, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                         if let Some(rows) = &sidebar {
-                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, &message, nav_scroll, tooltip.as_ref());
+                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, nav_scroll, tooltip.as_ref());
                         }
                         // the diff area sits right of the File Navigator
                         let x0 = left_edge + sw_w;
@@ -3863,16 +3865,8 @@ impl Render for Viewer {
                             fill(window, x0, y0, w, line_h() + 8.0, palette.banner_bg);
                             text(window, cx, &font, x0 + 12.0, y0 + 4.0, message, palette.fg);
                         }
-                        if let Some((bar, side)) = &find_bar {
-                            let bw = (bar.chars().count() as f32 * char_w + 24.0).max(240.0);
-                            let px_ = if *side == Side::Left { x0 + pane_w } else { x0 + w } - bw - 8.0;
-                            fill(window, px_ - 1.0, y0 + 3.0, bw + 2.0, line_h() + 10.0, palette.border);
-                            fill(window, px_, y0 + 4.0, bw, line_h() + 8.0, palette.status_bg);
-                            for (dx, mw, on) in &find_marks {
-                                fill(window, px_ + dx, y0 + 5.0, *mw, line_h() + 6.0, palette.border);
-                                fill(window, px_ + dx + 1.0, y0 + 6.0, mw - 2.0, line_h() + 4.0, if *on { palette.selected_bg } else { palette.status_bg });
-                            }
-                            text(window, cx, &font, px_ + 12.0, y0 + 8.0, bar, palette.fg);
+                        if let Some(control) = &find_control {
+                            control.paint(window, cx, metrics(&font), &palette, point(px(ox), px(oy - toolbar_h())), char_w);
                         }
                         if let Some((head, rows)) = &panel {
                             let py = y0 + h;

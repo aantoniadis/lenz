@@ -4,6 +4,27 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## 2026-10-17 bottom commit panel
+
+The Focus commit panel now spans the bottom in both adapters and can be hidden
+completely. Alternating release measurements found comparable startup, scrolling,
+and Find feedback when controlling the displayed content. Sequential page inputs
+reached the end earlier in the old layout; search caret movement also selected
+different folded/expanded regions because the viewport height changed. Both
+confounded observations remain in the evidence. A trial caching panel height once
+per frame did not help and was reverted. See the [panel verification report](commit-panel-performance.md)
+for measurements, short stress runs, correctness checks, and unverified platforms.
+
+The hardware follow-up used an owned headless compositor with RADV Vulkan and
+verified application graphics-engine activity. Fifteen-minute GUI runs completed
+688 rounds per build; TUI runs completed 2,584/2,592. GPU allocations plateaued at
+the same levels; GUI final-quarter RSS grew by 0.25 MiB in both builds and TUI
+final-quarter RSS was flat. Hardware log first paint measured 137→134 ms in eight
+alternating pairs. No product optimization was needed. Xvfb's hardware-ICD trial
+was excluded because it fell back to CPU rendering. Detailed results and the
+different framebuffer-polling feedback endpoint are in the
+[follow-up report](commit-panel-performance.md#hardware-gpu-and-15-minute-follow-up).
+
 ## 2026-10-13 archives as folders and Folder Summary
 
 Quick suite (`perf-suite.py --profile quick`, one run, Linux, rustc 1.99.0) on `main` (`12b682b`) against the branch, then repeated alternating pairs for the outliers. Raw results were kept only in the session scratchpad.
@@ -1035,3 +1056,21 @@ rows (`startup/warm/small/cpu_seconds` 0.54 → 0.75 s) did not reproduce with t
 runs each): small files 0.42–1.06 s on both; 100k-line Rust first paint 179–199 ms on both, background CPU median
 2.28 → 2.43 s and RSS +1–2 MiB (the declarations). The background parse cost was accepted by the user as the
 feature's tradeoff. Unverified: native macOS.
+
+
+## 2026-10-17 shared Reader and Diff features
+
+Shared appearance preferences, bounded in-document find behavior and the GPUI
+find control retain separate application cores. The [verification report](shared-features-performance.md)
+records source/executable identities, original and rebuilt baseline comparisons,
+40 alternating timing pairs, private-display checks and 30-second find stress.
+Timing intervals included zero; anonymous-memory changes were near zero against
+the original binaries, while file-backed RSS varied between baseline sets.
+
+The shared font-size probe initially reproduced Reader ignoring preferences, then
+passed at 13/26/32. Review found clipped large-font context menus; viewport bounds,
+selected-row scrolling and accumulated pixel-wheel movement passed red/green
+adapter checks and native 800×600 inspection. A stale-Cargo-artifact benchmark
+attempt was rejected and retained separately; forced workspace release rebuilds
+and immutable executable copies corrected the experiment. Long stress, cold
+starts, native macOS and physical display latency remain unverified.

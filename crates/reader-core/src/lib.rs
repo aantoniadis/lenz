@@ -1,0 +1,24 @@
+//! The code reader's headless core: immutable versioned documents, the reloadable-content cache and the
+//! session that owns every semantic state transition. Free of GPUI; adapters translate input into commands
+//! and present the state snapshot.
+#![deny(unsafe_code)]
+
+pub mod cache;
+pub mod decor;
+pub mod document;
+pub mod expand;
+pub mod find;
+pub mod wrap;
+pub mod folds;
+pub mod index;
+pub mod jobs;
+pub mod markdown;
+pub mod places;
+pub mod project;
+pub mod search;
+pub mod semantics;
+pub mod session;
+pub mod shown;
+pub mod breadcrumbs;
+pub mod tabs;
+pub mod watch;

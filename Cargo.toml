@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/content", "crates/gpui", "crates/app", "crates/tui"]
+members = ["crates/engine", "crates/content", "crates/gpui", "crates/app", "crates/tui", "crates/reader-core", "crates/reader-gui", "crates/launcher"]
 
 [workspace.package]
 edition = "2024"
@@ -16,6 +16,8 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
+lenz-content = { path = "crates/content" }
+lenz-gpui = { path = "crates/gpui" }
 gix-imara-diff = "0.3"
 # One tag for both so a bump moves every gpui reference together.
 gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
