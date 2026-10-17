@@ -4,6 +4,7 @@
 //! and returns hit locations; each product computes its own rows, decorations and commands.
 #![deny(unsafe_code)]
 
+pub mod find;
 pub mod image;
 pub mod markdown;
 

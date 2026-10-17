@@ -1806,8 +1806,9 @@ impl RepositorySession {
             MessageKey::Up | MessageKey::Down => None,
         }
     }
-    /// The panel's lines wrapped to `columns`, for both frontends to draw.
+    /// The visible panel's lines wrapped to `columns`; hidden panels have no rows.
     pub fn message_lines(&self, columns: usize) -> Option<Vec<crate::commit_message::Line>> {
+        if self.message_collapsed { return None; }
         use crate::commit_message::{Line, LineKind};
         let note = |text: &str| vec![Line { text: text.into(), kind: LineKind::Meta }];
         Some(match self.message_panel()? {

@@ -69,8 +69,8 @@ impl Files {
     pub fn can_show(&self)->bool{self.available.width>=50&&self.available.height>=5}
     pub fn shown(&self)->bool {self.area.width>0}
     pub(crate) fn candidate(&self)->usize {self.selected}
-    /// The keyboard is on the first file row (not a heading's summary): ↑ from it leaves Files.
-    pub(crate) fn on_first_file(&self)->bool {!self.summary&&self.rows.iter().find_map(|r|if let NavRow::File{index,..}=r{Some(*index)}else{None})==Some(self.selected)}
+    /// The keyboard is on the last file row (not a heading's summary): ↓ from it enters the commit panel.
+    pub(crate) fn on_last_file(&self)->bool {!self.summary&&self.rows.iter().rev().find_map(|r|if let NavRow::File{index,..}=r{Some(*index)}else{None})==Some(self.selected)}
     /// End a file search as Esc does, back at the accepted selection.
     pub(crate) fn cancel_search(&mut self){
         if !self.search.active(){return;}

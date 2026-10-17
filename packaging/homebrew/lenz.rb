@@ -36,6 +36,7 @@ class Lenz < Formula
       bin.install "lenz", "lenz-tui"
     end
     doc.install "README.md"
+    doc.install "LICENSE-THEMES" if File.exist?("LICENSE-THEMES")
     if OS.linux?
       (share/"applications").install "lenz.desktop"
       # one 1024 px PNG: pixmaps is the size-independent location the icon lookup always searches

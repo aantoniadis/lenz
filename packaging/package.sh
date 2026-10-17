@@ -96,7 +96,7 @@ else
     cp "$gui" "$out/$name/lenz"
 fi
 cp "$tui" "$out/$name/lenz-tui"
-cp README.md LICENSE-MIT "$out/$name/"
+cp README.md LICENSE-MIT LICENSE-THEMES "$out/$name/"
 cp crates/engine/LICENSE "$out/$name/LICENSE-APACHE"
 cp crates/engine/NOTICE "$out/$name/NOTICE"
 cp packaging/lenz.desktop assets/lenz-icon.png "$out/$name/"

@@ -1,16 +1,45 @@
 # Themes
 
-Lenz shares semantic chrome, syntax and diff colors between its GUI and TUI.
-Bundled themes are Darcula (`darcula`), Light (`light`), Catppuccin Mocha
-(`catppuccin`), Catppuccin Latte (`catppuccin-latte`), Tokyo Night (`tokyo-night`)
-and Gruvbox (`gruvbox`).
+Lenz shares semantic chrome, syntax and diff colors between its GUI, TUI and Reader.
+Choose from 16 bundled themes:
+
+| Theme | ID | Appearance |
+|---|---|---|
+| Darcula | `darcula` | Dark |
+| Light | `light` | Light |
+| Catppuccin Mocha | `catppuccin` | Dark |
+| Catppuccin Latte | `catppuccin-latte` | Light |
+| Tokyo Night | `tokyo-night` | Dark |
+| Gruvbox | `gruvbox` | Dark |
+| Nord | `nord` | Dark |
+| Everforest | `everforest` | Dark |
+| Kanagawa | `kanagawa` | Dark |
+| Dracula | `dracula` | Dark |
+| One Dark | `one-dark` | Dark |
+| Rosé Pine | `rose-pine` | Dark |
+| Rosé Pine Dawn | `rose-pine-dawn` | Light |
+| Flexoki Light | `flexoki-light` | Light |
+| Solarized Light | `solarized-light` | Light |
+| GitHub Light | `github-light` | Light |
 
 ## Attribution
 
 Darcula and Light follow IntelliJ's color schemes (JetBrains, Apache-2.0). The
-other base colors are adapted from [Omarchy's stock palettes](https://github.com/omacom/omarchy/tree/master/themes),
-under [Omarchy's MIT license](https://github.com/omacom/omarchy/blob/master/LICENSE).
-Semantic diff and syntax colors are derived for Lenz.
+Catppuccin, Tokyo Night, Gruvbox, Nord, Everforest, Kanagawa, Rosé Pine Dawn and
+Flexoki Light adapt [Omarchy's stock palettes](https://github.com/omacom/omarchy/tree/quattro/themes).
+The other additions use the upstream [Dracula ANSI palette](https://draculatheme.com/spec),
+[One Dark](https://github.com/atom/one-dark-syntax/blob/master/styles/colors.less),
+[Rosé Pine](https://github.com/rose-pine/alacritty/blob/main/dist/rose-pine.toml),
+[Solarized](https://ethanschoonover.com/solarized/), and
+[GitHub Primer](https://github.com/primer/github-vscode-theme/blob/main/src/colors.js).
+Their MIT notices are included in [theme licenses](../LICENSE-THEMES).
+
+Lenz derives its semantic diff and syntax colors from these base palettes rather
+than reproducing each editor's token mapping. The new palettes adjust muted colors
+and a few light-theme syntax accents to keep at least 3:1 contrast on the editor
+background; Solarized Light uses its darker `base01` for body text.
+Selection, menus, diff highlights and Markdown use the same shared
+palette in Reader, GUI Diff and TUI.
 
 ## Controls and Omarchy following
 
@@ -93,11 +122,54 @@ effect even when saving fails, with a notice that it was not saved. Missing
 custom themes fall back while retaining their saved ID.
 
 `LENZ_THEME=system|<id>` overrides saved settings for that launch.
-`LENZ_APPEARANCE=light|dark` is a legacy override when LENZ_THEME is unset.
+`LENZ_APPEARANCE=light|dark` is read when LENZ_THEME is unset. Both products also
+accept the old Reader variables with lower priority: `LENZ_THEME`, then
+`LENZ_APPEARANCE`, then `LENZ_READER_THEME`, then `LENZ_READER_APPEARANCE`.
 Unknown overrides report a notice and use the saved/default selection. Explicit
 menu selection supersedes the environment override and saves normally.
 
 The theme format, built-in themes, selection and Omarchy following live in the
-shared `lenz-content` crate, which the code reader also uses. Each product passes
-its own directories, selection file and overrides, so the reader's choice and
-user themes never change Lenz's.
+shared `lenz-content` crate. Reader and Diff use the same `lenz/appearance.json`
+and `lenz/themes`. If the canonical selection file is absent, both read
+`lenz-reader/appearance.json`; a missing canonical user-theme file can fall back to
+`lenz-reader/themes/<name>.toml`. Existing canonical files always win, including
+invalid files, which produce a notice. Legacy files are never rewritten or
+migrated; explicit choices save to `lenz/appearance.json` and preserve its unknown
+JSON fields. Separate processes read the shared selection at their next launch;
+they do not synchronize menu choices live. Follow system still watches Omarchy
+changes live.
+
+Both GUIs also read `[gui] font_family`, `font_size` (8–32, default 13) and
+`reading_font` from `lenz/settings.toml` at startup. Font changes take effect on
+the next launch. Reader's other settings, recent roots, providers and document
+state remain independent from Diff.
+
+
+## Verification (2026-10-18)
+
+All ten additions passed production-window rendering checks in Reader, GUI Diff
+and TUI, including selecting the final theme in a 400×300 chooser. Screenshots
+were inspected on an owned Xvfb display using Mesa lavapipe; these are software
+rendering checks. The full local CI gate passed, including shared contrast,
+Reader chooser/persistence, GUI/TUI input and packaging tests.
+
+Alternating release-binary comparisons against `3cca626` used the same generated
+2,001-line Rust documents, isolated settings and two warmup pairs. Medians:
+
+| Endpoint | Measured pairs | Before | After | RSS before / after at 1 s |
+|---|---:|---:|---:|---:|
+| Diff first-paint marker | 8 | 130.5 ms | 129.5 ms | 211.46 / 210.78 MiB |
+| Reader mapped window observed | 12 | 103.91 ms | 101.45 ms | 173.24 / 173.56 MiB |
+| TUI first content bytes | 16 | 5.42 ms | 5.29 ms | 14.59 / 14.71 MiB |
+
+Reader window observation is not first paint or document readiness. TUI bytes
+are not emulator display latency or completed refinement. Initial TUI timing
+outliers did not reproduce in the 16-pair repeat. Reader's initial RSS difference
+of 0.91 MiB narrowed to 0.32 MiB on repeat; executable mappings accounted for
+0.46 MiB more residency, while anonymous mappings decreased by 0.09 MiB. This
+is not evidence of a heap leak or zero memory overhead. The stripped Diff GUI
+executable grew by 6,272 bytes.
+
+Raw samples, executable/source identities and screenshots are retained locally
+under `target/theme-evidence/`. Cold starts, hardware rendering of these palettes,
+long-duration stress and native macOS were not rerun for this palette-only change.

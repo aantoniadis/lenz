@@ -186,7 +186,7 @@ fn terminal_theme_toolbar_keyboard_and_mouse_use_shared_selection() {
     key(&mut s, KeyCode::Enter);
     assert_eq!(
         s.themes.snapshot().selection,
-        ThemeSelection::Named("gruvbox".into())
+        ThemeSelection::Named(lenz::theme::builtin_entries().last().unwrap().id.clone())
     );
     assert_eq!(std::fs::read(d.path().join("right")).unwrap(), b"new\n");
 }

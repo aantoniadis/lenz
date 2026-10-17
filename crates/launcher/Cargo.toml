@@ -1,0 +1,13 @@
+[package]
+name = "lenz-launcher"
+description = "Experimental launcher for the separate Lenz applications"
+license = "MIT"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

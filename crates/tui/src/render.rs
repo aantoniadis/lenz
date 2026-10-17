@@ -210,24 +210,29 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     let lists=app.navigator.focused||app.repository.as_ref().is_some_and(|r|r.core.picker.shown&&r.core.picker.focus==lenz::repository_session::Pane::Log);
     let footer=if lists{" Type to find  ↑/↓ or F3 matches  Enter open  Esc cancel  F10 commands  Ctrl-Q quit"}else{" n/p changes  [/] files  / find  f files  F10 commands  ? help  q quit"};
     // a full-width bar under the side panels: the panel switches, glued, at the left and the keys at the right
-    let y=area.y+area.height - 1;
+    let y=app.popup_area.bottom().saturating_sub(1);
     let bar=Rect::new(app.popup_area.x,y,app.popup_area.width,1);
     frame.buffer_mut().set_style(bar,base(palette).bg(color(palette.status_bg)));
     let area=bar;
     let panels=app.layout.panels(app.repository.as_ref().map(|r|&r.core));
     let mut cells=Vec::new();
-    if app.repository.is_some(){cells.extend([("Branches",panels.branches,lenz::layout::LayoutCommand::ToggleBranches),("History",panels.history,lenz::layout::LayoutCommand::ToggleHistory)]);}
+    if app.repository.is_some(){cells.extend([("Branches",panels.branches,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleBranches)),("History",panels.history,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleHistory))]);}
     let files=app.icons.label(crate::icons::Icon::Files,"Files");
-    cells.push((files.as_ref(),app.navigator.shown(),lenz::layout::LayoutCommand::ToggleFiles));
+    cells.push((files.as_ref(),app.navigator.shown(),lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleFiles)));
+    if app.layout.focused(app.repository.as_ref().map(|r|&r.core)) && let Some(r)=app.repository.as_ref().filter(|r|r.core.message_panel().is_some()) {
+        cells.push((lenz::catalog::COMMIT_PANEL_LABEL,!r.core.message_collapsed(),lenz::catalog::Action::Repository(lenz::catalog::RepoAction::ToggleMessage)));
+    }
     let mut cells_drawn=Vec::new();
     let mut x=area.x+1.min(area.width);
     for (i,(name,on,command)) in cells.into_iter().enumerate() {
+        if x>=area.right() { break; }
         if i>0 {frame.buffer_mut().set_string(x,y,"│",base(palette).bg(color(palette.status_bg)).fg(color(palette.dim)));x+=1;}
-        let enabled=app.layout.disabled(command,app.repository.as_ref().map(|r|&r.core)).is_none();
+        if x>=area.right() { break; }
+        let enabled=lenz::catalog::Availability::disabled(app,command).is_none();
         let style=if on {base(palette).bg(color(palette.selected_bg)).fg(color(palette.fg))} else {base(palette).bg(color(palette.status_bg)).fg(color(if enabled {palette.fg} else {palette.dim}))};
         let width=unicode_width::UnicodeWidthStr::width(name) as u16;
         let cell=Rect::new(x,y,width.min(area.right().saturating_sub(x)),1);
-        frame.buffer_mut().set_string(x,y,name,style);
+        frame.buffer_mut().set_stringn(x,y,name,usize::from(cell.width),style);
         cells_drawn.push((cell,command));
         x+=width;
     }
@@ -253,11 +258,11 @@ pub(crate) fn status_text(app:&App)->String {
     let rendered=app.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
     let status = if let Some(prompt) = app.prompt.filter(|p| matches!(p, Prompt::Search | Prompt::Line)) {
         if prompt == Prompt::Search {
-            let tail = app.session.find().map_or(String::new(), |f| f.error().map_or_else(|| format!("{}/{}", f.at().map_or(0, |i| i + 1), f.hits().len()), str::to_owned));
+            let tail = app.session.find().map_or(String::new(), |f| f.counter());
             format!("Find{} {}  {tail}", option_marks(app.session.find_options()), app.input)
         } else { format!("Line: {}", app.input) }
     } else if let Some(notice) = app.session.notice().or_else(||app.visual.notice()) { notice.into() }
-    else if let Some(find) = app.session.find() { format!("Find: {}  {}/{}", find.query(), find.at().map_or(0, |i| i + 1), find.hits().len()) }
+    else if let Some(find) = app.session.find() { format!("Find: {}  {}", find.query(), find.counter()) }
     else if !app.session.applied().is_empty(){format!("{} applied records · A history / Undo · Ctrl-Z undo · Alt-Shift-←/→ apply",app.session.applied().len())}
     else if let Some(doc) = app.session.document() {
         let mut notes = doc.notes().to_vec();

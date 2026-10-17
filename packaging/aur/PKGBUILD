@@ -28,4 +28,8 @@ package() {
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/lenz/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/lenz/LICENSE-APACHE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/lenz/NOTICE"
+  # Older release archives predate the bundled-theme notices.
+  if [[ -f LICENSE-THEMES ]]; then
+    install -Dm644 LICENSE-THEMES "$pkgdir/usr/share/licenses/lenz/LICENSE-THEMES"
+  fi
 }

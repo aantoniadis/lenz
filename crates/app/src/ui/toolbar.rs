@@ -93,39 +93,39 @@ impl Viewer {
     }
 
     /// The Selection Title the Focus toolbar shows after Overview.
-    /// The bottom bar's panel switches, glued left to right: Branches and History (repository views), Files.
-    /// Focus refuses Branches and History; they stay, disabled, so the switch keeps its shape.
+    /// The bottom bar's panel switches; narrow Focus omits the disabled repository switches.
     pub(super) fn panel_switch(&self)->Vec<SwitchCell>{
         let panels=self.layout.panels(self.repo.as_ref());
         let mut cells=Vec::new();
-        if self.repo.is_some() {cells.extend([("Branches",panels.branches,LayoutCommand::ToggleBranches),("History",panels.history,LayoutCommand::ToggleHistory)]);}
-        cells.push(("Files",panels.files,LayoutCommand::ToggleFiles));
+        if self.repo.is_some() && !(self.layout.focused(self.repo.as_ref()) && self.panes.viewport[0]<600.) {cells.extend([("Branches",panels.branches,catalog::Action::Layout(LayoutCommand::ToggleBranches)),("History",panels.history,catalog::Action::Layout(LayoutCommand::ToggleHistory))]);}
+        cells.push(("Files",panels.files,catalog::Action::Layout(LayoutCommand::ToggleFiles)));
+        if self.layout.focused(self.repo.as_ref()) && let Some(r)=self.repo.as_ref().filter(|r|r.message_panel().is_some()) {
+            cells.push((catalog::COMMIT_PANEL_LABEL,!r.message_collapsed(),catalog::Action::Repository(catalog::RepoAction::ToggleMessage)));
+        }
         let y=self.panes.viewport[1];
         let mut x=8.;
+        let limit=self.palette_hint().0-4.;
         cells.into_iter().map(|(label,on,command)|{
             let w=(label.len()+2) as f32*self.char_w;
-            let cell=SwitchCell{x,y,w,label,on,enabled:self.layout.disabled(command,self.repo.as_ref()).is_none(),command};
+            let cell=SwitchCell{x,y,w,label,on,enabled:self.disabled(command).is_none(),command};
             x+=w;cell
-        }).collect()
+        }).take_while(|c|c.x+c.w<=limit).collect()
     }
 
     /// The bottom bar's right end: the palette's key (the toolbar has no button for it). x, width, label.
     pub(super) fn palette_hint(&self)->(f32,f32,&'static str){
-        let label=if cfg!(target_os="macos") {"Commands  Cmd+Shift+P"} else {"Commands  Ctrl+Shift+P"};
+        let label=if self.panes.viewport[0]<640. {"Commands"} else if cfg!(target_os="macos") {"Commands  Cmd+Shift+P"} else {"Commands  Ctrl+Shift+P"};
         let w=(label.chars().count()+2) as f32*self.char_w;
         ((self.panes.viewport[0]-8.-w).max(0.),w,label)
     }
 
     /// A click in the bottom bar; true when it was there.
-    pub(super) fn panel_switch_click(&mut self,x:f32,y:f32,cx:&mut Context<Self>)->bool{
+    pub(super) fn panel_switch_click(&mut self,x:f32,y:f32,window:&mut Window,cx:&mut Context<Self>)->bool{
         if y<self.panes.viewport[1] {return false;}
         let (hx,hw,_)=self.palette_hint();
         if x>=hx&&x<hx+hw {self.open_palette(cx);return true;}
         if let Some(c)=self.panel_switch().into_iter().find(|c|x>=c.x&&x<c.x+c.w&&y>=c.y) {
-            match self.layout.disabled(c.command,self.repo.as_ref()) {
-                Some(why)=>self.toast(why.into(),cx),
-                None=>self.layout_command(c.command,cx),
-            }
+            self.run_action(c.command,window,cx);
         }
         true
     }
@@ -357,7 +357,7 @@ impl Viewer {
 }
 
 /// One panel switch in the bottom bar.
-pub(super) struct SwitchCell { pub x:f32, pub y:f32, pub w:f32, pub label:&'static str, pub on:bool, pub enabled:bool, pub command:LayoutCommand }
+pub(super) struct SwitchCell { pub x:f32, pub y:f32, pub w:f32, pub label:&'static str, pub on:bool, pub enabled:bool, pub command:catalog::Action }
 
 pub(super) struct DiffOptionsPaint { pub x:f32, pub y:f32, pub width:f32, pub height:f32, pub rows:Vec<PaintRow> }
 

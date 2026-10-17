@@ -229,7 +229,8 @@ mod tests {
         r.execute(R::ToggleMessage(None));
         assert!(r.message_collapsed());
         assert_eq!(r.message_key(MessageKey::Enter), Some(R::ToggleMessage(None)), "collapsed: Enter expands");
-        assert_eq!(r.message_lines(80).unwrap().len(), 1, "collapsed: the heading only");
+        assert!(r.message_lines(80).is_none(), "hidden: no heading or body consumes space");
+        assert!(r.disabled(&R::ToggleMessage(None)).is_none(), "hidden panel remains available to show");
         r.execute(R::ToggleMessage(None));
 
         show(&mut r, branch_comparison(&format!("{three}^1"), &three, false));

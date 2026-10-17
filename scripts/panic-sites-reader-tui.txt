@@ -1,0 +1,5 @@
+unwrap_used 13
+expect_used 0
+panic 0
+unreachable 0
+string_slice 2
