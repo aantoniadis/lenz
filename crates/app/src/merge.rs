@@ -372,17 +372,28 @@ impl MergeResult {
         )
     }
 
-    /// Carry the user's choices over to `next` (a re-merge of the same versions, e.g. after a Whitespace Mode
-    /// change) for blocks whose text didn't change. Undo history starts afresh.
+    /// Carry choices over to a re-merge of the same versions at the same source ranges.
+    /// Repeated identical conflicts retain separate choices. Undo history starts afresh.
     pub fn carry_choices_to(&self, next: &mut MergeResult) {
         use std::collections::HashMap;
-        let mine: HashMap<_, _> = (0..self.blocks.len()).map(|i| (self.key(i), &self.choices[i])).collect();
-        for i in 0..next.blocks.len() {
-            if let Some(&c) = mine.get(&next.key(i)) {
-                next.choices[i] = c.clone();
+        let ranges = |b: &MergeBlock| (b.left.clone(), b.base.clone(), b.right.clone());
+        let mine: HashMap<_, _> = self.blocks.iter().zip(&self.choices).map(|(b, c)| (ranges(b), c)).collect();
+        for (b, choice) in next.blocks.iter().zip(&mut next.choices) {
+            if let Some(&c) = mine.get(&ranges(b)) {
+                *choice = c.clone();
             }
         }
         next.rebuild();
+    }
+
+    /// Compare output after re-merging unchanged inputs, without allocating rendered copies.
+    pub(crate) fn same_output(&self, next: &Self) -> bool {
+        fn markers(m: &MergeResult) -> impl Iterator<Item = (&Range<u32>, &Range<u32>, &Range<u32>, &Range<u32>)> {
+            m.blocks.iter().zip(&m.choices).zip(&m.ranges)
+                .filter(|((_, c), _)| !c.resolved && c.custom.is_none())
+                .map(|((b, _), r)| (&b.left, &b.base, &b.right, r))
+        }
+        self.lines == next.lines && markers(self).eq(markers(next))
     }
 
     /// The Result as text (lines joined with `\n`), each unresolved Conflict written as git conflict markers.
@@ -707,6 +718,17 @@ mod tests {
         assert_eq!(next.choice(2), m.choice(2));
         assert_eq!(next.choice(1).taken, vec![Pick::Theirs]);
         assert!(!next.clone().undo());
+    }
+
+    #[test]
+    fn output_equality_includes_unresolved_markers_and_their_positions() {
+        let m=sample();let mut next=m.clone();assert!(m.same_output(&next));
+        next.keep_base(2);
+        assert_eq!(m.lines(),next.lines());assert!(!m.same_output(&next));
+        for style in [MarkerStyle::Merge,MarkerStyle::Diff3,MarkerStyle::Zdiff3] {
+            let labels=Labels{ours:"ours".into(),base:"base".into(),theirs:"theirs".into()};
+            assert_ne!(m.render(style,7,&labels),next.render(style,7,&labels));
+        }
     }
 
     #[test]

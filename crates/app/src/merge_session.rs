@@ -594,6 +594,7 @@ impl MergeSession {
             next.resume(git, &file.text, self.style, self.marker_size, &self.labels);
         }
         self.m.carry_choices_to(&mut next);
+        self.dirty |= !self.m.same_output(&next);
         self.m = next;
         self.current = None;
         self.relayout();
@@ -1441,6 +1442,39 @@ pub(crate) mod tests {
         s.next_whitespace(); // Trim: the trailing space on "y " is now a whitespace-only change
         assert_eq!(s.m.choice(0).taken, vec![Pick::Theirs]);
         assert_eq!(s.m.lines().join("\n"), "x2\n\ny \n");
+    }
+
+    #[test]
+    fn whitespace_keeps_repeated_conflict_choices_separate() {
+        for choices in [[Some(Pick::Ours), None], [None, Some(Pick::Theirs)], [Some(Pick::Ours), Some(Pick::Theirs)]] {
+            let (_dir, mut s) = state("base\nseparator\nbase\n", "ours\nseparator\nours\n", "theirs\nseparator\ntheirs\n");
+            assert_eq!(s.m.blocks().len(), 2);
+            for (i, pick) in choices.into_iter().enumerate() {
+                if let Some(pick) = pick { s.control(Control::Accept(i, pick)); }
+            }
+            let expected = s.text();
+            let unresolved = s.m.unresolved();
+            for _ in 0..3 {
+                s.execute(Act::Whitespace);
+                assert_eq!(s.m.unresolved(), unresolved);
+                assert_eq!(s.text(), expected);
+            }
+            s.save().unwrap();
+            assert_eq!(std::fs::read_to_string(&s.snapshot.path).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn whitespace_output_changes_remain_unsaved_until_saved() {
+        let (_dir,mut s)=state("a\n"," a\n","a\nb\n");
+        s.execute(Act::AllFrom(Pick::Theirs));s.save().unwrap();
+        assert_eq!(s.text(),"a\nb\n");assert!(!s.dirty);
+        s.execute(Act::Whitespace);
+        assert_eq!(s.text()," a\nb\n");assert!(s.dirty);
+        let out=s.execute(Act::Cancel);assert!(!out.back);assert_eq!(s.ask,Some(Ask::Close));
+        s.ask=None;s.save().unwrap();assert!(!s.dirty);
+        assert_eq!(std::fs::read_to_string(&s.snapshot.path).unwrap()," a\nb\n");
+        s.execute(Act::Whitespace);assert!(!s.dirty,"unchanged output must stay saved");
     }
 
     #[test]

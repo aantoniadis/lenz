@@ -99,6 +99,74 @@ fn gui_user_flow_merge_replay(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gui_whitespace_keeps_repeated_conflict_choices_separate(cx: &mut TestAppContext) {
+    let (dir,viewer)=merge_view::gui_tests::fixture(cx);
+    for (name,text) in [("base","base\nseparator\nbase\n"),("ours","ours\nseparator\nours\n"),("theirs","theirs\nseparator\ntheirs\n")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let opened=crate::merge_session::open_files(&dir.path().join("base"),&dir.path().join("ours"),&dir.path().join("theirs"),&dir.path().join("result"),dir.path()).unwrap();
+    viewer.update(cx,|v,cx|v.start_merge(opened,false,cx));
+    let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();let f=Fixture{dir,viewer,window};
+    key(cx,&f,"right",false,true,true);
+    key(cx,&f,"w",false,false,false);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.merge.as_ref().unwrap().m.unresolved()),1);
+    key(cx,&f,"n",false,false,false);
+    key(cx,&f,"n",false,false,false);
+    key(cx,&f,"left",false,true,true);
+    key(cx,&f,"w",false,false,false);
+    key(cx,&f,"s",true,false,false);
+    assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(),b"ours\nseparator\ntheirs\n");
+}
+
+#[gpui::test]
+fn gui_whitespace_output_change_requires_save_before_close(cx: &mut TestAppContext) {
+    let (dir,viewer)=merge_view::gui_tests::fixture(cx);
+    for (name,text) in [("base","a\n"),("ours"," a\n"),("theirs","a\nb\n")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let opened=crate::merge_session::open_files(&dir.path().join("base"),&dir.path().join("ours"),&dir.path().join("theirs"),&dir.path().join("result"),dir.path()).unwrap();
+    viewer.update(cx,|v,cx|v.start_merge(opened,false,cx));
+    let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();let f=Fixture{dir,viewer,window};
+    run(cx,&f,crate::catalog::Action::Merge(crate::merge_session::Act::AllFrom(crate::merge::Pick::Theirs)));
+    key(cx,&f,"s",true,false,false);
+    key(cx,&f,"w",false,false,false);
+    key(cx,&f,"escape",false,false,false);
+    assert!(f.viewer.read_with(cx,|v,_|v.merge.as_ref().is_some_and(|m|m.dirty&&m.ask==Some(crate::merge_session::Ask::Close))));
+    assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(),b"a\nb\n");
+    key(cx,&f,"s",true,false,false);
+    assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(),b" a\nb\n");
+}
+
+#[gpui::test]
+fn gui_leaving_pr_clears_review_tabs_and_title(cx: &mut TestAppContext) {
+    let f=repository_markdown_fixture(cx);let _provider=crate::pr::test_support::markdown_provider(f.dir.path());
+    std::fs::write(f.dir.path().join("ref.md"),"local\n").unwrap();
+    f.viewer.update(cx,|v,_|v.repo.as_mut().unwrap().execute(crate::repository_session::RepositoryCommand::OpenPr(Some("9".into()))));
+    workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|r.pr.is_some()&&!r.busy()));
+    assert!(pr_tab(cx,&f).is_some());
+    run(cx,&f,crate::catalog::Action::Repository(crate::catalog::RepoAction::LocalChanges));
+    workflow_wait(cx,&f,|v|v.spec==crate::repository_session::local_spec()&&v.repo.as_ref().is_some_and(|r|!r.busy()));
+    f.viewer.read_with(cx,|v,_|{
+        assert!(v.repo.as_ref().unwrap().pr.is_none());
+        assert!(!v.repo.as_ref().unwrap().selection_title().unwrap().text.starts_with('#'));
+    });
+    assert_eq!(pr_tab(cx,&f),None);
+    assert!(!toolbar_labels(cx,&f,1200.).iter().any(|(_,label)|label=="Conversation"));
+    assert_eq!(std::fs::read(f.dir.path().join("ref.md")).unwrap(),b"local\n");
+}
+
+#[gpui::test]
+fn gui_rendered_markdown_escape_leaves_focus(cx: &mut TestAppContext) {
+    let f=repository_markdown_fixture(cx);
+    for layout in [crate::markdown::MarkdownLayout::Inline,crate::markdown::MarkdownLayout::SideBySide] {
+        enter_focus(cx,&f);
+        run(cx,&f,crate::catalog::Action::Comparison(Command::Preview(layout)));markdown_ready(cx,&f);
+        key(cx,&f,"escape",false,false,false);
+        assert!(f.viewer.read_with(cx,|v,_|!v.layout.focused(v.repo.as_ref())));
+    }
+}
+
+#[gpui::test]
 fn gui_user_flow_replay(cx: &mut TestAppContext) {
     use user_flows::{Snapshot, Step};
     for case in user_flows::CASES {
@@ -869,8 +937,11 @@ fn files_fixture(cx: &mut TestAppContext) -> Fixture {
         std::fs::write(left.join(format!("{i:02}.txt")), "old\n".repeat(100)).unwrap();
         std::fs::write(right.join(format!("{i:02}.txt")), "new\n".repeat(200)).unwrap();
     }
+    std::os::unix::fs::symlink(".",left.join("directory-link")).unwrap();
+    std::os::unix::fs::symlink(".",right.join("directory-link")).unwrap();
     let spec = Spec::Plain { left: left.clone(), right: right.clone() };
     let set = Arc::new(ChangeSet::load(&spec, dir.path()).unwrap());
+    assert_eq!(set.comparisons.len(),40);
     let doc = Arc::new(Doc::load(&set, 0, &left.join("00.txt"), &right.join("00.txt"), false).unwrap());
     let view = doc.view(&doc.line_diff(&Options::default()), 10.);
     let viewer = cx.new(|cx| Viewer::new(set, spec, false, None, doc, view, false,
@@ -1444,7 +1515,7 @@ fn gui_revert_hunk_is_a_draft_and_whole_file_discard_rejects_pending_edits(cx:&m
     assert!(f.viewer.read_with(cx,|v,_|v.file_actions.confirmation().is_none()&&!v.file_actions.busy()));
     assert_eq!(text(&f),"working\n");
     key(cx,&f,"s",true,false,false);assert_eq!(text(&f),"indexed\n");
-    assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\r\n");
+    assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\n");
     run(cx,&f,crate::catalog::Action::Edit(EditMenuCommand::Undo));assert_eq!(text(&f),"indexed\n");
     key(cx,&f,"s",true,false,false);assert_eq!(text(&f),"working\n");
 }
@@ -1824,6 +1895,7 @@ fn discard_fixture(cx:&mut TestAppContext)->Fixture{
     let f=fixture(cx,"head\n","staged\n");
     let root=f.dir.path();crate::git::run(root,&["init","-q"]).unwrap();crate::git::run(root,&["add","right.txt"]).unwrap();
     crate::git::run(root,&["-c","user.name=Test","-c","user.email=test@example.test","-c","core.hooksPath=/dev/null","-c","commit.gpgsign=false","commit","-qm","initial"]).unwrap();
+    std::fs::write(root.join(".gitattributes"),"*.txt text eol=crlf\n").unwrap();
     std::fs::write(root.join("right.txt"),"indexed\r\n").unwrap();crate::git::run(root,&["add","right.txt"]).unwrap();std::fs::write(root.join("right.txt"),"working\n").unwrap();
     let spec=Spec::Git{cached:false,revs:Vec::new(),paths:vec!["right.txt".into()],untracked:false};let set=Arc::new(ChangeSet::load(&spec,root).unwrap());let doc=Arc::new(Doc::load(&set,0,Path::new("right.txt"),Path::new("right.txt"),false).unwrap());let view=doc.view(&doc.line_diff(&Options::default()),30.);
     f.viewer.update(cx,|v,cx|{*v=Viewer::new(set,spec,false,Some("right.md".into()),doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.layout.set_files(true);});f
@@ -1920,7 +1992,7 @@ fn gui_file_context_discard_confirmation_preserves_staging_and_exposes_undo(cx:&
     for name in ["right","left","s","z"]{key(cx,&f,name,true,true,true);}click(cx,&f,10.,y);assert_eq!(text(&f),"working\n");
     key(cx,&f,"escape",false,false,false);assert_eq!(text(&f),"working\n");
     run(cx,&f,crate::catalog::Action::File(FileAction::Discard));wait_file_action(cx,&f);key(cx,&f,"enter",false,false,false);wait_file_action(cx,&f);
-    assert_eq!(std::fs::read(f.dir.path().join("right.txt")).unwrap(),b"indexed\r\n");assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\r\n");
+    assert_eq!(std::fs::read(f.dir.path().join("right.txt")).unwrap(),b"indexed\r\n");assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\n");
     let spec=f.viewer.read_with(cx,|v,_|v.spec.clone());let refreshed=ChangeSet::load(&spec,f.dir.path()).unwrap();f.viewer.update(cx,|v,cx|v.accept_repository_refresh(refreshed,spec,cx));cx.executor().run_until_parked();
     assert_eq!(f.viewer.read_with(cx,|v,_|v.set.comparisons.len()),1,"the discarded file must stay visible for undo after refresh");
     run(cx,&f,crate::catalog::Action::File(FileAction::UndoDiscard));wait_file_action(cx,&f);assert_eq!(text(&f),"working\n");
@@ -1944,7 +2016,7 @@ fn gui_whole_file_restore_undeletes_without_changing_the_index(cx:&mut TestAppCo
     assert!(f.viewer.read_with(cx,|v,_|v.file_actions.confirmation().is_some()));
     key(cx,&f,"enter",false,false,false);wait_file_action(cx,&f);
     assert_eq!(std::fs::read(f.dir.path().join("right.txt")).unwrap(),b"indexed\r\n");
-    assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\r\n");
+    assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\n");
 }
 
 #[gpui::test]
@@ -4344,6 +4416,8 @@ fn gui_find_options_toggle_by_key_and_click_and_report_bad_expressions(cx: &mut 
 #[gpui::test]
 fn gui_change_set_search_takes_options_and_changed_only_moved_to_alt_o(cx: &mut TestAppContext) {
     let f = fixture(cx, "needle Needle\n", "needle\n");
+    let encoded=std::iter::once(0xfeff).chain("Needle\n".encode_utf16()).flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+    std::fs::write(f.dir.path().join("right.txt"),encoded).unwrap();
     key(cx, &f, "f", true, true, false);
     type_keys(cx, &f, "Needle");
     key(cx, &f, "c", false, false, true);
@@ -4364,7 +4438,7 @@ fn gui_change_set_search_takes_options_and_changed_only_moved_to_alt_o(cx: &mut 
         assert!(Instant::now() < until, "search did not finish");
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
-    assert_eq!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().hits.len()), 1, "case-sensitive: only Needle");
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.search.as_ref().unwrap().hits.len()), 2, "case-sensitive Needle in UTF-8 and UTF-16");
 }
 
 #[gpui::test]

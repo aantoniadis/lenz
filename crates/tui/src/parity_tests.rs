@@ -364,6 +364,29 @@ fn tui_user_flow_merge_replay() {
 }
 
 #[test]
+fn tui_whitespace_keeps_repeated_conflict_choices_separate() {
+    use lenz::conflict_session::FileView;
+    let dir=tempfile::tempdir().unwrap();
+    for (name,text) in [("base","base\nseparator\nbase\n"),("ours","ours\nseparator\nours\n"),("theirs","theirs\nseparator\ntheirs\n"),("result","")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let req=cli::parse(&["merge","base","ours","theirs","result"].map(str::to_owned),dir.path()).unwrap();
+    let mut app=crate::merge::Merger::open(req,dir.path().into());
+    let deadline=Instant::now()+Duration::from_secs(10);
+    while app.busy(){app.poll();assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}
+    let press=|app:&mut crate::merge::Merger,code,mods|assert!(app.handle(Event::Key(KeyEvent::new(code,mods))));
+    press(&mut app,KeyCode::Char('1'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('w'),KeyModifiers::NONE);
+    assert!(matches!(&app.workspace.file,Some(FileView::Merge(m)) if m.m.unresolved()==1));
+    press(&mut app,KeyCode::Char('n'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('n'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('2'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('w'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);
+    assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b"ours\nseparator\ntheirs\n");
+}
+
+#[test]
 fn tui_user_flow_replay() {
     use user_flows::{Snapshot, Step};
     for case in user_flows::CASES {
@@ -1365,4 +1388,43 @@ fn summary_narrow_counts_stay_inside_the_pane() {
         let buffer = terminal.backend().buffer();
         for y in 0..10 { for x in 0..area.x { assert_eq!(buffer[(x, y)].symbol(), "X", "outside summary at {x},{y}, width {width}"); } }
     }
+}
+
+#[test]
+fn encoded_search_and_directory_symlinks_use_real_input() {
+    let dir=tempfile::tempdir().unwrap();
+    for side in ["left","right"] {
+        let root=dir.path().join(side);std::fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink(".",root.join("directory-link")).unwrap();
+        let value=if side=="left" {"old\n"} else {"needle\n"};
+        let bytes=std::iter::once(0xfeff).chain(value.encode_utf16()).flat_map(u16::to_le_bytes).collect::<Vec<_>>();
+        std::fs::write(root.join("text.txt"),bytes).unwrap();
+    }
+    let mut app=open(dir.path(),&["--no-index","left","right"]);
+    assert_eq!(app.session.comparisons().len(),1);
+    key(&mut app,KeyCode::Char('f'),KeyModifiers::CONTROL|KeyModifiers::SHIFT);
+    text(&mut app,"needle");key(&mut app,KeyCode::Enter,KeyModifiers::NONE);ready(&mut app);
+    assert_eq!(app.set_search.as_ref().unwrap().model.hits().len(),1);
+    assert!(screen(&draw(&mut app,120,36)).contains("needle"));
+}
+
+#[test]
+fn whitespace_output_change_requires_save_before_close() {
+    use lenz::{conflict_session::FileView,merge_session::{Act,Ask},merge::Pick};
+    let dir=tempfile::tempdir().unwrap();
+    for (name,text) in [("base","a\n"),("ours"," a\n"),("theirs","a\nb\n"),("result","")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let req=cli::parse(&["merge","base","ours","theirs","result"].map(str::to_owned),dir.path()).unwrap();
+    let mut app=crate::merge::Merger::open(req,dir.path().into());
+    let deadline=Instant::now()+Duration::from_secs(10);
+    while app.busy(){app.poll();assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}
+    if let Some(FileView::Merge(m))=&mut app.workspace.file {m.execute(Act::AllFrom(Pick::Theirs));} else {panic!()}
+    for (code,mods) in [(KeyCode::Char('s'),KeyModifiers::CONTROL),(KeyCode::Char('w'),KeyModifiers::NONE),(KeyCode::Esc,KeyModifiers::NONE)] {
+        assert!(app.handle(Event::Key(KeyEvent::new(code,mods))));
+    }
+    assert!(matches!(&app.workspace.file,Some(FileView::Merge(m)) if m.dirty&&m.ask==Some(Ask::Close)));
+    assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b"a\nb\n");
+    assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL))));
+    assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b" a\nb\n");
 }

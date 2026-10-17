@@ -6,7 +6,7 @@ use crate::{
 use std::{
     hash::{DefaultHasher, Hasher},
     io::Read,
-    os::unix::fs::MetadataExt,
+    os::unix::{ffi::OsStringExt, fs::MetadataExt},
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -185,6 +185,36 @@ pub struct PickerState {
     pub saved: bool,
     pub ask: Option<crate::merge_session::Ask>,
     disk_kept: bool,
+    original: Option<TargetBackup>,
+}
+
+enum TargetBackup {
+    Missing,
+    Link(PathBuf),
+    File { bytes: std::fs::File, mode: u32 },
+}
+impl TargetBackup {
+    fn capture(snapshot: &TargetSnapshot, path: &Path) -> Result<Self, write::WriteError> {
+        let io = |e| write::WriteError::Io(format!("backing up {}: {e}", path.display()));
+        match snapshot.0.as_ref().map_err(|e| write::WriteError::Io(e.clone()))? {
+            TargetEntry::Missing => Ok(Self::Missing),
+            TargetEntry::Link(to) => Ok(Self::Link(to.clone())),
+            TargetEntry::File { mode, .. } => {
+                let mut source = std::fs::File::open(path).map_err(io)?;
+                let mut bytes = tempfile::tempfile().map_err(io)?;
+                std::io::copy(&mut source, &mut bytes).map_err(io)?;
+                snapshot.verify(path)?;
+                Ok(Self::File { bytes, mode: *mode })
+            }
+        }
+    }
+    fn restore(&mut self, path: &Path) -> Result<(), write::WriteError> {
+        match self {
+            Self::Missing => write::remove_entry(path),
+            Self::Link(to) => write::put(path, &Entry::Link(to.clone())),
+            Self::File { bytes, mode } => write::put_file_from(path, bytes, *mode),
+        }
+    }
 }
 
 /// Why `bytes` can't be merged line by line, if so.
@@ -335,10 +365,11 @@ pub fn open_conflict(root: &Path, file: &crate::conflicts::ConflictedFile) -> Op
         let mode = stage.map_or(0, |s| s.mode);
         match crate::conflicts::read_stage(root, &file.path, n) {
             Ok(bytes) if mode == 0o120000 => {
-                let to = String::from_utf8_lossy(&bytes).into_owned();
+                let note = format!("symlink → {}", String::from_utf8_lossy(&bytes));
+                let to = std::ffi::OsString::from_vec(bytes);
                 Version {
                     label: label.to_string(),
-                    note: format!("symlink → {to}"),
+                    note,
                     entry: Some(Entry::Link(to.into())),
                     error: None,
                 }
@@ -475,6 +506,7 @@ impl PickerState {
             saved: false,
             ask: None,
             disk_kept: false,
+            original: None,
         }
     }
 
@@ -510,33 +542,38 @@ impl PickerState {
         true
     }
 
-    /// Write the version taken; nothing taken leaves the file as it is.
+    /// Writes the chosen version, or restores the initial result after Undo.
     pub fn save(&mut self) -> Result<(), String> {
         self.save_checked().map_err(|e| e.to_string())
     }
     fn save_checked(&mut self) -> Result<(), write::WriteError> {
-        let Some(i) = self.chosen else {
+        if self.chosen.is_none() && self.original.is_none() {
             self.dirty = false;
             self.ask = None;
             return Ok(());
-        };
+        }
         let target = &self.o.target;
         self.o.snapshot.verify(target)?;
-        match &self.o.versions[i].entry {
-            Some(entry) => write::put(target, entry)?,
-            None if std::fs::symlink_metadata(target).is_ok() => {
-                write::delete(target)?;
+        if self.original.is_none() {
+            self.original = Some(TargetBackup::capture(&self.o.snapshot, target)?);
+        }
+        if let Some(i) = self.chosen {
+            match &self.o.versions[i].entry {
+                Some(entry) => write::put(target, entry)?,
+                None => write::remove_entry(target)?,
             }
-            None => {}
+            self.o.snapshot = TargetSnapshot(
+                TargetSnapshot::written(target, self.o.versions[i].entry.as_ref()).0,
+                self.o.snapshot.1.clone(),
+            );
+        } else if let Some(original) = self.original.as_mut() {
+            original.restore(target)?;
+            self.o.snapshot = self.o.snapshot.recapture(target);
         }
         self.dirty = false;
         self.saved = true;
         self.ask = None;
         self.disk_kept = false;
-        self.o.snapshot = TargetSnapshot(
-            TargetSnapshot::written(target, self.o.versions[i].entry.as_ref()).0,
-            self.o.snapshot.1.clone(),
-        );
         Ok(())
     }
     fn overwrite(&mut self) -> Result<(), write::WriteError> {
@@ -553,6 +590,7 @@ impl PickerState {
         snapshot.0.as_ref().map_err(Clone::clone)?;
         self.o.snapshot = snapshot;
         self.chosen = None;
+        self.original = None;
         self.undo.clear();
         self.redo.clear();
         self.dirty = false;
@@ -798,6 +836,102 @@ mod tests {
             assert!(!dir.path().join("INJECTED").exists());
             std::fs::remove_file(&capture).unwrap();
         }
+    }
+
+    #[test]
+    fn saved_choice_can_restore_original_result_and_redo() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for (name, bytes) in [("base", b"\0base".as_slice()), ("ours", b"\0ours"), ("theirs", b"\0theirs"), ("result", b"\0original")] {
+            std::fs::write(d.join(name), bytes).unwrap();
+        }
+        let target = d.join("result");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let opened = open_files(&d.join("base"), &d.join("ours"), &d.join("theirs"), &target, d).unwrap().unwrap();
+        let mut picker = PickerState::new(opened, true);
+        picker.take(1);
+        picker.save().unwrap();
+        picker.undo();
+        picker.save().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"\0original");
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o751);
+        picker.redo();
+        picker.save().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"\0theirs");
+        picker.undo();
+        std::fs::write(&target, b"external").unwrap();
+        assert!(picker.save().is_err());
+        assert!(picker.dirty);
+        assert_eq!(std::fs::read(&target).unwrap(), b"external");
+        picker.reload().unwrap();
+        picker.take(0);
+        picker.save().unwrap();
+        picker.undo();
+        picker.save().unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"external");
+    }
+
+    #[test]
+    fn undo_saved_deletion_restores_missing_file_link_or_original_mode() {
+        use std::os::unix::{ffi::OsStringExt, fs::{symlink, PermissionsExt}};
+        for initial in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("result");
+            let link = PathBuf::from(std::ffi::OsString::from_vec(b"missing-\xff".to_vec()));
+            match initial {
+                0 => {},
+                1 => symlink(&link, &target).unwrap(),
+                _ => {
+                    std::fs::write(&target, b"original").unwrap();
+                    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+                }
+            }
+            let mut picker = PickerState::new(Opened {
+                path: "result".into(), target: target.clone(), snapshot: TargetSnapshot::capture(&target),
+                versions: versions(vec![("Chosen".into(), Some(b"chosen".to_vec())), ("Delete".into(), None)]),
+                why: "binary".into(), large_text: false, files: None, info: Vec::new(),
+            }, false);
+            for selection in [0, 1] {
+                picker.take(selection);
+                picker.save().unwrap();
+                picker.undo();
+                picker.save().unwrap();
+                match initial {
+                    0 => assert!(std::fs::symlink_metadata(&target).is_err()),
+                    1 => assert_eq!(std::fs::read_link(&target).unwrap(), link),
+                    _ => {
+                        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+                        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o751);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conflict_symlink_keeps_non_utf8_target_bytes() {
+        use std::os::unix::{ffi::{OsStrExt, OsStringExt}, fs::symlink};
+        use crate::git::testing::{commit_all, git, repo, try_git};
+        let dir = repo();
+        let d = dir.path();
+        symlink("base", d.join("link")).unwrap();
+        commit_all(d, "base");
+        git(d, &["checkout", "-qb", "feature"]);
+        std::fs::remove_file(d.join("link")).unwrap();
+        let theirs = std::ffi::OsString::from_vec(b"theirs-\xff".to_vec());
+        symlink(&theirs, d.join("link")).unwrap();
+        commit_all(d, "theirs");
+        git(d, &["checkout", "-q", "main"]);
+        std::fs::remove_file(d.join("link")).unwrap();
+        symlink("ours", d.join("link")).unwrap();
+        commit_all(d, "ours");
+        assert!(!try_git(d, &["merge", "-q", "feature"]));
+        let files = crate::conflicts::list(d).unwrap();
+        let mut picker = PickerState::new(open_conflict(d, &files[0]), false);
+        picker.take(1);
+        picker.save().unwrap();
+        assert_eq!(std::fs::read_link(d.join("link")).unwrap().as_os_str().as_bytes(), theirs.as_bytes());
     }
 
     #[test]
