@@ -364,6 +364,29 @@ fn tui_user_flow_merge_replay() {
 }
 
 #[test]
+fn tui_whitespace_keeps_repeated_conflict_choices_separate() {
+    use lenz::conflict_session::FileView;
+    let dir=tempfile::tempdir().unwrap();
+    for (name,text) in [("base","base\nseparator\nbase\n"),("ours","ours\nseparator\nours\n"),("theirs","theirs\nseparator\ntheirs\n"),("result","")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let req=cli::parse(&["merge","base","ours","theirs","result"].map(str::to_owned),dir.path()).unwrap();
+    let mut app=crate::merge::Merger::open(req,dir.path().into());
+    let deadline=Instant::now()+Duration::from_secs(10);
+    while app.busy(){app.poll();assert!(Instant::now()<deadline);thread::sleep(Duration::from_millis(2));}
+    let press=|app:&mut crate::merge::Merger,code,mods|assert!(app.handle(Event::Key(KeyEvent::new(code,mods))));
+    press(&mut app,KeyCode::Char('1'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('w'),KeyModifiers::NONE);
+    assert!(matches!(&app.workspace.file,Some(FileView::Merge(m)) if m.m.unresolved()==1));
+    press(&mut app,KeyCode::Char('n'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('n'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('2'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('w'),KeyModifiers::NONE);
+    press(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);
+    assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b"ours\nseparator\ntheirs\n");
+}
+
+#[test]
 fn tui_user_flow_replay() {
     use user_flows::{Snapshot, Step};
     for case in user_flows::CASES {

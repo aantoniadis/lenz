@@ -1751,10 +1751,12 @@ impl App {
                 if k.code == KeyCode::Esc {
                     if self.session.find().is_some() {
                         self.session.clear_find();
-                    } else {
+                    } else if self.session.markdown_selection().is_some() {
                         let doc = self.session.document_arc();
                         self.session
                             .markdown_command(MarkdownCommand::ClearSelection, doc);
+                    } else {
+                        return false;
                     }
                     return true;
                 }

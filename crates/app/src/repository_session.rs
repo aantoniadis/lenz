@@ -1331,6 +1331,8 @@ pub struct RepositorySession {
     navigating: bool,
     refreshing: Option<Inbox<RefreshedInventory>>,
     pending_refresh: bool,
+    /// Only explicit PR commit navigation and refresh retain the current review.
+    pending_pr: bool,
     refresh_placement: bool,
     set: Option<std::sync::Arc<ChangeSet>>,
     token: std::sync::Arc<()>,
@@ -1557,6 +1559,7 @@ impl RepositorySession {
     fn new_pick(&mut self) {
         self.picker.pick_generation += 1;
         self.pick_token = std::sync::Arc::new(());
+        self.pending_pr = false;
         if self.opened.take().is_some()&&self.notice.as_deref()==Some("Fetching pull request…"){self.notice=None;}
     }
     /// Persistent feedback until the request succeeds, fails, or another comparison supersedes it.
@@ -1658,6 +1661,7 @@ impl RepositorySession {
             navigating: false,
             refreshing: None,
             pending_refresh: false,
+            pending_pr: false,
             refresh_placement: false,
             set: None,
             token: std::sync::Arc::new(()),
@@ -1751,7 +1755,11 @@ impl RepositorySession {
             _ => None,
         }
     }
-    fn accept(&mut self, set: ChangeSet, spec: Spec) {
+    fn accept(&mut self, set: ChangeSet, spec: Spec, keep_pr: bool) {
+        if !keep_pr {
+            self.pr = None;
+            self.moved = None;
+        }
         let set = std::sync::Arc::new(set);
         if let Some(root)=set.git_root(){self.picker.root=root.to_path_buf();}
         self.set = Some(set.clone());
@@ -1832,6 +1840,8 @@ impl RepositorySession {
             // already on screen: drop any other load in flight and keep what is shown, without reloading it
             Ok(spec) if self.current_spec.as_ref() == Some(&spec) && self.ready.is_none() => {
                 self.new_pick();
+                self.pr = None;
+                self.moved = None;
                 self.pending = None;
                 self.initial_pick = false;
             }
@@ -1958,7 +1968,7 @@ impl RepositorySession {
                         self.place_initial(&spec);
                     }
                     self.refresh_placement=std::mem::take(&mut self.pending_refresh);
-                    self.accept(set, spec);
+                    self.accept(set, spec, self.pending_pr);
                 }
                 Err(error) => {
                     crate::diagnostics::repository_failure(&error);
@@ -1971,7 +1981,7 @@ impl RepositorySession {
             changed = true;
             match result {
                 Ok(opened) => {
-                    self.accept(opened.set, opened.fetched.spec());
+                    self.accept(opened.set, opened.fetched.spec(), false);
                     self.adopt_pr(opened.pr, opened.fetched);
                 }
                 Err(crate::pr::PrError::NoPullRequest) => {
@@ -2370,6 +2380,7 @@ impl RepositorySession {
                 }));
                 if let Some(spec)=self.current_spec.clone(){
                     self.initial_pick=false;self.new_pick();self.opened=None;
+                    self.pending_pr=self.pr.is_some();
                     let root=self.set.as_ref().and_then(|set|set.git_root()).unwrap_or(&self.picker.root).to_path_buf();
                     let selected=self.picker.log_row(self.picker.anchor).map(|row|self.picker.log.id(row));
                     let stash=self.set.as_ref().is_some_and(|set|set.groups.iter().any(|(group,_)|group=="Changes"));
@@ -2408,6 +2419,7 @@ impl RepositorySession {
                 pr.shown_commit = sha;
                 pr.execute(crate::pr_session::PrCommand::Close);
                 self.load(spec);
+                self.pending_pr = true;
             },
             C::CheckPrHead => {
                 if let Some(pr) = self.pr.as_ref() {
@@ -2971,6 +2983,35 @@ mod session_tests {
         state.execute(RepositoryCommand::RefreshRepository);let started=std::time::Instant::now();
         while state.busy(){assert!(state.prs.is_none()&&state.opened.is_none()&&state.pr.as_ref().is_none_or(|p|!p.review_loading())&&state.moved.is_none(),"local refresh must not create GitHub jobs");state.poll();assert!(started.elapsed().as_secs()<10);std::thread::sleep(std::time::Duration::from_millis(2));}
         assert_eq!(state.picker.sources.prs,vec![cached]);assert_eq!(state.pr.as_ref().unwrap().pr.head_ref_oid,metadata);
+    }
+    #[test]
+    fn leaving_pr_clears_review_context_but_pr_commits_and_refresh_keep_it() {
+        let root=repo();write(root.path(),"ref.md","old\n");commit_all(root.path(),"Before");
+        write(root.path(),"ref.md","new\n");commit_all(root.path(),"After");
+        let _provider=crate::pr::test_support::markdown_provider(root.path());
+        write(root.path(),"ref.md","local\n");
+        let mut state=open(root.path());
+        let head=state.picker.log.id(0);
+        for command in [RepositoryCommand::Source(SourceAction::Local),RepositoryCommand::Index,
+            RepositoryCommand::Compare{left:"HEAD^".into(),right:"HEAD".into(),merge_base:false},
+            RepositoryCommand::CompareRevs(state.picker.log.id(1),head.clone())] {
+            state.execute(RepositoryCommand::OpenPr(Some("9".into())));settle(&mut state);
+            state.execute(RepositoryCommand::PrCommit(Some(head.clone())));settle(&mut state);
+            assert_eq!(state.pr.as_ref().unwrap().shown_commit.as_deref(),Some(head.as_str()));
+            state.execute(RepositoryCommand::RefreshRepository);settle(&mut state);
+            assert!(state.pr.is_some());
+            state.execute(RepositoryCommand::PrCommit(None));settle(&mut state);
+            assert!(state.pr.is_some());
+            state.execute(RepositoryCommand::PrDetails(crate::pr_session::DetailsTab::Conversation));
+            state.execute(command);settle(&mut state);
+            assert!(state.pr.is_none(),"a different comparison must leave the PR");
+            assert_eq!(state.disabled(&RepositoryCommand::RefreshPr),Some("No pull request is open"));
+            assert!(!state.selection_title().unwrap().text.starts_with('#'));
+        }
+        state.execute(RepositoryCommand::OpenPr(Some("9".into())));settle(&mut state);
+        state.execute(RepositoryCommand::PrCommit(Some(head.clone())));settle(&mut state);
+        state.execute(RepositoryCommand::CompareRevs(format!("{head}^1"),head));settle(&mut state);
+        assert!(state.pr.is_none(),"ordinary navigation to a PR commit must leave review context");
     }
     #[test]
     fn shared_quiet_refresh_keeps_range_ids_and_ignores_obsolete_filter_results(){

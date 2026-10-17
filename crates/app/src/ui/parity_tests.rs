@@ -99,6 +99,55 @@ fn gui_user_flow_merge_replay(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gui_whitespace_keeps_repeated_conflict_choices_separate(cx: &mut TestAppContext) {
+    let (dir,viewer)=merge_view::gui_tests::fixture(cx);
+    for (name,text) in [("base","base\nseparator\nbase\n"),("ours","ours\nseparator\nours\n"),("theirs","theirs\nseparator\ntheirs\n")] {
+        std::fs::write(dir.path().join(name),text).unwrap();
+    }
+    let opened=crate::merge_session::open_files(&dir.path().join("base"),&dir.path().join("ours"),&dir.path().join("theirs"),&dir.path().join("result"),dir.path()).unwrap();
+    viewer.update(cx,|v,cx|v.start_merge(opened,false,cx));
+    let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();let f=Fixture{dir,viewer,window};
+    key(cx,&f,"right",false,true,true);
+    key(cx,&f,"w",false,false,false);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.merge.as_ref().unwrap().m.unresolved()),1);
+    key(cx,&f,"n",false,false,false);
+    key(cx,&f,"n",false,false,false);
+    key(cx,&f,"left",false,true,true);
+    key(cx,&f,"w",false,false,false);
+    key(cx,&f,"s",true,false,false);
+    assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(),b"ours\nseparator\ntheirs\n");
+}
+
+#[gpui::test]
+fn gui_leaving_pr_clears_review_tabs_and_title(cx: &mut TestAppContext) {
+    let f=repository_markdown_fixture(cx);let _provider=crate::pr::test_support::markdown_provider(f.dir.path());
+    std::fs::write(f.dir.path().join("ref.md"),"local\n").unwrap();
+    f.viewer.update(cx,|v,_|v.repo.as_mut().unwrap().execute(crate::repository_session::RepositoryCommand::OpenPr(Some("9".into()))));
+    workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|r.pr.is_some()&&!r.busy()));
+    assert!(pr_tab(cx,&f).is_some());
+    run(cx,&f,crate::catalog::Action::Repository(crate::catalog::RepoAction::LocalChanges));
+    workflow_wait(cx,&f,|v|v.spec==crate::repository_session::local_spec()&&v.repo.as_ref().is_some_and(|r|!r.busy()));
+    f.viewer.read_with(cx,|v,_|{
+        assert!(v.repo.as_ref().unwrap().pr.is_none());
+        assert!(!v.repo.as_ref().unwrap().selection_title().unwrap().text.starts_with('#'));
+    });
+    assert_eq!(pr_tab(cx,&f),None);
+    assert!(!toolbar_labels(cx,&f,1200.).iter().any(|(_,label)|label=="Conversation"));
+    assert_eq!(std::fs::read(f.dir.path().join("ref.md")).unwrap(),b"local\n");
+}
+
+#[gpui::test]
+fn gui_rendered_markdown_escape_leaves_focus(cx: &mut TestAppContext) {
+    let f=repository_markdown_fixture(cx);
+    for layout in [crate::markdown::MarkdownLayout::Inline,crate::markdown::MarkdownLayout::SideBySide] {
+        enter_focus(cx,&f);
+        run(cx,&f,crate::catalog::Action::Comparison(Command::Preview(layout)));markdown_ready(cx,&f);
+        key(cx,&f,"escape",false,false,false);
+        assert!(f.viewer.read_with(cx,|v,_|!v.layout.focused(v.repo.as_ref())));
+    }
+}
+
+#[gpui::test]
 fn gui_user_flow_replay(cx: &mut TestAppContext) {
     use user_flows::{Snapshot, Step};
     for case in user_flows::CASES {

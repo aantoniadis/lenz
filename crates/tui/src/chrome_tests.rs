@@ -62,6 +62,32 @@ fn markdown_tui_toolbar_renders_headings_and_accounts_for_link_edits() {
 }
 
 #[test]
+fn rendered_markdown_escape_dismisses_find_and_selection_then_leaves_focus() {
+    use lenz::{catalog::Action, commands::Command, markdown::MarkdownLayout};
+    let dir=tempfile::tempdir().unwrap();let root=dir.path();git(root,&["init","-q"]);
+    std::fs::write(root.join("note.md"),"# Before\n").unwrap();
+    git(root,&["add","."]);git(root,&["commit","-qm","Before"]);
+    std::fs::write(root.join("note.md"),"# After\n").unwrap();
+    let req=lenz::cli::parse(&["log".into()],root).unwrap();let mut app=App::open(req,root.into());ready(&mut app);
+    for layout in [MarkdownLayout::Inline,MarkdownLayout::SideBySide] {
+        app.run_action(Action::Layout(lenz::layout::LayoutCommand::ToggleFocus));
+        app.run_action(Action::Comparison(Command::Preview(layout)));ready(&mut app);
+        draw(&mut app,80,24);app.markdown_select_all();
+        app.session.search("After".into(),lenz::view::Side::Right);
+        key(&mut app,KeyCode::Esc);
+        assert!(app.session.find().is_none());
+        assert!(app.session.markdown_selection().is_some());
+        key(&mut app,KeyCode::Esc);
+        assert!(app.session.markdown_selection().is_none());
+        assert!(app.layout.focused(app.repository.as_ref().map(|r|&r.core)));
+        key(&mut app,KeyCode::Esc);
+        assert!(!app.layout.focused(app.repository.as_ref().map(|r|&r.core)));
+        let visible=text(&draw(&mut app,80,24));assert!(visible.contains("Focus"),"{visible}");
+    }
+    assert_eq!(std::fs::read(root.join("note.md")).unwrap(),b"# After\n");
+}
+
+#[test]
 fn files_pane_horizontal_keys_do_not_move_the_diff_selection() {
     let (_dir, mut app) = pair("old words\n", "new words\n");
     app.navigator.visible = Some(true);
@@ -914,6 +940,30 @@ fn pr_click_shows_a_persistent_loader_in_dark_light_and_narrow_layouts() {
     ready(&mut app);
     assert!(!text(&draw(&mut app, 32, 12)).contains("Loading pull request"));
     assert_eq!(std::fs::read(root.join("ref.md")).unwrap(), before);
+}
+
+#[cfg(feature="gui-test")]
+#[test]
+fn leaving_pr_clears_review_tabs_and_title() {
+    let dir=tempfile::tempdir().unwrap();let root=dir.path();git(root,&["init","-q","-b","main"]);
+    std::fs::write(root.join("ref.md"),"old\n").unwrap();git(root,&["add","."]);git(root,&["commit","-qm","Before"]);
+    std::fs::write(root.join("ref.md"),"new\n").unwrap();git(root,&["commit","-qam","After"]);
+    let _provider=lenz::pr::test_support::markdown_provider(root);
+    std::fs::write(root.join("ref.md"),"local\n").unwrap();
+    let req=lenz::cli::parse(&["log".into()],root).unwrap();let mut app=App::open(req,root.into());ready(&mut app);
+    let screen=draw(&mut app,180,40);click(&mut app,locate(&screen,"Markdown PR"));ready(&mut app);
+    assert!(app.pr_details_shown());
+    key(&mut app,KeyCode::F(10));
+    for c in "Local changes".chars(){key(&mut app,KeyCode::Char(c));}
+    key(&mut app,KeyCode::Enter);ready(&mut app);
+    assert!(app.repository.as_ref().unwrap().core.pr.is_none());
+    assert!(!app.pr_details_shown());
+    for (width,theme) in [(180,"darcula"),(48,"light")] {
+        app.palette=std::sync::Arc::new(*lenz::theme::builtin(theme).unwrap());
+        let visible=text(&draw(&mut app,width,24));
+        assert!(!visible.contains("Markdown PR")&&!visible.contains("Conversation"),"{visible}");
+    }
+    assert_eq!(std::fs::read(root.join("ref.md")).unwrap(),b"local\n");
 }
 
 #[cfg(feature="gui-test")]

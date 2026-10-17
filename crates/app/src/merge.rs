@@ -372,14 +372,15 @@ impl MergeResult {
         )
     }
 
-    /// Carry the user's choices over to `next` (a re-merge of the same versions, e.g. after a Whitespace Mode
-    /// change) for blocks whose text didn't change. Undo history starts afresh.
+    /// Carry choices over to a re-merge of the same versions at the same source ranges.
+    /// Repeated identical conflicts retain separate choices. Undo history starts afresh.
     pub fn carry_choices_to(&self, next: &mut MergeResult) {
         use std::collections::HashMap;
-        let mine: HashMap<_, _> = (0..self.blocks.len()).map(|i| (self.key(i), &self.choices[i])).collect();
-        for i in 0..next.blocks.len() {
-            if let Some(&c) = mine.get(&next.key(i)) {
-                next.choices[i] = c.clone();
+        let ranges = |b: &MergeBlock| (b.left.clone(), b.base.clone(), b.right.clone());
+        let mine: HashMap<_, _> = self.blocks.iter().zip(&self.choices).map(|(b, c)| (ranges(b), c)).collect();
+        for (b, choice) in next.blocks.iter().zip(&mut next.choices) {
+            if let Some(&c) = mine.get(&ranges(b)) {
+                *choice = c.clone();
             }
         }
         next.rebuild();

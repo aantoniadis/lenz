@@ -1444,6 +1444,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn whitespace_keeps_repeated_conflict_choices_separate() {
+        for choices in [[Some(Pick::Ours), None], [None, Some(Pick::Theirs)], [Some(Pick::Ours), Some(Pick::Theirs)]] {
+            let (_dir, mut s) = state("base\nseparator\nbase\n", "ours\nseparator\nours\n", "theirs\nseparator\ntheirs\n");
+            assert_eq!(s.m.blocks().len(), 2);
+            for (i, pick) in choices.into_iter().enumerate() {
+                if let Some(pick) = pick { s.control(Control::Accept(i, pick)); }
+            }
+            let expected = s.text();
+            let unresolved = s.m.unresolved();
+            for _ in 0..3 {
+                s.execute(Act::Whitespace);
+                assert_eq!(s.m.unresolved(), unresolved);
+                assert_eq!(s.text(), expected);
+            }
+            s.save().unwrap();
+            assert_eq!(std::fs::read_to_string(&s.snapshot.path).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn merge_find_takes_and_returns_the_window_options() {
         use lenz_content::find::{FindOption, FindOptions};
         let (_dir, mut s) = state("base (x\n", "ours (x\n", "theirs (x\n");
