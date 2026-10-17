@@ -4637,3 +4637,40 @@ fn gui_a_heading_in_each_group_shows_that_group_only(cx:&mut TestAppContext) {
     f.viewer.read_with(cx,|v,_|{let s=v.comparison.folders.summary().expect("the summary shows");
         assert_eq!(s.files.iter().map(|&i|v.set.comparisons[i].path.as_str()).collect::<Vec<_>>(),["a.zip/f.txt","a.zip/g.txt"]);assert_eq!(s.range,v.set.groups[1].1);});
 }
+
+#[gpui::test]
+fn gui_archive_grouped_summary_cursor_uses_selected_group(cx:&mut TestAppContext) {
+    use crate::archive::testing::zip;
+    let f=fixture(cx,"old\n","new\n");let root=f.dir.path();workflow_git(root,&["init","-q","-b","main"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"1\n")])).unwrap();workflow_git(root,&["add","a.zip"]);workflow_git(root,&["commit","-qm","Add a.zip"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"2\n")])).unwrap();workflow_git(root,&["add","a.zip"]);
+    std::fs::write(root.join("a.zip"),zip(&[("f.txt",b"3\n"),("g.txt",b"g\n")])).unwrap();
+    let set=crate::repo::local_changes(root,false).unwrap();
+    f.viewer.update(cx,|v,cx|{v.spec=crate::repository_session::local_spec();v.show_change_set(set,cx);v.layout.set_files(true);});
+    let y=nav_row_y(cx,&f,3);
+    click(cx,&f,f.viewer.read_with(cx,|v,_|v.nav_x()+80.),y);
+    let expected=f.viewer.read_with(cx,|v,_|v.set.groups[1].1.start);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.folders.summary().unwrap().range.start),expected);
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.sidebar_rows().iter().filter(|r| r.current).count()), 1, "only the selected group heading is highlighted");
+    key(cx,&f,"right",false,false,false);key(cx,&f,"down",false,false,false);
+    workflow_wait(cx,&f,|v|v.doc().is_some()&&v.comparison.diffed==v.comparison.generation);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.current),expected,"Down should open first Unstaged member, not Staged");
+}
+
+#[gpui::test]
+fn gui_archive_plain_reload_reads_changed_tar_members(cx: &mut TestAppContext) {
+    let f = fixture(cx, "old\n", "new\n");
+    let (left, right) = (f.dir.path().join("left.tgz"), f.dir.path().join("right.tgz"));
+    let tar = |text: &[u8]| crate::archive::testing::tar(&[("f.txt", text)], crate::archive::Compression::Gzip);
+    std::fs::write(&left, tar(b"old\n")).unwrap(); std::fs::write(&right, tar(b"new\n")).unwrap();
+    let spec = Spec::Plain { left, right: right.clone() };
+    let set = Arc::new(ChangeSet::load(&spec, f.dir.path()).unwrap());
+    let c = &set.comparisons[0];
+    let doc = Arc::new(Doc::load(&set, 0, Path::new(&c.old_path), Path::new(&c.path), false).unwrap());
+    let view = doc.view(&doc.line_diff(&Options::default()), 30.);
+    f.viewer.update(cx, |v, cx| *v = Viewer::new(set, spec, false, None, doc, view, false, Options::default(), gpui::font("monospace"), Instant::now(), false, cx));
+    std::fs::write(&right, tar(b"updated\n")).unwrap();
+    run(cx, &f, crate::catalog::Action::Interaction(crate::commands::Interaction::Reload));
+    workflow_wait(cx, &f, |v| v.doc().is_some() && v.comparison.diffed == v.comparison.generation);
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.doc().unwrap().text(Side::Right).to_string()), "updated\n");
+}

@@ -1279,3 +1279,56 @@ fn a_heading_in_each_group_shows_that_group_only() {
     assert_eq!(summary.files.iter().map(|&i| app.session.comparisons()[i].path.as_str()).collect::<Vec<_>>(), ["a.zip/f.txt", "a.zip/g.txt"]);
     assert_eq!(summary.range, app.session.change_set().unwrap().groups[1].1);
 }
+
+#[test]
+fn archive_grouped_summary_cursor_uses_selected_group() {
+    let dir = repository();
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "1\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]); git(dir.path(), &["commit", "-qm", "Add archive"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "2\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "3\n"), ("g.txt", "g\n")])).unwrap();
+    let mut app = open(dir.path(), &["log"]);
+    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::LocalChanges)); ready(&mut app);
+    let b = draw(&mut app,160,40); left_click(&mut app,cell_of(&b,"a.zip · 2 files"));
+    let expected=app.session.change_set().unwrap().groups[1].1.start;
+    assert_eq!(app.session.folders.summary().unwrap().range.start,expected);
+    let b = draw(&mut app, 160, 40);
+    let staged = cell_of(&b, "a.zip · 1 file");
+    let unstaged = cell_of(&b, "a.zip · 2 files");
+    assert_ne!(b[staged].bg, b[unstaged].bg, "only the selected group heading is highlighted");
+    key(&mut app,KeyCode::Right,KeyModifiers::NONE); draw(&mut app,160,40);
+    key(&mut app,KeyCode::Down,KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.current(),expected,"Down should open first Unstaged member, not Staged");
+}
+#[test]
+fn archive_first_summary_row_click_opens_it_while_files_focused() {
+    let (_dir,mut app)=big_archive();
+    let b=draw(&mut app,160,30);
+    left_click(&mut app,cell_of(&b,"big.zip · 60 files"));
+    assert!(app.navigator.focused);
+    let b=draw(&mut app,160,30); let at=cell_of(&b,"M dir/f01.txt");
+    left_click(&mut app,at);ready(&mut app);
+    assert!(app.session.folders.summary().is_none(),"first row click must open the row without an extra focus click");
+    assert!(app.session.labels().1.ends_with("f01.txt"));
+}
+
+#[test]
+fn archive_plain_reload_key_reads_changed_tar_members() {
+    let source = repository();
+    let d = tempfile::tempdir().unwrap();
+    let archive = |rev| {
+        let out = Command::new("git").args(["archive", "--format=tar.gz", rev]).current_dir(source.path()).output().unwrap();
+        assert!(out.status.success()); out.stdout
+    };
+    std::fs::write(d.path().join("left.tgz"), archive("HEAD~")).unwrap();
+    std::fs::write(d.path().join("right.tgz"), archive("HEAD")).unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.tgz", "right.tgz"]);
+    app.session.open_file(0); ready(&mut app);
+    assert!(app.session.document().unwrap().text(Side::Right).contains("second needle"));
+    std::fs::write(source.path().join("file.rs"), "third needle\n").unwrap();
+    git(source.path(), &["commit", "-qam", "third"]);
+    std::fs::write(d.path().join("right.tgz"), archive("HEAD")).unwrap();
+    key(&mut app, KeyCode::F(5), KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.document().unwrap().text(Side::Right), "third needle\n");
+}

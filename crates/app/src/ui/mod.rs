@@ -1184,6 +1184,7 @@ impl Viewer {
 
     fn reload(&mut self,cx:&mut Context<Self>){
         if self.repo.is_some(){self.refresh_repository(cx);return;}
+        self.set.invalidate_archive_cache();
         let index=self.comparison.current;let anchor=self.comparison.view.anchor_line();
         for side in [Side::Left,Side::Right]{if let Some(key)=self.blame_key(side){self.blames.remove(&key);}}
         self.loaded.remove(&index);self.comparison.cache.0.remove(&index);self.iview=ImageView::fresh();self.sel=None;self.comparison.find=None;
@@ -1763,12 +1764,12 @@ impl Viewer {
     /// Scroll the File Navigator so the current file's row is visible.
     fn reveal_in_nav(&mut self) {
         // the shown summary's heading, else the current file
-        let summary = self.comparison.folders.summary().map(|s| s.folder.as_str());
-        let Some(row) = self.nav.iter().position(|r| match (r, summary) {
-            (NavRow::Dir { path, .. }, Some(folder)) => path == folder,
-            (NavRow::File { index, .. }, None) => *index == self.comparison.current,
-            _ => false,
-        }) else {
+        let row = if self.comparison.folders.summary().is_some() {
+            self.comparison.folders.summary_row(&self.set, &self.nav)
+        } else {
+            self.nav.iter().position(|r| matches!(r, NavRow::File { index, .. } if *index == self.comparison.current))
+        };
+        let Some(row) = row else {
             return;
         };
         let visible = self.comparison.view.viewport_rows() - 1.0 - self.message_h() / line_h();
@@ -1790,10 +1791,11 @@ impl Viewer {
     fn nav_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         if !self.layout.files() || !self.nav_focused { return false; }
         // the keys walk files and folder headings, as a tree; the cursor is the shown summary's heading, else the file
-        let summary = self.comparison.folders.summary().map(|s| s.folder.clone());
-        let cursor = match &summary {
-            Some(folder) => self.nav.iter().position(|r| matches!(r, NavRow::Dir { path, .. } if path == folder)),
-            None => self.nav.iter().position(|r| matches!(r, NavRow::File { index, .. } if *index == self.comparison.current)),
+        let summary = self.comparison.folders.summary();
+        let cursor = if summary.is_some() {
+            self.comparison.folders.summary_row(&self.set, &self.nav)
+        } else {
+            self.nav.iter().position(|r| matches!(r, NavRow::File { index, .. } if *index == self.comparison.current))
         };
         let walkable: Vec<usize> = (0..self.nav.len()).filter(|&r| !matches!(self.nav[r], NavRow::Group(..))).collect();
         let at = cursor.and_then(|row| walkable.iter().position(|&r| r == row));
@@ -3174,15 +3176,15 @@ impl Viewer {
 
     fn sidebar_rows(&self) -> Vec<SideRow> {
         // a shown Folder Summary marks its heading, not the file behind it
-        let summary=self.comparison.folders.summary().map(|s|s.folder.as_str());
+        let summary=self.comparison.folders.summary_row(&self.set, &self.nav);
         let candidate=self.file_search.current().or(if summary.is_some(){None}else{Some(self.comparison.current)}).unwrap_or(usize::MAX);
         let mut rows:Vec<SideRow>=self.nav
-            .iter()
-            .map(|row| match row {
+            .iter().enumerate()
+            .map(|(row_index,row)| match row {
                 NavRow::Group(name, n) => SideRow { parts: vec![(format!("{} · {n}", name.to_uppercase()), self.palette.accent)], indent: 0.0, current: false, found:Vec::new() },
                 // the heading whose summary shows reads as the current row, in the text colour
-                NavRow::Dir { path, collapsed: false, .. } => { let current = summary==Some(path.as_str()); SideRow { parts: vec![(format!("▾ {path}"), if current { self.palette.fg } else { self.palette.dim })], indent: 0.0, current, found:Vec::new() } }
-                NavRow::Dir { path, files, .. } => { let current = summary==Some(path.as_str()); SideRow { parts: vec![(format!("▸ {path}"), if current { self.palette.fg } else { self.palette.dim }), (format!(" · {files} file{}", if *files == 1 { "" } else { "s" }), self.palette.num_fg)], indent: 0.0, current, found:Vec::new() } }
+                NavRow::Dir { path, collapsed: false, .. } => { let current = summary==Some(row_index); SideRow { parts: vec![(format!("▾ {path}"), if current { self.palette.fg } else { self.palette.dim })], indent: 0.0, current, found:Vec::new() } }
+                NavRow::Dir { path, files, .. } => { let current = summary==Some(row_index); SideRow { parts: vec![(format!("▸ {path}"), if current { self.palette.fg } else { self.palette.dim }), (format!(" · {files} file{}", if *files == 1 { "" } else { "s" }), self.palette.num_fg)], indent: 0.0, current, found:Vec::new() } }
                 NavRow::File { index, name, from } => {
                     if let Some(parts) = self.conflict_row(*index) {
                         return SideRow { parts, indent: 16.0, current: *index == candidate, found:Vec::new() };

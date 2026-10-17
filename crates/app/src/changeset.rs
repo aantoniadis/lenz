@@ -117,7 +117,7 @@ pub struct ChangeSet {
     encodings: HashMap<String, String>,
     /// The last compressed tar streams read whole, decompressed, so reading their members one by one doesn't
     /// decompress them again; see [`ChangeSet::unpacked`].
-    unpacked: std::sync::Arc<Mutex<Vec<Unpacked>>>,
+    unpacked: std::sync::Arc<Mutex<UnpackedCache>>,
     /// Why a path may not look as `git diff` shows it: a repository-config textconv or filter driver Lenz did not
     /// run, or an archive Lenz could not show as a folder.
     notes: HashMap<String, String>,
@@ -125,6 +125,12 @@ pub struct ChangeSet {
 
 /// A compressed tar archive's Content and its decompressed stream.
 type Unpacked = (Content, std::sync::Arc<[u8]>);
+
+#[derive(Default)]
+struct UnpackedCache {
+    generation: u64,
+    streams: Vec<Unpacked>,
+}
 
 /// The adapters behind a Change Set.
 #[derive(Clone)]
@@ -246,6 +252,13 @@ impl ChangeSet {
         }
     }
 
+    /// Explicit Reload must reread mutable archive inputs, including reads already in flight.
+    pub(crate) fn invalidate_archive_cache(&self) {
+        let mut cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.generation += 1;
+        cache.streams.clear();
+    }
+
     /// A compressed tar archive's stream, decompressed once and kept for its next member (two archives, up to
     /// 64 MiB each); `None` for any other archive, or one too large to keep.
     fn unpacked(&self, archive: &Content, kind: archive::Kind) -> Result<Option<std::sync::Arc<[u8]>>, String> {
@@ -254,17 +267,22 @@ impl ChangeSet {
         if compression == archive::Compression::None {
             return Ok(None);
         }
-        let cached = |c: &Vec<Unpacked>| c.iter().find(|(key, _)| key == archive).map(|(_, tar)| tar.clone());
-        if let Some(tar) = cached(&self.unpacked.lock().unwrap_or_else(PoisonError::into_inner)) {
-            return Ok(Some(tar));
-        }
+        let generation = {
+            let cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, tar)) = cache.streams.iter().find(|(key, _)| key == archive) {
+                return Ok(Some(tar.clone()));
+            }
+            cache.generation
+        };
         let Some(tar) = archive::unpack(compression, &self.read(archive)?, KEEP)? else { return Ok(None) };
         let tar: std::sync::Arc<[u8]> = tar.into();
         let mut cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
-        if cache.len() == 2 {
-            cache.remove(0);
+        if cache.generation == generation {
+            if cache.streams.len() == 2 {
+                cache.streams.remove(0);
+            }
+            cache.streams.push((archive.clone(), tar.clone()));
         }
-        cache.push((archive.clone(), tar.clone()));
         Ok(Some(tar))
     }
 
@@ -1544,6 +1562,11 @@ mod tests {
         assert!(set.note(0).unwrap().starts_with("not shown as a folder: invalid zip archive"), "{:?}", set.note(0));
         assert_eq!(set.note(1), Some("no file inside the archive changed: only its packing differs"));
         assert!(!set.comparisons[0].in_archive());
+        for index in 0..2 {
+            let c = &set.comparisons[index];
+            let doc = crate::document::PreparedDocument::load(&set, index, Path::new(&c.old_path), Path::new(&c.path), false).unwrap();
+            assert!(doc.text.notes().iter().any(|note| Some(note.as_str()) == set.note(index)));
+        }
     }
 
     #[test]
@@ -1576,7 +1599,7 @@ mod tests {
         commit_all(r.path(), "2");
         let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
         assert_eq!(set.comparisons.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["a.tgz/1.txt", "a.tgz/2.txt", "b.tgz/1.txt"]);
-        let kept = |set: &ChangeSet| set.unpacked.lock().unwrap().iter().map(|(c, tar)| (c.clone(), tar.clone())).collect::<Vec<_>>();
+        let kept = |set: &ChangeSet| set.unpacked.lock().unwrap().streams.iter().map(|(c, tar)| (c.clone(), tar.clone())).collect::<Vec<_>>();
         assert!(kept(&set).is_empty(), "listing reads archives whole, without keeping them");
         assert_eq!(set.texts(0).unwrap(), ("a\n".into(), "A\n".into()));
         let first = kept(&set);
@@ -1603,4 +1626,26 @@ mod tests {
         let set = plain(d.path(), "l/x.tar.bz2", "r/x.tar.bz2").unwrap();
         assert_eq!(paths(&set), [("l/x.tar.bz2/in.txt", "r/x.tar.bz2/in.txt", Status::Modified)]);
     }
+    #[cfg(unix)]
+    #[test]
+    fn archive_reload_does_not_cache_a_read_started_before_reload() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let pipe = d.path().join("input.tgz");
+        assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+        let set = std::sync::Arc::new(ChangeSet::load(&Spec::Empty, d.path()).unwrap());
+        let member = Content::Archived { archive: Box::new(Content::File(pipe.clone())), kind: archive::Kind::Tar(Compression::Gzip), member: "f.txt".into() };
+        let reader_set = set.clone(); let reader_member = member.clone();
+        let reader = std::thread::spawn(move || reader_set.read(&reader_member).unwrap());
+        // Opening the writer waits until the reader has checked the cache and started the file read.
+        let mut writer = std::fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+        set.invalidate_archive_cache();
+        writer.write_all(&archive_testing::tar(&[("f.txt", b"old\n")], Compression::Gzip)).unwrap();
+        drop(writer);
+        assert_eq!(reader.join().unwrap(), b"old\n");
+        std::fs::remove_file(&pipe).unwrap();
+        std::fs::write(&pipe, archive_testing::tar(&[("f.txt", b"updated\n")], Compression::Gzip)).unwrap();
+        assert_eq!(set.read(&member).unwrap(), b"updated\n");
+    }
+
 }

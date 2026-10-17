@@ -43,7 +43,7 @@ impl PreparedDocument {
     pub fn load(set: &ChangeSet, index: usize, left: &Path, right: &Path, force: bool) -> Result<Self, String> {
         let sides = match read_sides(set, index, force)? {
             ReadSides::Large(bytes) => return Ok(Self {
-                text: TextDocument::placeholder(left, right, Placeholder::Large { bytes }),
+                text: TextDocument::placeholder(left, right, Placeholder::Large { bytes }).with_comparison_note(set, index),
                 image: None,
             }),
             ReadSides::Bytes(sides) => sides,
@@ -67,7 +67,7 @@ impl PreparedDocument {
             }
             Some(Err(error)) => {
                 let sizes = [l.bytes.len() as u64, r.bytes.len() as u64];
-                let mut text = TextDocument::placeholder(left, right, Placeholder::Binary { sizes, differ: l.bytes != r.bytes });
+                let mut text = TextDocument::placeholder(left, right, Placeholder::Binary { sizes, differ: l.bytes != r.bytes }).with_comparison_note(set, index);
                 text.notes.push(format!("cannot show as an image: {error}"));
                 Ok(Self { text, image: Some(Err(error)) })
             }
@@ -133,7 +133,7 @@ impl TextDocument {
     /// Read and decode a comparison; oversized inputs require an explicit request.
     pub fn load(set: &ChangeSet, index: usize, left: &Path, right: &Path, force: bool) -> Result<Self, String> {
         match read_sides(set, index, force)? {
-            ReadSides::Large(bytes) => Ok(Self::placeholder(left, right, Placeholder::Large { bytes })),
+            ReadSides::Large(bytes) => Ok(Self::placeholder(left, right, Placeholder::Large { bytes }).with_comparison_note(set, index)),
             ReadSides::Bytes(sides) => Ok(Self::from_sides(set, index, left, right, sides)),
         }
     }
@@ -142,8 +142,13 @@ impl TextDocument {
         Self { placeholder: Some(placeholder), ..Self::new("", "", left, right) }
     }
 
+    fn with_comparison_note(mut self, set: &ChangeSet, index: usize) -> Self {
+        self.notes.extend(set.note(index).map(str::to_owned));
+        self
+    }
+
     pub(crate) fn from_sides(set: &ChangeSet, index: usize, left_path: &Path, right_path: &Path, [l, r]: [SideBytes; 2]) -> Self {
-        let empty = |p| Self::placeholder(left_path, right_path, p);
+        let empty = |p| Self::placeholder(left_path, right_path, p).with_comparison_note(set, index);
         if l.binary || r.binary {
             let sizes = [l.bytes.len() as u64, r.bytes.len() as u64];
             return empty(Placeholder::Binary { sizes, differ: l.bytes != r.bytes });
@@ -278,4 +283,21 @@ mod prepared_tests {
             assert!(prepared.text.placeholder_kind().is_none());
         }
     }
+
+    #[test]
+    fn archive_fallback_notes_reach_binary_and_large_documents() {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("left.zip"), d.path().join("right.zip"));
+        std::fs::write(&left, b"\0not a zip").unwrap(); std::fs::write(&right, b"\0still not a zip").unwrap();
+        for large in [false, true] {
+            if large { std::fs::OpenOptions::new().write(true).open(&right).unwrap().set_len(LARGE + 1).unwrap(); }
+            let set = ChangeSet::load(&crate::changeset::Spec::Plain { left: left.clone(), right: right.clone() }, d.path()).unwrap();
+            let note = set.note(0).unwrap();
+            for doc in [TextDocument::load(&set, 0, &left, &right, false).unwrap(), PreparedDocument::load(&set, 0, &left, &right, false).unwrap().text] {
+                assert_eq!(doc.notes(), [note]);
+                assert!(matches!((large, doc.placeholder_kind()), (true, Some(Placeholder::Large { .. })) | (false, Some(Placeholder::Binary { .. }))));
+            }
+        }
+    }
+
 }

@@ -60,10 +60,20 @@ pub struct Summary {
     pub folder: String,
     /// The Change Set group the folder heading was in; its range bounds the files.
     pub range: Range<usize>,
+    /// Stable across refreshes that move or remove groups.
+    group: Option<SummaryGroup>,
     /// The folder's files, as Comparison indices in File Navigator order.
     pub files: Vec<usize>,
     /// The row the keyboard is on, an index into `files`.
     pub selected: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SummaryGroup {
+    name: String,
+    /// A comparison identifies the run when retained edits split one named group.
+    anchor: (String, String),
+    unique: bool,
 }
 
 impl Summary {
@@ -172,8 +182,20 @@ impl Folders {
         self.stats.clear();
         self.cancel();
         if let Some(summary) = self.summary.take() {
-            let range = set.groups.iter().map(|(_, r)| r.clone()).find(|r| r.start == summary.range.start).unwrap_or(0..set.comparisons.len());
-            self.summary = Self::summary_of(set, &summary.folder, range);
+            let range = match summary.group.as_ref() {
+                Some(group) => {
+                    let mut matching = set.groups.iter().filter(|(name, _)| name == &group.name);
+                    let first = matching.next();
+                    if group.unique && matching.next().is_none() {
+                        first.map(|(_, range)| range.clone())
+                    } else {
+                        set.groups.iter().find(|(name, range)| name == &group.name && set.comparisons[range.clone()].iter()
+                            .any(|c| (&c.old_path, &c.path) == (&group.anchor.0, &group.anchor.1))).map(|(_, range)| range.clone())
+                    }
+                },
+                None => set.groups.is_empty().then_some(0..set.comparisons.len()),
+            };
+            self.summary = range.and_then(|range| Self::summary_of(set, &summary.folder, range));
         }
         self.revision += 1;
         true
@@ -299,6 +321,18 @@ impl Folders {
         self.summary.as_ref()
     }
 
+    /// The selected summary heading in the visible rows, including its group identity.
+    pub fn summary_row(&self, set: &ChangeSet, rows: &[NavRow]) -> Option<usize> {
+        let summary = self.summary.as_ref()?;
+        let mut group = 0usize;
+        rows.iter().position(|row| match row {
+            NavRow::Group(..) => { group += 1; false }
+            NavRow::Dir { path, .. } => path == &summary.folder && group.checked_sub(1).and_then(|i| set.groups.get(i))
+                .map_or(summary.group.is_none(), |(_, range)| range == &summary.range),
+            NavRow::File { .. } => false,
+        })
+    }
+
     /// A file's count, once the background work reached it.
     pub fn stat(&self, index: usize) -> Option<&Stat> {
         self.stats.get(&index)
@@ -353,7 +387,12 @@ impl Folders {
     fn summary_of(set: &ChangeSet, folder: &str, range: Range<usize>) -> Option<Summary> {
         let key = folder_key(folder);
         let files: Vec<usize> = range.clone().filter(|&i| folder == "." || under(dir_of(&set.comparisons[i].path), key)).collect();
-        (!files.is_empty()).then(|| Summary { folder: folder.to_string(), range, files, selected: 0 })
+        let first = &set.comparisons[*files.first()?];
+        let group = set.groups.iter().find(|(_, r)| *r == range).map(|(name, _)| SummaryGroup {
+            name: name.clone(), anchor: (first.old_path.clone(), first.path.clone()),
+            unique: set.groups.iter().filter(|(other, _)| other == name).count() == 1,
+        });
+        Some(Summary { folder: folder.to_string(), range, group, files, selected: 0 })
     }
 
     /// Why `action` can't run now.
@@ -487,14 +526,7 @@ pub fn count(set: &ChangeSet, index: usize) -> Stat {
 
 /// Lines as git counts them: a final newline ends the last line rather than starting an empty one.
 fn lines_of(text: &str) -> Vec<&str> {
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let mut lines = lenz_engine::split_lines(text);
-    if text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
+    text.split_inclusive('\n').collect()
 }
 
 /// The folder part of `path` (empty at the top level).
@@ -743,4 +775,73 @@ mod tests {
     fn under_matches_whole_path_components() {
         assert!(under("a/b", "a") && under("a", "a") && !under("ab", "a") && under("", "") && !under("a", ""));
     }
+
+    #[test]
+    fn archive_summary_keeps_its_group_when_refresh_moves_or_removes_it() {
+        let r = repo();
+        for name in ["src/a.txt", "src/b.txt", "other.txt"] { write(r.path(), name, "one\n"); }
+        commit_all(r.path(), "base");
+        write(r.path(), "src/a.txt", "two\n");
+        crate::git::testing::git(r.path(), &["add", "src/a.txt"]);
+        write(r.path(), "src/b.txt", "two\n");
+        write(r.path(), "other.txt", "two\n");
+        let set = Arc::new(crate::repo::local_changes(r.path(), false).unwrap());
+        let mut folders = Folders::default();
+        folders.sync(&set);
+        folders.show_summary(&set, "src", Some(1), None);
+        assert_eq!(folders.summary().unwrap().range, 1..3);
+        drop(set); // remapping cannot depend on the old weak ChangeSet still being alive
+        crate::git::testing::git(r.path(), &["add", "other.txt"]);
+        let fresh = Arc::new(crate::repo::local_changes(r.path(), false).unwrap());
+        folders.sync(&fresh);
+        assert_eq!(folders.summary().unwrap().range, 2..3);
+        assert_eq!(folders.summary().unwrap().files, [2]);
+        crate::git::testing::git(r.path(), &["add", "src/b.txt"]);
+        let fresh = Arc::new(crate::repo::local_changes(r.path(), false).unwrap());
+        folders.sync(&fresh);
+        assert!(folders.summary().is_none(), "the Unstaged group disappeared");
+    }
+
+    #[test]
+    fn archive_summary_counts_exact_newline_changes_like_git() {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("left.txt"), d.path().join("right.txt"));
+        for (old, new, added, removed) in [
+            ("one\n", "one", 1, 1), ("one", "one\n", 1, 1),
+            ("one\r\n", "one\n", 1, 1), ("", "\n", 1, 0),
+            ("\n", "", 0, 1), ("one\n\n", "one\n", 0, 1),
+        ] {
+            std::fs::write(&left, old).unwrap(); std::fs::write(&right, new).unwrap();
+            let set = ChangeSet::load(&Spec::Plain { left: left.clone(), right: right.clone() }, d.path()).unwrap();
+            assert_eq!(count(&set, 0), Stat::Lines { added, removed }, "{old:?} -> {new:?}");
+        }
+    }
+
+    #[test]
+    fn archive_summary_distinguishes_retained_runs_with_the_same_group_name() {
+        let r = repo();
+        for name in ["src/a.txt", "src/b.txt", "src/c.txt"] { write(r.path(), name, "one\n"); }
+        commit_all(r.path(), "base");
+        write(r.path(), "src/a.txt", "two\n"); write(r.path(), "src/b.txt", "two\n");
+        write(r.path(), "loose.txt", "untracked\n");
+        let old = crate::repo::local_changes(r.path(), false).unwrap();
+        write(r.path(), "src/b.txt", "one\n");
+        let mut fresh = crate::repo::local_changes(r.path(), false).unwrap();
+        fresh.retain_comparison(&old, 1);
+        let fresh = Arc::new(fresh);
+        assert_eq!(fresh.groups.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>(), ["Unstaged", "Untracked", "Unstaged"]);
+        let mut folders = Folders::default(); folders.sync(&fresh);
+        folders.show_summary(&fresh, "src", Some(2), None);
+        assert_eq!(folders.summary().unwrap().files, [2]);
+        assert_eq!(folders.summary_row(&fresh, &folders.rows(&fresh)), Some(7));
+        write(r.path(), "src/c.txt", "two\n");
+        let mut next = crate::repo::local_changes(r.path(), false).unwrap();
+        next.retain_comparison(&old, 1);
+        let next = Arc::new(next); folders.sync(&next);
+        assert_eq!(folders.summary().unwrap().range, 3..4);
+        let next = Arc::new(crate::repo::local_changes(r.path(), false).unwrap());
+        folders.sync(&next);
+        assert!(folders.summary().is_none(), "the retained run disappeared, not the live Unstaged group");
+    }
+
 }

@@ -701,7 +701,7 @@ impl App {
                 &&lenz::catalog::header_switch(&self.scope()).iter().any(|e|e.action==action){self.run_action(action);return true;}
             // a details tab takes its keys (Tab switches its sections) and the pointer over it
             if !self.navigator.focused && self.pr_tab_event(&event) {return true;}
-            if !self.navigator.focused && self.summary_event(&event) {return true;}
+            if (!self.navigator.focused || matches!(event, Event::Mouse(_))) && self.summary_event(&event) {return true;}
             if let Event::Key(k) = event && k.kind != KeyEventKind::Release
                 && matches!(k.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::F(6)) {
                 if k.code == KeyCode::F(6) && let Some(repo) = &mut self.repository && !repo.core.picker.shown {

@@ -217,7 +217,7 @@ impl Session {
     pub fn open_summary_file(&mut self){if let Some(index)=self.state.folders.selected_file(){self.open_file(index);}}
     pub fn reload_set(&mut self){self.state.begin();self.state.markdown_invalidate();self.reading=None;self.diffing=None;self.refining_job=None;self.document=None;self.image=None;self.opening_preserve=true;self.place=Place::Anchor(self.view().anchor_line());let spec=self.spec.clone();let cwd=self.cwd.clone();self.opening=Some(work::submit(Arc::downgrade(&self.state.work_id),move||ChangeSet::load(&spec,&cwd)));}
     pub fn find_selection(&self)->Option<crate::selection::Selection>{let find=self.find()?;let(line,range)=find.hits().get(find.at()?)?;Some(crate::selection::Selection{side:find.side(),anchor:Pos::new(*line,range.start),head:Pos::new(*line,range.end)})}
-    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
+    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");if let Some(set)=&self.set{set.invalidate_archive_cache();}let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
     pub fn execute(&mut self,command:Command){let loading=self.loading()||self.document.is_none();let large=self.document.as_ref().is_some_and(|d|matches!(d.placeholder_kind(),Some(Placeholder::Large{..})));
         let set=self.set.clone();let files=set.as_ref().map_or(&[][..],|s|s.comparisons.as_slice());
         self.notice=None;match self.state.command(command,files,loading,large){
@@ -443,4 +443,27 @@ mod find_option_tests {
         assert_eq!(s.find().unwrap().hits(),[(0,4..7)]);
         assert!(s.find_options().case);
     }
+
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    #[test]
+    fn archive_plain_reload_reads_changed_tar_members() {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("left.tgz"), d.path().join("right.tgz"));
+        let tar = |text: &[u8]| crate::archive::testing::tar(&[("f.txt", text)], crate::archive::Compression::Gzip);
+        std::fs::write(&left, tar(b"old\n")).unwrap(); std::fs::write(&right, tar(b"new\n")).unwrap();
+        let spec = Spec::Plain { left, right: right.clone() };
+        let set = Arc::new(ChangeSet::load(&spec, d.path()).unwrap());
+        let mut session = Session::from_set(set, spec, Options::default(), ScrollMode::Shared);
+        let settle = |s: &mut Session| { let until = Instant::now() + std::time::Duration::from_secs(10); while s.busy() { s.poll(); assert!(Instant::now() < until); std::thread::yield_now(); } };
+        settle(&mut session);
+        assert_eq!(session.document().unwrap().text(Side::Right), "new\n");
+        std::fs::write(&right, tar(b"updated\n")).unwrap();
+        session.reload(); settle(&mut session);
+        assert_eq!(session.document().unwrap().text(Side::Right), "updated\n");
+    }
+
 }

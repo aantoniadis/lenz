@@ -20,8 +20,8 @@ pub enum Pick {
 #[derive(Default)]
 pub struct Files {
     set:Weak<ChangeSet>,revision:u64,rows:Vec<NavRow>,current:usize,
-    /// The folder whose summary is shown, highlighted in place of the current file.
-    summary:Option<String>,selected:usize,scroll:usize,reveal_current:bool,
+    /// Whether a summary is shown, and its cached visible heading row.
+    summary:bool,summary_row:Option<usize>,selected:usize,scroll:usize,reveal_current:bool,
     pub(crate) search:lenz::pane_search::PaneSearch,search_origin:Option<(usize,usize)>,
     pub focused:bool,pub visible:Option<bool>,pub(crate) area:Rect,available:Rect,
     /// Replaces "Files (N)" as the box title (Focus names the selection there).
@@ -41,7 +41,7 @@ impl Files {
             let width=if show&&area.width>=50&&area.height>=5{crate::panes::size(area.width,self.desired_width.unwrap_or(f32::from((area.width/4).clamp(18,30))),18.0,32.0)}else{0};
             if resized{self.reveal_current=true;}
             self.area=Rect::new(area.x,area.y,width,area.height);
-        } else {self.rows.clear();self.set=Weak::new();self.search.cancel();self.search_origin=None;self.area=Rect::new(area.x,area.y,0,0);}
+        } else {self.rows.clear();self.summary=false;self.summary_row=None;self.set=Weak::new();self.search.cancel();self.search_origin=None;self.area=Rect::new(area.x,area.y,0,0);}
         self.resizer.grips.clear();
         if self.area.width>0 {self.resizer.grips.push(crate::panes::Grip::vertical(Rect::new(self.area.right()-1,self.area.y,1,self.area.height),0,area.x));}
         if self.area.width==0{self.focused=false;}
@@ -51,13 +51,13 @@ impl Files {
     /// Rows and the summary heading as the session has them now: before input as well as before drawing, so keys
     /// pressed between frames act on what they see.
     pub fn sync(&mut self,set:&Arc<ChangeSet>,folders:&Folders,current:usize){
-        self.summary=folders.summary().map(|s|s.folder.clone());
+        self.summary=folders.summary().is_some();
         if !self.set.ptr_eq(&Arc::downgrade(set)) {
-            self.rows=folders.rows(set);self.revision=folders.revision();self.set=Arc::downgrade(set);
+            self.rows=folders.rows(set);self.summary_row=folders.summary_row(set,&self.rows);self.revision=folders.revision();self.set=Arc::downgrade(set);
             self.selected=current;self.scroll=0;self.reveal_current=true;self.search.invalidate();self.search_origin=Some((current,0));
         } else if self.revision!=folders.revision() {
             // a folder collapsed or expanded: same Change Set, other rows
-            self.rows=folders.rows(set);self.revision=folders.revision();self.reveal_current=true;
+            self.rows=folders.rows(set);self.summary_row=folders.summary_row(set,&self.rows);self.revision=folders.revision();self.reveal_current=true;
             self.scroll=self.scroll.min(self.rows.len().saturating_sub(1));
         }
     }
@@ -70,7 +70,7 @@ impl Files {
     pub fn shown(&self)->bool {self.area.width>0}
     pub(crate) fn candidate(&self)->usize {self.selected}
     /// The keyboard is on the first file row (not a heading's summary): ↑ from it leaves Files.
-    pub(crate) fn on_first_file(&self)->bool {self.summary.is_none()&&self.rows.iter().find_map(|r|if let NavRow::File{index,..}=r{Some(*index)}else{None})==Some(self.selected)}
+    pub(crate) fn on_first_file(&self)->bool {!self.summary&&self.rows.iter().find_map(|r|if let NavRow::File{index,..}=r{Some(*index)}else{None})==Some(self.selected)}
     /// End a file search as Esc does, back at the accepted selection.
     pub(crate) fn cancel_search(&mut self){
         if !self.search.active(){return;}
@@ -95,10 +95,7 @@ impl Files {
     fn group_of(&self,row:usize)->Option<usize>{self.rows[..row].iter().filter(|r|matches!(r,NavRow::Group(..))).count().checked_sub(1)}
     /// The row the keyboard is on: the shown summary's heading, else the selected file.
     fn cursor(&self)->Option<usize>{
-        match &self.summary {
-            Some(folder)=>self.rows.iter().position(|r|matches!(r,NavRow::Dir{path,..}if path==folder)),
-            None=>self.rows.iter().position(|r|matches!(r,NavRow::File{index,..}if *index==self.selected)),
-        }
+        if self.summary {self.summary_row}else{self.rows.iter().position(|r|matches!(r,NavRow::File{index,..}if *index==self.selected))}
     }
     /// What choosing row `row` does: a file opens, a heading shows its summary.
     fn pick(&self,row:usize)->Option<Pick>{
@@ -191,19 +188,19 @@ impl Files {
         frame.render_widget(Block::default().borders(Borders::ALL).title(title).style(style_with(palette).bg(color(palette.sidebar_bg))),area);
         let height=usize::from(area.height.saturating_sub(2));
         // Keep file switching visible, without snapping manually scrolled rows back every frame.
-        if self.reveal_current&&!self.search.active(){self.reveal_current=false;if let Some(row)=self.rows.iter().position(|r|matches!(r,NavRow::File{index,..}if *index==if self.search.active(){self.selected}else{self.current})){self.reveal(row);}}
+        if self.reveal_current&&!self.search.active(){self.reveal_current=false;if let Some(row)=self.cursor(){self.reveal(row);}}
         for (row,item) in self.rows.iter().enumerate().skip(self.scroll).take(height) {
             let(label,fg,selected)=match item {
                 NavRow::Group(name,count)=>(format!("{name} ({count})"),palette.fg,false),
                 // the heading whose summary shows reads as the current row, in the text colour
                 NavRow::Dir{path,collapsed,files,..}=>{
-                    let current=self.summary.as_deref()==Some(path.as_str());
+                    let current=self.summary_row==Some(row);
                     let label=if *collapsed{format!("▸ {path} · {files} file{}",if *files==1{""}else{"s"})}else{format!("▾ {path}")};
                     (label,if current{palette.fg}else{palette.dim},current)
                 }
                 NavRow::File{index,name,from}=>{
                     let c=&set.comparisons[*index];let kind=match navigator::badge(&c.status){"A"=>0,"D"=>1,"M"=>2,"R"=>3,_=>4};
-                    (format!(" {} {}{}",navigator::badge(&c.status),if self.search.active(){c.path.as_str()}else{name.as_str()},from.as_ref().map_or(String::new(),|p|format!(" ← {p}"))),palette.status[kind],*index==if self.search.active(){self.selected}else{self.current}&&(self.search.active()||self.summary.is_none()))
+                    (format!(" {} {}{}",navigator::badge(&c.status),if self.search.active(){c.path.as_str()}else{name.as_str()},from.as_ref().map_or(String::new(),|p|format!(" ← {p}"))),palette.status[kind],*index==if self.search.active(){self.selected}else{self.current}&&(self.search.active()||!self.summary))
                 }
             };
             let rect=Rect::new(area.x+1,area.y+1+(row-self.scroll)as u16,area.width.saturating_sub(2),1);
