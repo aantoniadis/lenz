@@ -46,7 +46,8 @@ impl Session {
         let mut state=ComparisonSession::new(View::new(0,0,&[],24.0),options);state.view.start_in(mode);
         let mut session=Self{state,set:Some(set),spec,opening:None,opening_preserve:false,reading:None,diffing:None,refining_job:None,document:None,image:None,
             name,cwd,place:Place::FirstChange,diff_started:None,notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()};
-        session.load(0,line.map_or(Place::FirstChange,|n|Place::Line(Side::Right,n)),false,false);session
+        let start=session.change_set().map_or(0,|set|session.adopt(&set));
+        session.load(start,line.map_or(Place::FirstChange,|n|Place::Line(Side::Right,n)),false,false);session
     }
     pub fn replace_set(&mut self,mut set:Arc<ChangeSet>,spec:Spec,preserve:bool){
         if self.has_dirty() && (spec!=self.spec || !preserve) {
@@ -57,7 +58,8 @@ impl Session {
         let anchor=self.view().anchor_line();let old=self.set.clone();let identity=old.as_ref().and_then(|set|crate::changeset::comparison_identity(set,self.current()));
         if preserve{if let Some(old)=&old{if self.writes.has_applied()||self.writes.has_dirty(){self.writes.retain_applied_files(old,Arc::make_mut(&mut set));}self.writes.remap_files(old,&set);self.state.remap_files(old,&set);}}
         else{self.writes=EditSession::default();}
-        let index=if preserve{identity.and_then(|identity|(0..set.comparisons.len()).find(|&i|crate::changeset::comparison_identity(&set,i).as_ref()==Some(&identity))).unwrap_or(0)}else{0};
+        let found=identity.filter(|_|preserve).and_then(|identity|(0..set.comparisons.len()).find(|&i|crate::changeset::comparison_identity(&set,i).as_ref()==Some(&identity)));
+        let start=self.adopt(&set);let index=found.unwrap_or(start);
         if !preserve{self.state.folds.clear();}
         self.set=Some(set);self.spec=spec;self.opening=None;self.reading=None;self.diffing=None;self.refining_job=None;self.state.begin();self.state.markdown_invalidate();self.document=None;self.image=None;
         self.load(index,if preserve{Place::Anchor(anchor)}else{Place::FirstChange},false,false);
@@ -69,11 +71,12 @@ impl Session {
     pub fn revision(&self)->u64{self.state.revision()}
     pub fn poll(&mut self)->bool{
         let mut changed=false;
+        if let Some(set)=self.set.clone(){changed|=self.state.folders.poll(&set);}
         if let Some(result)=self.file_actions.poll(){changed=true;match result{Ok(Some(_))=>{self.reload_set();self.notice=Some("File updated".into());},Ok(None)=>{},Err(error)=>self.notice=Some(format!("Nothing written: {error}"))}}
 
         if let Some(rx)=&self.opening{
             match rx.try_recv(){
-                Ok(Some(Ok(set)))=>{self.opening=None;if self.opening_preserve{self.opening_preserve=false;self.replace_set(Arc::new(set),self.spec.clone(),true);}else{self.set=Some(Arc::new(set));self.load(0,self.place,false,false);}changed=true;},
+                Ok(Some(Ok(set)))=>{self.opening=None;if self.opening_preserve{self.opening_preserve=false;self.replace_set(Arc::new(set),self.spec.clone(),true);}else{let set=Arc::new(set);let start=self.adopt(&set);self.set=Some(set);self.load(start,self.place,false,false);}changed=true;},
                 Ok(Some(Err(e)))=>{self.opening=None;self.recover_failure(e);changed=true;},
                 Ok(None)=>{self.opening=None;self.recover_failure("Comparison loading was interrupted".into());changed=true;},
                 Err(TryRecvError::Disconnected)=>{self.opening=None;self.interrupted();changed=true;},
@@ -94,7 +97,7 @@ impl Session {
                 Ok(Some((mut view,budget)))=>{
                     self.diffing=None;self.diff_started=None;view.set_viewport_rows(self.state.view.viewport_rows());
                     if let Place::Line(side,line)=self.place {view.go_to_line(side,line);}
-                    let next=self.state.complete(self.state.generation,view,budget,self.place,self.comparisons().len());
+                    let set=self.set.clone();let next=self.state.complete(self.state.generation,view,budget,self.place,set.as_ref().map_or(&[][..],|s|&s.comparisons));
                     if let Some(doc)=&self.document{self.state.restore_position(doc,self.place);self.state.markdown_refresh(Some(doc));}
                     if let Some(index)=next{self.load(index,self.place,false,false);}changed=true;
                 },
@@ -134,12 +137,16 @@ impl Session {
         }
         false
     }
+    /// Adopts a new Change Set's folders (archives collapsed); the file to start on.
+    fn adopt(&mut self,set:&Arc<ChangeSet>)->usize{if self.state.folders.sync(set){self.state.folders.start(set)}else{self.state.current}}
     fn error(&mut self,e:String){crate::diagnostics::comparison_failure(&e);self.notice=Some(format!("{e} — check inputs, then reload; Report last error opens diagnostics"));self.failed=true;}
     fn paths(&self,index:usize)->(PathBuf,PathBuf){let c=&self.comparisons()[index];let name=self.name.as_deref().filter(|n|!n.is_empty());
         (PathBuf::from(name.unwrap_or(&c.old_path)),PathBuf::from(name.unwrap_or(&c.path)))}
     fn load(&mut self,index:usize,place:Place,force:bool,reuse:bool){
         let Some(set)=self.set.clone().filter(|s|index<s.comparisons.len())else{if self.comparisons().is_empty(){self.notice=Some("No differences".into());}return;};
         if index!=self.state.current && let Some(doc)=&self.document{self.state.remember_position(doc);}
+        // a file on screen has its row in Files; one behind a Folder Summary stays in its collapsed folder
+        if self.state.folders.summary().is_none(){self.state.folders.reveal(&set.comparisons,index);}
         let doc=reuse.then(||self.document.clone()).flatten();let rows=self.state.view.viewport_rows();let mode=self.state.view.mode();
         self.state.begin();self.state.current=index;self.place=place;self.refining_job=None;self.diffing=None;self.diff_started=None;
         if let Some(doc)=doc{self.reading=None;self.document=Some(doc);self.notice=None;self.failed=false;self.compare();return;}
@@ -168,7 +175,7 @@ impl Session {
     /// Unchanged lines outside changes are folded away.
     pub fn context_hidden(&self)->bool{self.state.collapse}
     pub fn loading(&self)->bool{self.opening.is_some()||self.reading.is_some()||self.diffing.is_some()}
-    pub fn busy(&self)->bool{self.markdown_loading()||self.file_actions.busy()||self.loading()||self.refining_job.is_some()}
+    pub fn busy(&self)->bool{self.state.folders.busy()||self.markdown_loading()||self.file_actions.busy()||self.loading()||self.refining_job.is_some()}
     pub fn failed(&self)->bool{self.failed}
     pub fn notice(&self)->Option<&str>{self.notice.as_deref().or(self.state.markdown_notice()).or(self.state.banner.as_deref())}
     pub fn set_notice(&mut self,notice:impl Into<String>){self.notice=Some(notice.into());}
@@ -188,17 +195,36 @@ impl Session {
     pub fn fold_block(&mut self,block:usize){if let Some(doc)=self.document.clone(){self.state.fold(&doc,Some(block));}}
     pub fn open_at(&mut self,side:Side,line:u32){self.place=Place::Line(side,line);if !self.loading(){self.state.view.go_to_line(side,line);}}
     pub fn open_at_line(&mut self,line:u32){self.open_at(Side::Right,line);}
-    pub fn open_file(&mut self,index:usize){if index==self.state.current&&self.document.is_some(){return;};self.state.press_again.reset();self.load(index,Place::Top,false,false);}
+    pub fn open_file(&mut self,index:usize){
+        // opening a file shows it in place of a Folder Summary, its folders expanded
+        if let Some(set)=self.set.clone()&&self.state.folders.summary().is_some(){self.state.folders.open(&set,index);}
+        if index==self.state.current&&self.document.is_some(){return;};self.state.press_again.reset();self.load(index,Place::Top,false,false);}
+    /// Runs a folder command; a refusal becomes the notice.
+    pub fn folder_action(&mut self,action:crate::folders::FolderAction){
+        let Some(set)=self.set.clone()else{self.notice=Some("No changed files".into());return;};
+        match self.state.folders.execute(action,&set,self.state.current){Ok(())=>self.notice=None,Err(why)=>self.notice=Some(why.into())}
+    }
+    pub fn folder_disabled(&self,action:crate::folders::FolderAction)->Option<&'static str>{self.state.folders.disabled(action,self.set.as_deref(),self.state.current)}
+    /// A folder heading's arrow: collapse or expand it.
+    pub fn toggle_folder(&mut self,folder:&str){self.state.folders.toggle(folder);}
+    /// A folder heading's name: its summary in place of the comparison; `group` is the heading's Change Set group.
+    pub fn show_summary(&mut self,folder:&str,group:Option<usize>){if let Some(set)=self.set.clone(){self.state.folders.show_summary(&set,folder,group,Some(self.state.current));}}
+    /// The summary of the folder holding file `index`.
+    pub fn show_folder_of(&mut self,index:usize){if let Some(set)=self.set.clone(){self.state.folders.show_summary_of(&set,index);}}
+    /// Back from the Folder Summary to the file behind it.
+    pub fn close_summary(&mut self){self.state.folders.close_summary();if let Some(set)=self.set.clone(){self.state.folders.reveal(&set.comparisons,self.state.current);}}
+    /// Opens the summary's selected file.
+    pub fn open_summary_file(&mut self){if let Some(index)=self.state.folders.selected_file(){self.open_file(index);}}
     pub fn reload_set(&mut self){self.state.begin();self.state.markdown_invalidate();self.reading=None;self.diffing=None;self.refining_job=None;self.document=None;self.image=None;self.opening_preserve=true;self.place=Place::Anchor(self.view().anchor_line());let spec=self.spec.clone();let cwd=self.cwd.clone();self.opening=Some(work::submit(Arc::downgrade(&self.state.work_id),move||ChangeSet::load(&spec,&cwd)));}
     pub fn find_selection(&self)->Option<crate::selection::Selection>{let find=self.find()?;let(line,range)=find.hits().get(find.at()?)?;Some(crate::selection::Selection{side:find.side(),anchor:Pos::new(*line,range.start),head:Pos::new(*line,range.end)})}
-    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
+    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");if let Some(set)=&self.set{set.invalidate_archive_cache();}self.state.folders.invalidate_counts();let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
     pub fn execute(&mut self,command:Command){let loading=self.loading()||self.document.is_none();let large=self.document.as_ref().is_some_and(|d|matches!(d.placeholder_kind(),Some(Placeholder::Large{..})));
         let set=self.set.clone();let files=set.as_ref().map_or(&[][..],|s|s.comparisons.as_slice());
         self.notice=None;match self.state.command(command,files,loading,large){
             Transition::Presentation(mode)=>self.state.markdown_command(crate::markdown::MarkdownCommand::SetMode(mode),self.document.clone()),
             Transition::Repaint=>{if matches!(command,Command::ToggleFold|Command::UnfoldAll)&&let Some(doc)=&self.document{self.state.remember_folds(doc);}},
             Transition::Recompare=>self.load(self.state.current,Place::Anchor(self.state.view.anchor_line()),false,true),
-            Transition::Load{index,place,force}=>self.load(index,place,force,false),Transition::Notice(msg)=>self.notice=Some(msg)
+            Transition::Load{index,place,force}=>{self.state.folders.close_summary();self.load(index,place,force,false)},Transition::Notice(msg)=>self.notice=Some(msg)
         }
     }
     pub fn edit_disabled(&self,command:crate::edit_session::EditMenuCommand)->Option<String>{if command==crate::edit_session::EditMenuCommand::Revert && !matches!(&self.spec,Spec::Git{cached,revs,..} if crate::changeset::right_is_worktree(*cached,revs)){return Some("Revert hunk requires a working-tree comparison".into());}self.state.edit_disabled(&self.writes,self.document(),command)}
@@ -417,4 +443,42 @@ mod find_option_tests {
         assert_eq!(s.find().unwrap().hits(),[(0,4..7)]);
         assert!(s.find_options().case);
     }
+
+}
+
+#[cfg(test)]
+mod archive_tests {
+    use super::*;
+    #[test]
+    fn archive_plain_reload_reads_changed_tar_members() {
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("left.tgz"), d.path().join("right.tgz"));
+        let tar = |text: &[u8]| crate::archive::testing::tar(&[("f.txt", text)], crate::archive::Compression::Gzip);
+        std::fs::write(&left, tar(b"old\n")).unwrap(); std::fs::write(&right, tar(b"new\n")).unwrap();
+        let spec = Spec::Plain { left, right: right.clone() };
+        let set = Arc::new(ChangeSet::load(&spec, d.path()).unwrap());
+        let mut session = Session::from_set(set, spec, Options::default(), ScrollMode::Shared);
+        let settle = |s: &mut Session| { let until = Instant::now() + std::time::Duration::from_secs(10); while s.busy() { s.poll(); assert!(Instant::now() < until); std::thread::yield_now(); } };
+        settle(&mut session);
+        assert_eq!(session.document().unwrap().text(Side::Right), "new\n");
+        std::fs::write(&right, tar(b"updated\n")).unwrap();
+        session.reload(); settle(&mut session);
+        assert_eq!(session.document().unwrap().text(Side::Right), "updated\n");
+    }
+
+    #[test]
+    fn summary_reload_refreshes_counts() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("left.txt"), "old\n").unwrap();
+        std::fs::write(d.path().join("right.txt"), "new\n").unwrap();
+        let args = ["--no-index", "left.txt", "right.txt"].map(str::to_owned);
+        let mut session = Session::open(crate::cli::parse(&args, d.path()).unwrap(), d.path().into());
+        let settle = |s: &mut Session| { let until = Instant::now() + std::time::Duration::from_secs(10); loop { s.poll(); if !s.busy() { break; } assert!(Instant::now() < until); std::thread::yield_now(); } };
+        settle(&mut session); session.show_folder_of(0); settle(&mut session);
+        assert_eq!(session.folders.stat(0), Some(&crate::folders::Stat::Lines { added: 1, removed: 1 }));
+        std::fs::write(d.path().join("right.txt"), "new\nmore\nlast\n").unwrap();
+        session.reload(); settle(&mut session);
+        assert_eq!(session.folders.stat(0), Some(&crate::folders::Stat::Lines { added: 3, removed: 1 }));
+    }
+
 }

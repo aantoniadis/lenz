@@ -87,9 +87,9 @@ impl App {
             FileAction::History => {
                 if let Some(repo) = &mut self.repository {
                     repo.core
-                        .execute(RepositoryCommand::FileHistory(c.path.clone()));
+                        .execute(RepositoryCommand::FileHistory(c.repository_path().to_owned()));
                 } else if let Some(root) = set.git_root() {
-                    let args = vec!["log".into(), "--follow".into(), c.path.clone()];
+                    let args = vec!["log".into(), "--follow".into(), c.repository_path().to_owned()];
                     if let Ok(request) = lenz::cli::parse(&args, root) {
                         self.new_view = Some((request, root.into()));
                     }

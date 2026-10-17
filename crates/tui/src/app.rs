@@ -38,6 +38,8 @@ pub struct App {
     report_request: lenz::diagnostics::ReportRequest,
     pub(crate) toolbar:crate::chrome::Bar<ToolbarAction>,
     pub(crate) navigator:crate::files::Files,
+    /// The Folder Summary's scroll and area; its content is the session's.
+    pub(crate) summary:crate::summary::SummaryPane,
     pub quit: bool,
     pub repository: Option<crate::repository::Repository>,
     pub(crate) visual: crate::visual::Visual,
@@ -88,7 +90,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -163,7 +165,7 @@ impl App {
         if let Some(repo)=&mut self.repository {
             changed|=repo.poll();
             if let Some((set,spec))=repo.take_change_set(){self.swap_at=Some(std::time::Instant::now());let preserve=repo.core.take_refresh_placement();if self.session.has_dirty(){let refused=spec!=*self.session.spec()||!preserve;self.session.replace_set(set,spec,preserve);if refused{self.navigator.focused=false;repo.core.execute(lenz::repository_session::RepositoryCommand::Focus(lenz::repository_session::Pane::Diff));}}else if preserve{self.session.replace_set(set,spec,true);}else{let name=self.comparison_name.clone();let line=self.initial_line.take();let mut next=Session::from_set_named(set,spec,self.session.options(),self.session.view().mode(),name,line);next.markdown_inherit_presentation(&self.session);self.session=next;}self.visual_revision=None;self.selection=None;self.set_search=None;self.pending_hit=None;changed=true;}
-            let path=self.session.comparisons().get(self.session.current()).map_or("",|c|c.path.as_str());repo.set_current(self.session.current(),path);
+            let (path,history)=self.session.comparisons().get(self.session.current()).map_or(("",""),|c|(c.path.as_str(),c.repository_path()));repo.set_current(self.session.current(),path,history);
             let effects=repo.take_effects();for effect in effects{self.repository_effect(effect);changed=true;}
         }
         if self.auto_repository && !self.session.loading(){self.auto_repository=false;
@@ -571,7 +573,17 @@ impl App {
     pub(crate) fn pr_details_shown(&self) -> bool {
         self.repository.as_ref().and_then(|r| r.core.pr.as_ref()).is_some_and(|p| p.details().is_some())
     }
+    /// A Folder Summary and a PR details tab both take the diff area: showing a summary closes the tab.
+    pub(crate) fn close_pr_details(&mut self) {
+        if self.pr_details_shown() { self.pr_command(lenz::pr_session::PrCommand::Close); }
+    }
+    /// ... and a PR details tab, however it opened, closes a summary.
+    fn yield_summary(&mut self) {
+        if self.pr_details_shown() && self.session.folders.summary().is_some() { self.session.close_summary(); }
+    }
     pub(crate) fn pr_command(&mut self, command: lenz::pr_session::PrCommand) {
+        // a details tab takes the diff area from a Folder Summary
+        if matches!(command, lenz::pr_session::PrCommand::Show(_) | lenz::pr_session::PrCommand::ShowThreads(_)) && self.session.folders.summary().is_some() { self.session.close_summary(); }
         if let Some(pr) = self.repository.as_mut().and_then(|r| r.core.pr.as_mut()) { pr.execute(command); }
         self.sync_pr_tab();
     }
@@ -580,6 +592,23 @@ impl App {
         if self.pr_details_shown() && !self.layout.focused(self.repository.as_ref().map(|r| &r.core)) {
             self.layout_command(lenz::layout::LayoutCommand::ToggleFocus);
         }
+    }
+    /// The Folder Summary takes its keys and the pointer over it; the rest reach the app.
+    fn summary_event(&mut self, event: &Event) -> bool {
+        use crate::summary::Outcome;
+        let Some(summary) = self.session.folders.summary().cloned() else { return false };
+        match self.summary.handle(event, &summary) {
+            Some(Outcome::Select(delta)) => self.session.folders.select(delta),
+            Some(Outcome::OpenRow(row)) => { self.session.folders.select(row as isize - summary.selected as isize); self.session.open_summary_file(); self.horizontal = [0; 2]; }
+            Some(Outcome::Open) => { self.session.open_summary_file(); self.horizontal = [0; 2]; }
+            Some(Outcome::Close) => self.session.close_summary(),
+            Some(Outcome::Collapse) => self.session.folder_action(lenz::folders::FolderAction::Collapse),
+            Some(Outcome::Expand) => self.session.folder_action(lenz::folders::FolderAction::Expand),
+            Some(Outcome::Taken) => {}
+            None => return false,
+        }
+        if matches!(event, Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left)) { self.navigator.focused = false; }
+        true
     }
     fn pr_tab_event(&mut self, event: &Event) -> bool {
         if !self.pr_details_shown() || matches!(event, Event::Key(k) if k.kind == KeyEventKind::Release) { return false; }
@@ -672,6 +701,7 @@ impl App {
                 &&lenz::catalog::header_switch(&self.scope()).iter().any(|e|e.action==action){self.run_action(action);return true;}
             // a details tab takes its keys (Tab switches its sections) and the pointer over it
             if !self.navigator.focused && self.pr_tab_event(&event) {return true;}
+            if (!self.navigator.focused || matches!(event, Event::Mouse(_))) && self.summary_event(&event) {return true;}
             if let Event::Key(k) = event && k.kind != KeyEventKind::Release
                 && matches!(k.code, KeyCode::Tab | KeyCode::BackTab | KeyCode::F(6)) {
                 if k.code == KeyCode::F(6) && let Some(repo) = &mut self.repository && !repo.core.picker.shown {
@@ -699,8 +729,15 @@ impl App {
             }
             if self.commit_panel_key(&event){return true;}
             let files_had_keyboard=self.navigator.focused;
-            let(handled,index)=self.navigator.handle(&event);
-            if let Some(index)=index{self.session.open_file(index);self.horizontal=[0;2];}
+            if let Some(set)=self.session.change_set(){self.navigator.sync(&set,&self.session.folders,self.session.current());}
+            let(handled,pick)=self.navigator.handle(&event);
+            let index=match pick {
+                Some(crate::files::Pick::File(index))=>{self.session.open_file(index);self.horizontal=[0;2];Some(index)}
+                Some(crate::files::Pick::Toggle(folder))=>{self.session.toggle_folder(&folder);None}
+                Some(crate::files::Pick::Summary{folder,group})=>{self.close_pr_details();self.session.show_summary(&folder,group);None}
+                Some(crate::files::Pick::FolderOf(index))=>{self.close_pr_details();self.session.show_folder_of(index);None}
+                None=>None,
+            };
             // Overview: Enter or a double click on a file enters Focus on it
             let overview=self.repository.is_some()&&!self.layout.focused(self.repository.as_ref().map(|r|&r.core));
             let enter=files_had_keyboard&&matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.code==KeyCode::Enter&&k.modifiers.is_empty());
@@ -871,6 +908,7 @@ impl App {
 
     pub fn render(&mut self,frame:&mut ratatui::Frame){let area=frame.area();self.render_in(frame,area);}
     pub fn render_in(&mut self,frame:&mut ratatui::Frame,area:ratatui::layout::Rect){
+        self.yield_summary();
         if self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.markdown.clear();}
         let palette=self.palette.clone();
         self.popup_area=area;
@@ -882,7 +920,7 @@ impl App {
         let repository_shown=self.repository.as_ref().is_some_and(|r|r.core.picker.shown);
         // a PR's Conversation and Commits read without the file list; Files changed has it
         self.navigator.suppressed=self.pr_details_shown();
-        let comparison=self.navigator.prepare(self.session.change_set(),self.session.current(),repository_shown,repo_area);
+        let comparison=self.navigator.prepare(self.session.change_set(),&self.session.folders,self.session.current(),repository_shown,repo_area);
         // the comparison keeps its last row, which the full-width bar draws over
         let comparison=ratatui::layout::Rect{height:comparison.height+footer_row,..comparison};
         let core=self.repository.as_ref().map(|r|&r.core).filter(|c|self.layout.focused(Some(c)));
@@ -897,7 +935,8 @@ impl App {
         self.visual.pane_ratio=Some(self.pane_ratio);
         self.resizer.grips.clear();
         let image_two_up=self.visual.image().is_some()&&self.visual.image_state().mode()==lenz::image_session::Mode::TwoUp;
-        if self.diff_area.width>=70&&(self.visual.image().is_none()||image_two_up)&&self.diff_area.height>=4&&!self.markdown_inline() {
+        // a Folder Summary has no panes to divide
+        if self.diff_area.width>=70&&(self.visual.image().is_none()||image_two_up)&&self.diff_area.height>=4&&!self.markdown_inline()&&self.session.folders.summary().is_none() {
             self.resizer.grips.push(crate::panes::Grip::vertical(ratatui::layout::Rect::new(self.diff_area.x+self.left_width(),self.diff_area.y+1,1,self.diff_area.height.saturating_sub(3+self.applied_panel_height())),0,self.diff_area.x));
         }
         let applied=self.applied_panel_height();

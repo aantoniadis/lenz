@@ -46,6 +46,8 @@ pub struct ComparisonSession {
     positions:HashMap<usize,(Options,[u64;2],crate::view::Presentation,u64)>,
     pub(crate) folds: HashMap<usize, Vec<(String, String)>>,
     pub(crate) banner: Option<String>,
+    /// Collapsed folders and the Folder Summary of the File Navigator.
+    pub folders: crate::folders::Folders,
 }
 
 impl ComparisonSession {
@@ -53,7 +55,7 @@ impl ComparisonSession {
         Self { current: 0, view, options, collapse: true, press_again: PressAgain::default(), find: None, find_options: Default::default(),
             generation: 0, work_id: Arc::new(()), diffed: 0, refining: false, budget: Budget::default(),
             #[cfg(feature="gui")]
-            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None }
+            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None, folders: Default::default() }
     }
     /// The change blocks to refine next: near the viewport in Source; in the Markdown Preview every change, a
     /// batch at a time, since its word outlines show anywhere in the document.
@@ -262,6 +264,12 @@ impl ComparisonSession {
         if let Some(reason) = commands::disabled(command, &self.view, loading, self.current, files.len(), large) {
             return Transition::Notice(reason.into());
         }
+        // stepping through changes shows the file behind a Folder Summary
+        if matches!(command, Command::NextChange | Command::PreviousChange) && self.folders.summary().is_some() {
+            self.folders.close_summary();
+            self.folders.reveal(files, self.current);
+            return Transition::Repaint;
+        }
         let effect = commands::execute(command, &mut self.view, &mut self.options, &mut self.collapse);
         if matches!(command, Command::NextChange | Command::PreviousChange)
             && let Some(hunk) = self.view.current_change()
@@ -280,10 +288,13 @@ impl ComparisonSession {
             Effect::Preview(layout) => { self.markdown_layout = layout; Transition::Presentation(crate::markdown::PresentationMode::Rendered) }
             Effect::Recompare => Transition::Recompare,
             Effect::LoadLarge => Transition::Load { index: self.current, place: Place::Top, force: true },
-            Effect::File(forward) => Transition::Load { index: if forward { self.current + 1 } else { self.current.saturating_sub(1) }, place: Place::Top, force: false },
+            // files a collapsed folder hides are skipped
+            Effect::File(forward) => match self.folders.step(files, self.current, forward) {
+                Some(index) => Transition::Load { index, place: Place::Top, force: false },
+                None => Transition::Notice(format!("No {} visible file", if forward { "later" } else { "earlier" })),
+            },
             Effect::Edge(forward) => {
-                let next = if forward { Some(self.current + 1) } else { self.current.checked_sub(1) };
-                match next.filter(|&n| n < files.len()) {
+                match self.folders.step(files, self.current, forward) {
                     None => { self.press_again.reset(); Transition::Notice(format!("{} change in the Change Set", if forward { "Last" } else { "First" })) }
                     Some(index) if self.press_again.at_edge(forward) => Transition::Load { index, place: if forward { Place::FirstChange } else { Place::LastChange }, force: false },
                     Some(index) => Transition::Notice(format!("Press {} again for {}", if forward { "n" } else { "p" }, files[index].path)),
@@ -339,14 +350,15 @@ impl ComparisonSession {
         self.view = view;
     }
     /// Reject obsolete completions, then skip unchanged files while stepping across a Change Set.
-    pub fn complete(&mut self, generation: u64, mut view: View, budget: Budget, place: Place, count: usize) -> Option<usize> {
+    /// Installs a finished diff; for an unchanged file reached by n/p, the next visible file to try instead.
+    pub fn complete(&mut self, generation: u64, mut view: View, budget: Budget, place: Place, files: &[Comparison]) -> Option<usize> {
         if generation != self.generation { return None; }
         if matches!(place,Place::Anchor(_)){view.retain_recompare_position(&self.view.recompare_position());}
         let empty = view.change_count() == 0;
         view.set_unified(self.view.unified());
         self.view = view; self.budget = budget; self.diffed = generation;
-        let next = match place { Place::FirstChange => Some(self.current + 1), Place::LastChange => self.current.checked_sub(1), _ => None };
-        next.filter(|&n| empty && n < count)
+        let next = match place { Place::FirstChange => self.folders.step(files, self.current, true), Place::LastChange => self.folders.step(files, self.current, false), _ => None };
+        next.filter(|_| empty)
     }
     pub fn expire(&mut self, generation: u64, doc: &TextDocument) -> bool {
         if generation != self.generation || self.diffed == generation { return false; }
@@ -429,8 +441,8 @@ mod tests {
         for _ in 0..12 {
             let old = state.begin();
             let current = state.begin();
-            state.complete(current, View::new(3, 1, &[], 10.0), Budget::default(), Place::Top, 1);
-            assert_eq!(state.complete(old, View::new(100, 100, &[], 10.0), Budget::default(), Place::Top, 1), None);
+            state.complete(current, View::new(3, 1, &[], 10.0), Budget::default(), Place::Top, &[]);
+            assert_eq!(state.complete(old, View::new(100, 100, &[], 10.0), Budget::default(), Place::Top, &[]), None);
             let old_doc = TextDocument::new("obsolete\n", "obsolete\n", std::path::Path::new("old"), std::path::Path::new("old"));
             assert!(!state.expire(old, &old_doc));
             assert_eq!(state.revision(), current);

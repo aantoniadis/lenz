@@ -133,10 +133,11 @@ impl ImageDoc {
             ));
         }
         let pct = 100.0 * self.diff.changed as f64 / self.diff.total.max(1) as f64;
+        let regions = self.diff.regions.len();
         out.push(format!(
-            "{} px changed ({pct:.2} %) · {} regions",
+            "{} px changed ({pct:.2} %) · {regions} region{}",
             self.diff.changed,
-            self.diff.regions.len()
+            if regions == 1 { "" } else { "s" }
         ));
         out
     }

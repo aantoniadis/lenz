@@ -13,6 +13,7 @@ mod about_sixel;
 mod chrome;
 mod icons;
 mod files;
+mod summary;
 mod commit_panel;
 mod pane_search;
 mod panes;

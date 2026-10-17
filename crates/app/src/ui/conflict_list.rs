@@ -500,13 +500,11 @@ impl Viewer {
             Some(cl) => format!("Conflicts · {} of {} left", cl.left(), cl.states.len()),
             // Focus names what is compared above its files
             None if let Some(t) = self.layout.focused(self.repo.as_ref()).then(|| self.repo.as_ref().and_then(|r| r.selection_title())).flatten() => t.text,
-            None => format!(
-                "{} changed files",
-                self.nav
-                    .iter()
-                    .filter(|r| matches!(r, NavRow::File { .. }))
-                    .count()
-            ),
+            // every file of the Change Set, those in collapsed folders too
+            None => match self.set.comparisons.len() {
+                1 => "1 changed file".to_string(),
+                n => format!("{n} changed files"),
+            },
         }
     }
 

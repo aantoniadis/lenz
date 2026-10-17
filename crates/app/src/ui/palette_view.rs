@@ -44,6 +44,7 @@ impl Viewer {
             Action::Comparison(command)=>self.comparison_command(command,cx),
             Action::Interaction(command)=>self.interaction(command,cx),
             Action::Edit(command)=>self.edit_menu(command,cx),
+            Action::Folder(action)=>self.folder_action(action,cx),
             Action::File(file)=>{let set=self.set.clone();self.file_action(file,self.comparison.current,&set,cx);},
             Action::Image(index)=>if let Some(entry)=crate::image_session::image_commands().get(index){let viewport=self.image_viewport(window);if let Some(doc)=self.image_doc(){self.iview.command(&doc,entry.command,viewport);}},
             Action::Repository(RepoAction::Refresh)=>self.refresh_repository(cx),
@@ -62,7 +63,7 @@ impl Viewer {
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
                 |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::ToggleMessage))=>{
-                let path=self.set.comparisons.get(self.comparison.current).map_or(String::new(),|c|c.path.clone());
+                let path=self.set.comparisons.get(self.comparison.current).map_or(String::new(),|c|c.repository_path().to_owned());
                 match self.repo.as_ref().map(|r|r.action_command(action,&path)) {
                     Some(Ok(Some(command)))=>self.repository_command(command,cx),
                     Some(Err(why))=>self.toast(why.into(),cx),
@@ -212,6 +213,7 @@ impl Availability for Viewer {
             Action::Comparison(crate::commands::Command::SetDiffLayout(crate::commands::DiffLayout::Unified))=>self.unified_disabled().map(Cow::Borrowed),
             Action::Comparison(command)=>crate::commands::disabled(command,&self.comparison.view,self.doc().is_none(),self.comparison.current,self.set.comparisons.len(),self.large()).map(Cow::Borrowed),
             Action::Interaction(command)=>self.interaction_disabled(command).map(Cow::Borrowed),
+            Action::Folder(action)=>self.comparison.folders.disabled(action,Some(&self.set),self.comparison.current).map(Cow::Borrowed),
             Action::Edit(command)=>self.edit_disabled(command).map(Cow::Owned),
             Action::File(file)=>{
                 let why=if file==crate::file_actions::FileAction::UndoLenz{self.comparison.markdown_edit_disabled().map(str::to_string)}else{None};
@@ -223,7 +225,7 @@ impl Availability for Viewer {
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
                 |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::OpenWorktree|RepoAction::ToggleMessage))=>{
-                let path=self.set.comparisons.get(self.comparison.current).map_or("",|c|c.path.as_str());
+                let path=self.set.comparisons.get(self.comparison.current).map_or("",|c|c.repository_path());
                 self.repo.as_ref().and_then(|r|r.action_command(action,path).err()).map(Cow::Borrowed)
             }
             Action::Repository(RepoAction::Back)=>(!self.repo.as_ref().is_some_and(|r|r.can_go_back())).then_some(Cow::Borrowed("Nowhere to go back to")),

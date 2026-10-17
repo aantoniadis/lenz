@@ -208,7 +208,11 @@ impl Viewer {
         if matches!(command, PrCommand::Show(_) | PrCommand::ShowThreads(_)) && self.repo.is_some() && !self.layout.focused(self.repo.as_ref()) {
             self.layout_command(crate::layout::LayoutCommand::ToggleFocus, cx);
         }
-        if matches!(command, PrCommand::Show(_) | PrCommand::ShowThreads(_)) { self.panel_focused = false; }
+        if matches!(command, PrCommand::Show(_) | PrCommand::ShowThreads(_)) {
+            self.panel_focused = false;
+            // a details tab takes the diff area from a Folder Summary
+            if self.summary_shown() { self.comparison.folders.close_summary(); self.comparison.folders.reveal(&self.set.comparisons, self.comparison.current); }
+        }
         if let Some(pr) = self.repo.as_mut().and_then(|r| r.pr.as_mut()) {
             pr.execute(command);
         }

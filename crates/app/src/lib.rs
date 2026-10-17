@@ -6,6 +6,7 @@ pub mod perf;
 mod perf_tests;
 #[cfg(any(test, feature = "perf-probe"))]
 pub use lenz_content::memory_probe;
+pub mod archive;
 pub mod blame;
 pub mod changeset;
 pub mod cli;
@@ -15,6 +16,7 @@ pub mod document;
 pub mod find;
 /// Go-to-line input, from the shared content crate.
 pub use lenz_content::goto;
+pub mod folders;
 pub mod git;
 #[cfg(all(target_os = "macos", feature = "gui"))]
 pub mod dock_icon;

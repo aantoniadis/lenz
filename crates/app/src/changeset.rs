@@ -8,7 +8,10 @@ use std::{
     sync::{Mutex, PoisonError},
 };
 
-use crate::git::{self, CatFile};
+use crate::{
+    archive,
+    git::{self, CatFile},
+};
 
 /// What to load, as the command line asked for it.
 #[derive(Debug, Clone, PartialEq)]
@@ -54,6 +57,8 @@ pub enum Content {
     Symlink(PathBuf),
     /// A submodule at a commit; shown as `Subproject commit <sha>`, as `git difftool` does.
     Submodule(String),
+    /// A file inside a zip or tar archive, read in memory from the archive's own Content: read-only.
+    Archived { archive: Box<Content>, kind: archive::Kind, member: String },
 }
 
 /// One pairing of a left and a right version of a file.
@@ -68,6 +73,37 @@ pub struct Comparison {
     pub right: Content,
 }
 
+impl Comparison {
+    /// Is this a file inside an archive (see [`crate::archive`])?
+    pub fn in_archive(&self) -> bool {
+        matches!(self.left, Content::Archived { .. }) || matches!(self.right, Content::Archived { .. })
+    }
+
+    /// The outermost archive's folder in `path`, for a file inside an archive: where its rows sit.
+    pub fn archive_root(&self) -> Option<&str> {
+        let mut content = if matches!(self.right, Content::Empty) { &self.left } else { &self.right };
+        let mut path = self.path.as_str();
+        let mut root = None;
+        while let Content::Archived { archive, member, .. } = content {
+            path = path.strip_suffix(member.as_str()).and_then(|p| p.strip_suffix('/'))?;
+            root = Some(path);
+            content = archive;
+        }
+        root
+    }
+
+    /// The repository path git knows: the outermost archive's path for a file inside an archive, else `path`.
+    pub fn repository_path(&self) -> &str {
+        let mut content = if matches!(self.right, Content::Empty) { &self.left } else { &self.right };
+        let mut path = if matches!(self.right, Content::Empty) { self.old_path.as_str() } else { self.path.as_str() };
+        while let Content::Archived { archive, member, .. } = content {
+            path = path.strip_suffix(member.as_str()).and_then(|p| p.strip_suffix('/')).unwrap_or(path);
+            content = archive;
+        }
+        path
+    }
+}
+
 /// The Comparisons opened at once, in File Navigator order (directory, then file name; within each group).
 #[derive(Clone)]
 pub struct ChangeSet {
@@ -79,8 +115,21 @@ pub struct ChangeSet {
     attrs: HashMap<String, DiffAttr>,
     /// Each listed path's `working-tree-encoding`, where set.
     encodings: HashMap<String, String>,
-    /// Paths whose textconv or filter driver comes from the repository's own config and was not run.
-    skipped: HashMap<String, String>,
+    /// The last compressed tar streams read whole, decompressed, so reading their members one by one doesn't
+    /// decompress them again; see [`ChangeSet::unpacked`].
+    unpacked: std::sync::Arc<Mutex<UnpackedCache>>,
+    /// Why a path may not look as `git diff` shows it: a repository-config textconv or filter driver Lenz did not
+    /// run, or an archive Lenz could not show as a folder.
+    notes: HashMap<String, String>,
+}
+
+/// A compressed tar archive's Content and its decompressed stream.
+type Unpacked = (Content, std::sync::Arc<[u8]>);
+
+#[derive(Default)]
+struct UnpackedCache {
+    generation: u64,
+    streams: Vec<Unpacked>,
 }
 
 /// The adapters behind a Change Set.
@@ -127,14 +176,14 @@ impl ChangeSet {
         let Some(c)=old.comparisons.get(index)else{return;};let at=self.comparisons.len();self.comparisons.push(c.clone());
         for path in [&c.old_path,&c.path]{if let Some(attr)=old.attrs.get(path){self.attrs.insert(path.clone(),attr.clone());}
             if let Some(encoding)=old.encodings.get(path){self.encodings.insert(path.clone(),encoding.clone());}
-            if let Some(note)=old.skipped.get(path){self.skipped.insert(path.clone(),note.clone());}}
+            if let Some(note)=old.notes.get(path){self.notes.insert(path.clone(),note.clone());}}
         if let Some((group,_))=old.groups.iter().find(|(_,range)|range.contains(&index)){if let Some((last,range))=self.groups.last_mut().filter(|(_,range)|range.end==at)&&last==group{range.end+=1;}else{self.groups.push((group.clone(),at..at+1));}}
     }
 
     /// Lists the Change Set; `cwd` is where the user ran Lenz. Synchronous: call it off the UI thread.
     pub fn load(spec: &Spec, cwd: &Path) -> Result<ChangeSet, String> {
         match spec {
-            Spec::Empty => Ok(ChangeSet{comparisons:Vec::new(),groups:Vec::new(),source:Source::Plain,attrs:Default::default(),encodings:Default::default(),skipped:Default::default()}),
+            Spec::Empty => Ok(ChangeSet{comparisons:Vec::new(),groups:Vec::new(),source:Source::Plain,attrs:Default::default(),encodings:Default::default(),unpacked:Default::default(),notes:Default::default()}),
             Spec::Git { cached, revs, paths, untracked } => {
                 let root = toplevel(cwd)?;
                 let list = list_git(cwd, &root, *cached, revs, paths, *untracked)?;
@@ -146,8 +195,10 @@ impl ChangeSet {
             Spec::Plain { left, right } => {
                 let mut comparisons = list_plain(cwd, left, right)?;
                 sort_for_navigator(&mut comparisons);
-                let (attrs, encodings, skipped) = Default::default();
-                Ok(ChangeSet { comparisons, groups: Vec::new(), source: Source::Plain, attrs, encodings, skipped })
+                let (attrs, encodings, notes) = Default::default();
+                let mut set = ChangeSet { comparisons, groups: Vec::new(), source: Source::Plain, attrs, encodings, unpacked: Default::default(), notes };
+                set.expand_archives();
+                Ok(set)
             }
         }
     }
@@ -170,15 +221,18 @@ impl ChangeSet {
             comparisons.extend(list);
             groups.push((name, start..comparisons.len()));
         }
-        let (attrs, encodings, skipped) = diff_attrs(&root, &comparisons)?;
+        let (attrs, encodings, notes) = diff_attrs(&root, &comparisons)?;
         let source = Source::Git { root, cat_file: std::sync::Arc::new(Mutex::new(None)), check: std::sync::Arc::new(Mutex::new(None)) };
-        Ok(ChangeSet { comparisons, groups, source, attrs, encodings, skipped })
+        let mut set = ChangeSet { comparisons, groups, source, attrs, encodings, unpacked: Default::default(), notes };
+        set.expand_archives();
+        Ok(set)
     }
 
-    /// Why comparison `index` may not look as `git diff` shows it: a repository-config driver Lenz did not run.
-    pub fn skipped_driver(&self, index: usize) -> Option<&str> {
+    /// Why comparison `index` may not look as `git diff` shows it: a repository-config driver Lenz did not run, or
+    /// an archive Lenz could not show as a folder.
+    pub fn note(&self, index: usize) -> Option<&str> {
         let c = self.comparisons.get(index)?;
-        self.skipped.get(&c.path).or_else(|| self.skipped.get(&c.old_path)).map(String::as_str)
+        self.notes.get(&c.path).or_else(|| self.notes.get(&c.old_path)).map(String::as_str)
     }
 
     /// One Side's bytes as stored (no textconv).
@@ -191,7 +245,45 @@ impl ChangeSet {
             }
             Content::Submodule(sha) => Ok(format!("Subproject commit {sha}\n").into_bytes()),
             Content::Blob(name) => self.blob(name, "--batch", |p| p.get(name)),
+            Content::Archived { archive, kind, member } => match self.unpacked(archive, *kind)? {
+                Some(tar) => archive::extract(archive::Kind::Tar(archive::Compression::None), &tar, member),
+                None => archive::extract(*kind, &self.read(archive)?, member),
+            },
         }
+    }
+
+    /// Explicit Reload must reread mutable archive inputs, including reads already in flight.
+    pub(crate) fn invalidate_archive_cache(&self) {
+        let mut cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+        cache.generation += 1;
+        cache.streams.clear();
+    }
+
+    /// A compressed tar archive's stream, decompressed once and kept for its next member (two archives, up to
+    /// 64 MiB each); `None` for any other archive, or one too large to keep.
+    fn unpacked(&self, archive: &Content, kind: archive::Kind) -> Result<Option<std::sync::Arc<[u8]>>, String> {
+        const KEEP: u64 = 64 << 20;
+        let archive::Kind::Tar(compression) = kind else { return Ok(None) };
+        if compression == archive::Compression::None {
+            return Ok(None);
+        }
+        let generation = {
+            let cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, tar)) = cache.streams.iter().find(|(key, _)| key == archive) {
+                return Ok(Some(tar.clone()));
+            }
+            cache.generation
+        };
+        let Some(tar) = archive::unpack(compression, &self.read(archive)?, KEEP)? else { return Ok(None) };
+        let tar: std::sync::Arc<[u8]> = tar.into();
+        let mut cache = self.unpacked.lock().unwrap_or_else(PoisonError::into_inner);
+        if cache.generation == generation {
+            if cache.streams.len() == 2 {
+                cache.streams.remove(0);
+            }
+            cache.streams.push((archive.clone(), tar.clone()));
+        }
+        Ok(Some(tar))
     }
 
     /// The repository's top directory, for a git Change Set.
@@ -267,6 +359,10 @@ impl ChangeSet {
         match content {
             Content::File(path) => fs::metadata(path).map(|m| m.len()).map_err(io_error(path)),
             Content::Blob(name) => self.blob(name, "--batch-check", |p| p.size(name)).map(|s| s as u64),
+            Content::Archived { archive, kind, member } => match self.unpacked(archive, *kind)? {
+                Some(tar) => archive::size(archive::Kind::Tar(archive::Compression::None), &tar, member),
+                None => archive::size(*kind, &self.read(archive)?, member),
+            },
             _ => self.read(content).map(|b| b.len() as u64),
         }
     }
@@ -292,6 +388,147 @@ impl ChangeSet {
             }
         }
     }
+}
+
+/// How deep archives inside archives are opened as folders.
+const MAX_NESTING: usize = 3;
+
+impl ChangeSet {
+    /// Replaces each changed archive with one Comparison per changed member, archives inside it too, keeping every
+    /// group in File Navigator order. An archive that can't be read, or whose members are all unchanged, stays one
+    /// binary Comparison with a note saying why.
+    fn expand_archives(&mut self) {
+        if !self.comparisons.iter().any(|c| archive_kinds(c).is_some()) {
+            return;
+        }
+        let spans: Vec<(Option<String>, Range<usize>)> = if self.groups.is_empty() {
+            vec![(None, 0..self.comparisons.len())]
+        } else {
+            self.groups.iter().map(|(name, range)| (Some(name.clone()), range.clone())).collect()
+        };
+        let old = std::mem::take(&mut self.comparisons);
+        let (mut comparisons, mut groups) = (Vec::with_capacity(old.len()), Vec::new());
+        for (name, range) in spans {
+            let start = comparisons.len();
+            let mut list = Vec::new();
+            for c in &old[range] {
+                self.expand(c.clone(), 0, &mut list);
+            }
+            sort_for_navigator(&mut list);
+            comparisons.extend(list);
+            if let Some(name) = name {
+                groups.push((name, start..comparisons.len()));
+            }
+        }
+        self.comparisons = comparisons;
+        self.groups = groups;
+    }
+
+    fn expand(&mut self, c: Comparison, depth: usize, out: &mut Vec<Comparison>) {
+        let Some(kinds) = archive_kinds(&c) else {
+            out.push(c);
+            return;
+        };
+        match self.archive_members(&c, kinds) {
+            Ok(members) if !members.is_empty() => {
+                for member in members {
+                    if depth < MAX_NESTING {
+                        self.expand(member, depth + 1, out);
+                    } else {
+                        out.push(member);
+                    }
+                }
+            }
+            Ok(_) => {
+                let note = "no file inside the archive changed: only its packing differs";
+                self.notes.entry(c.path.clone()).or_insert_with(|| note.into());
+                out.push(c);
+            }
+            Err(e) => {
+                self.notes.entry(c.path.clone()).or_insert_with(|| format!("not shown as a folder: {e}"));
+                out.push(c);
+            }
+        }
+    }
+
+    /// Comparison `c`'s changed members: paired by path, and files only on one side with the same content paired as
+    /// renames, as plain directories are.
+    fn archive_members(&self, c: &Comparison, [left_kind, right_kind]: [Option<archive::Kind>; 2]) -> Result<Vec<Comparison>, String> {
+        let list = |content: &Content, kind: Option<archive::Kind>| -> Result<BTreeMap<String, archive::Fingerprint>, String> {
+            let Some(kind) = kind else { return Ok(BTreeMap::new()) };
+            if self.size(content)? > archive::MAX_ARCHIVE {
+                return Err(format!("larger than {} MiB", archive::MAX_ARCHIVE >> 20));
+            }
+            archive::members(kind, &self.read(content)?)
+        };
+        let (left, right) = (list(&c.left, left_kind)?, list(&c.right, right_kind)?);
+        let member = |content: &Content, kind: Option<archive::Kind>, name: &str| match kind {
+            Some(kind) => Content::Archived { archive: Box::new(content.clone()), kind, member: name.to_string() },
+            None => Content::Empty,
+        };
+        let comparison = |old: &str, new: &str, status: Status, left: Content, right: Content| Comparison {
+            old_path: format!("{}/{old}", c.old_path),
+            path: format!("{}/{new}", c.path),
+            status,
+            left,
+            right,
+        };
+        let added = if c.status == Status::Untracked { Status::Untracked } else { Status::Added };
+        let mut out = Vec::new();
+        let mut deleted: HashMap<archive::Fingerprint, Vec<&String>> = HashMap::new();
+        let mut gone = Vec::new();
+        for (name, fingerprint) in &left {
+            match right.get(name) {
+                Some(other) if other != fingerprint => out.push(comparison(
+                    name,
+                    name,
+                    Status::Modified,
+                    member(&c.left, left_kind, name),
+                    member(&c.right, right_kind, name),
+                )),
+                Some(_) => {}
+                None => {
+                    gone.push(name);
+                    // Like git, never pair empty files as renames.
+                    if fingerprint.size > 0 {
+                        deleted.entry(*fingerprint).or_default().push(name);
+                    }
+                }
+            }
+        }
+        let mut renamed = BTreeSet::new();
+        for (name, fingerprint) in right.iter().filter(|(name, _)| !left.contains_key(*name)) {
+            let right_side = member(&c.right, right_kind, name);
+            match deleted.get_mut(fingerprint).and_then(Vec::pop) {
+                Some(old) => {
+                    renamed.insert(old);
+                    let status = Status::Renamed { similarity: 100 };
+                    out.push(comparison(old, name, status, member(&c.left, left_kind, old), right_side));
+                }
+                None => out.push(comparison(name, name, added.clone(), Content::Empty, right_side)),
+            }
+        }
+        for name in gone.into_iter().filter(|name| !renamed.contains(name)) {
+            out.push(comparison(name, name, Status::Deleted, member(&c.left, left_kind, name), Content::Empty));
+        }
+        Ok(out)
+    }
+}
+
+/// Each Side's archive format when comparison `c` is a changed archive Lenz may open as a folder (`None` for an
+/// absent Side).
+fn archive_kinds(c: &Comparison) -> Option<[Option<archive::Kind>; 2]> {
+    // conflicts belong to the merge workflow; a mode-only change or a pure rename has no changed member
+    if matches!(c.status, Status::Conflicted | Status::ModeChanged { .. } | Status::Renamed { similarity: 100 }) {
+        return None;
+    }
+    let side = |content: &Content, path: &str| match content {
+        Content::Empty => Some(None),
+        Content::Blob(_) | Content::File(_) | Content::Archived { .. } => archive::Kind::of(path).map(Some),
+        Content::Symlink(_) | Content::Submodule(_) => None,
+    };
+    let kinds = [side(&c.left, &c.old_path)?, side(&c.right, &c.path)?];
+    kinds.iter().any(Option::is_some).then_some(kinds)
 }
 
 pub(crate) use lenz_content::encoding::looks_binary;
@@ -991,7 +1228,7 @@ mod tests {
         for spec in [git_spec(false, &[], &[], true), git_spec(false, &["HEAD"], &[], false)] {
             let set = load(r.path(), spec);
             assert_eq!(texts(&set, 0), pair("abc\n", "abd\n"));
-            assert_eq!(set.skipped_driver(0), Some("textconv driver `upper` from this repository's .git/config was not run"));
+            assert_eq!(set.note(0), Some("textconv driver `upper` from this repository's .git/config was not run"));
             let doc = crate::document::TextDocument::from_sides(&set, 0, Path::new("doc.up"), Path::new("doc.up"), set.sides(0).unwrap());
             assert!(doc.notes.iter().any(|n| n.contains("was not run")), "{:?}", doc.notes);
         }
@@ -1209,4 +1446,206 @@ mod tests {
         assert!(plain(d.path(), "f.txt", "nope.txt").is_err());
         assert!(plain(d.path(), "f.txt", "dir").is_err());
     }
+
+    // --- archives ---
+
+    use crate::archive::{Compression, testing as archive_testing};
+
+    fn paths(set: &ChangeSet) -> Vec<(&str, &str, Status)> {
+        set.comparisons.iter().map(|c| (c.old_path.as_str(), c.path.as_str(), c.status.clone())).collect()
+    }
+
+    #[test]
+    fn a_committed_zip_is_a_folder_of_its_changed_files() {
+        let r = repo();
+        let v1 = archive_testing::zip(&[("doc/a.txt", b"one\ntwo\n"), ("same.txt", b"same\n"), ("gone.txt", b"bye\n"), ("old.bin", b"moved\0")]);
+        let v2 = archive_testing::zip(&[("doc/a.txt", b"one\n2\n"), ("same.txt", b"same\n"), ("new.txt", b"hi\n"), ("new.bin", b"moved\0")]);
+        write(r.path(), "pkg/app.zip", &v1);
+        write(r.path(), "z.txt", "z\n");
+        commit_all(r.path(), "1");
+        write(r.path(), "pkg/app.zip", &v2);
+        write(r.path(), "z.txt", "zz\n");
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
+        assert_eq!(
+            paths(&set),
+            [
+                ("z.txt", "z.txt", Status::Modified),
+                ("pkg/app.zip/gone.txt", "pkg/app.zip/gone.txt", Status::Deleted),
+                ("pkg/app.zip/old.bin", "pkg/app.zip/new.bin", Status::Renamed { similarity: 100 }),
+                ("pkg/app.zip/new.txt", "pkg/app.zip/new.txt", Status::Added),
+                ("pkg/app.zip/doc/a.txt", "pkg/app.zip/doc/a.txt", Status::Modified),
+            ]
+        );
+        let modified = set.comparisons.iter().position(|c| c.path.ends_with("doc/a.txt")).unwrap();
+        assert_eq!(set.texts(modified).unwrap(), ("one\ntwo\n".into(), "one\n2\n".into()));
+        assert_eq!(set.sizes(modified).unwrap(), [8, 6]);
+        let [l, r] = set.sides(2).unwrap();
+        assert!(l.binary && r.binary && l.bytes == b"moved\0");
+        let c = &set.comparisons[modified];
+        assert!(c.in_archive() && !set.comparisons[0].in_archive());
+        assert_eq!(c.repository_path(), "pkg/app.zip");
+        assert_eq!(set.comparisons[1].repository_path(), "pkg/app.zip", "a deleted member names the archive too");
+        assert_eq!(crate::moves::editable(&c.right, &std::env::temp_dir()), Err("inside an archive"));
+    }
+
+    #[test]
+    fn an_added_tarball_lists_every_file_and_an_untracked_one_stays_untracked() {
+        let r = repo();
+        write(r.path(), "keep.txt", "k\n");
+        commit_all(r.path(), "1");
+        let tgz = archive_testing::tar(&[("b.txt", b"b\n"), ("a/c.txt", b"c\n")], Compression::Gzip);
+        write(r.path(), "rel.tgz", &tgz);
+        let set = load(r.path(), git_spec(false, &[], &[], true));
+        assert_eq!(
+            paths(&set),
+            [("rel.tgz/b.txt", "rel.tgz/b.txt", Status::Untracked), ("rel.tgz/a/c.txt", "rel.tgz/a/c.txt", Status::Untracked)]
+        );
+        assert_eq!(set.texts(1).unwrap(), (String::new(), "c\n".into()));
+        let spec = git_spec(false, &[], &[], true);
+        assert_eq!(crate::file_actions::discard_disabled(&set, 0, &spec), Some("Untracked file has no indexed version"));
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
+        assert_eq!(set.comparisons.iter().map(|c| c.status.clone()).collect::<Vec<_>>(), [Status::Added, Status::Added]);
+        git(r.path(), &["rm", "-q", "rel.tgz"]);
+        let set = load(r.path(), git_spec(true, &[], &[], false));
+        assert_eq!(paths(&set)[1], ("rel.tgz/a/c.txt", "rel.tgz/a/c.txt", Status::Deleted));
+        assert_eq!(set.texts(1).unwrap(), ("c\n".into(), String::new()));
+    }
+
+    #[test]
+    fn working_tree_archive_members_cannot_be_discarded_one_by_one() {
+        let r = repo();
+        write(r.path(), "a.tar", archive_testing::tar(&[("x.txt", b"1\n")], Compression::None));
+        commit_all(r.path(), "1");
+        write(r.path(), "a.tar", archive_testing::tar(&[("x.txt", b"2\n")], Compression::None));
+        let spec = git_spec(false, &[], &[], true);
+        let set = load(r.path(), spec.clone());
+        assert_eq!(paths(&set), [("a.tar/x.txt", "a.tar/x.txt", Status::Modified)]);
+        assert!(matches!(&set.comparisons[0].right, Content::Archived { archive, .. } if matches!(**archive, Content::File(_))));
+        assert_eq!(set.texts(0).unwrap(), ("1\n".into(), "2\n".into()));
+        assert_eq!(crate::file_actions::discard_disabled(&set, 0, &spec), Some("A file inside an archive cannot be discarded on its own"));
+    }
+
+    #[test]
+    fn archives_inside_archives_open_as_folders_too() {
+        let r = repo();
+        let inner = |text: &[u8]| archive_testing::zip(&[("deep.txt", text)]);
+        write(r.path(), "outer.tar.xz", archive_testing::tar(&[("lib/inner.zip", &inner(b"old\n"))], Compression::Xz));
+        commit_all(r.path(), "1");
+        write(r.path(), "outer.tar.xz", archive_testing::tar(&[("lib/inner.zip", &inner(b"new\n"))], Compression::Xz));
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
+        assert_eq!(paths(&set), [("outer.tar.xz/lib/inner.zip/deep.txt", "outer.tar.xz/lib/inner.zip/deep.txt", Status::Modified)]);
+        assert_eq!(set.texts(0).unwrap(), ("old\n".into(), "new\n".into()));
+        assert_eq!(set.comparisons[0].repository_path(), "outer.tar.xz");
+    }
+
+    #[test]
+    fn an_unreadable_or_unchanged_archive_stays_one_binary_file_with_a_note() {
+        let r = repo();
+        write(r.path(), "bad.zip", "not a zip\n");
+        // same member content, different packing: stored, then deflated
+        let stored = {
+            use std::io::Write;
+            let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+            out.start_file("a.txt", zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored)).unwrap();
+            out.write_all(b"same\n").unwrap();
+            out.finish().unwrap().into_inner()
+        };
+        write(r.path(), "repacked.zip", &stored);
+        commit_all(r.path(), "1");
+        write(r.path(), "bad.zip", "still not a zip\n");
+        write(r.path(), "repacked.zip", archive_testing::zip(&[("a.txt", b"same\n")]));
+        let set = load(r.path(), git_spec(false, &[], &[], true));
+        assert_eq!(paths(&set), [("bad.zip", "bad.zip", Status::Modified), ("repacked.zip", "repacked.zip", Status::Modified)]);
+        assert!(set.note(0).unwrap().starts_with("not shown as a folder: invalid zip archive"), "{:?}", set.note(0));
+        assert_eq!(set.note(1), Some("no file inside the archive changed: only its packing differs"));
+        assert!(!set.comparisons[0].in_archive());
+        for index in 0..2 {
+            let c = &set.comparisons[index];
+            let doc = crate::document::PreparedDocument::load(&set, index, Path::new(&c.old_path), Path::new(&c.path), false).unwrap();
+            assert!(doc.text.notes().iter().any(|note| Some(note.as_str()) == set.note(index)));
+        }
+    }
+
+    #[test]
+    fn staged_and_unstaged_archive_members_stay_in_their_groups() {
+        let r = repo();
+        write(r.path(), "a.zip", archive_testing::zip(&[("f.txt", b"1\n")]));
+        write(r.path(), "b.txt", "b\n");
+        commit_all(r.path(), "1");
+        write(r.path(), "a.zip", archive_testing::zip(&[("f.txt", b"2\n")]));
+        git(r.path(), &["add", "a.zip"]);
+        write(r.path(), "a.zip", archive_testing::zip(&[("f.txt", b"3\n"), ("g.txt", b"g\n")]));
+        write(r.path(), "b.txt", "bb\n");
+        let set = crate::repo::local_changes(r.path(), false).unwrap();
+        let names: Vec<_> = set.groups.iter().map(|(name, range)| (name.as_str(), range.clone())).collect();
+        assert_eq!(names, [("Staged", 0..1), ("Unstaged", 1..4)]);
+        assert_eq!(set.comparisons.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["a.zip/f.txt", "b.txt", "a.zip/f.txt", "a.zip/g.txt"]);
+        assert_eq!(set.texts(0).unwrap(), ("1\n".into(), "2\n".into()));
+        assert_eq!(set.texts(2).unwrap(), ("2\n".into(), "3\n".into()));
+    }
+
+    #[test]
+    fn compressed_tar_streams_are_decompressed_once_and_at_most_two_are_kept() {
+        let r = repo();
+        let tgz = |files: &[(&str, &[u8])]| archive_testing::tar(files, Compression::Gzip);
+        write(r.path(), "a.tgz", tgz(&[("1.txt", b"a\n"), ("2.txt", b"b\n")]));
+        write(r.path(), "b.tgz", tgz(&[("1.txt", b"a\n")]));
+        commit_all(r.path(), "1");
+        write(r.path(), "a.tgz", tgz(&[("1.txt", b"A\n"), ("2.txt", b"B\n")]));
+        write(r.path(), "b.tgz", tgz(&[("1.txt", b"A\n")]));
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &["HEAD~", "HEAD"], &[], false));
+        assert_eq!(set.comparisons.iter().map(|c| c.path.as_str()).collect::<Vec<_>>(), ["a.tgz/1.txt", "a.tgz/2.txt", "b.tgz/1.txt"]);
+        let kept = |set: &ChangeSet| set.unpacked.lock().unwrap().streams.iter().map(|(c, tar)| (c.clone(), tar.clone())).collect::<Vec<_>>();
+        assert!(kept(&set).is_empty(), "listing reads archives whole, without keeping them");
+        assert_eq!(set.texts(0).unwrap(), ("a\n".into(), "A\n".into()));
+        let first = kept(&set);
+        assert_eq!(first.len(), 2, "both Sides of a.tgz");
+        // the next member of the same archives reads the kept streams
+        assert_eq!(set.texts(1).unwrap(), ("b\n".into(), "B\n".into()));
+        let again = kept(&set);
+        assert!(first.iter().zip(&again).all(|((c1, t1), (c2, t2))| c1 == c2 && std::sync::Arc::ptr_eq(t1, t2)));
+        // another archive replaces the oldest: never more than two
+        assert_eq!(set.texts(2).unwrap(), ("a\n".into(), "A\n".into()));
+        let after = kept(&set);
+        assert_eq!(after.len(), 2);
+        assert!(after.iter().all(|(c, _)| !first.iter().any(|(old, _)| old == c)), "b.tgz's Sides replaced a.tgz's");
+    }
+
+    #[test]
+    fn plain_directories_open_their_archives_as_folders() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "l/x.tar.bz2", archive_testing::tar(&[("in.txt", b"l\n")], Compression::Bzip2));
+        write(d.path(), "r/x.tar.bz2", archive_testing::tar(&[("in.txt", b"r\n")], Compression::Bzip2));
+        let set = plain(d.path(), "l", "r").unwrap();
+        assert_eq!(paths(&set), [("x.tar.bz2/in.txt", "x.tar.bz2/in.txt", Status::Modified)]);
+        assert_eq!(set.texts(0).unwrap(), ("l\n".into(), "r\n".into()));
+        let set = plain(d.path(), "l/x.tar.bz2", "r/x.tar.bz2").unwrap();
+        assert_eq!(paths(&set), [("l/x.tar.bz2/in.txt", "r/x.tar.bz2/in.txt", Status::Modified)]);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn archive_reload_does_not_cache_a_read_started_before_reload() {
+        use std::io::Write;
+        let d = tempfile::tempdir().unwrap();
+        let pipe = d.path().join("input.tgz");
+        assert!(std::process::Command::new("mkfifo").arg(&pipe).status().unwrap().success());
+        let set = std::sync::Arc::new(ChangeSet::load(&Spec::Empty, d.path()).unwrap());
+        let member = Content::Archived { archive: Box::new(Content::File(pipe.clone())), kind: archive::Kind::Tar(Compression::Gzip), member: "f.txt".into() };
+        let reader_set = set.clone(); let reader_member = member.clone();
+        let reader = std::thread::spawn(move || reader_set.read(&reader_member).unwrap());
+        // Opening the writer waits until the reader has checked the cache and started the file read.
+        let mut writer = std::fs::OpenOptions::new().write(true).open(&pipe).unwrap();
+        set.invalidate_archive_cache();
+        writer.write_all(&archive_testing::tar(&[("f.txt", b"old\n")], Compression::Gzip)).unwrap();
+        drop(writer);
+        assert_eq!(reader.join().unwrap(), b"old\n");
+        std::fs::remove_file(&pipe).unwrap();
+        std::fs::write(&pipe, archive_testing::tar(&[("f.txt", b"updated\n")], Compression::Gzip)).unwrap();
+        assert_eq!(set.read(&member).unwrap(), b"updated\n");
+    }
+
 }

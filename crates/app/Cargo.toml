@@ -40,6 +40,14 @@ resvg = { version = "0.46", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8.23"
+# Archives shown as folders (src/archive.rs); pure Rust. flate2, bzip2 and lzma-rust2 are the versions zip itself builds.
+zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2-zlib-rs", "deflate64", "bzip2", "lzma", "xz"] }
+tar = { version = "0.4.46", default-features = false }
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
+bzip2 = "0.6"
+lzma-rust2 = { version = "0.21", default-features = false, features = ["std", "xz", "optimization"] }
+ruzstd = "0.9.1"
+crc32fast = "1.5"
 # Private, exclusively created files for atomic saves and Git merge inputs.
 tempfile = "3"
 async-channel = "2.5.0"

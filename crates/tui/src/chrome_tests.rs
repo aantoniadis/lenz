@@ -267,9 +267,9 @@ fn file_navigator_reveals_switches_and_preserves_manual_scroll() {
     let (_dir,app)=pair("old\n","new\n");let set=many_files(&app);
     let mut files=crate::files::Files::default();let area=ratatui::layout::Rect::new(0,0,160,30);
     let mut terminal=Terminal::new(TestBackend::new(160,30)).unwrap();
-    for index in [0,9999,0]{files.prepare(Some(set.clone()),index,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();assert!(text(terminal.backend().buffer()).contains(&format!("file{index:05}.txt")));}
+    for index in [0,9999,0]{files.prepare(Some(set.clone()),&lenz::folders::Folders::default(),index,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();assert!(text(terminal.backend().buffer()).contains(&format!("file{index:05}.txt")));}
     files.handle(&Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollDown,column:5,row:5,modifiers:KeyModifiers::NONE}));
-    files.prepare(Some(set.clone()),0,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();
+    files.prepare(Some(set.clone()),&lenz::folders::Folders::default(),0,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();
     assert!(!text(terminal.backend().buffer()).contains("file00000.txt"));
     assert_eq!(std::sync::Arc::strong_count(&set),1,"navigator must not retain an obsolete Change Set");
 }
@@ -280,11 +280,11 @@ fn terminal_perf_chrome() {
     let (_dir,mut app)=pair("old\n","new\n");let set=many_files(&app);
     let mut files=crate::files::Files::default();let area=ratatui::layout::Rect::new(0,0,160,50);
     let mut terminal=Terminal::new(TestBackend::new(160,50)).unwrap();
-    files.prepare(Some(set.clone()),0,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();
+    files.prepare(Some(set.clone()),&lenz::folders::Folders::default(),0,false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();
     let mut render=Vec::new();let mut switches=Vec::new();let mut rss=Vec::new();
     for i in 0..300 {
-        let start=Instant::now();files.prepare(Some(set.clone()),if i%2==0{9999}else{0},false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();switches.push(start.elapsed().as_secs_f64()*1000.);
-        let start=Instant::now();files.prepare(Some(set.clone()),if i%2==0{9999}else{0},false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();render.push(start.elapsed().as_secs_f64()*1000.);
+        let start=Instant::now();files.prepare(Some(set.clone()),&lenz::folders::Folders::default(),if i%2==0{9999}else{0},false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();switches.push(start.elapsed().as_secs_f64()*1000.);
+        let start=Instant::now();files.prepare(Some(set.clone()),&lenz::folders::Folders::default(),if i%2==0{9999}else{0},false,area);terminal.draw(|f|files.draw(f,crate::chrome::palette())).unwrap();render.push(start.elapsed().as_secs_f64()*1000.);
         if let Some(value)=crate::perf::rss_mib(){rss.push(value);}
     }
     crate::perf::record("tui/chrome/cached-render-10k-files","ms",&render);

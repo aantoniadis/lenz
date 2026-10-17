@@ -96,7 +96,7 @@ impl crate::app::App {
         if k.kind == KeyEventKind::Release || !k.modifiers.is_empty() && k.modifiers != KeyModifiers::SHIFT || self.commit_panel.area.height == 0 { return false; }
         if self.navigator.focused {
             // Files' first file
-            if k.code == KeyCode::Up && !self.navigator.search.active() && self.navigator.candidate() == 0 {
+            if k.code == KeyCode::Up && !self.navigator.search.active() && self.navigator.on_first_file() {
                 (self.navigator.focused, self.commit_panel.focused) = (false, true);
                 return true;
             }

@@ -261,6 +261,9 @@ pub fn discard_disabled(set: &ChangeSet, index: usize, spec: &Spec) -> Option<&'
     if c.status == Status::Conflicted {
         return Some("Resolve the conflict with the merge workflow");
     }
+    if c.in_archive() {
+        return Some("A file inside an archive cannot be discarded on its own");
+    }
     if matches!(c.right, Content::Submodule(_)) || matches!(c.left, Content::Submodule(_)) {
         return Some("Submodule discard is unsupported");
     }

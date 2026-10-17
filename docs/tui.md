@@ -64,6 +64,12 @@ Writes use the same snapshots, encoding and line-ending preservation, read-only 
 
 Images draw as colored half-block cells. `m` cycles the modes; `0` fits and `1` shows 1:1; `+`/`-` zoom; arrows pan; `,` / `.` change the opacity or Swipe split; `n`/`p` step through changed regions. Every image command, including copying paths and opening the original externally, is also in the palette.
 
+### Archives
+
+A changed zip or tarball appears in Files as a folder (`bundle.zip/src`) of its changed files, collapsed at first with its file count. They are read-only, and Show file history follows the archive. The GUI behaves the same way; the [README](../README.md#editing-and-saving) lists the formats and limits.
+
+Folder headings in Files collapse and expand: click the ▾/▸ arrow (the heading's first two cells), or use the keys. Up/Down walk files and headings; on a heading the **Folder Summary** shows in the diff area, Left collapses it, Right expands it and Enter toggles it; Left on a file moves to its folder's heading. A click on a heading's name shows its summary too. Click the summary, or Esc out of Files, to give it the keyboard: Up/Down select a file, Enter or a click opens it, Left/Right collapse or expand the folder, and Esc returns to the file behind it. The palette lists the same folder commands as the GUI.
+
 ### Markdown Preview
 
 **Source | Inline | Side by side** sit in the pane header of eligible Markdown comparisons and in the palette; the [Markdown Preview guide](markdown.md) covers what is rendered and the source-fidelity rules. Terminal specifics:

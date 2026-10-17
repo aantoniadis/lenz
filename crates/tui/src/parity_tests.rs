@@ -990,3 +990,379 @@ fn commit_context_menu_compares_with_a_branch_and_opens_the_commit_in_a_new_view
     let (request, _) = app.new_view.take().expect("a new view for the commit");
     assert!(matches!(&request.spec, Spec::Git { revs, .. } if revs.last() == Some(&head) && revs.len() == 2));
 }
+
+/// A zip of `files` (path, content) made by `git archive`, which every test machine has.
+fn git_zip(files: &[(&str, &str)]) -> Vec<u8> {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-q"]);
+    for (path, content) in files {
+        let path = source.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+    git(source.path(), &["add", "-A"]);
+    git(source.path(), &["commit", "-qm", "archive"]);
+    let out = Command::new("git").args(["archive", "--format=zip", "HEAD"]).current_dir(source.path()).output().unwrap();
+    assert!(out.status.success());
+    out.stdout
+}
+
+#[test]
+fn committed_zip_opens_as_a_folder_whose_files_show_their_changes_read_only() {
+    let dir = repository();
+    std::fs::write(dir.path().join("bundle.zip"), git_zip(&[("src/main.rs", "fn main() {\n    old();\n}\n"), ("gone.txt", "bye\n")])).unwrap();
+    git(dir.path(), &["add", "bundle.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add bundle"]);
+    let v2 = git_zip(&[("src/main.rs", "fn main() {\n    new_call();\n}\n"), ("added.txt", "hi\n")]);
+    std::fs::write(dir.path().join("bundle.zip"), &v2).unwrap();
+    git(dir.path(), &["commit", "-qam", "Change bundle"]);
+    let mut app = open(dir.path(), &["HEAD~", "HEAD"]);
+    // the archive starts collapsed, and with nothing else changed its summary covers the first file
+    let buffer = draw(&mut app, 160, 30);
+    assert!(screen(&buffer).contains("▸ bundle.zip · 3 files"), "{}", screen(&buffer));
+    assert_eq!(app.session.folders.summary().map(|s| s.folder.as_str()), Some("bundle.zip"));
+    // a click on the heading's arrow expands it: the archive's members, as folders
+    let (x, y) = cell_of(&buffer, "▸ bundle.zip");
+    left_click(&mut app, (x, y));
+    let visible = screen(&draw(&mut app, 160, 30));
+    for row in ["bundle.zip/src", "main.rs", "added.txt", "gone.txt"] {
+        assert!(visible.contains(row), "{row} in {visible}");
+    }
+    // Esc leaves Files, where ] is search text; ] steps to the member's comparison, which shows both versions of the
+    // file inside the archive
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    for _ in 0..app.session.comparisons().len() {
+        if app.session.labels().1 == "bundle.zip/src/main.rs" { break; }
+        key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+        ready(&mut app);
+    }
+    assert_eq!(app.session.labels().1, "bundle.zip/src/main.rs");
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("old();") && visible.contains("new_call();"), "{visible}");
+    // Apply is refused with the reason, and nothing is written
+    key(&mut app, KeyCode::Right, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert!(app.session.notice().is_some_and(|n| n.contains("inside an archive")), "{:?}", app.session.notice());
+    assert_eq!(std::fs::read(dir.path().join("bundle.zip")).unwrap(), v2);
+    // Show file history follows the archive git knows
+    key(&mut app, KeyCode::F(10), KeyModifiers::NONE);
+    text(&mut app, "show file history");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    let followed = app.repository.as_ref().and_then(|r| r.core.picker.file_paths.as_ref()).map(|(path, _)| path.clone());
+    assert_eq!(followed.as_deref(), Some("bundle.zip"));
+}
+
+/// The screen cell where `needle` starts, from the last drawn buffer.
+fn cell_of(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let width = usize::from(buffer.area.width);
+    for y in 0..buffer.area.height {
+        let row: String = (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+        if let Some(at) = row.find(needle) {
+            return (row[..at].chars().count().min(width) as u16, y);
+        }
+    }
+    panic!("{needle} not on screen:\n{}", screen(buffer));
+}
+
+fn left_click(app: &mut App, (column, row): (u16, u16)) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE }));
+    app.poll();
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Up(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE }));
+    app.poll();
+}
+
+#[test]
+fn archive_folders_start_collapsed_and_show_a_summary_of_their_changed_files() {
+    use lenz::folders::{FolderAction, Stat};
+    let dir = repository();
+    std::fs::write(dir.path().join("bundle.zip"), git_zip(&[("src/main.rs", "fn main() {\n    old();\n}\n"), ("gone.txt", "bye\n")])).unwrap();
+    git(dir.path(), &["add", "bundle.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add bundle"]);
+    std::fs::write(dir.path().join("bundle.zip"), git_zip(&[("src/main.rs", "fn main() {\n    new_call();\n    more();\n}\n"), ("added.txt", "hi\n")])).unwrap();
+    std::fs::write(dir.path().join("file.rs"), "const VALUE: &str = \"third\";\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "Change bundle"]);
+    let mut app = open(dir.path(), &["HEAD~", "HEAD"]);
+    // the archive is one collapsed heading with its file count; the plain file is shown
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("▸ bundle.zip · 3 files") && !visible.contains("added.txt"), "{visible}");
+    assert_eq!(app.session.labels().1, "file.rs");
+    // ] skips the hidden files
+    key(&mut app, KeyCode::Char(']'), KeyModifiers::NONE);
+    assert_eq!(app.session.labels().1, "file.rs");
+    assert!(app.session.notice().is_some_and(|n| n.contains("No later visible file")), "{:?}", app.session.notice());
+    // a click on the heading's name shows the summary, its counts filled in the background
+    let buffer = draw(&mut app, 160, 30);
+    let (x, y) = cell_of(&buffer, "bundle.zip · 3");
+    left_click(&mut app, (x + 2, y));
+    ready(&mut app);
+    let summary = app.session.folders.summary().cloned().expect("the summary shows");
+    assert_eq!(summary.folder, "bundle.zip");
+    let main = summary.files.iter().copied().find(|&i| app.session.comparisons()[i].path.ends_with("src/main.rs")).unwrap();
+    assert_eq!(app.session.folders.stat(main), Some(&Stat::Lines { added: 2, removed: 1 }));
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("bundle.zip · 3 changed files") && visible.contains("src/main.rs") && visible.contains("+2 −1"), "{visible}");
+    assert!(!visible.contains("third"), "the comparison behind the summary doesn't show through: {visible}");
+    // a click on the summary's heading gives it the keyboard; down to main.rs, Enter opens it, and the archive
+    // expands to show it
+    let at = cell_of(&draw(&mut app, 160, 30), "3 changed files");
+    left_click(&mut app, at);
+    assert!(!app.navigator.focused);
+    for _ in 0..summary.files.len() {
+        if app.session.folders.selected_file() == Some(main) { break; }
+        key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert_eq!(app.session.folders.selected_file(), Some(main));
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    assert!(app.session.folders.summary().is_none());
+    assert_eq!(app.session.labels().1, "bundle.zip/src/main.rs");
+    assert!(screen(&draw(&mut app, 160, 30)).contains("▾ bundle.zip"));
+    // Collapse all archives from the palette hides the file on screen, so its folder's summary takes its place
+    app.run_action(lenz::catalog::Action::Folder(FolderAction::CollapseArchives));
+    assert!(app.session.folders.collapsed("bundle.zip"));
+    assert_eq!(app.session.folders.summary().map(|s| s.folder.as_str()), Some("bundle.zip/src"));
+    // Esc goes back to the file, its folders expanded again
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.session.folders.summary().is_none() && !app.session.folders.collapsed("bundle.zip"));
+    assert_eq!(app.session.labels().1, "bundle.zip/src/main.rs");
+    // with nothing to collapse at the top level, the palette says why
+    use lenz::catalog::Availability;
+    assert!(app.disabled(lenz::catalog::Action::Folder(FolderAction::ExpandAll)).is_some_and(|why| why.contains("No folder is collapsed")));
+}
+
+#[test]
+fn files_keys_walk_folder_headings_as_a_tree() {
+    let dir = repository();
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("x.txt", "1\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add a.zip"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("x.txt", "2\n"), ("y.txt", "y\n")])).unwrap();
+    std::fs::write(dir.path().join("file.rs"), "changed\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "Change a.zip"]);
+    let mut app = open(dir.path(), &["HEAD~", "HEAD"]);
+    draw(&mut app, 160, 30);
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(app.navigator.focused);
+    // Down from the file reaches the archive's heading: its summary shows
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(app.session.folders.summary().map(|s| s.folder.as_str()), Some("a.zip"));
+    // Right expands it, Down walks into it and opens its first file
+    key(&mut app, KeyCode::Right, KeyModifiers::NONE);
+    draw(&mut app, 160, 30);
+    assert!(!app.session.folders.collapsed("a.zip"));
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(app.session.labels().1, "a.zip/x.txt");
+    assert!(app.session.folders.summary().is_none());
+    // Left on a file goes to its folder's heading; Left there collapses it
+    key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    draw(&mut app, 160, 30);
+    assert_eq!(app.session.folders.summary().map(|s| s.folder.as_str()), Some("a.zip"));
+    key(&mut app, KeyCode::Left, KeyModifiers::NONE);
+    assert!(app.session.folders.collapsed("a.zip"));
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("▸ a.zip · 2 files"), "{visible}");
+}
+
+/// A repository whose last commit changes all 60 files inside `big.zip`, open on `HEAD~ HEAD` (on the zip's summary).
+fn big_archive() -> (tempfile::TempDir, App) {
+    let dir = repository();
+    let files = |v: &str| (0..60).map(|i| (format!("dir/f{i:02}.txt"), format!("{v} {i}\n"))).collect::<Vec<_>>();
+    fn pairs(f: &[(String, String)]) -> Vec<(&str, &str)> { f.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect() }
+    std::fs::write(dir.path().join("big.zip"), git_zip(&pairs(&files("old")))).unwrap();
+    git(dir.path(), &["add", "big.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add big"]);
+    std::fs::write(dir.path().join("big.zip"), git_zip(&pairs(&files("new")))).unwrap();
+    git(dir.path(), &["commit", "-qam", "Change big"]);
+    let app = open(dir.path(), &["HEAD~", "HEAD"]);
+    (dir, app)
+}
+
+#[test]
+fn a_long_summary_scrolls_with_its_keyboard_row_at_every_size_and_esc_leaves_it() {
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let (_dir, mut app) = big_archive();
+    assert_eq!(app.session.folders.summary().map(|s| s.files.len()), Some(60));
+    let buffer = draw(&mut app, 160, 20);
+    let at = cell_of(&buffer, "60 changed files");
+    left_click(&mut app, at);
+    // End then Up: the keyboard row is always on screen
+    key(&mut app, KeyCode::End, KeyModifiers::NONE);
+    assert_eq!(app.session.folders.summary().map(|s| s.selected), Some(59));
+    assert!(screen(&draw(&mut app, 160, 20)).contains("dir/f59.txt"));
+    key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    let visible = screen(&draw(&mut app, 160, 20));
+    assert!(visible.contains("dir/f58.txt") && !visible.contains("dir/f00.txt"), "{visible}");
+    // the wheel scrolls away from it, and the next key brings it back
+    for _ in 0..30 { app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollUp, column: at.0, row: at.1 + 3, modifiers: KeyModifiers::NONE })); }
+    let visible = screen(&draw(&mut app, 160, 20));
+    assert!(visible.contains("dir/f00.txt") && !visible.contains("dir/f58.txt"), "{visible}");
+    key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    assert!(screen(&draw(&mut app, 160, 20)).contains("dir/f57.txt"));
+    // tiny and empty sizes draw without panicking and keep the selection
+    for (w, h) in [(20, 10), (8, 3), (1, 1), (0, 0), (32, 6), (160, 20)] {
+        app.handle(Event::Resize(w, h));
+        draw(&mut app, w, h);
+        key(&mut app, KeyCode::End, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    }
+    assert_eq!(app.session.folders.summary().map(|s| s.selected), Some(58));
+    // Esc from the scrolled summary returns to the file behind it, its folders expanded
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.session.folders.summary().is_none() && !app.session.folders.collapsed("big.zip"));
+    assert!(screen(&draw(&mut app, 160, 20)).contains("big.zip/dir/f00.txt"));
+}
+
+#[test]
+fn dialogs_over_the_summary_take_its_keys() {
+    let (_dir, mut app) = big_archive();
+    let at = cell_of(&draw(&mut app, 160, 30), "60 changed files");
+    left_click(&mut app, at);
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    let selected = app.session.folders.summary().map(|s| s.selected);
+    assert_eq!(selected, Some(1));
+    // the palette and help consume the arrows and Enter; the summary keeps its row and stays open
+    key(&mut app, KeyCode::F(10), KeyModifiers::NONE);
+    assert!(app.command_palette.is_some());
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.command_palette.is_none());
+    key(&mut app, KeyCode::Char('?'), KeyModifiers::NONE);
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut app, KeyCode::End, KeyModifiers::NONE);
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(app.session.folders.summary().map(|s| s.selected), selected);
+    assert_eq!(app.session.current(), 0, "no file opened behind the dialogs");
+}
+
+#[test]
+fn a_summary_and_a_pr_details_tab_never_share_the_diff_area() {
+    use lenz::{catalog::{Action, PrAction}, folders::FolderAction, pr_session::DetailsTab};
+    let (_dir, mut app) = big_archive();
+    let pr = lenz::pr::PullRequest { number: 9, title: "PR".into(), author: lenz::pr::Account { login: "author".into() }, state: lenz::pr::State::Open, is_draft: false,
+        body: "PR_BODY".into(), base_ref_name: "main".into(), head_ref_name: "feature".into(), head_ref_oid: "head".into(), url: "https://github.com/o/r/pull/9".into(),
+        additions: 1, deletions: 0, changed_files: 1, is_cross_repository: false, head_repository: None, head_repository_owner: None };
+    let mut state = lenz::pr_session::PrState::new(pr, lenz::pr::Fetched { number: 9, merge_base: "base".into(), head: "head".into() });
+    state.marks = None;
+    app.repository.as_mut().expect("a repository view").core.pr = Some(state);
+    assert!(app.session.folders.summary().is_some());
+    // a details tab, however it opens, closes the summary
+    app.run_action(Action::Pr(PrAction::Details(DetailsTab::Conversation)));
+    draw(&mut app, 160, 30);
+    assert!(app.pr_details_shown() && app.session.folders.summary().is_none());
+    // and the summary closes the tab
+    app.run_action(Action::Folder(FolderAction::Summary));
+    assert!(!app.pr_details_shown());
+    assert_eq!(app.session.folders.summary().map(|s| s.folder.as_str()), Some("big.zip/dir"));
+    let visible = screen(&draw(&mut app, 160, 30));
+    assert!(visible.contains("60 changed files") && !visible.contains("PR_BODY"), "{visible}");
+}
+
+#[test]
+fn a_heading_in_each_group_shows_that_group_only() {
+    let dir = repository();
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "1\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]);
+    git(dir.path(), &["commit", "-qm", "Add a.zip"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "2\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "3\n"), ("g.txt", "g\n")])).unwrap();
+    let mut app = open(dir.path(), &["log"]);
+    // Local changes: Staged and Unstaged, each with the archive's heading
+    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::LocalChanges));
+    ready(&mut app);
+    let buffer = draw(&mut app, 160, 40);
+    assert!(screen(&buffer).contains("▸ a.zip · 1 file") && screen(&buffer).contains("▸ a.zip · 2 files"), "{}", screen(&buffer));
+    left_click(&mut app, cell_of(&buffer, "a.zip · 2 files"));
+    let summary = app.session.folders.summary().cloned().expect("the summary shows");
+    assert_eq!(summary.files.iter().map(|&i| app.session.comparisons()[i].path.as_str()).collect::<Vec<_>>(), ["a.zip/f.txt", "a.zip/g.txt"]);
+    assert_eq!(summary.range, app.session.change_set().unwrap().groups[1].1);
+}
+
+#[test]
+fn archive_grouped_summary_cursor_uses_selected_group() {
+    let dir = repository();
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "1\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]); git(dir.path(), &["commit", "-qm", "Add archive"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "2\n")])).unwrap();
+    git(dir.path(), &["add", "a.zip"]);
+    std::fs::write(dir.path().join("a.zip"), git_zip(&[("f.txt", "3\n"), ("g.txt", "g\n")])).unwrap();
+    let mut app = open(dir.path(), &["log"]);
+    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::LocalChanges)); ready(&mut app);
+    let b = draw(&mut app,160,40); left_click(&mut app,cell_of(&b,"a.zip · 2 files"));
+    let expected=app.session.change_set().unwrap().groups[1].1.start;
+    assert_eq!(app.session.folders.summary().unwrap().range.start,expected);
+    let b = draw(&mut app, 160, 40);
+    let staged = cell_of(&b, "a.zip · 1 file");
+    let unstaged = cell_of(&b, "a.zip · 2 files");
+    assert_ne!(b[staged].bg, b[unstaged].bg, "only the selected group heading is highlighted");
+    key(&mut app,KeyCode::Right,KeyModifiers::NONE); draw(&mut app,160,40);
+    key(&mut app,KeyCode::Down,KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.current(),expected,"Down should open first Unstaged member, not Staged");
+}
+#[test]
+fn archive_first_summary_row_click_opens_it_while_files_focused() {
+    let (_dir,mut app)=big_archive();
+    let b=draw(&mut app,160,30);
+    left_click(&mut app,cell_of(&b,"big.zip · 60 files"));
+    assert!(app.navigator.focused);
+    let b=draw(&mut app,160,30); let at=cell_of(&b,"M dir/f01.txt");
+    left_click(&mut app,at);ready(&mut app);
+    assert!(app.session.folders.summary().is_none(),"first row click must open the row without an extra focus click");
+    assert!(app.session.labels().1.ends_with("f01.txt"));
+}
+
+#[test]
+fn archive_plain_reload_key_reads_changed_tar_members() {
+    let source = repository();
+    let d = tempfile::tempdir().unwrap();
+    let archive = |rev| {
+        let out = Command::new("git").args(["archive", "--format=tar.gz", rev]).current_dir(source.path()).output().unwrap();
+        assert!(out.status.success()); out.stdout
+    };
+    std::fs::write(d.path().join("left.tgz"), archive("HEAD~")).unwrap();
+    std::fs::write(d.path().join("right.tgz"), archive("HEAD")).unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.tgz", "right.tgz"]);
+    app.session.open_file(0); ready(&mut app);
+    assert!(app.session.document().unwrap().text(Side::Right).contains("second needle"));
+    std::fs::write(source.path().join("file.rs"), "third needle\n").unwrap();
+    git(source.path(), &["commit", "-qam", "third"]);
+    std::fs::write(d.path().join("right.tgz"), archive("HEAD")).unwrap();
+    key(&mut app, KeyCode::F(5), KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.document().unwrap().text(Side::Right), "third needle\n");
+}
+
+#[test]
+fn summary_reload_key_refreshes_counts() {
+    use lenz::folders::Stat;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("left.txt"), "old\n").unwrap(); std::fs::write(d.path().join("right.txt"), "new\n").unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.txt", "right.txt"]);
+    app.session.show_folder_of(0); ready(&mut app);
+    assert_eq!(app.session.folders.stat(0), Some(&Stat::Lines { added: 1, removed: 1 }));
+    std::fs::write(d.path().join("right.txt"), "new\nmore\nlast\n").unwrap();
+    key(&mut app, KeyCode::F(5), KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.folders.stat(0), Some(&Stat::Lines { added: 3, removed: 1 }));
+}
+
+#[test]
+fn summary_narrow_counts_stay_inside_the_pane() {
+    use ratatui::{layout::Rect, style::Style};
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("left.bin"), vec![0; 1000]).unwrap(); std::fs::write(d.path().join("right.bin"), vec![0; 1001]).unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.bin", "right.bin"]);
+    app.session.show_folder_of(0); ready(&mut app);
+    let set = app.session.change_set().unwrap();
+    let mut pane = crate::summary::SummaryPane::default();
+    let mut terminal = Terminal::new(TestBackend::new(50, 10)).unwrap();
+    for (width, palette) in [8, 18, 32].into_iter().flat_map(|width| [&lenz::theme::DARCULA, &lenz::theme::LIGHT].map(|palette| (width, palette))) {
+        let area = Rect::new(50 - width, 0, width, 10);
+        terminal.draw(|frame| {
+            for y in 0..10 { frame.buffer_mut().set_string(0, y, "X".repeat(50), Style::default()); }
+            pane.draw(frame, area, &set, &app.session.folders, palette);
+        }).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 { for x in 0..area.x { assert_eq!(buffer[(x, y)].symbol(), "X", "outside summary at {x},{y}, width {width}"); } }
+    }
+}
