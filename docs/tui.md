@@ -78,7 +78,7 @@ Folder headings in Files collapse and expand: click the ▾/▸ arrow (the headi
 - A click on a removed word selects the old text; the arrow keys move a caret in the new text. Foldable callouts show ▸ or ▾ after the title and fold with a click or Enter; a callout containing a change starts open.
 - Callouts, `==highlights==`, tags, links, footnotes, properties and done tasks use theme colors and styles (see the guide).
 - Local images are decoded in the background and drawn at most 20 rows tall: as real pixels through kitty graphics Unicode placeholders in kitty and Ghostty (not inside tmux), as half-block cells elsewhere. `LENZ_IMAGES=cells|kitty` overrides detection (`sixel` also selects cells here). A missing or unreadable image keeps its placeholder text.
-- Three-way merge panes and PR metadata dialogs keep their plain rendering.
+- Three-way merge panes keep their plain rendering. PR conversations share the Markdown file parser and terminal text styles; the GUI also reuses its reading fonts and inline styling in a 30% wider column, formatted in the background. PR tables keep compact text separators and images remain linked placeholders; the timeline does not offer the Preview's image or callout controls. The PR wheel moves one row per notch; the GUI accumulates small trackpad movements instead of treating every event as three rows.
 
 ### Themes and icons
 
@@ -89,6 +89,10 @@ The terminal shares the GUI's themes and the [theme IDs, file format and precede
 ## Repository and pull request controls
 
 The commit list appears before the sidebar finishes loading. Very long histories load in steps of about 50,000 commits beyond the furthest visible row; scrolling toward the end, End, a commit search, a log filter or a branch comparison loads more. While paused, the log title reads, for example, "74160+ commits, more as you scroll", and the GUI shows the same wording.
+
+The sidebar first reads 20 local branches, keeping the current branch first. Remote branches and open pull requests also arrive in batches of about 20; a `+` after a section's count and **Load more…** indicate more are available. Branch and remote filters search the whole local inventory in the background; PR filtering covers loaded requests, with **Load more pull requests…** still available. Worktree status and the remaining repository details finish independently of the first comparison. Local refresh keeps the requested branch coverage and cached PR list. GitHub listing and PR fetching use separate workers from local navigation.
+
+Selecting or refreshing a PR in the repository view shows a persistent **Loading pull request…** message, including its number when supplied, until it completes or fails. The previous comparison stays usable; choosing another comparison cancels the loading state and ignores the obsolete result.
 
 - **Panes:** Ctrl-R shows or hides the picker. In the Sources pane Ctrl-S and Ctrl-L toggle the sidebar and the log. Sources are Local Changes, staged, branches, remotes, tags, stashes, worktrees and pull requests; arrows and Enter select, `/` filters, `c`/`C` compare the selected or current branch by merge base or tips, `a`/`b` show all or current-branch history, `s` shows staged changes, and `o` opens a worktree as an independent view.
 - **Files:** the commit's files stay listed beside the comparison, grouped by directory and marked with their Git status; selecting a commit replaces the list. Alt-1 toggles the pane, and narrow terminals use the file finder instead.

@@ -20,12 +20,12 @@ struct WrapRun<'a> {
     index_prefix: Vec<usize>,
     x_prefix: Vec<Pixels>,
 }
-struct WrapLookup<'a> {
+pub(super) struct WrapLookup<'a> {
     line: &'a gpui::LineLayout,
     runs: Vec<WrapRun<'a>>,
 }
 impl<'a> WrapLookup<'a> {
-    fn new(line: &'a gpui::LineLayout) -> Self {
+    pub(super) fn new(line: &'a gpui::LineLayout) -> Self {
         let mut max_index = 0;
         let mut max_x = px(f32::NEG_INFINITY);
         let runs = line.runs.iter().filter(|r| !r.glyphs.is_empty()).map(|run| {
@@ -46,14 +46,14 @@ impl<'a> WrapLookup<'a> {
         }).collect();
         Self { line, runs }
     }
-    fn x_for_index(&self, index: usize) -> Pixels {
+    pub(super) fn x_for_index(&self, index: usize) -> Pixels {
         let run = self.runs.partition_point(|r| r.max_index < index);
         let Some(run) = self.runs.get(run) else { return self.line.width; };
         let at = if run.index_prefix.is_empty() { run.glyphs.partition_point(|g| g.index < index) }
                  else { run.index_prefix.partition_point(|i| *i < index) };
         run.glyphs[at].position.x
     }
-    fn closest_index_for_x(&self, x: Pixels) -> usize {
+    pub(super) fn closest_index_for_x(&self, x: Pixels) -> usize {
         let run_index = self.runs.partition_point(|r| r.max_x < x);
         let Some(run) = self.runs.get(run_index) else {
             return if self.line.len == 1 && x <= self.line.width / 2. { 0 } else { self.line.len };

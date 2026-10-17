@@ -105,6 +105,13 @@ pub struct Sources {
     pub stashes: Vec<repo::Stash>,
     /// Open pull requests (when a remote is on GitHub and `gh` works), loaded in the background.
     pub prs: Vec<crate::pr::ListedPr>,
+    pub branches_more: bool,
+    pub branches_loading: bool,
+    pub remotes_more: bool,
+    pub remotes_loading: bool,
+    pub prs_more: bool,
+    pub prs_loading: bool,
+    pub details_loading: bool,
     pub loaded: bool,
     /// Collapsed sections, by title.
     pub collapsed: std::collections::HashSet<&'static str>,
@@ -143,6 +150,8 @@ pub enum SourceAction {
     Worktree(PathBuf),
     Stash(String),
     ShowAllBranches,
+    MorePrs,
+    MoreRemotes,
     /// Open pull request number.
     Pr(u64),
 }
@@ -160,18 +169,27 @@ pub struct SourceRow {
 pub const HISTORY_WINDOW: u64 = 50_000;
 
 const COLLAPSED: [&str; 3] = ["Remotes", "Tags", "Stashes"];
+pub const SOURCE_BATCH: usize = 20;
 
 impl Sources {
     pub fn read(root: &Path) -> Sources {
+        Self::read_limited(root,SOURCE_BATCH)
+    }
+    fn read_limited(root:&Path,limit:usize)->Sources {
+        let mut sources=Self::read_details(root,SOURCE_BATCH);
+        sources.set_branches(repo::branches_limited(root,limit.saturating_add(1)).unwrap_or_default(),limit);
+        sources
+    }
+    fn read_details(root:&Path,remote_limit:usize)->Sources {
         let worktrees = repo::worktrees(root).unwrap_or_default();
+        let (remotes,remotes_more)=repo::remotes_limited(root,remote_limit).unwrap_or_default();
         Sources {
             local: worktrees
                 .iter()
                 .find(|w| w.current)
                 .and_then(|w| w.dirty)
                 .unwrap_or(0),
-            branches: repo::branches(root).unwrap_or_default(),
-            remotes: repo::remotes(root).unwrap_or_default(),
+            remotes,remotes_more,
             tags: repo::tags(root).unwrap_or_default(),
             worktrees,
             stashes: repo::stashes(root).unwrap_or_default(),
@@ -180,10 +198,24 @@ impl Sources {
             ..Default::default()
         }
     }
+    fn set_branches(&mut self,mut branches:Vec<repo::Branch>,limit:usize) {
+        self.branches_more=branches.len()>limit;
+        branches.truncate(limit);
+        self.branches=branches;
+        self.branches_loading=false;
+    }
 
     /// Read local inventory plus conflict summary without any GitHub calls.
     pub fn read_repository(root: &Path) -> Sources {
-        let mut sources=Self::read(root);
+        Self::read_repository_limited(root,SOURCE_BATCH,SOURCE_BATCH)
+    }
+    fn read_repository_limited(root:&Path,limit:usize,remote_limit:usize)->Sources {
+        let mut sources=Self::read_repository_details(root,remote_limit);
+        sources.set_branches(repo::branches_limited(root,limit.saturating_add(1)).unwrap_or_default(),limit);
+        sources
+    }
+    fn read_repository_details(root:&Path,remote_limit:usize)->Sources {
+        let mut sources=Self::read_details(root,remote_limit);
         sources.conflicts=crate::conflict_session::read(root,&[]).ok().flatten().map(|snapshot| {
             let left=snapshot.files.len();
             ConflictsEntry { lines:crate::conflict_session::entry_text(&snapshot.op,left,left+snapshot.marked.len()),
@@ -197,6 +229,7 @@ impl Sources {
         fresh.collapsed=std::mem::take(&mut self.collapsed);
         fresh.selected=self.selected;fresh.scroll=self.scroll;fresh.show_all_branches=self.show_all_branches;
         fresh.prs=std::mem::take(&mut self.prs);
+        fresh.prs_more=self.prs_more;fresh.prs_loading=self.prs_loading;
         *self=fresh;
     }
     /// The sidebar's rows: section headers with counts, then entries, filtered by `filter`.
@@ -206,11 +239,12 @@ impl Sources {
         let mut out = Vec::new();
         let header = |out: &mut Vec<SourceRow>, title: &'static str, n: usize| {
             let open = !self.collapsed.contains(title);
+            let more=match title{"Branches"=>self.branches_more,"Remotes"=>self.remotes_more,"Pull requests"=>self.prs_more,_=>false};
             out.push(SourceRow {
                 text: format!(
-                    "{} {}  {n}",
+                    "{} {}  {n}{}",
                     if open { "▾" } else { "▸" },
-                    title.to_uppercase()
+                    title.to_uppercase(),if more{"+"}else{""}
                 ),
                 color: p.dim,
                 indent: 0.0,
@@ -256,7 +290,7 @@ impl Sources {
             }
         }
         out.push(entry(
-            format!("± Local changes  {}", self.local),
+            if self.details_loading{"± Local changes · loading…".into()}else{format!("± Local changes  {}", self.local)},
             p.status[2],
             SourceAction::Local,
             false,
@@ -285,9 +319,9 @@ impl Sources {
                     walking_one(&refname),
                 ));
             }
-            if shown.len() > limit {
+            if self.branches_more || self.branches_loading || shown.len() > limit {
                 out.push(entry(
-                    format!("Show all {} branches", shown.len()),
+                    if self.branches_loading { "Loading branches…".into() } else { "Load more branches…".into() },
                     p.dim,
                     SourceAction::ShowAllBranches,
                     false,
@@ -295,7 +329,7 @@ impl Sources {
             }
         }
         let remote_count: usize = self.remotes.iter().map(|r| r.branches.len()).sum();
-        if remote_count > 0 && header(&mut out, "Remotes", remote_count) {
+        if (remote_count > 0||self.remotes_more||self.remotes_loading) && header(&mut out, "Remotes", remote_count) {
             for r in &self.remotes {
                 for b in r.branches.iter().filter(|b| keep(&b.name)) {
                     let refname = format!("refs/remotes/{}", b.name);
@@ -306,6 +340,9 @@ impl Sources {
                         walking_one(&refname),
                     ));
                 }
+            }
+            if self.remotes_more||self.remotes_loading{
+                out.push(entry(if self.remotes_loading{"Loading remote branches…"}else{"Load more remote branches…"}.into(),p.dim,SourceAction::MoreRemotes,false));
             }
         }
         if !self.tags.is_empty() && header(&mut out, "Tags", self.tags.len()) {
@@ -353,7 +390,7 @@ impl Sources {
                 ));
             }
         }
-        if !self.prs.is_empty() && header(&mut out, "Pull requests", self.prs.len()) {
+        if (!self.prs.is_empty() || self.prs_more || self.prs_loading) && header(&mut out, "Pull requests", self.prs.len()) {
             for pr in self
                 .prs
                 .iter()
@@ -367,6 +404,12 @@ impl Sources {
                     false,
                 ));
             }
+            if self.prs_more || self.prs_loading {
+                out.push(entry(if self.prs_loading {"Loading pull requests…"}else{"Load more pull requests…"}.into(),p.dim,SourceAction::MorePrs,false));
+            }
+        }
+        if self.details_loading {
+            out.push(SourceRow{text:"Loading repository details…".into(),color:p.dim,indent:14.,action:None,current:false});
         }
         out
     }
@@ -534,7 +577,7 @@ impl Picker {
             compare: None,
             started: None,
             graph_notice: false,
-            sources: Sources::default(),
+            sources: Sources{collapsed:COLLAPSED.into_iter().collect(),..Default::default()},
             title_branch: String::new(),
             empty_tree: None,
             history_generation: 0,
@@ -910,10 +953,13 @@ pub enum SourcePlan {
     Worktree(PathBuf),
     Stash(String),
     Pr(u64),
+    MoreBranches,
+    MorePrs,
+    MoreRemotes,
 }
 impl Picker {
     pub fn source_action(&mut self, action: SourceAction) -> SourcePlan {
-        if !matches!(&action,SourceAction::Toggle(_)|SourceAction::ShowAllBranches|SourceAction::CopyCommand(_)){self.cancel_refresh();}
+        if !matches!(&action,SourceAction::Toggle(_)|SourceAction::ShowAllBranches|SourceAction::MorePrs|SourceAction::MoreRemotes|SourceAction::CopyCommand(_)){self.cancel_refresh();}
         match action {
             SourceAction::Toggle(title) => {
                 if !self.sources.collapsed.remove(title) {
@@ -923,8 +969,10 @@ impl Picker {
             }
             SourceAction::ShowAllBranches => {
                 self.sources.show_all_branches = true;
-                SourcePlan::None
+                SourcePlan::MoreBranches
             }
+            SourceAction::MorePrs=>SourcePlan::MorePrs,
+            SourceAction::MoreRemotes=>SourcePlan::MoreRemotes,
             SourceAction::Conflicts => {
                 self.pick_generation += 1;
                 SourcePlan::Conflicts
@@ -1125,17 +1173,32 @@ pub fn command_label(command: &RepositoryCommand) -> &'static str {
 }
 
 type Inbox<T> = std::sync::mpsc::Receiver<Option<T>>;
+type Job = Box<dyn FnOnce() + Send>;
+type Worker = std::sync::OnceLock<std::sync::mpsc::Sender<Job>>;
 pub(crate) fn submit<T: Send + 'static>(
     token: &std::sync::Arc<()>,
     job: impl FnOnce() -> T + Send + 'static,
 ) -> Inbox<T> {
-    // A repository worker separate from document work: a slow fetch does not delay painting text.
-    type Job = Box<dyn FnOnce() + Send>;
-    static WORKER: std::sync::OnceLock<std::sync::mpsc::Sender<Job>> = std::sync::OnceLock::new();
-    let worker = WORKER.get_or_init(|| {
+    static WORKER:Worker=Worker::new();
+    submit_on(&WORKER,"lenz-repository",token,job)
+}
+fn submit_inventory<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
+    static WORKER:Worker=Worker::new();
+    submit_on(&WORKER,"lenz-inventory",token,job)
+}
+pub(crate) fn submit_github<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
+    static WORKER:Worker=Worker::new();
+    submit_on(&WORKER,"lenz-github",token,job)
+}
+fn submit_pr<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
+    static WORKER:Worker=Worker::new();
+    submit_on(&WORKER,"lenz-pr-fetch",token,job)
+}
+fn submit_on<T:Send+'static>(worker:&Worker,name:&str,token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
+    let worker = worker.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<Job>();
         std::thread::Builder::new()
-            .name("lenz-repository".into())
+            .name(name.into())
             .spawn(move || {
                 for job in rx {
                     job();
@@ -1179,11 +1242,29 @@ type RefreshSelection = (Option<String>, Option<String>, bool, usize, f32);
 type RefreshedInventory = (PickerRefresh, Inventory, RefreshFilters);
 type FollowedHistory = (String, Vec<(String, String)>);
 type FollowedResult = (HistoryRequest,Result<Vec<(String,String)>,String>);
+type BranchBatch = (usize,Result<Vec<repo::Branch>,String>);
+type RemoteBatch = Result<(Vec<repo::Remote>,bool),String>;
 
 pub fn read_inventory(cwd: PathBuf) -> RepositoryInventory {
+    read_inventory_limited(cwd,SOURCE_BATCH,SOURCE_BATCH)
+}
+fn read_inventory_limited(cwd:PathBuf,limit:usize,remote_limit:usize)->RepositoryInventory {
     let root=crate::changeset::toplevel(&cwd).unwrap_or(cwd);
     let head=crate::git::run(&root,&["rev-parse","HEAD"]).ok().map(|bytes|String::from_utf8_lossy(&bytes).trim().into());
-    RepositoryInventory{sources:Sources::read_repository(&root),refs:history::refs(&root).ok(),head,root}
+    RepositoryInventory{sources:Sources::read_repository_limited(&root,limit,remote_limit),refs:history::refs(&root).ok(),head,root}
+}
+fn read_startup_inventory(cwd:PathBuf)->RepositoryInventory {
+    let root=crate::changeset::toplevel(&cwd).unwrap_or(cwd);
+    let mut sources=Sources{loaded:true,details_loading:true,collapsed:COLLAPSED.into_iter().collect(),..Default::default()};
+    sources.set_branches(repo::branches_limited(&root,SOURCE_BATCH+1).unwrap_or_default(),SOURCE_BATCH);
+    let head=sources.branches.iter().find(|b|b.current).map(|b|b.sha.clone());
+    RepositoryInventory{sources,refs:None,head,root}
+}
+fn read_inventory_details(root:PathBuf)->RepositoryInventory {
+    let sources=Sources::read_repository_details(&root,SOURCE_BATCH);
+    let refs=history::refs(&root).ok();
+    let head=refs.as_ref().and_then(history::Refs::head).map(str::to_string);
+    RepositoryInventory{sources,refs,head,root}
 }
 
 /// Initial log/default-clean view: grouped local changes, otherwise a pinned HEAD commit.
@@ -1256,9 +1337,17 @@ pub struct RepositorySession {
     pick_token: std::sync::Arc<()>,
     filter_token: std::sync::Arc<()>,
     sources: Option<Inbox<Inventory>>,
+    source_details: Option<Inbox<Inventory>>,
+    branches: Option<Inbox<BranchBatch>>,
+    branch_token: std::sync::Arc<()>,
+    branch_limit: usize,
+    remotes: Option<Inbox<RemoteBatch>>,
+    remote_token:std::sync::Arc<()>,
+    remote_limit:usize,
     prs: Option<Inbox<Result<Vec<crate::pr::ListedPr>, crate::pr::PrError>>>,
     pending: Option<Inbox<Result<(ChangeSet, Spec), String>>>,
     opened: Option<Inbox<Result<crate::pr_session::Opened, crate::pr::PrError>>>,
+    opening_label: String,
     filter: Option<Inbox<(HistoryRequest,Result<DeepFilter, String>)>>,
     followed: Option<Inbox<FollowedResult>>,
     graph: Option<Inbox<Result<(), String>>>,
@@ -1317,7 +1406,9 @@ impl RepositorySession {
         }
         let mut state = Self::with_picker(picker);
         if shown {
-            state.sources = Some(submit(&state.token, move || read_inventory(cwd)));
+            state.picker.sources.branches_loading=true;
+            state.picker.sources.details_loading=true;
+            state.sources = Some(submit_inventory(&state.token, move || read_startup_inventory(cwd)));
             state.initial_follow = follow;
         }
         state
@@ -1466,7 +1557,10 @@ impl RepositorySession {
     fn new_pick(&mut self) {
         self.picker.pick_generation += 1;
         self.pick_token = std::sync::Arc::new(());
+        if self.opened.take().is_some()&&self.notice.as_deref()==Some("Fetching pull request…"){self.notice=None;}
     }
+    /// Persistent feedback until the request succeeds, fails, or another comparison supersedes it.
+    pub fn pr_loading(&self)->Option<&str>{self.opened.as_ref().map(|_|self.opening_label.as_str())}
 
     /// Review `found`, whose comparison is already accepted or shown: its commits in the log, its review
     /// threads in the background, its fetch refs removed with the session.
@@ -1570,9 +1664,17 @@ impl RepositorySession {
             pick_token: std::sync::Arc::new(()),
             filter_token: std::sync::Arc::new(()),
             sources: None,
+            source_details:None,
+            branches:None,
+            branch_token:std::sync::Arc::new(()),
+            branch_limit:SOURCE_BATCH,
+            remotes:None,
+            remote_token:std::sync::Arc::new(()),
+            remote_limit:SOURCE_BATCH,
             prs: None,
             pending: None,
             opened: None,
+            opening_label:String::new(),
             filter: None,
             followed: None,
             graph: None,
@@ -1594,6 +1696,9 @@ impl RepositorySession {
     pub fn busy(&self) -> bool {
         self.picker.loading
             || self.sources.is_some()
+            || self.source_details.is_some()
+            || self.branches.is_some()
+            || self.remotes.is_some()
             || self.refreshing.is_some()
             || self.prs.is_some()
             || self.pending.is_some()
@@ -1735,11 +1840,32 @@ impl RepositorySession {
         }
     }
     fn restart(&mut self, branches: Branches, want: Option<String>) {
+        if self.opened.is_some(){self.new_pick();}
         self.filter_token = std::sync::Arc::new(());
         self.filter = None;
         self.followed = None;
         self.picker.restart(branches, want);
         self.picker.start_stream();
+    }
+    fn load_branches(&mut self,limit:usize){
+        self.branch_token=std::sync::Arc::new(());
+        self.branch_limit=limit;
+        self.picker.sources.branches_loading=true;
+        self.picker.sources.show_all_branches=true;
+        let root=self.picker.root.clone();
+        self.branches=Some(submit_inventory(&self.branch_token,move||(limit,repo::branches_limited(&root,limit.saturating_add(1)))));
+    }
+    fn load_more_prs(&mut self){
+        if self.prs.is_some() || !self.picker.sources.prs_more{return;}
+        let root=self.picker.root.clone();let limit=self.picker.sources.prs.len()+SOURCE_BATCH+1;
+        self.picker.sources.prs_loading=true;
+        self.prs=Some(submit_github(&self.token,move||crate::pr::Gh::new(&root).list_open(limit)));
+    }
+    fn load_remotes(&mut self,limit:usize){
+        self.remote_token=std::sync::Arc::new(());self.remote_limit=limit;
+        self.picker.sources.remotes_loading=true;
+        let root=self.picker.root.clone();
+        self.remotes=Some(submit_inventory(&self.remote_token,move||repo::remotes_limited(&root,limit)));
     }
     pub fn poll(&mut self) -> bool {
         self.poll_rows(12.0)
@@ -1749,42 +1875,74 @@ impl RepositorySession {
         let mut changed = false;
         if let Some((plan,inventory,filters))=receive(&mut self.refreshing)
             && self.picker.refresh_is_current(&plan){
+            self.source_details=None;
             self.head=self.picker.apply_repository_inventory(inventory);
             let errors=self.picker.apply_refresh_filters(&plan,filters);
             self.notice=Some(if errors.is_empty(){"Repository refreshed".into()}else{errors.join("\n")});changed=true;
         }
         if let Some(inventory) = receive(&mut self.sources) {
-            let RepositoryInventory{sources,refs,head,root}=inventory;
-            self.picker.root=root;
             changed = true;
-            self.picker.sources = sources;
-            self.picker.refs = refs;
-            self.picker.title_branch = self
-                .picker
-                .sources
-                .branches
-                .iter()
-                .find(|branch| branch.current)
-                .map_or("HEAD", |branch| branch.name.as_str())
-                .into();
-            self.head = head;
+            // A refresh may have supplied the complete inventory before the first batch arrived.
+            if !self.picker.sources.loaded {
+                let RepositoryInventory{sources,refs,head,root}=inventory;
+                self.picker.root=root;
+                self.picker.sources.refresh_with(sources);
+                self.picker.refs = refs;
+                self.picker.title_branch = self
+                    .picker
+                    .sources
+                    .branches
+                    .iter()
+                    .find(|branch| branch.current)
+                    .map_or("HEAD", |branch| branch.name.as_str())
+                    .into();
+                self.head = head;
+                let details_root=self.picker.root.clone();
+                self.source_details=Some(submit_inventory(&self.token,move||read_inventory_details(details_root)));
+            }
             if !std::mem::take(&mut self.stream_early) {
                 self.picker.start_stream();
             }
             let root = self.picker.root.clone();
             if github_url(&root).is_some() {
-                self.prs = Some(submit(&self.token, move || {
-                    crate::pr::Gh::new(&root).list_open(30)
-                }));
+                self.picker.sources.prs_more=true;
+                self.load_more_prs();
             }
+            if !self.picker.sources.filter.is_empty(){self.load_branches(usize::MAX);}
             if let Some(path) = self.initial_follow.take() {
                 self.execute(RepositoryCommand::FileHistory(path));
             }
         }
+        if let Some(mut inventory)=receive(&mut self.source_details){
+            // A branch batch/filter may have completed while worktree status was being read.
+            inventory.sources.branches=std::mem::take(&mut self.picker.sources.branches);
+            inventory.sources.branches_more=self.picker.sources.branches_more;
+            inventory.sources.branches_loading=self.picker.sources.branches_loading;
+            self.head=self.picker.apply_repository_inventory(inventory);
+            if !self.picker.sources.filter.is_empty()&&self.picker.sources.remotes_more{self.load_remotes(usize::MAX);}
+            changed=true;
+        }
+        if let Some(result)=receive(&mut self.remotes){
+            self.picker.sources.remotes_loading=false;
+            match result{Ok((remotes,more))=>{self.picker.sources.remotes=remotes;self.picker.sources.remotes_more=more;},Err(e)=>self.notice=Some(e)}
+            changed=true;
+        }
+        if let Some((limit,result))=receive(&mut self.branches){
+            self.picker.sources.branches_loading=false;
+            match result{Ok(branches)=>self.picker.sources.set_branches(branches,limit),Err(e)=>self.notice=Some(e)}
+            changed=true;
+        }
         if let Some(result) = receive(&mut self.prs) {
             changed = true;
-            if let Ok(prs) = result {
-                self.picker.sources.prs = prs;
+            self.picker.sources.prs_loading=false;
+            match result {
+                Ok(mut prs)=>{
+                    let limit=self.picker.sources.prs.len()+SOURCE_BATCH;
+                    self.picker.sources.prs_more=prs.len()>limit;
+                    prs.truncate(limit);
+                    self.picker.sources.prs=prs;
+                }
+                Err(e)=>self.notice=Some(e.to_string()),
             }
         }
         let (stream_changed, pick) = self.picker.poll_stream(log_rows);
@@ -1889,9 +2047,11 @@ impl RepositorySession {
         self.picker.shown = shown;
         self.picker.focus = if shown { Pane::Log } else { Pane::Diff };
         if shown && !self.picker.sources.loaded && self.sources.is_none() {
+            self.picker.sources.branches_loading=true;
+            self.picker.sources.details_loading=true;
             // the log streams when the inventory arrives
             let root = self.picker.root.clone();
-            self.sources = Some(submit(&self.token, move || read_inventory(root)));
+            self.sources = Some(submit_inventory(&self.token, move || read_startup_inventory(root)));
         } else if shown && self.sources.is_none() && self.picker.stream.is_none() && self.picker.log.is_empty() && !self.picker.loading {
             self.picker.start_stream();
         }
@@ -1966,7 +2126,7 @@ impl RepositorySession {
         use RepositoryCommand as C;
         let step = matches!(&command, C::SelectRow { .. } | C::Move { .. } | C::Select | C::Walk(_) | C::ApplyFilter | C::ClearFilter | C::FileHistory(_)
                 | C::Compare { .. } | C::CompareRows(..) | C::Parent(_) | C::OpenPr(_))
-            || matches!(&command, C::Source(a) if !matches!(a, SourceAction::Toggle(_) | SourceAction::ShowAllBranches | SourceAction::CopyCommand(_)));
+            || matches!(&command, C::Source(a) if !matches!(a, SourceAction::Toggle(_) | SourceAction::ShowAllBranches | SourceAction::MorePrs | SourceAction::MoreRemotes | SourceAction::CopyCommand(_)));
         let is_move = matches!(command, C::Move { .. });
         // a step whose effect arrives later (file history, a deep filter, a pull request) counts at once
         let later = matches!(command, C::FileHistory(_) | C::ApplyFilter | C::OpenPr(_) | C::Compare { .. });
@@ -2029,6 +2189,9 @@ impl RepositorySession {
                     }));
                 }
                 SourcePlan::Pr(number) => self.execute(C::OpenPr(Some(number.to_string()))),
+                SourcePlan::MoreBranches=>if !self.picker.sources.branches_loading{self.load_branches(self.branch_limit.saturating_add(SOURCE_BATCH));},
+                SourcePlan::MorePrs=>self.load_more_prs(),
+                SourcePlan::MoreRemotes=>if !self.picker.sources.remotes_loading{self.load_remotes(self.remote_limit.saturating_add(SOURCE_BATCH));},
             },
             C::Move { delta, extend, two } => {
                 self.picker.move_selection(delta, extend, two);
@@ -2058,6 +2221,8 @@ impl RepositorySession {
                 self.picker.sources.filter = input;
                 self.picker.sources.selected = 0;
                 self.picker.sources.scroll = 0.0;
+                if !self.picker.sources.filter.is_empty()&&self.picker.sources.branches_more{self.load_branches(usize::MAX);}
+                if !self.picker.sources.filter.is_empty()&&self.picker.sources.remotes_more{self.load_remotes(usize::MAX);}
             }
             C::SourceMove(delta) => {
                 let last = self
@@ -2184,18 +2349,24 @@ impl RepositorySession {
                 self.overlay=None;
                 if let Some(pr)=self.pr.as_mut(){pr.execute(crate::pr_session::PrCommand::Close);}
                 let root = self.picker.root.clone();
-                self.opened = Some(submit(&self.pick_token, move || {
+                self.opening_label=match target.as_deref(){Some(t) if t.chars().all(|c|c.is_ascii_digit())=>format!("Loading pull request #{t}…"),Some(t)=>format!("Loading pull request {t}…"),None=>"Loading pull request…".into()};
+                self.opened = Some(submit_pr(&self.pick_token, move || {
                     crate::pr_session::open(&root, target.as_deref())
                 }));
                 self.notice = Some("Fetching pull request…".into());
             }
             C::RefreshRepository => {
+                self.branch_token=std::sync::Arc::new(());self.branches=None;
+                self.remote_token=std::sync::Arc::new(());self.remotes=None;self.picker.sources.remotes_loading=false;
+                self.picker.sources.branches_loading=false;
                 let plan=self.picker.begin_repository_refresh();
                 if plan.history{self.picker.start_stream();}
                 self.filter_token=std::sync::Arc::new(());self.filter=None;self.followed=None;
                 let root=self.picker.root.clone();
-                self.refreshing=Some(submit(&self.token,move||{
-                    let inventory=read_inventory(root);let filters=plan.read_filters();(plan,inventory,filters)
+                let limit=self.branch_limit;
+                let remote_limit=self.remote_limit;
+                self.refreshing=Some(submit_inventory(&self.token,move||{
+                    let inventory=read_inventory_limited(root,limit,remote_limit);let filters=plan.read_filters();(plan,inventory,filters)
                 }));
                 if let Some(spec)=self.current_spec.clone(){
                     self.initial_pick=false;self.new_pick();self.opened=None;
@@ -2245,7 +2416,7 @@ impl RepositorySession {
                         pr.pr.url.clone(),
                         pr.fetched.head.clone(),
                     );
-                    self.moved = Some(submit(&self.token, move || {
+                    self.moved = Some(submit_github(&self.token, move || {
                         crate::pr::Gh::new(&root).head_moved(&url, &head)
                     }));
                 }
@@ -2273,7 +2444,7 @@ impl Drop for RepositorySession {
             // Queue cleanup after any fetch already running, without waiting on network at exit.
             let token = std::sync::Arc::new(());
             let keep = token.clone();
-            let _ = submit(&token, move || {
+            let _ = submit_pr(&token, move || {
                 let _keep = keep;
                 let _ = crate::pr::remove_refs(&root);
             });
@@ -2301,6 +2472,158 @@ mod session_tests {
         let mut state = RepositorySession::open(&request, root.into());
         settle(&mut state);
         state
+    }
+    #[test]
+    fn repository_branches_load_in_batches_and_filter_finds_unloaded_branches() {
+        let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+        for n in 0..65 { git(root.path(),&["branch",&format!("topic-{n:03}")]); }
+        let mut state=open(root.path());
+        assert_eq!(state.picker.sources.branches.len(),20,"startup reads only the first branch batch");
+        assert!(state.picker.sources.branches[0].current);
+        for count in [40,60,66] {
+            let rows=state.picker.sources.rows_with_palette(&state.picker.branches,SourcePalette::default());
+            let more=rows.iter().position(|r| r.text.contains("Load more branches")).expect("more branches row");
+            state.execute(RepositoryCommand::SourceSelect(more));settle(&mut state);
+            assert_eq!(state.picker.sources.branches.len(),count);
+            assert!(!state.can_go_back(),"loading a batch is not navigation");
+        }
+        state.execute(RepositoryCommand::RefreshRepository);settle(&mut state);
+        assert_eq!(state.picker.sources.branches.len(),66,"refresh keeps the requested coverage");
+        let mut filtered=open(root.path());
+        filtered.execute(RepositoryCommand::SourceFilter("topic-064".into()));settle(&mut filtered);
+        assert!(filtered.picker.sources.rows_with_palette(&filtered.picker.branches,SourcePalette::default()).iter().any(|r| r.text.contains("topic-064")));
+    }
+
+    #[test]
+    fn repository_remote_branches_load_in_batches() {
+        let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+        for n in 0..45 {git(root.path(),&["update-ref",&format!("refs/remotes/origin/topic-{n:03}"),"HEAD"]);}
+        let count=|state:&RepositorySession|state.picker.sources.remotes.iter().map(|r|r.branches.len()).sum::<usize>();
+        let mut state=open(root.path());assert_eq!(count(&state),20);
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Remotes")));
+        for n in [40,45] {
+            let rows=state.picker.sources.rows_with_palette(&state.picker.branches,SourcePalette::default());
+            let more=rows.iter().position(|r|r.text.contains("Load more remote branches")).expect("more remotes row");
+            state.execute(RepositoryCommand::SourceSelect(more));settle(&mut state);assert_eq!(count(&state),n);
+        }
+        state.execute(RepositoryCommand::RefreshRepository);settle(&mut state);assert_eq!(count(&state),45);
+        let mut filtered=open(root.path());filtered.execute(RepositoryCommand::Source(SourceAction::Toggle("Remotes")));
+        filtered.execute(RepositoryCommand::SourceFilter("topic-044".into()));settle(&mut filtered);
+        assert!(filtered.picker.sources.rows_with_palette(&filtered.picker.branches,SourcePalette::default()).iter().any(|r|r.text.contains("topic-044")));
+    }
+
+    #[test]
+    fn repository_prs_load_in_batches_without_changing_the_comparison() {
+        let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+        write(root.path(),"file","two\n");commit_all(root.path(),"Two");
+        let _provider=crate::pr::test_support::markdown_provider(root.path());
+        let dir=root.path().join(".git/markdown-provider");
+        let script=std::fs::read_to_string(dir.join("gh.sh")).unwrap();
+        let script=script.lines().map(|line| if line.starts_with("  'pr list'*") {
+            "  'pr list'*) case \"$*\" in *'--limit 21 '*) cat \"$dir/list-21.json\";; *'--limit 41 '*) cat \"$dir/list-41.json\";; *) cat \"$dir/list-45.json\";; esac;;"
+        }else{line}).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("gh.sh"),script).unwrap();
+        for count in [21,41,45] {
+            let prs:Vec<_>=(1..=count).map(|number|serde_json::json!({"number":number,"title":format!("PR {number}"),"author":{"login":"tester"},"headRefName":"topic","baseRefName":"main","isDraft":false,"updatedAt":""})).collect();
+            std::fs::write(dir.join(format!("list-{count}.json")),serde_json::to_vec(&prs).unwrap()).unwrap();
+        }
+        let mut state=open(root.path());let before=state.current_spec.clone();
+        assert_eq!(state.picker.sources.prs.len(),20);
+        for count in [40,45] {
+            let rows=state.picker.sources.rows_with_palette(&state.picker.branches,SourcePalette::default());
+            let more=rows.iter().position(|r|r.text.contains("Load more pull requests")).expect("more PRs row");
+            state.execute(RepositoryCommand::SourceSelect(more));settle(&mut state);
+            assert_eq!(state.picker.sources.prs.len(),count);
+            assert_eq!(state.current_spec,before);
+        }
+        let rows=state.picker.sources.rows_with_palette(&state.picker.branches,SourcePalette::default());
+        assert!(!rows.iter().any(|r|r.text.contains("Load more pull requests")));
+        assert!(!state.can_go_back());
+    }
+
+    #[test]
+    fn a_slow_pr_list_does_not_block_local_navigation_or_opening_a_pr() {
+        let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+        write(root.path(),"file","two\n");commit_all(root.path(),"Two");
+        let _provider=crate::pr::test_support::markdown_provider(root.path());
+        let dir=root.path().join(".git/markdown-provider");
+        struct Release(PathBuf);
+        impl Drop for Release {fn drop(&mut self){let _=std::fs::write(&self.0,"");}}
+        let release=Release(dir.join("list-release"));
+        let script=std::fs::read_to_string(dir.join("gh.sh")).unwrap();
+        let script=script.lines().map(|line|if line.starts_with("  'pr list'*"){
+            "  'pr list'*) touch \"$dir/list-started\"; while [ ! -e \"$dir/list-release\" ]; do sleep 0.01; done; echo '[]';;"
+        }else{line}).collect::<Vec<_>>().join("\n");
+        std::fs::write(dir.join("gh.sh"),script).unwrap();
+        let request=crate::cli::parse(&["log".into()],root.path()).unwrap();
+        let mut state=RepositorySession::open(&request,root.path().into());
+        let start=std::time::Instant::now();
+        while !dir.join("list-started").exists(){state.poll();assert!(start.elapsed().as_secs()<10);std::thread::sleep(std::time::Duration::from_millis(2));}
+        state.take_change_set();
+        state.execute(RepositoryCommand::Source(SourceAction::Local));
+        let start=std::time::Instant::now();
+        while state.take_change_set().is_none(){state.poll();assert!(start.elapsed().as_secs()<10,"local comparison waited for GitHub");std::thread::sleep(std::time::Duration::from_millis(2));}
+        state.execute(RepositoryCommand::OpenPr(Some("9".into())));
+        assert!(state.pr_loading().unwrap().contains("#9"));
+        let start=std::time::Instant::now();
+        while state.pr.is_none(){state.poll();assert!(start.elapsed().as_secs()<10,"PR open waited for background listing");std::thread::sleep(std::time::Duration::from_millis(2));}
+        assert!(state.pr_loading().is_none());
+        assert!(!dir.join("list-release").exists());
+        drop(release);settle(&mut state);
+        assert_eq!(std::fs::read_to_string(root.path().join("file")).unwrap(),"two\n");
+    }
+
+    #[test]
+    fn early_refresh_keeps_startup_inventory_and_pr_bootstrap_even_when_cancelled() {
+        for cancel in [false,true] {
+            let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+            write(root.path(),"file","two\n");commit_all(root.path(),"Two");
+            let _provider=crate::pr::test_support::markdown_provider(root.path());
+            let initial=read_startup_inventory(root.path().into());
+            let request=crate::cli::parse(&["log".into()],root.path()).unwrap();
+            let mut state=RepositorySession::open(&request,root.path().into());
+            let (tx,rx)=std::sync::mpsc::sync_channel(1);state.sources=Some(rx);
+            git(root.path(),&["tag","after-startup"]);
+            state.execute(RepositoryCommand::RefreshRepository);
+            if cancel {state.execute(RepositoryCommand::Source(SourceAction::Local));}
+            else {
+                let start=std::time::Instant::now();
+                while state.refreshing.is_some(){state.poll();assert!(start.elapsed().as_secs()<10);std::thread::sleep(std::time::Duration::from_millis(2));}
+            }
+            let _=tx.send(Some(initial));settle(&mut state);
+            assert_eq!(state.picker.sources.prs.len(),1,"initial listing must survive early refresh, cancelled={cancel}");
+            assert!(state.picker.sources.loaded&&!state.picker.sources.details_loading);
+            assert!(state.picker.sources.tags.iter().any(|t|t.name=="after-startup"),"late first batch must not overwrite refreshed details");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn repository_startup_many_branches_perf() {
+        let root=repo();write(root.path(),"file","one\n");commit_all(root.path(),"One");
+        let head=git(root.path(),&["rev-parse","HEAD"]).trim().to_string();
+        let refs=(0..5000).map(|n|format!("create refs/heads/topic-{n:05} {head}\n")).collect::<String>();
+        crate::git::run_with_input(root.path(),&["update-ref","--stdin"],refs.into_bytes()).unwrap();
+        let trees=tempfile::tempdir().unwrap();
+        for n in 0..24 { git(root.path(),&["worktree","add","-q","--detach",trees.path().join(format!("tree-{n}")).to_str().unwrap()]); }
+        let request=crate::cli::parse(&["log".into()],root.path()).unwrap();
+        let mut samples=Vec::new();
+        for _ in 0..6 {
+            let start=std::time::Instant::now();
+            let mut state=RepositorySession::open(&request,root.path().into());
+            let (mut branches,mut comparison)=(None,None);
+            while state.busy() {
+                state.poll();
+                if branches.is_none() && state.picker.sources.loaded { branches=Some(start.elapsed().as_secs_f64()*1000.); }
+                if comparison.is_none() && state.take_change_set().is_some() { comparison=Some(start.elapsed().as_secs_f64()*1000.); }
+                assert!(start.elapsed().as_secs()<30);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert_eq!(state.picker.log.len(),1);
+            assert_eq!(state.picker.sources.worktrees.len(),25);
+            samples.push(serde_json::json!({"branches_ms":branches.unwrap(),"comparison_ms":comparison.unwrap(),"settled_ms":start.elapsed().as_secs_f64()*1000.,"retained_branches":state.picker.sources.branches.len(),"rss_mib":crate::perf::rss_mib()}));
+        }
+        println!("LENZ_REPOSITORY {}",serde_json::json!({"branches":5001,"worktrees":25,"samples":samples}));
     }
     #[test]
     fn selection_title_names_the_selected_commit() {

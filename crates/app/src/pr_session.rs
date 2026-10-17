@@ -118,6 +118,7 @@ impl PrState {
     /// Changes whenever [`page`](Self::page) would.
     pub fn generation(&self)->u64{self.generation}
     /// The open tab laid out at `width` columns; `now` is Unix seconds.
+    #[cold]
     pub fn page(&self,width:usize,now:i64)->Option<Page>{
         let loaded=match (&self.review,&self.review_error){(Some(r),_)=>Loaded::Ready(r),(None,Some(e))=>Loaded::Failed(e),_=>Loaded::Loading};
         Some(match self.details.as_ref()?.tab {
@@ -133,7 +134,7 @@ impl PrState {
         if let Some(dir)=pr::test_support::state_dir(root){self.marks=ViewedMarks::open(&dir).ok();}
         self.review_token=Arc::new(());self.review_error=None;self.review_job=None;self.review=None;
         match self.pr.repo(){
-            Ok(repo)=>{let root=root.to_path_buf();let number=self.pr.number;let current=Arc::downgrade(&self.review_token);self.review_job=Some(crate::repository_session::submit(&self.review_token,move||pr::Gh::new(&root).review_while(&repo,number,||current.strong_count()>0)));},
+            Ok(repo)=>{let root=root.to_path_buf();let number=self.pr.number;let current=Arc::downgrade(&self.review_token);self.review_job=Some(crate::repository_session::submit_github(&self.review_token,move||pr::Gh::new(&root).review_while(&repo,number,||current.strong_count()>0)));},
             Err(e)=>self.review_error=Some(e.to_string()),
         }
         self.generation+=1;

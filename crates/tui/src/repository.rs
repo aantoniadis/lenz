@@ -886,12 +886,14 @@ impl Repository {
         }
         if let Some(notice) = self
             .core
-            .notice
-            .as_ref()
-            .or(self.core.picker.error.as_ref())
+            .pr_loading()
+            .or(self.core.notice.as_deref())
+            .or(self.core.picker.error.as_deref())
         {
+            let message = if self.core.pr_loading().is_some() { format!("◌ {}", safe_label(notice)) }
+                else { format!("F2 details · {}", safe_label(notice)) };
             frame.render_widget(
-                Paragraph::new(format!("F2 details · {}",safe_label(notice)))
+                Paragraph::new(message)
                     .style(crate::chrome::style_with(palette).fg(crate::chrome::color(palette.accent)).bg(crate::chrome::color(palette.status_bg))),
                 Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
             );

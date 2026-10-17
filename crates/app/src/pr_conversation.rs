@@ -12,7 +12,15 @@ pub struct CardBox { pub top: usize, pub bottom: usize, pub left: usize, pub rig
 
 /// A laid-out tab. `side` rows sit at column `side_at` beside the main rows (0: stacked above them instead).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Page { pub rows: Vec<Row>, pub boxes: Vec<CardBox>, pub side: Vec<Row>, pub side_at: usize }
+pub struct Page { pub rows: Vec<Row>, pub boxes: Vec<CardBox>, pub side: Vec<Row>, pub side_at: usize, pub markdown: Vec<MarkdownRegion> }
+
+/// A body rendered from one shared Markdown document; the GUI uses native typography to reflow its rows.
+#[derive(Clone, Debug)]
+pub struct MarkdownRegion { pub rows: std::ops::Range<usize>, pub columns: std::ops::Range<usize>, pub document: std::sync::Arc<lenz_content::markdown::MarkdownDocument> }
+impl PartialEq for MarkdownRegion {
+    fn eq(&self, other: &Self) -> bool { self.rows == other.rows && self.columns == other.columns && self.document.source == other.document.source }
+}
+impl Eq for MarkdownRegion {}
 
 impl Page {
     /// What a click at a row and column of the page does.
@@ -34,12 +42,18 @@ impl Page {
         let side = self.side_at > 0 && from.1.min(to.1) >= self.side_at;
         let rows = if side { &self.side } else { &self.rows };
         (r0..=r1).filter_map(|r| rows.get(r)).enumerate().map(|(i, row)| {
-            let line: Vec<char> = format!("{}{}", " ".repeat(row.indent), row.text()).chars().collect();
-            let end = if r0 + i == r1 { c1.min(line.len()) } else { line.len() };
-            let start = if i == 0 { c0.min(end) } else { 0 };
-            // a row's own indent is not part of what was selected
-            let indent = row.indent.max(start).min(end);
-            line[indent..end].iter().collect::<String>().trim_end().to_string()
+            let text = row.text();
+            let end = if r0 + i == r1 { c1 } else { usize::MAX };
+            let start = if i == 0 { c0 } else { row.indent };
+            let mut column = row.indent;
+            let mut previous = false;
+            text.chars().filter(|c| {
+                let width = rich::width(c.encode_utf8(&mut [0; 4]));
+                let selected = if width == 0 { previous } else { column >= start && column < end };
+                column += width;
+                previous = selected;
+                selected
+            }).collect::<String>().trim_end().to_string()
         }).collect::<Vec<_>>().join("\n")
     }
     pub fn height(&self) -> usize { if self.side_at > 0 { self.rows.len().max(self.side.len()) } else { self.rows.len() } }
@@ -139,7 +153,10 @@ impl Cards<'_> {
             self.page.rows.push(Row { spans: vec![Span::tone("No description provided.", Tone::Dim)], indent: left, fill: Fill::None });
             return;
         }
-        rich::wrap(&rich::markdown(text), right.saturating_sub(left), left, &mut self.page.rows);
+        let markdown = rich::markdown(text);
+        let start = self.page.rows.len();
+        rich::wrap(&markdown, right, left, &mut self.page.rows);
+        if let Some(document) = markdown.document { self.page.markdown.push(MarkdownRegion { rows: start..self.page.rows.len(), columns: left..right, document }); }
     }
     fn who(&self, c: &Comment, verb: &str) -> Vec<Span> {
         vec![Span::bold(login(c).to_string()), Span::tone(format!(" {verb}{}", ago(&c.created_at, self.now)), Tone::Dim)]
@@ -177,6 +194,7 @@ impl Cards<'_> {
 }
 
 /// The Conversation tab at `width` columns. `now` is Unix seconds, for "3 days ago".
+#[cold]
 pub fn conversation(pr: &PullRequest, loaded: Loaded, toggled: &HashSet<String>, width: usize, now: i64) -> Page {
     // narrower than this, the page is cut at the pane's edge rather than squeezed
     let width = width.max(MIN_WIDTH);
@@ -292,6 +310,7 @@ fn side_panel(review: Option<&Review>, width: usize, at: usize) -> Vec<Row> {
 }
 
 /// The Commits tab: the PR's commits, oldest first, each opening to its message.
+#[cold]
 pub fn commits(pr: &PullRequest, loaded: Loaded, toggled: &HashSet<String>, shown: Option<&str>, width: usize, now: i64) -> Page {
     let width = width.max(MIN_WIDTH);
     let mut page = Page::default();
@@ -370,6 +389,15 @@ mod tests {
         assert_eq!(ago("2026-10-09T22:00:00Z", NOW), "2 hours ago");
         assert_eq!(ago("2026-10-07T00:00:00Z", NOW), "3 days ago");
         assert_eq!(ago("2026-01-07T00:00:00Z", NOW), "on 2026-01-07");
+    }
+
+    #[test]
+    fn copy_uses_the_same_display_columns_as_adapter_selection() {
+        let page = Page { rows: vec![Row { spans: vec![Span::plain("界abc")], indent: 2, fill: Fill::None }], ..Default::default() };
+        assert_eq!(page.text((0, 4), (0, 5)), "a");
+        let page = Page { rows: vec![Row { spans: vec![Span::plain("\t界a\u{301}b")], ..Default::default() }], ..Default::default() };
+        assert_eq!(page.text((0, 0), (0, 8)), "\t界a\u{301}b");
+        assert_eq!(page.text((0, 6), (0, 7)), "a\u{301}");
     }
 
     #[test]

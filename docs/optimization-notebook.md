@@ -35,6 +35,35 @@ terminals; physical display latency, macOS and long stress remain unverified.
 
 GUI work used a private 1600×1000 Xvfb display with software rendering. Reproduce new trials with [the benchmark suite](benchmarking.md).
 
+## 2026-10-17 incremental repository loading and PR reading
+
+Linux release builds, same machine, shared-core fixture with 5,001 branches and 25 worktrees; medians of six session openings. The original executable was retained before product edits, along with source/executable identity and raw samples. These measure core readiness, not painting or GitHub latency.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| First comparison ready | 113.7 ms | 10.2 ms |
+| First branch batch available | 105.2 ms | 34.8 ms |
+| Full local inventory settled | 116.8 ms | 97.9 ms |
+| Settled test-process RSS | 12.16 MiB | 10.76 MiB |
+| Retained local branches | 5,001 | 20 |
+
+| Experiment | Outcome |
+|---|---|
+| Read the first 20 branches before worktree status, then complete other metadata independently; separate local, inventory, GitHub API and PR fetch workers | **Kept.** Comparisons no longer queue behind inventory or network calls. Workers are reused; superseded inboxes and request tokens reject obsolete work. PR-ref cleanup stays on the fetch worker so it follows in-flight fetches. |
+| Re-read the same branch batch while completing metadata | **Rejected.** The first version settled around 135 ms versus 117 ms before. Removing the duplicate scan brought completion below the baseline. |
+| Page local branches, remote refs and PRs in batches of about 20 | **Kept.** Local filtering can request the full inventory; PR filtering covers loaded requests. `gh pr list` has no offset, so another PR batch refetches a larger prefix. |
+| Shape a PR description synchronously during render | **Rejected.** Native formatting now runs on the background executor with source, width, theme, font and request identity checks; provisional content remains available. |
+| Reuse the Markdown parser, reading style and native glyph shaping for PR prose and code | **Kept.** The final release test's 35,255-byte description prepares its render in 1.49–1.69 ms; formatting completes in 39.1 ms cold and 4.99–5.11 ms warm in the background. Cached render preparation is 0.020–0.023 ms. These are native-text test measurements, excluding canvas paint and physical presentation; absolute process RSS was 78.1 MiB, not a leak or baseline-memory claim. |
+| Group the on-demand PR Markdown and cached page builders with `#[cold]` | **Kept.** Warmed, same-filesystem plain-TUI RSS overlaps at 10.6–10.8 MiB. Without the hints, the changed binary retained about 1.3 MiB more executable pages. Anonymous memory and thread counts were unchanged. Marking only the Markdown builder fixed plain comparisons; grouping the cached builders also removed a consistent extra 1 MiB in the conflict workflow and a 0.6 ms second-view slowdown. Final paired conflict RSS was 11.93 → 11.76 MiB; second-view timing moved in both directions. A temporary `MADV_RANDOM` diagnostic isolated executable fault-around; no preload, allocator or system configuration ships with the change. |
+
+The full Linux suite collected 133 passing cases and 394 metrics, including a 10-second sustained mixed workload and three repetitions of the GUI interaction scenarios on a private software-rendered display. Its final comparison guard held the baseline's earlier "running" status; a separate post-collection comparison verified the completed baseline and matching configuration without changing either raw report. Evidence remains under `target/perf/2026-10-17-repository-{before-frozen,after,ux}`.
+
+Three alternating, same-filesystem pairs did not reproduce the original search, blame and annotation outliers: Change Set search 5.07 → 4.83 ms, blame readiness 3.82 → 4.00 ms and annotation application 0.0449 → 0.0467 ms. The engine and content-test executables were byte-identical before and after, so their timing differences cannot be attributed to product edits. Initial TUI RSS comparisons also mixed a saved executable on tmpfs with a candidate on btrfs; the same-filesystem measurements and page attribution supersede those residency comparisons.
+
+Final GUI startup pairs (three alternating pairs, warmed binaries on btrfs) measured first paint at 133 → 136 ms for the repository, 143 → 143 ms for Windows-1252, and 140 → 141 ms for Unicode. Fresh application-cache merge loading was 146 → 148 ms. Startup CPU medians were about 0.05–0.07 seconds higher on the small fixtures, with overlapping repository sample ranges. Repository settled GUI RSS consistently rose from 200.8 to 208.3 MiB. A separate settled `smaps` pair attributed about 6 MiB to one additional shared `memfd` mapping whose size matches a 1536×1000 RGBA window buffer; another roughly 1 MiB was heap and executable residency. This is software-rendered process residency, not measured hardware GPU memory or proof of a leak. **Accepted by the maintainer after checking the changes on Linux.** The TUI placement improvements and core startup gains do not erase this GUI cost.
+
+Correctness checks cover load-more input in both adapters, remote paging, filtering unloaded branches, refresh during startup, slow GitHub listing alongside local navigation and PR opening, stale PR cancellation, persistent loading feedback, native link hit testing, Unicode/tab copying, End navigation and narrow layouts. PR tables retain compact text separators; images remain linked placeholders, and the timeline does not expose the file Preview's callout/image controls. Native macOS and live GitHub timing remain unverified.
+
 ## Kept: remove work and retain less
 
 | Technique | Evidence / result | Trade-off and when to revisit |

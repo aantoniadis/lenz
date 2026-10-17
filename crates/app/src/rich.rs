@@ -1,6 +1,7 @@
 //! Styled text for the PR reading tabs: Markdown into blocks, blocks into rows wrapped to a column count.
-//! Both frontends draw the same rows (the GUI in its monospace font), so wrapping and click targets agree.
-use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
+//! The terminal draws these rows; the GUI reflows their shared Markdown documents with the native reading style.
+use lenz_content::markdown::{BlockKind, MarkdownDocument};
+use std::{ops::Range, sync::Arc};
 use unicode_width::UnicodeWidthChar;
 
 /// A colour role; each frontend maps it to its palette.
@@ -8,7 +9,7 @@ use unicode_width::UnicodeWidthChar;
 pub enum Tone { #[default] Normal, Dim, Accent, Added, Removed, Good, Bad, Warn }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Style { pub bold: bool, pub italic: bool, pub code: bool, pub strike: bool, pub tone: Tone }
+pub struct Style { pub bold: bool, pub italic: bool, pub code: bool, pub strike: bool, pub highlight: bool, pub tone: Tone }
 
 /// What a click on a span does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -67,110 +68,68 @@ impl Row {
     }
 }
 
-pub fn width(text: &str) -> usize { text.chars().map(|c| c.width().unwrap_or(0)).sum() }
+pub fn width(text: &str) -> usize { text.chars().map(|c| if c == '\t' { 4 } else { c.width().unwrap_or(0) }).sum() }
 
-/// Markdown (GitHub flavour) as blocks. Images become a link to the image; raw HTML shows as dim text.
-pub fn markdown(text: &str) -> Vec<Block> {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let mut out: Vec<Block> = Vec::new();
-    let mut current = Block::default();
-    let mut style = Style::default();
-    let mut link: Option<String> = None;
-    let mut lists: Vec<Option<u64>> = Vec::new();
-    let mut quote = 0usize;
-    let mut table_row: Vec<Vec<Span>> = Vec::new();
-    let mut in_code = false;
-    let indent = |lists: &Vec<Option<u64>>, quote: usize| quote * 2 + lists.len().saturating_sub(1) * 2;
-    let flush = |out: &mut Vec<Block>, current: &mut Block| {
-        if !current.spans.is_empty() || current.fill == Fill::Rule { out.push(std::mem::take(current)); } else { *current = Block::default(); }
-    };
-    for event in Parser::new_ext(text, options) {
-        match event {
-            Event::Start(Tag::Heading { .. }) => { flush(&mut out, &mut current); style.bold = true; style.tone = Tone::Accent; current.indent = indent(&lists, quote); }
-            Event::End(TagEnd::Heading(_)) => { flush(&mut out, &mut current); style = Style::default(); }
-            Event::Start(Tag::Paragraph) => {
-                // a list item's first paragraph continues its marker
-                if current.marker.is_none() { flush(&mut out, &mut current); current.indent = indent(&lists, quote); }
-                if quote > 0 { current.fill = Fill::Quote; }
-            }
-            Event::End(TagEnd::Paragraph) => flush(&mut out, &mut current),
-            Event::Start(Tag::BlockQuote(_)) => { flush(&mut out, &mut current); quote += 1; }
-            Event::End(TagEnd::BlockQuote(_)) => { flush(&mut out, &mut current); quote -= 1; }
-            Event::Start(Tag::List(start)) => { flush(&mut out, &mut current); lists.push(start); }
-            Event::End(TagEnd::List(_)) => { flush(&mut out, &mut current); lists.pop(); }
-            Event::Start(Tag::Item) => {
-                flush(&mut out, &mut current);
-                let marker = match lists.last_mut() { Some(Some(n)) => { let m = format!("{n}. "); *n += 1; m } _ => "• ".into() };
-                current.indent = indent(&lists, quote);
-                current.marker = Some(Span::tone(marker, Tone::Dim));
-                if quote > 0 { current.fill = Fill::Quote; }
-            }
-            Event::End(TagEnd::Item) => flush(&mut out, &mut current),
-            Event::TaskListMarker(done) => current.spans.push(Span::tone(if done { "☑ " } else { "☐ " }, Tone::Dim)),
-            Event::Start(Tag::CodeBlock(kind)) => {
-                flush(&mut out, &mut current);
-                in_code = true;
-                let diff = matches!(&kind, CodeBlockKind::Fenced(lang) if lang.as_ref() == "diff");
-                current = Block { indent: indent(&lists, quote), fill: Fill::Code, verbatim: true, ..Block::default() };
-                current.marker = diff.then(|| Span::plain(""));
-            }
-            Event::End(TagEnd::CodeBlock) => {
-                in_code = false;
-                let diff = current.marker.take().is_some();
-                let text: String = current.spans.drain(..).map(|s| s.text).collect();
-                for line in text.trim_end_matches('\n').split('\n') {
-                    out.push(code_line(line, current.indent, diff));
-                }
-                current = Block::default();
-            }
-            Event::Start(Tag::Emphasis) => style.italic = true,
-            Event::End(TagEnd::Emphasis) => style.italic = false,
-            Event::Start(Tag::Strong) => style.bold = true,
-            Event::End(TagEnd::Strong) => style.bold = false,
-            Event::Start(Tag::Strikethrough) => style.strike = true,
-            Event::End(TagEnd::Strikethrough) => style.strike = false,
-            Event::Start(Tag::Link { dest_url, .. }) => link = Some(dest_url.to_string()),
-            Event::End(TagEnd::Link) => link = None,
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                current.spans.push(Span::tone("🖼 ", Tone::Dim));
-                link = Some(dest_url.to_string());
-            }
-            Event::End(TagEnd::Image) => link = None,
-            Event::Start(Tag::Table(_)) => flush(&mut out, &mut current),
-            Event::Start(Tag::TableHead | Tag::TableRow) => table_row.clear(),
-            Event::Start(Tag::TableCell) => table_row.push(Vec::new()),
-            Event::End(TagEnd::TableCell) => if let Some(cell) = table_row.last_mut() { cell.append(&mut current.spans); },
-            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
-                let head = matches!(event, Event::End(TagEnd::TableHead));
-                let mut spans = Vec::new();
-                for (i, cell) in table_row.drain(..).enumerate() {
-                    if i > 0 { spans.push(Span::tone(" │ ", Tone::Dim)); }
-                    spans.extend(cell.into_iter().map(|mut s| { s.style.bold |= head; s }));
-                }
-                out.push(Block { spans, indent: indent(&lists, quote), ..Block::default() });
-            }
-            Event::Rule => { flush(&mut out, &mut current); out.push(Block { fill: Fill::Rule, ..Block::default() }); }
-            Event::Text(t) if in_code => current.spans.push(Span::plain(t.to_string())),
-            Event::Text(t) => push(&mut current, &t, style, &link),
-            Event::Code(t) => push(&mut current, &t, Style { code: true, ..style }, &link),
-            Event::InlineMath(t) | Event::DisplayMath(t) => push(&mut current, &t, Style { code: true, ..style }, &link),
-            Event::Html(t) | Event::InlineHtml(t) => push(&mut current, t.trim_end_matches('\n'), Style { tone: Tone::Dim, ..style }, &link),
-            Event::SoftBreak => push(&mut current, " ", style, &link),
-            Event::HardBreak => { let (indent, fill) = (current.indent, current.fill); flush(&mut out, &mut current); current.indent = indent; current.fill = fill; }
-            Event::FootnoteReference(t) => push(&mut current, &format!("[{t}]"), style, &link),
-            _ => {}
-        }
-    }
-    flush(&mut out, &mut current);
-    out
+/// The same bounded document parser used by Markdown file previews, plus terminal-ready blocks.
+pub struct Markdown { pub document: Option<Arc<MarkdownDocument>>, blocks: Vec<Block> }
+impl std::ops::Deref for Markdown {
+    type Target = [Block];
+    fn deref(&self) -> &[Block] { &self.blocks }
 }
 
-fn push(block: &mut Block, text: &str, style: Style, link: &Option<String>) {
-    let style = if link.is_some() { Style { tone: Tone::Accent, ..style } } else { style };
-    let mut span = Span::new(text, style);
-    // other schemes stay plain text: a link that cannot open must not look clickable
-    span.target = link.clone().filter(|url| crate::open::is_web_link(url)).map(Target::Url);
-    block.spans.push(span);
+#[cold]
+pub fn markdown(text: &str) -> Markdown {
+    let limits = lenz_content::markdown::Limits::DEFAULT;
+    let mut remaining = limits.segments_per_pair;
+    let document = lenz_content::markdown::parse(Arc::from(text), limits, &mut remaining, &|| true).ok().map(Arc::new);
+    let Some(doc) = &document else {
+        return Markdown { document: None, blocks: vec![Block { spans: vec![Span::plain(text)], ..Block::default() }] };
+    };
+    let mut blocks = Vec::new();
+    for block in &doc.blocks {
+        let indent = usize::from(block.quote_depth) * 2 + usize::from(block.list_depth.saturating_sub(1)) * 2;
+        let fill = if matches!(block.kind, BlockKind::Code { .. } | BlockKind::Literal | BlockKind::Properties) { Fill::Code }
+            else if matches!(block.kind, BlockKind::Rule) { Fill::Rule }
+            else if block.quote_depth > 0 { Fill::Quote } else { Fill::None };
+        let verbatim = fill == Fill::Code;
+        let mut at = block.text.start;
+        for line in doc.text.get(block.text.clone()).unwrap_or_default().trim_end_matches('\n').split('\n') {
+            let marker = if at == block.text.start { if let BlockKind::ListItem { marker, .. } = &block.kind { Some(Span::tone(format!("{marker} "), Tone::Dim)) } else { None } } else { None };
+            let range = at + marker.as_ref().map_or(0, |m| m.text.len())..at + line.len();
+            let mut spans = markdown_spans(doc, block, range);
+            for span in &mut spans { span.text = span.text.replace('\t', if matches!(block.kind, BlockKind::TableRow { .. }) { " │ " } else { "    " }); }
+            if matches!(&block.kind, BlockKind::Code { language: Some(l) } if l == "diff") {
+                let tone = code_line(line, 0, true).spans[0].style.tone;
+                for span in &mut spans { span.style.tone = tone; }
+            }
+            blocks.push(Block { spans, indent, fill, verbatim, marker });
+            at += line.len() + 1;
+        }
+    }
+    Markdown { document, blocks }
+}
+
+/// Styled spans of one rendered document range; links use the same safe schemes in both adapters.
+pub fn markdown_spans(doc: &MarkdownDocument, block: &lenz_content::markdown::Block, range: Range<usize>) -> Vec<Span> {
+    let mut cuts = vec![range.start, range.end];
+    for run in &block.runs {
+        if run.text.start < range.end && run.text.end > range.start { cuts.extend([run.text.start.max(range.start), run.text.end.min(range.end)]); }
+    }
+    for link in &doc.links {
+        if link.text.start < range.end && link.text.end > range.start { cuts.extend([link.text.start.max(range.start), link.text.end.min(range.end)]); }
+    }
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2).map(|r| {
+        let run = block.runs.get(block.runs.partition_point(|s| s.text.end <= r[0])).filter(|s| s.text.start <= r[0]).map(|r| r.style).unwrap_or_default();
+        let heading = matches!(block.kind, BlockKind::Heading(_) | BlockKind::TableRow { header: true, .. });
+        let code = run.code || matches!(block.kind, BlockKind::Code { .. } | BlockKind::Literal | BlockKind::Properties);
+        let target = doc.links.iter().find(|l| l.text.start <= r[0] && l.text.end >= r[1]).map(|l| l.destination.as_ref())
+            .or(if let BlockKind::Image { destination, .. } = &block.kind { Some(destination.as_str()) } else { None })
+            .filter(|url| crate::open::is_web_link(url)).map(|url| Target::Url(url.to_string()));
+        let tone = if heading || target.is_some() { Tone::Accent } else { Tone::Normal };
+        Span { target, ..Span::new(doc.text.get(r[0]..r[1]).unwrap_or_default(), Style { bold: heading || run.strong, italic: run.emphasis, code, strike: run.strike, highlight: run.highlight, tone }) }
+    }).collect()
 }
 
 /// One line of code; in a diff, `+` and `-` lines are coloured.
@@ -253,6 +212,17 @@ mod tests {
         assert_eq!(markdown("[x](file:///etc/passwd) [y](vscode://z)")[0].spans.iter().find_map(|s| s.target.clone()), None, "only web links are links");
         assert!(blocks[2].spans[2].style.code);
         assert_eq!(markdown("> q")[0].fill, Fill::Quote);
+    }
+
+    #[test]
+    fn pr_markdown_uses_the_document_reading_parser() {
+        assert_eq!(texts("A ==highlight== and [[guide|the guide]].", 80), ["A highlight and the guide."]);
+    }
+
+    #[test]
+    fn code_tabs_stay_indentation_and_only_tables_have_cell_separators() {
+        assert_eq!(texts("```rust\n\tfn main() {}\n```", 80), ["    fn main() {}"]);
+        assert_eq!(texts("| a | b |\n|---|---|\n| x | y |", 80), ["a │ b", "x │ y"]);
     }
 
     #[test]

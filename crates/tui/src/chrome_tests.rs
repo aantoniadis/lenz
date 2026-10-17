@@ -851,6 +851,71 @@ fn markdown_tui_literal_math_and_mapped_editor_use_actual_input() {
     assert_eq!(std::fs::read_to_string(dir.path().join("right.md")).unwrap(),"# 漢字\n\n$**bold**$ and $$*math*$$\n\nentity &amp;\n");
 }
 
+#[test]
+fn source_load_more_branches_click_reads_the_next_page() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("file.txt"), "content\n").unwrap();
+    git(root, &["add", "."]); git(root, &["commit", "-qm", "Initial"]);
+    for i in 0..44 { git(root, &["branch", &format!("topic-{i:02}")]); }
+    let req = lenz::cli::parse(&["log".into()], root).unwrap();
+    let mut app = App::open(req, root.into());
+    ready(&mut app);
+    assert_eq!(app.repository.as_ref().unwrap().core.picker.sources.branches.len(), 20);
+    let screen = draw(&mut app, 180, 50);
+    click(&mut app, locate(&screen, "Load more branches"));
+    ready(&mut app);
+    assert_eq!(app.repository.as_ref().unwrap().core.picker.sources.branches.len(), 40);
+}
+
+#[cfg(feature="gui-test")]
+#[test]
+fn pr_click_shows_a_persistent_loader_in_dark_light_and_narrow_layouts() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("ref.md"), "# Before\n").unwrap();
+    git(root, &["add", "."]); git(root, &["commit", "-qm", "Before"]);
+    std::fs::write(root.join("ref.md"), "# After\n").unwrap();
+    git(root, &["commit", "-qam", "After"]);
+    let _provider = lenz::pr::test_support::markdown_provider(root);
+    let req = lenz::cli::parse(&["log".into()], root).unwrap();
+    let mut app = App::open(req, root.into());
+    ready(&mut app);
+    let before = std::fs::read(root.join("ref.md")).unwrap();
+    let old = app.session.document().map(|d| d.text(lenz::view::Side::Right).to_string());
+    let screen = draw(&mut app, 180, 40);
+    click(&mut app, locate(&screen, "Markdown PR"));
+    app.session.set_notice("");
+    for (width, height, theme) in [(180, 40, "darcula"), (80, 24, "light"), (32, 12, "light")] {
+        app.palette = std::sync::Arc::new(*lenz::theme::builtin(theme).unwrap());
+        let screen = draw(&mut app, width, height);
+        let rendered = text(&screen);
+        assert!(rendered.contains("Loading pull request"), "{width}×{height}: {rendered}");
+        assert_eq!(app.session.document().map(|d| d.text(lenz::view::Side::Right).to_string()), old);
+    }
+    let screen = draw(&mut app, 180, 40);
+    click(&mut app, locate(&screen, "Local changes"));
+    let cancelled = text(&draw(&mut app, 180, 40));
+    assert!(!cancelled.contains("Loading pull request") && !cancelled.contains("Fetching pull request"), "another source clears PR progress feedback");
+    ready(&mut app);
+    assert!(app.repository.as_ref().unwrap().core.pr.is_none(), "a stale PR completion must stay cancelled");
+    let screen = draw(&mut app, 180, 40);
+    click(&mut app, locate(&screen, "Markdown PR"));
+    ready(&mut app);
+    assert!(!text(&draw(&mut app, 180, 40)).contains("Loading pull request"));
+    assert_eq!(app.repository.as_ref().unwrap().core.pr.as_ref().unwrap().pr.number, 9);
+    assert!(!app.repository.as_ref().unwrap().core.picker.shown);
+    key(&mut app, KeyCode::F(10));
+    for ch in "Refresh pull request".chars() { key(&mut app, KeyCode::Char(ch)); }
+    key(&mut app, KeyCode::Enter);
+    assert!(text(&draw(&mut app, 32, 12)).contains("Loading pull request"), "refreshing in Focus also shows the loader");
+    ready(&mut app);
+    assert!(!text(&draw(&mut app, 32, 12)).contains("Loading pull request"));
+    assert_eq!(std::fs::read(root.join("ref.md")).unwrap(), before);
+}
+
 #[cfg(feature="gui-test")]
 #[test]
 fn markdown_tui_offline_pr_real_prompt_and_source_hunks() {

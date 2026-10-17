@@ -3422,6 +3422,13 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
         .collect()
 }
 
+impl Viewer {
+    fn banner(&self) -> Option<String> {
+        self.repo.as_ref().and_then(|r| r.pr_loading()).map(|message| format!("◌ {message}"))
+            .or_else(|| self.comparison.markdown_notice().map(str::to_owned)).or_else(|| self.comparison.banner.clone()).or_else(|| self.write_error.clone())
+    }
+}
+
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_and_record_place(cx);
@@ -3575,7 +3582,7 @@ impl Render for Viewer {
             status = if status.is_empty() { n } else { format!("{n} · {status}") };
         }
         let encodings = loaded.map_or([None, None], |l| l.doc.encodings.clone());
-        let banner = self.comparison.markdown_notice().map(str::to_owned).or_else(|| self.comparison.banner.clone()).or_else(|| self.write_error.clone());
+        let banner = self.banner();
         let arrows = loaded.map_or([false, false], |l| l.doc.writable.each_ref().map(|w| w.is_ok()));
         let placeholder = loaded.and_then(|l| l.doc.placeholder.as_ref()).map(|p| match p {
             Placeholder::Binary { sizes, differ } => format!(
@@ -3717,7 +3724,7 @@ impl Render for Viewer {
         let about_palette=palette.clone();
         let discard_overlay=self.discard_overlay(cx);
         let theme_overlay=self.theme_overlay(window,cx);
-        let pr_details=self.pr_details_frame();
+        let pr_details=self.pr_details_frame(window,cx);
         let summary_frame=self.summary_frame();
         // the summary covers the comparison behind it, with its loading and placeholder lines
         let (placeholder,loading)=if summary_frame.is_some(){(None,false)}else{(placeholder,loading)};
@@ -3838,8 +3845,8 @@ impl Render for Viewer {
                             text(window, cx, &font, sx + 8.0, sy, &status, palette.fg);
                         }
                         // a details tab covers the diff, under toasts, menus, the palette and popups
-                        if let Some((page, scroll, sel, rect, char_w)) = &pr_details {
-                            pr_details::Dialog { page: page.clone(), scroll: *scroll, sel: *sel, ..Default::default() }.paint(&palette, *rect, &font, *char_w, window, cx);
+                        if let Some((page, scroll, sel, rect, char_w, reading)) = &pr_details {
+                            pr_details::Dialog { page: page.clone(), scroll: *scroll, sel: *sel, reading: reading.clone(), ..Default::default() }.paint(&palette, *rect, &font, *char_w, window, cx);
                         }
                         if let Some(summary) = &summary_frame { summary.paint(&palette, &font, char_w, window, cx); }
                         if let Some(message) = &toast {

@@ -97,26 +97,45 @@ pub fn stash_changes(cwd: &Path, stash: &str) -> Result<ChangeSet, String> {
 
 /// Local branches: the current one first, then by last commit, most recent first.
 pub fn branches(cwd: &Path) -> Result<Vec<Branch>, String> {
+    branches_limited(cwd, usize::MAX)
+}
+
+/// At most `limit` branches, with HEAD first even when its commit is old.
+pub fn branches_limited(cwd: &Path, limit: usize) -> Result<Vec<Branch>, String> {
+    if limit==0 {return Ok(Vec::new());}
     let fields = ["%(HEAD)", "%(refname:lstrip=2)", "%(objectname)", "%(committerdate:unix)"];
+    let format = format!("--format={}", fields.join("%00"));
+    let count = format!("--count={limit}");
+    let mut args=vec!["for-each-ref","--sort=-committerdate","--sort=-HEAD",&format];
+    if limit != usize::MAX { args.push(&count); }
+    args.push("refs/heads");
+    let out=git::run(cwd,&args)?;
     let mut list = Vec::new();
-    for [head, name, sha, date] in refs(cwd, "refs/heads", "-committerdate", fields)? {
-        list.push(Branch { name, sha, date: date.parse().unwrap_or(0), current: head == "*" });
+    for line in String::from_utf8_lossy(&out).lines() {
+        let values:Vec<_>=line.split('\0').collect();
+        let [head,name,sha,date]=values[..] else { return Err(format!("lenz: unexpected branch output: {line:?}")); };
+        list.push(Branch { name:name.into(), sha:sha.into(), date: date.parse().unwrap_or(0), current: head == "*" });
     }
-    list.sort_by_key(|b| !b.current); // stable: the rest stay by date
     Ok(list)
 }
 
 /// Remote-tracking branches per remote (by name), each most recent first; `origin/HEAD` and the like left out.
 pub fn remotes(cwd: &Path) -> Result<Vec<Remote>, String> {
+    remotes_limited(cwd,usize::MAX).map(|(remotes,_)|remotes)
+}
+/// A bounded prefix of remote refs, plus whether another batch is available.
+pub fn remotes_limited(cwd:&Path,limit:usize)->Result<(Vec<Remote>,bool),String>{
     let fields = ["%(symref)", "%(refname:lstrip=2)", "%(objectname)", "%(committerdate:unix)"];
+    let mut refs=refs_limited(cwd,"refs/remotes","-committerdate",fields,limit.saturating_add(1))?;
+    let more=refs.len()>limit;refs.truncate(limit);
     let mut by_remote: BTreeMap<String, Vec<Branch>> = BTreeMap::new();
-    for [symref, name, sha, date] in refs(cwd, "refs/remotes", "-committerdate", fields)? {
+    for [symref, name, sha, date] in refs {
         // ponytail: a remote whose name has a `/` splits at the first one; match against `git remote` if that matters.
         let Some((remote, _)) = name.split_once('/').filter(|_| symref.is_empty()) else { continue };
         let branch = Branch { name: name.clone(), sha, date: date.parse().unwrap_or(0), current: false };
         by_remote.entry(remote.to_string()).or_default().push(branch);
     }
-    Ok(by_remote.into_iter().map(|(name, branches)| Remote { name, branches }).collect())
+    Ok((by_remote.into_iter().map(|(name, branches)| Remote { name, branches }).collect(),more))
 }
 
 /// Tags, newest first.
@@ -171,8 +190,15 @@ pub fn stashes(cwd: &Path) -> Result<Vec<Stash>, String> {
 
 /// `git for-each-ref` over `pattern` sorted by `sort`, the `fields` of each ref.
 fn refs<const N: usize>(cwd: &Path, pattern: &str, sort: &str, fields: [&str; N]) -> Result<Vec<[String; N]>, String> {
+    refs_limited(cwd,pattern,sort,fields,usize::MAX)
+}
+fn refs_limited<const N:usize>(cwd:&Path,pattern:&str,sort:&str,fields:[&str;N],limit:usize)->Result<Vec<[String;N]>,String>{
+    if limit==0{return Ok(Vec::new());}
     let format = format!("--format={}", fields.join("%00"));
-    let out = git::run(cwd, &["for-each-ref", &format!("--sort={sort}"), &format, pattern])?;
+    let sort=format!("--sort={sort}");let count=format!("--count={limit}");
+    let mut args=vec!["for-each-ref",&sort,&format];
+    if limit!=usize::MAX{args.push(&count);}
+    args.push(pattern);let out=git::run(cwd,&args)?;
     String::from_utf8_lossy(&out)
         .lines()
         .map(|line| {

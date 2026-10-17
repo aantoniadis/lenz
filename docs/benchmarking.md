@@ -215,6 +215,15 @@ The default per-case timeout is 300 seconds, configurable with `--timeout`. Buil
 
 The [optimization notebook](optimization-notebook.md) records approaches kept, rejected and still untried.
 
+Focused repository and PR description probes (test binaries only):
+
+```sh
+cargo test --locked --release -p lenz repository_startup_many_branches_perf -- --ignored --nocapture
+cargo test --locked --release -p lenz --features gui-test gui_pr_reading_release_perf -- --ignored --nocapture
+```
+
+The repository probe generates 5,001 branches and 25 worktrees, opens six shared sessions, and records the first branch batch, first comparison, full local inventory completion and process RSS. It asserts the history and worktree counts; it excludes frontend painting and network requests. The PR probe uses the native text system with a 35,255-byte description, separating render preparation, background native formatting completion and cached render preparation. It does not time the canvas paint callback or physical display. Retain its executable/source identity with the raw samples, and run equivalent before/after binaries on the same machine.
+
 ## Maintain the suite
 
 Add a deterministic workload with correctness assertions, a stable metric name/unit and raw `LENZ_PERF` samples. Keep instrumentation in benchmark/test targets. Record skips rather than passing zero tests. Change `workload_version` in the runner when fixture semantics or an existing metric's workload changes; do not silently compare incompatible definitions. Keep new large fixtures generated, and avoid optional network inputs in required coverage.

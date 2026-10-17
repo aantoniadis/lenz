@@ -6,7 +6,9 @@ Markdown comparisons have three views, chosen in the **Source | Inline | Side by
 
 Source is the default, including for each new independent view; `[view] markdown = "preview"` and `markdown_layout = "inline" | "side-by-side"` in the settings file change the starting view (see the [README](../README.md#settings-and-last-position)). A view keeps its choice across file, commit and pull request switching: ordinary text files use Source, and the next eligible Markdown file restores the Preview. Activating **Show in source** or a source marker chooses Source.
 
-The Preview works for standalone, repository, commit and PR file comparisons, including added and deleted files with an empty opposite side, and in the Version Picker's two-way comparison preview. Markdown is detected by the extensions `.md`, `.markdown`, `.mdown` and `.mkd`, or by `--name`. Images, binary and unreadable files and oversized placeholders keep their own views, as do three-way Merge View panes and PR description and details popups (the PR description is shown as text).
+The Preview works for standalone, repository, commit and PR file comparisons, including added and deleted files with an empty opposite side, and in the Version Picker's two-way comparison preview. Markdown is detected by the extensions `.md`, `.markdown`, `.mdown` and `.mkd`, or by `--name`. Images, binary and unreadable files and oversized placeholders keep their own views, as do three-way Merge View panes.
+
+PR conversations reuse the same bounded Markdown parser. The GUI uses the Preview's reading fonts, heading sizes and inline styles in a 30% wider column, shaped asynchronously; terminal conversations use styled cells. Their compact tables, linked image placeholders and timeline cards differ from the file Preview, and they have no image or callout controls. PR descriptions do not enter the comparison's edit or diff state.
 
 ## What is rendered
 

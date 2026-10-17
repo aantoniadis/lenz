@@ -4,6 +4,8 @@ use crate::pr_conversation::Page;
 use crate::pr_session::{DetailsTab, PrCommand, PrState};
 use crate::rich::{Fill, Target, Tone};
 use unicode_width::UnicodeWidthChar;
+#[path = "pr_reading.rs"]
+mod reading;
 
 /// A laid-out PR tab and its scroll; the page is rebuilt when the PR's pages or the width change.
 #[derive(Default)]
@@ -11,19 +13,31 @@ pub(super) struct Dialog {
     /// PR number, page generation, columns and tab the page was laid out for.
     pub(super) key: Option<(u64, u64, usize, Option<DetailsTab>)>,
     pub(super) page: Arc<Page>,
+    pub(super) source: Arc<Page>,
+    pub(super) reading: Option<Arc<reading::Layout>>,
+    pub(super) wheel: f32,
+    pub(super) reading_palette: Option<Arc<theme::Palette>>,
+    pub(super) reading_task: Option<gpui::Task<()>>,
+    pub(super) reading_ready: Option<Arc<reading::Layout>>,
+    pub(super) reading_request: Option<Arc<()>>,
+    pub(super) reading_font: Option<(Font, f32)>,
     pub scroll: usize,
+    pub(super) pending_scroll: Option<ScrollIntent>,
     /// Each tab's scroll, so coming back to a tab shows it as it was.
-    pub(super) scrolls: std::collections::HashMap<DetailsTab, usize>,
+    pub(super) scrolls: std::collections::HashMap<DetailsTab, ScrollIntent>,
     /// Selected text, between two (row, column) cells; the press a drag extends.
     pub(super) sel: Option<Selection>,
     pub(super) press: Option<(usize, usize)>,
 }
+#[derive(Clone)]
+pub(super) enum ScrollIntent { Position(usize), Reveal(Target) }
+
 /// The diff area the details fill: x, y, width, height.
 pub(super) type Rect = (f32, f32, f32, f32);
 /// Selected text: from and to (row, column) cells.
 pub(super) type Selection = ((usize, usize), (usize, usize));
 /// What a tab paints in a frame: the page, scroll, selection, pane and character width.
-pub(super) type Frame = (Arc<Page>, usize, Option<Selection>, Rect, f32);
+pub(super) type Frame = (Arc<Page>, usize, Option<Selection>, Rect, f32, Option<Arc<reading::Layout>>);
 const PAD_X: f32 = 12.0;
 const PAD_Y: f32 = 8.0;
 
@@ -41,25 +55,45 @@ impl Dialog {
         let tab = pr.details().map(|d| d.tab);
         let key = (pr.pr.number, pr.generation(), cols, tab);
         if self.key != Some(key) {
-            if self.key.is_some_and(|k| k.0 != key.0) { self.scrolls.clear(); }
-            if let Some(old) = self.key.filter(|k| k.0 != key.0 || k.3 != tab) {
-                if let Some(t) = old.3 { self.scrolls.insert(t, self.scroll); }
-                self.scroll = tab.and_then(|t| self.scrolls.get(&t).copied()).unwrap_or(0);
+            if self.key.is_some_and(|k| k.0 != key.0) {
+                self.scrolls.clear();
+                self.scroll = 0;
+                self.pending_scroll = None;
+            } else if let Some(old) = self.key.filter(|k| k.3 != tab) {
+                let saved = self.pending_scroll.take().unwrap_or(ScrollIntent::Position(self.scroll));
+                if let Some(t) = old.3 { self.scrolls.insert(t, saved); }
+                self.pending_scroll = Some(tab.and_then(|t| self.scrolls.get(&t).cloned()).unwrap_or(ScrollIntent::Position(0)));
             }
+            let restore = self.pending_scroll.take().unwrap_or(ScrollIntent::Position(self.scroll));
             // a rebuilt page wraps differently, so a selection's (row, column) cells would name other text
             self.sel = None;
             self.press = None;
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
-            self.page = Arc::new(pr.page(cols, now).unwrap_or_default());
+            self.source = Arc::new(pr.page(cols, now).unwrap_or_default());
+            self.page = self.source.clone();
+            match &restore {
+                ScrollIntent::Position(row) => self.scroll = *row,
+                ScrollIntent::Reveal(target) => if let Some(row) = self.page.row_of(target) { self.scroll = row.saturating_sub(2); }
+            }
+            self.pending_scroll = (!self.source.markdown.is_empty()).then_some(restore);
+            self.reading = None;
+            self.reading_task = None;
+            self.reading_ready = None;
+            self.reading_request = None;
+            self.wheel = 0.;
             self.key = Some(key);
         }
-        if let Some(row) = pr.take_reveal().and_then(|t| self.page.row_of(&t)) { self.scroll = row.saturating_sub(2); }
+        if let Some(target) = pr.take_reveal() {
+            if let Some(row) = self.page.row_of(&target) { self.scroll = row.saturating_sub(2); }
+            if self.reading.is_none() && !self.source.markdown.is_empty() { self.pending_scroll = Some(ScrollIntent::Reveal(target)); }
+        }
         self.scroll = self.scroll.min(self.max_scroll(rect));
     }
-    fn max_scroll(&self, rect: Rect) -> usize {
-        self.page.height().saturating_sub(visible(rect))
+    pub(super) fn max_scroll(&self, rect: Rect) -> usize {
+        self.reading.as_ref().map_or_else(|| self.page.height().saturating_sub(visible(rect)), |l| l.max_scroll((rect.3 - PAD_Y).max(0.)))
     }
     fn key(&mut self, key: &str, rect: Rect) {
+        self.pending_scroll = None;
         let max = self.max_scroll(rect);
         let page = visible(rect).saturating_sub(1).max(1);
         self.scroll = match key {
@@ -80,21 +114,51 @@ impl Dialog {
     /// The page row and column under a point, clamped into the pane (for a drag past its edge).
     fn cell_clamped(&self, rect: Rect, char_w: f32, x: f32, y: f32) -> (usize, usize) {
         let (rx, ry) = ((x - rect.0 - PAD_X).max(0.0), (y - rect.1 - PAD_Y).clamp(0.0, (rect.3 - PAD_Y - 1.0).max(0.0)));
-        ((ry / line_h()) as usize + self.scroll, (rx / char_w.max(1.0)).round() as usize)
+        let side = self.page.side_at > 0 && rx >= self.page.side_at as f32 * char_w;
+        let row = if side { ((self.row_top(self.scroll) + ry) / line_h()) as usize } else { self.row_at(ry) };
+        (row, self.reading.as_ref().filter(|_| !side).and_then(|l| l.column_at(row, rx, true)).unwrap_or_else(|| (rx / char_w.max(1.)).round() as usize))
     }
     /// The page row and column under a point.
-    fn cell(&self, rect: Rect, char_w: f32, x: f32, y: f32) -> Option<(usize, usize)> {
+    pub(super) fn cell(&self, rect: Rect, char_w: f32, x: f32, y: f32) -> Option<(usize, usize)> {
         let (rx, ry) = (x - rect.0 - PAD_X, y - rect.1 - PAD_Y);
-        (rx >= 0.0 && ry >= 0.0).then(|| ((ry / line_h()) as usize + self.scroll, (rx / char_w.max(1.0)) as usize))
+        if rx < 0. || ry < 0. { return None; }
+        let side = self.page.side_at > 0 && rx >= self.page.side_at as f32 * char_w;
+        let row = if side { ((self.row_top(self.scroll) + ry) / line_h()) as usize } else { self.row_at(ry) };
+        if !side && self.reading.as_ref().is_some_and(|l| self.row_top(self.scroll) + ry >= l.top(row) + l.height(row)) { return None; }
+        let column = if let Some(layout) = self.reading.as_ref().filter(|l| !side && l.rows.get(row).is_some_and(Option::is_some)) {
+            layout.column_at(row, rx, false)?
+        } else { (rx / char_w.max(1.)) as usize };
+        Some((row, column))
+    }
+    fn row_top(&self, row: usize) -> f32 { self.reading.as_ref().map_or(row as f32 * line_h(), |l| l.top(row)) }
+    fn row_at(&self, y: f32) -> usize { self.reading.as_ref().map_or(self.scroll + (y / line_h()) as usize, |l| l.row_at(l.top(self.scroll) + y)) }
+    pub(super) fn point_of(&self, row: usize, column: usize, rect: Rect, char_w: f32) -> (f32, f32) {
+        let side = self.page.side_at > 0 && column >= self.page.side_at;
+        let x = self.reading.as_ref().filter(|_| !side).and_then(|l| l.x_for_column(row, column)).unwrap_or(column as f32 * char_w);
+        let top = if side { row as f32 * line_h() } else { self.row_top(row) };
+        (rect.0 + PAD_X + x, rect.1 + PAD_Y + top - self.row_top(self.scroll))
+    }
+    fn reading_style(&mut self, p: &Arc<theme::Palette>, font: &Font, window: &Window) -> Option<lenz_gpui::markdown::ReadingStyle> {
+        if self.source.markdown.is_empty() { return None; }
+        let same = self.reading_palette.as_ref().is_some_and(|old| Arc::ptr_eq(old, p)) && self.reading_font.as_ref().is_some_and(|(f, size)| f == font && *size == font_size());
+        if same && (self.reading.is_some() || self.reading_task.is_some() || self.reading_ready.is_some()) { return None; }
+        self.reading_task = None;
+        self.reading_ready = None;
+        self.reading_request = None;
+        self.reading_palette = Some(p.clone());
+        self.reading_font = Some((font.clone(), font_size()));
+        let installed = window.text_system().all_font_names();
+        let family = lenz_gpui::markdown::sans_family(crate::settings::get().gui.reading_font.as_deref(), &installed);
+        Some(lenz_gpui::markdown::ReadingStyle::new(p, font.clone(), gpui::font(family.to_string()), font_size()))
     }
     pub(super) fn paint(&self, p: &theme::Palette, rect: Rect, font: &Font, char_w: f32, window: &mut Window, cx: &mut App) {
         let (x, y, w, h) = rect;
         fill(window, x, y, w, h, p.bg);
         let clip = Bounds { origin: point(px(x), px(y)), size: size(px(w.max(0.0)), px(h.max(0.0))) };
-        let rows = visible(rect) + 1;
-        let (top, bottom) = (self.scroll, self.scroll + rows);
+        let (top, bottom) = (self.scroll, self.row_at(h) + 2);
+        let rows = bottom.saturating_sub(top);
         let col = |c: usize| x + PAD_X + c as f32 * char_w;
-        let row_y = |r: usize| y + PAD_Y + (r as f32 - self.scroll as f32) * line_h();
+        let row_y = |r: usize| y + PAD_Y + self.row_top(r) - self.row_top(self.scroll);
         let sel = self.sel.filter(|(a, b)| a != b).map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
         window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
             // cards: a header band and an outline, the innermost drawn last
@@ -103,7 +167,7 @@ impl Dialog {
             boxes.sort_by_key(|b| std::cmp::Reverse(b.right - b.left));
             for b in boxes {
                 let (bx, bw) = (col(b.left) + char_w * 0.5, (b.right - b.left) as f32 * char_w - char_w);
-                let (by, bh) = (row_y(b.top) + line_h() * 0.5, (b.bottom - b.top - 1) as f32 * line_h());
+                let (by, bh) = (row_y(b.top) + line_h() * 0.5, self.row_top(b.bottom.saturating_sub(1)) - self.row_top(b.top));
                 fill(window, bx, by, bw, bh, p.bg);
                 // a folded card is its header alone
                 let body = b.bottom - b.top > 3;
@@ -112,15 +176,36 @@ impl Dialog {
                 for (ex, ey, ew, eh) in [(bx, by, bw, 1.0), (bx, by + bh, bw, 1.0), (bx, by, 1.0, bh), (bx + bw, by, 1.0, bh + 1.0)] { fill(window, ex, ey, ew, eh, edge); }
                 if body { fill(window, bx, by + line_h() * 1.5, bw, 1.0, p.border); }
             }
-            let paint_row = |window: &mut Window, cx: &mut App, row: &crate::rich::Row, at: f32, right: f32| {
-                let start = col(row.indent);
+            let paint_row = |window: &mut Window, cx: &mut App, row: &crate::rich::Row, index: usize, side: bool, at: f32, right: f32| {
+                let native = (!side).then(|| self.reading.as_ref().and_then(|l| l.rows.get(index)?.as_ref())).flatten();
+                let start = native.map_or_else(|| col(row.indent), |r| x + PAD_X + r.x);
+                let height = native.map_or(line_h(), |r| r.height);
                 match row.fill {
-                    Fill::Code => fill(window, start - 4.0, at, (right - start + 4.0).max(0.0), line_h(), p.fold_bg),
-                    Fill::Quote => fill(window, start - char_w * 1.5, at, 2.0, line_h(), p.border),
+                    Fill::Code => fill(window, start - 4.0, at, (right - start + 4.0).max(0.0), height, self.reading.as_ref().filter(|_| native.is_some()).map_or(p.fold_bg, |l| l.style.code_bg)),
+                    Fill::Quote => fill(window, start - char_w * 1.5, at, 2.0, height, p.border),
                     Fill::Rule => fill(window, start, at + line_h() * 0.5, (right - start).max(0.0), 1.0, p.border),
                     Fill::None => {}
                 }
-                rich_text(p, window, cx, font, start, at, &row.spans);
+                let bounds = Bounds { origin: point(px(start), px(at)), size: size(px((right - start).max(0.)), px(height)) };
+                window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                    if let Some(native) = native {
+                        let origin = point(px(start), px(at));
+                        let _ = native.line.paint_background(origin, px(height), TextAlign::Left, None, window, cx);
+                        let _ = native.line.paint(origin, px(height), TextAlign::Left, None, window, cx);
+                        if let (Some((offset, done)), Some(layout)) = (native.task, self.reading.as_ref()) {
+                            let style = &layout.style;
+                            let side = (style.size * 0.95).round();
+                            let (bx, by) = (start + offset, at + (height - side) / 2.);
+                            if done {
+                                fill(window, bx, by, side, side, style.check);
+                                let line = window.text_system().shape_line("✓".into(), px(side * 0.8), &[TextRun { len: "✓".len(), font: style.body.clone(), color: rgb(p.bg).into(), ..Default::default() }], None);
+                                let _ = line.paint(point(px(bx + (side - f32::from(line.width)) / 2.), px(by)), px(side), TextAlign::Left, None, window, cx);
+                            } else {
+                                for (x, y, w, h) in [(bx, by, side, 1.), (bx, by + side - 1., side, 1.), (bx, by, 1., side), (bx + side - 1., by, 1., side)] { fill(window, x, y, w, h, style.muted); }
+                            }
+                        }
+                    } else { rich_text(p, window, cx, font, start, at, &row.spans); }
+                });
             };
             let right_of = |side: bool| if side || self.page.side_at == 0 { x + w - PAD_X } else { col(self.page.side_at.saturating_sub(2)) };
             // the selection, under the text
@@ -129,16 +214,18 @@ impl Dialog {
                     // within the row's text: from its indent to its last character
                     let (indent, end) = self.page.rows.get(r).map_or((0, 0), |row| (row.indent, row.indent + crate::rich::width(&row.text())));
                     let (a, b) = ((if r == r0 { c0 } else { 0 }).max(indent), (if r == r1 { c1 } else { end }).min(end));
-                    let (a, b) = (col(a), col(b).min(x + w));
-                    if b > a { fill(window, a, row_y(r), b - a, line_h(), p.sel_bg); }
+                    let (a, b) = (self.point_of(r, a, rect, char_w).0, self.point_of(r, b, rect, char_w).0.min(x + w));
+                    let height = self.reading.as_ref().map_or(line_h(), |l| l.height(r));
+                    if b > a { fill(window, a, row_y(r), b - a, height, p.sel_bg); }
                 }
             }
             for (i, row) in self.page.rows.iter().enumerate().skip(top).take(rows) {
                 // a row inside a card ends at the card's edge
                 let edge = self.page.boxes.iter().filter(|b| (b.top..b.bottom).contains(&i) && row.indent >= b.left).map(|b| col(b.right) - char_w).fold(right_of(false), f32::min);
-                paint_row(window, cx, row, row_y(i), edge);
+                paint_row(window, cx, row, i, false, row_y(i), edge);
             }
-            for (i, row) in self.page.side.iter().enumerate().skip(top).take(rows) { paint_row(window, cx, row, row_y(i), right_of(true)); }
+            let side_top = (self.row_top(self.scroll) / line_h()) as usize;
+            for (i, row) in self.page.side.iter().enumerate().skip(side_top).take(visible(rect) + 2) { paint_row(window, cx, row, i, true, y + PAD_Y + i as f32 * line_h() - self.row_top(self.scroll), right_of(true)); }
         });
     }
 }
@@ -282,6 +369,7 @@ impl Viewer {
         if !self.pr_details_shown() || !self.in_pr_pane(ev.position) { return false; }
         if ev.button != MouseButton::Left { return true; }
         let target = self.pr_target_at(ev.position).map(|(t, _)| t);
+        if let Some(d) = self.pr_dialog.as_mut() { d.pending_scroll = None; }
         if target.is_none() {
             // anywhere else a press starts a selection
             let (rect, char_w) = (self.pr_pane(), self.char_w);
@@ -326,27 +414,75 @@ impl Viewer {
             return false;
         }
         self.prepare_pr_dialog();
-        let key = if f32::from(ev.delta.pixel_delta(px(line_h())).y) > 0.0 { "up" } else { "down" };
+        let delta = match &ev.delta {
+            ScrollDelta::Lines(lines) => lines.y.clamp(-1.,1.),
+            ScrollDelta::Pixels(pixels) => f32::from(pixels.y)/line_h(),
+        };
+        if delta == 0. { return true; }
         let rect = self.pr_pane();
         if let Some(d) = self.pr_dialog.as_mut() {
-            for _ in 0..3 { d.key(key, rect); }
+            d.pending_scroll = None;
+            // A full wheel step must not inherit a trackpad's fractional remainder.
+            if matches!(ev.delta,ScrollDelta::Lines(_))&&delta.abs()>=1. { d.wheel=0.; }
+            d.wheel -= delta;
+            let rows = d.wheel.trunc() as isize;
+            d.wheel -= rows as f32;
+            d.scroll = d.scroll.saturating_add_signed(rows).min(d.max_scroll(rect));
         }
         cx.notify();
         true
     }
     /// What a details tab paints this frame: the page, scroll and pane, or `None` on Files changed.
-    pub(super) fn pr_details_frame(&mut self) -> Option<Frame> {
+    pub(super) fn pr_details_frame(&mut self, window: &Window, cx: &mut Context<Self>) -> Option<Frame> {
         // the dialog stays while the PR is open, with each tab's scroll, for when a tab comes back
         if self.repo.as_ref().is_none_or(|r| r.pr.is_none()) { self.pr_dialog = None; }
         if !self.pr_details_shown() { return None; }
         self.prepare_pr_dialog();
-        let dialog = self.pr_dialog.as_ref()?;
-        Some((dialog.page.clone(), dialog.scroll, dialog.sel, self.pr_pane(), self.char_w))
+        let rect = self.pr_pane();
+        let dialog = self.pr_dialog.as_mut()?;
+        if let Some(style) = dialog.reading_style(&self.palette, &self.font, window) {
+            let request = Arc::new(());
+            let current = Arc::downgrade(&request);
+            dialog.reading_request = Some(request);
+            let source = dialog.source.clone();
+            let palette = self.palette.clone();
+            let char_w = self.char_w;
+            // Native shaping has its own cache and cancellation token, as in Markdown file previews.
+            let text_system = gpui::WindowTextSystem::new(cx.text_system().clone());
+            dialog.reading_task = Some(cx.spawn(async move |this, cx| {
+                let work = current.clone();
+                let layout = cx.background_executor().spawn(async move {
+                    reading::Layout::new(&source, style, &palette, char_w, &text_system, &|| work.strong_count() > 0)
+                }).await;
+                let _ = this.update(cx, |v, cx| {
+                    if let Some(d) = v.pr_dialog.as_mut().filter(|d| d.reading_request.as_ref().is_some_and(|r| std::sync::Weak::ptr_eq(&Arc::downgrade(r), &current))) {
+                        d.reading_task = None;
+                        d.reading_request = None;
+                        if let Some(layout) = layout { d.reading_ready = Some(Arc::new(layout)); }
+                        cx.notify();
+                    }
+                });
+            }));
+        }
+        // Keep the user's selection stable if formatting finishes during a drag or before Copy.
+        if dialog.press.is_none() && dialog.sel.is_none_or(|(a, b)| a == b) && let Some(layout) = dialog.reading_ready.take() {
+            dialog.sel = None;
+            dialog.page = layout.page.clone();
+            dialog.reading = Some(layout);
+            match dialog.pending_scroll.take() {
+                Some(ScrollIntent::Position(row)) => dialog.scroll = row,
+                Some(ScrollIntent::Reveal(target)) => if let Some(row) = dialog.page.row_of(&target) { dialog.scroll = row.saturating_sub(2); },
+                None => {}
+            }
+            dialog.scroll = dialog.scroll.min(dialog.max_scroll(rect));
+        }
+        Some((dialog.page.clone(), dialog.scroll, dialog.sel, rect, self.char_w, dialog.reading.clone()))
     }
     /// Dragging from a press on a tab selects its text.
     pub(super) fn pr_dialog_drag(&mut self, x: f32, y: f32, cx: &mut Context<Self>) -> bool {
         let (rect, char_w, shown) = (self.pr_pane(), self.char_w, self.pr_details_shown());
         let Some(d) = self.pr_dialog.as_mut().filter(|d| d.press.is_some() && shown) else { return false };
+        d.pending_scroll = None;
         let head = d.cell_clamped(rect, char_w, x, y);
         d.sel = d.press.map(|a| (a, head));
         cx.notify();

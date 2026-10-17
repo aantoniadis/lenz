@@ -9,6 +9,9 @@ mod user_flows;
 #[path = "followup_tests.rs"]
 mod followup_tests;
 
+#[path = "pr_reading_tests.rs"]
+mod pr_reading_tests;
+
 #[gpui::test]
 fn gui_user_flow_discard_shorter_external_file_renders_before_diff_completes(
     cx: &mut TestAppContext,
@@ -2413,6 +2416,70 @@ fn gui_markdown_repository_added_deleted_commits_keep_authoritative_hunks(cx:&mu
 }
 
 #[gpui::test]
+fn gui_source_load_more_branches_click_reads_the_next_page(cx: &mut TestAppContext) {
+    let f = repository_markdown_fixture(cx);
+    for i in 0..44 { workflow_git(f.dir.path(), &["branch", &format!("topic-{i:02}")]); }
+    f.viewer.update(cx, |v, cx| {
+        let session = crate::repository_session::RepositorySession::open_loaded(f.dir.path().into(), true, None, None, v.set.clone(), v.spec.clone());
+        v.with_session(session, cx);
+    });
+    workflow_wait(cx, &f, |v| v.repo.as_ref().unwrap().picker.sources.loaded);
+    let row = f.viewer.read_with(cx, |v, _| {
+        let p = &v.repo.as_ref().unwrap().picker;
+        assert_eq!(p.sources.branches.len(), 20);
+        p.sources.rows(&v.palette, &p.branches).iter().position(|r| matches!(r.action, Some(crate::repository_session::SourceAction::ShowAllBranches))).unwrap()
+    });
+    let y = f.viewer.read_with(cx, |v, _| toolbar_h() + (row as f32 - v.repo.as_ref().unwrap().picker.sources.scroll + 1.5) * line_h());
+    click(cx, &f, 30., y);
+    workflow_wait(cx, &f, |v| v.repo.as_ref().unwrap().picker.sources.branches.len() == 40);
+}
+
+#[gpui::test]
+fn gui_pr_click_keeps_a_loader_after_the_toast_and_clears_on_completion(cx: &mut TestAppContext) {
+    let f = repository_markdown_fixture(cx);
+    let _provider = crate::pr::test_support::markdown_provider(f.dir.path());
+    let before = workflow_source_hash(f.dir.path());
+    f.viewer.update(cx, |v, cx| {
+        let session = crate::repository_session::RepositorySession::open_loaded(f.dir.path().into(), true, None, None, v.set.clone(), v.spec.clone());
+        v.with_session(session, cx);
+    });
+    workflow_wait(cx, &f, |v| v.repo.as_ref().unwrap().picker.sources.prs.iter().any(|p| p.number == 9));
+    let row = f.viewer.read_with(cx, |v, _| {
+        let p = &v.repo.as_ref().unwrap().picker;
+        p.sources.rows(&v.palette, &p.branches).iter().position(|r| matches!(r.action, Some(crate::repository_session::SourceAction::Pr(9)))).unwrap()
+    });
+    let old = f.viewer.read_with(cx, |v, _| v.doc().unwrap().text_right.clone());
+    let y = f.viewer.read_with(cx, |v, _| toolbar_h() + (row as f32 - v.repo.as_ref().unwrap().picker.sources.scroll + 1.5) * line_h());
+    click(cx, &f, 30., y);
+    f.viewer.update(cx, |v, _| v.toast = None);
+    for (width, height, theme) in [(1200., 800., "darcula"), (320., 160., "light")] {
+        cx.simulate_window_resize(f.window.into(), size(px(width), px(height)));
+        cx.update(|cx| cx.update_global::<themes::GuiThemes, _>(|g, _| g.0.execute(theme::ThemeCommand::Select(theme::ThemeSelection::Named(theme.into())))));
+        f.window.update(cx, |v, w, cx| {
+            let _ = v.render(w, cx);
+            let banner = v.banner().expect("a clicked PR needs persistent visible feedback");
+            assert!(banner.contains("Loading pull request #9"), "{banner}");
+            assert_eq!(v.doc().unwrap().text_right, old, "keep the previous comparison while fetching");
+        }).unwrap();
+    }
+    click(cx, &f, 30., toolbar_h() + 1.5 * line_h());
+    assert!(f.viewer.read_with(cx, |v, _| v.banner().is_none_or(|b| !b.contains("Loading pull request"))), "another source cancels PR feedback immediately");
+    workflow_wait(cx, &f, |v| !v.repo.as_ref().unwrap().busy());
+    assert!(f.viewer.read_with(cx, |v, _| v.repo.as_ref().unwrap().pr.is_none()), "a stale PR completion must stay cancelled");
+    cx.simulate_window_resize(f.window.into(), size(px(1200.), px(800.)));
+    f.window.update(cx, |v, w, cx| { let _ = v.render(w, cx); }).unwrap();
+    click(cx, &f, 30., y);
+    workflow_wait(cx, &f, |v| v.repo.as_ref().unwrap().pr.as_ref().is_some_and(|p| p.pr.number == 9) && v.doc().is_some() && v.comparison.generation == v.comparison.diffed);
+    f.viewer.read_with(cx, |v, _| assert!(v.banner().is_none_or(|b| !b.contains("Loading pull request"))));
+    assert!(f.viewer.read_with(cx, |v, _| v.layout.focused(v.repo.as_ref())));
+    run(cx, &f, crate::catalog::Action::Pr(crate::catalog::PrAction::Refresh));
+    assert!(f.viewer.read_with(cx, |v, _| v.banner().is_some_and(|b| b.contains("Loading pull request #9"))), "refreshing in Focus also shows the loader");
+    workflow_wait(cx, &f, |v| !v.repo.as_ref().unwrap().busy());
+    assert!(f.viewer.read_with(cx, |v, _| v.banner().is_none_or(|b| !b.contains("Loading pull request"))));
+    assert_eq!(workflow_source_hash(f.dir.path()), before);
+}
+
+#[gpui::test]
 fn gui_markdown_offline_pr_sidebar_opens_real_comparison_and_modal(cx:&mut TestAppContext) {
     let f=repository_markdown_fixture(cx);let provider=crate::pr::test_support::markdown_provider(f.dir.path());
     let before=std::fs::read(f.dir.path().join("ref.md")).unwrap();let source_hash_before=workflow_source_hash(f.dir.path());
@@ -4170,10 +4237,12 @@ fn gui_pr_conversation_clicks_fold_jump_open_commits_and_copy(cx:&mut TestAppCon
     let page=|cx:&mut TestAppContext|{f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();f.viewer.read_with(cx,|v,_|v.pr_dialog.as_ref().unwrap().page.clone())};
     // the window point of a page target: its row, at its first column
     let point_of=|cx:&mut TestAppContext,target:&Target|f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);
-        v.char_w=8.;
-        let d=v.pr_dialog.as_ref().unwrap();let row=d.page.row_of(target).unwrap();let r=&d.page.rows[row];
+        let rect=v.pr_pane();let char_w=v.char_w;
+        let d=v.pr_dialog.as_mut().unwrap();let row=d.page.row_of(target).unwrap();let r=&d.page.rows[row];
         let mut col=r.indent;for s in &r.spans{if s.target.as_ref()==Some(target){break;}col+=crate::rich::width(&s.text);}
-        let (x,y,_,_)=v.pr_pane();(x+12.+(col as f32+0.5)*v.char_w,y+8.+(row as f32-d.scroll as f32+0.5)*line_h())
+        let (_,y)=d.point_of(row,col,rect,char_w);
+        if y<rect.1||y+line_h()>rect.1+rect.3 {d.scroll=row.saturating_sub(2).min(d.max_scroll(rect));}
+        let (x,y)=d.point_of(row,col,rect,char_w);(x+1.,y+2.)
     }).unwrap();
     let texts=|cx:&mut TestAppContext|page(cx).rows.iter().map(|r|r.text()).collect::<Vec<_>>().join("\n");
     assert!(!texts(cx).contains("THREAD_BODY"),"a resolved thread starts folded");
@@ -4210,7 +4279,7 @@ fn gui_pr_tabs_copy_text_hide_files_keep_their_place_and_sit_in_the_middle(cx:&m
         v.repo.as_mut().unwrap().pr.as_mut().unwrap().seed_review(review,&[]).unwrap();
         if !v.layout.files(){v.layout.execute(crate::layout::LayoutCommand::ToggleFiles,v.repo.as_mut());}
     });
-    let paint=|cx:&mut TestAppContext|f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);v.char_w=8.;}).unwrap();
+    let paint=|cx:&mut TestAppContext|f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
     run(cx,&f,crate::catalog::Action::Pr(crate::catalog::PrAction::Details(DetailsTab::Conversation)));paint(cx);
     // Files only on Files changed
     assert_eq!(f.viewer.read_with(cx,|v,_|v.sidebar_w()),0.,"no file list on Conversation");
@@ -4218,9 +4287,9 @@ fn gui_pr_tabs_copy_text_hide_files_keep_their_place_and_sit_in_the_middle(cx:&m
     // the tabs sit in the middle of the header
     f.viewer.read_with(cx,|v,_|assert_eq!(v.toolbar_slots().into_iter().filter(|s|s.center).map(|s|s.id).collect::<Vec<_>>(),["pr-tab-conversation","pr-tab-commits","pr-tab-files"],"the tabs sit in the toolbar's middle"));
     // a drag selects text and Ctrl/Cmd+C copies it
-    let (x,y)=f.viewer.read_with(cx,|v,_|{let d=v.pr_dialog.as_ref().unwrap();let row=d.page.rows.iter().position(|r|r.text().starts_with("Description line")).unwrap();let (px_,py_,_,_)=v.pr_pane();(px_+12.+(d.page.rows[row].indent as f32)*v.char_w,py_+8.+(row as f32+0.5)*line_h())});
+    let (x,y,end_x)=f.viewer.read_with(cx,|v,_|{let d=v.pr_dialog.as_ref().unwrap();let row=d.page.rows.iter().position(|r|r.text().starts_with("Description line")).unwrap();let col=d.page.rows[row].indent;let (x,y)=d.point_of(row,col,v.pr_pane(),v.char_w);let end_x=d.point_of(row,col+11,v.pr_pane(),v.char_w).0;(x,y+2.,end_x)});
     click(cx,&f,x,y);
-    f.window.update(cx,|v,w,cx|{v.on_mouse_move(&MouseMoveEvent{position:point(px(x+11.*8.),px(y)),pressed_button:Some(MouseButton::Left),modifiers:Default::default()},w,cx);v.on_mouse_up(&MouseUpEvent{button:MouseButton::Left,position:point(px(x+11.*8.),px(y)),modifiers:Default::default(),click_count:1},w,cx);}).unwrap();
+    f.window.update(cx,|v,w,cx|{v.on_mouse_move(&MouseMoveEvent{position:point(px(end_x),px(y)),pressed_button:Some(MouseButton::Left),modifiers:Default::default()},w,cx);v.on_mouse_up(&MouseUpEvent{button:MouseButton::Left,position:point(px(end_x),px(y)),modifiers:Default::default(),click_count:1},w,cx);}).unwrap();
     key(cx,&f,"c",true,false,false);
     assert_eq!(cx.read_from_clipboard().and_then(|c|c.text()).as_deref(),Some("Description"));
     // Commits keeps its place across Files changed

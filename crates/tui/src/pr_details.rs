@@ -123,8 +123,8 @@ impl Dialog {
             }
             Event::Mouse(m) if area.contains((m.column, m.row).into()) => {
                 let outcome = match m.kind {
-                    MouseEventKind::ScrollUp => { self.scroll = self.scroll.saturating_sub(3); None }
-                    MouseEventKind::ScrollDown => { self.scroll = (self.scroll + 3).min(max); None }
+                    MouseEventKind::ScrollUp => { self.scroll = self.scroll.saturating_sub(1); None }
+                    MouseEventKind::ScrollDown => { self.scroll = (self.scroll + 1).min(max); None }
                     MouseEventKind::Down(MouseButton::Left) => {
                         let target = self.cell(m.column, m.row).and_then(|(r, c)| self.page.target_at(r, c)).cloned();
                         // a press off a link, fold or hash starts a selection
@@ -202,6 +202,7 @@ impl Dialog {
                     if span.style.strike { style = style.add_modifier(Modifier::CROSSED_OUT); }
                     if matches!(span.target, Some(Target::Url(_))) { style = style.add_modifier(Modifier::UNDERLINED); }
                     if span.style.code || row.fill == Fill::Code { style = style.bg(color(p.fold_bg)); }
+                    if span.style.highlight { style = style.bg(color(lenz::theme::highlight_bg(p))); }
                     if header && !span.style.code { style = style.bg(color(p.header_bg)); }
                     let text = crate::repository::safe_label(&span.text);
                     if cx >= right { break; }
@@ -252,5 +253,39 @@ pub(crate) fn wrap_into(text: &str, width: u16, rows: &mut Vec<String>) {
             n += w;
         }
         rows.push(row);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crossterm::event::MouseEvent;
+
+    #[test]
+    fn pr_reading_wheel_moves_one_row_and_clamps_after_resize() {
+        let mut pr = lenz::pr::PullRequest { number: 1, title: "A change".into(), author: lenz::pr::Account { login: "alex".into() }, state: lenz::pr::State::Open, is_draft: false,
+            body: String::new(), base_ref_name: "main".into(), head_ref_name: "feature".into(), head_ref_oid: "head".into(), url: "https://github.com/o/r/pull/1".into(),
+            additions: 1, deletions: 0, changed_files: 1, is_cross_repository: false, head_repository: None, head_repository_owner: None };
+        pr.body = "Paragraph.\n\n".repeat(80);
+        let mut pr = PrState::new(pr, lenz::pr::Fetched { number: 14130, merge_base: "base".into(), head: "head".into() });
+        pr.execute(PrCommand::Show(DetailsTab::Conversation));
+        let mut dialog = Dialog::default();
+        let area = Rect::new(0, 0, 80, 20);
+        dialog.handle(&Event::Mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE }), &mut pr, area);
+        assert_eq!(dialog.scroll, 1);
+        let key = |code| Event::Key(crossterm::event::KeyEvent::new(code, KeyModifiers::NONE));
+        dialog.handle(&key(KeyCode::End), &mut pr, area);
+        let end = dialog.scroll;
+        dialog.handle(&key(KeyCode::Up), &mut pr, area);
+        assert_eq!(dialog.scroll, end - 1);
+        for theme in lenz::theme::builtin_entries() {
+            for (width, height) in [(120, 30), (28, 8), (8, 3), (1, 1)] {
+                let area = Rect::new(0, 0, width, height);
+                let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+                terminal.draw(|frame| dialog.draw(frame, &mut pr, area, &theme.palette)).unwrap();
+                assert!(dialog.scroll <= dialog.max());
+            }
+        }
+        assert!(matches!(dialog.handle(&key(KeyCode::Esc), &mut pr, area), (true, Some(Outcome::Pr(PrCommand::Close)))));
     }
 }
