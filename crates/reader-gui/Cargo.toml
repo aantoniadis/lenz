@@ -1,0 +1,39 @@
+[package]
+name = "reader-gui"
+description = "The Lenz code reader's GPUI window"
+license = "MIT"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "lenz-reader"
+path = "src/main.rs"
+
+[features]
+test-support = ["gpui/test-support"]
+# Benchmark markers on stderr; never in release builds that ship.
+perf-probe = []
+
+[dependencies]
+reader-core = { path = "../reader-core" }
+lenz-content.workspace = true
+lenz-gpui.workspace = true
+gpui.workspace = true
+# The tree's logos; the version Lenz's content crate already builds.
+resvg = { version = "0.46", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+gpui_platform = { workspace = true, features = ["font-kit"] }
+
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+gpui_platform = { workspace = true, features = ["wayland", "x11"] }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+tempfile = "3"
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true

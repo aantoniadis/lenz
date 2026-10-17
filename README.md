@@ -4,28 +4,67 @@
 
 <h1 align="center">Lenz</h1>
 
-<p align="center">Side-by-side diffs, repository history and three-way merges, in a native window or your terminal.</p>
+<p align="center">Read code, explore repositories, compare changes and resolve merges.</p>
 
 ![Lenz GUI comparing working-tree changes in a Rust project, with the changed files on the left and word-level highlights between the two sides](docs/images/gui-comparison.png)
 
-A fast, native side-by-side diff viewer, git client and merge tool for Linux and macOS, built in Rust. Lenz has two frontends over one shared core:
+A native code reader, diff viewer, git client and merge tool, built in Rust.
+**Lenz Code** reads code; **Lenz Diff** compares and merges. Both have native
+windows and terminal adapters. The desktop apps use [GPUI](https://github.com/zed-industries/zed);
+the terminal uses [Ratatui](https://ratatui.rs) and has no GUI dependencies.
 
-- **`lenz`**: a GPU-rendered desktop app built on [gpui](https://github.com/zed-industries/zed).
-- **`lenz-tui`**: a terminal app built on [Ratatui](https://ratatui.rs), without any GUI dependencies.
+**Command-family trial:** this branch brings the Reader and Diff into one workspace,
+with separate executables behind these commands:
 
-Run either with the arguments you'd give `git diff`, or give it two files or two directories, and it opens the Change Set. `lenz log` browses the repository and pull requests, and `lenz merge` (or `git mergetool`) resolves conflicts.
+| Command | Opens |
+|---|---|
+| `lenz [file-or-folder]` | Code Reader; with no path, the current folder |
+| `lenz --tui [file-or-folder]` | Terminal Code Reader |
+| `lenz diff …` | Desktop Diff |
+| `lenz diff --tui …` | Terminal Diff |
 
-**Status:** beta (0.0.1). GUI and TUI workflows are implemented and tested on Linux and macOS (Apple Silicon); automated GUI interaction coverage is Linux-only. See the [macOS figures and known costs](docs/performance.md#macos).
+Run `scripts/try-launcher.sh` to build the trial; see [Build](#build) and the
+[trial instructions](docs/launcher-trial.md). Existing release packages still ship
+Diff as `lenz` and `lenz-tui`; they do not yet include the Reader or command-family launcher.
+
+**Status:** Diff is beta (0.0.1), tested on Linux and macOS (Apple Silicon), with automated
+GUI interaction coverage on Linux. Reader and launcher integration are experimental
+and verified on Linux; native macOS validation is pending. Reader is currently read-only
+with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
-| | GUI (`lenz`) | Terminal (`lenz-tui`) |
+| Code Reader: project browsing and Find | Code Reader: Markdown preview |
+|---|---|
+| [![Reader showing a Rust file, project explorer and highlighted search matches](docs/images/reader-code.png)](docs/images/reader-code.png) | [![Reader rendering Markdown properties, callouts, code and a checklist](docs/images/reader-markdown.png)](docs/images/reader-markdown.png) |
+
+| | Diff GUI | Diff terminal |
 |---|---|---|
 | **Repository** | [![Repository window with branch graph, commit log and the selected Change Set](docs/images/gui-repository.png)](docs/images/gui-repository.png) | [![Terminal repository view with the same log and Change Set](docs/images/tui-repository.png)](docs/images/tui-repository.png) |
 | **Merge** | [![Three-way Merge View with Ours, Result and Theirs](docs/images/gui-merge.png)](docs/images/gui-merge.png) | [![Terminal Merge View](docs/images/tui-merge.png)](docs/images/tui-merge.png) |
 | **Compare** | [![Markdown Preview comparison](docs/images/gui-markdown.png)](docs/images/gui-markdown.png) | [![Terminal comparison with syntax highlighting and files list](docs/images/tui-comparison.png)](docs/images/tui-comparison.png) |
 
 ## Features
+
+### Code Reader
+
+- **Explore code** with a project tree, file finder, tabs, independent split panes,
+  breadcrumbs, outline, folding and sticky declarations.
+- **Navigate** with bookmarks, recent files and locations, and back/forward history.
+  Installed language servers add definitions, usages, documentation, call/type
+  hierarchies, semantic colours and inlay hints; availability depends on the provider.
+- **Find** within a file or across the project, with case, whole-word and regular-expression
+  options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
+- **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
+  with `Ctrl+Shift+V`, soft wrap with `Alt+Z`, and search with `Ctrl+F`.
+- **Share appearance** with Diff: theme selection, custom themes and desktop font
+  preferences. Each app keeps its own documents and navigation state.
+
+The Reader does not edit the files it displays. Archive browsing is currently a
+Diff feature. See the [Reader guide](docs/code/README.md) for controls and limits,
+and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
+
+### Diff and merge
 
 - **Compare** files, directories, revisions, the index or the working tree, with word/character/line highlighting, whitespace and case modes, three scroll modes, syntax highlighting, sticky scroll (the enclosing declarations stay pinned at the top of each pane) and blame annotations.
 - **Apply changes**: move Change Blocks with ≫ / ≪ and revert hunks. Changes stay as a draft until you save. Every applied change stays visible as Applied or Undone, with selective Undo.
@@ -35,10 +74,12 @@ Run either with the arguments you'd give `git diff`, or give it two files or two
 - **Archives as folders**: a changed `.zip` or tarball (`.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`, `.tar.xz`, `.tar.zst`) is listed as a folder of the files that changed inside it, each with its own comparison. Archives inside archives open too. RAR is shown as a binary file.
 - **Folders**: a folder heading in Files collapses and expands with its arrow; archives start collapsed with their file count. A click on a folder's name shows its **Folder Summary**: the folder's changed files with the lines each added and removed.
 - **Markdown Preview**: an Obsidian-like reading view (callouts, properties, highlights, tags, wiki links, footnotes, local images), Inline with removed words struck in place or Side by side, with change bars beside each changed block; every source change stays reachable. The terminal app shows it too, with images as real pixels in kitty and Ghostty.
-- **Themes**: Darcula, Light, Catppuccin, Tokyo Night and Gruvbox, system/Omarchy following and custom TOML themes.
+- **Themes**: 16 bundled dark/light palettes, including Nord, Everforest, Kanagawa, Dracula, One Dark, Rosé Pine, Flexoki and Solarized; system/Omarchy following and custom TOML themes. See the [theme list](docs/themes.md).
 - **Safe writes**: atomic, keeping encoding, BOM, line endings and file mode, and never over a file that changed on disk since Lenz read it.
 
 ## Install
+
+These packages contain Diff. To try the Reader and command family, build this branch as described below.
 
 Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub Releases page](https://github.com/aantoniadis/lenz/releases); the current one is a beta.
 
@@ -54,6 +95,25 @@ Linux tarballs include the logo and `lenz.desktop`; the AUR and Linux Homebrew p
 ## Build
 
 Needs a stable Rust toolchain and git 2.30 or later at runtime.
+
+### Reader and command-family trial
+
+From this branch, with the system libraries listed below:
+
+```sh
+scripts/try-launcher.sh
+target/launcher-trial/lenz path/to/project
+target/launcher-trial/lenz path/to/source.rs
+target/launcher-trial/lenz --tui path/to/source.rs
+target/launcher-trial/lenz diff --no-index left.txt right.txt
+target/launcher-trial/lenz diff --tui --no-index left.txt right.txt
+```
+
+The script prints the staging directory (which may differ with a custom Cargo target directory).
+It installs nothing globally. To build only the Reader, use
+`cargo build --release --locked -p reader-gui` and run `target/release/lenz-reader`.
+
+### Diff binaries
 
 ```sh
 cargo build --release --locked -p lenz       # GUI: target/release/lenz
@@ -80,6 +140,10 @@ target/package/lenz-0.0.1-aarch64-apple-darwin/lenz path/to/left path/to/right  
 To install it, copy `Lenz.app` to `/Applications` and put a `lenz` symlink to `/Applications/Lenz.app/Contents/MacOS/lenz` on your `PATH` (as the Homebrew formula does); launched through that symlink, from a terminal or as a git difftool, it still shows the logo.
 
 ## Usage
+
+This Diff reference uses the **released** executable names. In the command-family
+trial, replace `lenz` with `lenz diff` and `lenz-tui` with `lenz diff --tui`, including
+the Git tool configurations below. Reader usage is in the [Reader guide](docs/code/README.md).
 
 `lenz` and `lenz-tui` take the same arguments. The git grammar mirrors `git diff`:
 
@@ -161,6 +225,7 @@ Plain `lenz` and `lenz log` in a repository reopen where you left off: the selec
 - The toolbar keeps the frequent actions, with diff options under **⚙** and app actions under **☰**; Branches, History and Files toggle from the bottom bar; the diff header switches Markdown and image modes. Right-click shows only actions for what is under the pointer.
 - Tab/Shift-Tab move focus between panes. Typing in the Files or Commits list searches it; Ctrl/Cmd+F searches the focused text side, Ctrl/Cmd+Shift+F the whole Change Set.
 - **Back / Forward** (◀ ▶, Alt+Left/Right, mouse back/forward buttons) return to the previous commit, branch, filter or file history and reopen its file and line; `[` / `]` move between files.
+- In **Focus**, commit details sit below the file tree and diff in a full-width panel. **Commit** in the bottom bar, or **Show / hide commit message** in Commands, hides and restores it. Files can be hidden independently.
 - Drag pane dividers to resize; **Reset pane sizes** restores the layout.
 - `o` opens the file in your editor at the line (`$VISUAL`/`$EDITOR`, or `LENZ_EDITOR` when those are wrappers), `shift-o` in the default app.
 - Long histories load in steps of about 50,000 commits beyond what you can see; scrolling, End, searches and filters load more.
@@ -214,6 +279,31 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+### Code Reader
+
+Linux release build on a private Xvfb display with Mesa software rendering;
+generated Rust files, language servers disabled. Startup measures the first content-frame
+marker, before GPU presentation and without waiting for syntax highlighting.
+
+| Measurement | Result |
+|---|---:|
+| Open a 2,000-line Rust file, warm Reader cache (20 launches) | 153 ms median · 156 ms p95 |
+| Same file, fresh Reader cache (20 launches) | 152 ms median · 156 ms p95 |
+| Ten kept tabs, 20,000 source lines total | 164 MiB settled RSS · 164 MiB peak RSS |
+
+The warm OS page cache and shader cache were retained in both startup cases;
+"fresh" means an empty Reader cache. Memory covers the Reader process, not language
+servers or GPU allocations. See [Reader measurements](docs/code/performance.md) for
+raw samples, fixture details, reproduction and limits.
+
+The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
+(seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a
+60-second navigation run. Timings end at PTY bytes, and RSS excludes GPU and
+language-server memory. See [Reader TUI verification](docs/code/tui-performance.md)
+for the standalone comparison, raw evidence and unverified workloads.
+
+### Diff and merge
+
 Linux desktop, release builds, medians of three warm launches; the GUI on a software-rendered private X display, the TUI in a 120×36 pseudo-terminal:
 
 | Operation | GUI | TUI |
@@ -232,12 +322,20 @@ In a shared-core release fixture with 5,001 branches and 25 worktrees, increment
 
 The maintainer accepted about 7.5 MiB more settled GUI RSS and 0.05–0.07 seconds more startup CPU on the Linux software-rendered fixtures after checking the changes on Linux. Most extra repository RSS is one additional window-sized graphics allocation; hardware-rendered memory use remains unverified.
 
+Reader/Diff sharing checks on this Linux experiment measured 35.8→35.1 ms to observe the Reader window, 36.3→37.3 ms for Diff, and 6.0→6.4 ms to TUI content (16 alternating pairs). These GUI endpoints precede first paint and cannot replace the table above. Timing repeats found no consistent regression; see the [shared-feature verification](docs/shared-features-performance.md) for memory, stress and limits.
+
+The bottom commit-panel checks measured GUI alternating scroll feedback at 11.89→11.93 ms and TUI feedback at 0.486→0.451 ms. Hardware-rendered log first paint measured 137→134 ms; 15-minute GUI/TUI runs passed with comparable memory growth and matching GPU allocation plateaus. See the [panel verification](docs/commit-panel-performance.md) for startup, Find, memory, stress, and measurement limits.
+
 See the [performance overview](docs/performance.md) for method and accepted costs, and the [benchmark guide](docs/benchmarking.md) to run the suite yourself.
 
 ## Documentation
 
 | Guide | Covers |
 |---|---|
+| [Code Reader](docs/code/README.md) | Navigation, search, splits, Markdown and language-server controls |
+| [Terminal Code Reader](docs/code/tui.md) | Reader TUI controls and capability limits |
+| [Command-family trial](docs/launcher-trial.md) | Building the Reader/desktop Diff/terminal Diff launcher and migrating commands |
+| [Reader performance](docs/code/performance.md) | Startup and memory measurements, raw samples and limits |
 | [Terminal frontend](docs/tui.md) | TUI controls, architecture and capability limits |
 | [Markdown Preview](docs/markdown.md) | Source, Inline and Side by side views and source fidelity |
 | [Themes](docs/themes.md) | Built-in themes, system following and the custom theme format |
@@ -251,8 +349,8 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 
 ## Contributing
 
-Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the screenshots (Catppuccin Mocha) on a private display.
+Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the Diff screenshots (Catppuccin Mocha) on a private display. Add `--reader target/release/lenz-reader --only reader-code reader-markdown` to capture the Reader using disposable demo files.
 
 ## Licence
 
-The app (`crates/app`) and its shared content crate (`crates/content`: decoding, line offsets, syntax highlighting, themes) are MIT; the diff engine (`crates/engine`) is Apache-2.0 and contains ported IntelliJ Community code (see its NOTICE). Darcula and Light follow IntelliJ's schemes (JetBrains, Apache-2.0); additional base colors are adapted from Omarchy's MIT palettes. See [theme attribution](docs/themes.md).
+The app (`crates/app`) and its shared content crate (`crates/content`: decoding, line offsets, syntax highlighting, themes) are MIT; the diff engine (`crates/engine`) is Apache-2.0 and contains ported IntelliJ Community code (see its NOTICE). Darcula and Light follow IntelliJ's schemes (JetBrains, Apache-2.0); additional base colors adapt Omarchy and upstream editor palettes under MIT. See [theme attribution](docs/themes.md) and [third-party theme notices](LICENSE-THEMES).

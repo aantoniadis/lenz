@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 cli = argparse.ArgumentParser(description=__doc__)
 cli.add_argument('--gui', type=Path, default=ROOT/'target/release/lenz')
 cli.add_argument('--tui', type=Path, default=ROOT/'target/release/lenz-tui')
+cli.add_argument('--reader', type=Path, help='Also capture the Reader with this executable')
 cli.add_argument('--output', type=Path, default=ROOT/'docs/images')
 cli.add_argument('--xvfb', default=shutil.which('Xvfb'))
 cli.add_argument('--theme', default='catppuccin')
@@ -221,7 +222,8 @@ class Display:
         self.env.pop('WAYLAND_DISPLAY', None)
 
     def windows(self):
-        return [w for w in self.d.screen().root.query_tree().children if w.get_wm_name()]
+        return [w for w in self.d.screen().root.query_tree().children
+                if w.get_wm_name() and w.get_attributes().map_state == X.IsViewable]
 
     def launch(self, command, cwd, ready):
         log = tempfile.NamedTemporaryFile('w+', prefix='lenz-capture-', suffix='.log')
@@ -351,6 +353,27 @@ def main():
             screen.click(win, x, y)
             screen.click_away(win)
 
+        def reader(name, root, file, keys):
+            proc, win, log = screen.launch([str(opt.reader.resolve()), str(root)], root, lambda text: True)
+            try:
+                win.configure(width=GUI_SIZE[0], height=GUI_SIZE[1])
+                screen.d.sync()
+                time.sleep(2)
+                screen.key(win, 'p', 'Control_L')
+                for c in file:
+                    screen.key(win, 'period' if c == '.' else c)
+                screen.key(win, 'Return')
+                time.sleep(2)
+                screen.click(win, 266, 10)  # Reveal the opened file in the explorer.
+                for key in keys:
+                    screen.key(win, *key)
+                screen.click_away(win)
+                time.sleep(1)
+                screen.image(win).save(out/f'{name}.png', optimize=True)
+                print(out/f'{name}.png')
+            finally:
+                stop(proc, log)
+
         shots = {
             'gui-comparison': lambda: gui('gui-comparison', [], repo),
             'gui-repository': lambda: gui('gui-repository', ['log'], repo),
@@ -360,6 +383,13 @@ def main():
             'tui-repository': lambda: tui('tui-repository', ['log'], repo),
             'tui-merge': lambda: tui('tui-merge', ['merge', *merge], scratch),
         }
+        if opt.reader:
+            shots.update({
+                'reader-code': lambda: reader('reader-code', repo, 'config.rs',
+                                              [('f', 'Control_L'), *[(c,) for c in 'workers']]),
+                'reader-markdown': lambda: reader('reader-markdown', scratch/'docs/new', 'README.md',
+                                                  [('v', 'Control_L', 'Shift_L')]),
+            })
         try:
             for name, take in shots.items():
                 if not opt.only or name in opt.only:
@@ -367,6 +397,8 @@ def main():
         finally:
             screen.close()
         assert (scratch/'merge/config.rs').read_text() == CONFIG_OLD, 'merge result must stay unsaved'
+        assert (repo/'src/config.rs').read_text() == CONFIG_NEW, 'Reader must preserve source bytes'
+        assert (scratch/'docs/new/README.md').read_bytes() == (fixtures/'reading-view-new.md').read_bytes()
 
 
 if __name__ == '__main__':

@@ -1830,7 +1830,8 @@ fn gui_theme_mouse_selects_a_clipped_hit_row(cx:&mut TestAppContext){
 fn gui_theme_empty_constructor_and_merge_question_keep_documents_safe(cx:&mut TestAppContext){
     let f=fixture(cx,"old\n","new\n");let empty=Arc::new(ChangeSet::load(&Spec::Empty,f.dir.path()).unwrap());
     f.viewer.update(cx,|v,cx|{let doc=Arc::new(Doc::new("","",Path::new(""),Path::new("")));let view=doc.view(&[],20.0);*v=Viewer::new(empty,Spec::Empty,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);});
-    run(cx,&f,crate::catalog::Action::Interaction(commands::Interaction::ChangeTheme));key(cx,&f,"end",false,false,false);key(cx,&f,"enter",false,false,false);f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();assert!(f.viewer.read_with(cx,|v,_|v.doc().is_none()&&v.palette.bg==0x282828));
+    let last=theme::builtin_entries().last().unwrap().palette.bg;
+    run(cx,&f,crate::catalog::Action::Interaction(commands::Interaction::ChangeTheme));key(cx,&f,"end",false,false,false);key(cx,&f,"enter",false,false,false);f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();assert!(f.viewer.read_with(cx,|v,_|v.doc().is_none()&&v.palette.bg==last));
     let(dir,viewer)=merge_view::gui_tests::fixture(cx);let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();
     window.update(cx,|v,w,cx|{v.open_themes(cx);v.on_key(&event("s",true,false,false),w,cx);v.on_key(&event("escape",false,false,false),w,cx);v.merge.as_mut().unwrap().ask=Some(merge_view::Ask::ChangedOnDisk);v.tool(Tool::Theme,0.0,w,cx);assert!(v.theme_chooser.is_none());}).unwrap();assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b"needle ours\n");
 }
@@ -3957,8 +3958,8 @@ fn gui_panel_switches_sit_glued_at_the_bottom(cx:&mut TestAppContext) {
     let ids=toolbar_ids(cx,&f,1200.);
     assert!(!ids.contains(&"unchanged")&&ids.last()==Some(&"help"),"{ids:?}");
     let cells=f.viewer.read_with(cx,|v,_|v.panel_switch());
-    assert_eq!(cells.iter().map(|c|(c.label,c.enabled)).collect::<Vec<_>>(),[("Branches",false),("History",false),("Files",true)],"Focus refuses Branches and History");
-    assert_eq!(cells[2].command,L::ToggleFiles);
+    assert_eq!(cells.iter().map(|c|(c.label,c.enabled)).collect::<Vec<_>>(),[("Branches",false),("History",false),("Files",true),("Commit",true)],"Focus refuses Branches and History");
+    assert_eq!(cells[2].command,crate::catalog::Action::Layout(L::ToggleFiles));
 }
 
 #[gpui::test]
@@ -4234,21 +4235,21 @@ fn drag(cx:&mut TestAppContext,f:&Fixture,from:(f32,f32),to:(f32,f32)){
 }
 
 #[gpui::test]
-fn gui_focus_shows_the_commit_message_above_the_files(cx:&mut TestAppContext) {
-    use crate::catalog::{Action,RepoAction};
-    let (f,repo)=repository_fixture(cx);
+fn gui_focus_shows_the_commit_message_below_files_and_diff(cx:&mut TestAppContext) {
+        let (f,repo)=repository_fixture(cx);
     if !f.viewer.read_with(cx,|v,_|v.layout.files()){f.window.update(cx,|v,w,cx|v.tool(Tool::Layout(crate::layout::LayoutCommand::ToggleFiles),0.,w,cx)).unwrap();}
     assert!(f.viewer.read_with(cx,|v,_|v.message_lines().is_empty()),"the Overview has no panel");
     enter_focus(cx,&f);
     workflow_wait(cx,&f,|v|v.message_lines().first().is_some_and(|l|l.text=="▾ second"));
     // the test window shapes no text: give the panel a character width to place columns with
     f.viewer.update(cx,|v,_|v.char_w=8.);
-    let (x,top,nav_top,char_w)=f.viewer.read_with(cx,|v,_|(v.nav_x()+20.,v.top(),v.nav_top(),v.char_w));
-    assert!(nav_top>top,"the list starts below the panel");
+    let (x,top,nav_top,char_w)=f.viewer.read_with(cx,|v,_|(v.diff_x()+20.,v.panes.viewport[1]-v.message_h(),v.nav_top(),v.char_w));
+    assert!(top>nav_top+line_h(),"the panel sits below the files and diff");
+    assert_eq!(nav_top,f.viewer.read_with(cx,|v,_|v.top()),"Files start directly below their header");
     // a file row is still where it is drawn
     let (row,index)=f.viewer.read_with(cx,|v,_|v.nav.iter().enumerate().filter_map(|(i,r)|match r{NavRow::File{index,..}=>Some((i,*index)),_=>None}).next_back().unwrap());
     let scroll=f.viewer.read_with(cx,|v,_|v.nav_scroll);
-    click(cx,&f,x,nav_top+(row as f32-scroll+0.5)*line_h());
+    click(cx,&f,20.,nav_top+(row as f32-scroll+0.5)*line_h());
     assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.current),index);
     // right click: copy what is under the pointer
     f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{position:point(px(x),px(top+line_h()*0.5)),button:MouseButton::Right,..Default::default()},w,cx)).unwrap();
@@ -4268,11 +4269,23 @@ fn gui_focus_shows_the_commit_message_above_the_files(cx:&mut TestAppContext) {
     assert_eq!(cx.read_from_clipboard().and_then(|c|c.text()).as_deref(),Some("seco"));
     // a click on its first line collapses it, and the palette brings it back
     drag(cx,&f,(x,top+line_h()*0.5),(x,top+line_h()*0.5));
-    f.viewer.read_with(cx,|v,_|{assert_eq!(v.message_lines().len(),1);assert_eq!(v.message_lines()[0].text,"▸ second");});
-    run(cx,&f,Action::Repository(RepoAction::ToggleMessage));
+    f.viewer.read_with(cx,|v,_|{assert!(v.message_lines().is_empty());assert_eq!(v.message_h(),0.);});
+    let toggle=f.viewer.read_with(cx,|v,_|v.panel_switch().into_iter().find(|c|c.label=="Commit").expect("Commit switch remains available"));
+    click(cx,&f,toggle.x+toggle.w/2.,toggle.y+footer_h()/2.);
     assert_eq!(f.viewer.read_with(cx,|v,_|v.message_lines()[0].text.clone()),"▾ second");
 
-    // a range: ↑ from the first file enters the panel, ↓ walks the commits, Enter opens one, Esc gives Files back
+    // Hiding Files does not hide the panel; hiding the panel gives the diff its height back.
+    let rows=f.viewer.read_with(cx,|v,_|v.comparison.view.viewport_rows());
+    run(cx,&f,crate::catalog::Action::Layout(crate::layout::LayoutCommand::ToggleFiles));
+    f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    assert!(!f.viewer.read_with(cx,|v,_|v.message_lines().is_empty()));
+    run(cx,&f,crate::catalog::Action::Repository(crate::catalog::RepoAction::ToggleMessage));
+    f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    assert!(f.viewer.read_with(cx,|v,_|v.comparison.view.viewport_rows())>rows);
+    run(cx,&f,crate::catalog::Action::Repository(crate::catalog::RepoAction::ToggleMessage));
+    run(cx,&f,crate::catalog::Action::Layout(crate::layout::LayoutCommand::ToggleFiles));
+
+    // a range: ↓ from the last file enters the panel, ↓ walks the commits, Enter opens one, Esc gives Files back
     use crate::git::testing::{commit_all,write};
     write(repo.path(),"a.txt","3\n");commit_all(repo.path(),"third");
     let spec=crate::repository_session::branch_comparison("HEAD~2","HEAD",false);
@@ -4280,7 +4293,8 @@ fn gui_focus_shows_the_commit_message_above_the_files(cx:&mut TestAppContext) {
     f.viewer.update(cx,|v,_|v.repo.as_mut().unwrap().showing(Arc::new(set),spec));
     workflow_wait(cx,&f,|v|v.message_lines().first().is_some_and(|l|l.text=="▾ 2 commits"));
     f.window.update(cx,|v,w,cx|{v.nav_focused=true;v.open(0,Place::Top,cx);let _=w;}).unwrap();
-    key(cx,&f,"up",false,false,false);
+    key(cx,&f,"end",false,false,false);
+    key(cx,&f,"down",false,false,false);
     assert!(f.viewer.read_with(cx,|v,_|v.message_focused&&!v.nav_focused));
     key(cx,&f,"down",false,false,false);
     assert_eq!(f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().message_cursor()),1);
@@ -4288,6 +4302,45 @@ fn gui_focus_shows_the_commit_message_above_the_files(cx:&mut TestAppContext) {
     f.viewer.read_with(cx,|v,_|assert!(v.message_lines().iter().any(|l|l.text.trim()=="body"||l.kind==crate::commit_message::LineKind::Meta),"{:?}",v.message_lines()));
     key(cx,&f,"escape",false,false,false);
     assert!(f.viewer.read_with(cx,|v,_|!v.message_focused&&v.nav_focused));
+    // The commit panel keeps its keys while Folder Summary is open above it.
+    run(cx,&f,crate::catalog::Action::Folder(crate::folders::FolderAction::Summary));
+    f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    let (mx,my)=f.viewer.read_with(cx,|v,_|{
+        let row=v.message_lines().iter().position(|l|l.kind==crate::commit_message::LineKind::Meta).unwrap();
+        (v.nav_x()+12.,v.content_bottom()+1.+(row as f32+0.5)*line_h())
+    });
+    drag(cx,&f,(mx,my),(mx,my));
+    assert!(f.viewer.read_with(cx,|v,_|v.message_focused));
+    key(cx,&f,"escape",false,false,false);
+    assert!(f.viewer.read_with(cx,|v,_|!v.message_focused&&v.comparison.folders.summary().is_some()));
+    let bytes=std::fs::read(repo.path().join("a.txt")).unwrap();
+    // Current geometry clamps stale scroll after resize; the bottom panel never owns a diff divider.
+    for (width,height) in [(800.,600.),(400.,240.),(120.,90.),(1.,1.),(1200.,800.)] {
+        cx.simulate_window_resize(f.window.into(),size(px(width),px(height)));
+        f.window.update(cx,|v,w,cx|{v.message_scroll=10000.;let _=v.render(w,cx);
+            assert!(v.content_bottom()>=0. && v.message_h()<=v.panes.viewport[1]);
+            assert!(v.message_scroll<=v.message_lines().len() as f32);
+            if v.message_h()>0. {assert!(!v.begin_resize(v.diff_x()+v.comparison_widths(width-v.diff_x())[0],v.content_bottom()+line_h()/2.));}
+        }).unwrap();
+    }
+    // Narrow Focus keeps the active panel switches clear of the Commands hint.
+    cx.simulate_window_resize(f.window.into(),size(px(400.),px(240.)));
+    f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    let toggle=f.viewer.read_with(cx,|v,_|{
+        let c=v.panel_switch().into_iter().find(|c|c.label=="Commit").expect("visible narrow toggle");
+        assert!(c.x+c.w<=v.palette_hint().0);c
+    });
+    click(cx,&f,toggle.x+toggle.w/2.,toggle.y+footer_h()/2.);
+    assert!(f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().message_collapsed()&&v.command_palette.is_none()));
+    click(cx,&f,toggle.x+toggle.w/2.,toggle.y+footer_h()/2.);
+    assert!(!f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().message_collapsed()));
+    // A modal consumes the footer toggle, preserving both the panel state and file bytes.
+    let toggle=f.viewer.read_with(cx,|v,_|v.panel_switch().into_iter().find(|c|c.label=="Commit").unwrap());
+    let hidden=f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().message_collapsed());
+    f.viewer.update(cx,|v,_|v.help=true);
+    click(cx,&f,toggle.x+toggle.w/2.,toggle.y+footer_h()/2.);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().message_collapsed()),hidden);
+    assert_eq!(std::fs::read(repo.path().join("a.txt")).unwrap(),bytes);
 }
 
 #[gpui::test]
@@ -4408,7 +4461,7 @@ fn gui_find_options_toggle_by_key_and_click_and_report_bad_expressions(cx: &mut 
     key(cx, &f, "backspace", false, false, false);
     key(cx, &f, "(", false, false, false);
     assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.find.as_ref().and_then(|x| x.error().map(String::from))), Some("unclosed group".into()));
-    assert!(f.viewer.read_with(cx, |v, _| v.find_bar().unwrap().0.ends_with("unclosed group")), "the bar shows the reason instead of the count");
+    assert!(f.viewer.read_with(cx, |v, _| v.find_control().unwrap().counter.ends_with("unclosed group")), "the bar shows the reason instead of the count");
     key(cx, &f, "f3", false, false, false);
     assert!(find_hits(cx, &f).is_empty());
 }
@@ -4457,14 +4510,29 @@ fn gui_find_toggle_boxes_follow_the_measured_character_width(cx: &mut TestAppCon
     f.viewer.update(cx, |v, _| { v.diff_focus = Side::Left; v.char_w = 9.6; }); // a 16 px font
     key(cx, &f, "f", true, false, false);
     type_keys(cx, &f, "a long query here x");
-    let (bar_x, lead, toggles) = f.viewer.read_with(cx, |v, _| {
-        let lead = "Find: ".chars().count() + v.comparison.find.as_ref().unwrap().query.chars().count() + "▏  ".chars().count();
-        (v.find_bar_box().unwrap().0, lead, v.find_toggles())
-    });
-    // "Aa" is drawn at the bar's text start plus `lead` characters of the real width.
-    let aa = bar_x + 12.0 + (lead as f32 + 1.0) * 9.6;
-    let (_, (x, _, w, _)) = toggles[0];
-    assert!((x..x + w).contains(&aa), "the Aa box {x}..{} covers the drawn Aa at {aa}", x + w);
+    let control = f.viewer.read_with(cx, |v, _| v.find_control().unwrap());
+    for (option, bounds) in control.toggles {
+        assert!(bounds.origin.x >= control.bounds.origin.x);
+        assert!(bounds.right() <= control.bounds.right());
+        assert_eq!(control.option_at(bounds.center()), Some(option));
+    }
+    let (_, aa) = control.toggles[0];
+    assert!((f32::from(aa.size.width) - (3.0 * 9.6 + 2.0)).abs() < 0.01);
+
+}
+
+#[gpui::test]
+fn gui_find_shared_control_stays_in_tiny_panes(cx: &mut TestAppContext) {
+    let f = fixture(cx, "foo\n", "Foo\n");
+    key(cx, &f, "f", true, false, false);
+    type_keys(cx, &f, "a query much wider than the pane");
+    for width in [1.0, 16.0, 80.0, 180.0, 600.0] {
+        f.viewer.update(cx, |v, _| v.panes.viewport = [width, 400.0]);
+        let b = f.viewer.read_with(cx, |v, _| v.find_control().unwrap());
+        assert!(b.bounds.origin.x >= px(0.0));
+        assert!(b.bounds.right() <= px(width));
+        if width <= 180.0 { assert!(b.toggles.iter().all(|(_, t)| t.size.width == px(0.0))); }
+    }
 }
 
 #[gpui::test]

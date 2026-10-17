@@ -8,6 +8,8 @@ Start with the [project README](../README.md) for installation and usage. Screen
 
 | Document | Covers |
 |---|---|
+| [Code Reader](code/README.md) | Desktop code browsing, navigation, search, splits and language servers |
+| [Command-family trial](launcher-trial.md) | Building and using the Reader/desktop Diff/terminal Diff launcher |
 | [Terminal frontend](tui.md) | TUI controls, architecture, verification and capability limits |
 | [Markdown Preview](markdown.md) | Source, Inline and Side by side views, source fidelity and preparation limits |
 | [Themes](themes.md) | Built-in themes, system/Omarchy following, custom theme format and attribution |
@@ -20,6 +22,8 @@ Start with the [project README](../README.md) for installation and usage. Screen
 | Document | Covers |
 |---|---|
 | [Performance overview](performance.md) | Current GUI/TUI results, measurement boundaries, accepted costs and macOS status |
+| [Reader measurements](code/performance.md) | Reader startup and memory, raw samples, method and limits |
+| [Bottom commit panel](commit-panel-performance.md) | GUI/TUI layout verification, performance comparisons and limits |
 | [Benchmark guide](benchmarking.md) | Running, comparing and maintaining the performance suite |
 | [Optimization notebook](optimization-notebook.md) | Techniques kept, rejected, inconclusive and untried |
 

@@ -16,7 +16,7 @@ class PackageTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         (self.root / 'packaging').mkdir()
         shutil.copyfile(Path(__file__).resolve().parents[1] / 'packaging/package.sh', self.root / 'packaging/package.sh')
-        for name in ['README.md', 'LICENSE-MIT', 'crates/engine/LICENSE', 'crates/engine/NOTICE',
+        for name in ['README.md', 'LICENSE-MIT', 'LICENSE-THEMES', 'crates/engine/LICENSE', 'crates/engine/NOTICE',
                      'packaging/lenz.desktop', 'assets/lenz-icon.png', 'assets/lenz.icns']:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -63,6 +63,7 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         with tarfile.open(self.root / 'target/package' / (name + '.tar.gz')) as archive:
             self.assertEqual(archive.extractfile(name + '/lenz').read(), b'fresh lenz')
             self.assertEqual(archive.extractfile(name + '/lenz-tui').read(), b'fresh lenz-tui')
+            self.assertEqual(archive.extractfile(name + '/LICENSE-THEMES').read(), b'LICENSE-THEMES')
         calls = json.loads((self.root / 'calls.json').read_text())
         self.assertEqual([args[args.index('-p') + 1] for args in calls], ['lenz', 'lenz-tui'], 'built separately')
         for args in calls:
@@ -113,6 +114,7 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
             self.assertEqual(archive.extractfile(app + 'MacOS/lenz').read(), b'fresh lenz')
             self.assertTrue(archive.getmember(app + 'MacOS/lenz').mode & 0o111, 'executable')
             self.assertEqual(archive.extractfile(app + 'Resources/lenz.icns').read(), b'assets/lenz.icns')
+            self.assertEqual(archive.extractfile(name + '/LICENSE-THEMES').read(), b'LICENSE-THEMES')
             import plistlib
             info = plistlib.loads(archive.extractfile(app + 'Info.plist').read())
             self.assertEqual((info['CFBundleExecutable'], info['CFBundleIconFile'], info['CFBundlePackageType']), ('lenz', 'lenz', 'APPL'))
@@ -129,6 +131,27 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         result = self.package()
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz').exists())
+
+    def test_aur_installs_theme_notices_and_accepts_older_archives(self):
+        archive = self.root / 'lenz-0.2.0-x86_64-unknown-linux-gnu'
+        archive.mkdir()
+        for name in ['lenz', 'lenz-tui', 'lenz.desktop', 'lenz-icon.png', 'README.md',
+                     'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'LICENSE-THEMES']:
+            (archive / name).write_text(name)
+        recipe = Path(__file__).resolve().parents[1] / 'packaging/aur/PKGBUILD'
+        for has_notice in [True, False]:
+            if not has_notice:
+                (archive / 'LICENSE-THEMES').unlink()
+            installed = self.root / ('installed-new' if has_notice else 'installed-old')
+            result = subprocess.run(['bash', '-c',
+                                     'source "$1"; pkgver=0.2.0; CARCH=x86_64; pkgdir="$2"; package',
+                                     'package-test', str(recipe), str(installed)],
+                                    cwd=self.root, env=self.env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            notice = installed / 'usr/share/licenses/lenz/LICENSE-THEMES'
+            self.assertEqual(notice.exists(), has_notice)
+            if has_notice:
+                self.assertEqual(notice.read_text(), 'LICENSE-THEMES')
 
     def test_rejects_version_path_before_build_or_removal(self):
         marker = self.root / 'target/keep'

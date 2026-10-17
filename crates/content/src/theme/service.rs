@@ -63,7 +63,8 @@ impl ThemeService {
     pub fn new_deferred(paths: ThemePaths, overrides: ThemeOverrides, native_dark: bool) -> Self {
         let (selection, mut notices) = read_selection(&paths, &overrides);
         let must_save =
-            overrides.theme.is_some() || overrides.appearance.is_some() || !notices.is_empty();
+            overrides.theme.is_some() || overrides.appearance.is_some() || !notices.is_empty()
+                || !paths.selection.exists();
         let mut entries = builtin_entries();
         if let ThemeSelection::Named(id) = &selection
             && let Some(path) = paths.theme_path(id)

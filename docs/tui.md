@@ -1,5 +1,7 @@
 # Terminal frontend
 
+For the code reader, see the [terminal reader guide](code/tui.md).
+
 ![lenz-tui showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
 `lenz-tui` is the terminal adapter over the same shared core as the GUI (`lenz`): comparison, editing, merge, repository and pull request, image, annotation and search behavior all live in `crates/app`. This page lists the terminal's controls, where it differs from the GUI and its capability limits. Command-line usage, settings and the feature overview are in the [README](../README.md).
@@ -107,7 +109,7 @@ Both frontends share the **Overview** (Branches, History, Files and the diff) an
 - **Toolbar:** it starts with ☰, then **Focus** in the Overview or **Overview** in Focus, then ◀ ▶. Both views share **⚙** (Layout Split | Unified, whitespace, highlighting, scrolling, context, case, blame); Focus adds **≡ Unchanged** and **?**. A PR's **Conversation | Commits | Files changed** tabs sit in the middle and give way to the Markdown modes when the header is too narrow. The pane header carries **Source | Inline | Side by side** for Markdown and **2-up | Swipe | Onion skin | Difference** for images.
 - **Selection Title:** the name of what is compared (`main ~ feature/x`, `v0.1.0 (a1b2c3d)`) leads the diff title line and the History header. The terminal has no window title to carry it.
 - **Unified:** one full-width column (deleted rows, then inserted, unchanged once). Selection and copy work on the Side of the row under the pointer, one horizontal scroll covers both Sides, and editing is refused with "Switch to Split to edit". Images and the Preview keep their own layouts.
-- **Commit message:** in Focus a commit shows its subject, author, date, hash and body above Files; a range lists its newest 200 commits, each opening on a click. The panel takes at most a third of the column. A click on its first line, or "Show / hide commit message" in the palette, collapses it. Up on the first file gives the panel the keyboard: Up/Down walk a range or scroll one message, Enter or Space opens the commit, Esc or Down past the end returns to Files, Ctrl-C copies the message. The GUI also selects text by dragging; the terminal leaves text selection to the emulator. Working tree, index and pull requests show none.
+- **Commit message:** in Focus, the file tree and diff sit above a full-width bottom panel showing the commit's subject, author, date, hash and body. A range lists its newest 200 commits, each opening on a click. The panel takes at most a third of the available height. **Commit** in the bottom bar or **Show / hide commit message** in the palette hides or restores the whole panel; clicking its first line also hides it. It stays available when Files is hidden. Down on the last file gives the panel the keyboard: Up/Down walk a range or scroll one message, Enter or Space opens the commit, Esc or moving past an end returns to Files (or the diff if Files is hidden), Ctrl-C copies the message. The GUI also selects text by dragging; the terminal leaves text selection to the emulator. Working tree, index and pull requests show none. Very small terminals omit the panel until there is room.
 
 ## Merge, Conflict List and Version Picker
 

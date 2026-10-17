@@ -1,6 +1,6 @@
 //! Themes shared by Lenz and its code reader: palettes, built-in themes, the user theme format, the saved
-//! selection and the service that loads, saves and follows them. Each product supplies its own directories,
-//! selection file and overrides ([`ThemePaths`], [`ThemeOverrides`]); diff colour mapping and GPUI colour
+//! selection and the service that loads, saves and follows them. Reader and Diff share canonical Lenz paths
+//! and overrides ([`ThemePaths::shared`], [`ThemeOverrides::shared_from_env`]); diff colour mapping and GPUI colour
 //! conversion stay with the products.
 //!
 //! Colours of IntelliJ's Darcula and IntelliJ Light schemes (JetBrains intellij-community, Apache-2.0):

@@ -72,7 +72,7 @@ impl Viewer {
     fn stage(&self, window: &Window) -> (f32, f32, f32, f32) {
         let x0 = self.diff_x();
         let w = (f32::from(window.viewport_size().width) - x0).max(0.0);
-        let h = (self.panes.viewport[1] - self.top() - self.panel_h() - self.picker_v_height()).max(0.0);
+        let h = (self.content_bottom() - self.top() - self.panel_h() - self.picker_v_height()).max(0.0);
         (x0, self.top(), w, h)
     }
 

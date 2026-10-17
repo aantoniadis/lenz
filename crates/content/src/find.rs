@@ -25,6 +25,65 @@ pub enum FindOption {
     Regex,
 }
 
+impl FindOption {
+    pub const ALL: [Self; 3] = [Self::Case, Self::Word, Self::Regex];
+    pub fn label(self) -> &'static str {
+        match self { Self::Case => "Match case", Self::Word => "Whole word", Self::Regex => "Regular expression" }
+    }
+    pub fn key(self) -> char {
+        match self { Self::Case => 'c', Self::Word => 'w', Self::Regex => 'r' }
+    }
+    pub fn symbol(self) -> &'static str {
+        match self { Self::Case => "Aa", Self::Word => "W", Self::Regex => ".*" }
+    }
+}
+
+/// In-document searches retain at most this many matches; a further match marks truncation.
+pub const MATCH_LIMIT: usize = 10_000;
+
+pub type Matches<L> = (Vec<(L, Range<usize>)>, bool);
+
+/// Collect in document order without copying lines. `None` discards obsolete work.
+/// Check cancellation on sparse documents and within a line containing many matches.
+pub fn collect_matches<'a, L: Copy>(matcher: &Matcher, lines: impl IntoIterator<Item = (L, &'a str)>, mut current: impl FnMut() -> bool) -> Option<Matches<L>> {
+    let mut hits = Vec::new();
+    for (index, (line, text)) in lines.into_iter().enumerate() {
+        if index % 1024 == 0 && !current() { return None; }
+        for range in matcher.ranges(text) {
+            if hits.len() % 1024 == 0 && !current() { return None; }
+            if hits.len() == MATCH_LIMIT { return Some((hits, true)); }
+            hits.push((line, range));
+        }
+    }
+    if !current() { return None; }
+    Some((hits, false))
+}
+
+/// First match at or after the anchor, wrapping to the beginning.
+pub fn at_or_after<L: Copy + Ord>(hits: &[(L, Range<usize>)], line: L, byte: usize) -> Option<usize> {
+    if hits.is_empty() { return None; }
+    let at = hits.partition_point(|(l, range)| (*l, range.start) < (line, byte));
+    Some(if at < hits.len() { at } else { 0 })
+}
+
+/// Next selection and whether navigation wrapped. Ignore a stale selection.
+pub fn next_index(count: usize, current: Option<usize>, forward: bool) -> Option<(usize, bool)> {
+    if count == 0 { return None; }
+    let Some(at) = current.filter(|&i| i < count) else { return Some((0, false)); };
+    let next = if forward { if at + 1 == count { 0 } else { at + 1 } } else if at == 0 { count - 1 } else { at - 1 };
+    Some((next, if forward { next <= at } else { next >= at }))
+}
+
+/// Shared find status, including pending, invalid and truncated searches.
+pub fn counter(query: &str, count: usize, current: Option<usize>, capped: bool, pending: bool, error: Option<&str>) -> String {
+    if let Some(error) = error { return error.to_owned(); }
+    if count == 0 {
+        return if query.is_empty() { String::new() } else if pending { "…".into() } else { "No matches".into() };
+    }
+    let total = if capped { "10,000+".to_owned() } else { count.to_string() };
+    format!("{}/{total}", current.filter(|&i| i < count).map_or(0, |i| i + 1))
+}
+
 impl FindOptions {
     pub fn get(self, option: FindOption) -> bool {
         match option {
@@ -216,6 +275,39 @@ mod tests {
     const PLAIN: FindOptions = FindOptions { case: false, word: false, regex: false };
 
     #[test]
+    fn bounded_collection_distinguishes_exact_limit_and_cancels_dense_lines() {
+        let matcher = Matcher::new(&Query { text: "x".into(), ..Default::default() }).unwrap();
+        for (count, capped) in [(MATCH_LIMIT, false), (MATCH_LIMIT + 1, true)] {
+            let text = "x ".repeat(count);
+            let (hits, limited) = collect_matches(&matcher, [(0usize, text.as_str())], || true).unwrap();
+            assert_eq!((hits.len(), limited), (MATCH_LIMIT, capped));
+            assert_eq!(hits.last().unwrap().1, 19_998..19_999);
+        }
+        let text = "x ".repeat(MATCH_LIMIT);
+        let mut checks = 0;
+        assert!(collect_matches(&matcher, [(0, text.as_str())], || { checks += 1; checks < 3 }).is_none());
+        assert!(collect_matches(&matcher, [(0, "x")], || false).is_none());
+    }
+
+    #[test]
+    fn shared_navigation_and_counter_handle_empty_stale_and_wrapped_selection() {
+        let hits = [(1usize, 2..4), (2, 0..2)];
+        assert_eq!(at_or_after(&hits, 1, 3), Some(1));
+        assert_eq!(at_or_after(&hits, 3, 0), Some(0));
+        assert_eq!(at_or_after::<usize>(&[], 0, 0), None);
+        assert_eq!(next_index(2, Some(1), true), Some((0, true)));
+        assert_eq!(next_index(2, Some(0), false), Some((1, true)));
+        assert_eq!(next_index(2, Some(usize::MAX), true), Some((0, false)));
+        assert_eq!(next_index(0, Some(0), false), None);
+        assert_eq!(counter("x", 10_000, Some(1), false, false, None), "2/10000");
+        assert_eq!(counter("x", 10_000, Some(1), true, false, None), "2/10,000+");
+        assert_eq!(counter("x", 0, None, false, true, None), "…");
+        assert_eq!(counter("", 0, None, false, false, None), "");
+        assert_eq!(counter("x", 0, None, false, false, None), "No matches");
+        assert_eq!(counter("(", 0, None, false, false, Some("unclosed group")), "unclosed group");
+    }
+
+    #[test]
     fn literal_text_ignores_case_by_default_and_reports_byte_ranges() {
         assert_eq!(found("foo", PLAIN, "Foo foo FOO"), vec![0..3, 4..7, 8..11]);
         assert_eq!(found("a.b", PLAIN, "axb a.b"), vec![4..7], "literal: the dot is not a wildcard");
@@ -288,6 +380,13 @@ mod tests {
         assert!(m.regex.get().is_some());
         let re = Matcher::new(&Query { text: "n.e".into(), options: FindOptions { regex: true, ..Default::default() } }).unwrap();
         assert!(re.regex.get().is_some(), "an expression is compiled up front: it may be invalid");
+    }
+
+    #[test]
+    fn option_descriptions_keep_the_shared_controls_in_order() {
+        assert_eq!(FindOption::ALL.map(|o| (o.symbol(), o.label(), o.key())), [
+            ("Aa", "Match case", 'c'), ("W", "Whole word", 'w'), (".*", "Regular expression", 'r'),
+        ]);
     }
 
     #[test]

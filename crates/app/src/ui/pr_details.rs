@@ -283,7 +283,7 @@ impl Viewer {
         let [vw, vh] = self.panes.viewport;
         // over the diff header too: the tabs are in the toolbar, so that row has nothing to say
         let (x, y) = (self.diff_x(), self.top() - hdr_h());
-        (x, y, (vw - x).max(0.0), (vh - y).max(0.0))
+        (x, y, (vw - x).max(0.0), (vh - self.message_h() - y).max(0.0))
     }
     fn in_pr_pane(&self, at: gpui::Point<Pixels>) -> bool {
         let (x, y, w, h) = self.pr_pane();

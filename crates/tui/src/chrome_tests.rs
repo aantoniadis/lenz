@@ -1900,7 +1900,7 @@ fn tui_unified_is_one_column_with_selection_on_either_side() {
 }
 
 #[test]
-fn tui_focus_names_the_selection_above_files() {
+fn tui_focus_names_the_selection_in_the_bottom_panel() {
     let (_dir, mut app) = two_commit_log();
     for _ in 0..200 { if app.repository.as_ref().unwrap().core.picker.refs.is_some() { break; } std::thread::sleep(std::time::Duration::from_millis(5)); app.handle(Event::Resize(160, 36)); }
     let title = app.repository.as_ref().unwrap().core.selection_title().unwrap().text;
@@ -1909,10 +1909,10 @@ fn tui_focus_names_the_selection_above_files() {
     if !app.navigator.shown() { alt(&mut app, '1'); }
     let screen = text(&draw(&mut app, 160, 36));
     assert!(app.navigator.shown());
-    assert!(screen.contains(&format!("┌{title}")), "the Files column is headed by the selection: {screen}");
-    // the commit message box carries the name, the list below it keeps its own
+    assert!(screen.contains(&format!("┌{title}")), "the commit panel is headed by the selection: {screen}");
+    // the commit message box carries the name, the list above it keeps its own
     let buffer = draw(&mut app, 160, 36);
-    assert!(locate(&buffer, &format!("┌{title}")).1 < locate(&buffer, "┌Files (1)").1, "{screen}");
+    assert!(locate(&buffer, &format!("┌{title}")).1 > locate(&buffer, "┌Files (1)").1, "{screen}");
     assert_eq!(screen.matches(&title).count(), 1, "named once: {screen}");
 }
 
@@ -2040,7 +2040,7 @@ fn tui_palette_shortcuts_do_what_they_say() {
 }
 
 #[test]
-fn tui_focus_shows_the_commit_message_above_the_files() {
+fn tui_focus_shows_the_commit_message_below_files_and_diff() {
     let (_d, mut app) = two_commit_log();
     let overview = text(&draw(&mut app, 160, 40));
     assert!(!overview.contains("▾ Subject two"), "the Overview has no panel");
@@ -2048,10 +2048,12 @@ fn tui_focus_shows_the_commit_message_above_the_files() {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
     while !text(&draw(&mut app, 160, 40)).contains("▾ Subject two") { app.poll(); assert!(std::time::Instant::now() < until, "message read"); std::thread::sleep(std::time::Duration::from_millis(2)); }
     let screen = draw(&mut app, 160, 40);
-    // the file list starts below the panel, and its rows still open their files
+    // the file list and diff end above the panel, and its rows still open their files
     let (_, subject_row) = locate(&screen, "▾ Subject two");
     let file = locate(&screen, "M a.txt");
-    assert!(file.1 > subject_row + 1, "{}", text(&screen));
+    assert!(file.1 < subject_row, "{}", text(&screen));
+    assert_eq!(app.commit_panel.area.width,160);
+    assert!(app.diff_area.bottom() <= app.commit_panel.area.y + 1);
     click(&mut app, file);
     // right click: copy the commit under the pointer
     let at = locate(&screen, "▾ Subject two");
@@ -2068,11 +2070,24 @@ fn tui_focus_shows_the_commit_message_above_the_files() {
     // its first line collapses it, and the palette brings it back
     let at = locate(&draw(&mut app, 160, 40), "▾ Subject two");
     click(&mut app, at);
-    assert!(text(&draw(&mut app, 160, 40)).contains("▸ Subject two"));
-    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::ToggleMessage));
+    assert!(!text(&draw(&mut app, 160, 40)).contains("▸ Subject two"));
+    assert_eq!(app.commit_panel.area.height,0);
+    let toggle=locate(&draw(&mut app,160,40),"Commit");
+    click(&mut app,toggle);
     assert!(text(&draw(&mut app, 160, 40)).contains("▾ Subject two"));
 
-    // a range: ↑ from the first file enters the panel, ↓ walks the commits, Enter opens one, Esc gives Files back
+    let height=app.diff_area.height;
+    app.layout_command(lenz::layout::LayoutCommand::ToggleFiles);
+    draw(&mut app,160,40);
+    assert_eq!(app.navigator.area.width,0);
+    assert_eq!(app.commit_panel.area.width,160);
+    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::ToggleMessage));
+    draw(&mut app,160,40);
+    assert!(app.diff_area.height>height);
+    app.run_action(lenz::catalog::Action::Repository(lenz::catalog::RepoAction::ToggleMessage));
+    app.layout_command(lenz::layout::LayoutCommand::ToggleFiles);
+
+    // a range: ↓ from the last file enters the panel, ↓ walks the commits, Enter opens one, Esc gives Files back
     let d = _d.path();
     std::fs::write(d.join("a.txt"), "third\n").unwrap(); git(d, &["commit", "-qam", "Subject three"]);
     let spec = lenz::repository_session::branch_comparison("HEAD~2", "HEAD", false);
@@ -2081,7 +2096,8 @@ fn tui_focus_shows_the_commit_message_above_the_files() {
     while !text(&draw(&mut app, 160, 40)).contains("▾ 2 commits") { app.poll(); assert!(std::time::Instant::now() < until, "range read"); std::thread::sleep(std::time::Duration::from_millis(2)); }
     app.navigator.focused = true;
     app.commit_panel.focused = false;
-    key(&mut app, KeyCode::Up);
+    key(&mut app, KeyCode::End);
+    key(&mut app, KeyCode::Down);
     assert!(app.commit_panel.focused && !app.navigator.focused);
     key(&mut app, KeyCode::Down);
     assert_eq!(app.repository.as_ref().unwrap().core.message_cursor(), 1);
@@ -2092,6 +2108,26 @@ fn tui_focus_shows_the_commit_message_above_the_files() {
     assert!(!app.quit, "Ctrl+C in the panel copies");
     key(&mut app, KeyCode::Esc);
     assert!(!app.commit_panel.focused && app.navigator.focused);
+    app.run_action(lenz::catalog::Action::Folder(lenz::folders::FolderAction::Summary));
+    let screen=draw(&mut app,160,40);
+    click(&mut app,locate(&screen,"Tester"));
+    assert!(app.commit_panel.focused);
+    key(&mut app,KeyCode::Esc);
+    assert!(!app.commit_panel.focused&&app.session.folders.summary().is_some());
+    let screen=draw(&mut app,160,40);
+    click(&mut app,locate(&screen,"Tester"));
+    let summary=app.pr_pane();
+    click(&mut app,(summary.x+1,summary.y));
+    assert!(!app.commit_panel.focused);
+    let bytes=std::fs::read(d.join("a.txt")).unwrap();
+    for theme in ["darcula","light","catppuccin"] {
+        app.palette=std::sync::Arc::new(*lenz::theme::builtin(theme).unwrap());
+        for (w,h) in [(80,24),(50,12),(24,8),(12,4),(1,1)] {
+            draw(&mut app,w,h);
+            assert!(app.commit_panel.area.right()<=w && app.commit_panel.area.bottom()<=h);
+        }
+    }
+    assert_eq!(std::fs::read(d.join("a.txt")).unwrap(),bytes);
 }
 
 #[test]

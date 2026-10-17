@@ -1,12 +1,11 @@
 use super::{ThemeEntry, ThemeError, ThemeInputKind, builtin, load_theme, loader::read_bounded};
 use std::{
-    collections::BTreeSet,
+    collections::BTreeMap,
     io::Write,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-/// Where one product keeps its themes. Give each product its own selection file and user-theme directory
-/// ([`ThemePaths::xdg`] with its own `app`); the Omarchy directories are meant to be shared.
+/// Theme storage, with optional read-only compatibility paths.
 #[derive(Clone, Debug)]
 pub struct ThemePaths {
     /// User themes, one `<name>.toml` per `user:<name>` ID.
@@ -15,8 +14,28 @@ pub struct ThemePaths {
     pub selection: PathBuf,
     /// Omarchy `current` directories the System theme follows, first found wins.
     pub omarchy: [PathBuf; 2],
+    legacy: Option<Box<ThemePaths>>,
 }
 impl ThemePaths {
+    /// Canonical Lenz appearance with Reader's old paths as read-only fallbacks.
+    pub fn shared() -> Self {
+        let mut paths = Self::xdg("lenz");
+        paths.legacy = Some(Box::new(Self::xdg("lenz-reader")));
+        paths
+    }
+    pub fn shared_under(config_home: &Path, state_home: &Path) -> Self {
+        let mut paths = Self::under(config_home, state_home, "lenz");
+        paths.legacy = Some(Box::new(Self::under(config_home, state_home, "lenz-reader")));
+        paths
+    }
+    fn selection_path(&self) -> &Path {
+        if !present(&self.selection) && let Some(legacy) = &self.legacy {
+            &legacy.selection
+        } else {
+            &self.selection
+        }
+    }
+
     /// The XDG layout for `app`: `$XDG_CONFIG_HOME/<app>/themes`, `$XDG_CONFIG_HOME/<app>/appearance.json`, and
     /// Omarchy's `current` under `$XDG_STATE_HOME`, then `$XDG_CONFIG_HOME`. Relative XDG values are ignored.
     pub fn xdg(app: &str) -> Self {
@@ -38,12 +57,18 @@ impl ThemePaths {
             themes: config_home.join(app).join("themes"),
             selection: config_home.join(app).join("appearance.json"),
             omarchy: [state_home.join("omarchy/current"), config_home.join("omarchy/current")],
+            legacy: None,
         }
     }
     pub fn theme_path(&self, id: &str) -> Option<PathBuf> {
         id.strip_prefix("user:")
             .filter(|_| valid_id(id))
-            .map(|stem| self.themes.join(format!("{stem}.toml")))
+            .map(|stem| {
+                let canonical = self.themes.join(format!("{stem}.toml"));
+                if !present(&canonical) && let Some(legacy) = &self.legacy {
+                    legacy.themes.join(format!("{stem}.toml"))
+                } else { canonical }
+            })
     }
 }
 /// A product's override of the saved selection: `theme` (an ID or `system`) wins over `appearance` (`light` or
@@ -61,6 +86,14 @@ impl Default for ThemeOverrides {
     }
 }
 impl ThemeOverrides {
+    /// LENZ_THEME > LENZ_APPEARANCE > LENZ_READER_THEME > LENZ_READER_APPEARANCE.
+    /// An invalid higher-priority override is reported, never hidden by a legacy value.
+    pub fn shared_from_env() -> Self {
+        let shared = Self::from_env("LENZ_THEME", "LENZ_APPEARANCE");
+        if shared.theme.is_some() || shared.appearance.is_some() { shared }
+        else { Self::from_env("LENZ_READER_THEME", "LENZ_READER_APPEARANCE") }
+    }
+
     /// The overrides in the environment variables `theme_var` and `appearance_var`, labelled by their names.
     pub fn from_env(theme_var: &'static str, appearance_var: &'static str) -> Self {
         Self {
@@ -110,7 +143,7 @@ pub fn read_selection(
     overrides: &ThemeOverrides,
 ) -> (ThemeSelection, Vec<String>) {
     let mut notices = Vec::new();
-    let file = &paths.selection;
+    let file = paths.selection_path();
     let saved = match read_bounded(file) {
         Ok(bytes) => match serde_json::from_slice::<serde_json::Value>(&bytes) {
             Ok(v) if v["version"] == 1 => v["theme"]
@@ -125,7 +158,7 @@ pub fn read_selection(
                 ThemeSelection::System
             }
         },
-        Err(e) if !file.exists() => {
+        Err(e) if !present(file) => {
             let _ = e;
             ThemeSelection::System
         }
@@ -183,29 +216,32 @@ pub fn save_selection(paths: &ThemePaths, selection: &ThemeSelection) -> Result<
     result
 }
 pub fn discover_themes(paths: &ThemePaths) -> (Vec<ThemeEntry>, Vec<String>) {
-    let iter = match std::fs::read_dir(&paths.themes) {
-        Ok(i) => i,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Vec::new(), Vec::new()),
-        Err(e) => return (Vec::new(), vec![e.to_string()]),
-    };
-    let mut candidates = BTreeSet::new();
+    let mut candidates = BTreeMap::new();
+    let mut notices = Vec::new();
     let mut truncated = false;
-    for entry in iter.flatten() {
-        let p = entry.path();
-        if p.extension().is_some_and(|s| s == "toml") {
-            candidates.insert(p);
-            if candidates.len() > 256 {
-                candidates.pop_last();
-                truncated = true;
+    // Canonical filenames reserve their ID even when their contents are invalid.
+    for dir in std::iter::once(&paths.themes).chain(paths.legacy.iter().map(|p| &p.themes)) {
+        let iter = match std::fs::read_dir(dir) {
+            Ok(iter) => iter,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => { notices.push(e.to_string()); continue; }
+        };
+        for entry in iter.flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|s| s == "toml") {
+                candidates.entry(entry.file_name()).or_insert(p);
+                if candidates.len() > 256 {
+                    candidates.pop_last();
+                    truncated = true;
+                }
             }
         }
     }
     let mut entries = Vec::new();
-    let mut notices = Vec::new();
     if truncated {
         notices.push("Only the first 256 user theme files are listed".into());
     }
-    for p in candidates {
+    for p in candidates.into_values() {
         let Some(stem) = p.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
@@ -230,4 +266,8 @@ fn display(p: &Path) -> String {
         .unwrap_or_default()
         .to_string_lossy()
         .into_owned()
+}
+
+fn present(path: &Path) -> bool {
+    !matches!(std::fs::symlink_metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }

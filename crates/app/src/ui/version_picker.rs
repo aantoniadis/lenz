@@ -46,7 +46,7 @@ impl Viewer {
     pub(super) fn picker_v_height(&self) -> f32 {
         let Some(s)=&self.picker_v else{return 0.0;};
         let default=(s.o.versions.len()+s.o.info.len()+2) as f32*line_h();
-        crate::pane_layout::clamp_size((self.panes.viewport[1]-self.top()-self.panel_h()).max(0.0),self.panes.version.unwrap_or(default),3.0*line_h(),2.0*line_h())
+        crate::pane_layout::clamp_size((self.content_bottom()-self.top()-self.panel_h()).max(0.0),self.panes.version.unwrap_or(default),3.0*line_h(),2.0*line_h())
     }
 
     pub(super) fn picker_v_frame(&self) -> Option<PickerFrame> {
@@ -139,7 +139,7 @@ impl Viewer {
     /// Scroll the version band while retaining version numbers and keyboard shortcuts.
     pub(super) fn picker_v_wheel(&mut self,x:f32,y:f32,rows:f32,cx:&mut Context<Self>)->bool {
         let Some(frame)=self.picker_v_frame()else{return false;};
-        let top=self.panes.viewport[1]-self.panel_h()-frame.height();
+        let top=self.content_bottom()-self.panel_h()-frame.height();
         if x<self.diff_x()||y<top||y>=top+frame.height(){return false;}
         if self.resize_blocked(){return true;}
         let visible=((frame.height()-2.0*line_h())/line_h()).max(0.0).floor() as usize;

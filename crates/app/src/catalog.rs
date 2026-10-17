@@ -13,6 +13,8 @@ use crate::pr_session::DetailsTab;
 use crate::version_session::PickAct;
 use crate::view::ScrollMode;
 
+pub const COMMIT_PANEL_LABEL: &str = "Commit";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RepoAction {
     Refresh, Branches, StagedChanges, CopyUrl, OpenUrl, Back, Forward,
@@ -25,7 +27,7 @@ pub enum RepoAction {
     NextParent, FileHistory, WriteGraph, CopyHash, CopySubject, CopyDetails, ShowInGraph,
     /// The sidebar's selected worktree in a view (or window) of its own.
     OpenWorktree,
-    /// Collapse or expand the commit message panel in Focus.
+    /// Show or hide the commit message panel in Focus.
     ToggleMessage,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
