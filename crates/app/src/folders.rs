@@ -179,8 +179,7 @@ impl Folders {
                 self.collapsed.insert(root.to_string());
             }
         }
-        self.stats.clear();
-        self.cancel();
+        self.invalidate_counts();
         if let Some(summary) = self.summary.take() {
             let range = match summary.group.as_ref() {
                 Some(group) => {
@@ -336,6 +335,12 @@ impl Folders {
     /// A file's count, once the background work reached it.
     pub fn stat(&self, index: usize) -> Option<&Stat> {
         self.stats.get(&index)
+    }
+
+    /// Reload rereads mutable inputs; neither cached counts nor an old batch may survive it.
+    pub(crate) fn invalidate_counts(&mut self) {
+        self.stats.clear();
+        self.cancel();
     }
 
     /// Shows `folder`'s summary: the heading at row `row` of [`Folders::rows`] picks its group.
@@ -842,6 +847,19 @@ mod tests {
         let next = Arc::new(crate::repo::local_changes(r.path(), false).unwrap());
         folders.sync(&next);
         assert!(folders.summary().is_none(), "the retained run disappeared, not the live Unstaged group");
+    }
+
+    #[test]
+    fn summary_reload_drops_a_completed_obsolete_batch() {
+        let (_r, set) = set_with_archive();
+        let mut folders = Folders::default();
+        folders.sync(&set); folders.show_summary(&set, "pkg/app.zip", None, None);
+        let (tx, rx) = mpsc::channel();
+        tx.send(Some(vec![(2, Stat::Lines { added: 999, removed: 999 })])).unwrap();
+        folders.job = Some(rx);
+        folders.invalidate_counts();
+        counted(&mut folders, &set);
+        assert_eq!(folders.stat(2), Some(&count(&set, 2)));
     }
 
 }

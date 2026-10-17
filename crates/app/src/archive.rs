@@ -213,7 +213,9 @@ fn each_tar(
     let mut archive = tar::Archive::new(Limit { inner: stream(compression, bytes)?, left: MAX_UNPACKED });
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
-        let Some(name) = normalize(&String::from_utf8_lossy(&entry.path_bytes())) else { continue };
+        let path = entry.path_bytes();
+        let path = std::str::from_utf8(&path).map_err(|_| "non-UTF-8 archive member paths are unsupported".to_string())?;
+        let Some(name) = normalize(path) else { continue };
         let kind = entry.header().entry_type();
         if kind.is_file() || kind == tar::EntryType::Continuous {
             visit(name, &mut entry)
@@ -396,4 +398,31 @@ mod tests {
         assert_eq!(normalize("a/../b"), None);
         assert_eq!(normalize("./"), None);
     }
+    #[test]
+    fn summary_tar_names_cannot_collide_after_utf8_replacement() {
+        let mut builder = tar::Builder::new(Vec::new());
+        for name in [b"bad\xff.txt".as_slice(), "bad�.txt".as_bytes()] {
+            let mut header = tar::Header::new_gnu();
+            header.as_mut_bytes()[..name.len()].copy_from_slice(name);
+            header.set_size(4); header.set_mode(0o644); header.set_cksum();
+            builder.append(&header, b"old\n".as_slice()).unwrap();
+        }
+        let tar = builder.into_inner().unwrap();
+        let kind = Kind::Tar(Compression::None);
+        assert!(members(kind, &tar).unwrap_err().contains("non-UTF-8"));
+        assert!(extract(kind, &tar, "bad�.txt").unwrap_err().contains("non-UTF-8"));
+        // The ChangeSet must explain why it kept the outer archive, rather than call this packing-only.
+        let d = tempfile::tempdir().unwrap();
+        let (left, right) = (d.path().join("old.tar"), d.path().join("new.tar"));
+        std::fs::write(&left, &tar).unwrap();
+        let mut changed = tar.clone();
+        let at = changed.windows(4).position(|bytes| bytes == b"old\n").unwrap();
+        changed[at..at + 3].copy_from_slice(b"new");
+        std::fs::write(&right, changed).unwrap();
+        let set = crate::changeset::ChangeSet::load(&crate::changeset::Spec::Plain { left, right }, d.path()).unwrap();
+        assert_eq!(set.comparisons.len(), 1);
+        assert!(!set.comparisons[0].in_archive());
+        assert!(set.note(0).unwrap().contains("non-UTF-8"));
+    }
+
 }

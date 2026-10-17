@@ -1185,10 +1185,11 @@ impl Viewer {
     fn reload(&mut self,cx:&mut Context<Self>){
         if self.repo.is_some(){self.refresh_repository(cx);return;}
         self.set.invalidate_archive_cache();
+        self.comparison.folders.invalidate_counts();
         let index=self.comparison.current;let anchor=self.comparison.view.anchor_line();
         for side in [Side::Left,Side::Right]{if let Some(key)=self.blame_key(side){self.blames.remove(&key);}}
         self.loaded.remove(&index);self.comparison.cache.0.remove(&index);self.iview=ImageView::fresh();self.sel=None;self.comparison.find=None;
-        self.load(index,Place::Anchor(anchor),false,cx);self.ensure_blame(cx);self.refresh_repository(cx);cx.notify();
+        self.load(index,Place::Anchor(anchor),false,cx);self.poll_folders(cx);self.ensure_blame(cx);self.refresh_repository(cx);cx.notify();
     }
     fn interaction_disabled(&self,command:commands::Interaction)->Option<&'static str>{
         if matches!(command,commands::Interaction::Copy|commands::Interaction::CopyMarkdownSource) && (self.comparison.markdown_mode()==crate::markdown::PresentationMode::Rendered || command==commands::Interaction::CopyMarkdownSource) && let Some(doc)=self.doc() {

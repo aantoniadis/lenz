@@ -95,9 +95,10 @@ impl SummaryPane {
             let room = usize::from(area.width).saturating_sub(stat_w + 5);
             let line = format!(" {} {}", navigator::badge(&c.status), name);
             frame.buffer_mut().set_stringn(area.x + 1, y, &line, room, style.fg(color(palette.status[kind])));
-            let mut x = area.right().saturating_sub(stat_w as u16 + 1);
+            let right = area.right().saturating_sub(1);
+            let mut x = right.saturating_sub(stat_w as u16).max(area.x + 1);
             for (text, t) in stat {
-                x = frame.buffer_mut().set_stringn(x, y, &text, usize::from(area.right().saturating_sub(x)), tone(t).bg(style.bg.unwrap_or_default())).0 + 1;
+                x = frame.buffer_mut().set_stringn(x, y, &text, usize::from(right.saturating_sub(x)), tone(t).bg(style.bg.unwrap_or_default())).0.saturating_add(1).min(right);
             }
         }
         let hint_y = area.bottom().saturating_sub(1);

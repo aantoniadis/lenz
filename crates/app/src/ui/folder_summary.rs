@@ -90,7 +90,7 @@ impl Viewer {
         let (rx, ry, rw, rh) = self.pr_pane();
         if x < rx || x >= rx + rw || y < ry || y >= ry + rh { return false; }
         let row = ((y - ry) / line_h() - TOP_ROWS + self.summary_scroll).floor();
-        if row >= 0.0 && (row as usize) < summary.files.len() && y < ry + rh - line_h() {
+        if y >= ry + TOP_ROWS * line_h() && row >= 0.0 && (row as usize) < summary.files.len() && y < ry + rh - line_h() {
             let delta = row as isize - summary.selected as isize;
             self.comparison.folders.select(delta);
             self.open_summary_file(cx);

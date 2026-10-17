@@ -1332,3 +1332,37 @@ fn archive_plain_reload_key_reads_changed_tar_members() {
     key(&mut app, KeyCode::F(5), KeyModifiers::NONE); ready(&mut app);
     assert_eq!(app.session.document().unwrap().text(Side::Right), "third needle\n");
 }
+
+#[test]
+fn summary_reload_key_refreshes_counts() {
+    use lenz::folders::Stat;
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("left.txt"), "old\n").unwrap(); std::fs::write(d.path().join("right.txt"), "new\n").unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.txt", "right.txt"]);
+    app.session.show_folder_of(0); ready(&mut app);
+    assert_eq!(app.session.folders.stat(0), Some(&Stat::Lines { added: 1, removed: 1 }));
+    std::fs::write(d.path().join("right.txt"), "new\nmore\nlast\n").unwrap();
+    key(&mut app, KeyCode::F(5), KeyModifiers::NONE); ready(&mut app);
+    assert_eq!(app.session.folders.stat(0), Some(&Stat::Lines { added: 3, removed: 1 }));
+}
+
+#[test]
+fn summary_narrow_counts_stay_inside_the_pane() {
+    use ratatui::{layout::Rect, style::Style};
+    let d = tempfile::tempdir().unwrap();
+    std::fs::write(d.path().join("left.bin"), vec![0; 1000]).unwrap(); std::fs::write(d.path().join("right.bin"), vec![0; 1001]).unwrap();
+    let mut app = open(d.path(), &["--no-index", "left.bin", "right.bin"]);
+    app.session.show_folder_of(0); ready(&mut app);
+    let set = app.session.change_set().unwrap();
+    let mut pane = crate::summary::SummaryPane::default();
+    let mut terminal = Terminal::new(TestBackend::new(50, 10)).unwrap();
+    for (width, palette) in [8, 18, 32].into_iter().flat_map(|width| [&lenz::theme::DARCULA, &lenz::theme::LIGHT].map(|palette| (width, palette))) {
+        let area = Rect::new(50 - width, 0, width, 10);
+        terminal.draw(|frame| {
+            for y in 0..10 { frame.buffer_mut().set_string(0, y, "X".repeat(50), Style::default()); }
+            pane.draw(frame, area, &set, &app.session.folders, palette);
+        }).unwrap();
+        let buffer = terminal.backend().buffer();
+        for y in 0..10 { for x in 0..area.x { assert_eq!(buffer[(x, y)].symbol(), "X", "outside summary at {x},{y}, width {width}"); } }
+    }
+}

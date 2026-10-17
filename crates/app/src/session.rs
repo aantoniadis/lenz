@@ -217,7 +217,7 @@ impl Session {
     pub fn open_summary_file(&mut self){if let Some(index)=self.state.folders.selected_file(){self.open_file(index);}}
     pub fn reload_set(&mut self){self.state.begin();self.state.markdown_invalidate();self.reading=None;self.diffing=None;self.refining_job=None;self.document=None;self.image=None;self.opening_preserve=true;self.place=Place::Anchor(self.view().anchor_line());let spec=self.spec.clone();let cwd=self.cwd.clone();self.opening=Some(work::submit(Arc::downgrade(&self.state.work_id),move||ChangeSet::load(&spec,&cwd)));}
     pub fn find_selection(&self)->Option<crate::selection::Selection>{let find=self.find()?;let(line,range)=find.hits().get(find.at()?)?;Some(crate::selection::Selection{side:find.side(),anchor:Pos::new(*line,range.start),head:Pos::new(*line,range.end)})}
-    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");if let Some(set)=&self.set{set.invalidate_archive_cache();}let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
+    pub fn reload(&mut self){crate::diagnostics::breadcrumb("Reload comparison");if let Some(set)=&self.set{set.invalidate_archive_cache();}self.state.folders.invalidate_counts();let anchor=self.state.view.anchor_line();self.load(self.state.current,Place::Anchor(anchor),false,false);}
     pub fn execute(&mut self,command:Command){let loading=self.loading()||self.document.is_none();let large=self.document.as_ref().is_some_and(|d|matches!(d.placeholder_kind(),Some(Placeholder::Large{..})));
         let set=self.set.clone();let files=set.as_ref().map_or(&[][..],|s|s.comparisons.as_slice());
         self.notice=None;match self.state.command(command,files,loading,large){
@@ -464,6 +464,21 @@ mod archive_tests {
         std::fs::write(&right, tar(b"updated\n")).unwrap();
         session.reload(); settle(&mut session);
         assert_eq!(session.document().unwrap().text(Side::Right), "updated\n");
+    }
+
+    #[test]
+    fn summary_reload_refreshes_counts() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("left.txt"), "old\n").unwrap();
+        std::fs::write(d.path().join("right.txt"), "new\n").unwrap();
+        let args = ["--no-index", "left.txt", "right.txt"].map(str::to_owned);
+        let mut session = Session::open(crate::cli::parse(&args, d.path()).unwrap(), d.path().into());
+        let settle = |s: &mut Session| { let until = Instant::now() + std::time::Duration::from_secs(10); loop { s.poll(); if !s.busy() { break; } assert!(Instant::now() < until); std::thread::yield_now(); } };
+        settle(&mut session); session.show_folder_of(0); settle(&mut session);
+        assert_eq!(session.folders.stat(0), Some(&crate::folders::Stat::Lines { added: 1, removed: 1 }));
+        std::fs::write(d.path().join("right.txt"), "new\nmore\nlast\n").unwrap();
+        session.reload(); settle(&mut session);
+        assert_eq!(session.folders.stat(0), Some(&crate::folders::Stat::Lines { added: 3, removed: 1 }));
     }
 
 }

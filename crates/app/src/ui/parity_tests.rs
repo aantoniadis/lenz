@@ -4674,3 +4674,32 @@ fn gui_archive_plain_reload_reads_changed_tar_members(cx: &mut TestAppContext) {
     workflow_wait(cx, &f, |v| v.doc().is_some() && v.comparison.diffed == v.comparison.generation);
     assert_eq!(f.viewer.read_with(cx, |v, _| v.doc().unwrap().text(Side::Right).to_string()), "updated\n");
 }
+
+#[gpui::test]
+fn gui_summary_reload_refreshes_counts(cx: &mut TestAppContext) {
+    use crate::{catalog::Action, commands::Interaction, folders::{FolderAction, Stat}};
+    let f = fixture(cx, "old\n", "new\n");
+    run(cx, &f, Action::Folder(FolderAction::Summary));
+    workflow_wait(cx, &f, |v| v.comparison.folders.stat(0).is_some());
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.folders.stat(0).cloned()), Some(Stat::Lines { added: 1, removed: 1 }));
+    std::fs::write(f.dir.path().join("right.txt"), "new\nmore\nlast\n").unwrap();
+    run(cx, &f, Action::Interaction(Interaction::Reload));
+    workflow_wait(cx, &f, |v| v.doc().is_some() && v.comparison.diffed == v.comparison.generation && !v.comparison.folders.busy());
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.folders.stat(0).cloned()), Some(Stat::Lines { added: 3, removed: 1 }));
+}
+
+#[gpui::test]
+fn gui_summary_scrolled_header_click_only_focuses(cx: &mut TestAppContext) {
+    let f = big_archive_fixture(cx);
+    cx.simulate_window_resize(f.window.into(), size(px(1200.), px(400.))); cx.executor().run_until_parked();
+    let (x, y, _, _) = f.viewer.read_with(cx, |v, _| v.pr_pane());
+    click(cx, &f, x + 40., y + 4.);
+    key(cx, &f, "end", false, false, false);
+    summary_rows(cx, &f);
+    assert!(f.viewer.read_with(cx, |v, _| v.summary_scroll > 2.));
+    for row in [0., 1.] {
+        click(cx, &f, x + 40., y + (row + 0.5) * line_h());
+        assert!(f.viewer.read_with(cx, |v, _| v.summary_shown()), "header and gap must not open a file");
+        assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.folders.summary().unwrap().selected), 59);
+    }
+}
