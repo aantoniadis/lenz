@@ -386,6 +386,16 @@ impl MergeResult {
         next.rebuild();
     }
 
+    /// Compare output after re-merging unchanged inputs, without allocating rendered copies.
+    pub(crate) fn same_output(&self, next: &Self) -> bool {
+        fn markers(m: &MergeResult) -> impl Iterator<Item = (&Range<u32>, &Range<u32>, &Range<u32>, &Range<u32>)> {
+            m.blocks.iter().zip(&m.choices).zip(&m.ranges)
+                .filter(|((_, c), _)| !c.resolved && c.custom.is_none())
+                .map(|((b, _), r)| (&b.left, &b.base, &b.right, r))
+        }
+        self.lines == next.lines && markers(self).eq(markers(next))
+    }
+
     /// The Result as text (lines joined with `\n`), each unresolved Conflict written as git conflict markers.
     pub fn render(&self, style: MarkerStyle, marker_size: usize, labels: &Labels) -> String {
         self.rendered(style, marker_size, labels).0.join("\n")
@@ -708,6 +718,17 @@ mod tests {
         assert_eq!(next.choice(2), m.choice(2));
         assert_eq!(next.choice(1).taken, vec![Pick::Theirs]);
         assert!(!next.clone().undo());
+    }
+
+    #[test]
+    fn output_equality_includes_unresolved_markers_and_their_positions() {
+        let m=sample();let mut next=m.clone();assert!(m.same_output(&next));
+        next.keep_base(2);
+        assert_eq!(m.lines(),next.lines());assert!(!m.same_output(&next));
+        for style in [MarkerStyle::Merge,MarkerStyle::Diff3,MarkerStyle::Zdiff3] {
+            let labels=Labels{ours:"ours".into(),base:"base".into(),theirs:"theirs".into()};
+            assert_ne!(m.render(style,7,&labels),next.render(style,7,&labels));
+        }
     }
 
     #[test]

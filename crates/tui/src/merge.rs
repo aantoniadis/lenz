@@ -1531,6 +1531,12 @@ mod tests {
         assert!(matches!(&app.workspace.file,Some(FileView::Picker(p)) if p.chosen.is_none()&&p.dirty));
         let screen=draw(&mut app);let visible=screen.content().iter().map(|c|c.symbol()).collect::<String>();assert!(!visible.contains("✓ 2 Theirs"),"Undo must remove the chosen-version checkmark: {visible}");
         assert_eq!(std::fs::read(d.join("result.md")).unwrap(),source_bytes_before[1],"Undo is unsaved until the next Save");
+        key(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);
+        assert_eq!(std::fs::read(d.join("result.md")).unwrap(),source_bytes_before[0]);
+        assert!(matches!(&app.workspace.file,Some(FileView::Picker(p)) if p.chosen.is_none()&&!p.dirty));
+        key(&mut app,KeyCode::Char('y'),KeyModifiers::CONTROL);
+        key(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);
+        assert_eq!(std::fs::read(d.join("result.md")).unwrap(),source_bytes_before[1]);
         assert_eq!(app.diff.as_ref().unwrap().session.markdown_mode(),lenz::markdown::PresentationMode::Rendered);let source_bytes_after=[std::fs::read(d.join("ours.md")).unwrap(),std::fs::read(d.join("theirs.md")).unwrap()];let source_hash_after=source_hash(&source_bytes_after);assert_eq!(source_hash_before,source_hash_after);assert_eq!(source_bytes_before,source_bytes_after);
     }
     fn toolbar_row(app: &mut Merger, width: u16) -> String {

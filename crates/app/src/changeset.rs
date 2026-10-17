@@ -849,9 +849,10 @@ fn walk(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
         for entry in fs::read_dir(&dir).map_err(io_error(&dir))? {
             let entry = entry.map_err(io_error(&dir))?;
             let rel = format!("{prefix}{}", git::path_text(entry.file_name().as_encoded_bytes())?);
-            if entry.file_type().map_err(io_error(&entry.path()))?.is_dir() {
+            let kind = entry.file_type().map_err(io_error(&entry.path()))?;
+            if kind.is_dir() {
                 dirs.push((entry.path(), rel + "/"));
-            } else {
+            } else if !(kind.is_symlink() && entry.path().is_dir()) {
                 files.insert(rel, entry.path());
             }
         }
@@ -1422,6 +1423,30 @@ mod tests {
         std::os::unix::fs::symlink(d.path().join("worktree/a.txt"), d.path().join("r/a.txt")).unwrap();
         let set = plain(d.path(), "l", "r").unwrap();
         assert_eq!(texts(&set, 0), pair("old\n", "new\n"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn directory_symlinks_are_skipped_without_losing_real_or_symlinked_files() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "l/changed.txt", "old\n");
+        write(d.path(), "r/changed.txt", "new\n");
+        write(d.path(), "l/linked.txt", "before\n");
+        write(d.path(), "worktree/linked.txt", "after\n");
+        write(d.path(), "outside/hidden.txt", "do not traverse\n");
+        symlink(d.path().join("worktree/linked.txt"), d.path().join("r/linked.txt")).unwrap();
+        for side in ["l", "r"] {
+            symlink(d.path().join("outside"), d.path().join(side).join("directory-link")).unwrap();
+            symlink(".", d.path().join(side).join("loop")).unwrap();
+            let set = plain(d.path(), "l", "r").unwrap();
+            assert_eq!(listing(&set), [("changed.txt", Status::Modified), ("linked.txt", Status::Modified)]);
+            assert_eq!(texts(&set, 0), pair("old\n", "new\n"));
+            assert_eq!(texts(&set, 1), pair("before\n", "after\n"));
+            let reversed = plain(d.path(), "r", "l").unwrap();
+            assert_eq!(listing(&reversed), listing(&set));
+            assert_eq!(texts(&reversed, 1), pair("after\n", "before\n"));
+        }
     }
 
     #[test]

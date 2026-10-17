@@ -349,6 +349,17 @@ mod gui_tests {
         });
         assert_eq!(std::fs::read(&target).unwrap(), b"\0theirs\xfe");
         viewer.update(&mut cx, |v, cx| {
+            v.picker_v_key(&event("z", true, false, false), cx);
+            v.picker_v_key(&event("s", true, false, false), cx);
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), b"\0ours\xff");
+        assert!(viewer.read_with(&cx, |v, _| !v.picker_v.as_ref().unwrap().dirty));
+        viewer.update(&mut cx, |v, cx| {
+            v.picker_v_key(&event("y", true, false, false), cx);
+            v.picker_v_key(&event("s", true, false, false), cx);
+        });
+        assert_eq!(std::fs::read(&target).unwrap(), b"\0theirs\xfe");
+        viewer.update(&mut cx, |v, cx| {
             v.picker_v_key(&event("1", false, false, false), cx);
             v.picker_v_key(&event("escape", false, false, false), cx);
         });

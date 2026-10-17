@@ -11,7 +11,7 @@ use std::{
     fmt,
     fs::{self, File, OpenOptions},
     hash::{DefaultHasher, Hasher},
-    io::{self, Seek, Write},
+    io::{self, Read, Seek, Write},
     os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Component, Path, PathBuf},
     time::SystemTime,
@@ -261,6 +261,68 @@ pub fn put(path: &Path, entry: &Entry) -> Result<(), WriteError> {
     }
 }
 
+/// Restores a private file backup without loading its bytes into memory.
+pub(crate) fn put_file_from(path: &Path, source: &mut File, mode: u32) -> Result<(), WriteError> {
+    let meta = match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        other => Some(other.map_err(io_err("reading", path))?),
+    };
+    source.rewind().map_err(io_err("reading backup for", path))?;
+    let Some(meta) = meta.filter(|m| m.is_file()) else {
+        return create(path, |tmp| {
+            source.rewind()?;
+            let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600).open(tmp)?;
+            let result = (|| {
+                file.set_permissions(fs::Permissions::from_mode(mode))?;
+                io::copy(source, &mut file)?;
+                file.sync_all()
+            })();
+            if result.is_err() { let _ = fs::remove_file(tmp); }
+            result
+        });
+    };
+    if meta.nlink() == 1 {
+        match tempfile::Builder::new().prefix(".lenz-").suffix(".lenz~").tempfile_in(parent(path)) {
+            Ok(tmp) => {
+                if atomic_from(tmp.as_file(), tmp.path(), path, &meta, mode, source)
+                    .map_err(io_err("writing", path))? { return Ok(()); }
+            }
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {}
+            Err(e) => return Err(io_err("writing", path)(e)),
+        }
+    }
+    // Preserve hard links and ownership, with a streamed rollback for failed writes.
+    let mut restore = || -> io::Result<()> {
+        let mut original = File::open(path)?;
+        let mut rollback = tempfile::tempfile()?;
+        io::copy(&mut original, &mut rollback)?;
+        let mut file = OpenOptions::new().write(true).open(path)?;
+        let copy = |from: &mut File, to: &mut File| -> io::Result<()> {
+            from.rewind()?;
+            to.rewind()?;
+            let size = io::copy(from, to)?;
+            to.set_len(size)?;
+            to.sync_all()
+        };
+        file.set_permissions(fs::Permissions::from_mode(mode))?;
+        copy(source, &mut file).inspect_err(|_| {
+            let _ = copy(&mut rollback, &mut file);
+            let _ = file.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o7777));
+        })
+    };
+    restore().map_err(io_err("writing", path))
+}
+
+/// Removes an entry when the caller already owns its undo backup.
+pub(crate) fn remove_entry(path: &Path) -> Result<(), WriteError> {
+    match fs::remove_file(path) {
+        Ok(()) => sync_dir(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {},
+        Err(e) => return Err(io_err("deleting", path)(e)),
+    }
+    Ok(())
+}
+
 /// Removes the file or symlink at `path`, returning what re-creates it with [`put`].
 pub fn delete(path: &Path) -> Result<Entry, WriteError> {
     let meta = fs::symlink_metadata(path).map_err(io_err("deleting", path))?;
@@ -347,7 +409,11 @@ fn replace(target: &Path, bytes: &[u8], mode: Option<u32>, old: Option<&[u8]>) -
 }
 
 /// The temp-and-rename write. `Ok(false)`: the temp can't take the original's owner, so a rename would change it.
-fn atomic(file: &File, tmp: &Path, target: &Path, meta: &fs::Metadata, mode: u32, bytes: &[u8]) -> io::Result<bool> {
+fn atomic(file: &File, tmp: &Path, target: &Path, meta: &fs::Metadata, mode: u32, mut bytes: &[u8]) -> io::Result<bool> {
+    atomic_from(file, tmp, target, meta, mode, &mut bytes)
+}
+
+fn atomic_from(file: &File, tmp: &Path, target: &Path, meta: &fs::Metadata, mode: u32, source: &mut impl Read) -> io::Result<bool> {
     let ours = file.metadata()?;
     if ours.uid() != meta.uid() {
         return Ok(false);
@@ -357,7 +423,7 @@ fn atomic(file: &File, tmp: &Path, target: &Path, meta: &fs::Metadata, mode: u32
     }
     // mode before content: a private file's bytes are never readable under the temp name
     file.set_permissions(fs::Permissions::from_mode(mode))?;
-    (&*file).write_all(bytes)?;
+    io::copy(source, &mut &*file)?;
     file.sync_all()?;
     fs::rename(tmp, target)?;
     sync_dir(target);
@@ -643,6 +709,34 @@ mod tests {
         let err = put(&path, &Entry::File { bytes: b"x".to_vec(), mode: Some(0o644) }).unwrap_err();
         assert!(matches!(&err, WriteError::Io(msg) if msg.starts_with("writing ")), "{err:?}");
         assert_eq!(fs::read_to_string(path.join("inside")).unwrap(), "keep");
+        assert!(no_temps(dir.path()));
+    }
+
+    #[test]
+    fn streamed_backup_restores_atomically_and_preserves_hard_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("result");
+        let alias = dir.path().join("alias");
+        let mut backup = tempfile::tempfile().unwrap();
+        backup.write_all(b"restored\0bytes").unwrap();
+        for hard_link in [false, true] {
+            fs::write(&path, b"current").unwrap();
+            set_mode(&path, 0o644);
+            if hard_link { fs::hard_link(&path, &alias).unwrap(); }
+            let ino = fs::metadata(&path).unwrap().ino();
+            put_file_from(&path, &mut backup, 0o751).unwrap();
+            assert_eq!(fs::read(&path).unwrap(), b"restored\0bytes");
+            assert_eq!(mode(&path), 0o751);
+            if hard_link {
+                assert_eq!(fs::read(&alias).unwrap(), b"restored\0bytes");
+                assert_eq!(fs::metadata(&path).unwrap().ino(), ino);
+                // A source that refuses reading must leave the old bytes and mode intact.
+                let mut unreadable = OpenOptions::new().write(true).open(dir.path().join("alias")).unwrap();
+                assert!(put_file_from(&path, &mut unreadable, 0o600).is_err());
+                assert_eq!(fs::read(&path).unwrap(), b"restored\0bytes");
+                assert_eq!(mode(&path), 0o751);
+            } else { assert_ne!(fs::metadata(&path).unwrap().ino(), ino); }
+        }
         assert!(no_temps(dir.path()));
     }
 

@@ -87,12 +87,11 @@ pub fn in_change_set_cancellable(set: &ChangeSet, matcher: &Matcher, changed_onl
     for index in 0..set.comparisons.len() {
         if cancelled() { return Ended::Done; }
         if set.sizes(index).is_ok_and(|sizes| sizes.iter().any(|n| *n > MAX_BYTES as u64)) { continue; }
-        let Ok((left, right)) = set.texts(index) else { continue };
+        let Ok(sides) = set.sides(index) else { continue };
         if cancelled() { return Ended::Done; }
-        let skip = |t: &str| t.len() > MAX_BYTES || t.as_bytes()[..t.len().min(8000)].contains(&0);
-        if skip(&left) || skip(&right) {
-            continue;
-        }
+        if sides.iter().any(|s| s.binary || s.bytes.len() > MAX_BYTES) { continue; }
+        let [left, right] = sides.map(|s| crate::encoding::decode(&s.bytes, s.encoding.as_deref()).text);
+        if left.len() > MAX_BYTES || right.len() > MAX_BYTES { continue; }
         let (l, r) = (split_lines(&left), split_lines(&right));
         let changed: Option<[Vec<bool>; 2]> = changed_only.then(|| {
             let mut marks = [vec![false; l.len()], vec![false; r.len()]];
@@ -170,6 +169,64 @@ mod tests {
         let mut hits = Vec::new();
         in_change_set(&set, &m("needle", FindOptions { case: true, word: true, regex: false }), false, |h| { hits.extend(h); true });
         assert_eq!(hits.iter().map(|h| (h.side, h.range.clone())).collect::<Vec<_>>(), [(Side::Left, 7..13)]);
+    }
+
+    #[test]
+    fn change_set_search_decodes_bom_and_legacy_text_with_display_offsets() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = (dir.path().join("left.txt"), dir.path().join("right.txt"));
+        for (bytes, preview) in [
+            ([vec![0xff, 0xfe], "é needle\n".encode_utf16().flat_map(u16::to_le_bytes).collect()].concat(), "é needle"),
+            ([vec![0xfe, 0xff], "é needle\n".encode_utf16().flat_map(u16::to_be_bytes).collect()].concat(), "é needle"),
+            (b"caf\xe9 needle\n".to_vec(), "café needle"),
+        ] {
+            std::fs::write(&left, &bytes).unwrap();
+            std::fs::write(&right, "other\n").unwrap();
+            let set = ChangeSet::load(&Spec::Plain { left: left.clone(), right: right.clone() }, dir.path()).unwrap();
+            for changed_only in [false, true] {
+                for query in ["needle", preview.split_once(' ').unwrap().0] {
+                    let mut hits = Vec::new();
+                    assert_eq!(in_change_set(&set, &m(query, FindOptions::default()), changed_only, |h| { hits.extend(h); true }), Ended::Done);
+                    let start = preview.find(query).unwrap();
+                    assert_eq!(hits, [Hit { index: 0, side: Side::Left, line: 0, range: start..start + query.len(), preview: preview.into() }]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn change_set_search_honors_declared_encoding_and_binary_attributes() {
+        let r = repo();
+        write(r.path(), ".gitattributes", "encoded.txt working-tree-encoding=UTF-16LE\n*.bin -diff\nforced.txt diff\n");
+        let utf16 = |s: &str| s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<u8>>();
+        write(r.path(), "encoded.txt", utf16("old\n"));
+        write(r.path(), "ignored.bin", "old\n");
+        write(r.path(), "forced.txt", "old\n");
+        commit_all(r.path(), "first");
+        write(r.path(), "encoded.txt", utf16("é needle\n"));
+        write(r.path(), "ignored.bin", "needle\n");
+        write(r.path(), "forced.txt", "\0needle\n");
+        let set = ChangeSet::load(&Spec::Git { cached: false, revs: vec![], paths: vec![], untracked: false }, r.path()).unwrap();
+        let mut hits = Vec::new();
+        in_change_set(&set, &m("needle", FindOptions::default()), false, |h| { hits.extend(h); true });
+        let found: Vec<_> = hits.iter().map(|h| (set.comparisons[h.index].path.as_str(), h.side, h.range.clone(), h.preview.as_str())).collect();
+        assert_eq!(found, [("encoded.txt", Side::Right, 3..9, "é needle"), ("forced.txt", Side::Right, 1..7, "\0needle")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn change_set_search_uses_textconv_output_even_with_a_nul() {
+        let r = repo();
+        crate::git::trust(r.path());
+        write(r.path(), ".gitattributes", "*.up diff=upper\n");
+        crate::git::testing::git(r.path(), &["config", "diff.upper.textconv", "tr a-z A-Z <"]);
+        write(r.path(), "a.up", "old\0\n");
+        commit_all(r.path(), "first");
+        write(r.path(), "a.up", "needle\0\n");
+        let set = ChangeSet::load(&Spec::Git { cached: false, revs: vec![], paths: vec![], untracked: false }, r.path()).unwrap();
+        let mut hits = Vec::new();
+        in_change_set(&set, &m("NEEDLE", FindOptions { case: true, ..Default::default() }), false, |h| { hits.extend(h); true });
+        assert_eq!(hits, [Hit { index: 0, side: Side::Right, line: 0, range: 0..6, preview: "NEEDLE\0".into() }]);
     }
 
     #[test]

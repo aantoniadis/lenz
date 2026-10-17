@@ -6,6 +6,7 @@ use crate::{
 };
 use std::{
     collections::HashMap,
+    io::{Read, Seek},
     os::unix::{ffi::OsStringExt, fs::MetadataExt},
     path::{Component, Path, PathBuf},
     sync::{
@@ -326,7 +327,30 @@ fn indexed(root: &Path, relative: &str) -> Result<(Vec<u8>, Entry), String> {
     {
         return Err("Discard is limited to 64 MiB files to bound undo memory".into());
     }
-    let bytes = crate::git::run(root, &["cat-file", "blob", oid])?;
+    let bytes = if mode == "120000" {
+        crate::git::run(root, &["cat-file", "blob", oid])?
+    } else {
+        let untrusted=crate::git::untrusted(root);
+        if !untrusted.filters.is_empty() {
+            let attrs=crate::git::run(root,&["check-attr","-z","filter","--",relative])?;
+            let filter=attrs.split(|&b|b==0).nth(2).unwrap_or_default();
+            if untrusted.filters.iter().any(|name|name.as_bytes()==filter) {
+                return Err("Cannot discard: this file's repository-local filter is disabled; restore it with Git instead".into());
+            }
+        }
+        let mut converted=tempfile::tempfile().map_err(|e|format!("Preparing discard: {e}"))?;
+        let out=crate::git::command(root)?.args(["cat-file", "--filters", &format!("--path={relative}"), oid])
+            .stdout(converted.try_clone().map_err(|e|e.to_string())?).output().map_err(|e|e.to_string())?;
+        if !out.status.success() {return Err(String::from_utf8_lossy(&out.stderr).trim_end().into());}
+        if converted.metadata().map_err(|e|e.to_string())?.len()>64<<20 {
+            return Err("Discard is limited to 64 MiB files to bound undo memory".into());
+        }
+        converted.rewind().map_err(|e|e.to_string())?;
+        let mut bytes=Vec::new();converted.read_to_end(&mut bytes).map_err(|e|e.to_string())?;bytes
+    };
+    if bytes.len() > 64 << 20 {
+        return Err("Discard is limited to 64 MiB files to bound undo memory".into());
+    }
     let entry = match mode {
         "100644" => Entry::File {
             bytes,
@@ -397,8 +421,9 @@ fn discard(pending: Pending) -> Result<Undo, String> {
         snapshot,
     } = pending;
     safe_path(&root, &relative)?;
-    if indexed(&root, &relative)?.0 != expected {
-        return Err("The index changed — nothing written; reopen Discard".into());
+    let current=indexed(&root, &relative)?;
+    if current.0 != expected || current.1 != after {
+        return Err("The index or file conversion changed — nothing written; reopen Discard".into());
     }
     snapshot.verify(&path).map_err(|e| e.to_string())?;
     write::put(&path, &after).map_err(|e| e.to_string())?;
@@ -462,6 +487,46 @@ mod tests {
         );
         undo_discard(&undo).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"working\n\xff");
+    }
+    #[test]
+    fn discard_restores_working_tree_encoding_and_line_endings() {
+        for attributes in ["text working-tree-encoding=UTF-16LE", "text eol=crlf"] {
+            let dir=repo();let root=dir.path();let path=root.join("file.txt");
+            std::fs::write(root.join(".gitattributes"),format!("*.txt {attributes}\n")).unwrap();
+            let encode=|s:&str|if attributes.contains("UTF-16") {s.encode_utf16().flat_map(u16::to_le_bytes).collect::<Vec<_>>()}else{s.replace('\n',"\r\n").into_bytes()};
+            let indexed=encode("indexed text\n");let draft=encode("draft text\n");
+            std::fs::write(&path,&indexed).unwrap();crate::git::run(root,&["add","file.txt"]).unwrap();
+            std::fs::write(&path,&draft).unwrap();
+            let undo=discard(prepare(root,"file.txt").unwrap()).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(),indexed);
+            assert_eq!(crate::git::run(root,&["show",":file.txt"]).unwrap(),b"indexed text\n");
+            undo_discard(&undo).unwrap();assert_eq!(std::fs::read(&path).unwrap(),draft);
+        }
+    }
+
+    #[test]
+    fn discard_uses_trusted_filters_and_rejects_changed_conversion() {
+        let dir=repo();let root=dir.path();let path=root.join("file.txt");
+        std::fs::write(root.join(".gitattributes"),"*.txt filter=fixture\n").unwrap();
+        crate::git::run(root,&["config","filter.fixture.smudge","sed s/staged/restored/"]).unwrap();
+        crate::git::trust(root);
+        let pending=prepare(root,"file.txt").unwrap();
+        let undo=discard(pending).unwrap();assert_eq!(std::fs::read(&path).unwrap(),b"restored\r\n");
+        undo_discard(&undo).unwrap();
+        let pending=prepare(root,"file.txt").unwrap();
+        std::fs::write(root.join(".gitattributes"),"*.txt -filter\n").unwrap();
+        assert!(discard(pending).is_err());assert_eq!(std::fs::read(&path).unwrap(),b"working\n\xff");
+    }
+    #[test]
+    fn discard_refuses_suppressed_repository_filters() {
+        let dir=tempfile::tempdir().unwrap();let root=dir.path();
+        let git=|args:&[&str]|assert!(std::process::Command::new("git").current_dir(root).args(args).output().unwrap().status.success());
+        git(&["init","-q"]);std::fs::write(root.join("file.txt"),"indexed\n").unwrap();git(&["add","file.txt"]);
+        std::fs::write(root.join(".gitattributes"),"*.txt filter=fixture\n").unwrap();
+        git(&["config","filter.fixture.smudge","cat"]);
+        std::fs::write(root.join("file.txt"),"draft\n").unwrap();
+        assert!(prepare(root,"file.txt").err().unwrap().contains("filter is disabled"));
+        assert_eq!(std::fs::read(root.join("file.txt")).unwrap(),b"draft\n");
     }
     #[test]
     fn discard_and_undo_refuse_external_changes_and_index_changes() {
