@@ -20,8 +20,8 @@ reader-core = { path = "../reader-core" }
 lenz-content.workspace = true
 lenz-gpui.workspace = true
 gpui.workspace = true
-# The tree's logos; the version Lenz's content crate already builds.
-resvg = { version = "0.46", default-features = false }
+# SVG logos and embedded raster images in Reader content.
+resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, features = ["font-kit"] }

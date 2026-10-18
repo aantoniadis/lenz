@@ -16,7 +16,7 @@ ignore = "0.4"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 # Cargo manifests, for rust-analyzer's workspace discovery (already in the tree through lenz-content).
-toml = "0.8"
+toml = "1.1.8"
 # Following external file changes; the version lenz-content already uses.
 notify = "8.2.0"
 # Literal text search (ripgrep's libraries).

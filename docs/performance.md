@@ -4,6 +4,142 @@ Lenz aims to keep both frontends fast to open, responsive while you work, and sm
 
 This page summarizes the current results. The [benchmark guide](benchmarking.md) explains how to run the suite, and the [optimization notebook](optimization-notebook.md) records the experiments behind them.
 
+## Dependency refresh (2026-10-18)
+
+The direct-dependency audit checked 64 registry crates and the two GPUI git
+dependencies. The refresh updates every outdated direct dependency found by that
+audit and resolves compatible transitive updates; older transitive versions remain
+where upstream requirements need them. The lockfile contains 783 package entries,
+down from 821.
+
+| Dependency | Before | After |
+|---|---|---|
+| GPUI and GPUI platform | Zed v1.22.0 | Zed v1.24.2 |
+| base64 | 0.22.1 | 0.23.1 |
+| gix-imara-diff | 0.3.0 | 0.3.1 |
+| insta | 1.48.0 | 1.49.0 |
+| libc | 0.2.189 | 0.2.191 |
+| lzma-rust2 | 0.21.0 | 0.23.0 |
+| objc2 | 0.6.4 | 0.6.5 |
+| resvg | 0.46.0 | 0.48.1 |
+| serde_json | 1.0.151 | 1.0.154 |
+| toml | 0.8.23 | 1.1.8+spec-1.1.0 |
+| tree-sitter | 0.27.0 | 0.27.1 |
+| tree-sitter-php | 0.24.2 | 0.25.1 |
+| x11rb | 0.13.2 | 0.14.0 |
+| zip | 9.0.2 | 9.0.5 |
+
+Three compatibility checks caught real breaks before acceptance. TOML's value
+parser no longer reads whole documents, so the shared theme loader now uses
+`toml::from_str`. Updating resvg separated it from GPUI's renderer dependency;
+both GUI adapters explicitly enable embedded raster images rather than relying
+on feature unification. XZ fixture generation explicitly enables the new
+encoder feature in dev-dependencies only. Existing tests first reproduced the
+theme and SVG failures, then passed after the fixes. Standalone TUI builds still
+exclude GPUI and production builds exclude test instrumentation.
+
+Raw audit responses are in `target/dependency-check-2026-10-18/`; build, regression
+and runtime evidence is in `target/perf/dependency-upgrade/` (ignored local
+artifacts). The baseline is clean commit `3023e69`; both sides use Rust 1.99.1 on
+the same Linux system after its toolchain update. The full suite uses private
+Xvfb/lavapipe, one measured run after warmup, and 15-second model stress. Reader
+checks use isolated settings, disposable files, real GUI input and owned PTYs.
+
+The complete local CI gate passed: clippy, panic checks, workspace tests,
+serial memory tests, actual Diff and Reader GUI adapter tests, TUI parity checks,
+collector tests, separate TUI release builds and the production Diff GUI build.
+The production Reader GUI was rebuilt separately. Real-input Reader checks passed
+in Darcula and GitHub Light, covering Recent filtering/scrolling, arrow-key caret
+movement, exact copied bytes and narrow/1×1 layouts. All 20 GUI and 15 TUI fixture
+hashes stayed unchanged, and both terminal sessions restored their terminal modes.
+The GUI popup exercise ran 15.36 seconds/34 cycles (178.656–178.664 MiB RSS);
+the TUI exercise ran 15.11 seconds/74 cycles (9.777–9.844 MiB). These are
+correctness/resource checks, not paired timing comparisons.
+
+Both full performance runs passed all 75 cases and collected the same 394
+metrics, with no skipped cases. They include shared diff/merge, syntax and image
+workloads, actual terminal workflows, GUI startup with warm/fresh app caches,
+GUI input and text/image browsing. One measured full run is a screening pass;
+large deltas require adjacent alternating repeats before interpreting them.
+
+Selected full-suite screening medians:
+
+| Workload | Before | After |
+|---|---:|---:|
+| Generated 100k-line word diff | 34.64 ms | 34.24 ms |
+| 100k-line merge | 61.23 ms | 62.56 ms |
+| Syntax parse | 337.78 ms | 282.45 ms |
+| Small GUI first paint | 117 ms | 118 ms |
+| Generated 100k-line GUI first paint | 180 ms | 182 ms |
+| Generated 100k-line GUI settled RSS | 255.5 MiB | 256.4 MiB |
+| Generated 100k-line TUI first content | 19.51 ms | 21.72 ms |
+| Generated 100k-line TUI settled RSS | 53.75 MiB | 53.55 MiB |
+| Image browsing kernel high-water RSS | 700.1 MiB | 700.7 MiB |
+| Image browsing idle RSS | 563.9 MiB | 564.4 MiB |
+
+The Reader's 100k-line plaintext comparison uses seven alternating GUI pairs
+after one warmup pair and ten alternating TUI pairs, with language servers
+disabled. GUI startup ends when the collector receives a non-uniform client
+image; input ends at a changed image. TUI endpoints are received PTY bytes.
+These differ from the historical Reader content-frame startup figures.
+
+| Reader measurement | Before | After |
+|---|---:|---:|
+| GUI first client image | 163.57 ms | 163.75 ms |
+| GUI menu feedback | 23.05 ms | 19.87 ms |
+| GUI sampled RSS | 173.66 MiB | 174.59 MiB |
+| TUI first content | 7.695 ms | 7.981 ms |
+| TUI arrow feedback | 0.440 ms | 0.451 ms |
+| TUI sampled RSS | 13.648 MiB | 13.680 MiB |
+
+Paired Reader raw samples, per-trial terminal streams, executable hashes and
+15-second popup exercises are in `paired-gui.json` and `paired-tui.json` beneath
+the evidence directory. GUI menu stress completed 193/192 cycles in
+15.02/15.03 seconds; final-quarter RSS was flat in both builds.
+
+Three adjacent alternating pairs used the exact retained full-suite binaries to
+investigate screening outliers. Fresh-app-cache merge first paint measured
+313→303 ms rather than the screening run's 297→372 ms; small GUI first paint
+measured 113→110 ms and RSS 186.9→186.8 MiB. Merge Accept Both feedback measured
+3.27→4.33 ms and its undo 4.42→5.38 ms, smaller than the original roughly 5 ms
+deltas. TUI input measured 0.398→0.415 ms; resize measured 0.193→0.421 ms with
+candidate process medians ranging 0.223–0.798 ms. These are feedback endpoints
+with scheduling/rendering variation, not isolated component costs.
+
+The Reader's initial roughly 1 MiB RSS increase did not repeat in a warmed
+attribution pair: 176.19→175.91 MiB, comprising anonymous 55.52→55.25 MiB,
+file-backed 95.617→95.609 MiB and shared 25.051 MiB in both builds. The first
+cold-cache sample and warmup are retained separately. Mixed model stress ran
+15.03/15.08 seconds; final-quarter RSS growth was zero in both builds, with
+sampled resident peaks 310.96/311.07 MiB. Paired Reader TUI popup stress completed
+182 cycles per build in 15.01/15.02 seconds, with sampled ranges
+13.723–13.742/13.902–13.957 MiB.
+
+The image component microbenchmark did reproduce a slowdown: pooled 4K blend
+median 34.12→41.20 ms across three alternating pairs. The blend source and image
+dependency version are unchanged. Retained disassembly shows different compiler
+inlining/register layouts in the test executables and the opposite layout
+change in the shipping GUI. This does not establish the timing mechanism, and
+the slower component result remains part of the evidence.
+
+Three further alternating production GUI image pairs all passed the unchanged
+collector's correctness checks. Onion feedback measured 93.32→79.21 ms;
+opacity up/down measured 94.13→81.57/91.39→79.36 ms (12 samples per build for
+each opacity direction). The candidate was faster in every pair. Blending runs
+synchronously on the UI thread before the frame, so this exercises the shipping
+path that the component test approximates. Settled RSS measured
+832.9→831.4 MiB, kernel high-water RSS 949.2→948.9 MiB and idle RSS
+567.0→565.6 MiB. The blend implementation is retained unchanged: no shipping
+slowdown was reproduced, and changing it merely to repair test-executable
+codegen would not establish a product improvement. Raw commands, identities and
+samples are in `production-image-pairs/`; assembly observations,
+`focused-repeats/` and `reader-rss-attribution.json` are retained alongside them.
+
+Native macOS/Windows, hardware GPU allocations, physical display latency and
+long-session leak behavior remain unverified. The short stress runs establish
+bounded observations only. The optional repository-wide formatting check also
+reports extensive unchanged formatting drift; unrelated files were not reformatted.
+
 ## GUI and TUI on Linux
 
 Release builds on a Linux desktop. The GUI runs on a private Xvfb display with software presentation, the TUI in a 120×36 pseudo-terminal. Values are medians of three warm launches.

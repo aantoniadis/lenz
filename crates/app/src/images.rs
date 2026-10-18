@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(blend(&old, &new, 0.5).get_pixel(2, 0)[3], 128);
     }
 
-    /// Embedded raster data in an SVG is drawn when GPUI's resvg raster features are on (the GUI build); the
+    /// Embedded raster data in an SVG is drawn in GUI builds; the
     /// shared decoder's bounds are tested in `lenz_content::image`.
     #[cfg(feature = "gui")]
     #[test]
