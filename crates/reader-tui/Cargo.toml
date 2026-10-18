@@ -23,7 +23,7 @@ futures-lite = "2.6.1"
 async-io = "2.6.0"
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"
-base64 = "0.22.1"
+base64 = "0.23.1"
 reader-gui = { path = "../reader-gui", optional = true, features = ["test-support"] }
 gpui = { workspace = true, optional = true, features = ["test-support"] }
 

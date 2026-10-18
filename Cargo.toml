@@ -20,13 +20,13 @@ lenz-content = { path = "crates/content" }
 lenz-gpui = { path = "crates/gpui" }
 gix-imara-diff = "0.3"
 # One tag for both so a bump moves every gpui reference together.
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.22.0" }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
 
 # Zed's workspace patches don't propagate to dependents; mirror the ones gpui needs.
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
-# Zed's own patch names no rev; pin the commit Cargo.lock resolved so `cargo update` cannot float it.
+# Keep GPUI's patched event-loop commit pinned alongside its tag.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 
 [profile.release]

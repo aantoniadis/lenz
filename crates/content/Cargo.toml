@@ -35,7 +35,7 @@ tree-sitter-kotlin-sg = "0.4.1"
 tree-sitter-lua = "0.5.0"
 tree-sitter-make = "1.1.1"
 tree-sitter-md = "0.5.3"
-tree-sitter-php = "0.24.2"
+tree-sitter-php = "0.25.1"
 tree-sitter-python = "0.25.0"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-rust = "0.24.2"
@@ -48,14 +48,14 @@ tree-sitter-zig = "1.1.2"
 # Images (src/image.rs): the version and a subset of the features gpui already enables, so it unifies: nothing new
 # to compile in either product.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
-# SVG rasterising (src/image.rs); the version gpui already builds.
-resvg = { version = "0.46", default-features = false }
+# SVG rasterising (src/image.rs); GUI adapters enable embedded raster data explicitly.
+resvg = { version = "0.48.1", default-features = false }
 
 # Markdown (src/markdown): parsing only; the exact version Lenz pinned.
 pulldown-cmark = { version = "=0.13.4", default-features = false }
 
 # Themes (src/theme): user theme files, the saved selection, following Omarchy's current theme.
-toml = "0.8.23"
+toml = "1.1.8"
 serde_json = "1"
 notify = "8.2.0"
 async-channel = "2.5.0"

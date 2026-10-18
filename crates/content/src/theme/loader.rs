@@ -70,9 +70,7 @@ pub fn parse_theme(text: &str, kind: ThemeInputKind) -> Result<LoadedTheme, Them
     if text.len() > 65536 {
         return Err(ThemeError("Theme input exceeds 64 KiB".into()));
     }
-    let value = text
-        .parse::<toml::Value>()
-        .map_err(|e| ThemeError(e.to_string()))?;
+    let value = toml::from_str::<toml::Value>(text).map_err(|e| ThemeError(e.to_string()))?;
     let table = value.as_table().ok_or_else(|| invalid("table"))?;
     let color = |key: &str| {
         table
