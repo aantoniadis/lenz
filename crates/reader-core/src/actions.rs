@@ -39,6 +39,7 @@ pub enum InterfaceAction {
     WorkspaceRoot,
     LanguageServer,
     ServerRuntime,
+    StatusDetails,
 }
 
 impl Session {
@@ -84,6 +85,7 @@ impl Session {
         }
         let state = self.state();
         let command = match id {
+            CommandId::StatusDetails => return CatalogAction::Interface(InterfaceAction::StatusDetails),
             CommandId::SearchEverywhere => return CatalogAction::Interface(InterfaceAction::SearchEverywhere),
             CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
             CommandId::FindSymbol => return CatalogAction::Interface(InterfaceAction::FindSymbol),
@@ -207,10 +209,11 @@ pub enum CommandGroup {
     Find,
     Selection,
     LanguageServers,
+    Application,
 }
 
 impl CommandGroup {
-    pub const ALL: [Self; 6] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::LanguageServers];
+    pub const ALL: [Self; 7] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::LanguageServers, Self::Application];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -220,6 +223,7 @@ impl CommandGroup {
             Self::Find => "Find",
             Self::Selection => "Selection",
             Self::LanguageServers => "Language Servers",
+            Self::Application => "Application",
         }
     }
 }
@@ -230,7 +234,7 @@ impl CommandId {
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine => G::File,
-            Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline | Self::ChooseTheme
+            Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
@@ -250,6 +254,7 @@ impl CommandId {
             Self::SelectAll | Self::Copy | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::DisableServer | Self::EnableServer => G::LanguageServers,
+            Self::ChooseTheme => G::Application,
         }
     }
 }
@@ -271,6 +276,7 @@ impl CommandId {
             Self::Reload => Some("F5"),
             Self::SoftWrap => Some("Alt+Z"),
             Self::LanguageServer => Some("F2"),
+            Self::StatusDetails => Some("Shift+F2"),
             Self::Definition => Some("F12"),
             Self::PeekDefinition => Some("Alt+F12"),
             Self::TypeDefinition => Some("Ctrl+Shift+B"),

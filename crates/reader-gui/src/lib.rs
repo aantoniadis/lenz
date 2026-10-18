@@ -41,10 +41,12 @@ fn num_w() -> f32 { 56.0 * font_size() / 13.0 + fold_w() }
 const PLACEHOLDER: &str = " … ";
 /// The status bar along the window's bottom: one row, never taller.
 fn status_h() -> f32 { 24.0 * font_size() / 13.0 }
+fn toolbar_h() -> f32 { 28.0 * font_size() / 13.0 }
 /// The status bar's text inset from each side.
 const STATUS_PAD: f32 = 8.0;
 /// The query and status rows above a list modal's results in [`ReaderView::modal_rows`].
 const FINDER_HEADER_ROWS: usize = 2;
+const THEME_HEADER_ROWS: usize = 2;
 /// The AZERTY digit row's keys for 0–9 without Shift, as GPUI on Linux names them (the accented ones by keysym name).
 const AZERTY_DIGITS: [&str; 10] = ["agrave", "&", "eacute", "\"", "'", "(", "-", "egrave", "_", "ccedilla"];
 
@@ -58,6 +60,8 @@ pub enum Modal {
     CommandGroup { group: CommandGroup, at: usize },
     /// Full server status, troubleshooting and shared recovery actions.
     LanguageServer { at: usize },
+    /// A frozen, read-only diagnostic snapshot; Copy preserves the complete text.
+    StatusDetails { text: String },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
@@ -96,6 +100,8 @@ pub struct CrumbHit {
     pub chevron: bool,
     pub label: String,
 }
+
+type StatusCell = (Bounds<Pixels>, String);
 
 /// A list modal as drawn and clicked (context menus and navigation have their own layout): its box, its lines
 /// (the [`ReaderView::modal_rows`] row each belongs to, text, disabled), the first line shown, how many show, and the
@@ -523,12 +529,31 @@ impl ReaderView {
         self.tree_reveal = true;
     }
 
+    fn theme_ids(&self) -> Vec<(String, String)> {
+        std::iter::once(("system".to_string(), "Follow system".to_string()))
+            .chain(self.session.theme_entries().iter().map(|e| (e.id.clone(), e.label.clone())))
+            .collect()
+    }
+
+    /// Registry updates retain the highlighted ID, including when user themes arrive asynchronously.
+    fn refresh_theme_entries(&mut self, cx: &mut Context<Self>) {
+        if !matches!(self.modal, Some(Modal::Themes { .. })) { return; }
+        let entries = self.theme_ids();
+        let Some(Modal::Themes { ids, at }) = &mut self.modal else { return };
+        let selected = ids.get(*at).map(|(id, _)| id.as_str());
+        let next = selected.and_then(|id| entries.iter().position(|(entry, _)| entry == id));
+        *at = next.unwrap_or(0);
+        *ids = entries;
+        if next.is_none() { self.dispatch(Command::PreviewTheme(None), cx); }
+    }
+
     /// Close the open modal and its core search or runtime dialog.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
         self.modal_seen.set(None);
         match self.modal.take() {
             Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
+            Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
             _ => {}
         }
         cx.notify();
@@ -600,9 +625,11 @@ impl ReaderView {
         #[cfg(feature = "perf-probe")]
         let kind = input.kind();
         let input: reader_core::session::Input = input.into();
+        let theme_update = matches!(&input, reader_core::session::Input::Command(Command::Theme(_)) | reader_core::session::Input::Completion(Completion::Theme(_)));
         if matches!(&input, reader_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
         let workspace = self.session.state().workspace_revision();
         let effect = self.session.dispatch(input);
+        if theme_update { self.refresh_theme_entries(cx); }
         self.sync_workspace(workspace);
         #[cfg(feature = "perf-probe")]
         if started.elapsed().as_millis() >= 30 {
@@ -718,6 +745,12 @@ impl ReaderView {
                     self.modal = Some(Modal::LanguageServer { at: 0 });
                     cx.notify();
                 }
+                InterfaceAction::StatusDetails => {
+                    self.dispatch(Command::CloseDocumentation, cx);
+                    self.modal_scroll.set(0);
+                    self.modal = Some(Modal::StatusDetails { text: self.session.status_details() });
+                    cx.notify();
+                }
                 InterfaceAction::OpenRecent => {
                     self.modal = Some(Modal::Recent { at: 0 });
                     cx.notify();
@@ -793,8 +826,7 @@ impl ReaderView {
                 }
                 InterfaceAction::ChooseTheme => {
                     self.dispatch(Command::Theme(ThemeCommand::OpenChooser), cx);
-                    let mut ids = vec![("system".to_string(), "Follow system".to_string())];
-                    ids.extend(self.session.theme_entries().iter().map(|e| (e.id.clone(), e.label.clone())));
+                    let ids = self.theme_ids();
                     let at = ids.iter().position(|(id, _)| *id == self.session.theme_id()).unwrap_or(0);
                     self.modal = Some(Modal::Themes { ids, at });
                     cx.notify();
@@ -865,6 +897,9 @@ impl ReaderView {
             if self.modal.is_none() { self.modal_seen.set(None); }
             cx.notify();
             return;
+        }
+        if key == "f2" && shift && !ctrl && !k.modifiers.alt {
+            return self.run(CommandId::StatusDetails, window, cx);
         }
         if ctrl && !k.modifiers.alt && ((key == "k" && !shift) || (key == "p" && shift) || (key == "a" && shift)) {
             return self.run(if key == "k" { CommandId::SearchEverywhere } else { CommandId::FindAction }, window, cx);
@@ -1037,6 +1072,7 @@ impl ReaderView {
             return;
         }
         match self.modal.take() {
+            Some(Modal::StatusDetails { .. }) => {},
             Some(Modal::Navigation { .. }) => {}, // Handled above without taking the modal.
             Some(Modal::ServerRuntime { path, at }) => {
                 let choice = self.session.state().server_runtime().and_then(|m| m.choices(&path).get(at).cloned());
@@ -1058,6 +1094,7 @@ impl ReaderView {
             }
             Some(Modal::AppMenu { at }) => {
                 match CommandGroup::ALL.get(at) {
+                    Some(CommandGroup::Application) => self.run(CommandId::ChooseTheme, window, cx),
                     Some(&group) => self.modal = Some(Modal::CommandGroup { group, at: 1 }),
                     None => self.open_navigation(reader_core::navigation::Scope::Actions, cx),
                 }
@@ -1101,6 +1138,10 @@ impl ReaderView {
     /// accept it; in the key chooser a bookmark's row sets its key on the caret's line; header and input rows do
     /// nothing.
     fn modal_click(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Modal::StatusDetails { text }) = &self.modal {
+            if row == 0 { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); }
+            return;
+        }
         if matches!(self.modal, Some(Modal::Mnemonic)) {
             // Row 0 is the prompt; each other row starts with its key.
             let key = row.checked_sub(1).and_then(|i| self.keyed_bookmarks().into_iter().nth(i)).and_then(|r| r.label.chars().next());
@@ -1112,12 +1153,16 @@ impl ReaderView {
         }
         match &mut self.modal {
             Some(Modal::Navigation { .. }) => return,
-            Some(Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Themes { at, .. } | Modal::Recent { at }) => *at = row,
+            Some(Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Recent { at }) => *at = row,
+            Some(Modal::Themes { at, .. }) => match row.checked_sub(THEME_HEADER_ROWS) {
+                Some(i) => *at = i,
+                None => return,
+            },
             Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -1127,6 +1172,49 @@ impl ReaderView {
             return self.navigation_key(ev, window, cx);
         }
         let key = ev.keystroke.key.as_str();
+        if let Some(Modal::StatusDetails { text }) = &self.modal {
+            if key == "c" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform) {
+                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+            } else if matches!(key, "escape" | "enter" | "f2") {
+                self.close_modal(cx);
+            } else if let Some(l) = self.modal_layout() {
+                let max = l.lines.len().saturating_sub(l.visible);
+                let step = l.visible.saturating_sub(1).max(1);
+                self.modal_scroll.set(match key {
+                    "up" => l.first.saturating_sub(1),
+                    "down" => (l.first + 1).min(max),
+                    "pageup" => l.first.saturating_sub(step),
+                    "pagedown" => (l.first + step).min(max),
+                    "home" => 0,
+                    "end" => max,
+                    _ => l.first,
+                });
+            }
+            return;
+        }
+        if let Some(Modal::Themes { ids, at }) = &mut self.modal {
+            let last = ids.len().saturating_sub(1);
+            *at = (*at).min(last);
+            match key {
+                "escape" => self.close_modal(cx),
+                "enter" => self.modal_accept(window, cx),
+                "up" | "down" | "home" | "end" | "pageup" | "pagedown" => {
+                    *at = match key {
+                        "up" => at.saturating_sub(1),
+                        "down" => (*at + 1).min(last),
+                        "home" => 0,
+                        "end" => last,
+                        "pageup" => at.saturating_sub(8),
+                        "pagedown" => (*at + 8).min(last),
+                        _ => *at,
+                    };
+                    let id = ids.get(*at).map(|(id, _)| id.clone());
+                    self.dispatch(Command::PreviewTheme(id), cx);
+                }
+                _ => {}
+            }
+            return;
+        }
         if let Some(Modal::CommandGroup { group, .. }) = &self.modal
             && matches!(key, "left" | "escape")
         {
@@ -1357,7 +1445,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -2136,7 +2224,8 @@ impl ReaderView {
                 self.open_navigation(reader_core::navigation::Scope::Actions, cx);
                 return;
             }
-            self.run(CommandId::LanguageServer, window, cx);
+            let (server, _, _) = self.status_segments();
+            self.run(if server.0.contains(&ev.position) { CommandId::LanguageServer } else { CommandId::StatusDetails }, window, cx);
             return;
         }
         // A divider: dragged until the button is released.
@@ -2199,12 +2288,12 @@ impl ReaderView {
             return cx.notify();
         }
         // The toolbar row: the explorer's title and its buttons, then the files panel's buttons and tabs.
-        if (0.0..line_h()).contains(&y)
-            && let Some(&(_, _, id, _, _)) = self.explorer_buttons().iter().chain(&self.nav_buttons()).find(|b| (b.0..b.1).contains(&x))
+        if let Some((_, _, id, _, _)) = self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
+            .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x))
         {
             return self.run(id, window, cx);
         }
-        if (0.0..line_h()).contains(&y) && x < self.sidebar_w {
+        if y < toolbar_h() || (y < toolbar_h() + line_h() && x < self.sidebar_w) {
             return;
         }
         // A pane's tab bar: a tab is shown (its pane focused) and can be dragged; elsewhere the click focuses the pane.
@@ -2235,7 +2324,7 @@ impl ReaderView {
         if x < self.sidebar_w {
             self.tree_focus = true;
             // Rows as the tree is drawn: from below its title row, whatever the panes' bars and breadcrumbs take.
-            let row = ((y - line_h()).max(0.0) / line_h()) as usize;
+            let row = ((y - toolbar_h() - line_h()).max(0.0) / line_h()) as usize;
             let i = self.tree_scroll + row;
             if row < self.tree_rows && i < self.tree_len() {
                 self.activate_row(i, ev.click_count >= 2, cx);
@@ -2401,7 +2490,14 @@ impl ReaderView {
                 cx.notify();
             }
         }
-        let hover = (self.modal.is_none() && (0.0..line_h()).contains(&y)).then(|| self.explorer_buttons().into_iter().chain(self.nav_buttons()).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten();
+        let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
+            .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
+                if self.modal.is_none() && y >= self.body_bottom() && self.status_h() > 0.0 {
+                    let (server, message, _) = self.status_segments();
+                    if server.0.contains(&ev.position) { Some(CommandId::LanguageServer) }
+                    else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
+                } else { None }
+            });
         if hover != self.nav_hover {
             self.nav_hover = hover;
             cx.notify();
@@ -2465,7 +2561,7 @@ impl ReaderView {
     /// The divider at a window point, if any: the explorer's edge, the results panel's top, the split.
     fn divider_at(&self, x: f32, y: f32) -> Option<Drag> {
         let near = |a: f32, b: f32| (a - b).abs() <= 3.0;
-        let below_toolbar = y >= line_h() && y < self.panel_top.min(self.body_bottom());
+        let below_toolbar = y >= toolbar_h() + line_h() && y < self.panel_top.min(self.body_bottom());
         if self.panel_top < f32::MAX && near(y, self.panel_top) {
             return Some(Drag::Results);
         }
@@ -2482,7 +2578,7 @@ impl ReaderView {
     /// Follow the pointer: a divider moves (sizes stay within reach of every panel), a tab shows where it would land.
     fn drag_to(&mut self, drag: Drag, x: f32, y: f32) {
         let permille = |k: f32| Some((k * 1000.0).round() as u32);
-        let top = line_h();
+        let top = toolbar_h() + line_h();
         match drag {
             Drag::Explorer => self.layout.explorer_width = Some(x.clamp(120.0, (self.width - 160.0).max(120.0)).round() as u32),
             Drag::Results => {
@@ -2548,7 +2644,7 @@ impl ReaderView {
     }
 
     fn app_menu_button(&self) -> Bounds<Pixels> {
-        Bounds { origin: gpui::point(px(4.0), px(0.0)), size: gpui::size(px((self.char_w * 3.0).max(line_h())), px(line_h())) }
+        Bounds { origin: gpui::point(px(4.0), px(0.0)), size: gpui::size(px((self.char_w * 3.0).max(line_h()).min((self.width - 4.0).max(0.0))), px(toolbar_h())) }
     }
 
     fn commands_button(&self) -> Option<(Bounds<Pixels>, &'static str)> {
@@ -2558,24 +2654,32 @@ impl ReaderView {
         Some((Bounds { origin: gpui::point(px(self.width - w - STATUS_PAD), px(self.body_bottom())), size: gpui::size(px(w), px(self.status_h())) }, label))
     }
 
-    fn status_width(&self) -> f32 {
-        self.commands_button().map_or(self.width, |(b, _)| f32::from(b.origin.x)) - 2.0 * STATUS_PAD
+    /// Independent footer cells; narrow windows keep recovery and message targets accessible.
+    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell) {
+        let left = STATUS_PAD.min(self.width / 2.0);
+        let right = self.commands_button().map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
+        let room = right - left;
+        let label = self.session.state().language_server_label();
+        let server_w = ((lenz_content::wrap::width(label) as f32 + 2.0) * self.char_w).min(room * 0.4);
+        let position = self.session.status_position();
+        let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
+        let cell = |x: f32, w: f32, text: &str| {
+            let cols = (w.max(0.0) / self.char_w).floor() as usize;
+            (Bounds { origin: gpui::point(px(x), px(self.body_bottom())), size: gpui::size(px(w.max(0.0)), px(self.status_h())) }, reader_core::chrome::ellipsize(text, cols))
+        };
+        (cell(left, server_w, label), cell(left + server_w, (room - server_w - position_w).max(0.0), &self.session.status_message()), cell(right - position_w, position_w, &position))
     }
 
-    /// The files panel's toolbar buttons, in window coordinates: their x range, command, whether it can run now,
-    /// and label. The explorer's show/hide switch while a folder is open (drawn, not labelled), Back and Forward
-    /// always; then, for a Markdown file or an SVG, the switch between its source and its rendering, named for what
-    /// it switches to.
+    /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
     pub fn nav_buttons(&self) -> Vec<(f32, f32, CommandId, bool, &'static str)> {
-        let w = (self.char_w * 3.0).max(line_h());
-        let mut x = if self.sidebar_w > 0.0 { self.sidebar_w + 4.0 } else { f32::from(self.app_menu_button().right()) + 4.0 };
-        self.session.navigation().into_iter().map(|(id, label)| {
-            let preview = matches!(id, CommandId::MarkdownSource | CommandId::ImageSource);
-            if preview { x += 8.0; }
-            let end = x + if preview { (label.len() as f32 + 2.0) * self.char_w } else { w };
+        let mut x = f32::from(self.app_menu_button().right()) + 6.0;
+        self.session.toolbar().into_iter().filter_map(|(id, label)| {
+            if matches!(id, CommandId::Open | CommandId::MarkdownSource | CommandId::ImageSource) { x += 8.0; }
+            let drawn = matches!(id, CommandId::ToggleExplorer | CommandId::Back | CommandId::Forward);
+            let end = x + if drawn { (self.char_w * 3.0).max(line_h()) } else { (label.len() as f32 + 2.0) * self.char_w };
             let button = (x, end, id, self.session.disabled(id).is_none(), label);
-            x = end;
-            button
+            x = end + 4.0;
+            (end <= self.width - 4.0).then_some(button)
         }).collect()
     }
 
@@ -3021,50 +3125,20 @@ impl ReaderView {
         self.image[self.session.state().focused_pane() as usize].as_ref().filter(|s| s.texture.is_some() && !self.uploads.is_empty()).map(|s| s.size)
     }
 
-    /// The status bar's text: what the reader is waiting for and notices first (a narrow window cuts the end),
-    /// then the file, the folder and the language server.
-    pub fn status(&self) -> String {
-        let state = self.session.state();
-        let name = match (state.loading(), state.document()) {
-            (Some(p), _) => format!("Loading {}…", p.display()),
-            (None, Some(d)) => d.source().display().to_string(),
-            (None, None) => "No file open — Ctrl+O file, F10 commands".into(),
-        };
-        let project = state.project().map(|p| {
-            use reader_core::project::Coverage;
-            let root = p.root().display();
-            match p.coverage() {
-                Coverage::Scanning(n) => format!("{root}: scanning, {n} files so far"),
-                Coverage::Complete(n) if p.refreshing() => format!("{root}: {n} files, refreshing"),
-                Coverage::Complete(0) if p.skipped() == 0 => format!("{root}: no files"),
-                Coverage::Complete(n) if p.skipped() == 0 => format!("{root}: {n} files"),
-                Coverage::Complete(n) => format!("{root}: {n} files; {} unreadable entries skipped", p.skipped()),
-                Coverage::Unavailable(e) => format!("{root}: unavailable ({e})"),
-            }
-        });
-        // What the reader is waiting for the language server to answer, and the server for this file.
-        let asking = state.asking().map(|a| format!("{a} (Escape cancels)"));
-        let provider = state.provider().map(|v| v.summary());
-        asking.into_iter().chain(state.notices().iter().cloned()).chain([name]).chain(project).chain(provider).collect::<Vec<_>>().join(" · ")
-    }
+    /// Full diagnostic status, retained for adapter checks and troubleshooting.
+    pub fn status(&self) -> String { self.session.status_details() }
 
     /// Characters that fit across `width` pixels of text.
     fn columns(&self, width: f32) -> usize {
         ((width / self.char_w).floor() as usize).max(1)
     }
 
-    /// The status bar's text cut to the window with "…".
-    pub fn status_line(&self) -> String {
-        let (text, cols) = (format!("{} · F2 / click for details · {}", self.session.state().language_server_label(), self.status()), self.columns(self.status_width()));
-        if text.chars().count() <= cols {
-            return text;
-        }
-        text.chars().take(cols - 1).chain(['…']).collect()
-    }
+    /// The elastic message cell's displayed text (full content is in Status details).
+    pub fn status_line(&self) -> String { self.status_segments().1.1 }
 
     /// The status bar's height: none in a window too short for it and the toolbar.
     fn status_h(&self) -> f32 {
-        if self.height >= status_h() + line_h() { status_h() } else { 0.0 }
+        if self.height >= status_h() + toolbar_h() + line_h() { status_h() } else { 0.0 }
     }
 
     /// Where the panes, the explorer and the results panel end: the status bar's top.
@@ -3080,7 +3154,7 @@ impl ReaderView {
             .enumerate()
             .flat_map(|(i, (label, why))| {
                 let text = match why { Some(why) => format!("{label} — {why}"), None => label };
-                wrap(&text, cols).into_iter().map(move |l| (i, l, why.is_some()))
+                text.split('\n').flat_map(|line| wrap(line, cols)).collect::<Vec<_>>().into_iter().map(move |l| (i, l, why.is_some()))
             })
             .collect()
     }
@@ -3088,6 +3162,8 @@ impl ReaderView {
     fn modal_width(&self) -> f32 {
         if matches!(self.modal, Some(Modal::AppMenu { .. })) {
             menu_width(self.width).min(24.0 + 24.0 * self.char_w)
+        } else if matches!(self.modal, Some(Modal::Themes { .. } | Modal::StatusDetails { .. })) {
+            (self.width - 16.0).clamp(0.0, 600.0)
         } else { menu_width(self.width) }
     }
 
@@ -3101,7 +3177,7 @@ impl ReaderView {
             if selected.start < first { first = selected.start; }
             else if selected.end > first + visible { first = selected.end.saturating_sub(visible); }
         }
-        first = first.min(len.saturating_sub(visible));
+        first = first.min(len.saturating_sub(visible.max(1)));
         self.modal_scroll.set(first);
         first
     }
@@ -3119,7 +3195,24 @@ impl ReaderView {
         let lines = self.modal_lines();
         let at = at.min(lines.last().map_or(0, |r| r.0));
         let mw = self.modal_width();
-        let top = if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { line_h().min((self.height - 16.0).max(0.0)) } else { 8.0 };
+        if matches!(self.modal, Some(Modal::StatusDetails { .. })) {
+            let h = (self.height - 16.0).clamp(0.0, 480.0);
+            let visible = (((h - 8.0).max(0.0) / line_h()).floor() as usize).min(lines.len());
+            let first = self.modal_scroll.get().min(lines.len().saturating_sub(visible));
+            self.modal_scroll.set(first);
+            let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
+            return Some(ModalLayout { bounds, lines, first, visible, at });
+        }
+        if matches!(self.modal, Some(Modal::Themes { .. })) {
+            let h = (self.height - 16.0).clamp(0.0, 400.0);
+            let visible = (((h - 8.0).max(0.0) / line_h()).floor() as usize).min(lines.len());
+            let start = lines.iter().position(|(i, _, _)| *i == at).unwrap_or(0);
+            let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
+            let first = self.modal_first(at, start..end, lines.len(), visible);
+            let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
+            return Some(ModalLayout { bounds, lines, first, visible, at });
+        }
+        let top = if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { toolbar_h().min((self.height - 16.0).max(0.0)) } else { 8.0 };
         let visible = (((self.height - top - 8.0) / line_h()).floor().max(1.0) as usize).min(lines.len());
         let start = lines.iter().position(|(i, _, _)| *i == at).unwrap_or(0);
         let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
@@ -3146,6 +3239,7 @@ impl ReaderView {
     /// The modal's rows: label and disabled reason. Search headers precede their result rows.
     pub fn modal_rows(&self) -> Vec<(String, Option<&'static str>)> {
         match &self.modal {
+            Some(Modal::StatusDetails { text }) => std::iter::once(("Status details · Copy (Ctrl+C) · Esc close".to_string(), None)).chain(text.lines().map(|line| (line.to_owned(), None))).collect(),
             Some(Modal::Navigation { .. }) => self.navigation_rows(),
             Some(Modal::ServerRuntime { path, .. }) => {
                 let model = self.session.state().server_runtime();
@@ -3157,7 +3251,10 @@ impl ReaderView {
                 rows
             }
             Some(Modal::LanguageServer { .. }) => self.server_rows().into_iter().map(|(text, action)| (text, action.and_then(|id| self.session.disabled(id)))).collect(),
-            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.iter().map(|g| (format!("{} ›", g.label()), None)).chain([("All commands…".to_string(), None)]).collect(),
+            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.iter().map(|g| match g {
+                CommandGroup::Application => (CommandId::ChooseTheme.label().to_string(), self.session.disabled(CommandId::ChooseTheme)),
+                _ => (format!("{} ›", g.label()), None),
+            }).chain([("All commands…".to_string(), None)]).collect(),
             Some(Modal::Commands { .. } | Modal::CommandGroup { .. }) => {
                 let group = match self.modal { Some(Modal::CommandGroup { group, .. }) => Some(group), _ => None };
                 let heading = group.map(|g| (format!("‹ All menus — {}", g.label()), None));
@@ -3174,7 +3271,10 @@ impl ReaderView {
                     MenuEntry::Separator => ("—".to_string(), None),
                 })
                 .collect(),
-            Some(Modal::Themes { ids, .. }) => ids.iter().map(|(_, label)| (label.clone(), None)).collect(),
+            Some(Modal::Themes { ids, .. }) => [
+                ("Theme · ↑/↓ choose · Enter select · Esc close".to_string(), None),
+                (format!("Current: {}", self.session.theme_source()), None),
+            ].into_iter().chain(ids.iter().map(|(_, label)| (label.clone(), None))).collect(),
             Some(Modal::Recent { .. }) => self.session.state().recent().iter().map(|r| (r.display().to_string(), None)).collect(),
             Some(Modal::Declarations { query, semantic: false }) => {
                 let tab = if self.session.disabled(CommandId::Symbols).is_none() { "; Tab: language server symbols" } else { "" };
@@ -3276,9 +3376,7 @@ impl Render for ReaderView {
             Some(_) if self.tree_shown && (!narrow || self.tree_focus) => if narrow { self.width } else { explorer_w },
             _ => 0.0,
         };
-        let status_line = self.status_line();
-        let server_label: String = self.session.state().language_server_label().chars().take(self.columns(self.status_width())).collect();
-        let server_label_w = server_label.chars().count() as f32 * self.char_w;
+        let (server_cell, message_cell, position_cell) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
@@ -3287,11 +3385,12 @@ impl Render for ReaderView {
         let nav = self.nav_buttons();
         let explorer_buttons = self.explorer_buttons();
         let explorer_title = self.session.state().project().map(|p| p.root().file_name().map_or_else(|| p.root().display().to_string(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
-        let nav_end = nav.last().map_or(self.sidebar_w, |b| b.1) + 4.0;
+        let nav_end = self.sidebar_w;
+        let body_top = toolbar_h() + tabs_h;
         // The results panel: a status line, the list and a preview, below the panes and above the status bar: 45% of
         // the height (at most 15 rows) unless its divider was dragged.
         let status_h = self.status_h();
-        let body_rows = ((self.body_bottom() - tabs_h) / line_h()).floor().max(0.0) as usize;
+        let body_rows = ((self.body_bottom() - body_top) / line_h()).floor().max(0.0) as usize;
         let least = 3.min(body_rows);
         let panel_rows = match (self.session.state().results(), self.layout.results_permille) {
             (None, _) => 0,
@@ -3303,7 +3402,7 @@ impl Render for ReaderView {
         self.panel_list_rows = list_rows;
         let text_rows = body_rows - panel_rows;
         self.tree_rows = text_rows;
-        let panel_top = tabs_h + text_rows as f32 * line_h();
+        let panel_top = body_top + text_rows as f32 * line_h();
         self.panel_top = if panel_rows > 0 { panel_top } else { f32::MAX };
         self.panel_list_y = if panel_rows > 0 { panel_top + line_h() } else { f32::MAX };
         let status = self.results_status();
@@ -3316,19 +3415,19 @@ impl Render for ReaderView {
         let area = |x: f32, y: f32, w: f32, rows: usize| Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px(w.max(0.0)), px(rows as f32 * line_h())) };
         let mut panes = Vec::new();
         match split {
-            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, 0.0), text: area(fx, tabs_h, fw, text_rows), rows: text_rows }),
+            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, text_rows), rows: text_rows }),
             Some(Split::Columns) => {
                 let x = if fw >= 120.0 { (fx + (fw * share).round()).clamp(fx + 60.0, self.width - 60.0) } else { fx + (fw / 2.0).floor() };
                 self.split_at = x;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, 0.0), text: area(fx, tabs_h, x - fx, text_rows), rows: text_rows });
-                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, 0.0), text: area(x + 1.0, tabs_h, self.width - x - 1.0, text_rows), rows: text_rows });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, toolbar_h()), text: area(fx, body_top, x - fx, text_rows), rows: text_rows });
+                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, toolbar_h()), text: area(x + 1.0, body_top, self.width - x - 1.0, text_rows), rows: text_rows });
             }
             Some(Split::Rows) => {
                 // Too short for two panes and a bar: the first pane alone, until there is room.
                 let top = if text_rows >= 3 { ((((text_rows - 1) as f32) * share).round() as usize).clamp(1, text_rows - 2) } else { text_rows };
-                let y = tabs_h + top as f32 * line_h();
+                let y = body_top + top as f32 * line_h();
                 self.split_at = y;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, 0.0), text: area(fx, tabs_h, fw, top), rows: top });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, top), rows: top });
                 if text_rows >= 3 {
                     panes.push(PaneGeom { pane: 1, bar: (fx, self.width, y), text: area(fx, y + line_h(), fw, text_rows - 1 - top), rows: text_rows - 1 - top });
                 }
@@ -3400,7 +3499,7 @@ impl Render for ReaderView {
             Some(Drag::Explorer) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split) if split == Some(Split::Columns) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split | Drag::Results) => Some(gpui::CursorStyle::ResizeUpDown),
-            None if self.link.is_some() || self.app_menu_hover || self.commands_hover => Some(gpui::CursorStyle::PointingHand),
+            None if self.link.is_some() || self.app_menu_hover || self.commands_hover || self.nav_hover.is_some() => Some(gpui::CursorStyle::PointingHand),
             _ => None,
         };
         // Bring a newly highlighted tree row into view once; the wheel's scroll otherwise stands, within the rows.
@@ -3517,6 +3616,7 @@ impl Render for ReaderView {
         self.uploads.keep(frames.iter().flat_map(|f| f.picture.iter().map(|(t, _)| t.clone()).chain(f.markdown.iter().flat_map(|m| m.2.iter().map(|(_, t)| t.clone())))).collect(), window);
         let navigation = self.navigation_frame();
         let modal = self.modal_layout();
+        let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
         self.clamp_context();
@@ -3584,6 +3684,7 @@ impl Render for ReaderView {
         if render_started.elapsed().as_millis() >= 30 {
             eprintln!("lenz-reader: slow render {:.1} ms", render_started.elapsed().as_secs_f64() * 1000.0);
         }
+        let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
         let nav_hover = self.nav_hover;
         let app_menu_button = self.app_menu_button();
         let app_menu_active = self.app_menu_hover || matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
@@ -3615,33 +3716,30 @@ impl Render for ReaderView {
                         if let Some(cursor) = cursor {
                             window.set_window_cursor_style(cursor);
                         }
-                        lenz_gpui::fill(window, x0, y0, w, tabs_h, palette.header_bg);
+                        lenz_gpui::fill(window, x0, y0, w, toolbar_h() + tabs_h, palette.header_bg);
+                        lenz_gpui::fill(window, x0, y0 + toolbar_h() - 1.0, w, 1.0, palette.border);
                         let mx = x0 + f32::from(app_menu_button.origin.x);
                         let mw = f32::from(app_menu_button.size.width);
-                        if app_menu_active { lenz_gpui::fill(window, mx, y0 + 2.0, mw, tabs_h - 4.0, palette.selected_bg); }
+                        if app_menu_active { lenz_gpui::fill(window, mx, y0 + 3.0, mw, toolbar_h() - 6.0, palette.selected_bg); }
                         for offset in [-4.0, 0.0, 4.0] {
-                            lenz_gpui::fill(window, mx + mw / 2.0 - 6.0, y0 + tabs_h / 2.0 + offset, 12.0, 1.0, palette.fg);
+                            lenz_gpui::fill(window, mx + mw / 2.0 - 6.0, y0 + toolbar_h() / 2.0 + offset, 12.0, 1.0, palette.fg);
                         }
                         // The buttons: dim when they cannot run, raised under the pointer.
                         for (bx0, bx1, id, enabled, label) in nav.iter().chain(&explorer_buttons) {
+                            let locate = *id == CommandId::LocateFile;
+                            let (by, bh) = if locate { (y0 + toolbar_h(), tabs_h) } else { (y0, toolbar_h()) };
                             let drawn = matches!(id, CommandId::ToggleExplorer | CommandId::LocateFile);
-                            if !drawn && !matches!(id, CommandId::Back | CommandId::Forward) {
-                                // A labelled switch reads as a button: outlined.
-                                lenz_gpui::fill(window, x0 + bx0, y0 + 2.0, bx1 - bx0, tabs_h - 4.0, palette.border);
-                                lenz_gpui::fill(window, x0 + bx0 + 1.0, y0 + 3.0, bx1 - bx0 - 2.0, tabs_h - 6.0, palette.header_bg);
-                            }
                             if *enabled && nav_hover == Some(*id) {
-                                lenz_gpui::fill(window, x0 + bx0 + 1.0, y0 + 3.0, bx1 - bx0 - 2.0, tabs_h - 6.0, palette.selected_bg);
+                                window.paint_quad(gpui::fill(Bounds { origin: gpui::point(px(x0 + bx0), px(by + 3.0)), size: gpui::size(px(bx1 - bx0), px(bh - 6.0)) }, rgb(palette.selected_bg)).corner_radii(px(4.0)));
                             }
                             let color = if *enabled { palette.fg } else { palette.dim };
                             if drawn {
-                                paint_symbol(window, *id, x0 + (bx0 + bx1) / 2.0, y0 + tabs_h / 2.0, sidebar_w > 0.0, color);
+                                paint_symbol(window, *id, x0 + (bx0 + bx1) / 2.0, by + bh / 2.0, sidebar_w > 0.0, color);
                             } else {
-                                let width = label.chars().count() as f32 * char_w;
-                                lenz_gpui::text(window, cx, m, x0 + bx0 + (bx1 - bx0 - width) / 2.0, y0, label, color);
+                                let width = lenz_content::wrap::width(label) as f32 * char_w;
+                                lenz_gpui::text(window, cx, m, x0 + bx0 + (bx1 - bx0 - width) / 2.0, by + (bh - line_h()) / 2.0, label, color);
                             }
                         }
-                        lenz_gpui::fill(window, x0 + nav_end - 2.0, y0 + 3.0, 1.0, tabs_h - 6.0, palette.border);
                         // Each pane's tabs: the shown one raised (with an accent on the focused pane's while split), a
                         // preview tab dim, each with its close mark; never over the buttons.
                         for f in &frames {
@@ -3679,9 +3777,13 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            lenz_gpui::text(window, cx, m, x0 + STATUS_PAD, status_y + 2.0, &status_line, palette.fg);
-                            lenz_gpui::text(window, cx, m, x0 + STATUS_PAD, status_y + 2.0, &server_label, server_color);
-                            lenz_gpui::fill(window, x0 + STATUS_PAD, status_y + line_h() - 1.0, server_label_w, 1.0, server_color);
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&position_cell, palette.dim, None)] {
+                                let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
+                                window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
+                                    if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }
+                                    lenz_gpui::text(window, cx, m, f32::from(clip.origin.x), status_y + 2.0, label, color);
+                                });
+                            }
                             if let Some((b, label)) = &commands_button {
                                 let bx = x0 + f32::from(b.origin.x);
                                 let bw = f32::from(b.size.width);
@@ -3689,19 +3791,19 @@ impl Render for ReaderView {
                                 lenz_gpui::text(window, cx, m, bx + char_w, status_y + 2.0, label, palette.fg);
                             }
                         }
-                        let body_h = (h - tabs_h - status_h).max(0.0);
-                        let body = Bounds { origin: gpui::point(px(x0), px(y0 + tabs_h)), size: gpui::size(px(sidebar_w), px(body_h)) };
+                        let body_h = (h - body_top - status_h).max(0.0);
+                        let body = Bounds { origin: gpui::point(px(x0), px(y0 + body_top)), size: gpui::size(px(sidebar_w), px(body_h)) };
                         if sidebar_w > 0.0 {
                             // The explorer: its own panel from the toolbar row down, titled with the folder's name.
                             let title_w = explorer_buttons.first().map_or(sidebar_w, |b| b.0) - 8.0;
-                            let title = Bounds { origin: gpui::point(px(x0), px(y0)), size: gpui::size(px(title_w.max(0.0)), px(tabs_h)) };
+                            let title = Bounds { origin: gpui::point(px(x0), px(y0 + toolbar_h())), size: gpui::size(px(title_w.max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: title }), |window| {
-                                lenz_gpui::text(window, cx, m, x0 + f32::from(app_menu_button.right()) + 4.0, y0, &explorer_title, palette.dim);
+                                lenz_gpui::text(window, cx, m, x0 + 8.0, y0 + toolbar_h(), &explorer_title, palette.dim);
                             });
-                            lenz_gpui::fill(window, x0, y0 + tabs_h, sidebar_w, body_h, palette.sidebar_bg);
+                            lenz_gpui::fill(window, x0, y0 + body_top, sidebar_w, body_h, palette.sidebar_bg);
                             window.with_content_mask(Some(gpui::ContentMask { bounds: body }), |window| {
                                 for (i, line) in tree.iter().enumerate() {
-                                    let y = y0 + tabs_h + i as f32 * line_h();
+                                    let y = y0 + body_top + i as f32 * line_h();
                                     if line.selected {
                                         lenz_gpui::fill(window, x0, y, sidebar_w, line_h(), if tree_focus { palette.selected_bg } else { palette.fold_bg });
                                     }
@@ -3714,7 +3816,7 @@ impl Render for ReaderView {
                                     lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icons::SIZE + ICON_GAP, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
                                 }
                             });
-                            lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0, 1.0, body_h + tabs_h, palette.border);
+                            lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0 + toolbar_h(), 1.0, body_h + tabs_h, palette.border);
                         }
                         // Breadcrumb bars: crumbs and their `›`, the highlighted crumb on a selection box.
                         for c in &crumb_cells {
@@ -3853,10 +3955,10 @@ impl Render for ReaderView {
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
                                 for (n, (row, line, disabled)) in l.lines.iter().enumerate().skip(l.first).take(l.visible) {
                                     let y = my + 4.0 + (n - l.first) as f32 * line_h();
-                                    if *row == l.at {
+                                    if !details_modal && *row == l.at {
                                         lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg);
                                     }
-                                    lenz_gpui::text(window, cx, m, mx + 12.0, y, line, if *disabled { palette.dim } else { palette.fg });
+                                    lenz_gpui::text(window, cx, m, mx + 12.0, y, line, if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
                                 }
                             });
                         }
@@ -4146,17 +4248,18 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
     let cols = cols.max(1);
     let (mut lines, mut line, mut n) = (Vec::new(), String::new(), 0);
     for word in text.split_inclusive(' ') {
-        if n > 0 && n + word.trim_end().chars().count() > cols {
+        if n > 0 && n + lenz_content::wrap::width(word.trim_end()) > cols {
             lines.push(std::mem::take(&mut line));
             n = 0;
         }
         for c in word.chars() {
-            if n == cols {
+            let width = lenz_content::wrap::width(c.encode_utf8(&mut [0; 4]));
+            if n > 0 && n + width > cols {
                 lines.push(std::mem::take(&mut line));
                 n = 0;
             }
             line.push(c);
-            n += 1;
+            n += width;
         }
     }
     lines.push(line);
@@ -4168,10 +4271,11 @@ impl Modal {
     pub fn at(&self) -> usize {
         match self {
             Modal::Navigation { at } => *at,
-            Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Themes { at, .. } | Modal::Recent { at } => *at,
+            Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Recent { at } => *at,
+            Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic => 0,
             Modal::Context { at, .. } => *at,
         }
     }

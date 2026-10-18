@@ -112,6 +112,7 @@ pub(crate) struct App {
     pub tree_shown: bool,
     pending_explorer: Option<reader_core::workspace::Explorer>,
     pub notice: Option<String>,
+    pub independent_view: Option<(usize, usize)>,
     pub quit: bool,
     pub new_view: bool,
     pub copy: Option<String>,
@@ -137,6 +138,7 @@ impl App {
             tree_shown: true,
             pending_explorer: None,
             notice: None,
+            independent_view: None,
             quit: false,
             new_view: false,
             copy: None,
@@ -337,6 +339,7 @@ impl App {
         true
     }
     pub fn apply(&mut self, completion: Completion) -> bool {
+        let theme = self.highlighted_theme();
         let tree_path = self
             .session
             .state()
@@ -348,6 +351,9 @@ impl App {
         let preview_positions = self.preview_positions();
         let workspace = self.session.state().workspace_revision();
         let effect = self.session.dispatch(completion);
+        if let Some(id) = theme {
+            self.select_theme_row(&id);
+        }
         self.sync_workspace(workspace);
         if !restoring
             && let Some(path) = tree_path
@@ -552,6 +558,14 @@ impl App {
             }
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
+            InterfaceAction::StatusDetails => {
+                let mut details = self.session.status_details();
+                if let Some(notice) = &self.notice {
+                    details.push_str("\n\nTerminal notice\n");
+                    details.push_str(notice);
+                }
+                Prompt::Details(details)
+            },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;
@@ -624,6 +638,13 @@ impl App {
             reveal_selection: true,
             error: None,
         });
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| m.kind == Prompt::Themes)
+        {
+            self.select_theme_row(&self.session.theme_id());
+        }
         self.drag = None;
         self.hover = None;
     }
@@ -686,6 +707,7 @@ impl App {
     fn close_modal(&mut self) {
         if let Some(modal) = self.modal.take() {
             match modal.kind {
+                Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
                 Prompt::Details(_) if self.session.state().documentation().is_some() => {
@@ -693,6 +715,31 @@ impl App {
                 }
                 _ => {}
             }
+        }
+    }
+    fn highlighted_theme(&self) -> Option<String> {
+        let modal = self.modal.as_ref().filter(|m| m.kind == Prompt::Themes)?;
+        if modal.at == 0 {
+            Some("system".into())
+        } else {
+            self.session
+                .theme_entries()
+                .get(modal.at - 1)
+                .map(|e| e.id.clone())
+        }
+    }
+    fn select_theme_row(&mut self, id: &str) {
+        let at = self
+            .session
+            .theme_entries()
+            .iter()
+            .position(|e| e.id == id)
+            .map_or(0, |at| at + 1);
+        if let Some(modal) = &mut self.modal
+            && modal.at != at
+        {
+            modal.at = at;
+            modal.reveal_selection = true;
         }
     }
     pub fn choices(&self) -> Vec<Choice> {
@@ -823,7 +870,11 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
-        if matches!(modal.kind, Prompt::Places(_) | Prompt::ServerRuntime) || query.is_empty() {
+        if matches!(
+            modal.kind,
+            Prompt::Places(_) | Prompt::ServerRuntime | Prompt::Themes
+        ) || query.is_empty()
+        {
             choices
         } else {
             choices
@@ -851,14 +902,14 @@ impl App {
                 Prompt::Declarations => "Find declaration · Tab: workspace symbols",
                 Prompt::Symbols => "Workspace symbols · Tab: declarations",
                 Prompt::GoTo => "Go to line · line:column",
-                Prompt::Themes => "Choose theme",
+                Prompt::Themes => "Theme",
                 Prompt::Places(PlaceList::Bookmarks) => "Bookmarks · Delete forgets",
                 Prompt::Places(PlaceList::RecentFiles) => "Recent files · Delete forgets",
                 Prompt::Places(PlaceList::RecentLocations) => "Recent locations · Delete forgets",
                 Prompt::Mnemonic => "Bookmark key · press 0–9 or A–Z",
                 Prompt::Siblings { .. } => "Breadcrumb entries",
                 Prompt::Help => "Reader help",
-                Prompt::Details(_) => "Details",
+                Prompt::Details(_) => "Details · Ctrl+C copies · Esc closes",
             }
             .to_owned()
         })
@@ -947,6 +998,7 @@ impl App {
                 | Prompt::Mnemonic
                 | Prompt::Context { .. }
                 | Prompt::LanguageServer
+                | Prompt::Themes
         ) {
             return;
         }
@@ -991,6 +1043,12 @@ impl App {
             && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
             self.run(CommandId::CopyServerDetails);
+            return;
+        }
+        if let Prompt::Details(body) = &kind
+            && control && !alt && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            self.copy = Some(body.clone());
             return;
         }
         if key.code == KeyCode::Esc {
@@ -1116,7 +1174,9 @@ impl App {
                     self.modal_len()
                 };
                 let height = self.layout.modal_rows.height;
-                let page = if kind == Prompt::Navigation && height >= 4 {
+                let page = if kind == Prompt::Themes {
+                    8
+                } else if kind == Prompt::Navigation && height >= 4 {
                     height / 2
                 } else {
                     height
@@ -1130,6 +1190,9 @@ impl App {
                     m.reveal_selection = true;
                 }
                 self.clamp();
+                if kind == Prompt::Themes {
+                    self.dispatch(Command::PreviewTheme(self.highlighted_theme()));
+                }
             }
             KeyCode::Backspace if !control => self.edit_prompt("", true),
             KeyCode::Char('u') if control => {
@@ -1350,6 +1413,10 @@ impl App {
             }
             (KeyCode::F(1), _, _, _) | (KeyCode::Char('?'), false, _, _) => {
                 self.prompt(Prompt::Help);
+                return;
+            }
+            (KeyCode::F(2), false, true, false) => {
+                self.run(CommandId::StatusDetails);
                 return;
             }
             (KeyCode::F(2), _, _, _) => {
@@ -1780,6 +1847,12 @@ impl App {
                     .min(count.saturating_sub(visible));
                 }
             }
+            return;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.layout.command_menus.iter().any(|rect| rect.contains(point))
+        {
+            self.prompt(Prompt::Commands);
             return;
         }
         if matches!(event.kind, MouseEventKind::Down(MouseButton::Right)) {

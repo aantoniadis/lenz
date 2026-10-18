@@ -141,24 +141,8 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             }
         }
         if dirty {
-            terminal.draw(|frame| {
-                views[active].draw(frame);
-                if views.len() > 1 {
-                    let area = frame.area();
-                    if area.height > 0 {
-                        let bar =
-                            ratatui::layout::Rect::new(area.x, area.bottom() - 1, area.width, 1);
-                        frame.render_widget(
-                            ratatui::widgets::Paragraph::new(format!(
-                                " View {}/{} · F8/Shift-F8 switch · Ctrl-Q closes view",
-                                active + 1,
-                                views.len()
-                            )),
-                            bar,
-                        );
-                    }
-                }
-            })?;
+            views[active].independent_view = (views.len() > 1).then_some((active + 1, views.len()));
+            terminal.draw(|frame| views[active].draw(frame))?;
             views[active].session.start_themes();
             dirty = false;
         }

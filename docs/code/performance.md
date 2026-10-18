@@ -89,3 +89,137 @@ are not a direct speed comparison.
 Earlier [shared-feature checks](../shared-features-performance.md) cover paired
 before/after timing, input and 30-second Find stress. Their window-observation
 endpoint is earlier than the content-frame marker used here.
+
+## Theme chooser parity (2026-10-18)
+
+Reader's theme chooser now previews the highlighted theme through a shared core
+command, without changing or saving the selected theme. Commit and cancellation
+use the existing theme service. GUI and TUI expose **Change theme** outside the
+View group; the GUI app menu opens it directly. Current-source/help rows, keyboard
+paging, pointer input and narrow layouts follow Diff's chooser. Wheel movement
+keeps the highlight and preview unchanged.
+
+The complete local CI gate passed, including workspace/core tests, actual Diff
+and Reader GUI adapter tests, Reader TUI parity checks, panic checks and separate
+production terminal builds. Real input regressions first reproduced the missing
+preview in both adapters. The new cases cover cancellation after native appearance
+updates, retaining theme IDs when custom themes arrive, removal of a previewed
+theme, inert headers, current selection, persistence and 1×1 layouts.
+
+Local raw evidence is in `target/perf/reader-theme-parity/` (ignored): original
+production binaries/source, compiler identity, regression logs, full CI/build
+logs, screenshots, private PTY output and production executable hashes. The
+production probes use isolated settings and disposable source files, rather than
+the user's desktop or repositories. A first GUI probe passed its assertions and
+60-second exercise but failed while reading an already-closed log; its evidence
+is retained as `native-gui-initial.*` and the corrected collector was rerun.
+
+Production GUI checks passed after the collector fix, including viewport color
+changes before commit, header/outside clicks, wheel stability, reopening and tiny
+resizes. Its preview/cancel exercise completed 87 cycles in
+60.016 seconds; sampled RSS ranged
+170.574–170.598 MiB, with
+0.023 MiB final-quarter growth and
+170.598 MiB process high-water RSS. The private PTY completed
+147 cycles in 60.166 seconds, with RSS
+8.773→8.809 MiB
+and 8.809 MiB high-water RSS. Source and appearance bytes
+were unchanged during cancellation loops, and terminal modes were restored.
+These candidate-only checks overlapped other correctness/build work and are not
+paired performance comparisons.
+
+Adjacent before/after release comparisons used 100,000 plain-text lines with no
+language server, the same private Xvfb/lavapipe setup and Rust 1.99.1. Seven GUI
+pairs followed one discarded warmup pair; ten TUI pairs alternated launch order.
+The GUI startup endpoint is the first non-uniform client image received by the
+collector; menu feedback ends at a changed client image and includes capture
+cost. Terminal endpoints are received PTY bytes. These differ from the historical
+content-frame marker above and do not measure physical presentation.
+
+| Measurement | Before | After |
+|---|---:|---:|
+| GUI first client image | 157.02 ms | 154.04 ms |
+| GUI menu feedback | 25.11 ms | 23.39 ms |
+| GUI sampled RSS / median high-water at sample | 173.61 MiB | 173.44 MiB |
+| TUI first content | 7.971 ms | 7.984 ms |
+| TUI arrow feedback | 0.473 ms | 0.439 ms |
+| TUI sampled RSS | 13.539 MiB | 13.604 MiB |
+| TUI median high-water at sample | 19.527 MiB | 19.539 MiB |
+
+The paired menu/status exercises ran 15.021/15.017 seconds for GUI
+(192/189 cycles) and 15.025/15.023 seconds for TUI (182 cycles each). Final-quarter
+RSS growth was zero in all four runs. Raw samples, exact executable hashes,
+terminal streams and configuration are in `paired-gui.json` and
+`paired-tui.json`. No repeatable startup, response or memory regression appeared
+in these workloads. The full Diff performance suite was not rerun for this Reader
+change. Native macOS/Windows, hardware GPU allocations, physical display latency
+and long-session leak behavior remain unverified.
+
+
+## Reader chrome parity (2026-10-18)
+
+Reader's GUI and TUI now put frequent shared commands in a dedicated toolbar
+above the tabs. The footer separates LSP recovery, the primary message,
+position and Commands. Both adapters use the same status content and
+column-aware ellipsis; clicking the message opens a frozen, wrapped snapshot
+with full-text copying. Routine provider RSS samples stay in details. The GUI
+also stops painting its LSP label twice, and independent terminal views retain
+the footer rather than overwriting it with view-switching instructions.
+
+The full local gate passed, including workspace/core, Diff GUI, Reader GUI
+(124 passed, 7 ignored), Reader TUI (59 passed), terminal parity, collector tests,
+and separate terminal release builds. Reader's normal GUI release was built
+separately after the gate. Red/green evidence includes the old footer click
+opening LSP recovery instead of message details, the absent terminal Menu
+control and changing memory figures in the brief status. The initial lint and
+panic-site failures were corrected without raising a baseline; their logs remain.
+
+Two sequential release comparisons used the same generated 100,000-line plain
+text, disposable HOME/XDG directories, alternating before/after order, and no
+concurrent builds or other collectors. Each GUI round had seven measured pairs
+and one warmup pair on an owned 1920×1200 Xvfb/lavapipe display; each terminal
+round had ten pairs on owned PTYs. GUI feedback measured six F10/Escape changes
+per launch; terminal feedback measured five Down inputs. Startup is receipt of
+first nonuniform client pixels or source text, respectively; these are not
+completed-action or physical-display timings.
+
+| Median metric | Round 1 before → after | Round 2 before → after |
+| --- | --- | --- |
+| GUI first client image, ms | 153.90 → 156.36 | 157.35 → 159.47 |
+| GUI menu feedback, ms | 22.92 → 23.24 | 24.13 → 24.40 |
+| GUI initial sampled RSS, MiB | 173.73 → 174.99 | 173.68 → 174.30 |
+| TUI source receipt, ms | 8.63 → 8.73 | 8.88 → 8.80 |
+| TUI arrow feedback, ms | 0.691 → 0.740 | 0.703 → 0.741 |
+| TUI initial sampled RSS, MiB | 13.52 → 13.62 | 13.65 → 13.66 |
+| TUI sampled VmHWM, MiB | 19.79 → 19.65 | 19.76 → 19.91 |
+
+Timing differences changed sign between individual pairs; resampling paired
+launch medians across both rounds did not separate any timing difference from
+zero (95% percentile bootstrap, 10,000 resamples). The small initial GUI RSS
+increase is recorded rather than hidden: the two final 15-second menu exercises
+instead settled at 175.75–175.76 → 174.99 MiB and 175.93 → 174.73 MiB. Initial
+samples are not settled memory or GPU memory. Each terminal round also retained
+15 seconds of LSP-dialog exercise for each binary. All fixture bytes stayed
+unchanged and each terminal restored its input modes on exit.
+
+Production correctness replay additionally covered actual menu/Find file/Commands
+and message clicks, separate F2 LSP recovery, native GUI clipboard/terminal OSC52,
+immutable multiline snapshots, modal input isolation, both appearances, End then
+Up, 320×220 GUI / 36×12 terminal layouts, 1×1 resize and terminal independent views.
+A 400 ms quiet footer image comparison / no-idle-output check passed. A sustained
+GUI status open/scroll/copy/dismiss/resize run lasted 60.004 seconds / 111 cycles,
+with sampled RSS 173.52–173.65 MiB (final-quarter range 0.078 MiB). The terminal
+run lasted 60.222 seconds / 159 cycles, RSS 9.00–9.77 MiB (final-quarter range
+0.00 MiB). These smaller correctness fixtures are separate from the timing
+fixture above; the figures must not be compared as one workload.
+
+Raw evidence is in `target/perf/reader-chrome/`: `comparison-summary.json`,
+`paired-{gui,tui}{,-first}.json`, collectors and their hashes, native reports/raw
+PTY bytes/screenshots, visual inspection notes, source before/after archives,
+patches, executable identities, configuration and full gate logs. The first
+GUI collector's full-window OCR missed a visible Actions tab; its failure is
+retained under `native-gui-initial-ocr-failed/`, and focused tab OCR passed the
+rerun. The native OS Open chooser is unavailable on this display; its toolbar
+routing has adapter-test coverage, while actual Find file popup controls passed
+wide/narrow production replay. Native macOS, hardware rendering, physical
+latency, screen-reader behavior and long-session leak behavior remain unverified.

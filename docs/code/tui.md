@@ -25,9 +25,14 @@ for limits and concurrent-window behavior.
 
 ## Controls
 
-F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all 88 shared
+F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all 89 shared
 commands, their setting states and disabled reasons, including provider controls and features without a terminal
-shortcut. F1 opens wrapped, scrollable help; F2 shows full notices and language-server status. Esc dismisses a modal before underlying
+shortcut. F1 opens wrapped, scrollable help; F2 opens language-server status and recovery.
+A dedicated toolbar above the tabs exposes Menu and frequent navigation/file/search actions.
+The footer reserves separate language-server, message, cursor-position and Commands areas.
+Long messages end with an ellipsis: click the message or press Shift+F2 for a wrapped, scrollable
+status snapshot; Ctrl+C copies the full text through the terminal clipboard. Routine server-memory
+samples stay in details. Narrow layouts keep actions available through F10. Esc dismisses a modal before underlying
 controls can receive input. View switching with F8 and quitting remain global through modals. Ctrl-Q closes the current independent view; F8 and Shift-F8 switch views. New Window
 in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views in terminals that report it.
 
@@ -124,6 +129,8 @@ Files use the GUI reader's file-type glyphs and colors, including special names 
 `NO_COLOR` disables **all** terminal colors, including syntax and diff highlighting. If the entire app is
 monochrome, use `env -u NO_COLOR LENZ_ICONS=nerd lenz --tui` with the staged launcher (or run
 `lenz-reader-tui` directly). The app leaves your terminal and shell configuration unchanged.
+
+**Change theme** is an application command in the F10 menu. Its chooser highlights the current selection and previews themes with arrows, Home/End and Page Up/Down. Enter or a click saves the choice; Escape or an outside click cancels the preview. The wheel scrolls the list without changing the highlighted theme.
 
 Themes use the shared Lenz configuration: `lenz/appearance.json` and `lenz/themes` under
 `$XDG_CONFIG_HOME`, with `LENZ_THEME` taking precedence over `LENZ_APPEARANCE` and the legacy

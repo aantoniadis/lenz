@@ -5,6 +5,7 @@
 
 pub mod actions;
 pub mod cache;
+pub mod chrome;
 pub mod decor;
 pub mod document;
 pub mod expand;
