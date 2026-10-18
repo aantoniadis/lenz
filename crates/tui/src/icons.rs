@@ -2,8 +2,7 @@
 use std::borrow::Cow;
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum Icons { #[default] Plain, Nerd }
-#[derive(Clone, Copy)]
-pub(crate) enum Icon { Files }
+pub(crate) use lenz::icons::Icon;
 impl Icons {
     /// `LENZ_ICONS`, else the settings file's `icons`, else plain.
     pub(crate) fn from_env() -> Self { Self::resolve(std::env::var("LENZ_ICONS").ok().as_deref(), lenz::settings::get().tools.icons) }
@@ -17,11 +16,7 @@ impl Icons {
     }
     pub(crate) fn toggle(&mut self) { *self=if *self==Self::Plain{Self::Nerd}else{Self::Plain}; }
     pub(crate) fn nerd(self)->bool { self==Self::Nerd }
-    pub(crate) fn label(self,icon:Icon,text:&'static str)->Cow<'static,str> {
-        if self==Self::Plain{return Cow::Borrowed(text);}
-        let glyph=match icon {Icon::Files=>'\u{f07b}'};
-        format!("{glyph} {text}").into()
-    }
+    pub(crate) fn label(self,icon:Icon,text:&str)->Cow<'_,str> { icon.label(self.nerd(),text) }
 }
 #[cfg(test)]
 mod tests {

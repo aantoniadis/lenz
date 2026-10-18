@@ -110,12 +110,20 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         else if narrow { vec![(app.focus, Rect::new(area.x, area.y+2, area.width, body_h))] }
         else { vec![(Side::Left, Rect::new(area.x, area.y+2, left_w, body_h)), (Side::Right, Rect::new(area.x+left_w + 1, area.y+2, area.width - left_w - 1, body_h))] };
     let rendered=app.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
+    let text_focused=!app.navigator.focused&&!app.commit_panel.focused&&!app.set_search.as_ref().is_some_and(|s|s.focused)
+        &&app.repository.as_ref().is_none_or(|r|r.core.picker.focus==lenz::repository_session::Pane::Diff);
     let model = (!rendered).then(||app.session.view().frame());
     for &(side, pane) in &panes {
         let name = if side == Side::Left { left_name } else { right_name };
         let encoding = app.session.document().and_then(|d| d.encoding(side));
+        let icon=lenz::file_icons::file(name);
+        let name=icon.label(app.icons.nerd(),name);
         let title = format!("{} {}{}", if side == app.focus { "▶" } else { " " }, name, encoding.map_or(String::new(), |e| format!(" · {e}")));
-        label(palette,frame, Rect::new(pane.x, area.y+1, pane.width, 1), &title, base(palette).fg(if side == app.focus { color(palette.accent) } else { color(palette.dim) }));
+        let focused=text_focused&&side==app.focus;
+        let heading=base(palette).bg(color(palette.header_bg)).fg(if focused { color(palette.readable_on(palette.accent,palette.header_bg)) } else { color(palette.dim) }).add_modifier(if focused{Modifier::BOLD|Modifier::UNDERLINED}else{Modifier::empty()});
+        frame.buffer_mut().set_style(Rect::new(pane.x,area.y+1,pane.width,1),heading);
+        label(palette,frame, Rect::new(pane.x, area.y+1, pane.width, 1), &title, heading);
+        if app.icons.nerd() && pane.width>2 {frame.buffer_mut()[(pane.x+2,area.y+1)].set_fg(color(icon.color_on(palette,palette.header_bg)));}
         if app.visual.image().is_some() || rendered { continue; }
         let model=model.as_ref().expect("source frame");
         // Unified: both Sides' rows in this one pane, each drawn from its own Side
@@ -216,8 +224,10 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     let area=bar;
     let panels=app.layout.panels(app.repository.as_ref().map(|r|&r.core));
     let mut cells=Vec::new();
-    if app.repository.is_some(){cells.extend([("Branches",panels.branches,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleBranches)),("History",panels.history,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleHistory))]);}
-    let files=app.icons.label(crate::icons::Icon::Files,"Files");
+    let branches=app.icons.label(crate::icons::Icon::Branch,"Branches");
+    let history=app.icons.label(crate::icons::Icon::History,"History");
+    if app.repository.is_some(){cells.extend([(branches.as_ref(),panels.branches,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleBranches)),(history.as_ref(),panels.history,lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleHistory))]);}
+    let files=app.icons.label(crate::icons::Icon::Folder,"Files");
     cells.push((files.as_ref(),app.navigator.shown(),lenz::catalog::Action::Layout(lenz::layout::LayoutCommand::ToggleFiles)));
     if app.layout.focused(app.repository.as_ref().map(|r|&r.core)) && let Some(r)=app.repository.as_ref().filter(|r|r.core.message_panel().is_some()) {
         cells.push((lenz::catalog::COMMIT_PANEL_LABEL,!r.core.message_collapsed(),lenz::catalog::Action::Repository(lenz::catalog::RepoAction::ToggleMessage)));

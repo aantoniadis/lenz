@@ -214,10 +214,32 @@ fn main() {
     if std::env::args().any(|a| a == "--version") {
         if env("FAKE_LSP_VERSION_FAIL").is_some() {
             eprintln!("fake-lsp: no toolchain");
+            if env("FAKE_LSP_VERSION_FAIL").as_deref() == Some("mise") {
+                eprintln!("mise ERROR No version is set for shim: rust-analyzer");
+                eprintln!("Set a default version: mise use -g rust@stable");
+            }
             std::process::exit(1);
         }
         println!("fake-lsp 1.0.0");
         return;
+    }
+    if let Some(mode) = env("FAKE_LSP_START_FAIL") {
+        eprintln!("mise ERROR No version is set for shim: pyright-langserver");
+        eprintln!("Set a global default version with one of following:");
+        eprintln!("mise use -g node@26.8.1");
+        if mode == "noisy" {
+            let mut stderr = std::io::stderr().lock();
+            let _ = stderr.write_all(b"\x1b[31m\x07");
+            let _ = stderr.write_all("\u{202e}".as_bytes());
+            for _ in 0..10_000 {
+                let _ = stderr.write_all("é𝄞".as_bytes());
+            }
+            let _ = stderr.write_all(b"END OF UNTERMINATED NOISE");
+        } else {
+            eprintln!("mise ERROR Version: 2026.10.1 linux-x64");
+            eprintln!("mise ERROR Run with --verbose or MISE_VERBOSE=1 for more information");
+        }
+        std::process::exit(3);
     }
     let log = env("FAKE_LSP_LOG").and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
     let encoding = env("FAKE_LSP_ENCODING");

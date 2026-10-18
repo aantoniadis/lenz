@@ -125,6 +125,9 @@ impl Project {
         }
     }
 
+    pub(crate) fn expanded(&self) -> Vec<String> { let mut dirs: Vec<_> = self.expanded.iter().map(|p| p.to_string()).collect(); dirs.sort(); dirs }
+    pub(crate) fn restore_expanded(&mut self, dirs: Vec<String>) { self.expanded = dirs.into_iter().map(Into::into).collect(); self.rebuild(); }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

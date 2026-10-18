@@ -5,7 +5,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, 
 use lenz::catalog::{self, Action, Availability, HelpAction, PrAction, RepoAction, Scope, Surface};
 use lenz::palette::{Outcome, Palette, PaletteCommand};
 use lenz::repository_session::RepositoryCommand as R;
-use ratatui::{layout::Rect, style::Modifier, widgets::{Block, Borders, Clear}};
+use ratatui::{layout::Rect, style::Modifier, widgets::Clear};
 use std::borrow::Cow;
 
 impl App {
@@ -217,7 +217,7 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
     if rect.width < 4 || rect.height < 3 { return; }
     let base = crate::chrome::style_with(palette);
     frame.render_widget(Clear, rect);
-    frame.render_widget(Block::default().borders(Borders::ALL).style(base), rect);
+    frame.render_widget(crate::chrome::pane("",palette,true).style(base), rect);
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     let buf = frame.buffer_mut();
     crate::visual::safe_text(buf, Rect { height: 1, ..inner }, &format!("Commands: {}▏", p.query()), base.fg(color(palette.accent)));

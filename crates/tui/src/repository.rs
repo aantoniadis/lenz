@@ -27,6 +27,7 @@ enum Prompt {
 }
 
 pub struct Repository {
+    pub(crate) icons:crate::icons::Icons,
     pub core: RepositorySession,
     pub quit: bool,
     prompt: Option<Prompt>,
@@ -58,6 +59,7 @@ pub struct Repository {
 impl Repository {
     pub fn open(request: Request, cwd: PathBuf) -> Self {
         Self {
+            icons:Default::default(),
             core: RepositorySession::open(&request, cwd),
             quit: false,
             prompt: None,
@@ -790,7 +792,7 @@ impl Repository {
                 frame.render_widget(Clear, sidebar);
                 frame.render_widget(
                     Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.sidebar_bg)))
-                        .block(Block::default().borders(Borders::ALL).title(title)),
+                        .block(crate::chrome::pane(self.icons.label(crate::icons::Icon::Branch,&title).into_owned(),palette,picker.focus==Pane::Sidebar)),
                     sidebar,
                 );
             }
@@ -879,7 +881,7 @@ impl Repository {
                 frame.render_widget(Clear, log);
                 frame.render_widget(
                     Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.sidebar_bg)))
-                        .block(Block::default().borders(Borders::ALL).title(title)),
+                        .block(crate::chrome::pane(self.icons.label(crate::icons::Icon::History,&title).into_owned(),palette,picker.focus==Pane::Log)),
                     log,
                 );
             }

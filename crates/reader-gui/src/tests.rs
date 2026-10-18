@@ -143,6 +143,68 @@ fn an_empty_window_renders_and_its_menu_explains_disabled_commands(cx: &mut Test
 }
 
 #[gpui::test]
+fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = f.dir.path();
+    let path = root.join("main.rs");
+    let source = "fn main() {}\n";
+    std::fs::write(&path, source).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname='status'\nversion='0.1.0'\n").unwrap();
+    f.view.update(cx, |r, cx| {
+        r.open_root(root.into(), cx);
+        r.open(path.clone(), cx);
+    });
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, reader_core::semantics::Status::Missing(_))));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.status_line()).starts_with("LSP unavailable"));
+    v.simulate_keystrokes("ctrl-a");
+    let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
+    v.simulate_click(point(px(20.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    let text = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>().join(""));
+    assert!(text.contains("was not found") && text.contains("rustup component add rust-analyzer") && text.contains("providers.json"), "{text}");
+    v.simulate_keystrokes("ctrl-a f5");
+    v.simulate_event(gpui::MouseDownEvent { button: MouseButton::Right, position: point(px(600.0), px(75.0)), modifiers: Modifiers::default(), click_count: 1, first_mouse: false });
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+    for (w, h) in [(180.0, 90.0), (1.0, 1.0), (800.0, 400.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        v.simulate_keystrokes("end up");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| !r.modal_lines().is_empty()));
+    }
+    let expected = f.view.read_with(&v, |r, _| r.session().language_server_rows().into_iter().filter_map(|(text, action)| action.is_none().then_some(text)).collect::<Vec<_>>().join("\n\n"));
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
+    assert!(expected.contains("was not found") && expected.contains("rustup component add rust-analyzer"));
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+    let activate = |v: &mut VisualTestContext, id: CommandId| {
+        v.simulate_keystrokes("home");
+        let at = f.view.read_with(v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(id)).unwrap());
+        for _ in 0..at { v.simulate_keystrokes("down"); }
+        v.simulate_keystrokes("enter");
+        assert!(f.view.read_with(v, |r, _| r.modal.is_none()));
+    };
+    activate(&mut v, CommandId::CopyServerDetails);
+    assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::DisableServer);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().language_server_label()), "LSP off");
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::EnableServer);
+    drop(v);
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, reader_core::semantics::Status::Missing(_))));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("f2");
+    activate(&mut v, CommandId::RestartServer);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));
@@ -174,12 +236,12 @@ fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAp
     v.simulate_mouse_up(point(px(x0 + 80.0), line_y(1.0)), MouseButton::Left, Modifiers::default());
     let dragged = f.view.read_with(&v, |v, _| v.session().state().selection().unwrap());
     assert!(dragged.anchor == 0 && dragged.head > "fn café() {}\r\n\t".len(), "past the tab on line 1: {dragged:?}");
-    // Keys and the wheel scroll; End then Up stays in range.
-    v.simulate_keystrokes("end up");
+    // End and the wheel scroll independently of the caret.
+    v.simulate_keystrokes("end");
     let (top, lines) = f.view.read_with(&v, |v, _| (v.session().state().top_line(), v.session().state().document().unwrap().line_count()));
-    assert_eq!(top, lines - 2);
+    assert_eq!(top, lines - 1);
     v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, 10.0)), ..Default::default() });
-    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), lines - 2 - 30);
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), lines - 1 - 30);
     v.simulate_keystrokes("ctrl-a ctrl-c");
     assert_eq!(v.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some(source.as_str()));
     // Narrow and tiny windows still render.
@@ -267,15 +329,17 @@ fn narrow_windows_cut_the_status_bar_and_wrap_menu_reasons_and_shift_keys_select
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(160.0), px(300.0)));
     draw(&mut v);
-    // The status bar: one row at the bottom, the notice first and the rest cut with "…".
+    // The status bar keeps the server status visible before notices, and cuts the rest with "…".
     let (line, cols, toolbar, text) = f.view.read_with(&v, |v, _| (v.status_line(), v.columns(v.width - 2.0 * STATUS_PAD), v.panes[0].bar.2, v.text_bounds.unwrap()));
-    assert!(line.starts_with("Encoding: windows"), "the notice comes first: {line:?}");
+    assert!(line.starts_with("LSP unsupported"), "server status stays visible: {line:?}");
     assert!(line.ends_with('…') && line.chars().count() == cols, "{line:?} in {cols} columns");
     assert_eq!(toolbar, 0.0, "the toolbar is the top row");
     assert!(f32::from(text.origin.y + text.size.height) <= 300.0 - status_h(), "the text ends above the status bar: {text:?}");
-    // A click on the status bar selects nothing, a shift-click included; nor does a right-click open a menu.
+    // The status control opens details without selecting text; right-click does not open a context menu.
     v.simulate_click(point(px(20.0), px(300.0 - status_h() / 2.0)), Modifiers::shift());
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().selection()), None);
+    assert!(f.view.read_with(&v, |v, _| matches!(v.modal, Some(Modal::LanguageServer { .. }))));
+    v.simulate_keystrokes("escape");
     let p = point(px(20.0), px(300.0 - status_h() / 2.0));
     v.simulate_event(gpui::MouseDownEvent { button: MouseButton::Right, position: p, modifiers: Modifiers::default(), click_count: 1, first_mouse: false });
     v.simulate_event(gpui::MouseUpEvent { button: MouseButton::Right, position: p, modifiers: Modifiers::default(), click_count: 1 });
@@ -342,16 +406,20 @@ fn the_tree_and_finder_open_files_by_mouse_and_keyboard(cx: &mut TestAppContext)
     // The finder: type, see results over the whole inventory, pick the second.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape ctrl-p m a i n");
-    settle(cx, &f, |v| v.session().state().project().unwrap().finder().is_some_and(|f| f.ready && f.query == "main"));
+    settle(cx, &f, |v| v.session().state().navigation().is_some_and(|f| !f.pending && f.query == "main"));
     let mut v = visual(cx, &f);
     let rows = f.view.read_with(&v, |v, _| v.modal_rows());
-    assert_eq!(rows[0].0, "› main");
-    assert_eq!(rows[1].0, "2 results over 5 files");
-    assert_eq!((rows[2].0.as_str(), rows[3].0.as_str()), ("src/main.rs", "src/ui/main.rs"));
+    assert_eq!(rows[1].0, "Search › main");
+    assert!(rows[0].0.contains("[Files]"));
+    assert!(rows[3].0.contains("main.rs") && rows[3].0.contains("src"));
+    assert!(rows[4].0.contains("main.rs") && rows[4].0.contains("src/ui"));
     v.simulate_keystrokes("backspace n");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "main"));
+    let mut v = visual(cx, &f);
     v.simulate_keystrokes("down enter");
     settle(cx, &f, |v| v.modal.is_none() && v.session().state().document().is_some_and(|d| d.source().ends_with("ui/main.rs")));
-    assert!(f.view.read_with(cx, |v, _| v.session().state().project().unwrap().finder().is_none()));
+    assert!(f.view.read_with(cx, |v, _| v.session().state().navigation().is_none()));
     assert_eq!(std::fs::read(root.join("src/main.rs")).unwrap(), b"src/main.rs");
 }
 
@@ -375,7 +443,7 @@ fn folders_open_through_the_command_menu_recent_list_and_narrow_windows(cx: &mut
     let recent = f.view.read_with(&v, |v, _| v.modal_rows());
     assert_eq!(recent.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), [root.display().to_string(), missing.display().to_string()]);
     v.simulate_keystrokes("escape f10 down down down enter");
-    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Finder { .. })), "Find File from the menu");
+    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { .. })), "Find File from the menu");
     v.simulate_keystrokes("escape");
     // Narrow: the tree hides until focused, then takes the width; Escape gives the text back.
     v.simulate_resize(size(px(300.0), px(200.0)));
@@ -407,8 +475,8 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     draw(&mut v);
     // Clicking outside the finder closes it in the core too: later batches start no ranking.
     v.simulate_keystrokes("ctrl-p f");
-    v.simulate_click(point(px(600.0), px(250.0)), Modifiers::default());
-    assert!(f.view.read_with(&v, |v, _| v.modal.is_none() && v.session().state().project().unwrap().finder().is_none()));
+    v.simulate_click(point(px(2.0), px(2.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |v, _| v.modal.is_none() && v.session().state().navigation().is_none()));
     // The wheel scrolls the tree, and a repaint keeps that scroll.
     v.simulate_event(ScrollWheelEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Lines(point(0.0, -5.0)), ..Default::default() });
     draw(&mut v);
@@ -429,10 +497,10 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     // A short finder: End then Up stays within the results.
     v.simulate_keystrokes("escape ctrl-p f 0 1");
     drop(v);
-    settle(cx, &f, |v| v.session().state().project().unwrap().finder().is_some_and(|f| f.ready && f.query == "f01"));
+    settle(cx, &f, |v| v.session().state().navigation().is_some_and(|f| !f.pending && f.query == "f01"));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("end up up up");
-    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Finder { at: 0, .. })));
+    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { at: 0, .. })));
     v.simulate_keystrokes("end enter");
     drop(v);
     settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("f01.rs")));
@@ -584,7 +652,9 @@ fn a_new_window_has_its_own_session(cx: &mut TestAppContext) {
     settle(cx, &f, active_is("one.txt"));
     let before = cx.update(|cx| cx.windows().len());
     let mut v = visual(cx, &f);
-    v.simulate_keystrokes("ctrl-shift-n");
+    v.simulate_keystrokes("f10");
+    for _ in 0..CommandId::ALL.iter().position(|id| *id == CommandId::NewWindow).unwrap() { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
     drop(v);
     cx.run_until_parked();
     let windows = cx.update(|cx| cx.windows());
@@ -2010,7 +2080,8 @@ fn the_explorer_hides_by_its_button_and_selects_the_opened_file_by_its_target(cx
     click_toolbar(&mut v, &f, CommandId::ToggleExplorer);
     draw(&mut v);
     let (sidebar, first) = f.view.read_with(&v, |r, _| (r.sidebar_w, r.nav_buttons()[0].0));
-    assert_eq!((sidebar, first), (0.0, 4.0));
+    assert_eq!(sidebar, 0.0);
+    assert_eq!(first, f.view.read_with(&v, |r, _| f32::from(r.app_menu_button().right()) + 4.0));
     assert!(f.view.read_with(&v, |r, _| r.explorer_buttons().is_empty()));
     click_toolbar(&mut v, &f, CommandId::ToggleExplorer);
     draw(&mut v);
@@ -2433,8 +2504,8 @@ fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     v.simulate_keystrokes("ctrl-shift--");
     draw(&mut v);
     assert_eq!(numbers(&mut v), vec![1, 6, 9]);
-    // Down scrolls by shown rows.
-    v.simulate_keystrokes("down");
+    // The wheel scrolls by shown rows.
+    v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, -1.0 / 3.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), 5);
     v.simulate_keystrokes("ctrl-shift-=");
     draw(&mut v);
@@ -2962,7 +3033,7 @@ fn bookmark_keys_reach_their_commands(cx: &mut TestAppContext) {
     settle(cx, &f, active_is("b.rs"));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-e");
-    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Places { list: PlaceList::RecentFiles, .. })));
+    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { .. })));
     v.simulate_keystrokes("escape ctrl-alt-e");
     assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Places { list: PlaceList::RecentLocations, .. })));
 }
@@ -3063,6 +3134,22 @@ fn recent_files_switch_back_with_enter(cx: &mut TestAppContext) {
     v.simulate_keystrokes("ctrl-e enter");
     drop(v);
     settle(cx, &f, active_is("a.rs"));
+}
+
+#[gpui::test]
+fn recent_files_preserve_retained_tab_reading_position(cx: &mut TestAppContext) {
+    let (f, mut v, root) = bookmarks_fixture(cx);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::OpenRetained(root.join("a.rs")), cx));
+    caret_to(&f, &mut v, 3);
+    f.view.update(&mut v, |r, cx| r.open(root.join("b.rs"), cx));
+    drop(v);
+    settle(cx, &f, active_is("b.rs"));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-e enter");
+    drop(v);
+    settle(cx, &f, active_is("a.rs"));
+    let v = visual(cx, &f);
+    assert_eq!(caret_line(&f, &v), 3);
 }
 
 #[gpui::test]
@@ -3368,16 +3455,15 @@ fn a_click_in_a_scrolled_finder_opens_the_clicked_file(cx: &mut TestAppContext) 
     v.simulate_resize(size(px(700.0), px(300.0)));
     v.simulate_keystrokes("ctrl-p f");
     drop(v);
-    settle(cx, &f, |v| v.session().state().project().unwrap().finder().is_some_and(|f| f.ready && f.query == "f"));
+    settle(cx, &f, |v| v.session().state().navigation().is_some_and(|f| !f.pending && f.query == "f"));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("end");
     draw(&mut v);
     // Scrolled: the clicked row is the one drawn there, not the one the unscrolled layout would put there.
-    let (first, row) = f.view.read_with(&v, |r, _| { let l = r.modal_layout().unwrap(); (l.first, l.lines[l.first + 1].0) });
+    let first = f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1);
     assert!(first > 0, "the finder is scrolled");
-    let want = f.view.read_with(&v, |r, _| r.modal_rows()[row].0.clone());
-    let name = want.split_whitespace().find(|w| w.ends_with(".rs")).unwrap().to_string();
-    click_modal_row(&f, &mut v, row);
+    let name = f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows[first].label.clone());
+    click_navigation_row(&f, &mut v, first);
     drop(v);
     settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with(name.as_str())));
 }
@@ -3403,11 +3489,13 @@ fn clicks_pick_places_and_found_files_and_their_header_rows_do_nothing(cx: &mut 
     // The finder: its query row does nothing, a result opens.
     v.simulate_keystrokes("ctrl-p b");
     drop(v);
-    settle(cx, &f, |v| v.session().state().project().unwrap().finder().is_some_and(|f| f.ready && f.query == "b" && !f.hits.is_empty()));
+    settle(cx, &f, |v| v.session().state().navigation().is_some_and(|f| !f.pending && f.query == "b" && !f.rows.is_empty()));
     let mut v = visual(cx, &f);
-    click_modal_row(&f, &mut v, 0);
-    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Finder { .. })), "the query row does nothing");
-    click_modal_row(&f, &mut v, FINDER_HEADER_ROWS);
+    draw(&mut v);
+    let input = f.view.read_with(&v, |r, _| { let b = r.navigation_bounds(); point(b.center().x, b.origin.y + px(4.0 + line_h() * 1.5)) });
+    v.simulate_click(input, Modifiers::default());
+    assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { .. })), "the query row does nothing");
+    click_navigation_row(&f, &mut v, 0);
     drop(v);
     settle(cx, &f, active_is("b.rs"));
     assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "0\n1\n2\n3\n4\n5\n");
@@ -3846,7 +3934,7 @@ fn hidden_files_and_folders_are_greyed_out_in_the_tree(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn overflowing_context_menu_keeps_keyboard_and_wheel_selection_visible(cx: &mut TestAppContext) {
+fn overflowing_context_menu_wheel_moves_viewport_and_keeps_keyboard_selection(cx: &mut TestAppContext) {
     let bytes = b"ordinary source\nsecond line\n";
     let f = fixture(cx, Some(("small.txt", bytes)));
     settle(cx, &f, active_is("small.txt"));
@@ -3870,24 +3958,593 @@ fn overflowing_context_menu_keeps_keyboard_and_wheel_selection_visible(cx: &mut 
         assert!(rows[*at].0 >= f32::from(bounds.origin.y));
         assert!(rows[*at].0 + rows[*at].1 <= f32::from(bounds.bottom()));
     });
+    let selected = f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at());
+    let old_scroll = f.view.read_with(&v, |r, _| match r.modal { Some(Modal::Context { scroll, .. }) => scroll, _ => unreachable!() });
     let before = f.view.read_with(&v, |r, _| r.session.state().top_line());
     v.simulate_event(gpui::ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Lines(point(0.0, 3.0)),
         modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved });
     draw(&mut v);
     f.view.read_with(&v, |r, _| {
         assert_eq!(r.session.state().top_line(), before);
-        let Modal::Context { at, .. } = r.modal.as_ref().unwrap() else { panic!("menu closed") };
-        let (bounds, rows) = r.context_layout().unwrap();
-        assert!(rows[*at].0 >= f32::from(bounds.origin.y));
-        assert!(rows[*at].0 + rows[*at].1 <= f32::from(bounds.bottom()));
+        let Modal::Context { at, scroll, .. } = r.modal.as_ref().unwrap() else { panic!("menu closed") };
+        assert_eq!(*at, selected, "the wheel keeps the selected command");
+        assert!(*scroll < old_scroll, "the viewport moves toward the start");
     });
-    let selected = f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at());
+    let old_scroll = f.view.read_with(&v, |r, _| match r.modal { Some(Modal::Context { scroll, .. }) => scroll, _ => unreachable!() });
     for _ in 0..30 {
         v.simulate_event(gpui::ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(2.0))),
             modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved });
     }
-    assert!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()) < selected, "small trackpad deltas accumulate");
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected);
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Context { scroll, .. }) if scroll < old_scroll)), "small trackpad deltas move the viewport");
+    v.simulate_keystrokes("up");
+    draw(&mut v);
+    f.view.read_with(&v, |r, _| {
+        let at = r.modal.as_ref().unwrap().at();
+        let (b, rows) = r.context_layout().unwrap();
+        assert!(rows[at].0 >= f32::from(b.origin.y) && rows[at].0 + rows[at].1 <= f32::from(b.bottom()));
+    });
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
     assert_eq!(std::fs::read(f.dir.path().join("small.txt")).unwrap(), bytes);
+}
+
+#[gpui::test]
+#[cfg(unix)]
+fn server_runtime_dialog_validates_saves_and_preserves_the_document(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let source = "class Main {}\n";
+    let f = fixture(cx, Some(("Main.java", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let java = f.dir.path().join("java with spaces");
+    std::fs::write(&java, "#!/bin/sh\ntest \"$1\" = -version\n").unwrap();
+    std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let settings = f.dir.path().join("config/lenz-reader/providers.json");
+    let original = std::fs::read(&settings).unwrap();
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    v.simulate_keystrokes("ctrl-a f2");
+    let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
+    let at = f.view.read_with(&v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(CommandId::ServerRuntime)).unwrap());
+    for _ in 0..at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::ServerRuntime { .. }))));
+    v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("/nonexistent/java".into())));
+    v.simulate_keystrokes("ctrl-v enter");
+    drop(v);
+    settle(cx, &f, |r| r.session().state().server_runtime().unwrap().message.contains("not changed"));
+    assert_eq!(std::fs::read(&settings).unwrap(), original);
+    let mut v = visual(cx, &f);
+    for (w, h) in [(180.0, 90.0), (1.0, 1.0), (800.0, 400.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        v.simulate_keystrokes("end up");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| !r.modal_lines().is_empty()));
+    }
+    v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(java.to_str().unwrap().into())));
+    v.simulate_keystrokes("ctrl-a ctrl-v enter");
+    drop(v);
+    settle(cx, &f, |r| r.session().state().server_runtime().unwrap().message.contains("saved."));
+    let mut v = visual(cx, &f);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().server_runtime().unwrap().configured.clone()), Some(java.clone()));
+    v.simulate_keystrokes("f5 escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().server_runtime().is_none()));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(settings).unwrap()).unwrap();
+    assert_eq!(saved["providers"]["jdtls"]["args"], serde_json::json!([format!("--java-executable={}",java.display())]));
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("Main.java")).unwrap(), source);
+}
+
+#[gpui::test]
+fn app_menu_groups_existing_actions_and_keeps_clicks_modal(cx: &mut TestAppContext) {
+    let source = b"first\nsecond\n";
+    let f = fixture(cx, Some(("note.txt", source)));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    let menu = f.view.read_with(&v, |r, _| point(px(r.sidebar_w + 4.0 + line_h() / 2.0), px(line_h() / 2.0)));
+    v.simulate_click(menu, Modifiers::default());
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows()[0].0.clone()), "File ›");
+    v.simulate_keystrokes("down enter"); // View
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(label, _)| label == "Soft Wrap (off)")));
+    v.simulate_keystrokes("enter"); // Soft Wrap
+    assert!(f.view.read_with(&v, |r, _| r.session().state().soft_wrap()));
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    v.simulate_click(menu, Modifiers::default());
+    v.simulate_keystrokes("ctrl-a ctrl-c ctrl-w");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().selection().is_none()));
+    v.simulate_click(point(px(600.0), px(200.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().selection().is_none()));
+    assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), source);
+}
+
+#[gpui::test]
+fn footer_commands_opens_catalog_while_left_status_keeps_server_details(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    v.simulate_click(point(px(860.0), px(490.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|s| !s.pending));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope), reader_core::navigation::Scope::Actions);
+    v.simulate_keystrokes("escape");
+    v.simulate_click(point(px(20.0), px(490.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+}
+
+#[gpui::test]
+fn menu_groups_support_pointer_back_disabled_actions_and_tiny_appearances(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    let click_row = |v: &mut VisualTestContext, label: &str| {
+        draw(v);
+        let point = f.view.read_with(v, |r, _| {
+            let l = r.modal_layout().unwrap();
+            let n = l.lines.iter().enumerate().skip(l.first).take(l.visible).find(|(_, (_, text, _))| text.starts_with(label)).unwrap().0;
+            point(l.bounds.origin.x + px(16.0), l.bounds.origin.y + px(4.0 + (n - l.first) as f32 * line_h() + line_h() / 2.0))
+        });
+        v.simulate_click(point, Modifiers::default());
+    };
+    for dark in [true, false] {
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(if dark { "darcula" } else { "github-light" }).unwrap())), cx));
+        v.simulate_resize(size(px(800.0), px(500.0)));
+        draw(&mut v);
+        let button = f.view.read_with(&v, |r, _| r.app_menu_button().center());
+        v.simulate_click(button, Modifiers::default());
+        click_row(&mut v, "File");
+        assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, why)| s == "Reload" && *why == Some("No file is open"))));
+        click_row(&mut v, "‹ All menus");
+        click_row(&mut v, "Language Servers");
+        assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s == CommandId::LanguageServer.label())));
+        v.simulate_keystrokes("escape end enter");
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
+        v.simulate_keystrokes("escape");
+        for (w, h) in [(180.0, 90.0), (120.0, 40.0), (1.0, 1.0)] {
+            v.simulate_resize(size(px(w), px(h)));
+            draw(&mut v);
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::AppMenu { at: 0 }); cx.notify(); });
+            v.simulate_keystrokes("end up right end up");
+            draw(&mut v);
+            assert!(f.view.read_with(&v, |r, _| r.modal_layout().is_some_and(|l| !l.lines.is_empty() && l.first < l.lines.len())));
+            v.simulate_keystrokes("escape escape");
+            assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+        }
+    }
+}
+
+#[gpui::test]
+fn app_menu_wheel_reveals_long_groups_without_scrolling_the_document(cx: &mut TestAppContext) {
+    let source = "reader line\n".repeat(100);
+    let f = fixture(cx, Some(("note.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(180.0), px(90.0)));
+    draw(&mut v);
+    v.simulate_click(point(px(12.0), px(10.0)), Modifiers::default());
+    v.simulate_keystrokes("down enter");
+    draw(&mut v);
+    let selected = f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at());
+    v.simulate_event(ScrollWheelEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at() == selected && r.modal_layout().unwrap().first > 0));
+    v.simulate_event(ScrollWheelEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at() == selected));
+    v.simulate_keystrokes("escape escape");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().top_line() == 0 && r.modal.is_none()));
+    assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), source.as_bytes());
+}
+
+/// Click a unified search result using the geometry and revision from its last frame.
+fn click_navigation_row(f: &Fixture, v: &mut VisualTestContext, row: usize) {
+    draw(v);
+    let p = f.view.read_with(v, |r, _| {
+        let (_, first, visible) = r.navigation_drawn.unwrap();
+        assert!((first..first + visible).contains(&row));
+        let b = r.navigation_bounds();
+        point(b.center().x, b.origin.y + px(4.0 + (3.0 + (row - first) as f32 * 2.0 + 0.5) * line_h()))
+    });
+    v.simulate_click(p, Modifiers::default());
+}
+
+#[gpui::test]
+fn unified_search_switches_categories_preserving_query_and_runs_actions(cx: &mut TestAppContext) {
+    use reader_core::navigation::Scope;
+    let source = b"fn sample() {}\n";
+    let f = fixture(cx, Some(("main.rs", source)));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    v.simulate_keystrokes("ctrl-k s o f t");
+    assert_eq!(f.view.read_with(&v, |r, _| { let n = r.session.state().navigation().unwrap(); (n.scope, n.query.clone()) }), (Scope::All, "soft".to_string()));
+    for (keys, scope) in [("ctrl-p", Scope::Files), ("ctrl-shift-n", Scope::Files), ("ctrl-alt-shift-n", Scope::Symbols), ("ctrl-shift-p", Scope::Actions), ("ctrl-shift-a", Scope::Actions), ("ctrl-k", Scope::All)] {
+        v.simulate_keystrokes(keys);
+        assert_eq!(f.view.read_with(&v, |r, _| { let n = r.session.state().navigation().unwrap(); (n.scope, n.query.clone()) }), (scope, "soft".to_string()), "{keys} preserves the query");
+    }
+    v.simulate_keystrokes("tab tab tab");
+    assert_eq!(f.view.read_with(&v, |r, _| { let n = r.session.state().navigation().unwrap(); (n.scope, n.query.clone()) }), (Scope::Actions, "soft".to_string()));
+    v.simulate_keystrokes("shift-tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope), Scope::Symbols);
+    v.simulate_keystrokes("tab");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.iter().any(|r| r.label == "Soft Wrap")));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows());
+    assert!(rows.iter().any(|(r, _)| r.contains("Soft Wrap (off)")));
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session.state().soft_wrap()));
+    v.simulate_keystrokes("ctrl-shift-a ctrl-a s o f t");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && !n.rows.is_empty()));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    click_navigation_row(&f, &mut v, 0);
+    assert!(!f.view.read_with(&v, |r, _| r.session.state().soft_wrap()));
+    assert_eq!(std::fs::read(f.dir.path().join("main.rs")).unwrap(), source);
+}
+
+#[gpui::test]
+fn unified_search_opens_syntactic_symbols_without_a_language_server_and_file_positions(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["src/main.rs"]);
+    let source = "fn first() {}\n\nfn navigate_target() {}\n";
+    std::fs::write(root.join("src/main.rs"), source).unwrap();
+    f.view.update(cx, |r, cx| r.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-alt-shift-n n a v i g a t e");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.iter().any(|r| r.label.contains("navigate_target"))));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s.to_lowercase().contains("syntactic"))));
+    v.simulate_keystrokes("enter");
+    drop(v);
+    settle(cx, &f, |r| r.modal.is_none() && r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    assert_eq!(caret_line(&f, &v), 2);
+    v.simulate_keystrokes("ctrl-shift-n m a i n : 2 : 1");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && !n.rows.is_empty()));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("enter");
+    drop(v);
+    settle(cx, &f, |r| r.modal.is_none() && r.session.state().selection().is_some_and(|s| s.head == source.find('\n').unwrap() + 1));
+    assert_eq!(std::fs::read_to_string(root.join("src/main.rs")).unwrap(), source);
+}
+
+#[gpui::test]
+fn double_shift_opens_unified_search_but_typing_and_other_modals_interrupt_it(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("note.txt", b"first\nsecond\n")));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.update(|w, _| w.activate_window());
+    let shift = Modifiers { shift: true, ..Default::default() };
+    for _ in 0..2 { v.simulate_modifiers_change(shift); v.simulate_modifiers_change(Modifiers::default()); }
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
+    v.simulate_keystrokes("escape");
+    v.simulate_modifiers_change(shift);
+    v.simulate_modifiers_change(Modifiers::default());
+    v.deactivate_window();
+    v.update(|w, _| w.activate_window());
+    v.simulate_modifiers_change(shift);
+    v.simulate_modifiers_change(Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "a tap before focus loss does not count");
+    v.simulate_modifiers_change(shift);
+    v.simulate_keystrokes("shift-right");
+    v.simulate_modifiers_change(Modifiers::default());
+    v.simulate_modifiers_change(shift);
+    v.simulate_modifiers_change(Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    v.simulate_keystrokes("f10");
+    for _ in 0..2 { v.simulate_modifiers_change(shift); v.simulate_modifiers_change(Modifiers::default()); }
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Commands { .. }))));
+    v.simulate_keystrokes("escape ctrl-k");
+    let before = f.view.read_with(&v, |r, _| r.session.state().selection());
+    v.simulate_keystrokes("ctrl-a ctrl-w ctrl-s ctrl-f4 shift-right");
+    draw(&mut v);
+    v.simulate_click(point(px(5.0), px(100.0)), Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), before);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().tabs().len()), 1);
+    assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), b"first\nsecond\n");
+}
+
+#[gpui::test]
+fn unified_search_empty_constructor_paste_tabs_resize_and_appearances(cx: &mut TestAppContext) {
+    use reader_core::navigation::Scope;
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-p");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope), Scope::Files);
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s.contains("Open a folder"))));
+    v.simulate_keystrokes("escape");
+    for dark in [true, false] {
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(if dark { "darcula" } else { "github-light" }).unwrap())), cx));
+        for (w, h) in [(900.0, 500.0), (180.0, 90.0), (1.0, 1.0)] {
+            v.simulate_resize(size(px(w), px(h)));
+            v.simulate_keystrokes("ctrl-k end up pageup pagedown home");
+            draw(&mut v);
+            let (bounds, at, n) = f.view.read_with(&v, |r, _| (r.navigation_bounds(), r.modal.as_ref().unwrap().at(), r.session.state().navigation().unwrap().rows.len()));
+            assert!(f32::from(bounds.size.width) <= w && f32::from(bounds.size.height) <= h);
+            assert!(at <= n.saturating_sub(1));
+            v.simulate_keystrokes("escape");
+        }
+    }
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("Soft Wrap".into())));
+    v.simulate_keystrokes("ctrl-shift-p ctrl-v");
+    draw(&mut v);
+    let b = f.view.read_with(&v, |r, _| r.navigation_bounds());
+    v.simulate_click(point(b.origin.x + b.size.width / 8.0, b.origin.y + px(10.0)), Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| { let n = r.session.state().navigation().unwrap(); (n.scope, n.query.clone()) }), (Scope::All, "Soft Wrap".to_string()));
+    v.simulate_keystrokes("ctrl-a");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().query.is_empty()));
+    let long_query = format!("{}終端", "Été/".repeat(40));
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(long_query.clone())));
+    v.simulate_keystrokes("ctrl-v");
+    for (w, h) in [(180.0, 90.0), (1.0, 1.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().query.clone()), long_query);
+    }
+    v.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn unified_search_rejects_stale_mouse_rows_and_disabled_actions(cx: &mut TestAppContext) {
+    use reader_core::navigation::Scope;
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    v.simulate_keystrokes("ctrl-shift-a s o f t");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && !n.rows.is_empty()));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let (revision, p) = f.view.read_with(&v, |r, _| {
+        let b = r.navigation_bounds();
+        (r.navigation_drawn.unwrap().0, point(b.center().x, b.origin.y + px(4.0 + line_h() * 3.5)))
+    });
+    // A replacement snapshot arrives between paint and mouse-down. Its row zero is not the row drawn there.
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SearchEverywhere { scope: Scope::Actions, query: "Sticky Scroll".into() }, cx));
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.revision != revision));
+    let mut v = visual(cx, &f);
+    // Keep the previous painted hit identity while delivering a real GPUI mouse event.
+    f.view.update(&mut v, |r, _| r.navigation_drawn = Some((revision, 0, 1)));
+    v.simulate_event(MouseDownEvent { position: p, button: MouseButton::Left, ..Default::default() });
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. })) && !r.session.state().soft_wrap()));
+    v.simulate_keystrokes("ctrl-a r e l o a d");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "reload"));
+    let mut v = visual(cx, &f);
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, why)| s.contains("Reload") && *why == Some("No file is open"))));
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
+    v.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn navigation_wheel_keeps_enter_target_and_accumulates_trackpad_scroll(cx: &mut TestAppContext) {
+    let bytes = b"reader bytes\n";
+    let f = fixture(cx, Some(("note.txt", bytes)));
+    settle(cx, &f, active_is("note.txt"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(700.0), px(260.0)));
+    v.simulate_keystrokes("ctrl-shift-a");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.len() > 10));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let selected = f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows.iter().position(|row| row.label == "Soft Wrap").unwrap());
+    for _ in 0..selected { v.simulate_keystrokes("down"); }
+    draw(&mut v);
+    let first = f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1);
+    let position = f.view.read_with(&v, |r, _| r.navigation_bounds().center());
+    for _ in 0..30 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-2.0))), ..Default::default() });
+    }
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected);
+    assert!(f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1 > first), "small trackpad events accumulate");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().top_line()), 0);
+    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1 > selected), "the selected command is offscreen");
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session.state().soft_wrap()), "Enter runs the original selected action offscreen");
+    assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), bytes);
+}
+
+#[gpui::test]
+fn plain_arrows_move_unicode_caret_and_reveal_without_editing(cx: &mut TestAppContext) {
+    let text = format!("é🙂{}\nsecond\n{}", "x".repeat(200), "line\n".repeat(60));
+    let f = fixture(cx, Some(("arrows.txt", text.as_bytes())));
+    settle(cx, &f, active_is("arrows.txt"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(360.0), px(240.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("right");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), Some(Selection { anchor: 2, head: 2 }));
+    v.simulate_keystrokes("right");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), Some(Selection { anchor: 6, head: 6 }));
+    v.simulate_keystrokes("left shift-right");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), Some(Selection { anchor: 2, head: 6 }));
+    v.simulate_keystrokes("left");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), Some(Selection { anchor: 2, head: 2 }));
+    for _ in 0..100 { v.simulate_keystrokes("right"); }
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().column() > 0), "horizontal motion reveals the caret");
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.caret.is_some())));
+    for _ in 0..25 { v.simulate_keystrokes("down"); }
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().top_line() > 0), "vertical motion reveals the caret");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().selection().is_some_and(|s| s.anchor == s.head)));
+    let line = caret_line(&f, &v);
+    v.simulate_keystrokes("up");
+    assert_eq!(caret_line(&f, &v), line - 1);
+    let selected = f.view.read_with(&v, |r, _| r.session.state().selection());
+    v.simulate_keystrokes("f10 down right up left escape");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), selected, "modal navigation leaves text alone");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("arrows.txt")).unwrap(), text);
+}
+
+#[gpui::test]
+fn plain_arrows_follow_wrapped_and_folded_visible_rows(cx: &mut TestAppContext) {
+    let text = format!("fn folded() {{\n{}\n}}\nfn next() {{}}\n", "    word word word word word word word word word word;\n".repeat(30));
+    let f = fixture(cx, Some(("folded.rs", text.as_bytes())));
+    settle(cx, &f, |r| r.session.state().active().is_some_and(|t| t.fold_at(0).is_some()));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(360.0), px(240.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("right ctrl-shift-- down");
+    assert_eq!(caret_line(&f, &v), 33, "Down skips the collapsed function");
+    v.simulate_keystrokes("up");
+    assert_eq!(caret_line(&f, &v), 0);
+    v.simulate_keystrokes("ctrl-shift-= alt-z");
+    draw(&mut v);
+    for _ in 0..25 { v.simulate_keystrokes("down"); draw(&mut v); }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.caret.is_some())), "wrapped motion keeps its caret shown");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().selection().is_some_and(|s| s.anchor == s.head)));
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("folded.rs")).unwrap(), text);
+}
+
+#[gpui::test]
+fn recent_files_use_search_presentation_filter_delete_and_keep_query_between_modes(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["nested/Été.rs", "other/plain.rs", "not-visited.rs"]);
+    f.view.update(cx, |r, cx| r.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    for name in ["nested/Été.rs", "other/plain.rs"] {
+        f.view.update(cx, |r, cx| r.open(root.join(name), cx));
+        settle(cx, &f, active_is(name));
+    }
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(500.0)));
+    v.simulate_keystrokes("ctrl-e");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows()[0].0.clone()), "Recent Files");
+    f.view.read_with(&v, |r, _| {
+        let n = r.session.state().navigation().unwrap();
+        assert_eq!(n.scope.label(), "Recent Files");
+        assert_eq!(n.rows[0].label, "Été.rs");
+        assert!(n.rows[0].detail.contains("nested/Été.rs"));
+        assert_eq!(n.rows[1].label, "plain.rs");
+        assert!(!n.rows.iter().any(|row| row.label == "not-visited.rs"));
+    });
+    v.simulate_keystrokes("tab shift-tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope.label()), "Recent Files");
+    v.simulate_keystrokes("é r"); // subsequence in Été.rs; a substring-only filter would fail
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "ér"));
+    let mut v = visual(cx, &f);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows.len()), 1);
+    for keys in ["ctrl-p", "ctrl-e", "ctrl-shift-a", "ctrl-e"] {
+        v.simulate_keystrokes(keys);
+        assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().query.clone()), "ér");
+    }
+    v.simulate_keystrokes("backspace");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "é"));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.simulate_keystrokes("delete");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.is_empty()));
+    assert!(!f.view.read_with(cx, |r, _| r.session.state().places().recent_files().iter().any(|file| file.ends_with("Été.rs"))));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-a");
+    for dark in [true, false] {
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(if dark { "darcula" } else { "github-light" }).unwrap())), cx));
+        for (w, h) in [(800.0, 500.0), (180.0, 90.0), (1.0, 1.0)] {
+            v.simulate_resize(size(px(w), px(h)));
+            v.simulate_keystrokes("end up");
+            draw(&mut v);
+            let b = f.view.read_with(&v, |r, _| r.navigation_bounds());
+            assert!(f32::from(b.size.width) <= w && f32::from(b.size.height) <= h);
+        }
+    }
+    v.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn wheel_scrolls_theme_place_and_server_dialogs_without_selecting(cx: &mut TestAppContext) {
+    let text = "class Main {}\n".repeat(40);
+    let f = fixture(cx, Some(("Main.java", text.as_bytes())));
+    settle(cx, &f, active_is("Main.java"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(180.0), px(90.0)));
+    draw(&mut v);
+    for line in 0..20 {
+        caret_to(&f, &mut v, line);
+        v.simulate_keystrokes("f11");
+    }
+    let selection = f.view.read_with(&v, |r, _| r.session.state().selection());
+    for id in [CommandId::ChooseTheme, CommandId::ShowBookmarks, CommandId::LanguageServer, CommandId::ServerRuntime] {
+        f.view.update_in(&mut v, |r, w, cx| r.run(id, w, cx));
+        draw(&mut v);
+        let (selected, first) = f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.modal_layout().unwrap().first));
+        v.simulate_event(ScrollWheelEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        draw(&mut v);
+        assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected, "{id:?} keeps its selected option");
+        assert!(f.view.read_with(&v, |r, _| r.modal_layout().unwrap().first > first), "{id:?} scrolls its content");
+        assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection()), selection);
+        v.simulate_keystrokes("home");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| {
+            let l = r.modal_layout().unwrap();
+            l.lines.iter().skip(l.first).take(l.visible).any(|(row, ..)| *row == r.modal.as_ref().unwrap().at())
+        }), "keyboard navigation reveals the first option");
+        v.simulate_event(ScrollWheelEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        v.simulate_keystrokes("escape");
+        f.view.update_in(&mut v, |r, w, cx| r.run(id, w, cx));
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| {
+            let l = r.modal_layout().unwrap();
+            l.lines.iter().skip(l.first).take(l.visible).any(|(row, ..)| *row == r.modal.as_ref().unwrap().at())
+        }), "reopening {id:?} reveals its selected option");
+        v.simulate_keystrokes("escape");
+    }
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("Main.java")).unwrap(), text);
+}
+
+#[gpui::test]
+fn recent_files_missing_rows_stay_disabled_and_delete_uses_drawn_revision(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["old.rs", "current.rs"]);
+    for name in ["old.rs", "current.rs"] {
+        f.view.update(cx, |r, cx| r.open(root.join(name), cx));
+        settle(cx, &f, active_is(name));
+    }
+    std::fs::remove_file(root.join("old.rs")).unwrap();
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-e");
+    drop(v);
+    settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows[0].disabled.is_some()));
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_some() && active_is("current.rs")(r)), "a missing row cannot be opened");
+    f.view.update(&mut v, |r, _| {
+        let (revision, first, visible) = r.navigation_drawn.unwrap();
+        r.navigation_drawn = Some((revision.wrapping_sub(1), first, visible));
+    });
+    v.simulate_keystrokes("delete");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().places().recent_files().iter().any(|path| path.ends_with("old.rs"))), "stale displayed rows cannot delete current history");
+    draw(&mut v);
+    v.simulate_keystrokes("delete");
+    assert!(!f.view.read_with(&v, |r, _| r.session.state().places().recent_files().iter().any(|path| path.ends_with("old.rs"))));
+    v.simulate_keystrokes("escape");
+    assert_eq!(std::fs::read_to_string(root.join("current.rs")).unwrap(), "current.rs");
 }

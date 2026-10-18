@@ -1,5 +1,7 @@
 # Terminal reader
 
+![Terminal reader with Nerd Font icons, explorer and focused reading tab](../images/reader-tui.png)
+
 Lenz Code's terminal reader presents the same `reader-core` session as the GUI. In the
 [command-family trial](../launcher-trial.md), use `lenz --tui path/to/file.rs` or the `lenz-code-tui` alias.
 Build the adapter separately so its executable
@@ -16,17 +18,23 @@ work without a terminal; ordinary reading needs an interactive terminal on stdin
 path beginning with a dash. Opening a file alone does not enumerate its parent; Open Folder starts project
 browsing and project search.
 
+Reopening a directory restores its saved tabs, active file, caret and scroll positions, split panes and explorer
+state through the same core as the GUI. Switching directories saves and replaces the workspace; closing a view
+or quitting saves it too. Files load lazily and missing files are skipped. See [workspace persistence](README.md)
+for limits and concurrent-window behavior.
+
 ## Controls
 
-F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all 82 shared
+F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all 88 shared
 commands, their setting states and disabled reasons, including provider controls and features without a terminal
-shortcut. F1 opens wrapped, scrollable help; F2 shows full notices. Esc dismisses a modal before underlying
+shortcut. F1 opens wrapped, scrollable help; F2 shows full notices and language-server status. Esc dismisses a modal before underlying
 controls can receive input. View switching with F8 and quitting remain global through modals. Ctrl-Q closes the current independent view; F8 and Shift-F8 switch views. New Window
 in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views in terminals that report it.
 
 | Operation | Control |
 | --- | --- |
-| Open file / find project file / go to line | Ctrl-O / Ctrl-P / Ctrl-G |
+| Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
+| Open file / go to line | Ctrl-O / Ctrl-G |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
@@ -34,7 +42,8 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
 | Focus tree, reading area and results | Tab / Shift-Tab; click a pane |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
-| Scroll text | Arrows, j/k, PageUp/PageDown, Home/End; wheel |
+| Move text cursor | Up/Down/Left/Right (Shift extends selection) |
+| Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
 | Select / copy | Click or drag, Shift-arrows, Ctrl-A / Ctrl-C |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
@@ -51,6 +60,43 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Type definition / implementations | Ctrl-Shift-B / Ctrl-Alt-B |
 | Call / type hierarchy | Ctrl-Alt-H / Ctrl-H |
 
+**Search Everywhere** has the same All / Files / Symbols / Actions scopes as the GUI. Type to fuzzy-match,
+Tab / Shift+Tab changes scope while keeping the query, arrows/Page/Home/End select, Enter opens/runs and Esc
+closes. Scope tabs and rows are clickable when they fit; narrow windows show the current scope and keep Tab
+cycling. Results show their kind, path or action group, setting value, shortcut and disabled reason; only visible
+rows are formatted. Long Unicode queries keep their typed tail and caret in view. Empty queries favor recent
+files; file searches retain `name:line[:column]`. The shared core caps results at 100 and rejects stale replies
+and clicks. Symbol search uses the project declaration index without requiring an LSP and reports its limits.
+
+**Recent Files (Ctrl-E)** uses the same searchable rows, file icons and secondary paths, limited to files
+already visited. Empty queries keep the previous file first for quick Ctrl-E, Enter switching; typing fuzzy-matches
+names and paths. Delete forgets an entry without deleting its file. In popups, the wheel scrolls the viewport
+without changing the selected option; keyboard navigation selects and reveals an option.
+
+**Double Shift** also opens All when the terminal sends bare modifier press/release events through the enhanced
+keyboard protocol. Reader requests these reports and restores the previous mode on exit. Legacy terminals,
+multiplexers and SSH paths may omit them; **Ctrl-K** and the catalog's Search Everywhere always work. Shifted
+typing, selection, held-key repeats and focus loss do not count as double Shift. Ordinary held arrows and query
+characters continue to repeat. Ctrl-Shift-N now finds files; New Window remains in the command palette.
+
+The F10 palette labels commands with the same File, View, Navigate, Find, Selection and Language Servers groups
+as the GUI's ☰ menu; type a group name followed by `:` to filter that group. The GUI additionally has a clickable
+Commands button in its status bar; the terminal keeps F10 / Ctrl-Shift-P access to the same catalog.
+
+The top row follows the GUI: explorer toggle, Back/Forward and the current Markdown or SVG source/preview
+control sit beside the tabs. The explorer title has Select Opened File. Narrow panes omit controls that do not
+fit; every action remains available through F10. Left-click selects source text; right-click in either reading
+pane opens the same contextual command list as the GUI, with shared availability and separators. Clicking
+outside a menu dismisses it without acting on the document underneath.
+
+The footer keeps a clickable LSP status before paths and notices. Click it, press F2, or choose **Language Server
+Status…** in F10 to read the full error and setup guidance. Press Ctrl-C in that dialog or choose **Copy Language
+Server Details** to copy the full, unwrapped error and troubleshooting context through OSC 52. The dialog offers Restart, Enable/Disable for This
+Folder and Set Workspace Root with shared disabled reasons. Recovery actions stay in fixed positions while
+background status changes. Missing servers need user installation or an executable/PATH correction; restarting
+rechecks setup. Disabled servers stay off until explicitly enabled. Unsupported documents explain that no server
+is available; text search and syntax highlighting remain usable. See [provider setup](providers.md#status-and-recovery).
+
 The finder accepts `name:line[:column]`. Go to line accepts `line`, `line:column` or `line,column` and reports
 invalid input. Find updates while typing; Enter leaves its matches available for F3, while Esc closes find.
 Project search supports the same file globs, options, streamed results and cancellation as the GUI. Result
@@ -66,6 +112,18 @@ parsed blocks, inline styles and validated local images. Its rendered selection 
 core's Copy Text command. An SVG can switch between image and source. Images use true-color half-block cells; Markdown images fit the width and at most 20 terminal rows, without upscaling.
 The terminal controls fonts, cell aspect ratio and support for italic, underline and strike. These are display
 limits rather than different document behavior.
+
+Set `LENZ_ICONS=nerd` to decorate the command bar, explorer, tabs, search results heading and status bar with
+the same Nerd Font glyphs as the comparison TUI. Configure a [Nerd Font Mono](https://www.nerdfonts.com/)
+in your terminal, for example JetBrainsMono Nerd Font Mono, so icons occupy one cell. `LENZ_ICONS=plain`
+(the default) keeps ordinary labels; fonts are never installed or changed by the app. Active reading tabs use
+bold accent text and an underline when focused; pane headings and rounded dialogs follow the selected theme.
+Files use the GUI reader's file-type glyphs and colors, including special names such as `Cargo.toml`,
+`Dockerfile` and `.gitignore`. Folder icons distinguish open and closed directories.
+
+`NO_COLOR` disables **all** terminal colors, including syntax and diff highlighting. If the entire app is
+monochrome, use `env -u NO_COLOR LENZ_ICONS=nerd lenz --tui` with the staged launcher (or run
+`lenz-reader-tui` directly). The app leaves your terminal and shell configuration unchanged.
 
 Themes use the shared Lenz configuration: `lenz/appearance.json` and `lenz/themes` under
 `$XDG_CONFIG_HOME`, with `LENZ_THEME` taking precedence over `LENZ_APPEARANCE` and the legacy
@@ -105,3 +163,13 @@ physical-terminal appearance, authenticated or installed language-server combina
 tests, and long sessions remain separate acceptance checks. The [workspace integration measurements](tui-performance.md)
 record current startup, interaction and stress checks; the imported [performance record](performance.md)
 describes historical Reader measurements with different workloads.
+
+For a Java server runtime failure, F2 → **Choose Language Server Runtime…** offers installed executables and a path/JDK
+home field. Save validates the executable, persists the override and restarts enabled Java servers; Escape
+before saving cancels. The GUI exposes the same commands. See [provider runtime repair](providers.md#repairing-a-java-server-runtime-in-the-reader)
+for validation and installation limits.
+
+
+Python failures use the same runtime dialog to choose an existing Node.js installation containing Pyright.
+F2 shows the detected/tested server version, bounded launch log and selected runtime version when available;
+**Copy Language Server Details** copies the same diagnosis. See [version context and runtime repair](providers.md#version-context-and-pyright-runtime-repair).

@@ -1,14 +1,16 @@
 //! Terminal presentation. Coordinates here are cells; every source hit keeps its UTF-8 byte.
 use crate::app::{App, Focus, Prompt};
+use lenz_content::icons::Icon;
 use lenz_content::{markdown::BlockKind, theme::Palette};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 use reader_core::{
-    session::{Command, Rendering, Split, State},
+    navigation::{Kind, Scope},
+    session::{Command, CommandId, MenuEntry, Rendering, Split, State},
     tabs::{Tab, TabId},
 };
 use std::ops::Range;
@@ -17,6 +19,7 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Default)]
 pub(crate) struct Geometry {
+    pub controls: Vec<(CommandId, Rect)>,
     pub tree: Rect,
     pub results: Rect,
     pub panes: Vec<PaneGeometry>,
@@ -24,10 +27,13 @@ pub(crate) struct Geometry {
     pub modal_rows: Rect,
     pub modal_content_rows: usize,
     pub modal_items: Vec<usize>,
+    pub navigation_scopes: Vec<(Scope, Rect)>,
+    pub navigation_revision: Option<u64>,
 }
 
 #[derive(Default)]
 pub(crate) struct PaneGeometry {
+    pub controls: Vec<(CommandId, Rect)>,
     pub pane: u8,
     pub preview: bool,
     pub preview_top: usize,
@@ -103,23 +109,18 @@ impl App {
             self.layout = geometry;
             return;
         }
-        line(
-            frame.buffer_mut(),
-            row(area, 0),
-            " Lenz Reader   F10 Commands   Ctrl+P Files   Ctrl+F Find   F1 Help",
-            style(p.fg, p.header_bg),
-        );
         let body = Rect::new(
             area.x,
-            area.y.saturating_add(1),
+            area.y,
             area.width,
-            area.height.saturating_sub(2),
+            area.height.saturating_sub(u16::from(area.height >= 2)),
         );
-        let tree_width = if self.tree_shown && area.width >= 36 {
-            (area.width / 4).clamp(16, 32)
-        } else {
-            0
-        };
+        let tree_width =
+            if self.tree_shown && self.session.state().project().is_some() && area.width >= 36 {
+                (area.width / 4).clamp(16, 32)
+            } else {
+                0
+            };
         geometry.tree = Rect::new(body.x, body.y, tree_width, body.height);
         let main = Rect::new(
             body.x + tree_width,
@@ -188,6 +189,29 @@ impl App {
             }
         }
         self.draw_tree(frame, geometry.tree, p);
+        if geometry.tree.width >= 3 && geometry.tree.height > 0 {
+            let rect = Rect::new(geometry.tree.right() - 3, geometry.tree.y, 3, 1);
+            geometry
+                .controls
+                .push((reader_core::session::CommandId::LocateFile, rect));
+            line(
+                frame.buffer_mut(),
+                rect,
+                " ◎ ",
+                style(
+                    if self
+                        .session
+                        .disabled(reader_core::session::CommandId::LocateFile)
+                        .is_none()
+                    {
+                        p.fg
+                    } else {
+                        p.dim
+                    },
+                    p.header_bg,
+                ),
+            );
+        }
         geometry.tree.y = geometry
             .tree
             .y
@@ -199,6 +223,7 @@ impl App {
                 .push(draw_pane(frame, self, pane as u8, rect, p));
         }
         for pane in &geometry.panes {
+            geometry.controls.extend(pane.controls.iter().copied());
             if pane.preview
                 && let Some(tab) = self.session.state().shown(pane.pane)
             {
@@ -272,9 +297,33 @@ impl App {
             line(
                 frame.buffer_mut(),
                 row(area, area.height - 1),
-                &format!(" {status}"),
+                &format!(
+                    " {} [F2] · Lenz Reader  {}  F10 Commands",
+                    state.language_server_label(),
+                    Icon::Position.label(self.nerd_icons, &status)
+                ),
                 style(p.fg, p.status_bg),
             );
+            let control = Rect::new(
+                area.x,
+                area.bottom() - 1,
+                (state.language_server_label().width() as u16 + 6).min(area.width),
+                1,
+            );
+            let attention = state.provider().is_some_and(|v| {
+                matches!(
+                    v.status,
+                    reader_core::semantics::Status::Missing(_)
+                        | reader_core::semantics::Status::Failed(_)
+                        | reader_core::semantics::Status::Disabled
+                )
+            });
+            frame.buffer_mut().set_style(
+                control,
+                style(if attention { p.error } else { p.accent }, p.status_bg)
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            );
+            geometry.controls.push((CommandId::LanguageServer, control));
         }
         if self.modal.is_some() {
             self.draw_modal(frame, &mut geometry, p);
@@ -321,13 +370,24 @@ impl App {
             area,
             &format!(
                 " {}",
-                project
-                    .root()
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
+                Icon::FolderOpen.label(
+                    self.nerd_icons,
+                    &project
+                        .root()
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                )
             ),
-            style(p.accent, p.sidebar_bg).add_modifier(Modifier::BOLD),
+            style(
+                if self.focus == Focus::Tree {
+                    p.accent
+                } else {
+                    p.fg
+                },
+                p.header_bg,
+            )
+            .add_modifier(Modifier::BOLD),
         );
         let rows = project.rows();
         clamp(
@@ -354,12 +414,27 @@ impl App {
                 Some(false) => "▸",
                 None => " ",
             };
+            let icon = match entry.dir {
+                Some(open) => lenz_content::file_icons::folder(open),
+                None => lenz_content::file_icons::file(&entry.name),
+            };
+            let name = icon.label(self.nerd_icons, &entry.name);
             line(
                 frame.buffer_mut(),
                 r,
-                &format!(" {}{mark} {}", "  ".repeat(entry.depth.min(20)), entry.name),
-                style(if entry.hidden() { p.dim } else { p.fg }, bg),
+                &format!(" {}{mark} {}", "  ".repeat(entry.depth.min(20)), name),
+                style(if entry.hidden() { p.dim } else { p.fg }, bg).add_modifier(
+                    if i == self.tree_at && self.focus == Focus::Tree {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    },
+                ),
             );
+            let icon_x = r.x.saturating_add(3 + 2 * entry.depth.min(20) as u16);
+            if self.nerd_icons && icon_x < r.right() {
+                frame.buffer_mut()[(icon_x, r.y)].set_fg(color(icon.color_on(p, bg)));
+            }
         }
     }
 
@@ -389,8 +464,16 @@ impl App {
         line(
             frame.buffer_mut(),
             area,
-            &title,
-            style(p.accent, p.header_bg),
+            &Icon::Search.label(self.nerd_icons, &title),
+            style(
+                if self.focus == Focus::Results {
+                    p.accent
+                } else {
+                    p.fg
+                },
+                p.header_bg,
+            )
+            .add_modifier(Modifier::BOLD),
         );
         let list_width = if results.preview().is_some() && area.width >= 64 {
             area.width / 2
@@ -524,17 +607,259 @@ impl App {
         }
     }
 
-    fn draw_modal(&mut self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
-        let title = self.modal_title();
-        let choices = self.choices();
-        let Some(modal) = &mut self.modal else {
+    fn draw_navigation(
+        &mut self,
+        frame: &mut ratatui::Frame,
+        geometry: &mut Geometry,
+        p: &Palette,
+    ) {
+        let status = self.session.navigation_status();
+        let Some(search) = self.session.state().navigation() else {
             return;
         };
+        let Some(modal) = &mut self.modal else { return };
         let area = centered(
             frame.area(),
             frame.area().width.saturating_sub(2).min(100),
             frame.area().height.saturating_sub(2).min(28),
         );
+        geometry.modal = area;
+        geometry.navigation_revision = Some(search.revision);
+        if area.is_empty() {
+            return;
+        }
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(color(p.accent)))
+                .title(if search.scope == Scope::Recent {
+                    " Recent Files "
+                } else {
+                    " Search Everywhere "
+                })
+                .title_style(
+                    Style::default()
+                        .fg(color(p.accent))
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(style(p.fg, p.status_bg)),
+            area,
+        );
+        let content = inner(area);
+        if content.is_empty() {
+            return;
+        }
+        let mut x = content.x;
+        let scopes: &[Scope] = if search.scope == Scope::Recent {
+            &[Scope::Recent]
+        } else {
+            &Scope::ALL
+        };
+        for &scope in scopes {
+            if content.width < 42 && scope != search.scope {
+                continue;
+            }
+            let label = format!(" {} ", scope.label());
+            let width = (label.width() as u16).min(content.right().saturating_sub(x));
+            if width == 0 {
+                break;
+            }
+            let rect = Rect::new(x, content.y, width, 1);
+            let selected = scope == search.scope;
+            line(
+                frame.buffer_mut(),
+                rect,
+                &label,
+                style(
+                    if selected { p.accent } else { p.dim },
+                    if selected { p.selected_bg } else { p.status_bg },
+                )
+                .add_modifier(if selected {
+                    Modifier::BOLD | Modifier::UNDERLINED
+                } else {
+                    Modifier::empty()
+                }),
+            );
+            geometry.navigation_scopes.push((scope, rect));
+            x = x.saturating_add(width + 1);
+        }
+        if content.height > 1 {
+            let query = tail_columns(&modal.input, content.width.saturating_sub(3) as usize);
+            line(
+                frame.buffer_mut(),
+                row(content, 1),
+                &format!("› {query}"),
+                style(p.fg, p.status_bg),
+            );
+            if content.width > 2 {
+                frame.set_cursor_position((
+                    content.x
+                        + 2
+                        + query.width().min(content.width.saturating_sub(3) as usize) as u16,
+                    content.y + 1,
+                ));
+            }
+        }
+        let list_y = 2.min(content.height);
+        let reserve = u16::from(content.height > list_y);
+        let list = Rect::new(
+            content.x,
+            content.y + list_y,
+            content.width,
+            content.height.saturating_sub(list_y + reserve),
+        );
+        geometry.modal_rows = list;
+        let row_height = if list.height >= 4 { 2 } else { 1 };
+        let visible = (list.height / row_height).max(1) as usize;
+        modal.at = modal.at.min(search.rows.len().saturating_sub(1));
+        modal.top = modal.top.min(search.rows.len().saturating_sub(visible));
+        if modal.reveal_selection {
+            clamp(&mut modal.at, &mut modal.top, search.rows.len(), visible);
+            modal.reveal_selection = false;
+        }
+        geometry.modal_content_rows = search.rows.len();
+        for (index, result) in search.rows.iter().enumerate().skip(modal.top).take(visible) {
+            let screen = ((index - modal.top) * row_height as usize) as u16;
+            if screen >= list.height {
+                break;
+            }
+            let selected = index == modal.at;
+            let bg = if selected { p.selected_bg } else { p.status_bg };
+            let fg = if result.disabled.is_some() {
+                p.dim
+            } else {
+                p.fg
+            };
+            let icon = match result.kind {
+                Kind::File => lenz_content::file_icons::file(&result.label)
+                    .label(self.nerd_icons, &result.label),
+                Kind::Symbol => Icon::Book.label(self.nerd_icons, &result.label),
+                Kind::Action => Icon::Commands.label(self.nerd_icons, &result.label),
+            };
+            let setting = result.on.map_or("", |on| if on { "✓ " } else { "○ " });
+            let label = format!(
+                "{}{}{}  {}{}",
+                if selected { "› " } else { "  " },
+                setting,
+                icon,
+                result.kind.label(),
+                result
+                    .shortcut
+                    .map(|s| format!("  {s}"))
+                    .unwrap_or_default()
+            );
+            let rect = row(list, screen);
+            fill(frame.buffer_mut(), rect, style(fg, bg));
+            line(
+                frame.buffer_mut(),
+                rect,
+                &label,
+                style(fg, bg).add_modifier(if selected {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                }),
+            );
+            geometry.modal_items.push(index);
+            if row_height > 1 {
+                let detail = result.disabled.unwrap_or(&result.detail);
+                let rect = row(list, screen + 1);
+                fill(frame.buffer_mut(), rect, style(p.dim, bg));
+                line(
+                    frame.buffer_mut(),
+                    rect,
+                    &format!("  {detail}"),
+                    style(p.dim, bg),
+                );
+                geometry.modal_items.push(index);
+            }
+        }
+        if search.rows.is_empty() && list.height > 0 {
+            line(
+                frame.buffer_mut(),
+                list,
+                if search.pending {
+                    "  Searching…"
+                } else {
+                    "  No matching results"
+                },
+                style(p.dim, p.status_bg),
+            );
+        }
+        if reserve > 0 {
+            line(
+                frame.buffer_mut(),
+                row(content, content.height - 1),
+                &status,
+                style(p.dim, p.status_bg),
+            );
+        }
+    }
+
+    fn draw_modal(&mut self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| m.kind == Prompt::Navigation)
+        {
+            self.draw_navigation(frame, geometry, p);
+            return;
+        }
+        let title = self.modal_title();
+        let runtime_message = self
+            .session
+            .state()
+            .server_runtime()
+            .map(|m| m.message.clone());
+        let choices = if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| matches!(m.kind, Prompt::LanguageServer | Prompt::ServerRuntime))
+        {
+            self.choices_for(
+                frame
+                    .area()
+                    .width
+                    .saturating_sub(4)
+                    .min(98)
+                    .saturating_sub(2)
+                    .max(1) as usize,
+            )
+        } else {
+            self.choices()
+        };
+        let Some(modal) = &mut self.modal else {
+            return;
+        };
+        let context = matches!(modal.kind, Prompt::Context { .. });
+        let mut separators = Vec::new();
+        let area = if let Prompt::Context { x, y, ref entries } = modal.kind {
+            let width = (choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 4)
+                .max(20)
+                .min(frame.area().width as usize) as u16;
+            let height = (entries.len() + 3).min(frame.area().height as usize) as u16;
+            let mut choice = 0;
+            for entry in entries {
+                match entry {
+                    MenuEntry::Separator => separators.push(choice),
+                    MenuEntry::Command(_) => choice += 1,
+                }
+            }
+            Rect::new(
+                x.min(frame.area().right().saturating_sub(width)),
+                y.min(frame.area().bottom().saturating_sub(height)),
+                width,
+                height,
+            )
+        } else {
+            centered(
+                frame.area(),
+                frame.area().width.saturating_sub(2).min(100),
+                frame.area().height.saturating_sub(2).min(28),
+            )
+        };
         geometry.modal = area;
         if area.is_empty() {
             return;
@@ -543,7 +868,14 @@ impl App {
         frame.render_widget(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(color(p.accent)))
                 .title(format!(" {title} "))
+                .title_style(
+                    Style::default()
+                        .fg(color(p.accent))
+                        .add_modifier(Modifier::BOLD),
+                )
                 .style(style(p.fg, p.status_bg)),
             area,
         );
@@ -556,12 +888,9 @@ impl App {
             let wrapped = wrap_text(body, content.width.max(1) as usize);
             geometry.modal_content_rows = wrapped.len();
             geometry.modal_rows = content;
-            clamp(
-                &mut modal.at,
-                &mut modal.top,
-                wrapped.len(),
-                content.height as usize,
-            );
+            modal.top = modal
+                .top
+                .min(wrapped.len().saturating_sub(content.height as usize));
             for (n, text) in wrapped
                 .iter()
                 .skip(modal.top)
@@ -577,13 +906,18 @@ impl App {
             }
             return;
         }
-        let input_rows = 1 + usize::from(
-            matches!(modal.kind, Prompt::Search)
-                || !modal.secondary.is_empty()
-                || modal.secondary_focus,
-        );
+        let input_rows = if context || modal.kind == Prompt::LanguageServer {
+            0
+        } else {
+            1 + usize::from(
+                matches!(modal.kind, Prompt::Search)
+                    || !modal.secondary.is_empty()
+                    || modal.secondary_focus,
+            )
+        };
         for (i, text) in std::iter::once(&modal.input)
             .chain((input_rows > 1).then_some(&modal.secondary))
+            .take(input_rows)
             .enumerate()
         {
             let active = (i == 1) == modal.secondary_focus;
@@ -612,12 +946,19 @@ impl App {
         let mut selected = 0..0;
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         for (i, choice) in choices.iter().enumerate() {
+            if separators.contains(&i) {
+                rendered.push((usize::MAX, "─".repeat(width), true));
+            }
             let start = rendered.len();
-            let suffix = choice
-                .disabled
-                .map(|why| format!(" — {why}"))
-                .or_else(|| choice.detail.as_ref().map(|d| format!(" — {d}")))
-                .unwrap_or_default();
+            let suffix = if context {
+                String::new()
+            } else {
+                choice
+                    .disabled
+                    .map(|why| format!(" — {why}"))
+                    .or_else(|| choice.detail.as_ref().map(|d| format!(" — {d}")))
+                    .unwrap_or_default()
+            };
             for text in wrap_text(
                 &format!(
                     "{}{}{}",
@@ -637,11 +978,14 @@ impl App {
         modal.top = modal
             .top
             .min(rendered.len().saturating_sub(list.height as usize));
-        if selected.start < modal.top {
-            modal.top = selected.start;
-        }
-        if list.height > 0 && selected.start >= modal.top + list.height as usize {
-            modal.top = selected.start + 1 - list.height as usize;
+        if modal.reveal_selection {
+            if selected.start < modal.top {
+                modal.top = selected.start;
+            }
+            if list.height > 0 && selected.start >= modal.top + list.height as usize {
+                modal.top = selected.start + 1 - list.height as usize;
+            }
+            modal.reveal_selection = false;
         }
         for (n, (i, text, disabled)) in rendered
             .iter()
@@ -668,7 +1012,21 @@ impl App {
             let footer = modal
                 .error
                 .as_deref()
-                .unwrap_or("Enter accepts · Esc closes · ↑↓ selects · Tab field");
+                .or_else(|| {
+                    context
+                        .then(|| choices.get(modal.at).and_then(|c| c.disabled))
+                        .flatten()
+                })
+                .or_else(|| {
+                    (modal.kind == Prompt::ServerRuntime)
+                        .then_some(runtime_message.as_deref())
+                        .flatten()
+                })
+                .unwrap_or(if modal.kind == Prompt::LanguageServer {
+                    "Ctrl+C copies details · Enter runs action · Esc closes"
+                } else {
+                    "Enter accepts · Esc closes · ↑↓ selects · Tab field"
+                });
             line(
                 frame.buffer_mut(),
                 row(content, content.height - 1),
@@ -683,7 +1041,11 @@ impl App {
                 ),
             );
         }
-        if content.height > 0 && content.width > 2 {
+        if !context
+            && modal.kind != Prompt::LanguageServer
+            && content.height > 0
+            && content.width > 2
+        {
             let text = if modal.secondary_focus {
                 &modal.secondary
             } else {
@@ -757,13 +1119,46 @@ fn draw_pane(
     let active = state.shown(pane).map(Tab::id);
     fill(frame.buffer_mut(), row(area, 0), style(p.fg, p.header_bg));
     let mut x = area.x;
+    if pane == 0 {
+        let reserve = if state.pane_tabs(pane).next().is_some() {
+            area.width.min(8)
+        } else {
+            0
+        };
+        for (id, label) in app.session.navigation() {
+            let label = if id == CommandId::ToggleExplorer {
+                "▥"
+            } else {
+                label
+            };
+            let width = (label.width() + 2) as u16;
+            if width > area.right().saturating_sub(x).saturating_sub(reserve) {
+                break;
+            }
+            let rect = Rect::new(x, area.y, width, 1);
+            geometry.controls.push((id, rect));
+            let st = style(
+                if app.session.disabled(id).is_some() {
+                    p.dim
+                } else {
+                    p.fg
+                },
+                p.header_bg,
+            );
+            line(frame.buffer_mut(), rect, &format!(" {label} "), st);
+            x += width;
+        }
+    }
+    let tab_width = area.right().saturating_sub(x);
     let tabs: Vec<_> = state.pane_tabs(pane).collect();
     let widths: Vec<_> = tabs
         .iter()
         .map(|tab| {
-            (UnicodeWidthStr::width(tab.title().as_str()) as u16 + 4)
-                .min(32)
-                .min(area.width)
+            (UnicodeWidthStr::width(tab.title().as_str()) as u16
+                + 4
+                + if app.nerd_icons { 2 } else { 0 })
+            .min(32)
+            .min(tab_width)
         })
         .collect();
     let selected = tabs
@@ -772,14 +1167,14 @@ fn draw_pane(
         .unwrap_or(0);
     let mut first = selected;
     let mut used = widths.get(selected).copied().unwrap_or(0);
-    while first > 0 && used.saturating_add(widths[first - 1]) <= area.width {
+    while first > 0 && used.saturating_add(widths[first - 1]) <= tab_width {
         first -= 1;
         used += widths[first];
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
         let text = format!(
             " {}{} ",
-            tab.title(),
+            lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons, &tab.title()),
             if tab.retained() { "" } else { " ◇" }
         );
         let width = widths[i].min(area.right().saturating_sub(x));
@@ -794,7 +1189,7 @@ fn draw_pane(
             &text,
             style(
                 if Some(tab.id()) == active {
-                    p.fg
+                    p.accent
                 } else {
                     p.dim
                 },
@@ -806,10 +1201,24 @@ fn draw_pane(
             )
             .add_modifier(if Some(tab.id()) == active {
                 Modifier::BOLD
+                    | if focus == Focus::Text && pane == state.focused_pane() {
+                        Modifier::UNDERLINED
+                    } else {
+                        Modifier::empty()
+                    }
             } else {
                 Modifier::empty()
             }),
         );
+        if app.nerd_icons && width > 1 {
+            let icon = lenz_content::file_icons::file(&tab.title());
+            let bg = if Some(tab.id()) == active {
+                p.bg
+            } else {
+                p.header_bg
+            };
+            frame.buffer_mut()[(r.x + 1, r.y)].set_fg(color(icon.color_on(p, bg)));
+        }
         x += width;
     }
     if state.breadcrumbs() && area.height > 1 {
@@ -1589,7 +1998,7 @@ fn tail_columns(text: &str, columns: usize) -> &str {
     &text[start..]
 }
 
-fn wrap_text(text: &str, columns: usize) -> Vec<String> {
+pub(crate) fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     let mut rows = vec![String::new()];
     let mut width = 0;
     for g in text.graphemes(true) {
@@ -1610,7 +2019,7 @@ fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
-const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+P  Find file (name:line:column)\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Full notices and provider status\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
+const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Notices, language server status and recovery\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
 
 #[cfg(test)]
 #[path = "render_tests.rs"]

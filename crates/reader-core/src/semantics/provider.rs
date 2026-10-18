@@ -676,6 +676,9 @@ pub struct Settings {
 pub struct ProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<PathBuf>,
+    /// Node.js used only for Pyright; leaves the original executable and environment intact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<PathBuf>,
     /// Arguments instead of the provider's own.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Vec<String>>,
@@ -716,11 +719,25 @@ impl Settings {
     /// How `provider` is launched: its defaults, overridden by these settings.
     pub fn launch(&self, provider: &Provider) -> Launch {
         let s = self.providers.get(provider.id);
-        Launch {
+        let mut launch = Launch {
             executable: s.and_then(|s| s.executable.clone()).unwrap_or_else(|| provider.executable.into()),
             args: s.and_then(|s| s.args.clone()).unwrap_or_else(|| provider.args.iter().map(|a| a.to_string()).collect()),
             env: s.map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default(),
+        };
+        if provider.id == "pyright"
+            && let Some(bin) = s.and_then(|s| s.node.as_deref()).and_then(Path::parent)
+        {
+            if launch.executable == Path::new(provider.executable) {
+                launch.executable = bin.join(if cfg!(windows) { "pyright-langserver.cmd" } else { "pyright-langserver" });
+            }
+            let inherited = std::env::var_os("PATH");
+            let path = launch.path().or(inherited.as_deref());
+            if let Ok(path) = std::env::join_paths(std::iter::once(bin.to_owned()).chain(path.into_iter().flat_map(std::env::split_paths))) {
+                launch.env.retain(|(key, _)| key != "PATH");
+                launch.env.push(("PATH".into(), path.to_string_lossy().into_owned()));
+            }
         }
+        launch
     }
 
     /// `provider`'s `initializationOptions`: its defaults with the user's settings merged over them, object by
@@ -770,6 +787,31 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pyright_node_override_selects_matching_server_and_preserves_custom_launch() {
+        let d = tempfile::tempdir().unwrap();
+        let bin = d.path().join("Node with spaces/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("node"), "").unwrap();
+        std::fs::write(bin.join("pyright-langserver"), "").unwrap();
+        let pyright = for_language(Language::Python).unwrap().1;
+        let mut s: Settings = serde_json::from_value(json!({"providers":{"pyright":{
+            "node":bin.join("node"),"args":["--stdio","--custom"],
+            "env":{"PATH":"/custom/bin","KEEP":"yes"}
+        }}})).unwrap();
+        let launch = s.launch(pyright);
+        assert_eq!(launch.executable, bin.join("pyright-langserver"));
+        assert_eq!(launch.args, ["--stdio", "--custom"]);
+        assert!(launch.env.contains(&("KEEP".into(), "yes".into())));
+        assert_eq!(std::env::split_paths(launch.path().unwrap()).collect::<Vec<_>>(), [bin.clone(), PathBuf::from("/custom/bin")]);
+        s.providers.get_mut("pyright").unwrap().executable = Some("/custom/pyright".into());
+        assert_eq!(s.launch(pyright).executable, PathBuf::from("/custom/pyright"));
+        let ra = &PROVIDERS[0];
+        s.providers.entry(ra.id.into()).or_default().env.insert("PATH".into(), "/ra/bin".into());
+        s.providers.get_mut(ra.id).unwrap().node = Some(bin.join("node"));
+        assert_eq!(s.launch(ra).path(), Some(std::ffi::OsStr::new("/ra/bin")));
+    }
 
     #[test]
     fn rust_roots_follow_cargo_workspaces_and_rust_project_json() {

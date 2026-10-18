@@ -27,10 +27,14 @@ const HELP: &str = "Lenz Reader terminal
 Usage: lenz-reader-tui [FILE|FOLDER]
        lenz-reader-tui --help | --version
 
-F10 or : commands; F1 help; Ctrl-O open; Ctrl-P find file; Ctrl-F find;
+F10 or : commands; F1 help; Ctrl-K search everywhere; Ctrl-P find file;
+Ctrl-Alt-Shift-N symbols; Ctrl-Shift-A actions; Tab switches search scope;
+Ctrl-O open; Ctrl-F find;
 Ctrl-Shift-F project search; Ctrl-G line; F5 reload; Ctrl-F4 close tab;
 Tab focus panes; Ctrl-Tab next tab; F8/Shift-F8 independent views;
-Ctrl-Q close view; Ctrl-Shift-Q quit all. Files are read-only.";
+Ctrl-Q close view; Ctrl-Shift-Q quit all. Files are read-only.
+Optional icons: LENZ_ICONS=nerd (configure a Nerd Font Mono in your terminal);
+LENZ_ICONS=plain keeps ordinary labels.";
 
 /// An owned terminal's input modes are restored on success, I/O failure and panic.
 struct Restore;
@@ -113,7 +117,11 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
         EnableMouseCapture,
         EnableBracketedPaste,
         EnableFocusChange,
-        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        )
     )?;
     let mut views = vec![App::new(Config::from_env(true), path)];
     let mut active = 0usize;
@@ -181,7 +189,7 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             Wake::Input(event) => {
                 let event = event?;
                 if let Event::Key(k) = event
-                    && k.kind != KeyEventKind::Release
+                    && k.kind == KeyEventKind::Press
                 {
                     if matches!(k.code, KeyCode::Char('q' | 'Q'))
                         && k.modifiers.contains(KeyModifiers::CONTROL)

@@ -295,13 +295,22 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
     f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Missing(_))));
     let Status::Missing(why) = f.s.state().provider().unwrap().status else { unreachable!() };
     assert!(why.contains("was not found") && why.contains("rustup component add rust-analyzer"), "{why}");
+    let rows = f.s.language_server_rows();
+    assert!(rows.iter().any(|(text, _)| text.contains("rustup component add rust-analyzer")));
+    assert!(rows.iter().any(|(text, _)| text.contains("config/providers.json")));
+    assert!(rows.iter().any(|(_, action)| *action == Some(CommandId::RestartServer)));
+    let reader_core::actions::CatalogAction::Command(copy) = f.s.action(CommandId::CopyServerDetails) else { panic!("copy must be available") };
+    let copied = f.s.dispatch(copy).copy.unwrap();
+    assert!(copied.contains(&why) && copied.contains("Workspace:") && copied.contains("Executable:") && copied.contains("Provider settings:"));
+    assert!(!copied.contains("Restart Language Server\n\n"));
+    assert_eq!(f.s.state().provider().unwrap().status_label(), "LSP unavailable");
     assert_eq!(f.s.disabled(CommandId::Definition), Some("The language server is unavailable (see the status bar)"));
     drop(m);
 
     // A server that cannot answer --version is unusable, not running.
     let mut f = fixture(&[("FAKE_LSP_VERSION_FAIL", "1")], &[("src/main.rs", MAIN)]);
     f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
-    f.settle(|s| s.state().provider().is_some_and(|v| matches!(&v.status, Status::Missing(w) if w.contains("--version` failed: fake-lsp: no toolchain"))));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(&v.status, Status::Missing(w) if w.contains("--version` failed:") && w.contains("fake-lsp: no toolchain"))));
 
     // No definition capability: unsupported, not an empty success.
     let mut f = fixture(&[("FAKE_LSP_NO_DEFINITION", "1")], &[("src/main.rs", MAIN), ("src/lib.rs", LIB)]);
@@ -321,6 +330,19 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
     f.asked();
     assert!(f.notice("source unavailable: rust-analyzer offers no documented way for the reader to show fake-virtual:///pkg/Generated.java?=jar%2Fx"), "{:?}", f.s.state().notices());
     assert!(f.s.state().document().unwrap().source().ends_with("main.rs"));
+}
+
+#[test]
+fn recovery_rows_keep_their_command_identity_while_server_status_changes() {
+    let mut f = fixture(&[("FAKE_LSP_INIT_DELAY_MS", "200")], &[("src/main.rs", "fn main() { crash_now(); }\n")]);
+    let actions = |s: &Session| s.language_server_rows().into_iter().take(3).map(|(_, id)| id).collect::<Vec<_>>();
+    let expected = vec![Some(CommandId::RestartServer), Some(CommandId::DisableServer), Some(CommandId::WorkspaceRoot)];
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle_checking(ready, |s| assert_eq!(actions(s), expected));
+    assert_eq!(actions(&f.s), expected);
+    f.definition("crash_now", false);
+    f.settle_checking(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))), |s| assert_eq!(actions(s), expected));
+    assert_eq!(actions(&f.s), expected);
 }
 
 #[test]
@@ -380,6 +402,74 @@ fn edits_are_declined_and_initialization_is_not_readiness() {
 }
 
 #[test]
+fn a_failed_version_probe_keeps_the_recovery_hint() {
+    let mut f = fixture(&[("FAKE_LSP_VERSION_FAIL", "mise")], &[("src/main.rs", MAIN)]);
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Missing(_))));
+    let Status::Missing(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    assert!(why.contains("No version is set for shim: rust-analyzer") && why.contains("mise use -g rust@stable"), "{why}");
+}
+
+#[test]
+fn startup_failure_keeps_the_actual_cause_and_recovery_hint_in_copied_details() {
+    let mut f = fixture_as("pyright", &[("FAKE_LSP_START_FAIL", "mise")], &[("pyproject.toml", "[project]\nname = 'proj'\n"), ("main.py", "x = 1\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::Open(f.root.join("main.py")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
+    let Status::Failed(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    assert!(why.contains("No version is set for shim: pyright-langserver"), "{why}");
+    assert!(why.contains("mise use -g node@26.8.1"), "{why}");
+    assert!(why.contains(&f.root.parent().unwrap().join("fake-server").display().to_string()), "{why}");
+    let reader_core::actions::CatalogAction::Command(copy) = f.s.action(CommandId::CopyServerDetails) else { panic!("copy must be available") };
+    let copied = f.s.dispatch(copy).copy.unwrap();
+    assert!(copied.contains(&why) && copied.contains("mise use -g node@26.8.1"));
+}
+
+#[test]
+fn startup_failure_reports_the_runtime_found_on_the_effective_launch_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let node = dir.path().join("node");
+    std::fs::write(&node, "#!/bin/sh\necho v18.20.1\n").unwrap();
+    std::fs::set_permissions(&node, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut f = fixture_as("pyright", &[("FAKE_LSP_START_FAIL", "mise")], &[("pyproject.toml", "[project]\nname = 'proj'\n"), ("main.py", "x = 1\n")], serde_json::json!({"env":{"PATH":dir.path()}}), std::sync::Arc::new(Instant::now));
+    std::fs::write(f.root.parent().unwrap().join("package.json"), r#"{"name":"pyright","version":"1.1.407","engines":{"node":">=20"}}"#).unwrap();
+    f.s.dispatch(Command::Open(f.root.join("main.py")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
+    let Status::Failed(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    assert!(why.contains("v18.20.1") && why.contains(&node.display().to_string()), "{why}");
+    assert!(why.contains("engines.node") && why.contains(">=20"), "{why}");
+}
+
+#[test]
+fn java_startup_failure_reports_the_configured_runtime_before_java_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let java = dir.path().join("java");
+    std::fs::write(&java, "#!/bin/sh\ntest \"$1\" = -version || exit 42\necho 'openjdk version \"17.0.13\"' >&2\n").unwrap();
+    std::fs::set_permissions(&java, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_START_FAIL", "mise")], &[("pom.xml", "<project/>\n"), ("src/Main.java", "class Main {}\n")], serde_json::json!({"args":[format!("--java-executable={}", java.display())],"env":{"JAVA_HOME":"/nonexistent/jdk"}}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::Open(f.root.join("src/Main.java")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
+    let Status::Failed(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    assert!(why.contains("openjdk version \"17.0.13\"") && why.contains(&java.display().to_string()), "{why}");
+    assert!(!why.contains("/nonexistent/jdk"), "{why}");
+}
+
+#[test]
+fn startup_stderr_is_byte_bounded_and_hidden_controls_are_safe_without_a_newline() {
+    let mut f = fixture(&[("FAKE_LSP_START_FAIL", "noisy")], &[("src/main.rs", MAIN)]);
+    let start = Instant::now();
+    f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
+    f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
+    let Status::Failed(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    assert!(start.elapsed() < Duration::from_secs(5));
+    assert!(why.contains("No version is set for shim") && why.contains("mise use -g node@26.8.1"), "{why}");
+    assert!(why.contains("stderr truncated"), "missing visible truncation");
+    assert!(why.contains("END OF UNTERMINATED NOISE"));
+    assert!(why.len() < 26_000, "{} bytes", why.len());
+    assert!(!why.chars().any(lenz_content::display::hides_text), "hidden controls escaped display safety");
+    assert!(why.contains('é') && why.contains('𝄞'));
+}
+
+#[test]
 fn a_crash_is_reported_and_not_restarted() {
     let mut f = fixture(&[], &[("src/main.rs", "fn main() { crash_now(); }\n")]);
     f.open("src/main.rs");
@@ -387,6 +477,9 @@ fn a_crash_is_reported_and_not_restarted() {
     f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
     f.asked();
     let Status::Failed(why) = f.s.state().provider().unwrap().status else { unreachable!() };
+    let reader_core::actions::CatalogAction::Command(copy) = f.s.action(CommandId::CopyServerDetails) else { panic!("copy must be available") };
+    assert!(f.s.dispatch(copy).copy.unwrap().contains(&why));
+
     assert!(why.contains("exit status: 3") && why.contains("crashed on purpose"), "{why}");
     assert!(f.notice("rust-analyzer stopped before answering"));
     assert_eq!(f.s.disabled(CommandId::Definition), Some("The language server stopped (see the status bar)"));
@@ -923,11 +1016,16 @@ fn disable_and_restart_are_per_folder_and_invalidate_old_answers() {
     f.definition("crash_now", false);
     f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
     assert_eq!(f.s.disabled(CommandId::RestartServer), None);
+    assert_eq!(f.s.state().language_server_label(), "LSP stopped");
+    assert!(f.s.language_server_rows().iter().any(|(text, _)| text.contains("After fixing setup")));
     f.s.dispatch(Command::RestartServer);
     f.settle(ready);
     assert_eq!(pids(&f.log).len(), 3);
     // Disabled for this folder: stopped, explained, remembered; reading goes on.
     f.s.dispatch(Command::SetServerEnabled(false));
+    assert_eq!(f.s.state().language_server_label(), "LSP off");
+    assert!(f.s.language_server_rows().iter().any(|(_, id)| *id == Some(CommandId::EnableServer)));
+    assert!(!f.s.language_server_rows().iter().any(|(_, id)| *id == Some(CommandId::DisableServer)));
     assert_eq!(f.s.state().provider().unwrap().status, Status::Disabled);
     assert!(f.s.state().servers().is_empty());
     assert_eq!(f.s.disabled(CommandId::Definition), Some("The language server is disabled for this folder"));
@@ -1947,4 +2045,45 @@ fn a_typescript_7_project_is_served_by_typescript_go_from_its_own_tsc() {
     f.settle(|s| s.state().provider().is_some_and(|v| v.name == "typescript-go" && matches!(v.status, Status::Ready | Status::Indexing(_))));
     f.s.dispatch(Command::SetServerEnabled(false));
     f.settle(|s| s.state().servers().iter().all(|v| v.name != "typescript-go"));
+}
+
+#[test]
+fn server_runtime_selection_saves_restarts_and_keeps_disabled_servers_disabled() {
+    let mut f = fixture_as("jdtls", &[], &[("Main.java", "class Main {}\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.settle(|s| s.state().project().is_some());
+    f.open("Main.java");
+    let count = messages(&f.log).iter().filter(|m| m.get("args").is_some()).count();
+    let java = f._dir.path().join("java with spaces");
+    std::fs::write(&java, "#!/bin/sh\ntest \"$1\" = -version\n").unwrap();
+    std::fs::set_permissions(&java, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let settings = f._dir.path().join("config/providers.json");
+    let before = std::fs::read(&settings).unwrap();
+    f.s.dispatch(Command::OpenServerRuntime);
+    f.settle(|s| s.state().server_runtime().unwrap().message.starts_with("Enter"));
+    f.s.dispatch(Command::CloseServerRuntime);
+    assert!(f.s.state().server_runtime().is_none());
+    assert_eq!(std::fs::read(&settings).unwrap(), before);
+    f.s.dispatch(Command::OpenServerRuntime);
+    f.s.dispatch(Command::SetServerRuntime(Some(f._dir.path().join("missing"))));
+    f.settle(|s| s.state().server_runtime().unwrap().message.contains("not changed"));
+    assert_eq!(std::fs::read(&settings).unwrap(), before);
+    assert!(ready(&f.s));
+    f.s.dispatch(Command::SetServerRuntime(Some(java.clone())));
+    assert!(f.s.disabled(CommandId::DisableServer).is_some());
+    f.s.dispatch(Command::SetServerEnabled(false)); // Must not race the settings save.
+    f.settle(|s| s.state().server_runtime().unwrap().message.contains("saved."));
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m.get("args").is_some()).count() > count);
+    f.settle(ready);
+    let arg = format!("--java-executable={}", java.display());
+    assert!(messages(&f.log).iter().any(|m| m["args"].as_array().is_some_and(|a| a.contains(&serde_json::json!(arg)))));
+    let value: Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+    assert_eq!(value["providers"]["jdtls"]["args"], serde_json::json!([arg]));
+    f.s.dispatch(Command::SetServerEnabled(false));
+    f.settle(|s| s.disabled(CommandId::ServerRuntime).is_none());
+    f.s.dispatch(Command::SetServerRuntime(None));
+    f.settle(|s| s.state().server_runtime().unwrap().message.contains("saved."));
+    f.settle(|s| s.state().language_server_label() == "LSP off");
+    assert_eq!(std::fs::read_to_string(f.root.join("Main.java")).unwrap(), "class Main {}\n");
 }

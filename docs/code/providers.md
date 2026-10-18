@@ -39,6 +39,33 @@ Shared behaviour, for every provider:
 - Real-provider tests live in `crates/reader-core/tests/providers.rs` and `crates/reader-gui/src/tests.rs` (`real_*`, ignored);
   they run only against servers named by `READER_<NAME>` / `READER_<NAME>_PATH` or found on `PATH`.
 
+## Status and recovery
+
+Both readers keep the active file's LSP status visible at the start of the footer, including unavailable,
+stopped, off, starting, indexing and ready. Click the status, press F2, or choose **Language Server Status…**
+from the command menu for full errors, the selected executable, workspace, provider settings path and known
+provider limits. **Copy Language Server Details** copies the full, unwrapped diagnostic report, including the
+error, workspace, executable and settings path. Ctrl-C (Cmd-C on macOS) in the dialog copies the same report
+without closing it or copying the source selection; terminal copying uses OSC 52. The wrapped dialog scrolls with arrows and Page Up/Down; Home/End reach its ends.
+
+- **Unavailable:** read the specific reason. A missing executable or runtime gets that provider's existing
+  installation guidance. Install it yourself, or correct `executable`, `args` and `env` in
+  `$XDG_CONFIG_HOME/lenz-reader/providers.json`, then choose **Restart Language Server**. No workspace gets
+  **Set Workspace Root…** guidance instead. Large files explain why their server is not started.
+- **Stopped:** the full startup or exit error stays in the dialog. Check the named executable and its
+  runtime/toolchain from the same environment used to launch Lenz, correct its settings or workspace, then
+  restart. Crashed servers are never restarted automatically.
+- **Off:** **Enable Language Server for This Folder** activates it. This is an explicit per-folder preference;
+  opening the status dialog does not enable it.
+- **Starting/indexing:** a supported source starts its installed provider automatically. Initialization has a
+  120-second timeout. Indexing can produce incomplete results until the server reports completion.
+- **Unsupported/no file:** the dialog explains that a supported source file is needed. No installation is
+  offered for unsupported document types.
+
+Lenz never installs or upgrades language servers automatically. Their existing provider-specific discovery and
+fallback rules still apply. Restart reloads provider settings and checks setup again; actions unavailable in
+the current state display their reason. Source documents are unaffected by recovery actions.
+
 ## rust-analyzer (Rust)
 
 | | |
@@ -166,3 +193,41 @@ Shared behaviour, for every provider:
 | Side effects | It imports by running Maven (`mvn` from PATH) or Gradle: build plugins run, and missing artifacts are downloaded into `~/.m2` (seen: the standard library's sources and javadoc, and its import plugin's dependencies, kotlinx-serialization 1.9.0 and kotlin-stdlib 2.2.0, during the first imports). Nothing written into the project (verified, also alongside JDT LS). |
 | Measured (release, fixture, 100 samples after 5) | Warm definition to target shown: median 38–39 ms, p95 53–65 ms. Memory: 1.5–1.6 GiB (with JDT LS's 2.1–2.2 GiB the reader's 2 GiB notice shows). |
 | Platforms | Linux verified through the session and GPUI's test platform (Ctrl-click to Kotlin and to Java, Back, Shift+F12; no Xvfb); macOS unverified. Gradle projects untested (no offline Gradle Kotlin setup here); generated sources, root overrides and cancellation during an import untested with the real server (shared behaviour, covered by fake-server tests). Warm latency from 100 samples, as for the other providers (the spec's 1,000-sample methodology is not met for any provider). |
+
+## Repairing a Java server runtime in the reader
+
+In either frontend, open a Java file, press **F2** (Language Server Status), then choose **Choose Language Server Runtime…**.
+Select a detected Java executable, or enter/paste an executable path or JDK home folder and choose **Save entered
+path and restart**. Lenz runs `java -version` with a three-second timeout, saves the JDT LS `--java-executable`
+argument in `providers.json`, and restarts enabled Java servers. Other provider settings and disabled states are
+preserved. Invalid paths, malformed settings and save errors are shown in the dialog without replacing the
+existing settings. Escape before saving cancels; a save already submitted continues after dismissal.
+
+**Restore automatic Java selection and restart** removes the override. This does not install Java or JDT LS, or
+verify the runtime meets the installed JDT LS version's requirements: check the LSP status after restarting and
+use **Copy Language Server Details** for the complete failure report, including configured arguments. Missing
+servers still require installation; disabled servers can be enabled from the same status dialog.
+
+
+## Version context and Pyright runtime repair
+
+F2 and **Copy Language Server Details** include the detected server version (or explicitly unknown) and the
+version tested with Lenz. A different version is unverified, not automatically incompatible. Failed launches
+retain up to 8 KiB of stderr, keeping the beginning and end with an omission marker for larger logs, and show
+the resolved executable. Pyright/Java failures also probe the selected Node.js/Java executable and version in
+the server's environment and workspace, with a three-second limit. Pyright's declared Node.js requirement is
+shown when its installed package can be read. Missing-server setup instructions remain in the same dialog.
+
+For Pyright, open a Python file and use **F2 → Choose Language Server Runtime…**. Select an existing Node.js
+installation containing Pyright, or paste its `bin/node` executable or installation folder. Validation runs
+`node --version`; saving records only `providers.pyright.node` and restarts enabled Pyright servers. Reader
+then prefers the matching `pyright-langserver` beside that Node installation and prepends its bin folder to
+that provider's PATH. Custom executables, arguments, environment, other providers and disabled states are
+preserved. **Restore automatic Node.js selection and restart** removes only this override.
+
+A mise message such as “No version is set for shim: pyright-langserver” means the selected mise installation
+cannot provide that shim; it does not prove Pyright is incompatible with the selected Node version. Choose an
+installation where Pyright already exists, then check the new status. Lenz does not change mise's global
+version, read shell startup files, install tools or silently retry another runtime. Java repair still changes
+only JDT LS's launcher argument as described above. Other providers expose their version, failure and setup
+instructions; they do not yet have runtime pickers.

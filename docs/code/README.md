@@ -20,12 +20,41 @@ cargo test --release -p reader-core --test semantics -- --ignored --nocapture   
 
 Keys: Ctrl+O open, F5/Ctrl+R reload, Ctrl+F4 close, Ctrl+A select all, Ctrl+C copy, Shift+arrows/Home/End
 select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse / expand, Ctrl+Shift+- /
-Ctrl+Shift+= collapse / expand all, arrows/PageUp/PageDown/Home/End scroll, Ctrl+P find file (`name:line`), Ctrl+G go to
+Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll, Ctrl+P find file (`name:line`), Ctrl+G go to
 line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search, Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs,
 Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition, Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B
 implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy, Ctrl+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward, F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks,
-Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 or
-Ctrl+Shift+P commands, Escape closes a menu or cancels a pending definition.
+Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
+Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition.
+
+The GUI's **☰** button opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
+existing commands with setting values and disabled reasons; scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go
+back to the groups. **All commands…** and the bottom-right **Commands** button open searchable Actions.
+F10 retains the plain full command menu. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10
+still available. Menus consume input before the document beneath them.
+
+**Search Everywhere** follows [IntelliJ's name-navigation pattern](https://www.jetbrains.com/help/idea/searching-everywhere.html):
+one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details.
+Double-tap bare **Shift** in the GUI, or press **Ctrl+K**, to search all three categories. Direct shortcuts are:
+
+| Search | Shortcut |
+|---|---|
+| Files by name or path | Ctrl+P or Ctrl+Shift+N |
+| Symbols by name | Ctrl+Alt+Shift+N |
+| Actions by name | Ctrl+Shift+A or Ctrl+Shift+P |
+
+Tab / Shift+Tab cycles categories while keeping the query. Arrows, Page keys and Home/End select a
+result; the wheel scrolls the popup without changing selection. Enter opens/runs the selected result and Esc returns to reading. Tabs and rows are clickable. File results distinguish
+identical basenames by path and accept `name:line[:column]`. Empty queries prefer open/recent files; search
+keeps at most the best 100 results. Action rows show shortcuts, setting values and current disabled reasons.
+Long Unicode queries keep the typed tail visible. Search opens candidates only when selected.
+
+Symbols come from the existing bounded project declaration index, including types, methods, functions and
+constants supported by its syntax grammars. They work without a language server; indexing, syntax errors and
+coverage limits remain visible. Open a folder to index project symbols. Language-server workspace symbols
+remain separately available as **Find Symbol (language server)…**, including that provider's own coverage.
+Ctrl+Shift+N now finds files; **New Window** remains in the app/command menus. These workflows are also in the
+[terminal reader](tui.md), with a portable shortcut when bare Shift cannot be reported.
 
 Holding Ctrl over a name underlines it and shows a hand pointer: a click there follows it. A right-click in the text
 opens a menu with every navigation action and Copy Path / Copy Path:Line. The call hierarchy lists callers (Tab:
@@ -42,7 +71,8 @@ long as the server's usages plus reading its files (a warm rust-analyzer: 0.1 s 
 repository; its first query of a session takes seconds); launch and memory are unchanged. Resting the pointer on a name shows its
 documentation in a popup (Documentation on Hover in the command menu turns that off), and the other occurrences of the
 name at the caret are tinted. Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
-provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`.
+provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. Click the LSP footer status or press F2
+for the error log, version/runtime context, setup instructions and Restart/Enable actions. Java and Pyright also offer in-app runtime selection. See [status and recovery](providers.md#status-and-recovery).
 
 The language servers also add inlay hints and semantic colours to the text panes (sticky lines included). Type and
 parameter-name hints are drawn inline and dim (cut at 30 characters); semantic tokens recolour names over the syntax
@@ -115,7 +145,8 @@ Ctrl+F11, then the digit. A bookmarked line shows its key (or a dot) at the gutt
 bookmark keeps its line's text and finds it again when the file changes (the nearest copy wins; when none is left it
 keeps its line number and lists as "moved?"). Shift+F11 lists them; Next / Previous Bookmark are in the command menu.
 Recent Files (Ctrl+E) lists files by when they were left, the file before this one first, so Ctrl+E, Enter switches
-back; Recent Locations (Ctrl+Alt+E) lists where navigation went from and to, and where a file was left (a place
+back. It shares Find Files' icons, secondary paths and fuzzy name/path matching, with a dedicated Recent Files
+heading. Recent Locations (Ctrl+Alt+E) lists where navigation went from and to, and where a file was left (a place
 within five lines of a listed one replaces it). In each list, typing filters, Enter or a click goes there (a history step), Delete
 removes the entry, and files that no longer exist show "missing". The reader keeps 50 recent files and 30 recent
 locations per folder and every bookmark, in `$XDG_STATE_HOME/lenz-reader/projects/` (one file per folder, at most 4 MiB,
@@ -123,6 +154,21 @@ saved a second after the last change and at exit); without a folder they last un
 on one folder merge their places when either saves; a window shows the other's changes after its own next save. A
 places file from another reader version is left as it is, and places are then not saved. An unreadable file is kept
 beside it as `.json.unreadable`.
+
+
+Reopening a folder restores its last reading workspace in both GUI and TUI: up to 200 file tabs in order,
+the active file and focused split pane, caret/selection and scroll positions, source/preview choices, soft wrap,
+panel sizes, expanded folders, and explorer visibility/selection/scroll. Switching folders saves the old workspace
+and replaces its tabs with the destination's workspace. An explicit file opened before the first folder takes
+precedence over saved tabs. Missing files are skipped, positions are clamped to current UTF-8 content, and only
+the shown files load immediately; other tabs load when activated. Search queries/results and language-server
+virtual sources are not restored.
+
+Workspace metadata shares the folder's places file above. It is checkpointed when switching folders, closing a
+window/view or quitting; forced termination can lose changes made since the last checkpoint. The last window
+to save determines the workspace for the next opening; existing windows keep their own live state. Bookmarks
+continue to merge independently. Workspace metadata exceeding the places-file size limit is omitted so it
+cannot make bookmarks unreadable.
 
 Project search (Ctrl+Shift+F) takes the same options (literal and case-insensitive by default). Tab moves to its
 files field: comma-separated
