@@ -99,6 +99,86 @@ fn open(app: &mut App, dir: &std::path::Path, name: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    for dark in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), dark);
+        open(&mut app, dir.path(), "sample.rs", b"fn main() {}\n");
+        app.dispatch(Command::OpenRoot(dir.path().to_owned()));
+        settle(&mut app, |a| {
+            a.session
+                .state()
+                .project()
+                .is_some_and(|p| p.rows().iter().any(|r| r.name.as_ref() == "sample.rs"))
+        });
+        app.nerd_icons = true;
+        let buffer = draw(&mut app, 100, 24);
+        assert!(text(&buffer).contains("\u{e7a8} sample.rs"));
+        let glyphs: Vec<_> = buffer
+            .content
+            .iter()
+            .filter(|c| c.symbol() == "\u{e7a8}")
+            .collect();
+        assert!(
+            glyphs.len() >= 2,
+            "Rust icons appear in both explorer and tab"
+        );
+        assert!(
+            glyphs
+                .iter()
+                .all(|c| c.fg != color(app.session.state().palette().fg)),
+            "file icons keep their own color"
+        );
+        assert!(text(&buffer).contains("Lenz Reader"));
+        let (id, tab) = app.layout.panes[0].tabs[0];
+        app.handle(Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab.x + 1,
+            row: tab.y,
+            modifiers: KeyModifiers::NONE,
+        }));
+        assert_eq!(app.session.state().active().unwrap().id(), id);
+        for (w, h) in [(48, 12), (18, 5), (1, 1), (0, 0)] {
+            draw(&mut app, w, h);
+        }
+        app.nerd_icons = false;
+        let buffer = draw(&mut app, 100, 24);
+        assert!(!text(&buffer).contains('\u{e7a8}'));
+        assert!(text(&buffer).contains("sample.rs"));
+        assert_eq!(
+            std::fs::read(dir.path().join("sample.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
+    }
+}
+
+#[test]
+fn focused_reader_tab_has_a_visible_accent_in_light_and_dark() {
+    for dark in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = app(dir.path(), dark);
+        open(&mut app, dir.path(), "sample.rs", b"fn main() {}\n");
+        let buffer = draw(&mut app, 90, 20);
+        let tab = app.layout.panes[0].tabs[0].1;
+        let p = app.session.state().palette();
+        assert_eq!(buffer[(tab.x + 1, tab.y)].fg, color(p.accent));
+        assert!(
+            buffer[(tab.x + 1, tab.y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
+        app.focus = Focus::Tree;
+        let buffer = draw(&mut app, 90, 20);
+        assert!(
+            !buffer[(tab.x + 1, tab.y)]
+                .modifier
+                .contains(Modifier::UNDERLINED)
+        );
+    }
+}
+
+#[test]
 fn actual_empty_constructor_renders_dark_light_narrow_and_zero_and_closes_scrolled_help() {
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     for dark in [true, false] {
@@ -378,5 +458,202 @@ fn tall_local_markdown_images_keep_layout_metadata_bounded_on_resize() {
             layout.rows.len()
         );
         assert_eq!(layout.source_lines.len(), layout.rows.len());
+    }
+}
+
+#[test]
+fn navigation_popup_shows_scopes_types_details_and_toggle_state_in_both_appearances() {
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        a.run(CommandId::FindAction);
+        a.handle(crossterm::event::Event::Paste("soft wrap".into()));
+        settle(&mut a, |a| {
+            a.session.state().navigation().is_some_and(|s| !s.pending)
+        });
+        let buffer = draw(&mut a, 100, 26);
+        let shown = text(&buffer);
+        for expected in [
+            "Search Everywhere",
+            "All",
+            "Files",
+            "Symbols",
+            "Actions",
+            "Soft Wrap",
+            "Action",
+        ] {
+            assert!(shown.contains(expected), "missing {expected}: {shown}");
+        }
+        assert!(shown.contains('✓') || shown.contains('○'));
+        let revision = a.session.state().navigation().unwrap().revision;
+        assert_eq!(a.layout.navigation_revision, Some(revision));
+        assert!(!a.layout.modal_items.is_empty());
+        for (width, height) in [(42, 12), (20, 8), (4, 4), (1, 1), (0, 0), (100, 26)] {
+            a.handle(crossterm::event::Event::Resize(width, height));
+            draw(&mut a, width, height);
+        }
+    }
+}
+
+#[test]
+fn navigation_empty_popup_scroll_and_resize_are_clamped() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    a.run(CommandId::FindAction);
+    settle(&mut a, |a| {
+        a.session.state().navigation().is_some_and(|s| !s.pending)
+    });
+    let key = |a: &mut App, code| {
+        a.handle(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE),
+        ));
+    };
+    use crossterm::event::KeyCode;
+    draw(&mut a, 30, 10);
+    key(&mut a, KeyCode::End);
+    draw(&mut a, 30, 10);
+    let last = a.modal.as_ref().unwrap().at;
+    key(&mut a, KeyCode::Up);
+    draw(&mut a, 20, 8);
+    assert_eq!(a.modal.as_ref().unwrap().at, last.saturating_sub(1));
+    a.handle(crossterm::event::Event::Paste("xxxxxxxxxxnoresult".into()));
+    settle(&mut a, |a| {
+        a.session.state().navigation().is_some_and(|s| !s.pending)
+    });
+    let shown = text(&draw(&mut a, 100, 26));
+    assert!(shown.contains("No matching results"));
+    assert_eq!(a.modal.as_ref().unwrap().at, 0);
+    key(&mut a, KeyCode::Enter);
+    assert!(a.modal.is_some());
+    key(&mut a, KeyCode::Esc);
+    assert!(a.modal.is_none());
+    assert!(a.session.state().navigation().is_none());
+}
+
+#[test]
+fn navigation_files_show_distinct_paths_and_disabled_actions_explain_why() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::create_dir(dir.path().join("tests")).unwrap();
+    for path in ["src/NetworkParserEngine.rs", "tests/NetworkParserEngine.rs"] {
+        std::fs::write(dir.path().join(path), "// read only\n").unwrap();
+    }
+    let mut a = app(dir.path(), true);
+    a.dispatch(Command::OpenRoot(dir.path().to_owned()));
+    settle(&mut a, |a| {
+        a.session
+            .state()
+            .project()
+            .is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_)))
+    });
+    a.run(CommandId::FindFile);
+    a.handle(crossterm::event::Event::Paste("NPE".into()));
+    settle(&mut a, |a| {
+        a.session.state().navigation().is_some_and(|s| !s.pending)
+    });
+    let shown = text(&draw(&mut a, 100, 26));
+    for path in [
+        "NetworkParserEngine.rs",
+        "src/NetworkParserEngine.rs",
+        "tests/NetworkParserEngine.rs",
+        "File",
+    ] {
+        assert!(shown.contains(path), "missing {path}: {shown}");
+    }
+    a.run(CommandId::FindAction);
+    settle(&mut a, |a| {
+        a.session.state().navigation().is_some_and(|s| !s.pending)
+    });
+    let (index, reason) = a
+        .session
+        .state()
+        .navigation()
+        .unwrap()
+        .rows
+        .iter()
+        .enumerate()
+        .find_map(|(index, row)| row.disabled.map(|why| (index, why)))
+        .expect("an empty reader has disabled actions");
+    a.modal.as_mut().unwrap().at = index;
+    let shown = text(&draw(&mut a, 100, 26));
+    assert!(shown.contains(reason));
+    a.handle(crossterm::event::Event::Key(
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        ),
+    ));
+    assert!(a.modal.is_some());
+    assert!(a.session.state().document().is_none());
+}
+
+#[test]
+fn navigation_long_unicode_query_keeps_typed_tail_and_caret_visible_in_tiny_frames() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    a.run(CommandId::SearchEverywhere);
+    let query = format!("{}α界e\u{301}終Z", "obsolete-prefix-".repeat(20));
+    a.handle(crossterm::event::Event::Paste(query.clone()));
+    for (width, tail) in [(12, "e\u{301}終Z"), (10, "終Z"), (8, "Z")] {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, 8)).unwrap();
+        terminal.draw(|frame| a.draw(frame)).unwrap();
+        let content = inner(a.layout.modal);
+        let y = content.y + 1;
+        let mut x = content.x + 2;
+        for grapheme in tail.graphemes(true) {
+            assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), grapheme);
+            x += grapheme.width() as u16;
+        }
+        assert_eq!(terminal.get_cursor_position().unwrap(), (x, y).into());
+        assert!(
+            x < content.right(),
+            "caret must remain inside the query input"
+        );
+        assert_eq!(a.modal.as_ref().unwrap().input, query);
+    }
+}
+
+#[test]
+fn recent_files_popup_shows_one_heading_file_names_paths_and_query_tail_in_both_appearances() {
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        for folder in ["first", "second"] {
+            std::fs::create_dir_all(dir.path().join(folder)).unwrap();
+            open(
+                &mut a,
+                dir.path(),
+                &format!("{folder}/same.txt"),
+                b"hello\n",
+            );
+        }
+        a.run(CommandId::RecentFiles);
+        settle(&mut a, |a| {
+            a.session.state().navigation().is_some_and(|s| !s.pending)
+        });
+        let shown = text(&draw(&mut a, 100, 26));
+        for expected in ["Recent Files", "same.txt", "first", "second", "File"] {
+            assert!(shown.contains(expected), "missing {expected}: {shown}");
+        }
+        assert_eq!(a.layout.navigation_scopes.len(), 1);
+        assert_eq!(a.layout.navigation_scopes[0].0, Scope::Recent);
+        assert!(!shown.contains("Search Everywhere"));
+        assert!(!shown.contains("Symbols"));
+        assert!(!shown.contains("Actions"));
+        a.handle(crossterm::event::Event::Paste("α界".repeat(40)));
+        settle(&mut a, |a| {
+            a.session.state().navigation().is_some_and(|s| !s.pending)
+        });
+        for (w, h) in [(20, 8), (4, 4), (1, 1), (0, 0), (100, 26)] {
+            draw(&mut a, w, h);
+        }
+        a.handle(crossterm::event::Event::Key(
+            crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+        ));
+        assert!(a.modal.is_none());
     }
 }

@@ -1106,6 +1106,39 @@ fn pending_edits_toolbar_save_discard_and_quit_guard_use_actual_keys_and_disk() 
 }
 
 #[test]
+fn active_toolbar_text_stays_readable_in_light_accent_themes() {
+    let palette=lenz::theme::builtin("rose-pine-dawn").unwrap();
+    let mut bar=crate::chrome::Bar::default();
+    let mut terminal=Terminal::new(TestBackend::new(30,10)).unwrap();
+    terminal.draw(|frame|{bar.draw_with_theme(frame,frame.area(),vec![crate::chrome::Item::new("Active",0).active(true)],palette,1);}).unwrap();
+    let cell=&terminal.backend().buffer()[(1,0)];
+    let ratatui::style::Color::Rgb(r,g,b)=cell.fg else {panic!("theme RGB text")};
+    let fg=(u32::from(r)<<16)|(u32::from(g)<<8)|u32::from(b);
+    assert!(lenz::theme::contrast(fg,palette.selected_bg)>=3.0);
+    assert!(cell.modifier.contains(ratatui::style::Modifier::UNDERLINED));
+}
+
+#[test]
+fn nerd_files_keep_names_status_and_click_targets_in_both_themes() {
+    for palette in [&lenz::theme::DARCULA, &lenz::theme::LIGHT] {
+        let (dir,mut app)=crate::app::tests::writable_pair("old\n","new\n");
+        app.palette=std::sync::Arc::new(*palette);
+        app.icons=crate::icons::Icons::Nerd;
+        app.navigator.visible=Some(true);
+        let screen=draw(&mut app,100,24);
+        assert!(text(&screen).contains("\u{f15c} right.txt"));
+        click(&mut app,locate(&screen,"right.txt"));
+        assert_eq!(app.session.current(),0);
+        assert_eq!(std::fs::read_to_string(dir.path().join("right.txt")).unwrap(),"new\n");
+        app.icons=crate::icons::Icons::Plain;
+        let screen=draw(&mut app,100,24);
+        assert!(!text(&screen).contains('\u{f15c}'));
+        assert!(text(&screen).contains("right.txt"));
+        for (w,h) in [(48,12),(18,5),(1,1)] { draw(&mut app,w,h); }
+    }
+}
+
+#[test]
 fn compact_toolbar_keeps_primary_actions_and_mouse_palettes_modal() {
     let (dir,mut app)=crate::app::tests::writable_pair(&"old\n".repeat(80),&"new\n".repeat(80));
     app.icons=crate::icons::Icons::Plain;
@@ -1912,7 +1945,7 @@ fn tui_focus_names_the_selection_in_the_bottom_panel() {
     assert!(screen.contains(&format!("┌{title}")), "the commit panel is headed by the selection: {screen}");
     // the commit message box carries the name, the list above it keeps its own
     let buffer = draw(&mut app, 160, 36);
-    assert!(locate(&buffer, &format!("┌{title}")).1 > locate(&buffer, "┌Files (1)").1, "{screen}");
+    assert!(locate(&buffer, &format!("┌{title}")).1 > locate(&buffer, "Files (1)").1, "{screen}");
     assert_eq!(screen.matches(&title).count(), 1, "named once: {screen}");
 }
 
@@ -2285,5 +2318,5 @@ fn the_bottom_bar_spans_the_window_under_the_files_panel() {
     assert!(bottom.trim_end().ends_with("q quit"), "the keys end at the right edge: {bottom:?}");
     let bar = [app.palette.status_bg, app.palette.selected_bg].map(crate::chrome::color);
     assert!((0..w).all(|x| bar.contains(&screen[(x, h - 1)].bg)), "one bar across the window (the shown panel's switch selected)");
-    assert!(row(h - 2).starts_with('└'), "the Files panel ends above the bar: {:?}", row(h - 2));
+    assert!(row(h - 2).starts_with('╰'), "the Files panel ends above the bar: {:?}", row(h - 2));
 }

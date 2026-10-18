@@ -86,7 +86,11 @@ Folder headings in Files collapse and expand: click the ▾/▸ arrow (the headi
 
 The terminal shares the GUI's themes and the [theme IDs, file format and precedence](themes.md). **Change theme** (☰ or the palette) opens a scrollable chooser. Follow system is the default and tracks Omarchy palettes live on Linux; elsewhere the terminal falls back to Darcula, because native terminal appearance is not detected. A manual choice persists until you choose Follow system again. `LENZ_THEME=system|<id>` overrides a launch (`LENZ_APPEARANCE=light|dark` is read only when `LENZ_THEME` is unset), and an explicit menu choice overrides both.
 
-**Nerd Font icons** in ☰ add icons beside the toolbar labels; plain labels are the default. `LENZ_ICONS=nerd|plain` or `[tools] icons` in the settings file chooses at launch, and the menu choice lasts for the current view. Configure a [Nerd Font Mono](https://www.nerdfonts.com/) in your terminal for single-cell glyphs. Lenz installs no fonts. Command menus keep full action names.
+**Nerd Font icons** in ☰ decorate files, folders, comparison and merge headers, repository headings and panel switches; plain labels are the default. `LENZ_ICONS=nerd|plain` or `[tools] icons` in the settings file chooses at launch, and the menu choice lasts for the current view. Both TUIs use the same glyph set. Configure a [Nerd Font Mono](https://www.nerdfonts.com/) in your terminal for single-cell glyphs, such as JetBrainsMono Nerd Font Mono. Lenz installs no fonts. Command menus keep full action names.
+
+Pane borders use quiet theme colors and rounded corners, with accent headings for keyboard focus. Active toolbar controls and comparison headers use bold and underline as well as color. Existing theme choices apply to this styling in both light and dark appearances.
+
+File icons share the GUI reader's file-type mapping and colors; names and Git status badges retain their existing colors. `NO_COLOR` disables all terminal colors, including syntax and diff highlighting. For a colored launch, use `env -u NO_COLOR LENZ_ICONS=nerd lenz-tui` (or the staged `lenz diff --tui`).
 
 ## Repository and pull request controls
 

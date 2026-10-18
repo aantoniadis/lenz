@@ -1,6 +1,6 @@
 //! Terminal chrome: shared GUI palette and bounded, keyboard/mouse-accessible toolbars.
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
-use ratatui::{Frame, buffer::Buffer, layout::Rect, style::{Color, Modifier, Style}, widgets::{Block, Borders, Clear}};
+use ratatui::{Frame, buffer::Buffer, layout::Rect, style::{Color, Modifier, Style}, widgets::{Block, BorderType, Borders, Clear}};
 use unicode_width::UnicodeWidthStr;
 use std::borrow::Cow;
 
@@ -17,6 +17,12 @@ pub fn initial_palette()-> &'static lenz::theme::Palette {
 }
 pub fn color(rgb:u32)->Color { Color::Rgb((rgb>>16)as u8,(rgb>>8)as u8,rgb as u8) }
 pub fn style_with(palette:&lenz::theme::Palette)->Style { Style::default().fg(color(palette.fg)).bg(color(palette.bg)) }
+
+pub fn pane<'a>(title:impl Into<ratatui::text::Line<'a>>,palette:&lenz::theme::Palette,focused:bool)->Block<'a> {
+    Block::default().borders(Borders::ALL).border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(color(if focused{palette.accent}else{palette.border})))
+        .title(title).title_style(Style::default().fg(color(if focused{palette.readable_on(palette.accent,palette.sidebar_bg)}else{palette.fg})).add_modifier(Modifier::BOLD))
+}
 
 #[derive(Clone)]
 pub struct Item<A> { pub label:Cow<'static,str>, pub action:A, pub active:bool, pub disabled:Option<Cow<'static,str>>, pub choices:Vec<Item<A>>, overflow:bool,
@@ -104,8 +110,8 @@ impl<A:Copy> Bar<A> {
         for &(index,rect) in &self.hits {
             let item=&self.items[index];let selected=self.selected==Some(index);
             let bg=if selected||item.active{palette.selected_bg}else{palette.header_bg};
-            let fg=if item.disabled.is_some(){palette.dim}else{palette.fg};
-            let s=style_with(palette).fg(color(fg)).bg(color(bg)).add_modifier(if selected{Modifier::BOLD}else{Modifier::empty()});
+            let fg=if item.disabled.is_some(){palette.dim}else if selected||item.active{palette.readable_on(palette.accent,bg)}else{palette.fg};
+            let s=style_with(palette).fg(color(fg)).bg(color(bg)).add_modifier(if selected||item.active{Modifier::BOLD|Modifier::UNDERLINED}else{Modifier::empty()});
             frame.buffer_mut().set_style(rect,s);
             crate::visual::safe_text(frame.buffer_mut(),rect,&format!(" {} ",item.label),s);
         }
@@ -206,7 +212,7 @@ impl<A:Copy> Bar<A> {
         let anchor=self.hits.iter().find(|(i,_)|*i==index).map_or(area,|(_,r)|*r);
         self.popup=Rect::new(anchor.x.min(area.right()-width),(anchor.y+1).min(area.bottom()-height),width,height);
         frame.render_widget(Clear,self.popup);
-        frame.render_widget(Block::default().borders(Borders::ALL).title(title).style(style_with(palette).bg(color(palette.status_bg))),self.popup);
+        frame.render_widget(pane(title,palette,true).style(style_with(palette).bg(color(palette.status_bg))),self.popup);
         let visible=height.saturating_sub(3).max(1)as usize;
         self.menu_first=if self.row<self.menu_first{self.row}else if self.row>=self.menu_first+visible{self.row.saturating_add(1).saturating_sub(visible)}else{self.menu_first};
         self.menu_first=self.menu_first.min(rows.len().saturating_sub(visible));

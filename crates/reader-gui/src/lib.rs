@@ -15,7 +15,7 @@ use lenz_content::find::FindOption;
 use lenz_content::{display, theme::{ThemeCommand, ThemeSelection}};
 use lenz_gpui::{Metrics, TextRow};
 use reader_core::{
-    actions::{CatalogAction, InterfaceAction},
+    actions::{CatalogAction, CommandGroup, InterfaceAction},
     markdown::Preview,
     search::{Fold, Group, Row},
     semantics::hierarchy::Direction,
@@ -25,6 +25,7 @@ use reader_core::{
 
 pub mod icons;
 mod preview;
+mod navigation;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -42,7 +43,7 @@ const PLACEHOLDER: &str = " … ";
 fn status_h() -> f32 { 24.0 * font_size() / 13.0 }
 /// The status bar's text inset from each side.
 const STATUS_PAD: f32 = 8.0;
-/// The finder's query and status rows above its results in [`ReaderView::modal_rows`].
+/// The query and status rows above a list modal's results in [`ReaderView::modal_rows`].
 const FINDER_HEADER_ROWS: usize = 2;
 /// The AZERTY digit row's keys for 0–9 without Shift, as GPUI on Linux names them (the accented ones by keysym name).
 const AZERTY_DIGITS: [&str; 10] = ["agrave", "&", "eacute", "\"", "'", "(", "-", "egrave", "_", "ccedilla"];
@@ -52,12 +53,17 @@ const AZERTY_DIGITS: [&str; 10] = ["agrave", "&", "eacute", "\"", "'", "(", "-",
 pub enum Modal {
     /// The command menu: catalog rows and the highlighted one.
     Commands { at: usize },
+    /// The app menu and its shared command groups.
+    AppMenu { at: usize },
+    CommandGroup { group: CommandGroup, at: usize },
+    /// Full server status, troubleshooting and shared recovery actions.
+    LanguageServer { at: usize },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
     Recent { at: usize },
-    /// The file finder: the query typed so far and the highlighted result.
-    Finder { query: String, at: usize },
+    /// Unified file, symbol and command search; result targets stay in the core.
+    Navigation { at: usize },
     /// The search box: the text typed so far, and whether it searches the project (else the active file); for the
     /// project also the file pattern, and whether keys go to it (Tab switches).
     Search { query: String, files: String, in_files: bool, project: bool },
@@ -67,8 +73,9 @@ pub enum Modal {
     /// The workspace root for the active file's language server: the path typed so far (empty restores the
     /// server's own discovery).
     Root { path: String },
+    ServerRuntime { path: String, at: usize },
     /// The text's context menu, opened at a point: its entries and the highlighted one.
-    Context { entries: Vec<MenuEntry>, at: usize, x: f32, y: f32, scroll: f32, wheel: f32 },
+    Context { entries: Vec<MenuEntry>, at: usize, x: f32, y: f32, scroll: f32 },
     /// Go to line: what is typed so far (`line` or `line:column`), and why the last Enter was refused.
     GoTo { input: String, error: Option<String> },
     /// What is inside breadcrumb `crumb` of pane `pane`: the filter typed so far and the highlighted entry.
@@ -90,7 +97,7 @@ pub struct CrumbHit {
     pub label: String,
 }
 
-/// The open modal as drawn and clicked (every modal but the context menu): its box in window coordinates, its lines
+/// A list modal as drawn and clicked (context menus and navigation have their own layout): its box, its lines
 /// (the [`ReaderView::modal_rows`] row each belongs to, text, disabled), the first line shown, how many show, and the
 /// highlighted row.
 struct ModalLayout {
@@ -132,6 +139,12 @@ pub struct ReaderView {
     preview_drag: bool,
     themes_started: bool,
     pub modal: Option<Modal>,
+    double_shift: reader_core::navigation::DoubleShift,
+    navigation_drawn: Option<(u64, usize, usize)>,
+    /// Popup viewport and fractional wheel steps, independent of the highlighted option.
+    modal_scroll: std::cell::Cell<usize>,
+    modal_wheel: std::cell::Cell<f32>,
+    modal_seen: std::cell::Cell<Option<(std::mem::Discriminant<Modal>, usize)>>,
     /// The project tree's highlighted row (by path, so arriving files above it do not move it), its first
     /// visible row, whether the next paint brings the highlight into view, whether keys go to it and whether it
     /// is shown.
@@ -140,6 +153,7 @@ pub struct ReaderView {
     tree_reveal: bool,
     pub tree_focus: bool,
     tree_shown: bool,
+    pending_explorer: Option<reader_core::workspace::Explorer>,
     /// The sidebar's width from the last paint (0 when hidden).
     sidebar_w: f32,
     /// Keys go to the results panel; its first visible result; its list's top and row count from the last paint.
@@ -177,6 +191,8 @@ pub struct ReaderView {
     split_at: f32,
     /// The toolbar button under the pointer.
     pub nav_hover: Option<CommandId>,
+    app_menu_hover: bool,
+    commands_hover: bool,
     /// The installed Nerd Font for file icons (looked up once; `Some(None)`: none, shapes are drawn).
     icon_font: Option<Option<gpui::Font>>,
     /// The tree's and tabs' logos drawn so far, at `logo_px` device pixels, and their uploads.
@@ -398,8 +414,14 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
         view.layout = view.session.state().layout();
+        cx.on_app_quit(|view, cx| {
+            view.remember_explorer();
+            view.session.dispatch(Command::SaveWorkspace);
+            let saved = view.session.workspace_saved();
+            cx.background_executor().spawn(async move { let _ = saved.recv(); })
+        }).detach();
         if let Some(notice) = notice {
             eprintln!("lenz-reader: {notice}");
         }
@@ -465,8 +487,6 @@ impl ReaderView {
 
     pub fn open_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
         // A new root's rows replace the old ones: reset what pointed into them.
-        self.tree_sel = None;
-        self.tree_scroll = 0;
         self.close_modal(cx);
         self.dispatch(Command::OpenRoot(root), cx);
     }
@@ -503,10 +523,13 @@ impl ReaderView {
         self.tree_reveal = true;
     }
 
-    /// Close the open modal; closing the finder also ends its query in the core.
+    /// Close the open modal and its core search or runtime dialog.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
-        if matches!(self.modal.take(), Some(Modal::Finder { .. })) {
-            self.dispatch(Command::CloseFinder, cx);
+        self.modal_seen.set(None);
+        match self.modal.take() {
+            Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
+            Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
+            _ => {}
         }
         cx.notify();
     }
@@ -530,6 +553,32 @@ impl ReaderView {
         }
     }
 
+    fn remember_explorer(&mut self) {
+        if self.pending_explorer.is_some() || self.session.state().project().is_none() { return; }
+        let explorer = reader_core::workspace::Explorer { visible: self.tree_shown, selected: self.tree_sel.as_ref().map(ToString::to_string), top: self.session.state().project().and_then(|p| p.rows().get(self.tree_scroll)).map(|r| r.path.to_string()) };
+        if self.session.state().explorer() != &explorer { self.session.dispatch(Command::SetExplorer(explorer)); }
+    }
+
+    fn sync_workspace(&mut self, previous: u64) {
+        if self.session.state().workspace_revision() != previous {
+            let explorer = self.session.state().explorer().clone();
+            self.tree_shown = explorer.visible; self.tree_sel = None; self.tree_scroll = 0;
+            self.tree_focus &= self.tree_shown;
+            self.layout = self.session.state().layout();
+            self.pending_explorer = Some(explorer);
+            self.results_scroll = 0; self.results_focus = false;
+        }
+        let (Some(explorer), Some(project)) = (&self.pending_explorer, self.session.state().project()) else { return };
+        let at = |path: &Option<String>| path.as_ref().and_then(|path| project.rows().iter().position(|r| r.path.as_ref() == path));
+        let selected = at(&explorer.selected); let top = at(&explorer.top);
+        let done = matches!(project.coverage(), reader_core::project::Coverage::Complete(_) | reader_core::project::Coverage::Unavailable(_));
+        if (explorer.selected.is_none() || selected.is_some() || done) && (explorer.top.is_none() || top.is_some() || done) {
+            self.tree_sel = selected.map(|i| project.rows()[i].path.clone());
+            self.tree_scroll = top.unwrap_or(0); self.tree_reveal = false;
+            self.pending_explorer = None;
+        }
+    }
+
     pub fn session(&self) -> &Session {
         &self.session
     }
@@ -550,7 +599,11 @@ impl ReaderView {
         let (input, started): (reader_core::session::Input, _) = (input.into(), std::time::Instant::now());
         #[cfg(feature = "perf-probe")]
         let kind = input.kind();
+        let input: reader_core::session::Input = input.into();
+        if matches!(&input, reader_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
+        let workspace = self.session.state().workspace_revision();
         let effect = self.session.dispatch(input);
+        self.sync_workspace(workspace);
         #[cfg(feature = "perf-probe")]
         if started.elapsed().as_millis() >= 30 {
             eprintln!("lenz-reader: slow dispatch {kind} {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
@@ -660,21 +713,26 @@ impl ReaderView {
                     })
                     .detach();
                 }
+                InterfaceAction::LanguageServer => {
+                    self.dispatch(Command::CloseDocumentation, cx);
+                    self.modal = Some(Modal::LanguageServer { at: 0 });
+                    cx.notify();
+                }
                 InterfaceAction::OpenRecent => {
                     self.modal = Some(Modal::Recent { at: 0 });
                     cx.notify();
                 }
-                InterfaceAction::FindFile => {
-                    self.modal = Some(Modal::Finder { query: String::new(), at: 0 });
-                    self.dispatch(Command::FindFile(String::new()), cx);
-                    cx.notify();
-                }
+                InterfaceAction::FindFile => self.open_navigation(reader_core::navigation::Scope::Files, cx),
+                InterfaceAction::SearchEverywhere => self.open_navigation(reader_core::navigation::Scope::All, cx),
+                InterfaceAction::FindSymbol => self.open_navigation(reader_core::navigation::Scope::Symbols, cx),
+                InterfaceAction::FindAction => self.open_navigation(reader_core::navigation::Scope::Actions, cx),
                 InterfaceAction::FindDeclarations | InterfaceAction::Symbols => {
                     self.modal = Some(Modal::Declarations { query: String::new(), semantic: id == CommandId::Symbols });
                     cx.notify();
                 }
                 InterfaceAction::ToggleExplorer => {
                     self.tree_shown = !self.tree_shown;
+                    self.remember_explorer();
                     self.tree_focus &= self.tree_shown;
                     cx.notify();
                 }
@@ -704,10 +762,10 @@ impl ReaderView {
                     self.modal = Some(Modal::Mnemonic);
                     cx.notify();
                 }
-                InterfaceAction::ShowBookmarks | InterfaceAction::RecentFiles | InterfaceAction::RecentLocations => {
+                InterfaceAction::RecentFiles => self.open_navigation(reader_core::navigation::Scope::Recent, cx),
+                InterfaceAction::ShowBookmarks | InterfaceAction::RecentLocations => {
                     let list = match id {
                         CommandId::ShowBookmarks => PlaceList::Bookmarks,
-                        CommandId::RecentFiles => PlaceList::RecentFiles,
                         _ => PlaceList::RecentLocations,
                     };
                     self.modal = Some(Modal::Places { list, query: String::new(), at: 0 });
@@ -721,6 +779,12 @@ impl ReaderView {
                             eprintln!("lenz-reader: cannot open a window: {e}");
                         }
                     });
+                }
+                InterfaceAction::ServerRuntime => {
+                    self.dispatch(Command::OpenServerRuntime, cx);
+                    let path = self.session.state().server_runtime().and_then(|m| m.configured.as_ref()).map(|p| p.display().to_string()).unwrap_or_default();
+                    self.modal = Some(Modal::ServerRuntime { path, at: 0 });
+                    cx.notify();
                 }
                 InterfaceAction::WorkspaceRoot => {
                     let path = self.session.state().provider().and_then(|v| v.root).map(|r| r.display().to_string()).unwrap_or_default();
@@ -792,12 +856,21 @@ impl ReaderView {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
+        if !matches!(k.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
         let (key, ctrl, shift) = (k.key.as_str(), k.modifiers.control || k.modifiers.platform, k.modifiers.shift);
         // The modal takes every key first.
         if self.modal.is_some() {
+            if !matches!(key, "enter" | "escape") { self.modal_seen.set(None); }
             self.modal_key(ev, window, cx);
+            if self.modal.is_none() { self.modal_seen.set(None); }
             cx.notify();
             return;
+        }
+        if ctrl && !k.modifiers.alt && ((key == "k" && !shift) || (key == "p" && shift) || (key == "a" && shift)) {
+            return self.run(if key == "k" { CommandId::SearchEverywhere } else { CommandId::FindAction }, window, cx);
+        }
+        if ctrl && shift && key == "n" {
+            return self.run(if k.modifiers.alt { CommandId::FindSymbol } else { CommandId::FindFile }, window, cx);
         }
         if (key == "." && ctrl && shift) || (key == ">" && ctrl) {
             return self.run(CommandId::FocusBreadcrumbs, window, cx);
@@ -896,8 +969,7 @@ impl ReaderView {
             }
             ("1", true, false) => self.dispatch(Command::FocusPane(0), cx),
             ("2", true, false) => self.dispatch(Command::FocusPane(1), cx),
-            ("n", true, true) => self.run(CommandId::NewWindow, window, cx),
-            ("f10", _, _) | ("p", true, true) => {
+            ("f10", _, _) => {
                 self.modal = Some(Modal::Commands { at: 0 });
                 cx.notify();
             }
@@ -933,6 +1005,7 @@ impl ReaderView {
             ("f12", false, false) if k.modifiers.alt => self.run(CommandId::PeekDefinition, window, cx),
             ("f12", false, true) => self.run(CommandId::Usages, window, cx),
             ("f12", false, false) => self.run(CommandId::Definition, window, cx),
+            ("f2", false, false) => self.run(CommandId::LanguageServer, window, cx),
             ("escape", false, false) if self.session.state().asking().is_some() => self.dispatch(Command::CancelSemantic, cx),
             ("left", false, true) => self.extend(Motion::Left, cx),
             ("right", false, true) => self.extend(Motion::Right, cx),
@@ -940,8 +1013,10 @@ impl ReaderView {
             ("down", false, true) => self.extend(Motion::Down, cx),
             ("home", false, true) => self.extend(Motion::LineStart, cx),
             ("end", false, true) => self.extend(Motion::LineEnd, cx),
-            ("down", false, _) => self.dispatch(Command::ScrollRows(1), cx),
-            ("up", false, _) => self.dispatch(Command::ScrollRows(-1), cx),
+            ("left", false, false) => self.dispatch(Command::MoveCaret(Motion::Left), cx),
+            ("right", false, false) => self.dispatch(Command::MoveCaret(Motion::Right), cx),
+            ("up", false, false) => self.dispatch(Command::MoveCaret(Motion::Up), cx),
+            ("down", false, false) => self.dispatch(Command::MoveCaret(Motion::Down), cx),
             ("pagedown", _, _) => self.dispatch(Command::ScrollRows(page as isize), cx),
             ("pageup", _, _) => self.dispatch(Command::ScrollRows(-(page as isize)), cx),
             ("end", _, _) => self.dispatch(Command::Scroll(usize::MAX), cx),
@@ -956,8 +1031,44 @@ impl ReaderView {
     /// Accept the open list modal's highlighted row, as Enter does: run the command, pick the theme, open the recent
     /// folder or the found file, follow the crumb's entry, or go to the place (a missing place keeps the list open).
     fn modal_accept(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Navigation { .. })) {
+            let revision = self.session.state().navigation().map(|n| n.revision);
+            if let Some(revision) = revision { self.accept_navigation(revision, window, cx); }
+            return;
+        }
         match self.modal.take() {
-            Some(Modal::Commands { at }) => self.run(CommandId::ALL[at], window, cx),
+            Some(Modal::Navigation { .. }) => {}, // Handled above without taking the modal.
+            Some(Modal::ServerRuntime { path, at }) => {
+                let choice = self.session.state().server_runtime().and_then(|m| m.choices(&path).get(at).cloned());
+                self.modal = Some(Modal::ServerRuntime { path, at });
+                if let Some((_, path)) = choice {
+                    if let Some(Modal::ServerRuntime { path: input, .. }) = &mut self.modal { *input = path.as_ref().map_or_else(String::new, |p| p.display().to_string()); }
+                    self.dispatch(Command::SetServerRuntime(path), cx);
+                }
+            }
+            Some(Modal::LanguageServer { at }) => {
+                if let Some(id) = self.server_rows().get(at).and_then(|(_, id)| *id) {
+                    self.run(id, window, cx);
+                } else {
+                    self.modal = Some(Modal::LanguageServer { at });
+                }
+            }
+            Some(Modal::Commands { at }) => {
+                if let Some(&id) = CommandId::ALL.get(at) { self.run(id, window, cx); }
+            }
+            Some(Modal::AppMenu { at }) => {
+                match CommandGroup::ALL.get(at) {
+                    Some(&group) => self.modal = Some(Modal::CommandGroup { group, at: 1 }),
+                    None => self.open_navigation(reader_core::navigation::Scope::Actions, cx),
+                }
+            }
+            Some(Modal::CommandGroup { group, at }) => {
+                if at == 0 {
+                    self.modal = Some(Modal::AppMenu { at: CommandGroup::ALL.iter().position(|g| *g == group).unwrap_or(0) });
+                } else if let Some(id) = CommandId::ALL.iter().copied().filter(|id| id.group() == group).nth(at - 1) {
+                    self.run(id, window, cx);
+                }
+            }
             Some(Modal::Themes { ids, at }) => {
                 if let Some(selection) = ids.get(at).and_then(|(id, _)| ThemeSelection::from_id(id)) {
                     self.dispatch(Command::Theme(ThemeCommand::Select(selection)), cx);
@@ -966,16 +1077,6 @@ impl ReaderView {
             Some(Modal::Recent { at }) => {
                 if let Some(root) = self.session.state().recent().get(at).cloned() {
                     self.open_root(root, cx);
-                }
-            }
-            Some(Modal::Finder { at, .. }) => {
-                let target = self.session.state().project().and_then(|p| Some(p.root().join(&**p.finder()?.hits.get(at)?)));
-                let line = self.session.state().project().and_then(|p| p.finder()?.at());
-                self.dispatch(Command::CloseFinder, cx);
-                match (target, line) {
-                    (Some(path), Some(at)) => self.dispatch(Command::OpenAt { path, at }, cx),
-                    (Some(path), None) => self.open(path, cx),
-                    (None, _) => {}
                 }
             }
             Some(Modal::Siblings { pane, crumb, query, at }) => {
@@ -1010,8 +1111,9 @@ impl ReaderView {
             return;
         }
         match &mut self.modal {
-            Some(Modal::Commands { at } | Modal::Themes { at, .. } | Modal::Recent { at }) => *at = row,
-            Some(Modal::Finder { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
+            Some(Modal::Navigation { .. }) => return,
+            Some(Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Themes { at, .. } | Modal::Recent { at }) => *at = row,
+            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
             },
@@ -1021,7 +1123,43 @@ impl ReaderView {
     }
 
     fn modal_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.modal, Some(Modal::Navigation { .. })) {
+            return self.navigation_key(ev, window, cx);
+        }
         let key = ev.keystroke.key.as_str();
+        if let Some(Modal::CommandGroup { group, .. }) = &self.modal
+            && matches!(key, "left" | "escape")
+        {
+            self.modal = Some(Modal::AppMenu { at: CommandGroup::ALL.iter().position(|g| g == group).unwrap_or(0) });
+            return;
+        }
+        if matches!(self.modal, Some(Modal::AppMenu { .. })) && key == "right" {
+            return self.modal_accept(window, cx);
+        }
+        if matches!(self.modal, Some(Modal::LanguageServer { .. })) && key == "c"
+            && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform) && !ev.keystroke.modifiers.alt
+        {
+            self.run(CommandId::CopyServerDetails, window, cx);
+            return;
+        }
+        if let Some(Modal::ServerRuntime { path, at }) = &mut self.modal {
+            if ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform {
+                if key == "v" && let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+                    path.push_str(text.trim()); *at = 0;
+                } else if key == "a" { path.clear(); *at = 0; }
+                return;
+            }
+            match key {
+                "escape" => { self.close_modal(cx); return; }
+                "backspace" => { path.pop(); *at = 0; return; }
+                "enter" => { self.modal_accept(window, cx); return; }
+                "up" | "down" | "pageup" | "pagedown" | "home" | "end" => {},
+                _ => {
+                    if let Some(text) = ev.keystroke.key_char.as_ref().filter(|t| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !t.chars().any(char::is_control)) { path.push_str(text); *at = 0; }
+                    return;
+                }
+            }
+        }
         // A list of places: typing filters, Up/Down move, Enter goes there, Delete forgets, Escape back to the text.
         if let Some(Modal::Places { list, query, at }) = self.modal.clone() {
             let rows = self.session.state().place_rows(list, &query);
@@ -1110,7 +1248,6 @@ impl ReaderView {
             self.reveal_context();
             return;
         }
-        let hits = self.session.state().project().and_then(|p| p.finder()).map_or(0, |f| f.hits.len());
         if let Some(Modal::Declarations { query, semantic }) = &mut self.modal {
             let typed = ev.keystroke.key_char.clone().filter(|_| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform);
             match key {
@@ -1220,16 +1357,18 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic) => 0,
+            Some(Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic) => 0,
+            Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
+            Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
+            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.len() + 1,
+            Some(Modal::CommandGroup { group, .. }) => CommandId::ALL.iter().filter(|id| id.group() == *group).count() + 1,
             Some(Modal::Themes { ids, .. }) => ids.len(),
             Some(Modal::Recent { .. }) => self.session.state().recent().len(),
-            Some(Modal::Finder { .. }) => hits,
             None => 0,
         };
-        let finder = matches!(self.modal, Some(Modal::Finder { .. }));
         let Some(modal) = &mut self.modal else { return };
-        let (Modal::Commands { at } | Modal::Themes { at, .. } | Modal::Recent { at } | Modal::Finder { at, .. }) = modal else { return };
+        let (Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::ServerRuntime { at, .. } | Modal::Themes { at, .. } | Modal::Recent { at }) = modal else { return };
         // The finder's results may have changed since the highlight moved.
         *at = (*at).min(len.saturating_sub(1));
         match key {
@@ -1239,25 +1378,9 @@ impl ReaderView {
             "pageup" => *at = at.saturating_sub(10),
             "pagedown" => *at = (*at + 10).min(len.saturating_sub(1)),
             "enter" => self.modal_accept(window, cx),
-            "backspace" if finder => {
-                if let Some(Modal::Finder { query, at }) = &mut self.modal {
-                    query.pop();
-                    *at = 0;
-                    let q = query.clone();
-                    self.dispatch(Command::FindFile(q), cx);
-                }
-            }
             "home" => *at = 0,
             "end" => *at = len.saturating_sub(1),
-            _ => {
-                let typed = ev.keystroke.key_char.clone().filter(|_| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform);
-                if let (Some(Modal::Finder { query, at }), Some(text)) = (&mut self.modal, typed) {
-                    query.push_str(&text);
-                    *at = 0;
-                    let q = query.clone();
-                    self.dispatch(Command::FindFile(q), cx);
-                }
-            }
+            _ => {}
         }
     }
 
@@ -1666,23 +1789,27 @@ impl ReaderView {
     }
 
     fn on_wheel(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Modal::Context { entries, at, wheel, .. }) = &mut self.modal {
-            let delta = match ev.delta { ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(), ScrollDelta::Lines(l) => -l.y };
-            let commands: Vec<_> = entries.iter().enumerate().filter(|(_, e)| matches!(e, MenuEntry::Command(_))).map(|(i, _)| i).collect();
-            *wheel += delta;
-            let steps = wheel.trunc() as isize;
-            *wheel -= steps as f32;
-            if !commands.is_empty() && steps != 0 {
-                let here = commands.iter().position(|i| i == at).unwrap_or(0);
-                let next = (here as isize).saturating_add(steps).clamp(0, commands.len() as isize - 1) as usize;
-                *at = commands[next];
-                self.reveal_context();
-                cx.notify();
-            }
-            return;
+        self.double_shift.interrupt();
+        if let Some(Modal::Navigation { at }) = self.modal {
+            let len = self.session.state().navigation().map_or(0, |n| n.rows.len());
+            let visible = self.navigation_visible(len);
+            self.modal_first(at, at..at.saturating_add(1), len, visible);
+            let delta = match ev.delta { ScrollDelta::Pixels(p) => -f32::from(p.y) / (line_h() * 2.0), ScrollDelta::Lines(l) => -l.y * 3.0 };
+            self.scroll_modal(delta, len.saturating_sub(visible));
+            return cx.notify();
+        }
+        if let Some(Modal::Context { scroll, .. }) = &mut self.modal {
+            let delta = match ev.delta { ScrollDelta::Pixels(p) => -f32::from(p.y), ScrollDelta::Lines(l) => -l.y * line_h() };
+            *scroll += delta;
+            self.clamp_context();
+            return cx.notify();
         }
         if self.modal.is_some() {
-            return;
+            if let Some(layout) = self.modal_layout() {
+                let delta = match ev.delta { ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(), ScrollDelta::Lines(l) => -l.y * 3.0 };
+                self.scroll_modal(delta, layout.lines.len().saturating_sub(layout.visible));
+            }
+            return cx.notify();
         }
         self.link = None; // the text moves under the pointer; the next move finds it again
         // Over the documentation popup the wheel scrolls it; elsewhere it closes it.
@@ -1940,12 +2067,21 @@ impl ReaderView {
     }
 
     fn on_modifiers(&mut self, ev: &gpui::ModifiersChangedEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.modal.is_some() {
+            self.double_shift.reset();
+        } else if self.double_shift.update(ev.modifiers.shift, ev.modifiers.control || ev.modifiers.alt || ev.modifiers.platform || ev.modifiers.function, std::time::Instant::now()) {
+            self.open_navigation(reader_core::navigation::Scope::All, cx);
+        }
         let at = window.mouse_position();
         self.hover_link(window, f32::from(at.x), f32::from(at.y), ev.modifiers.control || ev.modifiers.platform, cx);
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.double_shift.interrupt();
         window.focus(&self.focus, cx);
+        if matches!(self.modal, Some(Modal::Navigation { .. })) {
+            return self.navigation_click(ev.position, window, cx);
+        }
         // A find box keeps a click: a toggle flips its option, anywhere else gives it the keys.
         if self.modal.is_none() && let Some((pane, b)) = self.panes.iter().find_map(|g| self.find_box(g).filter(|b| b.bounds.contains(&ev.position)).map(|b| (g.pane, b))) {
             match b.option_at(ev.position) {
@@ -1996,7 +2132,12 @@ impl ReaderView {
         }
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         if y >= self.body_bottom() {
-            return; // the status bar
+            if self.commands_button().is_some_and(|(b, _)| b.contains(&ev.position)) {
+                self.open_navigation(reader_core::navigation::Scope::Actions, cx);
+                return;
+            }
+            self.run(CommandId::LanguageServer, window, cx);
+            return;
         }
         // A divider: dragged until the button is released.
         if let Some(divider) = self.divider_at(x, y) {
@@ -2053,6 +2194,10 @@ impl ReaderView {
             return; // the panel's status line and preview
         }
         self.results_focus = false;
+        if self.app_menu_button().contains(&ev.position) {
+            self.modal = Some(Modal::AppMenu { at: 0 });
+            return cx.notify();
+        }
         // The toolbar row: the explorer's title and its buttons, then the files panel's buttons and tabs.
         if (0.0..line_h()).contains(&y)
             && let Some(&(_, _, id, _, _)) = self.explorer_buttons().iter().chain(&self.nav_buttons()).find(|b| (b.0..b.1).contains(&x))
@@ -2139,6 +2284,7 @@ impl ReaderView {
 
     /// A mouse side button: Back or Forward, unless a menu or dialog is open.
     fn side_button(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        self.double_shift.interrupt();
         if self.modal.is_none() {
             self.run(id, window, cx);
         }
@@ -2147,6 +2293,10 @@ impl ReaderView {
     /// A right-click in a pane's text: that pane takes focus, the caret moves to the pointer unless it is inside
     /// the selection, and the context menu opens there.
     fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.double_shift.interrupt();
+        if self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Context { .. })) {
+            return;
+        }
         window.focus(&self.focus, cx);
         self.close_modal(cx);
         if self.session.state().documentation().is_some() {
@@ -2167,7 +2317,7 @@ impl ReaderView {
         }
         let entries = self.session.context_menu();
         let at = entries.iter().position(|e| matches!(e, MenuEntry::Command(_))).unwrap_or(0);
-        self.modal = Some(Modal::Context { entries, at, x, y, scroll: 0.0, wheel: 0.0 });
+        self.modal = Some(Modal::Context { entries, at, x, y, scroll: 0.0 });
         cx.notify();
     }
 
@@ -2193,6 +2343,13 @@ impl ReaderView {
             })
             .collect();
         Some((Bounds { origin: gpui::point(px(left), px(top)), size: gpui::size(px(w), px(h)) }, rows))
+    }
+
+    fn clamp_context(&mut self) {
+        if let Some(Modal::Context { entries, scroll, .. }) = &mut self.modal {
+            let total: f32 = entries.iter().map(|e| context_row_height(*e)).sum();
+            *scroll = scroll.clamp(0.0, (total - (self.height - 8.0).max(0.0)).max(0.0));
+        }
     }
 
     fn reveal_context(&mut self) {
@@ -2225,6 +2382,25 @@ impl ReaderView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        let app_menu_hover = self.app_menu_button().contains(&ev.position);
+        let commands_hover = self.modal.is_none() && self.commands_button().is_some_and(|(b, _)| b.contains(&ev.position));
+        if (app_menu_hover, commands_hover) != (self.app_menu_hover, self.commands_hover) {
+            self.app_menu_hover = app_menu_hover;
+            self.commands_hover = commands_hover;
+            cx.notify();
+        }
+        if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }))
+            && let Some(l) = self.modal_layout().filter(|l| l.bounds.contains(&ev.position))
+        {
+            let n = ((y - f32::from(l.bounds.origin.y) - 4.0) / line_h()).floor();
+            if n >= 0.0 && (n as usize) < l.visible && let Some(&(row, ..)) = l.lines.get(l.first + n as usize)
+                && let Some(Modal::AppMenu { at } | Modal::CommandGroup { at, .. }) = &mut self.modal
+                && *at != row
+            {
+                *at = row;
+                cx.notify();
+            }
+        }
         let hover = (self.modal.is_none() && (0.0..line_h()).contains(&y)).then(|| self.explorer_buttons().into_iter().chain(self.nav_buttons()).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten();
         if hover != self.nav_hover {
             self.nav_hover = hover;
@@ -2371,28 +2547,36 @@ impl ReaderView {
         })
     }
 
+    fn app_menu_button(&self) -> Bounds<Pixels> {
+        Bounds { origin: gpui::point(px(4.0), px(0.0)), size: gpui::size(px((self.char_w * 3.0).max(line_h())), px(line_h())) }
+    }
+
+    fn commands_button(&self) -> Option<(Bounds<Pixels>, &'static str)> {
+        if self.status_h() == 0.0 || self.width < 240.0 { return None; }
+        let label = if self.width < 640.0 { "Commands" } else if cfg!(target_os = "macos") { "Commands  Cmd+Shift+P" } else { "Commands  Ctrl+Shift+P" };
+        let w = (label.len() as f32 + 2.0) * self.char_w;
+        Some((Bounds { origin: gpui::point(px(self.width - w - STATUS_PAD), px(self.body_bottom())), size: gpui::size(px(w), px(self.status_h())) }, label))
+    }
+
+    fn status_width(&self) -> f32 {
+        self.commands_button().map_or(self.width, |(b, _)| f32::from(b.origin.x)) - 2.0 * STATUS_PAD
+    }
+
     /// The files panel's toolbar buttons, in window coordinates: their x range, command, whether it can run now,
     /// and label. The explorer's show/hide switch while a folder is open (drawn, not labelled), Back and Forward
     /// always; then, for a Markdown file or an SVG, the switch between its source and its rendering, named for what
     /// it switches to.
     pub fn nav_buttons(&self) -> Vec<(f32, f32, CommandId, bool, &'static str)> {
         let w = (self.char_w * 3.0).max(line_h());
-        let explorer = self.session.state().project().is_some().then_some((CommandId::ToggleExplorer, ""));
-        let mut buttons: Vec<(f32, f32, CommandId, bool, &'static str)> = explorer.into_iter().chain([(CommandId::Back, "←"), (CommandId::Forward, "→")])
-            .enumerate()
-            .map(|(i, (id, label))| (self.sidebar_w + 4.0 + i as f32 * w, self.sidebar_w + 4.0 + (i + 1) as f32 * w, id, self.session.disabled(id).is_none(), label))
-            .collect();
-        let state = self.session.state();
-        let toggle = match (state.rendering(), state.active()) {
-            (Some(_), Some(t)) => Some((CommandId::MarkdownSource, if t.markdown_source() { "Preview" } else { "Source" })),
-            _ if self.session.disabled(CommandId::ImageSource).is_none() => Some((CommandId::ImageSource, if state.active().is_some_and(|t| t.image_source()) { "Image" } else { "Source" })),
-            _ => None,
-        };
-        if let Some((id, label)) = toggle {
-            let x = buttons.last().map_or(self.sidebar_w + 4.0, |b| b.1) + 8.0;
-            buttons.push((x, x + (label.len() as f32 + 2.0) * self.char_w, id, self.session.disabled(id).is_none(), label));
-        }
-        buttons
+        let mut x = if self.sidebar_w > 0.0 { self.sidebar_w + 4.0 } else { f32::from(self.app_menu_button().right()) + 4.0 };
+        self.session.navigation().into_iter().map(|(id, label)| {
+            let preview = matches!(id, CommandId::MarkdownSource | CommandId::ImageSource);
+            if preview { x += 8.0; }
+            let end = x + if preview { (label.len() as f32 + 2.0) * self.char_w } else { w };
+            let button = (x, end, id, self.session.disabled(id).is_none(), label);
+            x = end;
+            button
+        }).collect()
     }
 
     /// The explorer's title-row buttons, in window coordinates (as [`Self::nav_buttons`]): select the opened file.
@@ -2871,7 +3055,7 @@ impl ReaderView {
 
     /// The status bar's text cut to the window with "…".
     pub fn status_line(&self) -> String {
-        let (text, cols) = (self.status(), self.columns(self.width - 2.0 * STATUS_PAD));
+        let (text, cols) = (format!("{} · F2 / click for details · {}", self.session.state().language_server_label(), self.status()), self.columns(self.status_width()));
         if text.chars().count() <= cols {
             return text;
         }
@@ -2890,7 +3074,7 @@ impl ReaderView {
 
     /// The modal's rows, each wrapped to the menu's width, with the index of the row each line belongs to.
     pub fn modal_lines(&self) -> Vec<(usize, String, bool)> {
-        let cols = self.columns(menu_width(self.width) - 24.0);
+        let cols = self.columns(self.modal_width() - 24.0);
         self.modal_rows()
             .into_iter()
             .enumerate()
@@ -2901,16 +3085,46 @@ impl ReaderView {
             .collect()
     }
 
-    /// The open modal's box and lines (not the context menu: [`Self::context_layout`]), scrolled so the highlighted
-    /// row's last line shows. Paint draws it and a click picks from it.
+    fn modal_width(&self) -> f32 {
+        if matches!(self.modal, Some(Modal::AppMenu { .. })) {
+            menu_width(self.width).min(24.0 + 24.0 * self.char_w)
+        } else { menu_width(self.width) }
+    }
+
+    /// Clamp the popup viewport, revealing a selection only after keyboard or pointer navigation.
+    fn modal_first(&self, at: usize, selected: std::ops::Range<usize>, len: usize, visible: usize) -> usize {
+        let identity = self.modal.as_ref().map(|m| (std::mem::discriminant(m), at));
+        let previous = self.modal_seen.replace(identity);
+        let same_kind = previous.zip(identity).is_some_and(|(old, new)| old.0 == new.0);
+        let mut first = if same_kind { self.modal_scroll.get() } else { self.modal_wheel.set(0.0); 0 };
+        if previous != identity {
+            if selected.start < first { first = selected.start; }
+            else if selected.end > first + visible { first = selected.end.saturating_sub(visible); }
+        }
+        first = first.min(len.saturating_sub(visible));
+        self.modal_scroll.set(first);
+        first
+    }
+
+    fn scroll_modal(&self, delta: f32, max: usize) {
+        let accumulated = self.modal_wheel.get() + delta;
+        let steps = accumulated.trunc() as isize;
+        self.modal_wheel.set(accumulated - steps as f32);
+        self.modal_scroll.set(self.modal_scroll.get().saturating_add_signed(steps).min(max));
+    }
+
+    /// The open modal's box and wrapped lines. Paint and hit testing share the independent viewport.
     fn modal_layout(&self) -> Option<ModalLayout> {
-        let at = self.modal.as_ref().filter(|m| !matches!(m, Modal::Context { .. }))?.at();
+        let at = self.modal.as_ref().filter(|m| !matches!(m, Modal::Context { .. } | Modal::Navigation { .. }))?.at();
         let lines = self.modal_lines();
-        let mw = menu_width(self.width);
-        let visible = (((self.height - 16.0) / line_h()).floor().max(1.0) as usize).min(lines.len());
-        let last = lines.iter().rposition(|(i, _, _)| *i == at).unwrap_or(0);
-        let first = (last + 1).saturating_sub(visible);
-        let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px(8.0)), size: gpui::size(px(mw), px(visible as f32 * line_h() + 8.0)) };
+        let at = at.min(lines.last().map_or(0, |r| r.0));
+        let mw = self.modal_width();
+        let top = if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { line_h().min((self.height - 16.0).max(0.0)) } else { 8.0 };
+        let visible = (((self.height - top - 8.0) / line_h()).floor().max(1.0) as usize).min(lines.len());
+        let start = lines.iter().position(|(i, _, _)| *i == at).unwrap_or(0);
+        let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
+        let first = self.modal_first(at, start..end, lines.len(), visible);
+        let bounds = Bounds { origin: gpui::point(px(if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { 4.0_f32.min((self.width - mw).max(0.0)) } else { (self.width - mw) / 2.0 }), px(top)), size: gpui::size(px(mw), px(visible as f32 * line_h() + 8.0)) };
         Some(ModalLayout { bounds, lines, first, visible, at })
     }
 
@@ -2919,14 +3133,40 @@ impl ReaderView {
         self.session.state().place_rows(PlaceList::Bookmarks, "").into_iter().filter(|r| !r.label.starts_with('·')).collect()
     }
 
-    /// The modal's rows: label, and why it is disabled. The finder's first two rows are its query and status.
+    fn server_rows(&self) -> Vec<(String, Option<CommandId>)> {
+        let cols = self.columns(menu_width(self.width) - 24.0);
+        self.session.language_server_rows().into_iter().flat_map(|(text, action)| {
+            match action {
+                Some(id) => vec![(text, Some(id))],
+                None => wrap(&text, cols).into_iter().map(|line| (line, None)).collect(),
+            }
+        }).collect()
+    }
+
+    /// The modal's rows: label and disabled reason. Search headers precede their result rows.
     pub fn modal_rows(&self) -> Vec<(String, Option<&'static str>)> {
         match &self.modal {
-            Some(Modal::Commands { .. }) => self.session.actions().into_iter().map(|a| (match a.on {
-                Some(true) => format!("{} (on)", a.label),
-                Some(false) => format!("{} (off)", a.label),
-                None => a.label.to_string(),
-            }, a.disabled)).collect(),
+            Some(Modal::Navigation { .. }) => self.navigation_rows(),
+            Some(Modal::ServerRuntime { path, .. }) => {
+                let model = self.session.state().server_runtime();
+                let mut rows = vec![(format!("{} › {path}", model.map_or("Server runtime executable / install folder", |m| m.kind.input_label())), None), ("Enter a path or select an installed runtime; Escape closes".to_string(), None)];
+                if let Some(model) = model {
+                    rows.extend(model.choices(path).into_iter().map(|(label, _)| (label, self.session.disabled(CommandId::ServerRuntime))));
+                    rows.extend(wrap(&model.message, self.columns(menu_width(self.width) - 24.0)).into_iter().map(|line| (line, None)));
+                }
+                rows
+            }
+            Some(Modal::LanguageServer { .. }) => self.server_rows().into_iter().map(|(text, action)| (text, action.and_then(|id| self.session.disabled(id)))).collect(),
+            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.iter().map(|g| (format!("{} ›", g.label()), None)).chain([("All commands…".to_string(), None)]).collect(),
+            Some(Modal::Commands { .. } | Modal::CommandGroup { .. }) => {
+                let group = match self.modal { Some(Modal::CommandGroup { group, .. }) => Some(group), _ => None };
+                let heading = group.map(|g| (format!("‹ All menus — {}", g.label()), None));
+                heading.into_iter().chain(self.session.actions().into_iter().filter(|a| group.is_none_or(|g| a.id.group() == g)).map(|a| (match a.on {
+                    Some(true) => format!("{} (on)", a.label),
+                    Some(false) => format!("{} (off)", a.label),
+                    None => a.label.to_string(),
+                }, a.disabled))).collect()
+            },
             Some(Modal::Context { entries, .. }) => entries
                 .iter()
                 .map(|e| match e {
@@ -2974,29 +3214,6 @@ impl ReaderView {
                 rows.extend(self.sibling_items(*pane, *crumb, query).into_iter().map(|s| (if s.dir { format!("{}/", s.label) } else { s.label }, None)));
                 rows
             }
-            Some(Modal::Finder { query, .. }) => {
-                let p = self.session.state().project();
-                let f = p.and_then(|p| p.finder());
-                let scanning = p.is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Scanning(_)));
-                let status = match f {
-                    Some(f) if f.query.is_empty() => format!("Type to find among {} files", p.map_or(0, |p| p.files())),
-                    Some(f) => format!(
-                        "{} over {} files{}{}",
-                        match (f.hits.len(), f.matched) {
-                            (1, 1) => "1 result".to_string(),
-                            (shown, all) if shown == all => format!("{shown} results"),
-                            (shown, all) => format!("best {shown} of {all} results"),
-                        },
-                        f.searched,
-                        if f.ready { "" } else { ", searching…" },
-                        if scanning { "; the folder is still being scanned" } else { "" },
-                    ),
-                    None => String::new(),
-                };
-                let mut rows = vec![(format!("› {query}"), None), (status, None)];
-                rows.extend(f.into_iter().flat_map(|f| f.hits.iter()).map(|h| (h.to_string(), None)));
-                rows
-            }
             Some(Modal::Places { list, query, .. }) => {
                 let hint = match list {
                     PlaceList::Bookmarks => "Bookmarks — type to filter; Enter goes there, Delete removes, Escape back",
@@ -3033,8 +3250,16 @@ impl Render for ReaderView {
             self.dispatch(Command::CloseDocumentation, cx);
         }
         if !std::mem::replace(&mut self.themes_started, true) {
+            cx.observe_window_activation(window, |v, window, _| {
+                if !window.is_window_active() { v.double_shift.reset(); }
+            }).detach();
             // Theme I/O starts once the first frame is on its way.
             self.session.start_themes();
+            let this = cx.weak_entity();
+            let id = window.window_handle().window_id();
+            cx.on_window_closed(move |cx, closed| {
+                if closed == id { let _ = this.update(cx, |view, _| { view.remember_explorer(); view.session.dispatch(Command::SaveWorkspace); }); }
+            }).detach();
         }
         let palette = self.session.state().palette().clone();
         let viewport = window.viewport_size();
@@ -3052,6 +3277,10 @@ impl Render for ReaderView {
             _ => 0.0,
         };
         let status_line = self.status_line();
+        let server_label: String = self.session.state().language_server_label().chars().take(self.columns(self.status_width())).collect();
+        let server_label_w = server_label.chars().count() as f32 * self.char_w;
+        let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
+        let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
         // pane's tabs.
         let tabs_h = line_h();
@@ -3171,7 +3400,7 @@ impl Render for ReaderView {
             Some(Drag::Explorer) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split) if split == Some(Split::Columns) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split | Drag::Results) => Some(gpui::CursorStyle::ResizeUpDown),
-            None if self.link.is_some() => Some(gpui::CursorStyle::PointingHand),
+            None if self.link.is_some() || self.app_menu_hover || self.commands_hover => Some(gpui::CursorStyle::PointingHand),
             _ => None,
         };
         // Bring a newly highlighted tree row into view once; the wheel's scroll otherwise stands, within the rows.
@@ -3286,10 +3515,11 @@ impl Render for ReaderView {
         self.marks_drawn = marks_drawn;
         self.fold_marks_drawn = folds_drawn;
         self.uploads.keep(frames.iter().flat_map(|f| f.picture.iter().map(|(t, _)| t.clone()).chain(f.markdown.iter().flat_map(|m| m.2.iter().map(|(_, t)| t.clone())))).collect(), window);
+        let navigation = self.navigation_frame();
         let modal = self.modal_layout();
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
-        self.reveal_context();
+        self.clamp_context();
         let context = self.context_layout().map(|(b, rows)| {
             let at = self.modal.as_ref().map_or(0, Modal::at);
             let rows: Vec<_> = rows
@@ -3355,6 +3585,10 @@ impl Render for ReaderView {
             eprintln!("lenz-reader: slow render {:.1} ms", render_started.elapsed().as_secs_f64() * 1000.0);
         }
         let nav_hover = self.nav_hover;
+        let app_menu_button = self.app_menu_button();
+        let app_menu_active = self.app_menu_hover || matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
+        let commands_button = self.commands_button();
+        let commands_hover = self.commands_hover;
         div()
             .id("reader")
             .size_full()
@@ -3382,6 +3616,12 @@ impl Render for ReaderView {
                             window.set_window_cursor_style(cursor);
                         }
                         lenz_gpui::fill(window, x0, y0, w, tabs_h, palette.header_bg);
+                        let mx = x0 + f32::from(app_menu_button.origin.x);
+                        let mw = f32::from(app_menu_button.size.width);
+                        if app_menu_active { lenz_gpui::fill(window, mx, y0 + 2.0, mw, tabs_h - 4.0, palette.selected_bg); }
+                        for offset in [-4.0, 0.0, 4.0] {
+                            lenz_gpui::fill(window, mx + mw / 2.0 - 6.0, y0 + tabs_h / 2.0 + offset, 12.0, 1.0, palette.fg);
+                        }
                         // The buttons: dim when they cannot run, raised under the pointer.
                         for (bx0, bx1, id, enabled, label) in nav.iter().chain(&explorer_buttons) {
                             let drawn = matches!(id, CommandId::ToggleExplorer | CommandId::LocateFile);
@@ -3440,6 +3680,14 @@ impl Render for ReaderView {
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
                             lenz_gpui::text(window, cx, m, x0 + STATUS_PAD, status_y + 2.0, &status_line, palette.fg);
+                            lenz_gpui::text(window, cx, m, x0 + STATUS_PAD, status_y + 2.0, &server_label, server_color);
+                            lenz_gpui::fill(window, x0 + STATUS_PAD, status_y + line_h() - 1.0, server_label_w, 1.0, server_color);
+                            if let Some((b, label)) = &commands_button {
+                                let bx = x0 + f32::from(b.origin.x);
+                                let bw = f32::from(b.size.width);
+                                lenz_gpui::fill(window, bx, status_y + 2.0, bw, status_h - 4.0, if commands_hover { palette.selected_bg } else { palette.fold_bg });
+                                lenz_gpui::text(window, cx, m, bx + char_w, status_y + 2.0, label, palette.fg);
+                            }
                         }
                         let body_h = (h - tabs_h - status_h).max(0.0);
                         let body = Bounds { origin: gpui::point(px(x0), px(y0 + tabs_h)), size: gpui::size(px(sidebar_w), px(body_h)) };
@@ -3448,7 +3696,7 @@ impl Render for ReaderView {
                             let title_w = explorer_buttons.first().map_or(sidebar_w, |b| b.0) - 8.0;
                             let title = Bounds { origin: gpui::point(px(x0), px(y0)), size: gpui::size(px(title_w.max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: title }), |window| {
-                                lenz_gpui::text(window, cx, m, x0 + 8.0, y0, &explorer_title, palette.dim);
+                                lenz_gpui::text(window, cx, m, x0 + f32::from(app_menu_button.right()) + 4.0, y0, &explorer_title, palette.dim);
                             });
                             lenz_gpui::fill(window, x0, y0 + tabs_h, sidebar_w, body_h, palette.sidebar_bg);
                             window.with_content_mask(Some(gpui::ContentMask { bounds: body }), |window| {
@@ -3591,6 +3839,9 @@ impl Render for ReaderView {
                                     lenz_gpui::paint_row(window, cx, m, &palette, pane, px0, pw, 0.0, row);
                                 }
                             });
+                        }
+                        if let Some(frame) = &navigation {
+                            frame.paint(window, cx, m, &palette, x0, y0, icon_font.as_ref(), &logos);
                         }
                         if let Some(l) = &modal {
                             let (mx, my) = (x0 + f32::from(l.bounds.origin.x), y0 + f32::from(l.bounds.origin.y));
@@ -3875,33 +4126,7 @@ type MenuRow = (f32, f32, MenuEntry);
 fn context_row_height(entry: MenuEntry) -> f32 { if matches!(entry, MenuEntry::Separator) { line_h() / 2.0 } else { line_h() } }
 
 /// The key that runs `id`, as the context menu shows it.
-fn key_hint(id: CommandId) -> Option<&'static str> {
-    match id {
-        CommandId::Definition => Some("F12"),
-        CommandId::PeekDefinition => Some("Alt+F12"),
-        CommandId::TypeDefinition => Some("Ctrl+Shift+B"),
-        CommandId::Implementation => Some("Ctrl+Alt+B"),
-        CommandId::Usages => Some("Shift+F12"),
-        CommandId::CallHierarchy => Some("Ctrl+Alt+H"),
-        CommandId::TypeHierarchy => Some("Ctrl+H"),
-        CommandId::Documentation => Some("Ctrl+Q"),
-        CommandId::Copy => Some("Ctrl+C"),
-        CommandId::Close => Some("Ctrl+F4"),
-        CommandId::ExtendSelection => Some("Ctrl+W"),
-        CommandId::ShrinkSelection => Some("Ctrl+Shift+W"),
-        CommandId::FocusBreadcrumbs => Some("Ctrl+Shift+."),
-        CommandId::ToggleBookmark => Some("F11"),
-        CommandId::SetBookmarkMnemonic => Some("Ctrl+F11"),
-        CommandId::ShowBookmarks => Some("Shift+F11"),
-        CommandId::RecentFiles => Some("Ctrl+E"),
-        CommandId::RecentLocations => Some("Ctrl+Alt+E"),
-        CommandId::Collapse => Some("Ctrl+-"),
-        CommandId::Expand => Some("Ctrl+="),
-        CommandId::CollapseAll => Some("Ctrl+Shift+-"),
-        CommandId::ExpandAll => Some("Ctrl+Shift+="),
-        _ => None,
-    }
-}
+fn key_hint(id: CommandId) -> Option<&'static str> { id.shortcut() }
 
 /// The word (letters, digits, `_`) around byte `at` of `text`, as (start, end); the byte itself when none.
 fn word_around(text: &str, at: usize) -> (usize, usize) {
@@ -3942,8 +4167,9 @@ impl Modal {
     /// The highlighted row of [`ReaderView::modal_rows`].
     pub fn at(&self) -> usize {
         match self {
-            Modal::Commands { at } | Modal::Themes { at, .. } | Modal::Recent { at } => *at,
-            Modal::Finder { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
+            Modal::Navigation { at } => *at,
+            Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Themes { at, .. } | Modal::Recent { at } => *at,
+            Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
             Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic => 0,
             Modal::Context { at, .. } => *at,
@@ -3957,3 +4183,7 @@ fn dark(window: &Window) -> bool {
 
 #[cfg(all(test, feature = "test-support"))]
 mod tests;
+
+impl Drop for ReaderView {
+    fn drop(&mut self) { self.remember_explorer(); }
+}

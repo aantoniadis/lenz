@@ -16,6 +16,9 @@ pub enum CatalogAction {
 /// Interface requests whose inputs and layout belong to the frontend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterfaceAction {
+    SearchEverywhere,
+    FindAction,
+    FindSymbol,
     Open,
     OpenFolder,
     OpenRecent,
@@ -34,9 +37,45 @@ pub enum InterfaceAction {
     FocusBreadcrumbs,
     ToggleExplorer,
     WorkspaceRoot,
+    LanguageServer,
+    ServerRuntime,
 }
 
 impl Session {
+    /// Navigation controls shared by the GUI and terminal tab bars; adapters own their geometry.
+    pub fn navigation(&self) -> Vec<(CommandId, &'static str)> {
+        let state = self.state();
+        let explorer = state
+            .project()
+            .is_some()
+            .then_some((CommandId::ToggleExplorer, ""));
+        let mut buttons: Vec<_> = explorer
+            .into_iter()
+            .chain([(CommandId::Back, "←"), (CommandId::Forward, "→")])
+            .collect();
+        let toggle = match (state.rendering(), state.active()) {
+            (Some(_), Some(tab)) => Some((
+                CommandId::MarkdownSource,
+                if tab.markdown_source() {
+                    "Preview"
+                } else {
+                    "Source"
+                },
+            )),
+            _ if self.disabled(CommandId::ImageSource).is_none() => Some((
+                CommandId::ImageSource,
+                if state.active().is_some_and(|t| t.image_source()) {
+                    "Image"
+                } else {
+                    "Source"
+                },
+            )),
+            _ => None,
+        };
+        buttons.extend(toggle);
+        buttons
+    }
+
     /// Resolve against the current state, including availability and toggle values. Dispatch a returned command
     /// immediately: do not retain it across state changes.
     pub fn action(&self, id: CommandId) -> CatalogAction {
@@ -45,6 +84,11 @@ impl Session {
         }
         let state = self.state();
         let command = match id {
+            CommandId::SearchEverywhere => return CatalogAction::Interface(InterfaceAction::SearchEverywhere),
+            CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
+            CommandId::FindSymbol => return CatalogAction::Interface(InterfaceAction::FindSymbol),
+            CommandId::ServerRuntime => return CatalogAction::Interface(InterfaceAction::ServerRuntime),
+            CommandId::LanguageServer => return CatalogAction::Interface(InterfaceAction::LanguageServer),
             CommandId::Open => return CatalogAction::Interface(InterfaceAction::Open),
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
@@ -123,6 +167,8 @@ impl Session {
             CommandId::CopyPath => Command::CopyPath { line: false },
             CommandId::CopyPathLine => Command::CopyPath { line: true },
             CommandId::FileSymbols => Command::FileSymbols,
+            CommandId::CopyServerDetails => Command::CopyText(self.language_server_rows().into_iter()
+                .filter_map(|(text, action)| action.is_none().then_some(text)).collect::<Vec<_>>().join("\n\n")),
             CommandId::RestartServer => Command::RestartServer,
             CommandId::DisableServer => Command::SetServerEnabled(false),
             CommandId::EnableServer => Command::SetServerEnabled(true),
@@ -149,5 +195,121 @@ impl Session {
         state.selected_text().filter(|s| !s.contains('\n')).map(str::to_owned)
             .or_else(|| state.active().and_then(|t| t.find()).map(|f| f.query().to_owned()))
             .unwrap_or_default()
+    }
+}
+
+/// The same command groups in the app menu and command catalogs of both adapters.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandGroup {
+    File,
+    View,
+    Navigate,
+    Find,
+    Selection,
+    LanguageServers,
+}
+
+impl CommandGroup {
+    pub const ALL: [Self; 6] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::LanguageServers];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::File => "File",
+            Self::View => "View",
+            Self::Navigate => "Navigate",
+            Self::Find => "Find",
+            Self::Selection => "Selection",
+            Self::LanguageServers => "Language Servers",
+        }
+    }
+}
+
+impl CommandId {
+    pub fn group(self) -> CommandGroup {
+        use CommandGroup as G;
+        match self {
+            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload
+            | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine => G::File,
+            Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline | Self::ChooseTheme
+            | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
+            | Self::DocumentationOnHover | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
+            | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
+            | Self::FoldersFirst | Self::AllByName | Self::SplitRight | Self::SplitDown | Self::Unsplit
+            | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
+            Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
+            | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
+            | Self::RecentFiles | Self::RecentLocations | Self::NextTab | Self::PreviousTab
+            | Self::Definition | Self::PeekDefinition | Self::TypeDefinition | Self::Implementation
+            | Self::CallHierarchy | Self::CallHierarchyCallers | Self::CallHierarchyCallees
+            | Self::TypeHierarchy | Self::TypeHierarchySupertypes | Self::TypeHierarchySubtypes
+            | Self::Documentation => G::Navigate,
+            Self::SearchEverywhere | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
+            | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
+            | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
+            | Self::FileSymbols => G::Find,
+            Self::SelectAll | Self::Copy | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
+            Self::WorkspaceRoot | Self::LanguageServer | Self::CopyServerDetails | Self::ServerRuntime
+            | Self::RestartServer | Self::DisableServer | Self::EnableServer => G::LanguageServers,
+        }
+    }
+}
+
+
+impl CommandId {
+    /// Key labels shared by name-search results and pointer menus.
+    pub fn shortcut(self) -> Option<&'static str> {
+        match self {
+            Self::SearchEverywhere => Some("Double Shift / Ctrl+K"),
+            Self::FindFile => Some("Ctrl+P / Ctrl+Shift+N"),
+            Self::FindSymbol => Some("Ctrl+Alt+Shift+N"),
+            Self::FindAction => Some("Ctrl+Shift+A"),
+            Self::Open => Some("Ctrl+O"),
+            Self::Outline => Some("Ctrl+Shift+O"),
+            Self::FindInFile => Some("Ctrl+F"),
+            Self::SearchProject => Some("Ctrl+Shift+F"),
+            Self::GoToLine => Some("Ctrl+G"),
+            Self::Reload => Some("F5"),
+            Self::SoftWrap => Some("Alt+Z"),
+            Self::LanguageServer => Some("F2"),
+            Self::Definition => Some("F12"),
+            Self::PeekDefinition => Some("Alt+F12"),
+            Self::TypeDefinition => Some("Ctrl+Shift+B"),
+            Self::Implementation => Some("Ctrl+Alt+B"),
+            Self::Usages => Some("Shift+F12"),
+            Self::CallHierarchy => Some("Ctrl+Alt+H"),
+            Self::TypeHierarchy => Some("Ctrl+H"),
+            Self::Documentation => Some("Ctrl+Q"),
+            Self::Copy => Some("Ctrl+C"),
+            Self::Close => Some("Ctrl+F4"),
+            Self::ExtendSelection => Some("Ctrl+W"),
+            Self::ShrinkSelection => Some("Ctrl+Shift+W"),
+            Self::FocusBreadcrumbs => Some("Ctrl+Shift+."),
+            Self::ToggleBookmark => Some("F11"),
+            Self::SetBookmarkMnemonic => Some("Ctrl+F11"),
+            Self::ShowBookmarks => Some("Shift+F11"),
+            Self::RecentFiles => Some("Ctrl+E"),
+            Self::RecentLocations => Some("Ctrl+Alt+E"),
+            Self::Collapse => Some("Ctrl+-"),
+            Self::Expand => Some("Ctrl+="),
+            Self::CollapseAll => Some("Ctrl+Shift+-"),
+            Self::ExpandAll => Some("Ctrl+Shift+="),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_command_is_in_one_nonempty_menu_group() {
+        let grouped: Vec<_> = CommandGroup::ALL.into_iter().flat_map(|group| {
+            let ids: Vec<_> = CommandId::ALL.iter().copied().filter(|id| id.group() == group).collect();
+            assert!(!ids.is_empty(), "{}", group.label());
+            ids
+        }).collect();
+        assert_eq!(grouped.len(), CommandId::ALL.len());
+        assert!(CommandId::ALL.iter().all(|id| grouped.contains(id)));
     }
 }

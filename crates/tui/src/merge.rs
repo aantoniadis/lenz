@@ -927,12 +927,12 @@ impl Merger {
                     };
                     crate::pane_search::line(
                         clean(&format!(
-                            "{} {tag} {p}",
+                            "{} {tag} {}",
                             if i == self.files_search.current().unwrap_or(self.workspace.current) {
                                 ">"
                             } else {
                                 " "
-                            }
+                            },lenz::file_icons::file(p).label(self.icons.nerd(),p)
                         )),
                         &self.files_search,
                         crate::chrome::style_with(palette).fg(if i == self.files_search.current().unwrap_or(self.workspace.current) {
@@ -947,6 +947,16 @@ impl Merger {
                 Paragraph::new(lines).block(Block::default().borders(Borders::RIGHT)),
                 files_content,
             );
+            if self.icons.nerd() {
+                for (row,(path,state)) in self.workspace.rows.iter().skip(start).take(files_content.height as usize).enumerate() {
+                    let tag_width=match self.workspace.row_state(path,*state){State::Unresolved(Some(n))=>1+n.to_string().len() as u16,_=>1};
+                    let x=files_content.x+3+tag_width;
+                    if x<files_content.right().saturating_sub(1) {
+                        let icon=lenz::file_icons::file(path);
+                        frame.buffer_mut()[(x,files_content.y+row as u16)].set_fg(crate::chrome::color(icon.color_on(palette,palette.bg)));
+                    }
+                }
+            }
         }
         if self.files_search.active()&&self.files_area.height>0 {frame.render_widget(Paragraph::new(crate::pane_search::status(&self.files_search,self.workspace.rows.len())).style(crate::chrome::style_with(palette).fg(crate::chrome::color(palette.accent))),Rect::new(self.files_area.x,self.files_area.y,self.files_area.width.saturating_sub(1),1));}
         self.text_area=body;
@@ -972,8 +982,8 @@ impl Merger {
                         _ => m.m.side(Some(Pick::Theirs)),
                     };
                     let mut lines = vec![Line::styled(
-                        clean(&heads[p]),
-                        crate::chrome::style_with(palette).fg(crate::chrome::color(palette.accent)),
+                        clean(&lenz::file_icons::file(&heads[p]).label(self.icons.nerd(),&heads[p])),
+                        crate::chrome::style_with(palette).bg(crate::chrome::color(palette.header_bg)).fg(crate::chrome::color(palette.accent)).add_modifier(ratatui::style::Modifier::BOLD),
                     )];
                     for r in &rows[p] {
                         if r.y < 0.0 || r.y >= body.height.saturating_sub(2) as f32 {
@@ -1031,6 +1041,10 @@ impl Merger {
                         Paragraph::new(lines).block(Block::default().borders(Borders::RIGHT)),
                         panes[p],
                     );
+                    if self.icons.nerd() && panes[p].width>1 {
+                        let icon=lenz::file_icons::file(&heads[p]);
+                        frame.buffer_mut()[(panes[p].x,panes[p].y)].set_fg(crate::chrome::color(icon.color_on(palette,palette.header_bg)));
+                    }
                 }
                 question = m
                     .question()

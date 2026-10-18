@@ -78,16 +78,19 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Theme…", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Restart Language Server", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Theme…", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No folder is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
     assert_eq!(disabled(CommandId::MarkdownSource), Some("Not a Markdown file"));
     assert_eq!(disabled(CommandId::Symbols), Some("No folder is open"));
+    assert_eq!(disabled(CommandId::LanguageServer), None);
+    assert_eq!(disabled(CommandId::CopyServerDetails), None);
+    assert!(disabled(CommandId::ServerRuntime).is_some());
     assert_eq!(disabled(CommandId::RestartServer), Some("No language server for this file"));
     assert_eq!(disabled(CommandId::Definition), Some("No file is open"));
     assert_eq!(disabled(CommandId::WorkspaceRoot), Some("No file is open"));
-    assert_eq!(disabled(CommandId::FindFile), Some("No folder is open"));
+    assert_eq!(disabled(CommandId::FindFile), None, "file search can show recent files before a folder opens");
     assert_eq!(disabled(CommandId::Back), Some("Nothing to go back to"));
     assert_eq!(disabled(CommandId::Close), Some("No tab is open"));
     assert_eq!(disabled(CommandId::NextTab), Some("Only one tab is open"));
@@ -425,7 +428,7 @@ fn the_tree_order_is_remembered_and_the_opened_file_can_be_located() {
     assert!(!s.state().folders_first());
     s.dispatch(Command::OpenRoot(root.clone()));
     settle(&mut s, scanned);
-    assert_eq!(names(&s), ["a.md", "src"]);
+    assert_eq!(names(&s), ["a.md", "src", "src/lib.rs", "src/ui", "src/ui/view.rs"], "the workspace remembers expanded folders too");
 }
 
 #[test]
@@ -3991,4 +3994,310 @@ fn extending_selection_keeps_its_head_in_the_reported_viewport_with_and_without_
         }
         assert_eq!(std::fs::read(file).unwrap(), text.as_bytes());
     }
+}
+
+#[test]
+fn workspace_restores_tabs_positions_split_and_explorer_without_loading_inactive_files() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["src/a.txt", "src/b.txt", "c.txt"]);
+    let source = "héllo workspace\n".repeat(120);
+    for file in ["src/a.txt", "src/b.txt", "c.txt"] { std::fs::write(root.join(file), &source).unwrap(); }
+    let mut one = session(d.path());
+    open_project(&mut one, &root, "src/a.txt");
+    one.dispatch(Command::Pin(one.state.active.unwrap()));
+    one.dispatch(Command::Select(Selection { anchor: 8, head: 3 }));
+    one.dispatch(Command::Scroll(25));
+    one.dispatch(Command::ScrollColumn(3));
+    one.dispatch(Command::OpenRetained(root.join("src/b.txt")));
+    settle(&mut one, opened);
+    one.dispatch(Command::OpenRetained(root.join("c.txt")));
+    settle(&mut one, opened);
+    one.dispatch(Command::Split(Split::Rows));
+    one.dispatch(Command::FocusPane(1));
+    one.dispatch(Command::Scroll(40));
+    one.dispatch(Command::SetLayout(Layout { explorer_width: Some(220), split_permille: Some(650), results_permille: None }));
+    one.dispatch(Command::RevealInTree("src/a.txt".into()));
+    one.dispatch(Command::SetExplorer(crate::workspace::Explorer { visible: false, selected: Some("src/b.txt".into()), top: Some("src".into()) }));
+    let snapshot = |s: &Session| s.state.tabs.iter().map(|t| (t.source.clone(), t.pane, t.retained, t.selection, t.top_line, t.column)).collect::<Vec<_>>();
+    let expected = snapshot(&one);
+    let active = one.state.active().unwrap().source.clone();
+    drop(one);
+    let mut two = session(d.path());
+    two.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut two, |s| scanned(s) && s.state.document().is_some() && s.state.shown(0).is_some_and(|t| t.doc.is_some()));
+    assert_eq!(snapshot(&two), expected);
+    assert_eq!(two.state.active().unwrap().source, active);
+    assert_eq!(two.state.focused, 1);
+    assert_eq!(two.state.split(), Some(Split::Rows));
+    assert_eq!(two.state.layout().explorer_width, Some(220));
+    assert!(!two.state.explorer.visible);
+    assert!(two.state.project().unwrap().rows().iter().any(|r| &*r.path == "src/a.txt"));
+    assert_eq!(two.state.tabs.iter().filter(|t| t.doc.is_some()).count(), 2, "only the two shown tabs are loaded");
+    assert_eq!(std::fs::read_to_string(root.join("src/a.txt")).unwrap(), source);
+}
+
+#[test]
+fn workspace_directory_switches_flush_old_state_and_restore_each_directory() {
+    let d = tempfile::tempdir().unwrap();
+    let a = d.path().join("one"); let b = d.path().join("two");
+    tree(&a, &["a.txt"]); tree(&b, &["b.txt"]);
+    let mut s = session(d.path());
+    open_project(&mut s, &a, "a.txt");
+    s.dispatch(Command::OpenRoot(b.clone())); settle(&mut s, scanned);
+    assert!(s.state.tabs.is_empty());
+    s.dispatch(Command::Open(b.join("b.txt"))); settle(&mut s, opened);
+    s.dispatch(Command::OpenRoot(a.clone()));
+    settle(&mut s, |s| s.state.document().is_some_and(|d| d.source() == a.join("a.txt")));
+    assert_eq!(s.state.tabs.len(), 1);
+    s.dispatch(Command::OpenRoot(b.clone()));
+    settle(&mut s, |s| s.state.document().is_some_and(|d| d.source() == b.join("b.txt")));
+    assert_eq!(s.state.tabs.len(), 1);
+}
+
+#[test]
+fn workspace_skips_missing_tabs_and_clamps_positions_in_changed_utf8_files() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project");
+    tree(&root, &["a.txt", "b.txt", "c.txt"]);
+    std::fs::write(root.join("b.txt"), "long text\n".repeat(100)).unwrap();
+    let mut s = session(d.path());
+    open_project(&mut s, &root, "a.txt");
+    s.dispatch(Command::Pin(s.state.active.unwrap()));
+    s.dispatch(Command::OpenRetained(root.join("b.txt"))); settle(&mut s, opened);
+    s.dispatch(Command::Select(Selection { anchor: 800, head: 801 })); s.dispatch(Command::Scroll(90));
+    s.dispatch(Command::OpenRetained(root.join("c.txt"))); settle(&mut s, opened);
+    drop(s);
+    std::fs::remove_file(root.join("a.txt")).unwrap(); std::fs::remove_file(root.join("c.txt")).unwrap();
+    std::fs::write(root.join("b.txt"), "é\n").unwrap();
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut s, |s| s.state.document().is_some());
+    assert_eq!(s.state.tabs.len(), 1);
+    assert!(s.state.active().unwrap().source.ends_with("b.txt"));
+    assert!(s.state.top_line() < s.state.document().unwrap().line_count());
+    for at in [s.state.selection().unwrap().anchor, s.state.selection().unwrap().head] { assert!(s.state.document().unwrap().text().is_char_boundary(at)); }
+}
+
+#[test]
+fn workspace_late_restore_does_not_replace_a_file_the_user_just_opened() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); tree(&root, &["a.txt", "b.txt"]);
+    let mut s = session(d.path()); open_project(&mut s, &root, "a.txt"); drop(s);
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root.clone()));
+    let completion = loop { let c = s.completions().recv_blocking_timeout().unwrap(); if matches!(c, Completion::PlacesRead { .. }) { break c; } s.dispatch(c); };
+    s.dispatch(Command::Open(root.join("b.txt")));
+    s.dispatch(completion);
+    settle(&mut s, opened);
+    assert_eq!(s.state.tabs.len(), 1);
+    assert!(s.state.active().unwrap().source.ends_with("b.txt"));
+}
+
+#[test]
+fn workspace_closing_before_restore_finishes_keeps_the_saved_tabs() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); tree(&root, &["a.txt"]);
+    let mut s = session(d.path()); open_project(&mut s, &root, "a.txt"); drop(s);
+    let file = places_file(d.path(), &root);
+    let before: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); drop(s);
+    let after: serde_json::Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+    assert_eq!(before["workspace"], after["workspace"]);
+}
+
+#[test]
+fn unified_navigation_finds_files_symbols_and_actions_without_loading_search_candidates() {
+    use crate::navigation::{Chosen, Kind, Scope as N};
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "wrap.rs", b"// source\nfn wrap() {}\n");
+    let mut s = session(dir.path());
+    s.dispatch(Command::OpenRoot(dir.path().to_owned()));
+    settle(&mut s, |s| s.state().project().is_some_and(|p| matches!(p.coverage(), project::Coverage::Complete(_))) && s.state().index_coverage().complete());
+    s.dispatch(Command::SearchEverywhere {scope: N::All, query: "wrap".into()});
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let n = s.state().navigation().unwrap();
+    for kind in [Kind::File,Kind::Symbol,Kind::Action] { assert!(n.rows.iter().any(|r| r.kind == kind), "{kind:?}: {:?}", n.rows); }
+    assert!(s.state().document().is_none() && s.state().results().is_none(), "ranking must not open documents or replace search results");
+    let row = n.rows.iter().position(|r| r.kind == Kind::Symbol && r.label == "wrap").unwrap();
+    let chosen = s.navigation_choice(n.revision, row).unwrap();
+    s.dispatch(Command::CloseSearchEverywhere);
+    let Chosen::Command(command) = chosen else { panic!("expected source navigation") };
+    s.dispatch(command);
+    settle(&mut s, |s| s.state().document().is_some() && s.state().active().is_some_and(|t| t.selection().is_some()));
+    assert_eq!(s.state().active().unwrap().source(), path);
+    assert_eq!(s.state().selection().unwrap().head, "// source\n".len());
+    assert_eq!(std::fs::read(path).unwrap(), b"// source\nfn wrap() {}\n");
+}
+
+#[test]
+fn unified_navigation_rejects_stale_queries_indices_closure_and_replaced_roots() {
+    use crate::navigation::Scope as N;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(dir.path());
+    s.dispatch(Command::SearchEverywhere {scope:N::Actions,query:"wrap".into()});
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let old = s.state().navigation().unwrap().clone();
+    assert!(s.navigation_choice(old.revision, usize::MAX).is_none());
+    assert!(s.navigation_choice(old.revision.wrapping_add(1), 0).is_none());
+    s.dispatch(Command::SearchEverywhere {scope:N::Actions,query:"reload".into()});
+    assert!(!s.dispatch(Completion::Navigation {request:old.request,files:0,indexed:0,found:Some((old.rows.clone(),1))}).repaint);
+    assert!(s.navigation_choice(old.revision,0).is_none());
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let n = s.state().navigation().unwrap();
+    assert_eq!(n.rows[0].label,"Reload");
+    assert_eq!(n.rows[0].disabled,Some("No file is open"));
+    assert!(s.navigation_choice(n.revision,0).is_none());
+    s.dispatch(Command::CloseSearchEverywhere);
+    s.dispatch(Completion::Navigation {request:old.request,files:0,indexed:0,found:Some((old.rows.clone(),1))});
+    assert!(s.state().navigation().is_none());
+    s.dispatch(Command::SearchEverywhere {scope:N::Actions,query:"".into()});
+    s.dispatch(Command::OpenRoot(dir.path().join("other")));
+    s.dispatch(Completion::Navigation {request:old.request,files:0,indexed:0,found:Some((old.rows,1))});
+    assert!(s.state().navigation().is_none());
+}
+
+#[test]
+fn unified_navigation_updates_live_action_values_and_deduplicates_recent_files() {
+    use crate::navigation::{Kind,Scope as N};
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(),"opened.txt",b"read only\n");
+    let mut s = session(dir.path());
+    s.dispatch(Command::Open(path.clone()));
+    settle(&mut s, opened);
+    s.dispatch(Command::SearchEverywhere {scope:N::Actions,query:"soft wrap".into()});
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let revision = s.state().navigation().unwrap().revision;
+    assert_eq!(s.state().navigation().unwrap().rows[0].on,Some(false));
+    s.dispatch(Command::SetSoftWrap(true));
+    assert_eq!(s.state().navigation().unwrap().revision,revision);
+    assert_eq!(s.state().navigation().unwrap().rows[0].on,Some(true));
+    s.dispatch(Command::SearchEverywhere {scope:N::All,query:"".into()});
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    assert_eq!(s.state().navigation().unwrap().rows.iter().filter(|r|r.kind == Kind::File && r.label == "opened.txt").count(),1);
+    assert_eq!(std::fs::read(path).unwrap(),b"read only\n");
+}
+
+#[test]
+fn unified_navigation_refreshes_symbols_when_a_same_size_index_snapshot_is_replaced() {
+    use crate::navigation::Scope as N;
+    let dir = tempfile::tempdir().unwrap();
+    let path=write(dir.path(),"a.rs",b"fn alpha() {}\n");
+    let mut s=session(dir.path());
+    s.dispatch(Command::OpenRoot(dir.path().to_owned()));
+    settle(&mut s,|s|s.state().project().is_some_and(|p|matches!(p.coverage(),project::Coverage::Complete(_)))&&s.state().index_coverage().complete());
+    s.dispatch(Command::SearchEverywhere{scope:N::Symbols,query:"alpha".into()});
+    let request=s.state().navigation().unwrap().request;
+    std::fs::write(&path,b"fn bravo() {}\n").unwrap();
+    let rel:Arc<str>="a.rs".into();
+    s.state.index.invalidate(&rel,true);
+    assert_eq!(s.state.index.next_chunk().as_slice(),std::slice::from_ref(&rel));
+    let indexed=index::index_file(dir.path(),&rel,||true);
+    let generation=s.state().project().unwrap().generation();
+    s.dispatch(Completion::Indexed{generation,files:vec![(rel,indexed)]});
+    assert!(s.state().navigation().unwrap().dirty);
+    settle(&mut s,|s|s.state().navigation().is_some_and(|n|!n.pending&&n.request!=request));
+    assert!(s.state().navigation().unwrap().rows.is_empty(),"the old declaration must not survive a same-count replacement");
+}
+
+#[test]
+fn unified_navigation_removes_symbols_after_the_last_source_is_deleted() {
+    use crate::navigation::Scope as N;
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "a.rs", b"fn alpha() {}\n");
+    let mut s = session(dir.path());
+    s.dispatch(Command::OpenRoot(dir.path().to_owned()));
+    settle(&mut s, |s| s.state().project().is_some_and(|p| matches!(p.coverage(), project::Coverage::Complete(_))) && s.state().index_coverage().complete());
+    s.dispatch(Command::SearchEverywhere { scope: N::Symbols, query: "alpha".into() });
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let old = s.state().navigation().unwrap().revision;
+    assert_eq!(s.state().navigation().unwrap().rows[0].label, "alpha");
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Completion::Changed(Change { paths: [path].into(), structure: true, ..Change::default() }));
+    settle(&mut s, |s| s.state().project().is_some_and(|p| !p.refreshing()) && s.state().navigation().is_some_and(|n| !n.pending));
+    assert!(s.state().navigation().unwrap().rows.is_empty(), "deleted declarations must disappear without another indexed file completing");
+    assert!(s.navigation_choice(old, 0).is_none());
+}
+
+#[test]
+fn pyright_failures_offer_runtime_repair_and_version_context() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "main.py", b"def main(): pass\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path)); settle(&mut s, opened);
+    assert_eq!(s.disabled(CommandId::ServerRuntime), None, "Python must offer an in-app runtime repair");
+    let rows = s.language_server_rows();
+    assert!(rows.iter().any(|(label, _)| label.contains("Server version:")));
+    assert!(rows.iter().any(|(label, _)| label.contains("1.1.414")), "show the tested Pyright version independently of a failed launch");
+    s.dispatch(Command::OpenServerRuntime);
+    assert!(s.state().server_runtime().is_some());
+    assert!(s.state().server_runtime().unwrap().message.contains("Node"));
+}
+
+#[test]
+fn caret_arrows_move_without_selecting_and_reveal_unicode_columns_and_crlf() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "caret.txt", "éx\r\nabcdef\n終端\n".as_bytes());
+    let mut s = session(d.path()); s.dispatch(Command::Open(path.clone())); settle(&mut s, opened);
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 2, rows: 2 });
+    s.dispatch(Command::MoveCaret(Motion::Right));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 2, head: 2 }));
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    assert_eq!(s.state().selection().unwrap().head, 6, "keep display column 1, not UTF-8 byte column 2");
+    s.dispatch(Command::MoveCaret(Motion::Right));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 7, head: 7 }));
+    assert!(s.state().column() > 0, "reveal the caret horizontally");
+    s.dispatch(Command::Select(Selection {anchor:0,head:3}));
+    s.dispatch(Command::MoveCaret(Motion::Left));
+    assert_eq!(s.state().selection(), Some(Selection {anchor:0,head:0}), "Left collapses a range to its start");
+    s.dispatch(Command::Select(Selection {anchor:0,head:3}));
+    s.dispatch(Command::MoveCaret(Motion::Right));
+    assert_eq!(s.state().selection(), Some(Selection {anchor:3,head:3}));
+    s.dispatch(Command::MoveCaret(Motion::Right));
+    assert_eq!(s.state().selection().unwrap().head,5,"CRLF is crossed as one line break");
+    s.dispatch(Command::MoveCaret(Motion::Left));
+    assert_eq!(s.state().selection().unwrap().head,3);
+    assert_eq!(std::fs::read(path).unwrap(),"éx\r\nabcdef\n終端\n".as_bytes());
+}
+
+#[test]
+fn caret_vertical_movement_uses_expanded_tabs_and_inlay_columns() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "caret.txt", b"abcdef\n\tab\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path)); settle(&mut s, opened);
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 6 }));
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    assert_eq!(s.state().selection().unwrap().head, 10, "expanded tab preserves display column six");
+    let version = s.state().document().unwrap().version();
+    let hint = crate::decor::Hint { byte: 1, label: "XYZ".into(), kind: crate::decor::HintKind::Type };
+    s.state.tabs[0].hints = Some((version, Arc::new(crate::decor::Hints::new(vec![(1, hint)]))));
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 6 }));
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    assert_eq!(s.state().selection().unwrap().head, 8, "column six falls in the hint after the tab");
+    s.dispatch(Command::Select(Selection { anchor: 10, head: 10 }));
+    s.dispatch(Command::MoveCaret(Motion::Up));
+    assert_eq!(s.state().selection().unwrap().head, 6, "a shorter source line clamps to its end");
+}
+
+#[test]
+fn recent_navigation_uses_only_mru_files_and_validates_forget_identity() {
+    use crate::navigation::{Scope,Chosen};
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("src")).unwrap(); std::fs::create_dir_all(d.path().join("tests")).unwrap();
+    let a=write(d.path(),"src/Same.txt",b"a\n"); let b=write(d.path(),"tests/Same.txt",b"b\n");
+    write(d.path(),"unopened.txt",b"not recent\n");
+    let mut s=session(d.path()); s.dispatch(Command::OpenRoot(d.path().into())); settle(&mut s,scanned);
+    s.dispatch(Command::Open(a.clone()));settle(&mut s,opened);
+    s.dispatch(Command::Open(b.clone()));settle(&mut s,opened);
+    s.dispatch(Command::SearchEverywhere{scope:Scope::Recent,query:String::new()});
+    assert!(!s.state().navigation().unwrap().pending, "Ctrl-E, Enter can immediately choose the previous file");
+    settle(&mut s,|s|s.state().navigation().is_some_and(|n|!n.pending));
+    let old=s.state().navigation().unwrap().revision;
+    assert_eq!(s.state().navigation().unwrap().rows.len(),2);
+    assert_eq!(s.state().navigation().unwrap().rows[0].detail,"src/Same.txt");
+    let Some(Chosen::Command(Command::GoToPlace(Place::File(path))))=s.navigation_choice(old,0) else {panic!("recent selection restores a file place")};
+    assert_eq!(path,a);
+    s.dispatch(Command::ForgetNavigation{revision:old.wrapping_add(1),index:0});
+    assert_eq!(s.state().navigation().unwrap().rows.len(),2);
+    s.dispatch(Command::ForgetNavigation{revision:old,index:0});
+    settle(&mut s,|s|s.state().navigation().is_some_and(|n|!n.pending&&n.revision!=old));
+    assert_eq!(s.state().navigation().unwrap().rows.len(),1);
+    assert!(s.navigation_choice(old,0).is_none());
+    assert!(a.exists()&&b.exists(),"forgetting never deletes source files");
 }

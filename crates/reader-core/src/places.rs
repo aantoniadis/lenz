@@ -115,6 +115,7 @@ fn nearest(lines: &[usize], old: usize) -> Option<usize> {
 /// One project's places.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Places {
+    pub(crate) workspace: Option<Box<crate::workspace::Workspace>>,
     /// Sorted by source, then line; one per line.
     bookmarks: Vec<Mark>,
     /// Most recently left first.
@@ -286,6 +287,7 @@ impl Places {
 
     /// Add `saved` (read from disk) behind what is here: entries here win their line, key and order.
     pub fn merge(&mut self, saved: Places) {
+        if self.workspace.is_none() { self.workspace = saved.workspace.clone(); }
         for m in saved.bookmarks {
             if let Err(i) = self.find(&m.source, m.line) {
                 let taken = m.mnemonic.is_some_and(|k| self.mnemonic(k).is_some());
@@ -338,7 +340,9 @@ impl Places {
             out.recent_locations.insert(at + n, m);
         }
         out.recent_locations.truncate(RECENT_LOCATIONS);
+        let workspace = if self.workspace == base.workspace { disk.workspace.clone() } else { self.workspace.clone() };
         out.merge(disk);
+        out.workspace = workspace;
         // Keys: where this window left a key as it was, the file's assignment of it stands (another window's), except
         // on a line holding a key this window changed: that one wins its line.
         let changed_here = |k: char| holder(self, k) != holder(base, k);
@@ -377,19 +381,27 @@ impl Places {
     pub fn to_bytes(&self, root: &Path) -> Vec<u8> {
         let rel = |p: &Path| p.strip_prefix(root).map_or_else(|_| p.to_owned(), Path::to_owned);
         let saved = |m: &Mark| SavedMark { path: rel(&m.source), line: m.line, anchor: m.anchor.to_string(), offset: m.offset, mnemonic: m.mnemonic };
-        let s = Saved {
+        let mut s = Saved {
             v: VERSION,
             root: root.to_owned(),
+            workspace: self.workspace.clone().map(|mut w| { w.relativize(root); w }),
             bookmarks: self.bookmarks.iter().map(saved).collect(),
             recent_files: self.recent_files.iter().map(|p| rel(p)).collect(),
             recent_locations: self.recent_locations.iter().map(saved).collect(),
         };
-        serde_json::to_vec(&s).unwrap_or_default()
+        let bytes = serde_json::to_vec(&s).unwrap_or_default();
+        if bytes.len() as u64 > PLACES_BYTES && s.workspace.is_some() {
+            s.workspace = None; // Oversized UI metadata must not make bookmarks unreadable.
+            return serde_json::to_vec(&s).unwrap_or_default();
+        }
+        bytes
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Saved {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace: Option<Box<crate::workspace::Workspace>>,
     v: u32,
     root: PathBuf,
     bookmarks: Vec<SavedMark>,
@@ -473,7 +485,7 @@ pub fn read(file: &Path, root: &Path) -> Result<Places, ReadError> {
     let abs = |p: PathBuf| if p.is_absolute() { p } else { root.join(p) };
     // Positions past any document are clamped; keys other than 0–9 and A–Z are dropped (the bookmark stays).
     let mark = |m: SavedMark| Mark { source: abs(m.path).into(), line: m.line.min(MAX_POSITION), anchor: m.anchor.into(), offset: m.offset.min(MAX_POSITION), mnemonic: m.mnemonic.map(|k| k.to_ascii_uppercase()).filter(char::is_ascii_alphanumeric), moved: false };
-    let mut p = Places::default();
+    let mut p = Places { workspace: s.workspace.map(|mut w| { w.resolve(root); w }), ..Default::default() };
     // Through the same rules as typing them: sorted, one per line and key.
     for m in s.bookmarks.into_iter().map(mark) {
         match m.mnemonic {
@@ -531,6 +543,7 @@ enum Job {
     /// A file as the window now knows it.
     Base(PathBuf, Arc<Places>),
     Save(Save),
+    Flush(mpsc::Sender<()>),
 }
 
 /// Writes places off the UI thread. A file is written once no newer save has arrived for the debounce. A save for
@@ -564,7 +577,7 @@ impl Saver {
                     match next {
                         Ok(job) => {
                             if let Some(old) = pending.take_if(|p| match &job {
-                                Job::Base(..) => true,
+                                Job::Base(..) | Job::Flush(_) => true,
                                 Job::Save(s) => s.file != p.file,
                             }) {
                                 write(old, &mut base);
@@ -572,6 +585,7 @@ impl Saver {
                             match job {
                                 Job::Base(file, places) => base = (file, places),
                                 Job::Save(save) => pending = Some(save),
+                                Job::Flush(done) => { let _ = done.send(()); }
                             }
                         }
                         Err(e) => {
@@ -594,6 +608,13 @@ impl Saver {
         if let Some(tx) = &self.tx {
             let _ = tx.send(Job::Base(file, places));
         }
+    }
+
+    /// A background reader waits for pending saves before reopening a directory.
+    pub fn flush(&self) -> mpsc::Receiver<()> {
+        let (done, ready) = mpsc::channel();
+        if let Some(tx) = &self.tx { let _ = tx.send(Job::Flush(done)); }
+        ready
     }
 
     pub fn save(&self, save: Save) {

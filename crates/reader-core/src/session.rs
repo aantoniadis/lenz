@@ -48,7 +48,7 @@ pub const TICK: std::time::Duration = std::time::Duration::from_secs(5);
 pub const SYMBOLS_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// A selection as source byte offsets on character boundaries; `anchor == head` is a caret.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Selection {
     pub anchor: usize,
     pub head: usize,
@@ -62,6 +62,10 @@ impl Selection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    SearchEverywhere { scope: crate::navigation::Scope, query: String },
+    CloseSearchEverywhere,
+    /// Forget one recent-file result only if its displayed identity is still current.
+    ForgetNavigation { revision: u64, index: usize },
     /// Add an anonymous bookmark on the caret's line, or remove the one there.
     ToggleBookmark,
     /// Key `key` (0–9, A–Z) on the caret line's bookmark (adding it); its own key removes it, a key used elsewhere
@@ -162,6 +166,10 @@ pub enum Command {
     MoveTab { tab: TabId, pane: u8, index: usize },
     /// Panel sizes chosen in the adapter; remembered.
     SetLayout(Layout),
+    /// Explorer presentation recorded by either adapter, using paths rather than row indices.
+    SetExplorer(crate::workspace::Explorer),
+    /// Checkpoint the current directory and flush its pending metadata off the UI thread.
+    SaveWorkspace,
     /// Show the file finder with this query (empty shows it with no results).
     FindFile(String),
     CloseFinder,
@@ -179,6 +187,8 @@ pub enum Command {
     ShrinkSelection,
     /// Move the selection's head by `Motion`, keeping its anchor (a caret becomes a selection).
     Extend(Motion),
+    /// Move a collapsed text caret; Shift uses Extend instead.
+    MoveCaret(Motion),
     /// The first visible line (one inside a collapsed region shows that region's first line).
     Scroll(usize),
     /// Scroll by this many shown rows (collapsed lines are skipped).
@@ -235,6 +245,9 @@ pub enum Command {
     RestartServer,
     /// Turn the active file's language server off (or on) for the browsing root, remembered.
     SetServerEnabled(bool),
+    OpenServerRuntime,
+    CloseServerRuntime,
+    SetServerRuntime(Option<PathBuf>),
     /// An SVG: switch between its rendering and its source text.
     ToggleImageSource,
     /// A Markdown file: switch between its preview and its source, at the same place.
@@ -350,6 +363,9 @@ pub enum CommandId {
     Symbols,
     FileSymbols,
     WorkspaceRoot,
+    LanguageServer,
+    CopyServerDetails,
+    ServerRuntime,
     RestartServer,
     DisableServer,
     EnableServer,
@@ -366,6 +382,9 @@ pub enum CommandId {
     Unsplit,
     FocusOtherPane,
     MoveTabToOtherPane,
+    SearchEverywhere,
+    FindSymbol,
+    FindAction,
 }
 
 /// How the file panel is split: side by side, or one pane above the other.
@@ -388,7 +407,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 82] = [
+    pub const ALL: [CommandId; 88] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -457,6 +476,9 @@ impl CommandId {
         Self::Symbols,
         Self::FileSymbols,
         Self::WorkspaceRoot,
+        Self::LanguageServer,
+        Self::CopyServerDetails,
+        Self::ServerRuntime,
         Self::RestartServer,
         Self::DisableServer,
         Self::EnableServer,
@@ -471,10 +493,16 @@ impl CommandId {
         Self::Unsplit,
         Self::FocusOtherPane,
         Self::MoveTabToOtherPane,
+        Self::SearchEverywhere,
+        Self::FindSymbol,
+        Self::FindAction,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
+            Self::SearchEverywhere => "Search Everywhere…",
+            Self::FindSymbol => "Find Symbol…",
+            Self::FindAction => "Find Action…",
             Self::Open => "Open File…",
             Self::OpenFolder => "Open Folder…",
             Self::OpenRecent => "Open Recent Folder…",
@@ -543,6 +571,9 @@ impl CommandId {
             Self::Usages => "Find Usages",
             Self::Symbols => "Find Symbol (language server)…",
             Self::FileSymbols => "File Symbols (language server)",
+            Self::LanguageServer => "Language Server Status…",
+            Self::CopyServerDetails => "Copy Language Server Details",
+            Self::ServerRuntime => "Choose Language Server Runtime…",
             Self::RestartServer => "Restart Language Server",
             Self::DisableServer => "Disable Language Server for This Folder",
             Self::EnableServer => "Enable Language Server for This Folder",
@@ -614,6 +645,10 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
+    ServerRuntimes { request: u64, paths: Vec<PathBuf> },
+    ServerRuntimeSaved { request: u64, kind: semantics::runtime::Kind, result: Result<Option<PathBuf>, String> },
+    ProviderSettingsSaved { ok: bool },
     /// The project's saved places read from `from` (or why not), for saving to `file` (a different file when `from`
     /// is its name before names were canonical).
     PlacesRead { generation: u64, file: PathBuf, from: PathBuf, result: Result<crate::places::Places, crate::places::ReadError> },
@@ -720,6 +755,7 @@ impl Input {
                 Completion::PreviewImages { .. } => "preview images",
                 Completion::Scanned { .. } => "scanned",
                 Completion::Ranked { .. } => "ranked",
+                Completion::Navigation { .. } => "navigation",
                 Completion::Theme(_) => "theme",
                 Completion::Changed(_) => "changed",
                 Completion::Refreshed { .. } => "refreshed",
@@ -731,6 +767,9 @@ impl Input {
                 Completion::Indexed { .. } => "indexed",
                 Completion::Moved { .. } => "moved",
                 Completion::Semantic(_) => "semantic",
+                Completion::ServerRuntimes { .. } => "Server runtimes",
+                Completion::ServerRuntimeSaved { .. } => "Server runtime saved",
+                Completion::ProviderSettingsSaved { .. } => "provider settings saved",
                 Completion::Watch { .. } => "watch",
                 Completion::Retrieved { .. } => "retrieved",
                 Completion::Targets { .. } => "targets",
@@ -777,6 +816,8 @@ pub struct State {
     messages: Vec<String>,
     palette: Arc<Palette>,
     project: Option<Project>,
+    explorer: crate::workspace::Explorer,
+    workspace_revision: u64,
     recent: Vec<PathBuf>,
     /// The project's bookmarks, recent files and locations (the session's own without a project).
     places: Arc<crate::places::Places>,
@@ -786,8 +827,12 @@ pub struct State {
     /// Each pane's text area, in columns and rows, as the adapter last reported it (0: not yet).
     text_size: [(usize, usize); 2],
     results: Option<Results>,
+    navigation: Option<crate::navigation::Search>,
     index: DeclIndex,
     semantics: Semantics,
+    server_runtime: Option<semantics::runtime::Runtime>,
+    runtime_saving: Option<u64>,
+    provider_saves: usize,
     /// The semantic request being answered.
     asking: Option<Asking>,
     /// The occurrences of the name last asked about.
@@ -904,6 +949,7 @@ impl Ask {
 }
 
 impl State {
+    pub fn navigation(&self) -> Option<&crate::navigation::Search> { self.navigation.as_ref() }
     /// How much of the project the declaration index covers.
     pub fn index_coverage(&self) -> index::Coverage {
         self.index.coverage()
@@ -996,6 +1042,9 @@ impl State {
     pub fn split(&self) -> Option<Split> {
         self.settings.split
     }
+    pub fn explorer(&self) -> &crate::workspace::Explorer { &self.explorer }
+    pub fn workspace_revision(&self) -> u64 { self.workspace_revision }
+
     pub fn layout(&self) -> Layout {
         self.settings.layout
     }
@@ -1075,6 +1124,11 @@ impl State {
         }
         self.semantics.view(self.document()?)
     }
+    /// Compact status shown before paths and other notices so setup failures remain visible.
+    pub fn language_server_label(&self) -> &'static str {
+        self.provider().map_or(if self.document().is_some() { "LSP unsupported" } else { "LSP no file" }, |v| v.status_label())
+    }
+    pub fn server_runtime(&self) -> Option<&semantics::runtime::Runtime> { self.server_runtime.as_ref() }
     /// Every language server of this session and its state.
     pub fn servers(&self) -> Vec<ProviderView> {
         self.semantics.views()
@@ -1255,6 +1309,7 @@ pub struct Session {
     project_generation: Arc<AtomicU64>,
     /// The current finder query's sequence number.
     query_latest: Arc<AtomicU64>,
+    navigation_latest: Arc<AtomicU64>,
     recent_file: PathBuf,
     /// Where each project's places file is kept (`projects/` beside the recent roots).
     places_dir: PathBuf,
@@ -1270,6 +1325,8 @@ pub struct Session {
     settings_file: PathBuf,
     settings_saves: Arc<std::sync::Mutex<u64>>,
     settings_seq: u64,
+    runtime_request: u64,
+    restore_workspace: bool,
     watcher: Watcher,
     /// The project's folders to watch, for its root, walk and size (built once per inventory), and the tabs' folders
     /// outside them that were last added.
@@ -1350,12 +1407,15 @@ impl Session {
                 messages,
                 palette: themes.snapshot().palette,
                 project: None,
+                explorer: Default::default(), workspace_revision: 0,
                 recent,
                 places: Default::default(),
                 missing: Default::default(),
                 settings,
                 text_size: [(0, 0); 2],
+                server_runtime: None, runtime_saving: None, provider_saves: 0,
                 results: None,
+                navigation: None,
                 index: DeclIndex::new(index::INDEX_BYTES),
                 semantics: Semantics::new(config.providers, config.cache, config.idle, config.clock),
                 asking: None,
@@ -1376,6 +1436,7 @@ impl Session {
             root_generation: Arc::new(AtomicU64::new(0)),
             project_generation: Arc::new(AtomicU64::new(0)),
             query_latest: Arc::new(AtomicU64::new(0)),
+            navigation_latest: Arc::new(AtomicU64::new(0)),
             places_dir: config.recent.parent().map_or_else(PathBuf::new, |d| d.join("projects")),
             places_saver: crate::places::Saver::new(crate::places::DEBOUNCE, move |generation, seq, places| {
                 let _ = merged.send_blocking(Completion::PlacesMerged { generation, seq, places });
@@ -1388,6 +1449,8 @@ impl Session {
             settings_file: config.settings,
             settings_saves: Arc::default(),
             settings_seq: 0,
+            runtime_request: 0,
+            restore_workspace: false,
             watcher,
             watching: None,
             inventory_folders: None,
@@ -1445,6 +1508,9 @@ impl Session {
         self.themes.snapshot().selection.id().to_owned()
     }
 
+    /// A background quit task can wait until metadata already submitted by SaveWorkspace is durable.
+    pub fn workspace_saved(&self) -> std::sync::mpsc::Receiver<()> { self.places_saver.flush() }
+
     pub fn inactive_bytes(&self) -> usize {
         self.cache.used()
     }
@@ -1490,10 +1556,14 @@ impl Session {
     }
 
     pub fn disabled(&self, id: CommandId) -> Option<&'static str> {
+        if self.state.runtime_saving.is_some() && matches!(id, CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot) {
+            return Some("Saving the Java runtime…");
+        }
+
         let open = self.state.document().is_some();
         let tabs = self.state.pane_tabs(self.state.focused).count();
         match id {
-            CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
+            CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
             CommandId::Unsplit | CommandId::FocusOtherPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
@@ -1528,7 +1598,7 @@ impl Session {
             CommandId::NextTab | CommandId::PreviousTab => (tabs < 2).then_some("Only one tab is open"),
             CommandId::Close => (tabs == 0).then_some("No tab is open"),
             CommandId::OpenRecent => self.state.recent.is_empty().then_some("No recent folders"),
-            CommandId::FindFile | CommandId::SearchProject => self.state.project.is_none().then_some("No folder is open"),
+            CommandId::SearchProject => self.state.project.is_none().then_some("No folder is open"),
             CommandId::FindInFile => match self.state.active() {
                 _ if !open => Some("No file is open"),
                 Some(t) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("Find works on the source; Ctrl+Shift+V shows it"),
@@ -1608,6 +1678,9 @@ impl Session {
                 None => Some("No folder is open"),
                 Some(p) => self.state.semantics.symbols_unavailable(Some(p.root())),
             },
+            CommandId::LanguageServer | CommandId::CopyServerDetails => None,
+            CommandId::ServerRuntime => if self.state.provider_saves > 0 { Some("Waiting for provider settings to finish saving") }
+                else if self.runtime_kind().is_none() { Some("Open a Java or Python source file to choose its server runtime") } else { None },
             CommandId::RestartServer => match self.state.provider() {
                 None => Some("No language server for this file"),
                 Some(v) if v.status == semantics::Status::Disabled => Some("Disabled for this folder"),
@@ -1650,6 +1723,88 @@ impl Session {
         }
     }
 
+    fn runtime_kind(&self) -> Option<semantics::runtime::Kind> {
+        match self.state.document()?.language()? {
+            highlight::Language::Java => Some(semantics::runtime::Kind::Java),
+            highlight::Language::Python => Some(semantics::runtime::Kind::PyrightNode),
+            _ => None,
+        }
+    }
+
+    /// Status, recovery commands and troubleshooting shared by both adapters. Informational rows have no action.
+    pub fn language_server_rows(&self) -> Vec<(String, Option<CommandId>)> {
+        let mut rows = Vec::new();
+        let view = self.state.provider();
+        // Recovery rows keep their identity while asynchronous status text changes or wraps.
+        for id in [
+            CommandId::RestartServer,
+            if view
+                .as_ref()
+                .is_some_and(|v| v.status == semantics::Status::Disabled)
+            {
+                CommandId::EnableServer
+            } else {
+                CommandId::DisableServer
+            },
+            CommandId::WorkspaceRoot,
+            CommandId::CopyServerDetails,
+            CommandId::ServerRuntime,
+        ] {
+            rows.push((id.label().into(), Some(id)));
+        }
+        let summary = match &view {
+            Some(v) => v.summary(),
+            None if self.state.document().is_some() => "No language server supports this document. Syntax highlighting and text search remain available.".into(),
+            None => "Open a source file to start its language server automatically.".into(),
+        };
+        rows.push((summary, None));
+        if let Some(v) = view {
+            let has_root = v.root.is_some();
+            if let Some(root) = v.root {
+                rows.push((format!("Workspace: {}", root.display()), None));
+            }
+            if let Some(p) = semantics::provider::PROVIDERS
+                .iter()
+                .find(|p| p.name == v.name)
+            {
+                let launch = self.state.semantics.settings().launch(p);
+                rows.push((format!("Executable: {}", launch.executable.display()), None));
+                if !launch.args.is_empty() { rows.push((format!("Arguments: {}", launch.args.join(" ")), None)); }
+                rows.push((format!("Server version: {}", v.version.as_deref().unwrap_or("unknown (the server has not reported a version)")), None));
+                if let Some(tested) = p.tested {
+                    rows.push((format!("Tested with Lenz: {} {tested}. Other versions may work; compatibility is unverified.", p.name), None));
+                }
+                if matches!(v.status, semantics::Status::Missing(_) | semantics::Status::Failed(_)) {
+                    rows.push((format!("Setup: {}", p.setup), None));
+                    if self.runtime_kind().is_some() {
+                        rows.push(("Choose Language Server Runtime to select an existing installation, validate it and restart the server. The failure may be a runtime selection or version problem; an exit code alone does not prove incompatibility.".into(), None));
+                    }
+                }
+                match v.status {
+                    semantics::Status::Disabled => rows.push(("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into(), None)),
+                    semantics::Status::Missing(_) if self.state.document().is_some_and(|d| d.is_large()) => rows.push(("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into(), None)),
+                    semantics::Status::Missing(_) if !has_root => rows.push(("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into(), None)),
+                    semantics::Status::Missing(_) | semantics::Status::Failed(_) => {
+                        rows.push(("Check the error above, the executable and its runtime/toolchain in the same environment as Lenz. Check executable, args, env and workspace root in your provider settings. After fixing setup, choose Restart Language Server; if no workspace was found, set its root first. Lenz never installs servers automatically.".into(), None));
+                    }
+                    semantics::Status::Queued | semantics::Status::Starting => rows.push(("Starts automatically when you open a supported source file. Startup is limited to 120 seconds; a failure will be shown here.".into(), None)),
+                    semantics::Status::Indexing(_) => rows.push(("The server is still loading the project. Results may be incomplete until indexing finishes.".into(), None)),
+                    semantics::Status::Ready => rows.push(("The server is running. If navigation fails, check the workspace root and server capabilities, or restart it.".into(), None)),
+                }
+                rows.push((format!("Provider limits: {}", p.limits), None));
+            }
+        }
+        rows.push((
+            format!(
+                "Provider settings: {}",
+                self.state.semantics.settings_file().display()
+            ),
+            None,
+        ));
+        rows.extend(self.state.notices().into_iter().map(|text| (text, None)));
+        rows
+    }
+
     /// The context menu for the active tab: navigation and copying for text; for an image or a Markdown preview
     /// only its path and its place in the explorer.
     pub fn context_menu(&self) -> Vec<MenuEntry> {
@@ -1676,10 +1831,11 @@ impl Session {
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
         let input = input.into();
+        if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let reveal_selection = matches!(&input,
-            Input::Command(Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)
+            Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)
             | Input::Completion(Completion::SelectionSteps { .. }));
-        let effect = match input {
+        let mut effect = match input {
             Input::Command(c) => self.command(c),
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
             Input::Completion(c) => self.complete(c),
@@ -1689,6 +1845,22 @@ impl Session {
         }
         // Language servers follow the documents shown (cheap: a pass over the tabs).
         self.sync_semantics();
+        // Search rows retain their identity while background server availability changes.
+        if let Some(n) = &self.state.navigation {
+            let updates: Vec<_> = n.rows.iter().enumerate().filter_map(|(i, row)| match row.target {
+                crate::navigation::Target::Action(id) => Some((i, self.disabled(id), self.on(id))),
+                crate::navigation::Target::Recent {ref path,..} => Some((i, self.state.missing.contains(path).then_some("File missing"), None)),
+                crate::navigation::Target::Open {..} => None,
+            }).collect();
+            if let Some(n) = &mut self.state.navigation {
+                for (i, disabled, on) in updates {
+                    if let Some(row) = n.rows.get_mut(i) {
+                        effect.repaint |= row.disabled != disabled || row.on != on;
+                        row.disabled = disabled; row.on = on;
+                    }
+                }
+            }
+        }
         // Documentation whose tab is no longer shown as it was is closed, not kept for its return.
         if self.state.documentation.is_some() && self.state.documentation().is_none() {
             self.state.documentation = None;
@@ -1699,6 +1871,24 @@ impl Session {
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
+            Command::SearchEverywhere {scope, query} => {
+                if scope == crate::navigation::Scope::Recent && self.state.navigation.as_ref().is_none_or(|n| n.scope != scope) {
+                    self.command(Command::CheckPlaces);
+                }
+                self.state.navigation = Some(crate::navigation::Search {scope, query, rows: Vec::new(), revision: 0, pending: false, request: 0, dirty: false, matched: 0});
+                self.rank_navigation();
+                repaint
+            }
+            Command::CloseSearchEverywhere => {
+                self.navigation_latest.fetch_add(1, Ordering::Relaxed);
+                Effect {repaint: self.state.navigation.take().is_some(), copy: None}
+            }
+            Command::ForgetNavigation { revision, index } => {
+                let Some(search) = self.state.navigation.as_ref().filter(|s| s.scope == crate::navigation::Scope::Recent && s.revision == revision) else { return Effect::default() };
+                let Some(crate::navigation::Row {target: crate::navigation::Target::Recent {path,..},..}) = search.rows.get(index) else { return Effect::default() };
+                let path = path.clone();
+                self.command(Command::ForgetPlace(Place::File(path)))
+            }
             Command::Open(path) => self.navigate(path, false, None, true),
             Command::OpenRetained(path) => self.navigate(path, true, None, true),
             Command::ActivateTab(id) => {
@@ -1984,6 +2174,8 @@ impl Session {
                 }
                 _ => Effect::default(),
             },
+            Command::SaveWorkspace => { self.checkpoint_workspace(); self.places_saver.flush(); Effect::default() }
+            Command::SetExplorer(explorer) => { self.state.explorer = explorer; repaint }
             Command::OpenRoot(root) => {
                 self.open_root(root);
                 repaint
@@ -2093,13 +2285,36 @@ impl Session {
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
             }
+            Command::MoveCaret(motion) => {
+                if matches!(self.state.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Effect::default(); }
+                let cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
+                let Some(t) = self.active_mut() else { return Effect::default() };
+                let Some(doc) = t.doc.clone().filter(|d| d.image().is_none() || t.image_source) else { return Effect::default() };
+                let s = t.selection.unwrap_or(Selection {anchor:0,head:0});
+                let visible = t.visible();
+                let line = doc.line_of(s.head);
+                let range = doc.line_range(line);
+                let head = match motion {
+                    Motion::Left if s.anchor != s.head => s.anchor.min(s.head),
+                    Motion::Right if s.anchor != s.head => s.anchor.max(s.head),
+                    Motion::Left if s.head <= range.start && line > 0 => doc.line_range(visible.step(line,-1)).end,
+                    Motion::Right if s.head >= range.end && visible.step(line,1) > line => doc.line_range(visible.step(line,1)).start,
+                    Motion::Up | Motion::Down => moved_row(t, &doc, s.head, motion == Motion::Down, cols),
+                    _ => moved(&doc, &visible, s.head, motion),
+                };
+                let head = if visible.hidden(doc.line_of(head)) { doc.line_range(visible.shown(doc.line_of(head))).end } else { head };
+                t.selection = Some(Selection {anchor:head,head});
+                t.approximate = false;
+                t.show_head();
+                repaint
+            }
             Command::Extend(motion) => {
                 let cols = self.state.active().and_then(|t| self.state.wrap_cols(t)).filter(|_| matches!(motion, Motion::Up | Motion::Down));
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 let Some(doc) = t.doc.clone() else { return Effect::default() };
                 let s = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
                 let head = match cols {
-                    Some(cols) => moved_row(t, &doc, s.head, motion == Motion::Down, cols),
+                    Some(cols) => moved_row(t, &doc, s.head, motion == Motion::Down, Some(cols)),
                     None => moved(&doc, &t.visible(), s.head, motion),
                 };
                 let line = doc.line_of(head);
@@ -2334,6 +2549,29 @@ impl Session {
                 None => Effect::default(),
             },
             Command::Symbols(query) => self.symbols(query),
+            Command::OpenServerRuntime => {
+                if self.disabled(CommandId::ServerRuntime).is_some() { return Effect::default(); }
+                self.runtime_request += 1;
+                let request = self.runtime_request;
+                let Some(kind) = self.runtime_kind() else { return Effect::default() };
+                let configured = semantics::runtime::configured(kind, self.state.semantics.settings());
+                self.state.server_runtime = Some(semantics::runtime::Runtime { kind, configured: configured.clone(), candidates: Vec::new(), message: format!("Finding installed {} runtimes…", kind.label()) });
+                let tx = self.tx.clone();
+                self.jobs.submit(Priority::Visible, move || { let paths = semantics::runtime::discover(kind, configured); let _ = tx.send_blocking(Completion::ServerRuntimes { request, paths }); });
+                repaint
+            }
+            Command::CloseServerRuntime => { self.state.server_runtime = None; repaint }
+            Command::SetServerRuntime(path) => {
+                if self.disabled(CommandId::ServerRuntime).is_some() { return Effect::default(); }
+                let Some(kind) = self.state.server_runtime.as_ref().map(|m| m.kind).filter(|k| Some(*k) == self.runtime_kind()) else { return Effect::default() };
+                self.runtime_request += 1;
+                let request = self.runtime_request;
+                self.state.runtime_saving = Some(request);
+                if let Some(model) = &mut self.state.server_runtime { model.message = format!("Validating and saving {} runtime…", kind.label()); }
+                let (file, tx) = (self.state.semantics.settings_file().to_owned(), self.tx.clone());
+                self.jobs.submit(Priority::Visible, move || { let result = semantics::runtime::save(kind, &file, path); let _ = tx.send_blocking(Completion::ServerRuntimeSaved { request, kind, result }); });
+                repaint
+            }
             Command::RestartServer => {
                 let Some(doc) = self.state.document().cloned() else { return Effect::default() };
                 self.state.asking = None;
@@ -2345,14 +2583,12 @@ impl Session {
                 repaint
             }
             Command::SetServerEnabled(enabled) => {
+                if self.state.runtime_saving.is_some() { return Effect::default(); }
                 let (Some(doc), Some(browse)) = (self.state.document(), self.state.project.as_ref().map(|p| p.root().to_owned())) else { return Effect::default() };
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
                 let settings = self.state.semantics.set_enabled(provider, browse, enabled);
-                let file = self.state.semantics.settings_file().to_owned();
-                self.jobs.submit(Priority::Background, move || {
-                    settings.save(&file);
-                });
+                self.save_provider_settings(settings);
                 self.synced = 0;
                 repaint
             }
@@ -2362,16 +2598,14 @@ impl Session {
                 Effect { repaint: asked, copy: None }
             }
             Command::SetWorkspaceRoot(root) => {
+                if self.state.runtime_saving.is_some() { return Effect::default(); }
                 let (Some(doc), Some(browse)) = (self.state.document(), self.state.project.as_ref().map(|p| p.root().to_owned())) else { return Effect::default() };
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
                 let root = root.map(|r| normalized(&r));
                 let settings = self.state.semantics.set_root(provider, browse, root);
                 self.synced = 0;
-                let file = self.state.semantics.settings_file().to_owned();
-                self.jobs.submit(Priority::Background, move || {
-                    settings.save(&file);
-                });
+                self.save_provider_settings(settings);
                 repaint
             }
         }
@@ -2632,6 +2866,12 @@ impl Session {
 
     /// Bring language servers in line with the documents tabs hold; roots resolve off the UI thread. Nothing
     /// happens when the tabs' documents are as they were at the last synchronization.
+    fn save_provider_settings(&mut self, settings: semantics::provider::Settings) {
+        self.state.provider_saves += 1;
+        let (file, tx) = (self.state.semantics.settings_file().to_owned(), self.tx.clone());
+        self.jobs.submit(Priority::Background, move || { let ok = settings.save(&file); let _ = tx.send_blocking(Completion::ProviderSettingsSaved { ok }); });
+    }
+
     fn sync_documents(&mut self) {
         // Each snapshot's identity: a rename keeps the version but is a new snapshot (made while the old one lives,
         // so at another address).
@@ -2771,6 +3011,34 @@ impl Session {
 
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
+            Completion::ProviderSettingsSaved { ok } => {
+                self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
+                if !ok { self.state.messages.push("Could not save language server settings".into()); }
+                Effect { repaint: true, copy: None }
+            }
+            Completion::ServerRuntimes { request, paths } => {
+                if request != self.runtime_request { return Effect::default(); }
+                if let Some(model) = &mut self.state.server_runtime { model.candidates = paths; model.message = format!("Enter {}, or choose an installed runtime below", model.kind.input_label()); }
+                Effect { repaint: true, copy: None }
+            }
+            Completion::ServerRuntimeSaved { request, kind, result } => {
+                if self.state.runtime_saving != Some(request) { return Effect::default(); }
+                self.state.runtime_saving = None;
+                let message = match result {
+                    Ok(path) => {
+                        if self.runtime_kind() == Some(kind) { self.state.asking = None; self.state.semantics.cancel(); }
+                        self.state.semantics.reload_runtime(kind.provider());
+                        self.synced = 0;
+                        if let Some(model) = &mut self.state.server_runtime { model.configured = path; }
+                        format!("{} runtime saved. Enabled {} language servers are restarting.", kind.label(), kind.provider())
+                    }
+                    Err(why) => format!("{} runtime was not changed: {why}", kind.label()),
+                };
+                if let Some(model) = &mut self.state.server_runtime { model.message = message.clone(); }
+                self.state.messages.push(message);
+                Effect { repaint: true, copy: None }
+            }
+
             Completion::Checked { request, tab, path, stamp } => {
                 if request != self.request {
                     return Effect::default();
@@ -2945,7 +3213,11 @@ impl Session {
                     return Effect::default();
                 }
                 match result {
-                    Ok(saved) => self.apply_places(file, &from, saved),
+                    Ok(saved) => {
+                        let workspace = self.restore_workspace.then(|| saved.workspace.clone()).flatten();
+                        self.apply_places(file, &from, saved);
+                        if let Some(workspace) = workspace { self.apply_workspace(*workspace); }
+                    }
                     Err(crate::places::ReadError::OtherVersion) => self.state.messages.push("Places file is from another version; not saved".into()),
                     Err(crate::places::ReadError::Broken(e)) => {
                         // Kept beside it rather than saved over; when it cannot be moved, nothing is saved.
@@ -2957,6 +3229,7 @@ impl Session {
                         self.state.messages.push(format!("Bookmarks and recent places could not be read: {e}{kept}"));
                     }
                 }
+                self.restore_workspace = false;
                 // Open files' marks follow their current text.
                 for t in &self.state.tabs {
                     if let Some(doc) = &t.doc
@@ -3014,7 +3287,19 @@ impl Session {
                 if p.ranking.is_none() && p.finder.as_ref().is_some_and(|f| !f.ready) {
                     self.rank();
                 }
+                if let Some(n) = &mut self.state.navigation
+                    && (matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Files)
+                        || rescan && done && n.scope == crate::navigation::Scope::Symbols)
+                { n.dirty = true; if !n.pending { self.rank_navigation(); } }
                 Effect { repaint: true, copy: None }
+            }
+            Completion::Navigation {request, files, indexed, found} => {
+                let Some(n) = self.state.navigation.as_mut().filter(|n| n.request == request) else { return Effect::default() };
+                n.pending = false;
+                let dirty = n.dirty;
+                if let Some((rows, matched)) = found { n.rows = rows; n.matched = matched; n.revision = request; }
+                if dirty || self.state.project.as_ref().map_or(0, |p| p.files()) != files || self.state.index.coverage().indexed != indexed { self.rank_navigation(); }
+                Effect {repaint: true, copy: None}
             }
             Completion::Ranked { generation, seq, searched, hits } => {
                 let Some(p) = self.state.project.as_mut().filter(|p| p.generation() == generation) else { return Effect::default() };
@@ -3133,6 +3418,9 @@ impl Session {
                 if let Some(query) = rerun {
                     self.find_declarations(query);
                 }
+                if let Some(n) = &mut self.state.navigation
+                    && matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Symbols)
+                { n.dirty = true; if !n.pending { self.rank_navigation(); } }
                 self.pump_index();
                 Effect { repaint: self.state.results.as_ref().is_some_and(|r| r.kind == ResultsKind::Declarations), copy: None }
             }
@@ -3146,6 +3434,10 @@ impl Session {
                     }
                     self.pump_index();
                 }
+                // Deletions may leave no indexing job to refresh an open symbol search.
+                if let Some(n) = &mut self.state.navigation
+                    && matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Symbols)
+                { n.dirty = true; if !n.pending { self.rank_navigation(); } }
                 // Servers that rely on the client hear of changed files they do not hold open (a rename's ends are
                 // among the paths).
                 self.state.semantics.files_changed(&change.paths);
@@ -4074,15 +4366,20 @@ impl Session {
     }
 
     fn open_root(&mut self, root: PathBuf) {
+        self.command(Command::CloseSearchEverywhere);
+        self.checkpoint_workspace();
+        if self.state.project.is_some() {
+            for id in [self.state.other, self.state.active].into_iter().flatten() { self.release(id); }
+            for tab in &self.state.tabs { tab.find_latest.store(u64::MAX, Ordering::Relaxed); }
+            self.state.tabs.clear(); self.state.active = None; self.state.other = None; self.state.focused = 0;
+            self.state.history = History::default();
+            self.next_request(); self.pending = None; self.state.loading = None;
+            self.current.store(0, Ordering::Relaxed); self.other_current.store(0, Ordering::Relaxed);
+        }
+        self.restore_workspace = self.state.tabs.is_empty();
+        self.state.explorer = Default::default(); self.state.workspace_revision += 1;
         let root = normalized(&root);
         self.pending_goto = None;
-        // Tabs open now belong to the old root (a reopened root keeps recording its own; files opened before any
-        // folder belong to the first one).
-        if self.state.project.as_ref().is_some_and(|p| p.root() != root.as_path()) {
-            for t in &mut self.state.tabs {
-                t.before_root = true;
-            }
-        }
         let generation = self.root_generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.query_latest.fetch_add(1, Ordering::Relaxed); // stops a ranking over the old root
         self.rescanning = false;
@@ -4112,6 +4409,7 @@ impl Session {
         self.recent_seq += 1;
         let (seq, saves) = (self.recent_seq, self.recent_saves.clone());
         let places_dir = self.places_dir.clone();
+        let saved = self.places_saver.flush();
         // Discovery is background work: loads of files the user is waiting for go first.
         self.jobs.submit(Priority::Background, move || {
             // Two quick root changes save from two workers: the newer list wins.
@@ -4121,12 +4419,88 @@ impl Session {
                 *written = seq;
             }
             drop(written);
+            let _ = saved.recv();
             let (file, from) = crate::places::files_for(&places_dir, &root);
             let result = crate::places::read(&from, &root);
             let _ = tx.send_blocking(Completion::PlacesRead { generation, file, from, result });
             project::scan(&root, generation, &latest, |batch| {
                 let _ = tx.send_blocking(Completion::Scanned { generation, batch });
             });
+        });
+    }
+
+    /// Resolve a row from the currently displayed search snapshot; adapters only present or dispatch it.
+    pub fn navigation_choice(&self, revision: u64, index: usize) -> Option<crate::navigation::Chosen> {
+        use crate::navigation::{Chosen, Target};
+        let search = self.state.navigation.as_ref().filter(|s| s.revision == revision)?;
+        let row = search.rows.get(index)?;
+        match &row.target {
+            Target::Recent {path, at} => (!self.state.missing.contains(path)).then(|| Chosen::Command(match at {
+                Some(at) => Command::OpenAt {path:path.clone(),at:*at},
+                None => Command::GoToPlace(Place::File(path.clone())),
+            })),
+            Target::Action(id) => self.disabled(*id).is_none().then_some(Chosen::Action(*id)),
+            Target::Open {path, at} => Some(Chosen::Command(match at {
+                Some(at) => Command::OpenAt {path: path.clone(), at: *at},
+                None => Command::Open(path.clone()),
+            })),
+        }
+    }
+
+    pub fn navigation_status(&self) -> String {
+        use crate::navigation::Scope as S;
+        let Some(n) = &self.state.navigation else { return String::new() };
+        let mut parts = vec![if n.pending { "Searching…".into() } else if n.rows.is_empty() { "No matches".into() } else if n.matched > crate::navigation::LIMIT { format!("Best {} results — type to narrow", n.rows.len()) } else { format!("{} results", n.rows.len()) }];
+        if matches!(n.scope, S::All | S::Files | S::Symbols) {
+            match &self.state.project {
+                None => parts.push("Open a folder to search project files and symbols".into()),
+                Some(p) => {
+                    if !matches!(p.coverage(), project::Coverage::Complete(_)) { parts.push(format!("Scanning folder: {} files", p.files())); }
+                    if matches!(n.scope, S::All | S::Symbols) {
+                        parts.push("Syntactic symbol candidates".into());
+                        let c = self.state.index.coverage();
+                        if c.pending > 0 { parts.push(format!("Indexing symbols: {}/{} files", c.indexed, c.candidates)); }
+                        if c.limited { parts.push("Symbol index reached its size limit".into()); }
+                        if c.too_large + c.unreadable > 0 { parts.push(format!("{} files too large or unreadable for symbols", c.too_large + c.unreadable)); }
+                        if c.syntax_errors > 0 { parts.push(format!("{} files have syntax errors; symbols may be incomplete", c.syntax_errors)); }
+                    }
+                }
+            }
+        }
+        if n.scope == S::Symbols && n.query.is_empty() { parts.push("Type a symbol name".into()); }
+        if n.scope == S::Recent { parts.push("Recent files · Delete forgets".into()); }
+        parts.join(" · ")
+    }
+
+    fn rank_navigation(&mut self) {
+        use crate::navigation::{self, Snapshot};
+        let Some(n) = &mut self.state.navigation else { return };
+        let request = self.navigation_latest.fetch_add(1, Ordering::Relaxed) + 1;
+        n.request = request; n.pending = true; n.dirty = false;
+        if n.rows.is_empty() { n.revision = request; }
+        let (scope, query) = (n.scope, n.query.clone());
+        let files = self.state.project.as_ref().map_or(0, |p| p.files());
+        let indexed = self.state.index.coverage().indexed;
+        let recent = if scope == navigation::Scope::Recent {
+            self.state.place_rows(PlaceList::RecentFiles, "").into_iter().filter_map(|row| match row.place { Place::File(path) => Some(path), Place::Bookmark(..) | Place::Location(..) => None }).take(navigation::LIMIT).collect()
+        } else { self.state.active().into_iter().chain(self.state.tabs.iter().rev()).map(|t| t.source().to_owned()).chain(self.state.places.recent_files().iter().cloned()).take(navigation::LIMIT).collect() };
+        let snapshot = Snapshot {
+            root: self.state.project.as_ref().map(|p| p.root().to_owned()),
+            files: if matches!(scope, navigation::Scope::All | navigation::Scope::Files) { self.state.project.as_ref().map_or_else(Vec::new, Project::entries) } else { Vec::new() },
+            symbols: if !query.is_empty() && matches!(scope, navigation::Scope::All | navigation::Scope::Symbols) { self.state.index.snapshot() } else { Vec::new() },
+            recent,
+            actions: if matches!(scope, navigation::Scope::All | navigation::Scope::Actions) { self.actions() } else { Vec::new() },
+        };
+        // Recent files are bounded to fifty entries; populate immediately for Ctrl-E followed by Enter.
+        if scope == navigation::Scope::Recent {
+            let found = navigation::rank(snapshot, scope, &query, || true);
+            self.complete(Completion::Navigation {request,files,indexed,found});
+            return;
+        }
+        let (latest, tx) = (self.navigation_latest.clone(), self.tx.clone());
+        self.jobs.submit(Priority::Visible, move || {
+            let found = navigation::rank(snapshot, scope, &query, || latest.load(Ordering::Relaxed) == request);
+            if latest.load(Ordering::Relaxed) == request { let _ = tx.send_blocking(Completion::Navigation {request, files, indexed, found}); }
         });
     }
 
@@ -4293,6 +4667,12 @@ impl Session {
         let cols = self.state.wrap_cols(t);
         let row = t.caret_row(line, byte, cols);
         let id = t.id();
+        let width = self.state.text_size[t.pane() as usize].0;
+        let column = if cols.is_none() && width > 0 {
+            let shown = t.shown_line(line);
+            let caret = lenz_content::wrap::width(shown.text.get(..shown.caret(byte)).unwrap_or_default());
+            Some(if caret < t.column { caret } else { t.column.max(caret.saturating_add(1).saturating_sub(width)) })
+        } else { None };
         if !t.rows(rows, cols).iter().any(|r| r.line == line && r.index == row) {
             let back = rows.saturating_sub(1).min(isize::MAX as usize) as isize;
             let (top, top_row) = match cols {
@@ -4301,6 +4681,7 @@ impl Session {
             };
             if let Some(t) = self.tab_mut(id) { t.set_top(top, top_row); }
         }
+        if let (Some(column), Some(t)) = (column, self.tab_mut(id)) { t.column = column; }
         self.clear_of_band(id, line, row);
     }
 
@@ -4521,10 +4902,53 @@ impl Session {
         }
     }
 
+    fn checkpoint_workspace(&mut self) {
+        if self.restore_workspace { return; } // A directory closed before its state arrived keeps the saved workspace.
+        let Some(project) = &self.state.project else { return };
+        let tabs: Vec<_> = self.state.tabs.iter().filter(|t| t.retrieved.is_none()).take(crate::workspace::MAX_TABS).collect();
+        let index = |id| tabs.iter().position(|t| Some(t.id) == id);
+        let workspace = crate::workspace::Workspace {
+            active: index(self.state.active), other: index(self.state.other), focused: self.state.focused,
+            split: self.state.settings.split, layout: self.state.settings.layout, soft_wrap: self.state.settings.soft_wrap,
+            expanded: project.expanded(), explorer: self.state.explorer.clone(),
+            tabs: tabs.into_iter().map(|t| crate::workspace::SavedTab { path: t.source.clone(), selection: t.selection, top_line: t.top_line, top_row: t.top_row(), column: t.column, pane: t.pane, retained: t.retained, markdown_source: t.markdown_source, image_source: t.image_source }).collect(),
+        };
+        Arc::make_mut(&mut self.state.places).workspace = Some(Box::new(workspace));
+        self.places_changed();
+    }
+
+    fn apply_workspace(&mut self, saved: crate::workspace::Workspace) {
+        self.state.settings.split = saved.split; self.state.settings.layout = saved.layout; self.state.settings.soft_wrap = saved.soft_wrap;
+        self.state.explorer = saved.explorer; self.state.workspace_revision += 1;
+        if let Some(project) = &mut self.state.project { project.restore_expanded(saved.expanded); }
+        self.state.tabs = saved.tabs.into_iter().map(|s| {
+            self.next_tab += 1;
+            let mut tab = Tab::new(TabId(self.next_tab), s.path, s.retained);
+            tab.pane = s.pane; tab.selection = s.selection; tab.set_top(s.top_line, s.top_row); tab.column = s.column;
+            tab.markdown_source = s.markdown_source; tab.image_source = s.image_source;
+            tab
+        }).collect();
+        self.state.focused = saved.focused;
+        let shown = |index: Option<usize>, pane| index.and_then(|i| self.state.tabs.get(i)).filter(|t| t.pane == pane).or_else(|| self.state.tabs.iter().find(|t| t.pane == pane)).map(|t| t.id);
+        let mut active = shown(saved.active, saved.focused);
+        self.state.other = self.state.settings.split.and_then(|_| shown(saved.other, 1 - saved.focused));
+        if active.is_none() && self.state.other.is_some() { active = self.state.other.take(); self.state.focused = 1 - saved.focused; }
+        self.state.active = None;
+        if let Some(active) = active { self.activate(active); }
+        self.load_other();
+        self.rewatch();
+    }
+
     /// An inactive tab's content goes to the inactive cache when it can be read again; positions stay.
     /// Save the places: debounced, then merged with the file and written off the UI thread from a snapshot. Without
     /// a project, or before its file is read, they last for the session.
     fn places_changed(&mut self) {
+        if let Some(n) = &mut self.state.navigation
+            && n.scope == crate::navigation::Scope::Recent
+        {
+            n.dirty = true;
+            if !n.pending { self.rank_navigation(); }
+        }
         self.places_seq += 1;
         let (Some(file), Some(p)) = (&self.places_file, &self.state.project) else { return };
         let save = crate::places::Save { file: file.clone(), root: p.root().to_owned(), generation: self.project_generation.load(Ordering::Relaxed), seq: self.places_seq, places: self.state.places.clone() };
@@ -4992,6 +5416,7 @@ impl Drop for Session {
                 self.places_changed();
             }
         }
+        self.checkpoint_workspace();
         // The shown file is left at exit; the saver (a field) drops after this body and writes it.
         if let Some(id) = self.state.active {
             self.release(id);
@@ -4999,6 +5424,7 @@ impl Drop for Session {
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
         self.rx.close();
+        self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
         self.query_latest.fetch_add(1, Ordering::Relaxed);
         self.latest.fetch_add(1, Ordering::Relaxed);
@@ -5190,43 +5616,48 @@ fn moved(doc: &Document, v: &crate::folds::Visible, head: usize, motion: Motion)
     }
 }
 
-/// The head moved one visual row up or down in wrapped text, keeping its display column (collapsed lines skipped).
-fn moved_row(t: &Tab, doc: &Document, head: usize, down: bool, cols: usize) -> usize {
+/// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).
+fn moved_row(t: &Tab, doc: &Document, head: usize, down: bool, cols: Option<usize>) -> usize {
     let line = doc.line_of(head);
     let byte = head - doc.line_range(line).start;
-    let rows = t.line_rows(line, Some(cols));
+    let rows = t.line_rows(line, cols);
     if rows.is_empty() {
         return head;
     }
-    let row = t.caret_row(line, byte, Some(cols));
+    let row = t.caret_row(line, byte, cols);
     let shown = t.shown_line(line);
     let at = shown.caret(byte);
     let column = rows[row].indent + shown.text.get(rows[row].display.start..at).map_or(0, lenz_content::wrap::width);
-    let (to_line, to_row) = t.step_rows((line, row), if down { 1 } else { -1 }, cols);
+    let (to_line, to_row) = match cols { Some(cols) => t.step_rows((line, row), if down {1} else {-1}, cols), None => (t.visible().step(line, if down {1} else {-1}), 0) };
     if (to_line, to_row) == (line, row) {
         return if down { doc.line_range(line).end } else { doc.line_range(line).start };
     }
-    let to_rows = t.line_rows(to_line, Some(cols));
+    let to_rows = t.line_rows(to_line, cols);
     let target = &to_rows[to_row];
     let crate::shown::Shown { text: to_shown, map: to_map, .. } = t.shown_line(to_line);
+    // Unwrapped row metadata uses source bytes; shown text includes expanded tabs and inlay hints.
+    let display = if cols.is_none() { 0..to_shown.len() } else { target.display.clone() };
     // The display offset in the target row nearest the column. A shorter row ends there, except that a row
     // continued by another ends before its last character (its end is the next row's start).
     let last_row = to_row + 1 == to_rows.len();
     let end = match last_row {
-        true => target.display.end,
-        false => to_shown.get(target.display.clone()).and_then(|r| r.char_indices().next_back()).map_or(target.display.start, |(i, _)| target.display.start + i),
+        true => display.end,
+        false => to_shown.get(display.clone()).and_then(|r| r.char_indices().next_back()).map_or(display.start, |(i, _)| display.start + i),
     };
     let mut width = target.indent;
     let mut d = end;
-    for (i, c) in to_shown.get(target.display.clone()).unwrap_or_default().char_indices() {
+    for (i, c) in to_shown.get(display.clone()).unwrap_or_default().char_indices() {
         let w = lenz_content::wrap::width(c.encode_utf8(&mut [0; 4]));
         if width + w > column {
-            d = target.display.start + i;
+            d = display.start + i;
             break;
         }
         width += w;
     }
-    doc.line_range(to_line).start + crate::wrap::source_of(&to_map, d)
+    let mut head = doc.line_range(to_line).start + crate::wrap::source_of(&to_map, d);
+    // Display maps repeat a character's end offset for its continuation bytes.
+    while !doc.text().is_char_boundary(head) { head += 1; }
+    head
 }
 
 /// A syntax-built level: each usage that is one side of a relation in its file gives the other side (subtypes: the

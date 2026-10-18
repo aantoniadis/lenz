@@ -945,10 +945,11 @@ impl App {
         crate::render::draw(self,frame);
         self.hold_comparison(frame.buffer_mut());
         self.resizer.draw(frame.buffer_mut(),&palette);
-        if let Some(repo)=&mut self.repository{repo.render_in(frame,panels,&palette);}
+        if let Some(repo)=&mut self.repository{repo.icons=self.icons;repo.render_in(frame,panels,&palette);}
         let focused=self.layout.focused(self.repository.as_ref().map(|r|&r.core));
         // the commit message panel carries the title when it is shown
         self.navigator.heading=(focused&&self.commit_panel.area.height==0).then(||self.repository.as_ref().and_then(|r|r.core.selection_title()).map(|t|t.text)).flatten();
+        self.navigator.icons=self.icons;
         self.navigator.draw(frame,&palette);
         self.commit_panel.draw(frame,&palette);
         if let Some(search)=&mut self.set_search{search.render_in(frame,comparison,&palette);}

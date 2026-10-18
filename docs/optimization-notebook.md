@@ -1096,3 +1096,129 @@ hashing source identity. Its failed log was retained; hashing only files passed
 a red/green regression test and the complete collector suite. Native macOS,
 hardware rendering, installed providers, long sessions and release packaging
 remain unverified by this integration.
+
+
+## 2026-10-18 Reader navigation and provider recovery checks
+
+The reader TUI now shares GUI navigation and contextual commands; both readers expose language-server
+status and recovery. The [reader verification record](code/tui-performance.md#2026-10-18-menu-parity-and-lsp-recovery)
+retains focused release comparisons and their limits. Source-content feedback, sustained input, GUI scrolling
+and memory were comparable in these short checks. An apparent small-source GUI startup increase did not
+repeat across nine further alternating pairs. Moving the terminal brand into the footer confounded the old
+first-brand endpoint; a controlled repeat measured the shared tab label and source content instead. No
+performance tradeoff was accepted. Native displays, macOS and long sessions remain unverified.
+
+
+## 2026-10-18 in-app Java runtime repair
+
+Java runtime discovery, validation and settings writes use the existing core workers on demand. The
+[reader verification record](code/tui-performance.md#2026-10-18-in-app-java-runtime-repair) retains the full
+local gate, identical GUI/TUI settings replay, staged-launcher Java 21 → Java 26 repair, source preservation,
+and production executable comparisons. Runtime selection does not install software or infer compatibility
+with every JDT LS version. Short private-display/PTY checks do not cover long sessions or native macOS/Windows.
+
+The first GUI feedback collector expected F2 to dismiss its own modal; it correctly received no paint. The
+collector was corrected to send Escape. A subsequent comparison included a cold shader-cache launch; that
+run is retained separately and a warmup pair precedes the final seven alternating pairs. No performance
+tradeoff was accepted.
+
+
+## 2026-10-18 per-directory Reader workspaces
+
+The shared core restores tabs and reading positions from the existing per-project places store. Checkpoints
+happen on directory switches, normal window/view closure and application quit; the existing saver performs
+writes, and inactive tabs remain metadata until activated. The [verification record](code/tui-performance.md#2026-10-18-per-directory-workspaces)
+retains the local gate, core/adapter checks, TUI → GUI → TUI replay, native private-display close/reopen and
+staged-launcher checks with fifty saved tabs. Source files remain unchanged.
+
+The round-trip test caught stale GUI state when relying solely on entity destruction. Explicit close/quit
+checkpoints and an awaited background quit flush fixed it. A first inline workspace representation enlarged
+the completion enum; boxing that optional metadata kept the normal completion path compact. No new idle
+worker was added. Forced termination, long sessions and native macOS/Windows remain unverified.
+
+## 2026-10-18 Reader GUI app menu
+
+Reader reuses its shared command catalog for a grouped ☰ app menu and the Diff-style Commands footer control;
+TUI command labels expose the same groups. No new service, dependency or document copying was added. The full
+local gate and actual input parity checks pass. Private production screenshots cover dark, light and narrow
+layouts. See the [verification record](code/tui-performance.md#2026-10-18-reader-gui-app-menu-and-commands-control)
+for raw evidence, configuration, limitations and timings.
+
+Seven alternating production GUI pairs measured first feedback 172.60→173.50 ms and Commands response
+24.79→26.06 ms; four additional pairs measured 166.96→172.54 ms and 24.21→23.03 ms. Response differences reverse
+and startup samples overlap. GUI RSS is about 0.7–0.9 MiB higher across these runs; the detailed repeat locates
+most of the difference in file-backed pages (97.32→97.91 MiB), with anonymous RSS 53.62→53.56 MiB. Exact RSS
+preservation is not established; mapped-file attribution remains unverified. The new app-menu stress has flat
+RSS for 19 open/View/back cycles over 15.24 seconds. Terminal content, input and RSS remain close to baseline.
+These are short software-rendered Linux checks, not native macOS/Windows or long-session/GPU-memory proof.
+
+
+## 2026-10-18 Reader Search Everywhere
+
+Files, local syntactic symbols and actions now share bounded core ranking and one tabbed popup in each adapter.
+Shared snapshots and existing cancellable workers avoid loading candidate documents, starting language servers
+or adding idle services. Revision checks reject stale clicks; live action availability is validated centrally.
+The [verification record](code/tui-performance.md#2026-10-18-reader-search-everywhere) retains the full local gate,
+actual adapter input replay, native private-display double Shift, enhanced-terminal reports, production captures,
+raw timing/memory samples and source/executable identities.
+
+A focused review found deleted symbols surviving when no indexing job remained; declaration invalidation and
+completed rescans now refresh the popup, with a red/green sole-source-deletion regression. An initial native
+GUI OCR check missed visible category labels; cropped/upscaled recognition corrected the collector, with no
+application change. Temporary event traces were removed and the diagnostic debug executable rebuilt clean.
+
+Seven alternating GUI pairs measured first captured image 180.75→175.32 ms, F10 response 25.38→24.93 ms and
+RSS 175.83→175.95 MiB; ten terminal pairs measured content 7.51→7.18 ms, arrow feedback 0.487→0.479 ms and
+RSS 13.42→13.52 MiB. These normal-reading samples show no reproducible slowdown. The 100,000-file rank-only
+probe costs 4.02 ms; the new Files rank plus row metadata costs 4.38 ms, and All plus 10,000 declarations costs
+4.57 ms. These worker outputs differ, so they do not establish an adapter-latency regression. New-popup stress
+runs last about fifteen seconds in each adapter; their RSS ranges are bounded for the observed interval, not
+leak proof. Native macOS/Windows, physical display latency and long sessions remain unverified.
+
+
+## 2026-10-18 LSP version context and runtime repair
+
+Mise's selected Node installation lacked Pyright, while Reader showed only stderr's generic final hint.
+Bounded raw head/tail capture now retains the cause and recovery hint, with resolved executable and failure-only
+runtime/version evidence. The existing Java chooser now also repairs Pyright by selecting an already-installed
+Node runtime, without installing tools or changing global mise settings. The [verification record](code/tui-performance.md#2026-10-18-lsp-version-diagnostics-and-runtime-repair)
+retains red/green diagnostics, the full gate, final core/clippy checks, GUI/TUI settings replay, actual production
+repair and version display, private dark/light/narrow captures, and an initialize/shutdown handshake for the
+reported workspace. Provider settings preserve custom launch options, unknown JSON and disabled states.
+
+Version checks now have bounded output and a three-second deadline; no periodic probe or idle worker was
+added. Runtime discovery and validation are requested explicitly, and error probes happen after failure.
+The first seven GUI pairs and a four-pair repeat showed approximately five milliseconds more startup time;
+twenty additional startup-only alternating pairs measured 174.64→173.47 ms, so the difference did not reproduce.
+F10 response differences reverse across runs. Terminal content/input remain comparable. GUI file-backed RSS
+is about 0.57 MiB higher in the twenty-pair repeat, while anonymous/shared memory is comparable; exact RSS
+preservation and mapping attribution are unverified. Chooser stress has a bounded sampled range in both
+adapters, with terminal RSS flat for the final twenty of 120 cycles and GUI RSS stable over fifteen cycles.
+
+A fixture script rewrite/execute race was corrected with atomic publication of fresh script inodes; no
+production retry was added. Initial PTY harness failures (duplicate TERM and tightly sequenced Escape/F2) are
+recorded and excluded from measurements. Native macOS/Windows, hardware latency, full project analysis and
+long-session leak behavior remain unverified. Runtime probes may delay a failure report by up to three seconds.
+
+
+## 2026-10-18 Reader popup scrolling, caret arrows and Recent Files
+
+Popup wheel input now changes only the viewport, plain source arrows move the shared caret, and Ctrl+E reuses
+file-search rows with icons, paths and fuzzy matching. Recent ranking stays bounded to saved MRU entries and
+is immediate to preserve Ctrl+E, Enter; project name searches retain their cancellable worker. No dependency,
+idle service or full-document copy was added. The [verification record](code/tui-performance.md#2026-10-18-reader-popup-scrolling-caret-arrows-and-recent-files)
+retains the full local gate, red/green regressions, combined GUI/TUI input replay, normal releases, private
+production dark/light/narrow checks, terminal restoration, raw samples and source/executable identities.
+
+Review caught source-byte row lengths being used for expanded tabs/inlay hints during unwrapped cursor
+movement, and a dismissed Places popup reusing its old viewport. Focused regressions cover both fixes. Native
+collectors initially confused OCR/background tab text and persistent clipboard notices; semantic Enter/copy
+assertions and popup-only checks corrected those assumptions. Failed evidence remains separate.
+
+Seven alternating GUI pairs measured first image 178.42→175.96 ms, F10 feedback 25.00→25.34 ms and RSS
+175.82→175.91 MiB. Ten terminal pairs measured first source 7.64→7.76 ms and RSS 13.63→13.68 MiB. Down feedback
+was 0.502→0.415 ms, with the requested semantic change from scrolling to caret movement. These samples remain
+close to baseline; exact preservation is not proven. New Recent stress lasted 15.35 seconds/34 cycles in GUI
+and 15.02 seconds/73 cycles in terminal, with RSS ranges 182.73–182.88 MiB and 9.742–9.797 MiB respectively.
+These short bounded samples are not leak proof. Native macOS/Windows, GPU memory and hardware display latency
+remain unverified.

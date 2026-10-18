@@ -23,3 +23,7 @@ pub mod shown;
 pub mod breadcrumbs;
 pub mod tabs;
 pub mod watch;
+
+pub mod workspace;
+
+pub mod navigation;

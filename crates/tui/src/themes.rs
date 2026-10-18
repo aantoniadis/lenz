@@ -5,7 +5,7 @@ use lenz::theme::{Palette, ThemeEntry, ThemeSelection, ThemeService};
 use ratatui::{
     Frame,
     layout::Rect,
-    widgets::{Block, Borders, Clear},
+    widgets::Clear,
 };
 use unicode_width::UnicodeWidthStr;
 pub struct Chooser {
@@ -115,10 +115,7 @@ impl Chooser {
         frame.render_widget(Clear, rect);
         let base = style_with(palette).bg(color(palette.status_bg));
         frame.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Theme ")
-                .style(base),
+            crate::chrome::pane(" Theme ",palette,true).style(base),
             rect,
         );
         let cols = usize::from(w - 2);

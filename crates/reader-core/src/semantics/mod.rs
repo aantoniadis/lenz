@@ -6,6 +6,8 @@
 pub mod hierarchy;
 pub mod hover;
 pub mod lsp;
+pub mod java;
+pub mod runtime;
 pub mod provider;
 
 use std::{
@@ -223,6 +225,19 @@ pub struct ProviderView {
 }
 
 impl ProviderView {
+    /// Short, persistent status control; full errors and recovery actions live in the status dialog.
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            Status::Queued => "LSP waiting",
+            Status::Starting => "LSP starting",
+            Status::Indexing(_) => "LSP indexing",
+            Status::Ready => "LSP ready",
+            Status::Missing(_) => "LSP unavailable",
+            Status::Failed(_) => "LSP stopped",
+            Status::Disabled => "LSP off",
+        }
+    }
+
     /// Whether it offers `question` (false until it has initialized).
     pub fn offers(&self, question: Question) -> bool {
         self.supports.contains(&question)
@@ -919,6 +934,15 @@ impl Semantics {
         self.settings.clone()
     }
 
+    pub fn reload_runtime(&mut self, provider: &str) {
+        self.reload();
+        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(|s| PROVIDERS[s.key.provider].id == provider);
+        self.servers = keep;
+        self.queued.retain(|id| self.servers.iter().any(|s| s.session == *id));
+        self.roots.retain(|(p, _), _| PROVIDERS[*p].id != provider);
+        stop.into_iter().for_each(Server::stop);
+    }
+
     /// Process groups of running servers, for memory sampling.
     pub fn groups(&self) -> Vec<(u64, u32)> {
         self.servers.iter().filter_map(|s| Some((s.session, s.process.lock().ok()?.child.as_ref()?.id()))).collect()
@@ -1469,6 +1493,70 @@ fn kill_group(child: &mut Child) {
     let _ = child.kill();
 }
 
+/// Keep the start and end of stderr, including unterminated lines, within 8 KiB of raw bytes.
+#[derive(Default)]
+struct Stderr {
+    head: Vec<u8>,
+    tail: VecDeque<u8>,
+    omitted: usize,
+}
+
+impl Stderr {
+    fn push(&mut self, bytes: &[u8]) {
+        const HALF: usize = 4096;
+        let first = bytes.len().min(HALF - self.head.len());
+        self.head.extend_from_slice(&bytes[..first]);
+        let bytes = &bytes[first..];
+        let overflow = (self.tail.len() + bytes.len()).saturating_sub(HALF);
+        self.omitted = self.omitted.saturating_add(overflow);
+        self.tail.drain(..overflow.min(self.tail.len()));
+        self.tail.extend(&bytes[bytes.len().saturating_sub(HALF)..]);
+    }
+
+    fn summary(&self) -> String {
+        let mut bytes = self.head.clone();
+        if self.omitted > 0 {
+            bytes.extend_from_slice(format!(" | [stderr truncated: {} bytes omitted] | ", self.omitted).as_bytes());
+        }
+        bytes.extend(self.tail.iter());
+        String::from_utf8_lossy(&bytes).lines().map(str::trim).filter(|s| !s.is_empty())
+            .map(|line| lenz_content::display::expand_tabs(line).0).collect::<Vec<_>>().join(" | ")
+    }
+}
+
+/// Runtime evidence is gathered only after a failure, with the launch's own executable search path.
+fn runtime_failure(key: &Key, provider: &Provider, exe: &Path) -> String {
+    let (label, flag, runtime) = match provider.id {
+        "pyright" => ("Node.js", "--version", provider::find_executable(Path::new("node"), key.launch.path())),
+        "jdtls" => {
+            let home = key.launch.env.iter().find(|(k, _)| k == "JAVA_HOME").map(|(_, v)| std::ffi::OsString::from(v))
+                .or_else(|| std::env::var_os("JAVA_HOME"));
+            let java = java::configured(&key.launch.args)
+                .or_else(|| home.map(|home| PathBuf::from(home).join("bin").join(if cfg!(windows) { "java.exe" } else { "java" })))
+                .map(|p| provider::find_executable(&p, key.launch.path()).unwrap_or(p))
+                .or_else(|| provider::find_executable(Path::new("java"), key.launch.path()));
+            ("Java", "-version", java)
+        }
+        _ => return String::new(),
+    };
+    let details = match runtime {
+        Some(path) => {
+            let version = runtime::version_in(&path, flag, &key.launch.env, Some(&key.root)).unwrap_or_else(|e| format!("version unavailable: {e}"));
+            let version = version.lines().collect::<Vec<_>>().join(" | ");
+            format!("; {label}: {} ({version})", path.display())
+        }
+        None => format!("; {label}: executable not found on the launch PATH"),
+    };
+    let requirement = (provider.id == "pyright").then(|| exe.canonicalize().ok()).flatten().and_then(|real| {
+        real.ancestors().skip(1).take(4).find_map(|dir| {
+            let json: Value = serde_json::from_slice(&lenz_content::theme::read_bounded(&dir.join("package.json")).ok()?).ok()?;
+            (json["name"] == "pyright").then(|| json["engines"]["node"].as_str().map(str::to_owned)).flatten()
+        })
+    });
+    // Settings, executable paths and manifests are external text too.
+    lenz_content::display::expand_tabs(&format!("{details}{}", requirement.map(|r| format!("; Pyright package engines.node: {r}")).unwrap_or_default())).0
+}
+
 /// Launch a server off the UI thread: check `--version`, start the process in its own process group, then pump
 /// its input from `inbox` and its output into `events` until it exits.
 #[allow(clippy::too_many_arguments)]
@@ -1519,11 +1607,9 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         // A version flag that fails means it cannot run; a version that cannot be read is only unknown.
         let version = match provider.version {
             _ if let Some(v) = &bundled_version => Ok(if v.is_empty() { String::new() } else { format!("{v} (its built-in server)") }),
-            provider::Version::Flag(args) => match Command::new(&exe).args(args).envs(key.launch.env.iter().map(|(k, v)| (k, v))).stdin(Stdio::null()).output() {
-                Ok(o) if o.status.success() => Ok(String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or_default().trim().to_owned()),
-                Ok(o) => Err(format!("`{} {}` failed: {}", exe.display(), args.join(" "), String::from_utf8_lossy(&o.stderr).lines().next().unwrap_or("no output"))),
-                Err(e) => Err(format!("`{}` could not be run: {e}", exe.display())),
-            },
+            provider::Version::Flag(args) => runtime::version_args_in(&exe, args, &key.launch.env, Some(&key.root))
+                .map(|v| v.lines().next().unwrap_or_default().trim().to_owned())
+                .map_err(|e| lenz_content::display::expand_tabs(&format!("`{} {}` failed: {}", exe.display(), args.join(" "), e.lines().collect::<Vec<_>>().join(" | "))).0),
             provider::Version::Package(name) => Ok(provider::package_version(&exe, name).map(|v| format!("{name} {v}")).unwrap_or_default()),
             provider::Version::Initialize => Ok(String::new()),
         };
@@ -1544,7 +1630,8 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         let mut child = match command.spawn() {
             Ok(c) => c,
             Err(e) => {
-                send(Event::Exited { session, reason: format!("could not start: {e}") });
+                let reason = format!("could not start `{}`: {e}{}", exe.display(), runtime_failure(&key, provider, &exe));
+                send(Event::Exited { session, reason: lenz_content::display::expand_tabs(&reason).0 });
                 return;
             }
         };
@@ -1574,17 +1661,21 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
                 }
             });
         }
-        // The last line it wrote to stderr explains an unexpected exit.
-        let last: Arc<Mutex<Option<String>>> = Arc::default();
+        let stderr_log: Arc<Mutex<Stderr>> = Arc::default();
+        let (stderr_done, stderr_eof) = std::sync::mpsc::sync_channel(1);
         if let Some(stderr) = stderr {
-            let last = last.clone();
+            let stderr_log = stderr_log.clone();
             let _ = std::thread::Builder::new().name(format!("reader-{}-err", provider.id)).spawn(move || {
-                use std::io::BufRead;
-                for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                    if let Ok(mut l) = last.lock() {
-                        *l = Some(line.chars().take(300).collect());
+                use std::io::Read;
+                let mut stderr = stderr;
+                let mut chunk = [0; 2048];
+                loop {
+                    match stderr.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => if let Ok(mut log) = stderr_log.lock() { log.push(&chunk[..n]); },
                     }
                 }
+                let _ = stderr_done.send(());
             });
         }
         let Some(stdout) = stdout else { return };
@@ -1611,11 +1702,11 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
         let Some(mut child) = child else { return };
         kill_group(&mut child);
         let status = child.wait().map_or_else(|e| e.to_string(), |s| s.to_string());
-        std::thread::sleep(std::time::Duration::from_millis(20)); // the stderr reader's last line
-        let reason = match last.lock().ok().and_then(|l| l.clone()) {
-            Some(l) => format!("exited ({status}): {l}"),
-            None => format!("exited ({status})"),
-        };
+        // A descendant can inherit stderr: never join its reader or wait indefinitely for EOF.
+        let _ = stderr_eof.recv_timeout(std::time::Duration::from_millis(100));
+        let stderr = stderr_log.lock().map(|log| log.summary()).unwrap_or_default();
+        let reason = format!("`{}` exited ({status}){}{}", exe.display(), if stderr.is_empty() { String::new() } else { format!(": {stderr}") }, runtime_failure(&key, provider, &exe));
+        let reason = lenz_content::display::expand_tabs(&reason).0;
         send(Event::Exited { session, reason });
     });
 }
@@ -1806,6 +1897,23 @@ fn add_trigger_file(options: &mut Value, uri: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stderr_retains_bounded_raw_head_and_tail_across_arbitrary_chunks() {
+        let mut log = Stderr::default();
+        log.push(b"root cause\nrecovery hint\n");
+        for _ in 0..20_000 {
+            log.push("é𝄞\x1b\u{202e}".as_bytes());
+            assert!(log.head.len() + log.tail.len() <= 8192);
+        }
+        log.push(b"final recovery hint");
+        let shown = log.summary();
+        assert!(shown.starts_with("root cause | recovery hint | "));
+        assert!(shown.ends_with("final recovery hint"));
+        assert!(shown.contains("stderr truncated"));
+        assert!(!shown.chars().any(lenz_content::display::hides_text));
+        assert!(shown.len() < 25_000);
+    }
 
     #[test]
     fn trigger_files_join_object_options_and_leave_others_alone() {

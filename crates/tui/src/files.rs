@@ -1,7 +1,7 @@
 //! Persistent GUI-style File Navigator; build grouped rows only when the Change Set changes.
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use lenz::{changeset::ChangeSet,folders::Folders,navigator::{self,NavRow}};
-use ratatui::{Frame,layout::Rect,style::Modifier,widgets::{Block,Borders,Paragraph}};
+use ratatui::{Frame,layout::Rect,style::Modifier,widgets::Paragraph};
 use std::sync::{Arc,Weak};
 use crate::chrome::{color,style_with};
 
@@ -19,6 +19,7 @@ pub enum Pick {
 
 #[derive(Default)]
 pub struct Files {
+    pub(crate) icons:crate::icons::Icons,
     set:Weak<ChangeSet>,revision:u64,rows:Vec<NavRow>,current:usize,
     /// Whether a summary is shown, and its cached visible heading row.
     summary:bool,summary_row:Option<usize>,selected:usize,scroll:usize,reveal_current:bool,
@@ -185,27 +186,35 @@ impl Files {
         if !self.shown(){return;}
         let area=self.area;let Some(set)=self.set.upgrade()else{return;};
         let title=if self.search.active(){crate::pane_search::status(&self.search,set.comparisons.len())}else{self.heading.clone().unwrap_or_else(||format!("Files ({})",set.comparisons.len()))};
-        frame.render_widget(Block::default().borders(Borders::ALL).title(title).style(style_with(palette).bg(color(palette.sidebar_bg))),area);
+        let title=self.icons.label(crate::icons::Icon::Folder,&title);
+        frame.render_widget(crate::chrome::pane(title.as_ref(),palette,self.focused).style(style_with(palette).bg(color(palette.sidebar_bg))),area);
         let height=usize::from(area.height.saturating_sub(2));
         // Keep file switching visible, without snapping manually scrolled rows back every frame.
         if self.reveal_current&&!self.search.active(){self.reveal_current=false;if let Some(row)=self.cursor(){self.reveal(row);}}
         for (row,item) in self.rows.iter().enumerate().skip(self.scroll).take(height) {
-            let(label,fg,selected)=match item {
-                NavRow::Group(name,count)=>(format!("{name} ({count})"),palette.fg,false),
+            let(label,fg,selected,decoration)=match item {
+                NavRow::Group(name,count)=>(format!("{name} ({count})"),palette.fg,false,None),
                 // the heading whose summary shows reads as the current row, in the text colour
                 NavRow::Dir{path,collapsed,files,..}=>{
                     let current=self.summary_row==Some(row);
-                    let label=if *collapsed{format!("▸ {path} · {files} file{}",if *files==1{""}else{"s"})}else{format!("▾ {path}")};
-                    (label,if current{palette.fg}else{palette.dim},current)
+                    let icon=lenz::file_icons::folder(!collapsed);
+                    let name=icon.label(self.icons.nerd(),path);
+                    let label=if *collapsed{format!("▸ {name} · {files} file{}",if *files==1{""}else{"s"})}else{format!("▾ {name}")};
+                    (label,if current{palette.fg}else{palette.dim},current,Some((2,icon)))
                 }
                 NavRow::File{index,name,from}=>{
                     let c=&set.comparisons[*index];let kind=match navigator::badge(&c.status){"A"=>0,"D"=>1,"M"=>2,"R"=>3,_=>4};
-                    (format!(" {} {}{}",navigator::badge(&c.status),if self.search.active(){c.path.as_str()}else{name.as_str()},from.as_ref().map_or(String::new(),|p|format!(" ← {p}"))),palette.status[kind],*index==if self.search.active(){self.selected}else{self.current}&&(self.search.active()||!self.summary))
+                    let icon=lenz::file_icons::file(&c.path);
+                    let name=icon.label(self.icons.nerd(),if self.search.active(){c.path.as_str()}else{name.as_str()});
+                    (format!(" {} {}{}",navigator::badge(&c.status),name,from.as_ref().map_or(String::new(),|p|format!(" ← {p}"))),palette.status[kind],*index==if self.search.active(){self.selected}else{self.current}&&(self.search.active()||!self.summary),Some((3,icon)))
                 }
             };
             let rect=Rect::new(area.x+1,area.y+1+(row-self.scroll)as u16,area.width.saturating_sub(2),1);
             let bg=if selected{palette.selected_bg}else{palette.sidebar_bg};let s=style_with(palette).fg(color(fg)).bg(color(bg)).add_modifier(if selected&&self.focused{Modifier::BOLD}else{Modifier::empty()});
             frame.buffer_mut().set_style(rect,s);frame.render_widget(Paragraph::new(crate::pane_search::line(label,&self.search,s,palette)),rect);
+            if self.icons.nerd() && let Some((offset,icon))=decoration && rect.width>offset {
+                frame.buffer_mut()[(rect.x+offset,rect.y)].set_fg(color(icon.color_on(palette,bg)));
+            }
         }
         self.resizer.draw(frame.buffer_mut(),palette);
         if set.comparisons.is_empty() {crate::visual::safe_text(frame.buffer_mut(),Rect::new(area.x+1,area.y+1,area.width.saturating_sub(2),1),"No changed files",style_with(palette));}

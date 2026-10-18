@@ -1,6 +1,7 @@
 //! Terminal input translates to the shared reader session; only focus and cell geometry live here.
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, ModifierKeyCode, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use lenz_content::{
     goto::parse_line_column,
@@ -9,10 +10,11 @@ use lenz_content::{
 use reader_core::{
     actions::{CatalogAction, InterfaceAction},
     breadcrumbs::SiblingTarget,
+    navigation::{Chosen, DoubleShift, Scope},
     search::{Group, Row},
     session::{
-        Command, CommandId, Completion, Config, Motion, Place, PlaceList, Rendering, SearchIn,
-        Selection, Session,
+        Command, CommandId, Completion, Config, MenuEntry, Motion, Place, PlaceList, Rendering,
+        SearchIn, Selection, Session,
     },
     tabs::TabId,
 };
@@ -32,11 +34,18 @@ pub(crate) enum Focus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Prompt {
     Commands,
+    LanguageServer,
+    Context {
+        x: u16,
+        y: u16,
+        entries: Vec<MenuEntry>,
+    },
     Open,
     OpenFolder,
     WorkspaceRoot,
+    ServerRuntime,
     RecentRoots,
-    Finder,
+    Navigation,
     Search,
     Find,
     Declarations,
@@ -45,7 +54,10 @@ pub(crate) enum Prompt {
     Themes,
     Places(PlaceList),
     Mnemonic,
-    Siblings { pane: u8, crumb: usize },
+    Siblings {
+        pane: u8,
+        crumb: usize,
+    },
     Help,
     Details(String),
 }
@@ -56,6 +68,7 @@ pub(crate) struct Modal {
     pub secondary_focus: bool,
     pub at: usize,
     pub top: usize,
+    pub reveal_selection: bool,
     pub error: Option<String>,
 }
 #[derive(Clone)]
@@ -68,6 +81,8 @@ pub(crate) struct Choice {
 #[derive(Clone)]
 pub(crate) enum ChoiceTarget {
     Action(CommandId),
+    Information,
+    ServerRuntime(Option<PathBuf>),
     Path(PathBuf),
     Theme(String),
     Place(Place),
@@ -86,6 +101,7 @@ struct Hover {
     due: Instant,
 }
 pub(crate) struct App {
+    pub nerd_icons: bool,
     pub session: Session,
     pub modal: Option<Modal>,
     pub focus: Focus,
@@ -94,6 +110,7 @@ pub(crate) struct App {
     pub results_at: usize,
     pub results_top: usize,
     pub tree_shown: bool,
+    pending_explorer: Option<reader_core::workspace::Explorer>,
     pub notice: Option<String>,
     pub quit: bool,
     pub new_view: bool,
@@ -102,12 +119,14 @@ pub(crate) struct App {
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
     hover: Option<Hover>,
+    double_shift: DoubleShift,
     pub(crate) preview_selection: Option<(TabId, u64, Selection)>,
     pub(crate) preview_scroll: HashMap<TabId, (u64, usize)>,
 }
 impl App {
     pub fn new(config: Config, path: Option<PathBuf>) -> Self {
         let mut app = Self {
+            nerd_icons: std::env::var("LENZ_ICONS").is_ok_and(|v| v == "nerd"),
             session: Session::new(config),
             modal: None,
             focus: Focus::Text,
@@ -116,6 +135,7 @@ impl App {
             results_at: 0,
             results_top: 0,
             tree_shown: true,
+            pending_explorer: None,
             notice: None,
             quit: false,
             new_view: false,
@@ -124,6 +144,7 @@ impl App {
             crumb_at: 0,
             drag: None,
             hover: None,
+            double_shift: DoubleShift::default(),
             preview_selection: None,
             preview_scroll: HashMap::new(),
         };
@@ -136,6 +157,61 @@ impl App {
         }
         app
     }
+    fn remember_explorer(&mut self) {
+        if self.pending_explorer.is_some() {
+            return;
+        }
+        let Some(project) = self.session.state().project() else {
+            return;
+        };
+        let explorer = reader_core::workspace::Explorer {
+            visible: self.tree_shown,
+            selected: project.rows().get(self.tree_at).map(|r| r.path.to_string()),
+            top: project
+                .rows()
+                .get(self.tree_top)
+                .map(|r| r.path.to_string()),
+        };
+        if self.session.state().explorer() != &explorer {
+            self.session.dispatch(Command::SetExplorer(explorer));
+        }
+    }
+
+    fn sync_workspace(&mut self, previous: u64) {
+        if self.session.state().workspace_revision() != previous {
+            let explorer = self.session.state().explorer().clone();
+            self.tree_shown = explorer.visible;
+            self.tree_at = 0;
+            self.tree_top = 0;
+            self.results_at = 0;
+            self.results_top = 0;
+            self.pending_explorer = Some(explorer);
+        }
+        let (Some(explorer), Some(project)) =
+            (&self.pending_explorer, self.session.state().project())
+        else {
+            return;
+        };
+        let at = |path: &Option<String>| {
+            path.as_ref()
+                .and_then(|path| project.rows().iter().position(|r| r.path.as_ref() == path))
+        };
+        let selected = at(&explorer.selected);
+        let top = at(&explorer.top);
+        let done = matches!(
+            project.coverage(),
+            reader_core::project::Coverage::Complete(_)
+                | reader_core::project::Coverage::Unavailable(_)
+        );
+        if (explorer.selected.is_none() || selected.is_some() || done)
+            && (explorer.top.is_none() || top.is_some() || done)
+        {
+            self.tree_at = selected.unwrap_or(0);
+            self.tree_top = top.unwrap_or(0);
+            self.pending_explorer = None;
+        }
+    }
+
     pub fn dispatch(&mut self, command: Command) {
         if !matches!(command, Command::ColourResults(_)) {
             self.hover = None;
@@ -199,7 +275,12 @@ impl App {
                 | Command::TypeHierarchy(_)
         );
         let close_results = matches!(command, Command::CloseResults);
+        if matches!(&command, Command::OpenRoot(_)) {
+            self.remember_explorer();
+        }
+        let workspace = self.session.state().workspace_revision();
         let effect = self.session.dispatch(command);
+        self.sync_workspace(workspace);
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
             self.notice = Some("Copied to terminal clipboard".into());
@@ -262,10 +343,14 @@ impl App {
             .project()
             .and_then(|p| p.rows().get(self.tree_at))
             .map(|r| r.path.clone());
+        let restoring = self.pending_explorer.is_some();
         let results_id = self.session.state().results().map(|r| r.id());
         let preview_positions = self.preview_positions();
+        let workspace = self.session.state().workspace_revision();
         let effect = self.session.dispatch(completion);
-        if let Some(path) = tree_path
+        self.sync_workspace(workspace);
+        if !restoring
+            && let Some(path) = tree_path
             && let Some(project) = self.session.state().project()
             && project
                 .rows()
@@ -302,10 +387,6 @@ impl App {
         }
     }
     fn open_root(&mut self, path: PathBuf) {
-        self.tree_at = 0;
-        self.tree_top = 0;
-        self.results_at = 0;
-        self.results_top = 0;
         self.dispatch(Command::OpenRoot(path));
     }
     pub fn run(&mut self, id: CommandId) {
@@ -448,10 +529,10 @@ impl App {
             InterfaceAction::Open => Prompt::Open,
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenRecent => Prompt::RecentRoots,
-            InterfaceAction::FindFile => {
-                self.dispatch(Command::FindFile(String::new()));
-                Prompt::Finder
-            }
+            InterfaceAction::FindFile => return self.open_navigation(Scope::Files),
+            InterfaceAction::SearchEverywhere => return self.open_navigation(Scope::All),
+            InterfaceAction::FindSymbol => return self.open_navigation(Scope::Symbols),
+            InterfaceAction::FindAction => return self.open_navigation(Scope::Actions),
             InterfaceAction::SearchProject => Prompt::Search,
             InterfaceAction::FindInFile => Prompt::Find,
             InterfaceAction::GoToLine => Prompt::GoTo,
@@ -459,19 +540,25 @@ impl App {
             InterfaceAction::Symbols => Prompt::Symbols,
             InterfaceAction::SetBookmarkMnemonic => Prompt::Mnemonic,
             InterfaceAction::ShowBookmarks => Prompt::Places(PlaceList::Bookmarks),
-            InterfaceAction::RecentFiles => Prompt::Places(PlaceList::RecentFiles),
+            InterfaceAction::RecentFiles => return self.open_navigation(Scope::Recent),
             InterfaceAction::RecentLocations => Prompt::Places(PlaceList::RecentLocations),
             InterfaceAction::ChooseTheme => {
                 self.dispatch(Command::Theme(ThemeCommand::OpenChooser));
                 Prompt::Themes
             }
+            InterfaceAction::ServerRuntime => {
+                self.dispatch(Command::OpenServerRuntime);
+                Prompt::ServerRuntime
+            }
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
+            InterfaceAction::LanguageServer => Prompt::LanguageServer,
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;
             }
             InterfaceAction::ToggleExplorer => {
                 self.tree_shown = !self.tree_shown;
+                self.remember_explorer();
                 if !self.tree_shown && self.focus == Focus::Tree {
                     self.focus = Focus::Text;
                 }
@@ -490,6 +577,9 @@ impl App {
         self.prompt(kind);
     }
     pub(crate) fn prompt(&mut self, kind: Prompt) {
+        if !matches!(kind, Prompt::Details(_)) {
+            self.dispatch(Command::CloseDocumentation);
+        }
         let mut input = String::new();
         let mut secondary = String::new();
         match kind {
@@ -502,6 +592,15 @@ impl App {
                     input = results.query().into();
                     secondary = results.pattern().into();
                 }
+            }
+            Prompt::ServerRuntime => {
+                input = self
+                    .session
+                    .state()
+                    .server_runtime()
+                    .and_then(|m| m.configured.as_ref())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default();
             }
             Prompt::WorkspaceRoot => {
                 input = self
@@ -522,15 +621,73 @@ impl App {
             secondary_focus: false,
             at: 0,
             top: 0,
+            reveal_selection: true,
             error: None,
         });
         self.drag = None;
         self.hover = None;
     }
+    fn open_navigation(&mut self, scope: Scope) {
+        self.close_modal();
+        self.prompt(Prompt::Navigation);
+        self.dispatch(Command::SearchEverywhere {
+            scope,
+            query: String::new(),
+        });
+    }
+    fn navigation_scope(&mut self, scope: Scope) {
+        let Some(modal) = self.modal.as_mut() else {
+            return;
+        };
+        modal.at = 0;
+        modal.top = 0;
+        modal.reveal_selection = true;
+        let query = modal.input.clone();
+        self.dispatch(Command::SearchEverywhere { scope, query });
+    }
+    fn modal_visible_rows(&self) -> usize {
+        let height = self.layout.modal_rows.height as usize;
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| m.kind == Prompt::Navigation)
+            && height >= 4
+        {
+            height / 2
+        } else {
+            height.max(1)
+        }
+    }
+    fn modal_len(&self) -> usize {
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| m.kind == Prompt::Navigation)
+        {
+            self.session
+                .state()
+                .navigation()
+                .map_or(0, |s| s.rows.len())
+        } else {
+            self.choices().len()
+        }
+    }
+    fn accept_navigation(&mut self, revision: u64, index: usize) {
+        let Some(chosen) = self.session.navigation_choice(revision, index) else {
+            return;
+        };
+        self.close_modal();
+        self.focus = Focus::Text;
+        match chosen {
+            Chosen::Command(command) => self.dispatch(command),
+            Chosen::Action(id) => self.run(id),
+        }
+    }
     fn close_modal(&mut self) {
         if let Some(modal) = self.modal.take() {
             match modal.kind {
-                Prompt::Finder => self.dispatch(Command::CloseFinder),
+                Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
+                Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
                 Prompt::Details(_) if self.session.state().documentation().is_some() => {
                     self.dispatch(Command::CloseDocumentation)
                 }
@@ -539,6 +696,9 @@ impl App {
         }
     }
     pub fn choices(&self) -> Vec<Choice> {
+        self.choices_for(self.layout.modal_rows.width.saturating_sub(2).max(1) as usize)
+    }
+    pub(crate) fn choices_for(&self, width: usize) -> Vec<Choice> {
         let Some(modal) = &self.modal else {
             return Vec::new();
         };
@@ -550,13 +710,66 @@ impl App {
             target,
         };
         let choices: Vec<Choice> = match modal.kind {
+            Prompt::Context { ref entries, .. } => entries
+                .iter()
+                .filter_map(|entry| match entry {
+                    MenuEntry::Command(id) => Some(Choice {
+                        label: id.label().into(),
+                        detail: None,
+                        disabled: self.session.disabled(*id),
+                        target: ChoiceTarget::Action(*id),
+                    }),
+                    MenuEntry::Separator => None,
+                })
+                .collect(),
+            Prompt::ServerRuntime => {
+                self.session
+                    .state()
+                    .server_runtime()
+                    .map_or_else(Vec::new, |model| {
+                        model
+                            .choices(&modal.input)
+                            .into_iter()
+                            .map(|(label, path)| Choice {
+                                label,
+                                detail: None,
+                                disabled: self.session.disabled(CommandId::ServerRuntime),
+                                target: ChoiceTarget::ServerRuntime(path),
+                            })
+                            .chain(
+                                crate::render::wrap_text(&model.message, width)
+                                    .into_iter()
+                                    .map(|label| simple(label, ChoiceTarget::Information)),
+                            )
+                            .collect()
+                    })
+            }
+            Prompt::LanguageServer => self
+                .session
+                .language_server_rows()
+                .into_iter()
+                .chain(self.notice.iter().cloned().map(|text| (text, None)))
+                .flat_map(|(text, action)| match action {
+                    Some(id) => vec![Choice {
+                        label: text,
+                        detail: None,
+                        disabled: self.session.disabled(id),
+                        target: ChoiceTarget::Action(id),
+                    }],
+                    None => crate::render::wrap_text(&text, width)
+                        .into_iter()
+                        .map(|label| simple(label, ChoiceTarget::Information))
+                        .collect(),
+                })
+                .collect(),
             Prompt::Commands => self
                 .session
                 .actions()
                 .into_iter()
                 .map(|a| Choice {
                     label: format!(
-                        "{}{}",
+                        "{}: {}{}",
+                        a.id.group().label(),
                         a.on.map_or("", |on| if on { "✓ " } else { "○ " }),
                         a.label
                     ),
@@ -572,14 +785,6 @@ impl App {
                 .iter()
                 .map(|p| simple(p.display().to_string(), ChoiceTarget::Path(p.clone())))
                 .collect(),
-            Prompt::Finder => self.session.state().project().map_or_else(Vec::new, |p| {
-                p.finder().map_or_else(Vec::new, |f| {
-                    f.hits
-                        .iter()
-                        .map(|h| simple(h.to_string(), ChoiceTarget::Path(p.root().join(&**h))))
-                        .collect()
-                })
-            }),
             Prompt::Themes => std::iter::once(simple(
                 "Follow system".into(),
                 ChoiceTarget::Theme("system".into()),
@@ -618,7 +823,7 @@ impl App {
                 .collect(),
             _ => Vec::new(),
         };
-        if matches!(modal.kind, Prompt::Finder | Prompt::Places(_)) || query.is_empty() {
+        if matches!(modal.kind, Prompt::Places(_) | Prompt::ServerRuntime) || query.is_empty() {
             choices
         } else {
             choices
@@ -630,12 +835,17 @@ impl App {
     pub fn modal_title(&self) -> String {
         self.modal.as_ref().map_or_else(String::new, |m| {
             match &m.kind {
+                Prompt::LanguageServer => "Language server status · ↑↓ scroll · Enter runs action",
                 Prompt::Commands => "Commands · type to filter",
+                Prompt::Context { .. } => "",
                 Prompt::Open => "Open file · enter path",
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
+                Prompt::ServerRuntime => {
+                    "Server runtime executable / install folder · Enter saves and restarts"
+                }
                 Prompt::RecentRoots => "Recent folders",
-                Prompt::Finder => "Find file · name:line:column",
+                Prompt::Navigation => "Search Everywhere · Tab scope · ↑↓ select · Enter open",
                 Prompt::Search => "Search project · Tab switches file pattern",
                 Prompt::Find => "Find in file · F3 next · Alt+C/W/R options",
                 Prompt::Declarations => "Find declaration · Tab: workspace symbols",
@@ -655,7 +865,39 @@ impl App {
     }
     pub fn handle(&mut self, event: Event) -> bool {
         match event {
-            Event::Key(key) if key.kind != KeyEventKind::Release => {
+            Event::Key(key) => {
+                if let KeyCode::Modifier(modifier) = key.code {
+                    if matches!(
+                        modifier,
+                        ModifierKeyCode::LeftShift | ModifierKeyCode::RightShift
+                    ) {
+                        let other = key.modifiers.intersects(
+                            KeyModifiers::CONTROL
+                                | KeyModifiers::ALT
+                                | KeyModifiers::SUPER
+                                | KeyModifiers::HYPER
+                                | KeyModifiers::META,
+                        );
+                        if key.kind != KeyEventKind::Repeat
+                            && self.double_shift.update(
+                                key.kind == KeyEventKind::Press,
+                                other,
+                                Instant::now(),
+                            )
+                            && self.modal.is_none()
+                        {
+                            self.open_navigation(Scope::All);
+                            return true;
+                        }
+                    } else {
+                        self.double_shift.interrupt();
+                    }
+                    return false;
+                }
+                self.double_shift.interrupt();
+                if key.kind == KeyEventKind::Release {
+                    return false;
+                }
                 self.hover = None;
                 // Ctrl+Q is the one action supported through every modal.
                 if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -669,19 +911,26 @@ impl App {
                 }
             }
             Event::Paste(text) if self.modal.is_some() => {
+                self.double_shift.interrupt();
                 self.edit_prompt(&text, false);
             }
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
+                self.double_shift.interrupt();
+                let before = self.modal.as_ref().map(|m| m.at);
                 self.mouse(mouse);
-                return false;
+                return before != self.modal.as_ref().map(|m| m.at);
             }
-            Event::Mouse(mouse) => self.mouse(mouse),
+            Event::Mouse(mouse) => {
+                self.double_shift.interrupt();
+                self.mouse(mouse);
+            }
             Event::FocusGained => self.dispatch(Command::Recheck),
             Event::Resize(_, _) => {
                 self.hover = None;
                 self.clamp();
             }
             Event::FocusLost => {
+                self.double_shift.reset();
                 self.hover = None;
                 self.drag = None;
             }
@@ -693,7 +942,11 @@ impl App {
         let Some(modal) = &mut self.modal else { return };
         if matches!(
             modal.kind,
-            Prompt::Help | Prompt::Details(_) | Prompt::Mnemonic
+            Prompt::Help
+                | Prompt::Details(_)
+                | Prompt::Mnemonic
+                | Prompt::Context { .. }
+                | Prompt::LanguageServer
         ) {
             return;
         }
@@ -709,10 +962,18 @@ impl App {
         }
         modal.at = 0;
         modal.top = 0;
+        modal.reveal_selection = true;
         modal.error = None;
         let (kind, query) = (modal.kind.clone(), modal.input.clone());
         match kind {
-            Prompt::Finder => self.dispatch(Command::FindFile(query)),
+            Prompt::Navigation => {
+                if let Some(search) = self.session.state().navigation() {
+                    self.dispatch(Command::SearchEverywhere {
+                        scope: search.scope,
+                        query,
+                    });
+                }
+            }
             Prompt::Find => self.dispatch(Command::Find(query)),
             Prompt::Declarations => self.dispatch(Command::FindDeclarations(query)),
             Prompt::Symbols => self.dispatch(Command::Symbols(query)),
@@ -724,6 +985,14 @@ impl App {
         let kind = self.modal.as_ref().unwrap().kind.clone();
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if kind == Prompt::LanguageServer
+            && control
+            && !alt
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            self.run(CommandId::CopyServerDetails);
+            return;
+        }
         if key.code == KeyCode::Esc {
             self.close_modal();
             if kind == Prompt::Find {
@@ -741,6 +1010,29 @@ impl App {
                 self.dispatch(Command::SetMnemonic(c.to_ascii_uppercase()));
             }
             return;
+        }
+        if kind == Prompt::Navigation && control {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            let scope = match (key.code, shift, alt) {
+                (KeyCode::Char('p' | 'P'), false, false)
+                | (KeyCode::Char('n' | 'N'), true, false) => Some(Scope::Files),
+                (KeyCode::Char('n' | 'N'), true, true) => Some(Scope::Symbols),
+                (KeyCode::Char('a' | 'A' | 'p' | 'P'), true, false) => Some(Scope::Actions),
+                (KeyCode::Char('k' | 'K'), false, false) => Some(Scope::All),
+                (KeyCode::Char('e' | 'E'), false, false) => Some(Scope::Recent),
+                _ => None,
+            };
+            if let Some(scope) = scope {
+                self.navigation_scope(scope);
+                return;
+            }
+            if !shift && !alt && matches!(key.code, KeyCode::Char('a' | 'A')) {
+                if let Some(modal) = &mut self.modal {
+                    modal.input.clear();
+                }
+                self.edit_prompt("", false);
+                return;
+            }
         }
         if alt {
             let command = match key.code {
@@ -765,6 +1057,20 @@ impl App {
                     CommandId::NextMatch
                 })
             }
+            KeyCode::Tab | KeyCode::BackTab if kind == Prompt::Navigation => {
+                if let Some(search) = self.session.state().navigation() {
+                    if search.scope == Scope::Recent {
+                        return;
+                    }
+                    let at = Scope::ALL
+                        .iter()
+                        .position(|s| *s == search.scope)
+                        .unwrap_or(0);
+                    let previous =
+                        key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                    self.navigation_scope(Scope::ALL[(at + if previous { 3 } else { 1 }) % 4]);
+                }
+            }
             KeyCode::Tab if kind == Prompt::Search => {
                 let m = self.modal.as_mut().unwrap();
                 m.secondary_focus = !m.secondary_focus;
@@ -777,6 +1083,18 @@ impl App {
                     Prompt::Declarations
                 };
                 self.edit_prompt("", false);
+            }
+            KeyCode::Delete if kind == Prompt::Navigation => {
+                if self
+                    .session
+                    .state()
+                    .navigation()
+                    .is_some_and(|s| s.scope == Scope::Recent)
+                    && let Some(revision) = self.layout.navigation_revision
+                    && let Some(index) = self.modal.as_ref().map(|m| m.at)
+                {
+                    self.dispatch(Command::ForgetNavigation { revision, index });
+                }
             }
             KeyCode::Delete if matches!(kind, Prompt::Places(_)) => {
                 if let Some(choice) = self.choices().get(self.modal.as_ref().unwrap().at)
@@ -795,17 +1113,21 @@ impl App {
                 let count = if matches!(kind, Prompt::Help | Prompt::Details(_)) {
                     self.layout.modal_content_rows
                 } else {
-                    self.choices().len()
+                    self.modal_len()
+                };
+                let height = self.layout.modal_rows.height;
+                let page = if kind == Prompt::Navigation && height >= 4 {
+                    height / 2
+                } else {
+                    height
                 };
                 let m = self.modal.as_mut().unwrap();
-                m.at = stepped(
-                    m.at,
-                    count,
-                    key.code,
-                    self.layout.modal_rows.height.max(1) as usize,
-                );
                 if matches!(kind, Prompt::Help | Prompt::Details(_)) {
-                    m.top = m.at;
+                    m.top = stepped(m.top, count, key.code, page.max(1) as usize)
+                        .min(count.saturating_sub(height as usize));
+                } else {
+                    m.at = stepped(m.at, count, key.code, page.max(1) as usize);
+                    m.reveal_selection = true;
                 }
                 self.clamp();
             }
@@ -829,6 +1151,22 @@ impl App {
         let (kind, input, secondary, at) =
             (m.kind.clone(), m.input.clone(), m.secondary.clone(), m.at);
         match kind {
+            Prompt::Navigation => {
+                if let Some(search) = self.session.state().navigation() {
+                    self.accept_navigation(search.revision, at);
+                }
+            }
+            Prompt::Context { .. } => {
+                let choice = self.choices().get(at).cloned();
+                self.close_modal();
+                if let Some(Choice {
+                    target: ChoiceTarget::Action(id),
+                    ..
+                }) = choice
+                {
+                    self.run(id);
+                }
+            }
             Prompt::GoTo => match parse_line_column(&input) {
                 Ok(at) => {
                     self.close_modal();
@@ -855,6 +1193,20 @@ impl App {
                     } else {
                         self.dispatch(Command::Open(path));
                     }
+                }
+            }
+            Prompt::ServerRuntime => {
+                if let Some(Choice {
+                    target: ChoiceTarget::ServerRuntime(path),
+                    ..
+                }) = self.choices().get(at).cloned()
+                {
+                    if let Some(modal) = &mut self.modal {
+                        modal.input = path
+                            .as_ref()
+                            .map_or_else(String::new, |p| p.display().to_string());
+                    }
+                    self.dispatch(Command::SetServerRuntime(path));
                 }
             }
             Prompt::WorkspaceRoot => {
@@ -892,27 +1244,19 @@ impl App {
                 let Some(choice) = self.choices().get(at).cloned() else {
                     return;
                 };
+                if matches!(choice.target, ChoiceTarget::Information) {
+                    return;
+                }
                 if let Some(why) = choice.disabled {
                     self.modal.as_mut().unwrap().error = Some(why.into());
                     return;
                 }
-                let finder_at = self
-                    .session
-                    .state()
-                    .project()
-                    .and_then(|p| p.finder())
-                    .and_then(|f| f.at());
                 self.close_modal();
                 match choice.target {
+                    ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) => {}
                     ChoiceTarget::Action(id) => self.run(id),
                     ChoiceTarget::Path(path) if kind == Prompt::RecentRoots => self.open_root(path),
-                    ChoiceTarget::Path(path) => {
-                        if let Some(at) = finder_at.filter(|_| kind == Prompt::Finder) {
-                            self.dispatch(Command::OpenAt { path, at });
-                        } else {
-                            self.dispatch(Command::Open(path));
-                        }
-                    }
+                    ChoiceTarget::Path(path) => self.dispatch(Command::Open(path)),
                     ChoiceTarget::Theme(id) => {
                         if let Some(theme) = ThemeSelection::from_id(&id) {
                             self.dispatch(Command::Theme(ThemeCommand::Select(theme)));
@@ -1000,9 +1344,7 @@ impl App {
             return;
         }
         let action = match (key.code, ctrl, shift, alt) {
-            (KeyCode::F(10), _, _, _)
-            | (KeyCode::Char(':'), false, _, _)
-            | (KeyCode::Char('p' | 'P'), true, true, _) => {
+            (KeyCode::F(10), _, _, _) | (KeyCode::Char(':'), false, _, _) => {
                 self.prompt(Prompt::Commands);
                 return;
             }
@@ -1011,15 +1353,7 @@ impl App {
                 return;
             }
             (KeyCode::F(2), _, _, _) => {
-                let mut notices = self.session.state().notices();
-                if let Some(notice) = &self.notice {
-                    notices.push(notice.clone());
-                }
-                self.prompt(Prompt::Details(if notices.is_empty() {
-                    "No reader notices".into()
-                } else {
-                    notices.join("\n\n")
-                }));
+                self.run(CommandId::LanguageServer);
                 return;
             }
             (KeyCode::Char('z'), false, _, true) => Some(CommandId::SoftWrap),
@@ -1034,7 +1368,12 @@ impl App {
             (KeyCode::Char('='), true, false, _) => Some(CommandId::Expand),
             (KeyCode::Char('o' | 'O'), true, true, _) => Some(CommandId::Outline),
             (KeyCode::Char('o'), true, false, _) => Some(CommandId::Open),
-            (KeyCode::Char('p'), true, false, _) => Some(CommandId::FindFile),
+            (KeyCode::Char('p' | 'P'), true, true, false)
+            | (KeyCode::Char('a' | 'A'), true, true, false) => Some(CommandId::FindAction),
+            (KeyCode::Char('n' | 'N'), true, true, true) => Some(CommandId::FindSymbol),
+            (KeyCode::Char('n' | 'N'), true, true, false)
+            | (KeyCode::Char('p'), true, false, false) => Some(CommandId::FindFile),
+            (KeyCode::Char('k'), true, false, false) => Some(CommandId::SearchEverywhere),
             (KeyCode::Char('f' | 'F'), true, true, _) => Some(CommandId::SearchProject),
             (KeyCode::Char('f'), true, false, _) | (KeyCode::Char('/'), false, _, _) => {
                 Some(CommandId::FindInFile)
@@ -1060,7 +1399,6 @@ impl App {
             (KeyCode::Char('h'), true, _, true) => Some(CommandId::CallHierarchy),
             (KeyCode::Char('h'), true, _, false) => Some(CommandId::TypeHierarchy),
             (KeyCode::Char('k' | 'K'), true, true, _) => Some(CommandId::PinTab),
-            (KeyCode::Char('n' | 'N'), true, true, _) => Some(CommandId::NewWindow),
             (KeyCode::Char('\\'), true, false, _) => Some(CommandId::SplitRight),
             (KeyCode::Char('\\' | '|'), true, true, _) => Some(CommandId::SplitDown),
             (KeyCode::Char('1'), true, _, _) => {
@@ -1101,7 +1439,18 @@ impl App {
             _ => None,
         };
         if let Some(id) = action {
-            self.run(id);
+            if key.kind != KeyEventKind::Repeat
+                || !matches!(
+                    id,
+                    CommandId::SearchEverywhere
+                        | CommandId::FindFile
+                        | CommandId::FindSymbol
+                        | CommandId::FindAction
+                        | CommandId::RecentFiles
+                )
+            {
+                self.run(id);
+            }
             return;
         }
         if key.code == KeyCode::Esc {
@@ -1209,6 +1558,20 @@ impl App {
                 };
                 if shift && let Some(motion) = motion {
                     self.dispatch(Command::Extend(motion));
+                    return;
+                }
+                if matches!(
+                    key.code,
+                    KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
+                ) && self.session.state().active().is_some_and(|tab| {
+                    tab.document().is_some()
+                        && !matches!(
+                            tab.rendering(),
+                            Some(Rendering::Preview(_) | Rendering::Pending)
+                        )
+                }) && let Some(motion) = motion
+                {
+                    self.dispatch(Command::MoveCaret(motion));
                     return;
                 }
                 let page = self
@@ -1338,11 +1701,54 @@ impl App {
         let (x, y) = (event.column, event.row);
         let point = ratatui::layout::Position::new(x, y);
         if event.kind == MouseEventKind::Moved {
+            if matches!(
+                self.modal.as_ref().map(|m| &m.kind),
+                Some(Prompt::Context { .. })
+            ) {
+                if self.layout.modal_rows.contains(point)
+                    && let Some(&at) = self
+                        .layout
+                        .modal_items
+                        .get(usize::from(y - self.layout.modal_rows.y))
+                    && at < self.choices().len()
+                    && let Some(modal) = &mut self.modal
+                {
+                    modal.at = at;
+                }
+                return;
+            }
             self.hover_at(x, y);
             return;
         }
         self.hover = None;
         if self.modal.is_some() {
+            if self
+                .modal
+                .as_ref()
+                .is_some_and(|m| m.kind == Prompt::Navigation)
+                && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            {
+                if let Some((scope, _)) = self
+                    .layout
+                    .navigation_scopes
+                    .iter()
+                    .find(|(_, r)| r.contains(point))
+                {
+                    self.navigation_scope(*scope);
+                    return;
+                }
+                if self.layout.modal_rows.contains(point) {
+                    if let (Some(revision), Some(&index)) = (
+                        self.layout.navigation_revision,
+                        self.layout
+                            .modal_items
+                            .get(usize::from(y - self.layout.modal_rows.y)),
+                    ) {
+                        self.accept_navigation(revision, index);
+                    }
+                    return;
+                }
+            }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.layout.modal_rows.contains(point)
             {
@@ -1354,25 +1760,41 @@ impl App {
                     self.modal.as_mut().unwrap().at = row;
                     self.accept();
                 }
+            } else if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && !self.layout.modal.contains(point)
+            {
+                self.close_modal();
             } else if matches!(
                 event.kind,
                 MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
             ) {
-                let key = if event.kind == MouseEventKind::ScrollDown {
-                    KeyCode::Down
-                } else {
-                    KeyCode::Up
-                };
-                self.modal_key(KeyEvent::new(key, KeyModifiers::NONE));
+                let visible = self.modal_visible_rows();
+                let count = self.layout.modal_content_rows;
+                if let Some(modal) = &mut self.modal {
+                    modal.reveal_selection = false;
+                    modal.top = if event.kind == MouseEventKind::ScrollDown {
+                        modal.top.saturating_add(1)
+                    } else {
+                        modal.top.saturating_sub(1)
+                    }
+                    .min(count.saturating_sub(visible));
+                }
             }
             return;
         }
         if matches!(event.kind, MouseEventKind::Down(MouseButton::Right)) {
-            self.prompt(Prompt::Commands);
+            self.context_menu(x, y);
             return;
         }
-        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) && y == 0 {
-            self.prompt(Prompt::Commands);
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            && let Some((id, _)) = self
+                .layout
+                .controls
+                .iter()
+                .find(|(_, rect)| rect.contains(point))
+                .copied()
+        {
+            self.run(id);
             return;
         }
         if matches!(event.kind, MouseEventKind::Up(MouseButton::Left)) {
@@ -1566,6 +1988,51 @@ impl App {
         }
         self.clamp();
     }
+
+    fn context_menu(&mut self, x: u16, y: u16) {
+        let Some(pane) = self
+            .layout
+            .panes
+            .iter()
+            .find(|p| p.text.contains((x, y).into()))
+        else {
+            return;
+        };
+        let pane_id = pane.pane;
+        let preview = pane.preview;
+        let offset = (!preview)
+            .then(|| {
+                let line = pane.rows.iter().find(|(row, _, _)| *row == y)?.1;
+                let byte = pane
+                    .hits
+                    .iter()
+                    .filter(|h| h.y == y && h.line == line && h.x <= x)
+                    .max_by_key(|h| h.x)
+                    .map_or(0, |h| h.byte);
+                let doc = self.session.state().shown(pane_id)?.document()?;
+                Some((doc.line_range(line).start + byte).min(doc.text().len()))
+            })
+            .flatten();
+        if self.session.state().shown(pane_id).is_none() {
+            return;
+        }
+        self.dispatch(Command::FocusPane(pane_id));
+        if let Some(at) = offset
+            && !self
+                .session
+                .state()
+                .selection()
+                .is_some_and(|s| s.range().contains(&at))
+        {
+            self.dispatch(Command::Select(Selection {
+                anchor: at,
+                head: at,
+            }));
+        }
+        self.focus = Focus::Text;
+        let entries = self.session.context_menu();
+        self.prompt(Prompt::Context { x, y, entries });
+    }
     pub(crate) fn clamp(&mut self) {
         let tree = self.session.state().project().map_or(0, |p| p.rows().len());
         clamp_list(
@@ -1589,12 +2056,19 @@ impl App {
         {
             self.focus = Focus::Text;
         }
+        let visible = self.modal_visible_rows();
+        if let Some(modal) = &mut self.modal {
+            modal.top = modal
+                .top
+                .min(self.layout.modal_content_rows.saturating_sub(visible));
+        }
         if let Some(modal) = &self.modal
             && !matches!(modal.kind, Prompt::Help | Prompt::Details(_))
         {
-            let len = self.choices().len();
-            let modal = self.modal.as_mut().unwrap();
-            modal.at = modal.at.min(len.saturating_sub(1));
+            let len = self.modal_len();
+            if let Some(modal) = &mut self.modal {
+                modal.at = modal.at.min(len.saturating_sub(1));
+            }
         }
     }
 }
@@ -1624,3 +2098,9 @@ fn clamp_list(at: &mut usize, top: &mut usize, len: usize, rows: usize) {
 #[cfg(test)]
 #[path = "input_tests.rs"]
 mod tests;
+
+impl Drop for App {
+    fn drop(&mut self) {
+        self.remember_explorer();
+    }
+}
