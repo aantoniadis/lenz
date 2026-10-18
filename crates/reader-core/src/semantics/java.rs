@@ -229,8 +229,13 @@ mod tests {
     fn executable(dir: &Path, body: &str) -> PathBuf {
         let path = dir.join("JDK with spaces/bin/java");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let temporary = path.with_extension("new");
+        // Keep writable script descriptors out of children spawned by parallel tests.
+        assert!(Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "fixture", &format!("#!/bin/sh\n{body}\n")])
+            .arg(&temporary).status().unwrap().success());
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(temporary, &path).unwrap();
         path
     }
 
@@ -315,7 +320,8 @@ mod tests {
         let file = dir.path().join("providers.json");
         std::fs::write(&file, "{}").unwrap();
         let start = Instant::now();
-        assert!(save(&file, Some(java)).unwrap_err().contains("3 seconds"));
+        let error = save(&file, Some(java)).unwrap_err();
+        assert!(error.contains("3 seconds"), "{error}");
         assert!(start.elapsed() < Duration::from_secs(6));
         assert_eq!(std::fs::read_to_string(file).unwrap(), "{}");
     }

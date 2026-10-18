@@ -571,3 +571,10 @@ advancing 12.83→13.25 seconds between samples. Sampled RSS was flat at 178.93�
 stress completed 182 cycles each over 15.05 seconds, with cumulative CPU 0.16→0.17 seconds, and after RSS
 13.82–13.84 MiB. All fixture bytes and terminal modes were preserved. Native macOS/Windows, hardware latency,
 GPU-memory attribution and long-session leak behavior remain unverified.
+
+A subsequent push coincided with a host Rust/LLVM upgrade: the missing LLVM 22 library interrupted the final
+release build, then Rust 1.99.1 restored compiler availability. That retry exposed an intermittent runtime-test
+fixture `ETXTBSY`: atomic renaming alone cannot prevent another forked child from retaining a writable script
+descriptor. A controlled fork/descriptor probe reproduces the failure and verifies an isolated writer process;
+the Node and Java test helpers now publish scripts from that process. The core suite passes 318 tests with 16 ignored.
+The probe and failed push logs remain in `target/perf/reader-interactions/`; this change affects test setup only.
