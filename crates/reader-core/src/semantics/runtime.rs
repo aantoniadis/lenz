@@ -225,7 +225,10 @@ mod tests {
 
     fn publish(path: &Path, script: &str) {
         let temporary = path.with_extension("new");
-        std::fs::write(&temporary, script).unwrap();
+        // Keep writable script descriptors out of children spawned by parallel tests.
+        assert!(std::process::Command::new("/bin/sh")
+            .args(["-c", "printf '%s' \"$1\" > \"$2\"", "fixture", script])
+            .arg(&temporary).status().unwrap().success());
         std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(temporary, path).unwrap();
     }
