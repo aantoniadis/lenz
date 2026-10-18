@@ -4,6 +4,63 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## 2026-10-18 Reader toolbar and status
+
+Reader now follows Diff's separate toolbar/tab layout in both adapters. Shared
+core helpers provide commands, brief status, position and complete details;
+adapters retain their pixel/cell layout. Brief status excludes routine provider
+memory samples, the GUI paints each footer segment once, and terminal independent
+views no longer cover status with view-switching text. Full details are captured
+on request, so background changes cannot move the text while it is being read.
+
+The complete local gate and production dark/light, narrow/tiny, clipboard and
+modal-isolation replays passed. Sixty-second status cycles showed bounded sampled
+RSS and unchanged source/configuration bytes. Two alternating release comparisons
+found timing differences within pair variation. GUI initial sampled RSS rose
+0.6–1.3 MiB, while both 15-second sustained comparisons settled below the saved
+baseline; this distinction remains explicit in the report. The first native GUI
+OCR oracle missed a visible Actions tab and was narrowed to the relevant tab;
+the failed run was retained. No source changes were needed after visual review.
+See [Reader chrome measurements](code/performance.md#reader-chrome-parity-2026-10-18)
+for raw samples, identities, limits and the unverified native OS chooser/macOS
+and hardware-rendering cases.
+
+## 2026-10-18 Reader theme chooser parity
+
+Reader now uses a shared ephemeral preview command for the same chooser behavior
+as Diff. Navigation previews, Enter/click commits, and Escape/outside click
+restores the latest committed theme. The palette changes without copying a
+source document or saving a preview. Theme registry refreshes retain the
+highlighted ID. Change theme is a direct GUI app-menu item and an application
+command in the TUI, outside View.
+
+Actual GUI and TUI input tests first reproduced the absent preview; the complete
+local gate then passed with the fix. Real production input checks covered current
+selection, header/wheel isolation, commit/cancel and tiny layouts, including
+60-second preview/cancel exercises with unchanged source/config bytes. The
+initial GUI collector's log-close error was corrected and its unsuccessful run
+retained. See [Reader theme measurements](code/performance.md#theme-chooser-parity-2026-10-18)
+for alternating timing, memory, raw evidence and limits. Native macOS and hardware
+rendering remain unverified.
+
+## 2026-10-18 dependency refresh
+
+The audit found 13 outdated registry dependencies and a GPUI tag update. Both
+GPUI references now use Zed v1.24.2 with the same pinned upstream patches.
+Compatible transitive refreshes reduce the lockfile from 821 to 783 entries.
+
+| Experiment | Evidence and outcome |
+|---|---|
+| Keep the old theme parser after upgrading TOML | Rejected: the existing custom-theme test failed because `Value::from_str` now parses a value. `toml::from_str` reads the whole document; all 19 selected theme tests passed. |
+| Rely on GPUI to enable resvg's raster support | Rejected: the embedded-PNG SVG test rendered transparent pixels after the renderer versions separated. Both GUI adapters now enable `raster-images` explicitly; the same test passed. Standalone TUIs retain their existing feature scope. |
+| Reuse XZ fixture generation without feature changes | Rejected at compilation: lzma-rust2 0.23 gates its encoder separately. Enable it only for tests; production decoding and archive validation remain unchanged. |
+| Production Reader input/resource checks | Passed in light/dark appearances, including Recent wheel/Enter, exact copied Unicode, caret arrows, tiny resizes, unchanged fixture hashes and terminal restoration. Short stress samples remained bounded; they do not prove long-session leak freedom. |
+| Full-suite screening outliers | Both suites passed 75 cases/394 metrics. Adjacent repeats did not reproduce the merge-startup or small-GUI/Reader memory increases. Raw observations remain available rather than replacing them with only the favorable repeats. |
+| 4K blend microbenchmark | Reproduced 34.12→41.20 ms in test executables. Disassembly shows changed compiler output, with the opposite layout change in production; the precise timing mechanism remains unresolved. Three production image pairs instead improved onion feedback 93.32→79.21 ms with comparable memory. Retain the blend code and document the slower test result; no product regression was reproduced in this path. |
+
+See the [dependency refresh measurements](performance.md#dependency-refresh-2026-10-18)
+for versions, verification, workload boundaries and raw evidence locations.
+
 ## 2026-10-17 bottom commit panel
 
 The Focus commit panel now spans the bottom in both adapters and can be hidden

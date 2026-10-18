@@ -130,7 +130,8 @@ fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
                 .all(|c| c.fg != color(app.session.state().palette().fg)),
             "file icons keep their own color"
         );
-        assert!(text(&buffer).contains("Lenz Reader"));
+        assert!(text(&buffer).contains("Menu"));
+        assert!(text(&buffer).contains("F10 Commands"));
         let (id, tab) = app.layout.panes[0].tabs[0];
         app.handle(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -198,6 +199,47 @@ fn actual_empty_constructor_renders_dark_light_narrow_and_zero_and_closes_scroll
         app.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
         assert!(app.modal.is_none());
         assert!(app.session.state().tabs().is_empty());
+    }
+}
+
+#[test]
+fn theme_chooser_shows_current_source_help_and_wrapped_choices_in_both_appearances() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        a.run(CommandId::ChooseTheme);
+        let current = a.session.theme_source();
+        let buffer = draw(&mut a, 100, 26);
+        let shown = text(&buffer);
+        for expected in [
+            "Theme",
+            "↑/↓ choose · Enter select · Esc close",
+            "Follow system",
+            &format!("Current: {current}"),
+        ] {
+            assert!(shown.contains(expected), "missing {expected}: {shown}");
+        }
+        assert_eq!(&a.layout.modal_items[..2], &[usize::MAX, usize::MAX]);
+        assert_eq!(a.layout.modal.width, 70);
+        for (width, height) in [(28, 18), (12, 8), (4, 4), (1, 1), (0, 0), (28, 18)] {
+            draw(&mut a, width, height);
+            a.handle(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+            draw(&mut a, width, height);
+            let end = a.modal.as_ref().unwrap().at;
+            a.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+            draw(&mut a, width, height);
+            assert_eq!(a.modal.as_ref().unwrap().at, end - 1);
+            assert_eq!(a.session.theme_source(), current);
+            if a.layout.modal_rows.height > 0 {
+                assert!(
+                    a.layout.modal_items.contains(&(end - 1)),
+                    "selected wrapped choice is visible"
+                );
+            }
+        }
+        a.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(a.modal.is_none());
     }
 }
 
@@ -655,5 +697,45 @@ fn recent_files_popup_shows_one_heading_file_names_paths_and_query_tail_in_both_
             ),
         ));
         assert!(a.modal.is_none());
+    }
+}
+
+#[test]
+fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
+    for dark in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        open(&mut a, dir.path(), "sample.txt", b"hello\n");
+        a.independent_view = Some((2, 3));
+        a.notice = Some("界e\u{301} diagnostic\n".repeat(30));
+        for (width, height) in [(120, 26), (60, 18), (28, 10), (8, 5), (1, 1), (0, 0), (120, 26)] {
+            let buffer = draw(&mut a, width, height);
+            for (_, rect) in &a.layout.controls {
+                assert!(rect.right() <= width);
+                assert!(rect.bottom() <= height);
+            }
+            for rect in &a.layout.command_menus {
+                assert!(rect.right() <= width);
+                assert!(rect.bottom() <= height);
+            }
+            if width >= 60 {
+                let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
+                assert!(top.contains("Menu"), "top: {top:?}");
+                assert!(top.contains("Open"));
+                let footer: String = (0..width).map(|x| buffer[(x, height - 1)].symbol()).collect();
+                assert!(footer.contains("F10 Commands"));
+                assert!(footer.contains("View 2/3"));
+                assert!(footer.contains('…'));
+                assert!(a.layout.panes[0].tabs.iter().all(|(_, rect)| rect.y == 1));
+                let (_, message) = a.layout.controls.iter().find(|(id, _)| *id == CommandId::StatusDetails).unwrap();
+                let shown: String = (message.x..message.right()).map(|x| buffer[(x, message.y)].symbol()).collect();
+                assert!(shown.contains('界'));
+                assert!(shown.contains("e\u{301}"));
+                assert!(shown.ends_with('…'));
+                let (id, back) = a.layout.controls.iter().find(|(id, _)| *id == CommandId::Back).unwrap();
+                assert!(a.session.disabled(*id).is_some());
+                assert_eq!(buffer[(back.x, back.y)].fg, color(a.session.state().palette().dim));
+            }
+        }
     }
 }

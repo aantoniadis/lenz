@@ -158,7 +158,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
-    assert!(f.view.read_with(&v, |r, _| r.status_line()).starts_with("LSP unavailable"));
+    assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP unavailable"));
     v.simulate_keystrokes("ctrl-a");
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
     v.simulate_click(point(px(20.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
@@ -270,6 +270,115 @@ fn encoding_notices_and_unavailable_files_show_in_the_status_bar(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn theme_chooser_navigation_previews_without_committing_and_escape_restores(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let initial = f.view.read_with(&v, |r, _| (r.session.theme_id().to_string(), r.session.state().palette().bg));
+    let appearance = f.dir.path().join("config/lenz-reader/appearance.json");
+    let persisted = std::fs::read(&appearance).ok();
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ChooseTheme, w, cx));
+    v.simulate_keystrokes("home down down");
+    let expected = lenz_content::theme::builtin_entries()[1].palette.bg;
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().palette().bg), expected, "navigation should preview before Enter");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.theme_id().to_string()), initial.0);
+    assert_eq!(std::fs::read(&appearance).ok(), persisted);
+    v.simulate_keystrokes("escape");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().palette().bg), initial.1);
+    assert_eq!(std::fs::read(&appearance).ok(), persisted);
+}
+
+#[gpui::test]
+fn theme_chooser_is_a_direct_menu_action_with_inert_headers_and_scroll(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    for dark in [true, false] {
+        let committed = if dark { "darcula" } else { "github-light" };
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(committed).unwrap())), cx));
+        v.simulate_resize(size(px(800.0), px(500.0)));
+        draw(&mut v);
+        let menu = f.view.read_with(&v, |r, _| r.app_menu_button().center());
+        v.simulate_click(menu, Modifiers::default());
+        let row = f.view.read_with(&v, |r, _| r.modal_rows().iter().position(|(s, _)| s == "Change theme").unwrap());
+        click_modal_row(&f, &mut v, row);
+        let chosen = f.view.read_with(&v, |r, _| match &r.modal {
+            Some(Modal::Themes { ids, at }) => { assert_eq!(ids[*at].0, committed); *at }
+            other => panic!("{other:?}"),
+        });
+        assert!(chosen > 0);
+        assert!(f.view.read_with(&v, |r, _| r.modal_rows()[1].0.starts_with("Current: ")));
+        v.simulate_keystrokes("home");
+        click_modal_row(&f, &mut v, 0);
+        click_modal_row(&f, &mut v, 1);
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Themes { at: 0, .. }))));
+        v.simulate_keystrokes("end pageup");
+        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Themes { ids, at }) if *at == ids.len().saturating_sub(9))));
+        v.simulate_keystrokes("pagedown home down down");
+        let preview = f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.session.state().palette().bg));
+        v.simulate_resize(size(px(800.0), px(180.0)));
+        draw(&mut v);
+        let inside = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().bounds.center());
+        v.simulate_event(ScrollWheelEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.modal_layout().unwrap().first > 0));
+        assert_eq!(f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.session.state().palette().bg)), preview);
+        v.simulate_event(ScrollWheelEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+        draw(&mut v);
+        assert_eq!(f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.session.state().palette().bg)), preview);
+        for (w, h) in [(120.0, 80.0), (1.0, 1.0)] {
+            v.simulate_resize(size(px(w), px(h)));
+            v.simulate_keystrokes("end up");
+            draw(&mut v);
+            assert!(f.view.read_with(&v, |r, _| {
+                let b = r.modal_layout().unwrap().bounds;
+                f32::from(b.size.width) <= w && f32::from(b.size.height) <= h
+            }));
+        }
+        v.simulate_resize(size(px(800.0), px(500.0)));
+        draw(&mut v);
+        v.simulate_click(point(px(1.0), px(1.0)), Modifiers::default());
+        assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+        let bg = lenz_content::theme::builtin_entries().iter().find(|e| e.id == committed).unwrap().palette.bg;
+        assert_eq!(f.view.read_with(&v, |r, _| r.session.state().palette().bg), bg);
+        assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().top_line()), 0);
+    }
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"fn a() {}\n");
+}
+
+#[gpui::test]
+fn theme_chooser_registry_refresh_retains_ids_and_handles_a_removed_preview(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let themes = f.dir.path().join("config/lenz-reader/themes");
+    std::fs::create_dir_all(&themes).unwrap();
+    std::fs::write(themes.join("loaded.toml"), include_str!("../../content/src/theme/fixtures/custom.toml")).unwrap();
+    let mut v = visual(cx, &f);
+    f.view.update_in(&mut v, |r, w, cx| {
+        r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id("light").unwrap())), cx);
+        r.run(CommandId::ChooseTheme, w, cx);
+    });
+    drop(v);
+    settle(cx, &f, |r| r.session.theme_entries().iter().any(|e| e.id == "user:loaded"));
+    let mut v = visual(cx, &f);
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Themes { ids, .. }) if ids.iter().any(|(id, _)| id == "user:loaded"))));
+    let one = lenz_content::theme::ThemeEntry { id: "user:one".into(), label: "First user theme".into(), palette: Arc::new(lenz_content::theme::DARCULA) };
+    let two = lenz_content::theme::ThemeEntry { id: "user:two".into(), label: "Second user theme".into(), palette: Arc::new(lenz_content::theme::LIGHT) };
+    f.view.update(&mut v, |r, cx| r.dispatch(Completion::Theme(Box::new(lenz_content::theme::ThemeUpdate::Registry { request: 1, entries: vec![two.clone(), one.clone()], notices: Vec::new() })), cx));
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Themes { ids, at }) if ids[*at].0 == "light")));
+    // Newly discovered themes appear in the open chooser, and reordering retains the highlighted ID.
+    v.simulate_keystrokes("end");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().palette().bg), lenz_content::theme::DARCULA.bg);
+    f.view.update(&mut v, |r, cx| r.dispatch(Completion::Theme(Box::new(lenz_content::theme::ThemeUpdate::Registry { request: 1, entries: vec![one, two], notices: Vec::new() })), cx));
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Themes { ids, at }) if ids[*at].0 == "user:one" && *at == ids.len() - 2)));
+    f.view.update(&mut v, |r, cx| r.dispatch(Completion::Theme(Box::new(lenz_content::theme::ThemeUpdate::Registry { request: 1, entries: Vec::new(), notices: Vec::new() })), cx));
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Themes { at: 0, .. }))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().palette().bg), lenz_content::theme::LIGHT.bg);
+    v.simulate_keystrokes("enter");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.theme_id().to_string()), "system");
+}
+
+#[gpui::test]
 fn themes_change_through_the_chooser_and_persist_for_the_reader_only(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
     settle(cx, &f, |v| v.session().state().document().is_some());
@@ -329,11 +438,11 @@ fn narrow_windows_cut_the_status_bar_and_wrap_menu_reasons_and_shift_keys_select
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(160.0), px(300.0)));
     draw(&mut v);
-    // The status bar keeps the server status visible before notices, and cuts the rest with "…".
-    let (line, cols, toolbar, text) = f.view.read_with(&v, |v, _| (v.status_line(), v.columns(v.width - 2.0 * STATUS_PAD), v.panes[0].bar.2, v.text_bounds.unwrap()));
-    assert!(line.starts_with("LSP unsupported"), "server status stays visible: {line:?}");
+    // The server and message use separate cells; long notices end with an ellipsis.
+    let (line, cols, toolbar, text) = f.view.read_with(&v, |v, _| (v.status_line(), v.columns(f32::from(v.status_segments().1.0.size.width)), v.panes[0].bar.2, v.text_bounds.unwrap()));
+    assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP"));
     assert!(line.ends_with('…') && line.chars().count() == cols, "{line:?} in {cols} columns");
-    assert_eq!(toolbar, 0.0, "the toolbar is the top row");
+    assert_eq!(toolbar, toolbar_h(), "tabs sit below the dedicated toolbar");
     assert!(f32::from(text.origin.y + text.size.height) <= 300.0 - status_h(), "the text ends above the status bar: {text:?}");
     // The status control opens details without selecting text; right-click does not open a context menu.
     v.simulate_click(point(px(20.0), px(300.0 - status_h() / 2.0)), Modifiers::shift());
@@ -527,7 +636,7 @@ fn tabs_open_reuse_keep_and_close_through_real_input(cx: &mut TestAppContext) {
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
     // Tree rows as drawn: from below the explorer's title row, whatever the tab bar and breadcrumbs take.
-    let row = |i: f32| point(px(20.0), px(line_h() + i * line_h() + line_h() / 2.0));
+    let row = |i: f32| point(px(20.0), px(toolbar_h() + line_h() + i * line_h() + line_h() / 2.0));
     // Single clicks in the tree reuse the preview tab; a double-click keeps one.
     v.simulate_click(row(0.0), Modifiers::default());
     drop(v);
@@ -565,7 +674,7 @@ fn tabs_open_reuse_keep_and_close_through_real_input(cx: &mut TestAppContext) {
     // The tab bar: click b's label to activate it, double-click a's to keep it, its × to close it.
     let mut v = visual(cx, &f);
     draw(&mut v);
-    let (hits, bar_y) = f.view.read_with(&v, |v, _| (v.tab_hits.clone(), line_h() / 2.0));
+    let (hits, bar_y) = f.view.read_with(&v, |v, _| (v.tab_hits.clone(), toolbar_h() + line_h() / 2.0));
     v.simulate_click(point(px(hits[0].0 + 10.0), px(bar_y)), Modifiers::default());
     drop(v);
     settle(cx, &f, active_is("b.rs"));
@@ -986,8 +1095,8 @@ fn definitions_follow_f12_alt_f12_and_ctrl_click_but_never_a_plain_click(cx: &mu
     v.simulate_keystrokes("f12");
     assert!(asking(&mut v).is_some_and(|a| a.starts_with("Finding the definition")));
     let status = f.view.read_with(&v, |r, _| r.status());
-    assert!(status.starts_with("Finding the definition: waiting for the language server to start… (Escape cancels) · "), "{status}");
-    assert!(status.ends_with(" · rust-analyzer: starting…"), "{status}");
+    assert!(status.starts_with("Finding the definition: waiting for the language server to start… (Escape cancels)"), "{status}");
+    assert!(status.contains("rust-analyzer: starting…"), "{status}");
     v.simulate_keystrokes("escape");
     assert_eq!(asking(&mut v), None);
     v.simulate_keystrokes("alt-f12");
@@ -1468,7 +1577,7 @@ fn markdown_reads_as_a_preview_and_switches_to_source_at_the_same_place(cx: &mut
     let mut v = visual(cx, &f);
     show(&mut v);
     show(&mut v);
-    assert_eq!(f.view.read_with(&v, |r, _| r.nav_buttons().last().map(|b| b.4)), Some("Source"), "the button now goes back to the source");
+    assert_eq!(f.view.read_with(&v, |r, _| r.nav_buttons().iter().find(|b| b.2 == CommandId::MarkdownSource).map(|b| b.4)), Some("Source"), "the button now goes back to the source");
     // The rendered text, its image drawn, no source rows.
     let rows = f.view.read_with(&v, |r, _| r.preview_rows());
     assert_eq!(rows[0], (0, "Title".to_string()));
@@ -1958,8 +2067,7 @@ fn back_and_forward_buttons_navigate_and_are_disabled_when_there_is_nowhere_to_g
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(160.0), px(200.0)));
     draw(&mut v);
-    let last_button = f.view.read_with(&v, |r, _| r.nav_buttons().last().unwrap().1);
-    assert!(f.view.read_with(&v, |r, _| r.tab_hits.iter().all(|t| t.1 <= last_button || t.0 >= last_button)));
+    assert!(f.view.read_with(&v, |r, _| r.panes.iter().all(|p| p.bar.2 >= toolbar_h())));
     let (back, enabled) = button(&v, CommandId::Back);
     assert!(enabled);
     v.simulate_click(back, Modifiers::default());
@@ -2064,12 +2172,12 @@ fn the_explorer_hides_by_its_button_and_selects_the_opened_file_by_its_target(cx
     let mut v = visual(cx, &f);
     draw(&mut v);
     let (sidebar, tabs) = f.view.read_with(&v, |r, _| (r.sidebar_w, r.tab_hits.clone()));
-    let nav_end = f.view.read_with(&v, |r, _| r.nav_buttons().last().unwrap().1);
-    assert!(sidebar > 0.0 && tabs[0].0 > nav_end && nav_end > sidebar, "the tabs and buttons sit right of the explorer");
+    assert!(sidebar > 0.0 && tabs[0].0 >= sidebar, "tabs sit right of the explorer");
+    assert!(f.view.read_with(&v, |r, _| r.panes[0].bar.2 >= toolbar_h()), "toolbar has its own row");
     // The target: the file's folders open and its row is selected.
     let (x0, x1, enabled) = f.view.read_with(&v, |r, _| r.explorer_buttons().into_iter().find(|b| b.2 == CommandId::LocateFile).map(|b| (b.0, b.1, b.3)).unwrap());
     assert!(enabled && x1 <= sidebar);
-    let y = line_h() / 2.0;
+    let y = toolbar_h() + line_h() / 2.0;
     v.simulate_click(point(px((x0 + x1) / 2.0), px(y)), Modifiers::default());
     draw(&mut v);
     let (rows, sel) = f.view.read_with(&v, |r, _| (r.session().state().project().unwrap().rows().iter().map(|r| r.path.to_string()).collect::<Vec<_>>(), r.tree_sel.clone()));
@@ -2081,7 +2189,7 @@ fn the_explorer_hides_by_its_button_and_selects_the_opened_file_by_its_target(cx
     draw(&mut v);
     let (sidebar, first) = f.view.read_with(&v, |r, _| (r.sidebar_w, r.nav_buttons()[0].0));
     assert_eq!(sidebar, 0.0);
-    assert_eq!(first, f.view.read_with(&v, |r, _| f32::from(r.app_menu_button().right()) + 4.0));
+    assert_eq!(first, f.view.read_with(&v, |r, _| f32::from(r.app_menu_button().right()) + 6.0));
     assert!(f.view.read_with(&v, |r, _| r.explorer_buttons().is_empty()));
     click_toolbar(&mut v, &f, CommandId::ToggleExplorer);
     draw(&mut v);
@@ -3433,7 +3541,7 @@ fn clicks_pick_rows_in_the_command_menu_recent_folders_and_theme_chooser(cx: &mu
         Some(Modal::Themes { ids, .. }) => ids.iter().position(|(i, _)| i == "light").unwrap(),
         other => panic!("{other:?}"),
     });
-    click_modal_row(&f, &mut v, light);
+    click_modal_row(&f, &mut v, light + THEME_HEADER_ROWS);
     assert!(f.view.read_with(&v, |v, _| v.modal.is_none()));
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().palette().bg), lenz_content::theme::LIGHT.bg);
     // Outside the box: dismissed, nothing run.
@@ -3729,12 +3837,12 @@ fn a_tree_click_selects_the_row_drawn_there(cx: &mut TestAppContext) {
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
     // The tree is drawn below its title row: row i from y = (1 + i) * line_h().
-    v.simulate_click(point(px(20.0), px(1.5 * line_h())), Modifiers::default());
+    v.simulate_click(point(px(20.0), px(toolbar_h() + 1.5 * line_h())), Modifiers::default());
     drop(v);
     settle(cx, &f, active_is("a.rs"));
     let mut v = visual(cx, &f);
     draw(&mut v);
-    v.simulate_click(point(px(20.0), px(2.5 * line_h())), Modifiers::default());
+    v.simulate_click(point(px(20.0), px(toolbar_h() + 2.5 * line_h())), Modifiers::default());
     drop(v);
     assert!(wait_until(cx, &f, active_is("b.rs")), "b.rs, drawn on row 1, opens; tabs {:?}", f.view.read_with(cx, |v, _| tab_titles(v)));
 }
@@ -4547,4 +4655,69 @@ fn recent_files_missing_rows_stay_disabled_and_delete_uses_drawn_revision(cx: &m
     assert!(!f.view.read_with(&v, |r, _| r.session.state().places().recent_files().iter().any(|path| path.ends_with("old.rs"))));
     v.simulate_keystrokes("escape");
     assert_eq!(std::fs::read_to_string(root.join("current.rs")).unwrap(), "current.rs");
+}
+
+#[gpui::test]
+fn status_message_click_opens_full_snapshot_and_keeps_document_input_modal(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("latin.txt", b"caf\xe9\n")));
+    settle(cx, &f, active_is("latin.txt"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    // The message has its own target, separate from server recovery on the left.
+    v.simulate_click(point(px(350.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows());
+    assert!(rows.iter().any(|(s, _)| s.contains("Status details")), "{rows:?}");
+    assert!(rows.iter().any(|(s, _)| s.contains("windows-1252")), "{rows:?}");
+    let before = f.view.read_with(&v, |r, _| r.session().state().selection());
+    v.simulate_keystrokes("ctrl-c ctrl-a ctrl-s down end up");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), before);
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_some()));
+    assert!(v.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())).is_some_and(|s| s.contains("windows-1252")));
+    assert_eq!(std::fs::read(f.dir.path().join("latin.txt")).unwrap(), b"caf\xe9\n");
+}
+
+#[gpui::test]
+fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("note.txt", b"unchanged\n")));
+    settle(cx, &f, active_is("note.txt"));
+    let mut v = visual(cx, &f);
+    for theme in ["darcula", "github-light"] {
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())), cx));
+        for (w, h) in [(900.0, 500.0), (480.0, 300.0), (160.0, 120.0), (1.0, 1.0)] {
+            v.simulate_resize(size(px(w), px(h)));
+            draw(&mut v);
+            f.view.read_with(&v, |r, _| {
+                let (a, b, c) = r.status_segments();
+                assert!(a.0.right() <= b.0.left() && b.0.right() <= c.0.left());
+                assert!(c.0.right() <= px(w));
+                for (bounds, text) in [a, b, c] {
+                    assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
+                }
+                assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
+                assert!(r.panes.iter().all(|p| p.bar.2 >= toolbar_h()));
+            });
+            // The shortcut reaches the same frozen snapshot as a message click.
+            v.simulate_keystrokes("shift-f2");
+            assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
+            // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
+            let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { text: text.clone() }); cx.notify(); });
+            v.simulate_keystrokes("end up");
+            draw(&mut v);
+            f.view.read_with(&v, |r, _| {
+                let l = r.modal_layout().unwrap();
+                assert!(l.bounds.left() >= px(0.0) && l.bounds.right() <= px(w));
+                assert!(l.bounds.top() >= px(0.0) && l.bounds.bottom() <= px(h));
+                assert!(l.first <= l.lines.len().saturating_sub(l.visible));
+                let cols = r.columns(r.modal_width() - 24.0);
+                assert!(l.lines.iter().all(|(_, line, _)| lenz_content::wrap::width(line) <= cols.max(2)));
+            });
+            v.simulate_keystrokes("ctrl-c");
+            assert_eq!(v.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())), Some(text));
+            v.simulate_keystrokes("escape");
+            assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+        }
+    }
+    assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), b"unchanged\n");
 }

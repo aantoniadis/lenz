@@ -71,7 +71,13 @@ long as the server's usages plus reading its files (a warm rust-analyzer: 0.1 s 
 repository; its first query of a session takes seconds); launch and memory are unchanged. Resting the pointer on a name shows its
 documentation in a popup (Documentation on Hover in the command menu turns that off), and the other occurrences of the
 name at the caret are tinted. Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
-provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. Click the LSP footer status or press F2
+provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. The toolbar keeps navigation and frequent file/search actions above the tabs, with a visible app menu.
+The footer separates language-server status, the current message, cursor position and Commands.
+Long messages end with an ellipsis; click the message or use **Status details…** (Shift+F2)
+for a wrapped, scrollable snapshot. Ctrl+C copies the complete snapshot. Routine server-memory
+samples stay in details so they do not continually change the footer.
+
+Click the LSP footer status or press F2
 for the error log, version/runtime context, setup instructions and Restart/Enable actions. Java and Pyright also offer in-app runtime selection. See [status and recovery](providers.md#status-and-recovery).
 
 The language servers also add inlay hints and semantic colours to the text panes (sticky lines included). Type and
@@ -97,6 +103,8 @@ without a grammar word, line, paragraph, file) and Ctrl+Shift+W walks back. Copy
 line; a selection over collapsed code copies the hidden source too; on Linux every selection is also the primary
 selection (middle-click paste). In a Markdown preview, drag, double-click, Shift-click and Ctrl+A select the rendered
 text and Ctrl+C copies it.
+
+Choose **Change theme** directly from the ☰ app menu (or Find Action). The chooser works like Diff: arrows and Page/Home/End preview a theme, Enter or a click selects it, and Escape or an outside click restores the current theme. Scrolling moves the list without changing the highlighted theme.
 
 The reader never writes the files it shows. It shares Diff's theme choice in
 `$XDG_CONFIG_HOME/lenz/appearance.json`, user themes in `lenz/themes`, and font preferences

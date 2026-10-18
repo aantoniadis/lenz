@@ -204,6 +204,8 @@ pub enum Command {
     /// Fold or unfold the region starting on this line of the active tab (its gutter mark or placeholder).
     ToggleFold(usize),
     Theme(ThemeCommand),
+    /// Preview a chooser highlight without selecting or saving; None restores the current theme.
+    PreviewTheme(Option<String>),
     /// Follow the definition of the name at the caret: one target opens (a committed navigation), several are
     /// listed as candidates. `peek` shows the target in the results panel without moving.
     Definition { peek: bool },
@@ -385,6 +387,7 @@ pub enum CommandId {
     SearchEverywhere,
     FindSymbol,
     FindAction,
+    StatusDetails,
 }
 
 /// How the file panel is split: side by side, or one pane above the other.
@@ -407,7 +410,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 88] = [
+    pub const ALL: [CommandId; 89] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -496,6 +499,7 @@ impl CommandId {
         Self::SearchEverywhere,
         Self::FindSymbol,
         Self::FindAction,
+        Self::StatusDetails,
     ];
 
     pub fn label(self) -> &'static str {
@@ -503,6 +507,7 @@ impl CommandId {
             Self::SearchEverywhere => "Search Everywhere…",
             Self::FindSymbol => "Find Symbol…",
             Self::FindAction => "Find Action…",
+            Self::StatusDetails => "Status details…",
             Self::Open => "Open File…",
             Self::OpenFolder => "Open Folder…",
             Self::OpenRecent => "Open Recent Folder…",
@@ -548,7 +553,7 @@ impl CommandId {
             Self::CollapseCommentsImports => "Collapse Comments and Imports",
             Self::ExtendSelection => "Extend Selection",
             Self::ShrinkSelection => "Shrink Selection",
-            Self::ChooseTheme => "Theme…",
+            Self::ChooseTheme => "Change theme",
             Self::NewWindow => "New Window",
             Self::Definition => "Go to Definition",
             Self::PeekDefinition => "Peek Definition",
@@ -1291,6 +1296,7 @@ pub struct Session {
     cache: InactiveCache,
     jobs: Jobs,
     themes: ThemeService,
+    theme_preview: Option<String>,
     request: u64,
     /// `request`, for jobs to skip work a later open or reload superseded.
     latest: Arc<AtomicU64>,
@@ -1425,6 +1431,7 @@ impl Session {
             cache: InactiveCache::new(INACTIVE_BYTES),
             jobs: Jobs::new(),
             themes,
+            theme_preview: None,
             request: 0,
             latest: Arc::new(AtomicU64::new(0)),
             current: Arc::new(AtomicU64::new(0)),
@@ -1508,6 +1515,10 @@ impl Session {
         self.themes.snapshot().selection.id().to_owned()
     }
 
+    pub fn theme_source(&self) -> String {
+        self.themes.snapshot().source
+    }
+
     /// A background quit task can wait until metadata already submitted by SaveWorkspace is durable.
     pub fn workspace_saved(&self) -> std::sync::mpsc::Receiver<()> { self.places_saver.flush() }
 
@@ -1563,7 +1574,7 @@ impl Session {
         let open = self.state.document().is_some();
         let tabs = self.state.pane_tabs(self.state.focused).count();
         match id {
-            CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
+            CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
             CommandId::Unsplit | CommandId::FocusOtherPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
@@ -2467,8 +2478,13 @@ impl Session {
                 repaint
             }
             Command::Theme(c) => {
+                if matches!(c, ThemeCommand::Select(_)) { self.theme_preview = None; }
                 let effect = self.themes.execute(c);
                 self.theme_effect(effect)
+            }
+            Command::PreviewTheme(id) => {
+                self.theme_preview = id;
+                self.theme_effect(lenz_content::theme::ThemeEffect { repaint: true, notice: None })
             }
             Command::Definition { peek } => self.ask(if peek { Ask::Peek } else { Ask::Definition }),
             Command::HighlightAt => self.occurrences(),
@@ -4531,9 +4547,13 @@ impl Session {
     }
 
     fn theme_effect(&mut self, effect: lenz_content::theme::ThemeEffect) -> Effect {
-        self.state.palette = self.themes.snapshot().palette;
+        self.theme_preview = self.theme_preview.take().filter(|id| id == "system" || self.themes.entries().iter().any(|entry| &entry.id == id));
+        let palette = self.theme_preview.as_deref().and_then(|id| self.themes.preview(id))
+            .unwrap_or_else(|| self.themes.snapshot().palette);
+        let repaint = effect.repaint || *self.state.palette != *palette;
+        self.state.palette = palette;
         self.state.messages.extend(effect.notice);
-        Effect { repaint: effect.repaint, copy: None }
+        Effect { repaint, copy: None }
     }
 
     fn next_request(&mut self) -> u64 {

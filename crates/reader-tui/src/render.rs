@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Default)]
 pub(crate) struct Geometry {
     pub controls: Vec<(CommandId, Rect)>,
+    pub command_menus: Vec<Rect>,
     pub tree: Rect,
     pub results: Rect,
     pub panes: Vec<PaneGeometry>,
@@ -109,11 +110,12 @@ impl App {
             self.layout = geometry;
             return;
         }
+        self.draw_toolbar(frame, &mut geometry, p);
         let body = Rect::new(
             area.x,
-            area.y,
+            area.y.saturating_add(1),
             area.width,
-            area.height.saturating_sub(u16::from(area.height >= 2)),
+            area.height.saturating_sub(1 + u16::from(area.height >= 2)),
         );
         let tree_width =
             if self.tree_shown && self.session.state().project().is_some() && area.width >= 36 {
@@ -246,84 +248,8 @@ impl App {
             .y
             .saturating_add(u16::from(geometry.results.height > 0));
         geometry.results.height = geometry.results.height.saturating_sub(1);
-        let state = self.session.state();
-        let status = self
-            .notice
-            .clone()
-            .or_else(|| state.asking())
-            .or_else(|| state.notices().last().cloned())
-            .unwrap_or_else(|| {
-                let position = state
-                    .active()
-                    .map(|t| {
-                        if let Some(image) = t
-                            .document()
-                            .and_then(|d| d.image())
-                            .filter(|_| !t.image_source())
-                        {
-                            return format!(
-                                "{}×{} · {:?} · {} bytes{}",
-                                image.width,
-                                image.height,
-                                image.format,
-                                image.byte_size,
-                                if image.downscaled {
-                                    " · downscaled"
-                                } else {
-                                    ""
-                                }
-                            );
-                        }
-                        let at = t.selection().and_then(|s| {
-                            t.document().map(|d| {
-                                (
-                                    d.line_of(s.head),
-                                    s.head - d.line_range(d.line_of(s.head)).start,
-                                )
-                            })
-                        });
-                        at.map_or_else(
-                            || format!("Line {}", t.top_line() + 1),
-                            |(l, b)| format!("{}:{}", l + 1, b + 1),
-                        )
-                    })
-                    .unwrap_or_else(|| "Open a file or folder with F10".into());
-                format!(
-                    "{position}  {}",
-                    state.provider().map_or_else(String::new, |v| v.summary())
-                )
-            });
         if area.height >= 2 {
-            line(
-                frame.buffer_mut(),
-                row(area, area.height - 1),
-                &format!(
-                    " {} [F2] · Lenz Reader  {}  F10 Commands",
-                    state.language_server_label(),
-                    Icon::Position.label(self.nerd_icons, &status)
-                ),
-                style(p.fg, p.status_bg),
-            );
-            let control = Rect::new(
-                area.x,
-                area.bottom() - 1,
-                (state.language_server_label().width() as u16 + 6).min(area.width),
-                1,
-            );
-            let attention = state.provider().is_some_and(|v| {
-                matches!(
-                    v.status,
-                    reader_core::semantics::Status::Missing(_)
-                        | reader_core::semantics::Status::Failed(_)
-                        | reader_core::semantics::Status::Disabled
-                )
-            });
-            frame.buffer_mut().set_style(
-                control,
-                style(if attention { p.error } else { p.accent }, p.status_bg)
-                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-            );
-            geometry.controls.push((CommandId::LanguageServer, control));
+            self.draw_status(frame, &mut geometry, p);
         }
         if self.modal.is_some() {
             self.draw_modal(frame, &mut geometry, p);
@@ -349,6 +275,120 @@ impl App {
             );
         }
         self.layout = geometry;
+    }
+
+    fn draw_toolbar(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
+        let area = row(frame.area(), 0);
+        fill(frame.buffer_mut(), area, style(p.fg, p.header_bg));
+        let menu = " ☰ Menu ";
+        let width = (menu.width() as u16).min(area.width);
+        let rect = Rect::new(area.x, area.y, width, 1);
+        line(
+            frame.buffer_mut(),
+            rect,
+            &reader_core::chrome::ellipsize(menu, width as usize),
+            style(p.fg, p.header_bg).add_modifier(Modifier::BOLD),
+        );
+        geometry.command_menus.push(rect);
+        let mut x = rect.right().saturating_add(1);
+        for (id, label) in self.session.toolbar() {
+            let width = (label.width() + 2) as u16;
+            if width > area.right().saturating_sub(x) {
+                break;
+            }
+            let rect = Rect::new(x, area.y, width, 1);
+            let disabled = self.session.disabled(id).is_some();
+            let active = id == CommandId::ToggleExplorer && self.tree_shown
+                || id == CommandId::MarkdownSource
+                    && self
+                        .session
+                        .state()
+                        .rendering()
+                        .is_some_and(|rendering| matches!(rendering, Rendering::Preview(_)));
+            let bg = if active { p.selected_bg } else { p.header_bg };
+            let st = style(if disabled { p.dim } else { p.fg }, bg).add_modifier(if active {
+                Modifier::BOLD | Modifier::UNDERLINED
+            } else {
+                Modifier::empty()
+            });
+            fill(frame.buffer_mut(), rect, st);
+            line(frame.buffer_mut(), rect, &format!(" {label} "), st);
+            geometry.controls.push((id, rect));
+            x = rect.right().saturating_add(1);
+        }
+    }
+
+    fn draw_status(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
+        let area = row(frame.area(), frame.area().height - 1);
+        fill(frame.buffer_mut(), area, style(p.fg, p.status_bg));
+        let commands = " F10 Commands ";
+        let commands_width = (commands.width() as u16).min(area.width);
+        let commands_rect = Rect::new(area.right() - commands_width, area.y, commands_width, 1);
+        line(
+            frame.buffer_mut(),
+            commands_rect,
+            &reader_core::chrome::ellipsize(commands, commands_width as usize),
+            style(p.fg, p.status_bg).add_modifier(Modifier::UNDERLINED),
+        );
+        geometry.command_menus.push(commands_rect);
+        let available = area.width.saturating_sub(commands_width);
+        let state = self.session.state();
+        let lsp = format!(" {} [F2] ", state.language_server_label());
+        let lsp_width = (lsp.width() as u16).min(available / 2);
+        let lsp_rect = Rect::new(area.x, area.y, lsp_width, 1);
+        let attention = state.provider().is_some_and(|v| {
+            matches!(
+                v.status,
+                reader_core::semantics::Status::Missing(_)
+                    | reader_core::semantics::Status::Failed(_)
+                    | reader_core::semantics::Status::Disabled
+            )
+        });
+        line(
+            frame.buffer_mut(),
+            lsp_rect,
+            &reader_core::chrome::ellipsize(&lsp, lsp_width as usize),
+            style(if attention { p.error } else { p.accent }, p.status_bg)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        );
+        geometry
+            .controls
+            .push((CommandId::LanguageServer, lsp_rect));
+        let position = match self.independent_view {
+            Some((index, count)) => format!(
+                " View {index}/{count} · {} ",
+                self.session.status_position()
+            ),
+            None => format!(" {} ", self.session.status_position()),
+        };
+        let remainder = available.saturating_sub(lsp_width);
+        let position_width = (position.width() as u16).min(remainder / 2);
+        let position_rect = Rect::new(commands_rect.x - position_width, area.y, position_width, 1);
+        line(
+            frame.buffer_mut(),
+            position_rect,
+            &reader_core::chrome::ellipsize(&position, position_width as usize),
+            style(p.fg, p.status_bg),
+        );
+        let message_rect = Rect::new(
+            lsp_rect.right(),
+            area.y,
+            position_rect.x.saturating_sub(lsp_rect.right()),
+            1,
+        );
+        let message = self
+            .notice
+            .clone()
+            .unwrap_or_else(|| self.session.status_message());
+        line(
+            frame.buffer_mut(),
+            message_rect,
+            &reader_core::chrome::ellipsize(&format!(" {message}"), message_rect.width as usize),
+            style(p.fg, p.status_bg),
+        );
+        geometry
+            .controls
+            .push((CommandId::StatusDetails, message_rect));
     }
 
     fn draw_tree(&mut self, frame: &mut ratatui::Frame, area: Rect, p: &Palette) {
@@ -808,6 +848,11 @@ impl App {
             return;
         }
         let title = self.modal_title();
+        let theme_source = self
+            .modal
+            .as_ref()
+            .filter(|m| m.kind == Prompt::Themes)
+            .map(|_| self.session.theme_source());
         let runtime_message = self
             .session
             .state()
@@ -834,6 +879,7 @@ impl App {
             return;
         };
         let context = matches!(modal.kind, Prompt::Context { .. });
+        let themes = modal.kind == Prompt::Themes;
         let mut separators = Vec::new();
         let area = if let Prompt::Context { x, y, ref entries } = modal.kind {
             let width = (choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 4)
@@ -856,8 +902,16 @@ impl App {
         } else {
             centered(
                 frame.area(),
-                frame.area().width.saturating_sub(2).min(100),
-                frame.area().height.saturating_sub(2).min(28),
+                frame
+                    .area()
+                    .width
+                    .saturating_sub(2)
+                    .min(if themes { 70 } else { 100 }),
+                frame
+                    .area()
+                    .height
+                    .saturating_sub(2)
+                    .min(if themes { 22 } else { 28 }),
             )
         };
         geometry.modal = area;
@@ -906,7 +960,7 @@ impl App {
             }
             return;
         }
-        let input_rows = if context || modal.kind == Prompt::LanguageServer {
+        let input_rows = if context || themes || modal.kind == Prompt::LanguageServer {
             0
         } else {
             1 + usize::from(
@@ -932,7 +986,7 @@ impl App {
             );
         }
         let list_y = input_rows.min(content.height as usize) as u16;
-        let reserve = u16::from(content.height > list_y);
+        let reserve = u16::from(!themes && content.height > list_y);
         geometry.modal_rows = Rect::new(
             content.x,
             content.y + list_y,
@@ -943,6 +997,16 @@ impl App {
         // Wrapped details participate in scrolling: selection remains a choice index, top is a visual row.
         let width = list.width.max(1) as usize;
         let mut rendered = Vec::new();
+        if themes {
+            for header in [
+                "↑/↓ choose · Enter select · Esc close".to_owned(),
+                format!("Current: {}", theme_source.as_deref().unwrap_or_default()),
+            ] {
+                for text in wrap_text(&header, width) {
+                    rendered.push((usize::MAX, text, false));
+                }
+            }
+        }
         let mut selected = 0..0;
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         for (i, choice) in choices.iter().enumerate() {
@@ -1005,7 +1069,16 @@ impl App {
                 frame.buffer_mut(),
                 r,
                 text,
-                style(if *disabled { p.dim } else { p.fg }, bg),
+                style(
+                    if themes && *i == usize::MAX {
+                        p.accent
+                    } else if *disabled {
+                        p.dim
+                    } else {
+                        p.fg
+                    },
+                    bg,
+                ),
             );
         }
         if reserve > 0 {
@@ -1042,6 +1115,7 @@ impl App {
             );
         }
         if !context
+            && !themes
             && modal.kind != Prompt::LanguageServer
             && content.height > 0
             && content.width > 2
@@ -1119,36 +1193,6 @@ fn draw_pane(
     let active = state.shown(pane).map(Tab::id);
     fill(frame.buffer_mut(), row(area, 0), style(p.fg, p.header_bg));
     let mut x = area.x;
-    if pane == 0 {
-        let reserve = if state.pane_tabs(pane).next().is_some() {
-            area.width.min(8)
-        } else {
-            0
-        };
-        for (id, label) in app.session.navigation() {
-            let label = if id == CommandId::ToggleExplorer {
-                "▥"
-            } else {
-                label
-            };
-            let width = (label.width() + 2) as u16;
-            if width > area.right().saturating_sub(x).saturating_sub(reserve) {
-                break;
-            }
-            let rect = Rect::new(x, area.y, width, 1);
-            geometry.controls.push((id, rect));
-            let st = style(
-                if app.session.disabled(id).is_some() {
-                    p.dim
-                } else {
-                    p.fg
-                },
-                p.header_bg,
-            );
-            line(frame.buffer_mut(), rect, &format!(" {label} "), st);
-            x += width;
-        }
-    }
     let tab_width = area.right().saturating_sub(x);
     let tabs: Vec<_> = state.pane_tabs(pane).collect();
     let widths: Vec<_> = tabs
@@ -2019,7 +2063,7 @@ pub(crate) fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
-const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Notices, language server status and recovery\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
+const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
 
 #[cfg(test)]
 #[path = "render_tests.rs"]

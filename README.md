@@ -326,6 +326,25 @@ Reader/Diff sharing checks on this Linux experiment measured 35.8→35.1 ms to o
 
 The bottom commit-panel checks measured GUI alternating scroll feedback at 11.89→11.93 ms and TUI feedback at 0.486→0.451 ms. Hardware-rendered log first paint measured 137→134 ms; 15-minute GUI/TUI runs passed with comparable memory growth and matching GPU allocation plateaus. See the [panel verification](docs/commit-panel-performance.md) for startup, Find, memory, stress, and measurement limits.
 
+The dependency refresh measured Reader GUI startup at 163.57→163.75 ms to the
+first received client image and TUI content at 7.695→7.981 ms in alternating
+release runs. Both full suites passed 75 cases. These startup endpoints differ
+from the historical content-frame figures above; see the
+[refresh measurements](docs/performance.md#dependency-refresh-2026-10-18) for
+memory, repeated outliers and the slower image microbenchmark.
+
+Reader theme-chooser parity measured GUI first client image at 157.02→154.04 ms,
+menu feedback at 25.11→23.39 ms and RSS at 173.61→173.44 MiB in seven alternating
+release pairs. See the [theme checks](docs/code/performance.md#theme-chooser-parity-2026-10-18)
+for terminal measurements, actual input and short stress limits.
+
+Reader toolbar/status checks repeated the GUI comparison at 157.35→159.47 ms
+first client image and 24.13→24.40 ms menu feedback; TUI source receipt was
+8.88→8.80 ms. Pair variation includes zero timing difference. Initial GUI RSS
+rose slightly while sustained RSS settled below baseline in both rounds; see the
+[chrome measurements](docs/code/performance.md#reader-chrome-parity-2026-10-18)
+for the complete results and 60-second status/copy/resize checks.
+
 See the [performance overview](docs/performance.md) for method and accepted costs, and the [benchmark guide](docs/benchmarking.md) to run the suite yourself.
 
 ## Documentation

@@ -78,7 +78,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Theme…", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No folder is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -260,6 +260,44 @@ fn theme_selection_is_the_readers_own() {
     let saved = std::fs::read_to_string(d.path().join("config/lenz-reader/appearance.json")).unwrap();
     assert!(saved.contains("\"light\""));
     assert!(!d.path().join("config/lenz").exists(), "Lenz's settings are untouched");
+}
+
+#[test]
+fn theme_preview_does_not_select_or_save_and_selection_finishes_it() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = session(d.path());
+    let source = s.theme_source();
+    s.dispatch(Command::PreviewTheme(Some("light".into())));
+    assert_eq!(s.state().palette().bg, lenz_content::theme::LIGHT.bg);
+    assert_eq!(s.theme_id(), "system");
+    assert_eq!(s.theme_source(), source);
+    assert!(!d.path().join("config/lenz-reader/appearance.json").exists());
+    let effect = s.dispatch(Command::Theme(ThemeCommand::Select(lenz_content::theme::ThemeSelection::System)));
+    assert!(effect.repaint, "ending a preview repaints even when the saved selection stays the same");
+    assert_eq!(s.state().palette().bg, lenz_content::theme::DARCULA.bg);
+    s.dispatch(Command::PreviewTheme(Some("light".into())));
+    s.dispatch(Command::PreviewTheme(None));
+    assert_eq!(s.state().palette().bg, lenz_content::theme::DARCULA.bg);
+    s.dispatch(Command::PreviewTheme(Some("light".into())));
+    s.dispatch(Command::Theme(ThemeCommand::Select(lenz_content::theme::ThemeSelection::Named("gruvbox".into()))));
+    assert_eq!(s.theme_id(), "gruvbox");
+    assert_eq!(s.state().palette().bg, 0x282828);
+    s.dispatch(Command::PreviewTheme(None));
+    assert_eq!(s.state().palette().bg, 0x282828);
+}
+
+#[test]
+fn cancelling_theme_preview_restores_the_latest_system_appearance() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = session(d.path());
+    s.dispatch(Command::PreviewTheme(Some("gruvbox".into())));
+    s.dispatch(Command::Theme(ThemeCommand::NativeAppearance(false)));
+    assert_eq!(s.state().palette().bg, 0x282828);
+    s.dispatch(Command::PreviewTheme(None));
+    assert_eq!(s.state().palette().bg, lenz_content::theme::LIGHT.bg);
+    s.dispatch(Command::PreviewTheme(Some("not-an-installed-theme".into())));
+    assert_eq!(s.state().palette().bg, lenz_content::theme::LIGHT.bg);
+    assert_eq!(s.theme_id(), "system");
 }
 
 #[test]
@@ -4300,4 +4338,18 @@ fn recent_navigation_uses_only_mru_files_and_validates_forget_identity() {
     assert_eq!(s.state().navigation().unwrap().rows.len(),1);
     assert!(s.navigation_choice(old,0).is_none());
     assert!(a.exists()&&b.exists(),"forgetting never deletes source files");
+}
+
+#[test]
+fn status_details_keeps_complete_messages_while_brief_and_controls_stay_bounded() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(dir.path());
+    let long = format!("Runtime error: {}\nInstall the compatible runtime", "日本語e\u{301}".repeat(120));
+    s.state.messages.push(long.clone());
+    assert_eq!(s.status_message(), long);
+    assert!(s.status_details().contains(&long));
+    assert!(lenz_content::wrap::width(&crate::chrome::ellipsize(&s.status_message(), 40)) <= 40);
+    assert_eq!(s.action(CommandId::StatusDetails), crate::actions::CatalogAction::Interface(crate::actions::InterfaceAction::StatusDetails));
+    assert!(s.toolbar().iter().any(|(id, _)| *id == CommandId::FindFile));
+    assert_eq!(CommandId::StatusDetails.shortcut(), Some("Shift+F2"));
 }

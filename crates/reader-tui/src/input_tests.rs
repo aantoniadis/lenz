@@ -236,6 +236,186 @@ fn palette_exposes_entire_core_catalog_and_filters() {
 }
 
 #[test]
+fn theme_chooser_previews_before_enter_and_escape_restores_without_saving() {
+    let dir = tempfile::tempdir().unwrap();
+    let selection_file = config(dir.path()).themes.selection;
+    let mut a = app(dir.path());
+    let original = a.session.state().palette().clone();
+    let selected = a.session.theme_id();
+    a.run(CommandId::ChooseTheme);
+    draw(&mut a, 100, 26);
+    let (index, preview) = a
+        .session
+        .theme_entries()
+        .iter()
+        .enumerate()
+        .find(|(_, entry)| entry.palette.bg != original.bg)
+        .map(|(index, entry)| (index + 1, entry.palette.clone()))
+        .unwrap();
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    for _ in 0..index {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    }
+    assert_eq!(a.session.state().palette().bg, preview.bg);
+    assert_eq!(a.session.theme_id(), selected);
+    assert!(!selection_file.exists());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(a.session.state().palette().bg, original.bg);
+    assert_eq!(a.session.theme_id(), selected);
+    assert!(!selection_file.exists());
+}
+
+#[test]
+fn theme_chooser_current_choice_navigation_and_enter_or_click_persist() {
+    for mouse in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let selection_file = config(dir.path()).themes.selection;
+        std::fs::create_dir_all(selection_file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &selection_file,
+            r#"{"version":1,"theme":"light","keep":true}"#,
+        )
+        .unwrap();
+        let mut a = app(dir.path());
+        a.run(CommandId::ChooseTheme);
+        assert_eq!(a.highlighted_theme().as_deref(), Some("light"));
+        key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(a.modal.as_ref().unwrap().at, 0);
+        key(&mut a, KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(a.modal.as_ref().unwrap().at, 8);
+        key(&mut a, KeyCode::PageUp, KeyModifiers::NONE);
+        assert_eq!(a.modal.as_ref().unwrap().at, 0);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(a.modal.as_ref().unwrap().at, a.choices().len() - 1);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        let chosen = a.highlighted_theme().unwrap();
+        let palette = a.session.state().palette().clone();
+        draw(&mut a, 100, 26);
+        if mouse {
+            let selected = a.modal.as_ref().unwrap().at;
+            let row = a
+                .layout
+                .modal_items
+                .iter()
+                .position(|i| *i == selected)
+                .unwrap();
+            let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y + row as u16);
+            click(&mut a, x, y);
+        } else {
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        }
+        assert!(a.modal.is_none());
+        assert_eq!(a.session.theme_id(), chosen);
+        assert_eq!(a.session.state().palette().bg, palette.bg);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let saved: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&selection_file).unwrap()).unwrap();
+            if saved["theme"] == chosen {
+                assert_eq!(saved["keep"], true);
+                break;
+            }
+            assert!(Instant::now() < deadline, "theme selection was not saved");
+            std::thread::yield_now();
+        }
+        a.run(CommandId::ChooseTheme);
+        assert_eq!(a.highlighted_theme().as_deref(), Some(chosen.as_str()));
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    }
+}
+
+#[test]
+fn theme_chooser_wheel_and_header_keep_preview_and_modal_blocks_source_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sample.txt");
+    let source = "hello\r\nworld\r\n";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::Select(Selection { anchor: 0, head: 5 }));
+    let selection = a.session.state().selection();
+    let original = a.session.state().palette().clone();
+    a.run(CommandId::ChooseTheme);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    let preview = a.session.state().palette().clone();
+    assert_ne!(preview.bg, original.bg);
+    let at = a.modal.as_ref().unwrap().at;
+    draw(&mut a, 100, 26);
+    let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y);
+    click(&mut a, x, y);
+    assert!(
+        a.modal.is_some(),
+        "help/current source are not theme choices"
+    );
+    for (w, h) in [(100, 26), (24, 10), (8, 5), (1, 1), (0, 0), (100, 26)] {
+        draw(&mut a, w, h);
+        for kind in [MouseEventKind::ScrollDown, MouseEventKind::ScrollUp] {
+            a.handle(Event::Mouse(MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            }));
+        }
+        a.handle(Event::Paste("ignored filter".into()));
+        key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+        for code in [
+            KeyCode::Char('s'),
+            KeyCode::Char('z'),
+            KeyCode::Char('o'),
+            KeyCode::Char('p'),
+        ] {
+            key(&mut a, code, KeyModifiers::CONTROL);
+        }
+        key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
+        assert_eq!(a.modal.as_ref().unwrap().at, at);
+        assert!(a.modal.as_ref().unwrap().input.is_empty());
+        assert_eq!(a.session.state().palette().bg, preview.bg);
+        assert_eq!(a.session.state().selection(), selection);
+    }
+    click(&mut a, 0, 0);
+    assert!(a.modal.is_none());
+    assert_eq!(a.session.state().palette().bg, original.bg);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn theme_chooser_refresh_retains_highlighted_id_when_registry_rows_move() {
+    use lenz_content::theme::{ThemeEntry, ThemeUpdate};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    a.handle(Event::Paste("Change theme".into()));
+    assert_eq!(a.choices().len(), 1);
+    assert_eq!(a.choices()[0].label, "Application: Change theme");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let entry = |id: &str| ThemeEntry {
+        id: id.into(),
+        label: id.into(),
+        palette: a.session.state().palette().clone(),
+    };
+    let one = entry("user:one");
+    let two = entry("user:two");
+    a.apply(Completion::Theme(Box::new(ThemeUpdate::Registry {
+        request: 1,
+        entries: vec![one.clone(), two.clone()],
+        notices: Vec::new(),
+    })));
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    assert_eq!(a.highlighted_theme().as_deref(), Some("user:two"));
+    a.apply(Completion::Theme(Box::new(ThemeUpdate::Registry {
+        request: 1,
+        entries: vec![two, one],
+        notices: Vec::new(),
+    })));
+    assert_eq!(a.highlighted_theme().as_deref(), Some("user:two"));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+}
+
+#[test]
 fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touching_source() {
     use reader_core::semantics::Status;
     let dir = tempfile::tempdir().unwrap();
@@ -1583,4 +1763,85 @@ fn recent_popup_fuzzy_filters_forgets_and_opens_scrolled_paths_at_saved_caret() 
             "first\nsecond\nthird\n"
         );
     }
+}
+
+#[test]
+fn chrome_status_click_opens_copyable_snapshot_and_keeps_document_input_modal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("status.txt");
+    let bytes = "hello 界e\u{301}\r\nsecond\r\n";
+    std::fs::write(&path, bytes).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.notice = Some("Adapter warning 界e\u{301} ".repeat(20) + "\nsecond diagnostic line");
+    draw(&mut a, 100, 26);
+    let before = a.session.state().selection();
+    click(&mut a, 30, 25);
+    let snapshot = match &a.modal.as_ref().expect("status click opens details").kind {
+        Prompt::Details(body) => body.clone(),
+        other => panic!("unexpected prompt: {other:?}"),
+    };
+    assert!(snapshot.contains(a.notice.as_deref().unwrap()));
+    a.notice = Some("new background notice".into());
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.as_deref(), Some(snapshot.as_str()));
+    for (w, h) in [(28, 10), (8, 5), (1, 1), (0, 0), (100, 26)] {
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        a.handle(Event::Paste("should not edit".into()));
+    }
+    assert_eq!(a.session.state().selection(), before);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), bytes);
+}
+
+#[test]
+fn chrome_menu_button_opens_shared_commands_without_moving_caret() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    draw(&mut a, 100, 26);
+    click(&mut a, 2, 0);
+    assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::Commands)));
+}
+
+#[test]
+fn chrome_toolbar_controls_and_footer_commands_run_catalog_actions() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path());
+    settle(&mut a, |a| a.session.state().project().is_some());
+    for (id, expected) in [
+        (CommandId::Open, Prompt::Open),
+        (CommandId::FindFile, Prompt::Navigation),
+        (CommandId::SearchProject, Prompt::Search),
+    ] {
+        draw(&mut a, 120, 26);
+        let (_, rect) = a.layout.controls.iter().find(|(control, _)| *control == id).unwrap();
+        let (x, y) = (rect.x, rect.y);
+        click(&mut a, x, y);
+        assert_eq!(a.modal.as_ref().unwrap().kind, expected);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    }
+    draw(&mut a, 120, 26);
+    let (_, rect) = a.layout.controls.iter().find(|(id, _)| *id == CommandId::ToggleExplorer).unwrap();
+    let (x, y) = (rect.x, rect.y);
+    let visible = a.tree_shown;
+    click(&mut a, x, y);
+    assert_eq!(a.tree_shown, !visible);
+    draw(&mut a, 120, 26);
+    let rect = *a.layout.command_menus.last().unwrap();
+    click(&mut a, rect.x, rect.y);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Commands);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::F(2), KeyModifiers::SHIFT);
+    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details(_)));
+    draw(&mut a, 120, 26);
+    // A toolbar click dismisses the dialog, without opening its underlying command.
+    click(&mut a, 2, 0);
+    assert!(a.modal.is_none());
 }
