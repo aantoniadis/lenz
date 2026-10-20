@@ -86,3 +86,17 @@ fn help_does_not_need_payloads_and_missing_or_unexecutable_payloads_fail_clearly
     assert_eq!(out.status.code(), Some(126));
     assert!(String::from_utf8_lossy(&out.stderr).contains("lenz-diff"));
 }
+
+#[test]
+fn a_symlinked_launcher_runs_the_apps_beside_its_real_file() {
+    // Homebrew and the macOS bundle put `lenz` on PATH as a symlink into the install directory.
+    let dir = fixture();
+    let bin = tempfile::Builder::new().prefix("lenz bin ").tempdir().unwrap();
+    std::os::unix::fs::symlink(dir.path().join("lenz"), bin.path().join("lenz")).unwrap();
+    for (args, binary) in [(&["a.rs"][..], "lenz-code"), (&["diff", "--tui"][..], "lenz-diff-tui")] {
+        let out = Command::new(bin.path().join("lenz")).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(37), "{binary}: {}", String::from_utf8_lossy(&out.stderr));
+        let first = out.stdout.split(|&b| b == 0).next().unwrap();
+        assert_eq!(OsString::from_vec(first.to_vec()), dir.path().join(binary));
+    }
+}
