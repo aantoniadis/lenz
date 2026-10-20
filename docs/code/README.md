@@ -178,8 +178,10 @@ to save determines the workspace for the next opening; existing windows keep the
 continue to merge independently. Workspace metadata exceeding the places-file size limit is omitted so it
 cannot make bookmarks unreadable.
 
-Project search (Ctrl+Shift+F) takes the same options (literal and case-insensitive by default). Tab moves to its
-files field: comma-separated
+Project search (Ctrl+Shift+F) opens a centered dialog that takes the same options (literal and case-insensitive by
+default); a click on a field focuses it and a click on an option toggles it, and an invalid regular expression is
+shown there and not searched. Tab moves to its files field:
+comma-separated
 globs, any case, `!` to exclude (`*.rs, src/, !*.test.ts`); a name without `/` matches at any depth, a path with `/`
 from the root, and a folder means everything in it. Matches list as a tree of folders, files and lines, coloured by
 the file's language with the match emphasized; a click or Left/Right folds a folder or file. A line's colours come

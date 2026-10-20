@@ -26,6 +26,7 @@ use reader_core::{
 pub mod icons;
 mod preview;
 mod navigation;
+mod search;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -1410,7 +1411,7 @@ impl ReaderView {
             return;
         }
         let refused = match &self.modal {
-            Some(Modal::Search { query, .. }) => lenz_content::find::Matcher::new(&lenz_content::find::Query { text: query.clone(), options: self.session.find_options() }).err(),
+            Some(Modal::Search { query, .. }) => self.session.search_refusal(query),
             _ => None,
         };
         if let Some(Modal::Search { query, files, in_files, project }) = &mut self.modal {
@@ -2169,6 +2170,9 @@ impl ReaderView {
         window.focus(&self.focus, cx);
         if matches!(self.modal, Some(Modal::Navigation { .. })) {
             return self.navigation_click(ev.position, window, cx);
+        }
+        if matches!(self.modal, Some(Modal::Search { .. })) {
+            return self.search_click(ev.position, cx);
         }
         // A find box keeps a click: a toggle flips its option, anywhere else gives it the keys.
         if self.modal.is_none() && let Some((pane, b)) = self.panes.iter().find_map(|g| self.find_box(g).filter(|b| b.bounds.contains(&ev.position)).map(|b| (g.pane, b))) {
@@ -3191,7 +3195,7 @@ impl ReaderView {
 
     /// The open modal's box and wrapped lines. Paint and hit testing share the independent viewport.
     fn modal_layout(&self) -> Option<ModalLayout> {
-        let at = self.modal.as_ref().filter(|m| !matches!(m, Modal::Context { .. } | Modal::Navigation { .. }))?.at();
+        let at = self.modal.as_ref().filter(|m| !matches!(m, Modal::Context { .. } | Modal::Navigation { .. } | Modal::Search { .. }))?.at();
         let lines = self.modal_lines();
         let at = at.min(lines.last().map_or(0, |r| r.0));
         let mw = self.modal_width();
@@ -3297,8 +3301,7 @@ impl ReaderView {
                 let files = if files.is_empty() { "all files".to_string() } else { files.clone() };
                 let o = self.session.find_options();
                 let marks: Vec<String> = [(o.case, "Aa"), (o.word, "W"), (o.regex, ".*")].into_iter().map(|(on, m)| if on { format!("[{m}]") } else { m.to_string() }).collect();
-                let refused = lenz_content::find::Matcher::new(&lenz_content::find::Query { text: query.clone(), options: o }).err();
-                let hint = match refused {
+                let hint = match self.session.search_refusal(query) {
                     Some(e) => format!("{e} — fix the expression to search"),
                     None => "Search the project for this text — Enter; Tab: which files, e.g. *.rs, src/, !*.test.ts".to_string(),
                 };
@@ -3615,6 +3618,7 @@ impl Render for ReaderView {
         self.fold_marks_drawn = folds_drawn;
         self.uploads.keep(frames.iter().flat_map(|f| f.picture.iter().map(|(t, _)| t.clone()).chain(f.markdown.iter().flat_map(|m| m.2.iter().map(|(_, t)| t.clone())))).collect(), window);
         let navigation = self.navigation_frame();
+        let search = self.search_layout();
         let modal = self.modal_layout();
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
@@ -3944,6 +3948,9 @@ impl Render for ReaderView {
                         }
                         if let Some(frame) = &navigation {
                             frame.paint(window, cx, m, &palette, x0, y0, icon_font.as_ref(), &logos);
+                        }
+                        if let Some(dialog) = &search {
+                            dialog.paint(window, cx, m, &palette, x0, y0);
                         }
                         if let Some(l) = &modal {
                             let (mx, my) = (x0 + f32::from(l.bounds.origin.x), y0 + f32::from(l.bounds.origin.y));

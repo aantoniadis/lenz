@@ -3628,12 +3628,46 @@ fn a_click_on_a_crumbs_entry_goes_there(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn search_dialog_is_centered_and_its_fields_and_toggles_take_clicks(cx: &mut TestAppContext) {
+    let (f, mut v, root) = bookmarks_fixture(cx);
+    v.simulate_resize(size(px(900.0), px(600.0)));
+    v.simulate_keystrokes("ctrl-shift-f x");
+    draw(&mut v);
+    let (l, w, h) = f.view.read_with(&v, |r, _| (r.search_layout().unwrap(), r.width, r.height));
+    assert!((f32::from(l.bounds.center().x) - w / 2.0).abs() < 1.0 && (f32::from(l.bounds.center().y) - h / 2.0).abs() < 1.0, "centered: {:?}", l.bounds);
+    let click = |v: &mut VisualTestContext, b: Bounds<Pixels>| { v.simulate_click(b.center(), Modifiers::default()); draw(v); };
+    click(&mut v, l.fields[1]);
+    v.simulate_keystrokes("y");
+    assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Search { ref query, ref files, in_files: true, .. }) if query == "x" && files == "y"));
+    click(&mut v, l.fields[0]);
+    assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Search { in_files: false, .. })));
+    let (option, b) = l.toggles[2];
+    assert_eq!(option, FindOption::Regex);
+    click(&mut v, b);
+    assert!(f.view.read_with(&v, |r, _| r.session().find_options().regex));
+    click(&mut v, b);
+    assert!(!f.view.read_with(&v, |r, _| r.session().find_options().regex));
+    click(&mut v, Bounds { origin: l.bounds.origin + point(px(2.0), px(2.0)), size: size(px(1.0), px(1.0)) });
+    assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Search { .. })), "padding keeps it");
+    // A tiny window keeps the dialog inside it, and a click outside closes it.
+    for (w, h) in [(120.0, 80.0), (40.0, 20.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        let l = f.view.read_with(&v, |r, _| r.search_layout().unwrap());
+        assert!(l.bounds.origin.x >= px(0.0) && l.bounds.right() <= px(w) && l.bounds.bottom() <= px(h), "{w}x{h}: {:?}", l.bounds);
+    }
+    v.simulate_resize(size(px(900.0), px(600.0)));
+    v.simulate_click(point(px(4.0), px(590.0)), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "0\n1\n2\n3\n4\n5\n");
+}
+
+#[gpui::test]
 fn clicks_inside_input_modals_keep_them_and_go_to_line_still_closes(cx: &mut TestAppContext) {
     let (f, mut v, root) = bookmarks_fixture(cx);
     v.simulate_resize(size(px(900.0), px(600.0)));
     let caret = f.view.read_with(&v, |r, _| r.session().state().selection());
     let inputs = [
-        Modal::Search { query: "x".into(), files: String::new(), in_files: false, project: true },
         Modal::Declarations { query: "x".into(), semantic: false },
         Modal::Root { path: "x".into() },
     ];
