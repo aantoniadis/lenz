@@ -34,6 +34,46 @@ pub enum SiblingTarget {
     Line(usize),
 }
 
+impl Crumb {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Folder { name, .. } | Self::File { name } => name,
+            Self::Decl { name, .. } => name,
+        }
+    }
+}
+
+impl Breadcrumbs {
+    /// Which crumbs fit in `avail` when each takes `width(name) + sep` and a run of left-out ones one "…" with its
+    /// `sep`: folders go first, then declarations before the innermost; the file, the innermost and `keep` stay.
+    pub fn fit(&self, width: impl Fn(&str) -> f32, sep: f32, avail: f32, keep: Option<usize>) -> Vec<bool> {
+        let n = self.crumbs.len();
+        let file = self.crumbs.iter().position(|c| matches!(c, Crumb::File { .. }));
+        let mut kept = vec![true; n];
+        let total = |kept: &[bool]| {
+            let (mut t, mut gap) = (0.0, false);
+            for (c, k) in self.crumbs.iter().zip(kept) {
+                if *k {
+                    t += width(c.name()) + sep;
+                } else if !gap {
+                    t += width("…") + sep;
+                }
+                gap = !*k;
+            }
+            t
+        };
+        for i in (0..file.unwrap_or(0)).chain(file.map_or(0, |f| f + 1)..n.saturating_sub(1)) {
+            if total(&kept) <= avail {
+                break;
+            }
+            if Some(i) != keep {
+                kept[i] = false;
+            }
+        }
+        kept
+    }
+}
+
 /// One entry of the list after a crumb.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Sibling {
@@ -125,5 +165,33 @@ pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, project: Option<&Pr
                 .collect()
         }
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_drops_folders_then_outer_declarations_and_keeps_the_file_innermost_and_focus() {
+        let decl = |name: &str| Crumb::Decl { kind: DeclKind::Function, name: name.into(), line: 0, index: 0 };
+        let bar = Breadcrumbs {
+            crumbs: vec![
+                Crumb::Folder { name: "src".into(), rel: "src".into() },
+                Crumb::Folder { name: "ui".into(), rel: "src/ui".into() },
+                Crumb::File { name: "a.rs".into() },
+                decl("Outer"),
+                decl("inner"),
+            ],
+            large: false,
+        };
+        let w = |s: &str| s.chars().count() as f32;
+        assert_eq!(bar.fit(w, 3.0, 100.0, None), vec![true; 5]);
+        // src+3 ui+3 a.rs+3 Outer+3 inner+3 = 33; "…"+3 for src is 31, and one "…" for both folders 27.
+        assert_eq!(bar.fit(w, 3.0, 32.0, None), vec![false, true, true, true, true]);
+        assert_eq!(bar.fit(w, 3.0, 30.0, None), vec![false, false, true, true, true]);
+        assert_eq!(bar.fit(w, 3.0, 20.0, None), vec![false, false, true, false, true]);
+        assert_eq!(bar.fit(w, 3.0, 0.0, None), vec![false, false, true, false, true], "never the file or innermost");
+        assert_eq!(bar.fit(w, 3.0, 20.0, Some(1)), vec![false, true, true, false, true], "the focused crumb stays");
     }
 }

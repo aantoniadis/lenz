@@ -2888,40 +2888,13 @@ impl ReaderView {
         for &(pane, x, y, w) in rows {
             cells.push(CrumbCell { x, y, w, text: String::new(), color: palette.dim, bg: Some(palette.bg) });
             let Some(bar) = state.breadcrumbs_for(pane) else { continue };
-            let names: Vec<String> = bar.crumbs.iter().map(|c| match c {
-                reader_core::session::Crumb::Folder { name, .. } | reader_core::session::Crumb::File { name } => name.to_string(),
-                reader_core::session::Crumb::Decl { name, .. } => name.to_string(),
-            }).collect();
+            let names: Vec<String> = bar.crumbs.iter().map(|c| c.name().to_string()).collect();
             let n = names.len();
             let width = |label: &str| label.chars().count() as f32 * cw + 8.0;
             let chevron = 2.0 * cw;
             let note = if bar.large { "large file" } else { "" };
             let avail = w - 8.0 - if note.is_empty() { 0.0 } else { width(note) };
-            // Drop order: folders, then declarations before the innermost.
-            let file = bar.crumbs.iter().position(|c| matches!(c, reader_core::session::Crumb::File { .. }));
-            let mut drop_order: Vec<usize> = (0..file.unwrap_or(0)).collect();
-            drop_order.extend(file.map_or(0, |f| f + 1)..n.saturating_sub(1));
-            let mut kept = vec![true; n];
-            let total = |kept: &[bool]| -> f32 {
-                let mut t = 0.0;
-                let mut gap = false;
-                for (i, k) in kept.iter().enumerate() {
-                    if *k {
-                        t += width(&names[i]) + chevron;
-                        gap = false;
-                    } else if !gap {
-                        t += width("…") + chevron;
-                        gap = true;
-                    }
-                }
-                t
-            };
-            for &i in &drop_order {
-                if total(&kept) <= avail {
-                    break;
-                }
-                kept[i] = false;
-            }
+            let kept = bar.fit(width, chevron, avail, self.crumb_focus.filter(|f| f.0 == pane).map(|f| f.1));
             let mut at = x + 4.0;
             let mut gap = false;
             for i in 0..n {
