@@ -897,7 +897,7 @@ impl App {
                 }
                 Prompt::RecentRoots => "Recent folders",
                 Prompt::Navigation => "Search Everywhere · Tab scope · ↑↓ select · Enter open",
-                Prompt::Search => "Search project · Tab switches file pattern",
+                Prompt::Search => "Search in Project",
                 Prompt::Find => "Find in file · F3 next · Alt+C/W/R options",
                 Prompt::Declarations => "Find declaration · Tab: workspace symbols",
                 Prompt::Symbols => "Workspace symbols · Tab: declarations",
@@ -1283,6 +1283,9 @@ impl App {
                 }
             }
             Prompt::Search => {
+                if self.session.search_refusal(&input).is_some() {
+                    return;
+                }
                 self.close_modal();
                 self.dispatch(Command::Search {
                     query: input,
@@ -1789,6 +1792,30 @@ impl App {
         }
         self.hover = None;
         if self.modal.is_some() {
+            // Project search: a toggle flips its option and a field takes the keys; a click outside closes it.
+            if self.modal.as_ref().is_some_and(|m| m.kind == Prompt::Search)
+                && matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+            {
+                if let Some(&(id, _)) = self
+                    .layout
+                    .search_toggles
+                    .iter()
+                    .find(|(_, r)| r.contains(point))
+                {
+                    self.run(id);
+                } else if let Some(i) = self
+                    .layout
+                    .search_fields
+                    .iter()
+                    .position(|r| r.contains(point))
+                    && let Some(modal) = &mut self.modal
+                {
+                    modal.secondary_focus = i == 1;
+                } else if !self.layout.modal.contains(point) {
+                    self.close_modal();
+                }
+                return;
+            }
             if self
                 .modal
                 .as_ref()

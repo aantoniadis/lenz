@@ -1,5 +1,6 @@
 //! Terminal presentation. Coordinates here are cells; every source hit keeps its UTF-8 byte.
 use crate::app::{App, Focus, Prompt};
+use lenz_content::find::FindOption;
 use lenz_content::icons::Icon;
 use lenz_content::{markdown::BlockKind, theme::Palette};
 use ratatui::{
@@ -30,6 +31,9 @@ pub(crate) struct Geometry {
     pub modal_items: Vec<usize>,
     pub navigation_scopes: Vec<(Scope, Rect)>,
     pub navigation_revision: Option<u64>,
+    /// Project search: its text and file-pattern fields, and each option's toggle.
+    pub search_fields: Vec<Rect>,
+    pub search_toggles: Vec<(CommandId, Rect)>,
 }
 
 #[derive(Default)]
@@ -647,6 +651,154 @@ impl App {
         }
     }
 
+    /// Project search as a centered dialog: labelled fields, option toggles and a hint (or why the expression is
+    /// refused), wrapping in a narrow terminal.
+    fn draw_search(&mut self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
+        let Some(modal) = &self.modal else { return };
+        let options = [
+            CommandId::MatchCase,
+            CommandId::WholeWord,
+            CommandId::RegularExpression,
+        ];
+        let o = self.session.find_options();
+        let on = [o.case, o.word, o.regex];
+        let width = frame.area().width.saturating_sub(2).min(72);
+        let inner_w = width.saturating_sub(4);
+        let labels: Vec<(CommandId, String)> = options
+            .into_iter()
+            .zip(FindOption::ALL)
+            .zip(on)
+            .map(|((id, option), on)| {
+                let mark = if on { "✓" } else { "○" };
+                (id, format!(" {mark} {} {} ", option.symbol(), option.label()))
+            })
+            .collect();
+        // Toggle rows: (row, x offset, width) per toggle, wrapping when the next does not fit.
+        let (mut rows, mut x) = (0u16, 0u16);
+        let mut placed = Vec::new();
+        for (_, label) in &labels {
+            let w = (label.width() as u16).min(inner_w);
+            if x > 0 && x + w > inner_w {
+                (rows, x) = (rows + 1, 0);
+            }
+            placed.push((rows, x, w));
+            x += w + 2;
+        }
+        let refused = self.session.search_refusal(&modal.input);
+        let hint = match &refused {
+            Some(e) => format!("{e} — fix the expression to search"),
+            None => "Enter search · Tab switch field · Alt+C/W/R options · Esc close".to_owned(),
+        };
+        let hint = wrap_text(&hint, inner_w.max(1) as usize);
+        let toggles_y = 5;
+        let hint_y = toggles_y + rows + 2;
+        let height = hint_y + hint.len() as u16 + 3;
+        let area = centered(frame.area(), width, height);
+        geometry.modal = area;
+        if area.is_empty() {
+            return;
+        }
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(color(p.accent)))
+                .title(" Search in Project ")
+                .title_style(
+                    Style::default()
+                        .fg(color(p.accent))
+                        .add_modifier(Modifier::BOLD),
+                )
+                .style(style(p.fg, p.status_bg)),
+            area,
+        );
+        let content = inner(area);
+        let content = Rect::new(
+            content.x.saturating_add(1),
+            content.y,
+            content.width.saturating_sub(2),
+            content.height,
+        );
+        if content.is_empty() {
+            return;
+        }
+        const LABEL: u16 = 7;
+        let fields = [
+            ("Find", &modal.input, "Text to search for"),
+            ("Files", &modal.secondary, "All files — e.g. *.rs, src/, !*.test.ts"),
+        ];
+        for (i, (label, value, placeholder)) in fields.into_iter().enumerate() {
+            let r = row(content, 1 + 2 * i as u16);
+            let active = modal.secondary_focus == (i == 1);
+            line(
+                frame.buffer_mut(),
+                r,
+                label,
+                if active {
+                    style(p.accent, p.status_bg).add_modifier(Modifier::BOLD)
+                } else {
+                    style(p.dim, p.status_bg)
+                },
+            );
+            let field = Rect::new(
+                r.x + LABEL.min(r.width),
+                r.y,
+                r.width.saturating_sub(LABEL),
+                r.height,
+            );
+            geometry.search_fields.push(field);
+            fill(frame.buffer_mut(), field, style(p.fg, p.bg));
+            let text_area = Rect::new(
+                field.x.saturating_add(1),
+                field.y,
+                field.width.saturating_sub(2),
+                field.height,
+            );
+            let shown = tail_columns(value, text_area.width.saturating_sub(1) as usize);
+            if value.is_empty() {
+                line(frame.buffer_mut(), text_area, placeholder, style(p.dim, p.bg));
+            } else {
+                line(frame.buffer_mut(), text_area, shown, style(p.fg, p.bg));
+            }
+            if active && text_area.height > 0 && text_area.width > 0 {
+                frame.set_cursor_position((
+                    text_area.x
+                        + (shown.width() as u16).min(text_area.width.saturating_sub(1)),
+                    text_area.y,
+                ));
+            }
+        }
+        for (((id, label), (dy, dx, w)), on) in labels.iter().zip(placed).zip(on) {
+            let r = row(content, toggles_y + dy);
+            let rect = Rect::new(
+                r.x + dx.min(r.width),
+                r.y,
+                w.min(r.width.saturating_sub(dx)),
+                r.height,
+            );
+            line(
+                frame.buffer_mut(),
+                rect,
+                label,
+                if on {
+                    style(p.accent, p.selected_bg).add_modifier(Modifier::BOLD)
+                } else {
+                    style(p.fg, p.bg)
+                },
+            );
+            geometry.search_toggles.push((*id, rect));
+        }
+        for (i, text) in hint.iter().enumerate() {
+            line(
+                frame.buffer_mut(),
+                row(content, hint_y + i as u16),
+                text,
+                style(if refused.is_some() { p.error } else { p.dim }, p.status_bg),
+            );
+        }
+    }
+
     fn draw_navigation(
         &mut self,
         frame: &mut ratatui::Frame,
@@ -845,6 +997,14 @@ impl App {
             .is_some_and(|m| m.kind == Prompt::Navigation)
         {
             self.draw_navigation(frame, geometry, p);
+            return;
+        }
+        if self
+            .modal
+            .as_ref()
+            .is_some_and(|m| m.kind == Prompt::Search)
+        {
+            self.draw_search(frame, geometry, p);
             return;
         }
         let title = self.modal_title();

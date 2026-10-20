@@ -216,7 +216,7 @@ fn highlights(query: &str, label: &str, color: u32) -> Vec<(std::ops::Range<usiz
 }
 
 /// Keep the end of a long query and its caret visible in the fixed input row.
-fn tail(query: &str, columns: usize) -> String {
+pub(super) fn tail(query: &str, columns: usize) -> String {
     use lenz_content::wrap::width;
     if columns == 0 { return String::new(); }
     if width(query) <= columns { return query.to_owned(); }

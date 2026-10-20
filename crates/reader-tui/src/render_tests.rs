@@ -739,3 +739,44 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
         }
     }
 }
+
+#[test]
+fn search_dialog_shows_labelled_fields_toggles_and_refusal_in_both_appearances_and_tiny_frames() {
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        a.dispatch(Command::OpenRoot(dir.path().to_owned()));
+        settle(&mut a, |a| a.session.state().project().is_some());
+        a.run(CommandId::SearchProject);
+        a.handle(crossterm::event::Event::Paste("foo".into()));
+        a.run(CommandId::MatchCase);
+        let shown = text(&draw(&mut a, 100, 30));
+        for expected in [
+            "Search in Project",
+            "Find    foo",
+            "Files   All files",
+            "✓ Aa Match case",
+            "○ W Whole word",
+            "○ .* Regular expression",
+            "Enter search",
+        ] {
+            assert!(shown.contains(expected), "missing {expected}: {shown}");
+        }
+        assert_eq!(a.layout.search_fields.len(), 2);
+        assert_eq!(a.layout.search_toggles.len(), 3);
+        assert!(a.layout.modal.y > 1, "centered, not at the top: {:?}", a.layout.modal);
+        a.run(CommandId::RegularExpression);
+        a.handle(crossterm::event::Event::Paste("(".into()));
+        let shown = text(&draw(&mut a, 100, 30));
+        assert!(shown.contains("unclosed group — fix the expression"), "{shown}");
+        for (width, height) in [(44, 16), (30, 10), (4, 4), (1, 1), (0, 0), (100, 30)] {
+            a.handle(crossterm::event::Event::Resize(width, height));
+            draw(&mut a, width, height);
+            let area = Rect::new(0, 0, width, height);
+            assert!(area.union(a.layout.modal) == area || a.layout.modal.is_empty(), "{width}x{height}: {:?}", a.layout.modal);
+            for r in a.layout.search_fields.iter().chain(a.layout.search_toggles.iter().map(|(_, r)| r)) {
+                assert!(a.layout.modal.union(*r) == a.layout.modal || r.is_empty(), "{width}x{height}: {r:?} in {:?}", a.layout.modal);
+            }
+        }
+    }
+}

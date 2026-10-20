@@ -4566,6 +4566,11 @@ impl Session {
         self.find_options
     }
 
+    /// Why `query` cannot be searched with the session's options (a bad regular expression); project search refuses it.
+    pub fn search_refusal(&self, query: &str) -> Option<String> {
+        lenz_content::find::Matcher::new(&lenz_content::find::Query { text: query.to_owned(), options: self.find_options }).err().map(|e| e.to_string())
+    }
+
     /// Search `tab`'s document for `text` with the session's options, off the UI thread; the newest request wins.
     /// Find `text` in tab `tab`, going to the match at or after the caret when it arrives if `reveal`.
     fn find_in(&mut self, tab: TabId, text: String, reveal: bool) -> Effect {

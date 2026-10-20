@@ -1845,3 +1845,42 @@ fn chrome_toolbar_controls_and_footer_commands_run_catalog_actions() {
     click(&mut a, 2, 0);
     assert!(a.modal.is_none());
 }
+
+#[test]
+fn search_dialog_fields_and_toggles_take_clicks_and_a_bad_expression_does_not_search() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.rs"), "Foo foo\n").unwrap();
+    let mut a = app(dir.path());
+    settle(&mut a, |a| a.session.state().project().is_some());
+    a.run(CommandId::SearchProject);
+    a.handle(Event::Paste("(".into()));
+    draw(&mut a, 100, 30);
+    let files = a.layout.search_fields[1];
+    click(&mut a, files.x + 1, files.y);
+    a.handle(Event::Paste("*.rs".into()));
+    let m = a.modal.as_ref().unwrap();
+    assert!(m.secondary_focus && m.input == "(" && m.secondary == "*.rs");
+    let (id, toggle) = a.layout.search_toggles[2];
+    assert_eq!(id, CommandId::RegularExpression);
+    click(&mut a, toggle.x + 1, toggle.y);
+    assert!(a.session.find_options().regex);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.modal.as_ref().map(|m| &m.kind), Some(&Prompt::Search), "a bad expression does not search");
+    assert!(a.session.state().results().is_none());
+    draw(&mut a, 100, 30);
+    let modal = a.layout.modal;
+    click(&mut a, modal.x + 1, modal.y + 1);
+    assert_eq!(a.modal.as_ref().map(|m| &m.kind), Some(&Prompt::Search), "padding keeps it");
+    let find = a.layout.search_fields[0];
+    click(&mut a, find.x + 1, find.y);
+    assert!(!a.modal.as_ref().unwrap().secondary_focus);
+    click(&mut a, toggle.x + 1, toggle.y);
+    assert!(!a.session.find_options().regex);
+    click(&mut a, 0, 15);
+    assert!(a.modal.is_none(), "a click outside closes it");
+    a.run(CommandId::SearchProject);
+    a.handle(Event::Paste("foo".into()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.modal.is_none() && a.session.state().results().is_some());
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.rs")).unwrap(), "Foo foo\n");
+}
