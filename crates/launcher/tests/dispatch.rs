@@ -7,12 +7,14 @@ use std::{
 
 fn fixture() -> tempfile::TempDir {
     let dir = tempfile::Builder::new().prefix("lenz launcher ").tempdir().unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_lenz-launcher"), dir.path().join("lenz")).unwrap();
-    for name in ["lenz-code", "lenz-code-tui", "lenz-diff", "lenz-diff-tui"] {
-        let path = dir.path().join(name);
-        fs::write(&path, "#!/bin/sh\nprintf '%s\\0' \"$0\" \"$$\" \"$PWD\" \"$LENZ_LAUNCHER_TEST\" \"$@\"\nexit 37\n").unwrap();
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
-    }
+    // Write the executables from another process: a child forked by a parallel test would otherwise keep a writable
+    // descriptor and make running them fail with ETXTBSY.
+    let script = "#!/bin/sh\nprintf '%s\\0' \"$0\" \"$$\" \"$PWD\" \"$LENZ_LAUNCHER_TEST\" \"$@\"\nexit 37\n";
+    let written = Command::new("/bin/sh")
+        .args(["-c", r#"cp "$1" "$2/lenz" && for n in lenz-code lenz-code-tui lenz-diff lenz-diff-tui; do printf '%s' "$3" > "$2/$n" && chmod 755 "$2/$n" || exit 1; done"#, "fixture"])
+        .arg(env!("CARGO_BIN_EXE_lenz-launcher")).arg(dir.path()).arg(script)
+        .status().unwrap();
+    assert!(written.success());
     dir
 }
 
