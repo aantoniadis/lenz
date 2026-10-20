@@ -2,7 +2,7 @@
 pkgname=lenz-bin
 pkgver=0.0.1
 pkgrel=1
-pkgdesc="Side-by-side diff viewer, Git client and merge tool with GUI and terminal frontends"
+pkgdesc="Code reader, diff viewer, Git client and merge tool with GUI and terminal frontends"
 arch=('x86_64' 'aarch64')
 url="https://github.com/aantoniadis/lenz"
 license=('MIT' 'Apache-2.0')
@@ -19,17 +19,16 @@ sha256sums_aarch64=('492fb85ec187d27631ee77f8b7b5652b36d170d1a497e143a7047690106
 
 package() {
   cd "lenz-$pkgver-$CARCH-unknown-linux-gnu"
-  install -Dm755 lenz "$pkgdir/usr/bin/lenz"
-  install -Dm755 lenz-tui "$pkgdir/usr/bin/lenz-tui"
+  for executable in lenz lenz-code lenz-code-tui lenz-diff lenz-diff-tui; do
+    install -Dm755 "$executable" "$pkgdir/usr/bin/$executable"
+  done
   install -Dm644 lenz.desktop "$pkgdir/usr/share/applications/lenz.desktop"
+  install -Dm644 lenz-diff.desktop "$pkgdir/usr/share/applications/lenz-diff.desktop"
   # one 1024 px PNG: pixmaps is the size-independent location the icon lookup always searches
   install -Dm644 lenz-icon.png "$pkgdir/usr/share/pixmaps/lenz.png"
   install -Dm644 README.md "$pkgdir/usr/share/doc/lenz/README.md"
   install -Dm644 LICENSE-MIT "$pkgdir/usr/share/licenses/lenz/LICENSE-MIT"
   install -Dm644 LICENSE-APACHE "$pkgdir/usr/share/licenses/lenz/LICENSE-APACHE"
   install -Dm644 NOTICE "$pkgdir/usr/share/licenses/lenz/NOTICE"
-  # Older release archives predate the bundled-theme notices.
-  if [[ -f LICENSE-THEMES ]]; then
-    install -Dm644 LICENSE-THEMES "$pkgdir/usr/share/licenses/lenz/LICENSE-THEMES"
-  fi
+  install -Dm644 LICENSE-THEMES "$pkgdir/usr/share/licenses/lenz/LICENSE-THEMES"
 }

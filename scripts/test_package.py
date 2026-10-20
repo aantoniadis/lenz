@@ -144,26 +144,26 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz').exists())
 
-    def test_aur_installs_theme_notices_and_accepts_older_archives(self):
+    def test_aur_installs_the_launcher_its_apps_desktop_entries_and_notices(self):
         archive = self.root / 'lenz-0.2.0-x86_64-unknown-linux-gnu'
         archive.mkdir()
-        for name in ['lenz', 'lenz-tui', 'lenz.desktop', 'lenz-icon.png', 'README.md',
-                     'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE', 'LICENSE-THEMES']:
+        for name in [installed for installed, _ in SHIPPED] + ['lenz.desktop', 'lenz-diff.desktop', 'lenz-icon.png',
+                                                             'README.md', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE',
+                                                             'LICENSE-THEMES']:
             (archive / name).write_text(name)
         recipe = Path(__file__).resolve().parents[1] / 'packaging/aur/PKGBUILD'
-        for has_notice in [True, False]:
-            if not has_notice:
-                (archive / 'LICENSE-THEMES').unlink()
-            installed = self.root / ('installed-new' if has_notice else 'installed-old')
-            result = subprocess.run(['bash', '-c',
-                                     'source "$1"; pkgver=0.2.0; CARCH=x86_64; pkgdir="$2"; package',
-                                     'package-test', str(recipe), str(installed)],
-                                    cwd=self.root, env=self.env, capture_output=True, text=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            notice = installed / 'usr/share/licenses/lenz/LICENSE-THEMES'
-            self.assertEqual(notice.exists(), has_notice)
-            if has_notice:
-                self.assertEqual(notice.read_text(), 'LICENSE-THEMES')
+        installed = self.root / 'installed'
+        result = subprocess.run(['bash', '-c', 'source "$1"; pkgver=0.2.0; CARCH=x86_64; pkgdir="$2"; package',
+                                 'package-test', str(recipe), str(installed)],
+                                cwd=self.root, env=self.env, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for name, _ in SHIPPED:
+            path = installed / 'usr/bin' / name
+            self.assertEqual(path.read_text(), name)
+            self.assertTrue(path.stat().st_mode & 0o111, name)
+        for desktop in ['lenz.desktop', 'lenz-diff.desktop']:
+            self.assertEqual((installed / 'usr/share/applications' / desktop).read_text(), desktop)
+        self.assertEqual((installed / 'usr/share/licenses/lenz/LICENSE-THEMES').read_text(), 'LICENSE-THEMES')
 
     def test_rejects_version_path_before_build_or_removal(self):
         marker = self.root / 'target/keep'
