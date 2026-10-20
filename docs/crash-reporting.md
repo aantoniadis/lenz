@@ -37,12 +37,12 @@ repository, merge and Version Picker views. Missing reports produce an
 explanation. No comparison needs to be loaded.
 
 ```sh
-lenz report --last
-lenz-tui report --last
+lenz diff report --last
+lenz diff --tui report --last
 
 # Works without a browser, display, interactive terminal or repository:
-lenz report --last --print
-lenz-tui report --last --print
+lenz diff report --last --print
+lenz diff --tui report --last --print
 ```
 
 The draft has a title, build/platform/frontend metadata, report identifier and

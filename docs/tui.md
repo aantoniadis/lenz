@@ -2,9 +2,9 @@
 
 For the code reader, see the [terminal reader guide](code/tui.md).
 
-![lenz-tui showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
+![The terminal Diff showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
-`lenz-tui` is the terminal adapter over the same shared core as the GUI (`lenz`): comparison, editing, merge, repository and pull request, image, annotation and search behavior all live in `crates/app`. This page lists the terminal's controls, where it differs from the GUI and its capability limits. Command-line usage, settings and the feature overview are in the [README](../README.md).
+`lenz diff --tui` (installed as `lenz-diff-tui`) is the terminal adapter over the same shared core as the GUI (`lenz diff`): comparison, editing, merge, repository and pull request, image, annotation and search behavior all live in `crates/app`. This page lists the terminal's controls, where it differs from the GUI and its capability limits. Command-line usage, settings and the feature overview are in the [README](../README.md).
 
 Build it on its own to keep the GPU and windowing dependencies out of the binary:
 
@@ -15,7 +15,7 @@ cargo build --locked --release -p lenz-tui
 ./target/release/lenz-tui merge
 ```
 
-`lenz-tui` needs an interactive terminal and takes the same arguments as `lenz`, including `--about`. Started outside a repository, `lenz-tui`, `log`, `merge` and `pr` first show the shared repository chooser: type a path (Tab completes folders, `~` is home) or pick a recent repository with the arrows or a click, Enter opens it and Esc quits. The GUI has the same chooser plus **Browse…**, which a terminal cannot offer.
+`lenz diff --tui` needs an interactive terminal and takes the same arguments as `lenz diff`, including `--about`. Started outside a repository, `lenz diff --tui` and its `log`, `merge` and `pr` first show the shared repository chooser: type a path (Tab completes folders, `~` is home) or pick a recent repository with the arrows or a click, Enter opens it and Esc quits. The GUI has the same chooser plus **Browse…**, which a terminal cannot offer.
 
 ## Keyboard and mouse basics
 
@@ -52,7 +52,7 @@ cargo build --locked --release -p lenz-tui
 | Editor / default application / reload | o / O / F5 |
 | Independent views | F8 / Shift-F8 switch; q closes the current view |
 
-`lenz-tui --about` and **About Lenz** (in ☰ and the palette) show the shared application information. Terminals that support it show the logo as pixels: kitty graphics in kitty and Ghostty, Sixel in foot (detected from `TERM=foot*` or its Linux launcher ancestry), both outside tmux and GNU screen. Other terminals draw a precomputed 24×12 cell logo. `LENZ_IMAGES=cells|kitty|sixel` overrides detection; Sixel applies to About only. The artwork is loaded while About is visible and released when it closes. Esc, Enter or **Close** dismisses it, and the arrows, Page keys and Home/End scroll it at small sizes.
+`lenz diff --tui --about` and **About Lenz** (in ☰ and the palette) show the shared application information. Terminals that support it show the logo as pixels: kitty graphics in kitty and Ghostty, Sixel in foot (detected from `TERM=foot*` or its Linux launcher ancestry), both outside tmux and GNU screen. Other terminals draw a precomputed 24×12 cell logo. `LENZ_IMAGES=cells|kitty|sixel` overrides detection; Sixel applies to About only. The artwork is loaded while About is visible and released when it closes. Esc, Enter or **Close** dismisses it, and the arrows, Page keys and Home/End scroll it at small sizes.
 
 ### Editing and saving
 
@@ -117,7 +117,7 @@ Both frontends share the **Overview** (Branches, History, Files and the diff) an
 
 ## Merge, Conflict List and Version Picker
 
-![lenz-tui Merge View with Ours, Result and Theirs panes](images/tui-merge.png)
+![The terminal Diff's Merge View with Ours, Result and Theirs panes](images/tui-merge.png)
 
 The Merge View's toolbar matches the GUI's: ☰, ↑ ↓ changes, ⇡ ⇣ unresolved conflicts, ↶ Undo, ↷ Redo, ⤓ Save, Done/Cancel and `⋯`. The Version Picker uses the same icons plus Mark resolved and its **Take ‹version›** buttons. The Conflict List adds **File actions ▾** and **Copy command ▾** (continuation and submodule commands). The GUI shows those buttons in the page rather than the toolbar.
 
@@ -177,4 +177,4 @@ Limits to be aware of:
 - Tests and shared behavior reduce drift between the adapters but cannot guarantee that every rendering or input bug is absent.
 - New behavior must be usable and verified in both adapters, and performance-sensitive changes need equivalent release workloads compared before and after.
 
-Both adapters offer **Report last error** in their command menus, even before a comparison is ready. `lenz-tui report --last` also works outside Git without an interactive terminal, and `--print` prints the report path and issue-draft link. On a panic the terminal restores mouse, paste, focus and raw/alternate-screen modes before diagnostics print. See [crash reporting](crash-reporting.md).
+Both adapters offer **Report last error** in their command menus, even before a comparison is ready. `lenz diff --tui report --last` also works outside Git without an interactive terminal, and `--print` prints the report path and issue-draft link. On a panic the terminal restores mouse, paste, focus and raw/alternate-screen modes before diagnostics print. See [crash reporting](crash-reporting.md).

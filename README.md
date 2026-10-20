@@ -13,8 +13,7 @@ A native code reader, diff viewer, git client and merge tool, built in Rust.
 windows and terminal adapters. The desktop apps use [GPUI](https://github.com/zed-industries/zed);
 the terminal uses [Ratatui](https://ratatui.rs) and has no GUI dependencies.
 
-**Command-family trial:** this branch brings the Reader and Diff into one workspace,
-with separate executables behind these commands:
+One `lenz` command opens both, each a separate executable:
 
 | Command | Opens |
 |---|---|
@@ -23,14 +22,16 @@ with separate executables behind these commands:
 | `lenz diff …` | Desktop Diff |
 | `lenz diff --tui …` | Terminal Diff |
 
-Run `scripts/try-launcher.sh` to build the trial; see [Build](#build) and the
-[trial instructions](docs/launcher-trial.md). Existing release packages still ship
-Diff as `lenz` and `lenz-tui`; they do not yet include the Reader or command-family launcher.
+`lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui` run an app directly with the same arguments.
 
-**Status:** Diff is beta (0.0.1), tested on Linux and macOS (Apple Silicon), with automated
-GUI interaction coverage on Linux. Reader and launcher integration are experimental
-and verified on Linux; native macOS validation is pending. Reader is currently read-only
-with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
+**Upgrading from 0.0.1:** `lenz` now opens the Code Reader. Comparisons need the `diff` prefix
+(`lenz diff left right`, `lenz diff log`, `lenz diff merge …`), `lenz-tui` is now `lenz diff --tui`
+(or `lenz-diff-tui`), and git difftool and mergetool configurations change as shown in
+[git difftool](#git-difftool) and [git mergetool](#git-mergetool).
+
+**Status:** beta (0.0.2). Diff is tested on Linux and macOS (Apple Silicon), with automated
+GUI interaction coverage on Linux. The Code Reader and the launcher are verified on Linux;
+native macOS validation is pending. The Reader is read-only, with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
@@ -79,26 +80,24 @@ and [language-server compatibility](docs/code/providers.md) for setup and provid
 
 ## Install
 
-These packages contain Diff. To try the Reader and command family, build this branch as described below.
-
 Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub Releases page](https://github.com/aantoniadis/lenz/releases); the current one is a beta.
 
 - **Homebrew** (macOS arm64, Linux): `brew install aantoniadis/lenz/lenz`, from the tap's formula (`packaging/homebrew/lenz.rb`).
 - **Arch Linux**: `packaging/aur/PKGBUILD` builds `lenz-bin` from the release tarball: `curl -LO https://raw.githubusercontent.com/aantoniadis/lenz/main/packaging/aur/PKGBUILD && makepkg -si`. It will be submitted to the AUR as `lenz-bin` once account registration there reopens.
-- **Tarball**: `lenz-<version>-<target>.tar.gz` from the [releases](https://github.com/aantoniadis/lenz/releases) holds `lenz`, `lenz-tui`, this README and the licences; put them on your `PATH`. On macOS the GUI is inside `Lenz.app` (so the Dock shows its icon) and `lenz` is a symlink into it: keep the two together, or link to `Lenz.app/Contents/MacOS/lenz`.
-- **From source**: `cargo install --locked --git https://github.com/aantoniadis/lenz lenz` (or `lenz-tui`); see [Build](#build) for the system libraries.
+- **Tarball**: `lenz-<version>-<target>.tar.gz` from the [releases](https://github.com/aantoniadis/lenz/releases) holds `lenz`, `lenz-code`, `lenz-code-tui`, `lenz-diff`, `lenz-diff-tui`, this README and the licences; put the five executables on your `PATH`, together. On macOS they are inside `Lenz.app` (so the Dock shows its icon), with a symlink into it for each: keep them with the bundle, or link to `Lenz.app/Contents/MacOS/<name>`.
+- **From source**: build the release package with `packaging/package.sh <version>` and put the five executables from `target/package/lenz-<version>-<target>/` on your `PATH`; see [Build](#build) for the system libraries.
 
-Every package installs both `lenz` and `lenz-tui`. Linux binaries need glibc 2.35 or later; the GUI also loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime (Debian/Ubuntu: `libxkbcommon-x11-0 libxcb1 libvulkan1`), which desktop installations already have.
+Every package installs all five executables; `lenz` finds the others beside it. Linux binaries need glibc 2.35 or later; the GUI also loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime (Debian/Ubuntu: `libxkbcommon-x11-0 libxcb1 libvulkan1`), which desktop installations already have.
 
-Linux tarballs include the logo and `lenz.desktop`; the AUR and Linux Homebrew packages install them. The launcher opens the repository chooser described below.
+Linux tarballs include the logo and two desktop entries, **Lenz Code** (`lenz.desktop`) and **Lenz Diff** (`lenz-diff.desktop`, which opens the repository chooser described below); the AUR and Linux Homebrew packages install them.
 
 ## Build
 
 Needs a stable Rust toolchain and git 2.30 or later at runtime.
 
-### Reader and command-family trial
+### Command family
 
-From this branch, with the system libraries listed below:
+With the system libraries listed below, build every app and stage the five commands together:
 
 ```sh
 scripts/try-launcher.sh
@@ -110,8 +109,10 @@ target/launcher-trial/lenz diff --tui --no-index left.txt right.txt
 ```
 
 The script prints the staging directory (which may differ with a custom Cargo target directory).
-It installs nothing globally. To build only the Reader, use
-`cargo build --release --locked -p reader-gui` and run `target/release/lenz-reader`.
+It installs nothing globally. Cargo's build names differ from the installed ones: `lenz-launcher` is `lenz`,
+`lenz-reader` and `lenz-reader-tui` are `lenz-code` and `lenz-code-tui`, and Diff's `lenz` and `lenz-tui` are
+`lenz-diff` and `lenz-diff-tui`. To build only the Reader, use `cargo build --release --locked -p reader-gui`
+and run `target/release/lenz-reader`.
 
 ### Diff binaries
 
@@ -124,55 +125,53 @@ On Linux, gpui needs: `libxkbcommon-x11-dev libwayland-dev libfontconfig-dev lib
 
 ### macOS app bundle
 
-`cargo build` makes a bare `target/release/lenz`. It works, but the Dock shows a generic icon while it starts and quits, and the Lenz logo only once the window is up. For the logo throughout, build the release package, which puts the GUI in `Lenz.app`:
+`cargo build` makes bare executables. They work, but the Dock shows a generic icon while they start and quit, and the Lenz logo only once the window is up. For the logo throughout, build the release package, which puts all five executables in `Lenz.app`:
 
 ```sh
-packaging/package.sh 0.0.1
+packaging/package.sh 0.0.2
 ```
 
-The bundle is at `target/package/lenz-0.0.1-aarch64-apple-darwin/Lenz.app`, next to a `lenz` symlink into it; the same folder is packed as `target/package/lenz-0.0.1-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version.
+The bundle is at `target/package/lenz-0.0.2-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.2-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version.
 
 ```sh
-open target/package/lenz-0.0.1-aarch64-apple-darwin/Lenz.app                     # no files, as from Finder
-target/package/lenz-0.0.1-aarch64-apple-darwin/lenz path/to/left path/to/right  # a comparison
+open target/package/lenz-0.0.2-aarch64-apple-darwin/Lenz.app                          # the Reader, as from Finder
+target/package/lenz-0.0.2-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
 ```
 
-To install it, copy `Lenz.app` to `/Applications` and put a `lenz` symlink to `/Applications/Lenz.app/Contents/MacOS/lenz` on your `PATH` (as the Homebrew formula does); launched through that symlink, from a terminal or as a git difftool, it still shows the logo.
+To install it, copy `Lenz.app` to `/Applications` and put symlinks to the five executables in `/Applications/Lenz.app/Contents/MacOS/` on your `PATH` (as the Homebrew formula does); launched through them, from a terminal or as a git difftool, it still shows the logo.
 
 ## Usage
 
-This Diff reference uses the **released** executable names. In the command-family
-trial, replace `lenz` with `lenz diff` and `lenz-tui` with `lenz diff --tui`, including
-the Git tool configurations below. Reader usage is in the [Reader guide](docs/code/README.md).
-
-`lenz` and `lenz-tui` take the same arguments. The git grammar mirrors `git diff`:
+This is Diff's reference; Reader usage is in the [Reader guide](docs/code/README.md).
+`lenz diff --tui` (the terminal) takes the same arguments as `lenz diff`, and `lenz-diff` and
+`lenz-diff-tui` take them without the prefix. The git grammar mirrors `git diff`:
 
 | Command | Shows |
 |---|---|
-| `lenz` | working tree vs index (unstaged changes), plus untracked files |
-| `lenz --staged` (or `--cached`) | index vs HEAD |
-| `lenz <rev>` | working tree vs `<rev>`, plus untracked files |
-| `lenz A B`, `lenz A..B` | revision `A` vs revision `B` |
-| `lenz A...B` | merge base of `A` and `B` vs `B` |
-| `lenz ... -- <path>...` | only these paths (relative to the current directory) |
-| `lenz <left> <right>` | two files, or two directories paired by relative path |
-| `lenz --no-index <left> <right>` | the same, even if an argument names a revision |
+| `lenz diff` | working tree vs index (unstaged changes), plus untracked files |
+| `lenz diff --staged` (or `--cached`) | index vs HEAD |
+| `lenz diff <rev>` | working tree vs `<rev>`, plus untracked files |
+| `lenz diff A B`, `lenz diff A..B` | revision `A` vs revision `B` |
+| `lenz diff A...B` | merge base of `A` and `B` vs `B` |
+| `lenz diff ... -- <path>...` | only these paths (relative to the current directory) |
+| `lenz diff <left> <right>` | two files, or two directories paired by relative path |
+| `lenz diff --no-index <left> <right>` | the same, even if an argument names a revision |
 
 Browsing the repository:
 
 | Command | Opens |
 |---|---|
-| `lenz log [<rev>...] [-- <path>...]` | the Repository Window: sources sidebar, commit log with branch graph, the picked Change Set below |
-| `lenz log --follow <file>` | one file's history |
-| `lenz pr [<number>\|<url>]` | a GitHub pull request, read-only (needs `gh`, run inside a clone) |
-| `lenz` in a repository without changes | the Repository Window on HEAD |
+| `lenz diff log [<rev>...] [-- <path>...]` | the Repository Window: sources sidebar, commit log with branch graph, the picked Change Set below |
+| `lenz diff log --follow <file>` | one file's history |
+| `lenz diff pr [<number>\|<url>]` | a GitHub pull request, read-only (needs `gh`, run inside a clone) |
+| `lenz diff` in a repository without changes | the Repository Window on HEAD |
 
 Resolving conflicts:
 
 | Command | Opens |
 |---|---|
-| `lenz merge [<path>...]` | the Repository Window on the **Conflict List** of the merge, rebase, cherry-pick, revert or stash pop in progress (plain `lenz` does too while one is) |
-| `lenz merge <base> <local> <remote> <merged>` | one file in the **Merge View** (what `git mergetool` runs); works outside git too |
+| `lenz diff merge [<path>...]` | the Repository Window on the **Conflict List** of the merge, rebase, cherry-pick, revert or stash pop in progress (plain `lenz diff` does too while one is) |
+| `lenz diff merge <base> <local> <remote> <merged>` | one file in the **Merge View** (what `git mergetool` runs); works outside git too |
 
 Diffs given on the command line (and `git difftool`) open with the branches and history hidden (Files shows when there is more than one file); Esc shows the picker. **Focus** (the toolbar button, `f`, Enter in the log, or a double click on a commit) hides Branches and History, leaving Files and the diff; Focus again or Esc restores them. Two arguments are compared as plain files when both exist on disk and neither names a commit. In directory mode, byte-identical files at different paths are shown as renames.
 
@@ -186,9 +185,9 @@ Options:
 - `--blame`: start with Blame Annotations on; `--line <n>`: open the first file at line `n` of the right Side.
 - `--about`: show version, platform and licence information without opening a comparison.
 
-**Outside a repository**, `lenz`, `lenz log`, `lenz merge` and `lenz pr` (and the same in `lenz-tui`) open a repository chooser instead of failing: recent repositories (those Lenz has saved a place for), a path field with Tab completion, and in the GUI **Browse…** (Ctrl+O) for the system folder dialog. Choosing one reruns the same command inside it; Esc quits with exit code `0`. Two files or folders still compare anywhere.
+**Outside a repository**, `lenz diff`, `lenz diff log`, `lenz diff merge` and `lenz diff pr` (and the same in `lenz diff --tui`) open a repository chooser instead of failing: recent repositories (those Lenz has saved a place for), a path field with Tab completion, and in the GUI **Browse…** (Ctrl+O) for the system folder dialog. Choosing one reruns the same command inside it; Esc quits with exit code `0`. Two files or folders still compare anywhere.
 
-Lenz stays in the foreground until its window closes. Exit codes: `0` on a normal close, or when there is nothing to show (it prints `no differences` and opens no window); `2` on bad arguments or startup errors (git missing or older than 2.30, `lenz-tui` outside a repository without an interactive terminal). `lenz merge <base> <local> <remote> <merged>` exits `0` only after **Done**, `1` when cancelled or closed, so `git mergetool` restores its backup.
+Lenz stays in the foreground until its window closes. Exit codes: `0` on a normal close, or when there is nothing to show (it prints `no differences` and opens no window); `2` on bad arguments or startup errors (git missing or older than 2.30, `lenz diff --tui` outside a repository without an interactive terminal). `lenz diff merge <base> <local> <remote> <merged>` exits `0` only after **Done**, `1` when cancelled or closed, so `git mergetool` restores its backup.
 
 ### Settings and last position
 
@@ -217,7 +216,7 @@ crash_dir = "~/lenz-crashes"
 restore_place = true
 ```
 
-Plain `lenz` and `lenz log` in a repository reopen where you left off: the selected commit, the file and the line. Anything that no longer exists falls back to the normal start, and a merge or rebase in progress always opens its Conflict List. Explicit comparisons, `lenz pr`, `lenz merge`, difftool and mergetool always open what they name. Positions are kept privately in `~/.local/state/lenz/places/`; set `restore_place = false` to turn this off.
+Plain `lenz diff` and `lenz diff log` in a repository reopen where you left off: the selected commit, the file and the line. Anything that no longer exists falls back to the normal start, and a merge or rebase in progress always opens its Conflict List. Explicit comparisons, `lenz diff pr`, `lenz diff merge`, difftool and mergetool always open what they name. Positions are kept privately in `~/.local/state/lenz/places/`; set `restore_place = false` to turn this off.
 
 ### In the window
 
@@ -247,7 +246,7 @@ Files inside an archive are read-only: Apply, Revert hunk and Discard are refuse
 
 In the **Merge View** the Result starts from the Base with every non-conflicting change applied. Resolve each red **Conflict** with ≫ (Ours), ≪ (Theirs) — both, in the order clicked — or ✕ (keep the Base), or the keys `alt-shift-→ ← ↓ backspace`. **Resolve simple conflicts** (in the command palette) resolves Conflicts whose edits don't overlap word by word. `ctrl-s` saves; Conflicts left are written as git conflict markers in your `merge.conflictStyle`, with both versions kept, so saving early never loses a change. `ctrl-enter` is **Done**. Binary files open in the **Version Picker**: take one version whole. **Reopen conflict** resets an individual resolution.
 
-git runs the merge tool once per file; `lenz merge` instead opens one window on every conflict (text, binary, deleted, symlink, submodule) with **Mark resolved** for each file.
+git runs the merge tool once per file; `lenz diff merge` instead opens one window on every conflict (text, binary, deleted, symlink, submodule) with **Mark resolved** for each file.
 
 ### What Lenz writes
 
@@ -255,23 +254,23 @@ Only the files you act on: a Merge View's Result when you save, a whole version 
 
 ### Crash reports
 
-A panic saves a local diagnostic report. **Report last error** in either command menu, or `lenz report --last` / `lenz-tui report --last`, opens an editable GitHub issue draft; `--print` shows the report location and link instead. The draft holds metadata only and uploads nothing. See [crash reporting](docs/crash-reporting.md).
+A panic saves a local diagnostic report. **Report last error** in either command menu, or `lenz diff report --last` / `lenz diff --tui report --last`, opens an editable GitHub issue draft; `--print` shows the report location and link instead. The draft holds metadata only and uploads nothing. See [crash reporting](docs/crash-reporting.md).
 
 ## git difftool
 
 ```sh
 git config --global diff.tool lenz
-git config --global difftool.lenz.cmd 'lenz --name "$MERGED" "$LOCAL" "$REMOTE"'
+git config --global difftool.lenz.cmd 'lenz diff --name "$MERGED" "$LOCAL" "$REMOTE"'
 git config --global difftool.prompt false
 ```
 
-Prefer `git difftool -d` (for example `git difftool -d main...HEAD`): it opens one window for the whole Change Set instead of one window per file. Use `lenz-tui` in place of `lenz` for the terminal frontend.
+Prefer `git difftool -d` (for example `git difftool -d main...HEAD`): it opens one window for the whole Change Set instead of one window per file. Use `lenz diff --tui` in place of `lenz diff` for the terminal frontend. Configurations from 0.0.1 that run plain `lenz` open the Code Reader instead; add `diff`, or run `lenz-diff` directly.
 
 ## git mergetool
 
 ```sh
 git config --global merge.tool lenz
-git config --global mergetool.lenz.cmd 'lenz merge "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
+git config --global mergetool.lenz.cmd 'lenz diff merge "$BASE" "$LOCAL" "$REMOTE" "$MERGED"'
 git config --global mergetool.lenz.trustExitCode true
 git config --global mergetool.prompt false
 git config --global mergetool.keepBackup false   # optional: Lenz writes atomically, so the .orig files are just clutter
@@ -353,7 +352,7 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 |---|---|
 | [Code Reader](docs/code/README.md) | Navigation, search, splits, Markdown and language-server controls |
 | [Terminal Code Reader](docs/code/tui.md) | Reader TUI controls and capability limits |
-| [Command-family trial](docs/launcher-trial.md) | Building the Reader/desktop Diff/terminal Diff launcher and migrating commands |
+| [Command family](docs/launcher-trial.md) | How `lenz` dispatches to the four apps, migrating 0.0.1 commands, and the trial record |
 | [Reader performance](docs/code/performance.md) | Startup and memory measurements, raw samples and limits |
 | [Terminal frontend](docs/tui.md) | TUI controls, architecture and capability limits |
 | [Markdown Preview](docs/markdown.md) | Source, Inline and Side by side views and source fidelity |
