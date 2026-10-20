@@ -9,6 +9,11 @@ import tempfile
 import unittest
 
 
+# Each installed executable and the Cargo executable it is built as.
+SHIPPED = [('lenz', 'lenz-launcher'), ('lenz-code', 'lenz-reader'), ('lenz-code-tui', 'lenz-reader-tui'),
+           ('lenz-diff', 'lenz'), ('lenz-diff-tui', 'lenz-tui')]
+
+
 class PackageTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='lenz-package-')
@@ -17,7 +22,7 @@ class PackageTests(unittest.TestCase):
         (self.root / 'packaging').mkdir()
         shutil.copyfile(Path(__file__).resolve().parents[1] / 'packaging/package.sh', self.root / 'packaging/package.sh')
         for name in ['README.md', 'LICENSE-MIT', 'LICENSE-THEMES', 'crates/engine/LICENSE', 'crates/engine/NOTICE',
-                     'packaging/lenz.desktop', 'assets/lenz-icon.png', 'assets/lenz.icns']:
+                     'packaging/lenz.desktop', 'packaging/lenz-diff.desktop', 'assets/lenz-icon.png', 'assets/lenz.icns']:
             path = self.root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(name)
@@ -38,7 +43,9 @@ class PackageTests(unittest.TestCase):
 calls = pathlib.Path(os.environ['LENZ_TEST_CALLS'])
 calls.write_text(json.dumps((json.loads(calls.read_text()) if calls.exists() else []) + [sys.argv[1:]]))
 pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('flags.json').write_text(json.dumps({k: os.environ.get(k) for k in ('RUSTFLAGS', 'CFLAGS', 'CXXFLAGS')}))
-name = sys.argv[sys.argv.index('-p') + 1]
+package = sys.argv[sys.argv.index('-p') + 1]
+# Cargo names an executable by its bin target, not its package.
+name = {'reader-gui': 'lenz-reader', 'reader-tui': 'lenz-reader-tui'}.get(package, package)
 artifact = pathlib.Path(os.environ['LENZ_TEST_ARTIFACT']).with_name(name)
 artifact.parent.mkdir(parents=True, exist_ok=True)
 artifact.write_bytes(b'fresh ' + name.encode())
@@ -61,11 +68,16 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         self.assertEqual(result.returncode, 0, result.stderr)
         name = 'lenz-0.2.0-rc.1+test-x86_64-test-linux-gnu'
         with tarfile.open(self.root / 'target/package' / (name + '.tar.gz')) as archive:
-            self.assertEqual(archive.extractfile(name + '/lenz').read(), b'fresh lenz')
-            self.assertEqual(archive.extractfile(name + '/lenz-tui').read(), b'fresh lenz-tui')
+            for installed, executable in SHIPPED:
+                self.assertEqual(archive.extractfile(f'{name}/{installed}').read(), b'fresh ' + executable.encode())
+                self.assertTrue(archive.getmember(f'{name}/{installed}').mode & 0o111, installed)
+            self.assertFalse([n for n in archive.getnames() if n.endswith('/lenz-tui')], 'no old terminal name')
             self.assertEqual(archive.extractfile(name + '/LICENSE-THEMES').read(), b'LICENSE-THEMES')
+            for desktop in ['lenz.desktop', 'lenz-diff.desktop']:
+                self.assertEqual(archive.extractfile(f'{name}/{desktop}').read(), f'packaging/{desktop}'.encode())
         calls = json.loads((self.root / 'calls.json').read_text())
-        self.assertEqual([args[args.index('-p') + 1] for args in calls], ['lenz', 'lenz-tui'], 'built separately')
+        self.assertEqual([args[args.index('-p') + 1] for args in calls],
+                         ['lenz-launcher', 'reader-gui', 'reader-tui', 'lenz', 'lenz-tui'], 'built separately')
         for args in calls:
             self.assertEqual(args[args.index('--target') + 1], 'x86_64-test-linux-gnu')
 
@@ -111,18 +123,18 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         name = 'lenz-0.2.0-aarch64-apple-darwin'
         with tarfile.open(self.root / 'target/package' / (name + '.tar.gz')) as archive:
             app = name + '/Lenz.app/Contents/'
-            self.assertEqual(archive.extractfile(app + 'MacOS/lenz').read(), b'fresh lenz')
-            self.assertTrue(archive.getmember(app + 'MacOS/lenz').mode & 0o111, 'executable')
+            for installed, executable in SHIPPED:
+                self.assertEqual(archive.extractfile(app + 'MacOS/' + installed).read(), b'fresh ' + executable.encode())
+                self.assertTrue(archive.getmember(app + 'MacOS/' + installed).mode & 0o111, 'executable')
+                link = archive.getmember(f'{name}/{installed}')
+                self.assertTrue(link.issym(), f'the top-level {installed} runs through the bundle')
+                self.assertEqual(link.linkname, 'Lenz.app/Contents/MacOS/' + installed)
             self.assertEqual(archive.extractfile(app + 'Resources/lenz.icns').read(), b'assets/lenz.icns')
             self.assertEqual(archive.extractfile(name + '/LICENSE-THEMES').read(), b'LICENSE-THEMES')
             import plistlib
             info = plistlib.loads(archive.extractfile(app + 'Info.plist').read())
             self.assertEqual((info['CFBundleExecutable'], info['CFBundleIconFile'], info['CFBundlePackageType']), ('lenz', 'lenz', 'APPL'))
             self.assertEqual((info['CFBundleName'], info['CFBundleShortVersionString']), ('Lenz', '0.2.0'))
-            link = archive.getmember(name + '/lenz')
-            self.assertTrue(link.issym(), 'the top-level lenz still runs, through the bundle')
-            self.assertEqual(link.linkname, 'Lenz.app/Contents/MacOS/lenz')
-            self.assertEqual(archive.extractfile(name + '/lenz-tui').read(), b'fresh lenz-tui')
         signed = (self.root / 'codesign.txt').read_text()
         self.assertTrue(signed.startswith('--force --sign -') and signed.endswith('/Lenz.app'), signed)
 
