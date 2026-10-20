@@ -21,6 +21,8 @@ use unicode_width::UnicodeWidthStr;
 #[derive(Default)]
 pub(crate) struct Geometry {
     pub controls: Vec<(CommandId, Rect)>,
+    /// The toolbar's application menu button.
+    pub app_menu: Rect,
     pub command_menus: Vec<Rect>,
     pub tree: Rect,
     pub results: Rect,
@@ -287,13 +289,19 @@ impl App {
         let menu = " ☰ Menu ";
         let width = (menu.width() as u16).min(area.width);
         let rect = Rect::new(area.x, area.y, width, 1);
+        let open = self
+            .modal
+            .as_ref()
+            .is_some_and(|m| matches!(m.kind, Prompt::Menu(_)));
+        let st = style(p.fg, if open { p.selected_bg } else { p.header_bg }).add_modifier(Modifier::BOLD);
+        fill(frame.buffer_mut(), rect, st);
         line(
             frame.buffer_mut(),
             rect,
             &reader_core::chrome::ellipsize(menu, width as usize),
-            style(p.fg, p.header_bg).add_modifier(Modifier::BOLD),
+            st,
         );
-        geometry.command_menus.push(rect);
+        geometry.app_menu = rect;
         let mut x = rect.right().saturating_add(1);
         for (id, label) in self.session.toolbar() {
             let width = (label.width() + 2) as u16;
@@ -1038,10 +1046,18 @@ impl App {
         let Some(modal) = &mut self.modal else {
             return;
         };
-        let context = matches!(modal.kind, Prompt::Context { .. });
+        let context = matches!(modal.kind, Prompt::Context { .. } | Prompt::Menu(_));
         let themes = modal.kind == Prompt::Themes;
         let mut separators = Vec::new();
-        let area = if let Prompt::Context { x, y, ref entries } = modal.kind {
+        let area = if let Prompt::Menu(_) = modal.kind {
+            // A dropdown under the toolbar's button, as wide as its longest row.
+            let width = (choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 6)
+                .max(34)
+                .min(frame.area().width as usize) as u16;
+            // Above the status bar; a long group scrolls.
+            let height = (choices.len() as u16 + 3).min(frame.area().height.saturating_sub(2));
+            Rect::new(frame.area().x, frame.area().y + 1.min(frame.area().height), width, height)
+        } else if let Prompt::Context { x, y, ref entries } = modal.kind {
             let width = (choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 4)
                 .max(20)
                 .min(frame.area().width as usize) as u16;
@@ -1084,7 +1100,7 @@ impl App {
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(color(p.accent)))
-                .title(format!(" {title} "))
+                .title(if title.is_empty() { String::new() } else { format!(" {title} ") })
                 .title_style(
                     Style::default()
                         .fg(color(p.accent))
@@ -1257,6 +1273,10 @@ impl App {
                 })
                 .unwrap_or(if modal.kind == Prompt::LanguageServer {
                     "Ctrl+C copies details · Enter runs action · Esc closes"
+                } else if modal.kind == Prompt::Menu(None) {
+                    "Enter / → open · Esc closes"
+                } else if matches!(modal.kind, Prompt::Menu(Some(_))) {
+                    "Enter runs · ← back · Esc closes"
                 } else {
                     "Enter accepts · Esc closes · ↑↓ selects · Tab field"
                 });

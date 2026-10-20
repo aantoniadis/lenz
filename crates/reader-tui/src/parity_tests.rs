@@ -286,31 +286,37 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
         CommandId::SoftWrap,
         CommandId::Reload,
     ] {
-        // Reach the same action through the GUI's visible app menu and the terminal's command palette.
+        // Reach the same action with the same keys through both adapters' application menus.
         visual.simulate_click(
             gpui::point(gpui::px(12.0), gpui::px(10.0)),
             gpui::Modifiers::default(),
         );
+        terminal.draw(|f| tui.draw(f)).unwrap();
+        let button = tui.layout.app_menu;
+        tui.handle(Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: button.x + 1,
+            row: button.y,
+            modifiers: KeyModifiers::NONE,
+        }));
         let group = reader_core::actions::CommandGroup::ALL
             .iter()
             .position(|g| *g == id.group())
             .unwrap();
         visual.simulate_keystrokes(&format!("{}enter", "down ".repeat(group)));
+        for _ in 0..group {
+            key(&mut tui, KeyCode::Down, KeyModifiers::NONE);
+        }
+        key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+        let gui_rows = gui.read_with(&visual, |v, _| v.modal_rows());
+        let tui_rows: Vec<_> = tui.choices().into_iter().map(|c| (c.label, c.disabled)).collect();
+        assert_eq!(tui_rows, gui_rows, "{id:?}");
         let row = CommandId::ALL
             .iter()
             .filter(|c| c.group() == id.group())
             .position(|c| *c == id)
             .unwrap();
         visual.simulate_keystrokes(&format!("{}enter", "down ".repeat(row)));
-        key(&mut tui, KeyCode::F(10), KeyModifiers::NONE);
-        tui.handle(Event::Paste(id.label().into()));
-        let row = tui
-            .choices()
-            .iter()
-            .position(
-                |c| matches!(c.target, crate::app::ChoiceTarget::Action(target) if target == id),
-            )
-            .unwrap();
         for _ in 0..row {
             key(&mut tui, KeyCode::Down, KeyModifiers::NONE);
         }
