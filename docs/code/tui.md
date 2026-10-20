@@ -2,8 +2,8 @@
 
 ![Terminal reader with Nerd Font icons, explorer and focused reading tab](../images/reader-tui.png)
 
-Lenz Code's terminal reader presents the same `reader-core` session as the GUI. In the
-[command-family trial](../launcher-trial.md), use `lenz --tui path/to/file.rs` or the `lenz-code-tui` alias.
+Lenz Code's terminal reader presents the same `reader-core` session as the GUI. Installed, run
+`lenz --tui path/to/file.rs` or `lenz-code-tui` (see [the command family](../launcher-trial.md)).
 Build the adapter separately so its executable
 does not include GPUI, GPU or windowing dependencies:
 

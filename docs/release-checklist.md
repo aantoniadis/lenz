@@ -68,13 +68,17 @@ In a throwaway repository with a merge conflict in a text file, a binary (PNG) f
 - [ ] Done with a Conflict left asks first; Done → the file is staged by git. Cancel → "merge of … failed", the file still conflicted. **Closing the window with the title bar** after a change asks first.
 - [ ] macOS: `python3 scripts/check-mergetool-cancel.py --app <lenz>` (opens one window and quits it like ⌘Q) reports the cancelled merge unresolved. Then by hand: ⌘Q and the Dock's **Quit** after a change keep the file conflicted, and Done still stages it.
 - [ ] The binary conflict opens the Version Picker: rows with sizes, the image compare below, **click a row** or `1`–`3`, `b` puts the Base left; Done stages the exact bytes.
-- [ ] `lenz merge` (and plain `lenz`) during the merge opens the Conflict List at the top of the sidebar; **Mark resolved** and **Re-open**; deleted-on-one-side, symlink and submodule files open in the Version Picker (submodule: commands only); after `git merge --continue` in a terminal the entry goes away when the window is focused again.
+- [ ] `lenz diff merge` (and plain `lenz diff`) during the merge opens the Conflict List at the top of the sidebar; **Mark resolved** and **Re-open**; deleted-on-one-side, symlink and submodule files open in the Version Picker (submodule: commands only); after `git merge --continue` in a terminal the entry goes away when the window is focused again.
 - [ ] Moving changes: `lenz` with local changes shows ≫ / ≪ in the gutter of each Change Block (not for files under the temp directory); **click them**, `alt-shift-→ / ←`, right-click entries; `ctrl-z` writes the file back; the File Navigator marks "● edited in Lenz".
 - [ ] A file saved with Conflicts left, then edited by hand and reopened, resumes (marker-free Conflicts resolved, "edited outside Lenz"); a file changed on disk while open shows the banner on focus.
 
 ## Package and publish
 
-Packaging is manual and needs Python 3. Each tarball holds both `lenz` and `lenz-tui`, each built on its own.
+Packaging is manual and needs Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own.
+
+- [ ] From the unpacked tarball (and, on macOS, through the Homebrew-style symlinks into `Lenz.app`): `lenz --help` lists the commands; `lenz <folder>` opens the Code Reader; `lenz --tui <file>` opens the terminal reader; `lenz diff <left> <right>` and `lenz diff --tui <left> <right>` open the comparisons; `lenz diff --bogus` prints `usage: lenz diff`.
+- [ ] macOS: the Dock shows the Lenz logo from launch to quit for both a Code and a Diff window, launched from Finder (`Lenz.app` opens the Reader) and from a terminal through the symlinks; `codesign -v --strict Lenz.app` passes.
+- [ ] Linux: the **Lenz Code** and **Lenz Diff** desktop entries start their apps and group their windows under the right icon.
 
 - [ ] Linux: `packaging/build-linux.sh <version>` builds `x86_64` and `aarch64` tarballs in Ubuntu 22.04 containers (glibc 2.35; `aarch64` runs under qemu-user and is slow). A tarball built directly on a newer distribution needs that distribution's glibc.
 - [ ] macOS: `packaging/package.sh <version>` on an Apple Silicon Mac. It builds the `dist` profile (thin LTO, function symbols kept for crash reports, `panic = abort`) and writes `target/package/lenz-<version>-<target>.tar.gz` and its `.sha256`. The GUI goes into an ad-hoc signed `Lenz.app` (Info.plist with the version, `assets/lenz.icns`) with a top-level `lenz` symlink; check `codesign -v --strict` on it and that the Dock shows the logo from launch to quit. The release identifier and Git revision are embedded in crash diagnostics; the version in About comes from the workspace version, not the filename.

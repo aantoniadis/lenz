@@ -1,7 +1,9 @@
-# Lenz command-family trial
+# Lenz command family
 
-This branch tests one workspace and a small launcher over four independent applications.
-It adds the Reader sources to the existing Lenz workspace.
+Lenz 0.0.2 ships one workspace and a small launcher over four independent applications; this page began
+as the trial that brought the Reader sources into the Lenz workspace, and keeps that record below.
+Release packages install the launcher as `lenz` beside `lenz-code`, `lenz-code-tui`, `lenz-diff` and
+`lenz-diff-tui`; from a checkout, `scripts/try-launcher.sh` stages the same names.
 
 ```sh
 scripts/try-launcher.sh
@@ -31,21 +33,23 @@ Bare `lenz` opens the reader in the current directory; a path opens that file or
 Only `diff` is a reserved application selector. Paths named `code`, `log` and `merge` go to
 the reader like other paths; use `lenz ./diff` or an absolute path to read something named `diff`.
 
-## Migrating existing comparison commands
+## Migrating from 0.0.1
 
-The staged launcher now defaults to the reader. Existing comparison commands need the `diff`
-prefix, or the separate `lenz-diff` executable:
+`lenz` now opens the reader. Comparison commands need the `diff` prefix, or the separate
+`lenz-diff` executable:
 
-| Previous command | Staged launcher command |
+| 0.0.1 command | 0.0.2 command |
 | --- | --- |
 | `lenz left right` | `lenz diff left right` |
 | `lenz log` | `lenz diff log` |
 | `lenz merge ...` | `lenz diff merge ...` |
+| `lenz pr <n>`, `lenz report --last` | `lenz diff pr <n>`, `lenz diff report --last` |
+| `lenz-tui ...` | `lenz diff --tui ...` or `lenz-diff-tui ...` |
 
 Git difftool and mergetool command strings likewise become
 `lenz diff "$LOCAL" "$REMOTE"` and
 `lenz diff merge "$BASE" "$LOCAL" "$REMOTE" "$MERGED"`.
-This trial changes no installed Git configuration. Reader arguments are forwarded to its existing
+Lenz changes no installed Git configuration: update yours by hand. Reader arguments are forwarded to its existing
 executable; use the explicit Diff command for comparisons instead of supplying two paths to the reader.
 
 Reader's code is under `crates/reader-core`, `crates/reader-gui` and `crates/reader-tui`.
@@ -53,10 +57,10 @@ Both reader adapters share the reader core; terminal Code and Diff have no GUI d
 Reader documentation is [here](code/README.md), with terminal controls and capability limits
 [in the TUI guide](code/tui.md). Application behavior remains in the existing respective cores.
 
-This is a local command/workspace experiment, not a release migration. Existing Cargo package
-and build-artifact names, window branding, configuration directories, desktop entries and release
-packaging remain as they were. In particular, `target/release/lenz` remains the original GUI;
-use the **staged** `target/launcher-trial/lenz` to try the command family. The staging script
+Cargo package and build-artifact names, window branding and configuration directories remain as
+they were; only release packaging installs the new names (with **Lenz Code** and **Lenz Diff**
+desktop entries on Linux). In particular, `target/release/lenz` remains the Diff GUI; use the
+**staged** `target/launcher-trial/lenz` to try the command family from a checkout. The staging script
 creates aliases to the built applications and copies the tiny launcher; it does not combine
 their dependencies or retain an extra launcher process.
 
