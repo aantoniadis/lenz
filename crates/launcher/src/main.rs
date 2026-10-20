@@ -35,10 +35,12 @@ fn main() -> ExitCode {
         }
         _ => "lenz-code",
     };
-    let error = match env::current_exe() {
+    // The apps sit beside the real launcher: `lenz` on PATH may be a symlink to it (Homebrew, the macOS bundle), and
+    // macOS reports the symlink's path.
+    let error = match env::current_exe().map(|path| std::fs::canonicalize(&path).unwrap_or(path)) {
         Ok(mut path) => { path.set_file_name(binary); Command::new(path).args(args).exec() }
         Err(error) => error,
     };
-    eprintln!("lenz: cannot start {binary}: {error}. Keep the Lenz executables together; rebuild with scripts/try-launcher.sh.");
+    eprintln!("lenz: cannot start {binary}: {error}. Keep the Lenz executables together: reinstall Lenz, or rebuild with scripts/try-launcher.sh.");
     ExitCode::from(if error.kind() == io::ErrorKind::NotFound { 127 } else { 126 })
 }
