@@ -18,7 +18,7 @@ pub fn run() -> ExitCode {
     let (mut request, mut set, launch) = match load(&args) {
         Ok(loaded) => loaded,
         Err(LoadError::Usage(msg)) => {
-            crate::diagnostics::user_error(&msg, "Check the command arguments; lenz --help lists them.");
+            crate::diagnostics::user_error(&msg, "Check the command arguments; lenz diff --help lists them.");
             return ExitCode::from(2);
         }
         Err(LoadError::Failed(msg)) => {
@@ -68,7 +68,7 @@ pub fn run() -> ExitCode {
         (cli::Launch::Merge(cli::Merge::List(paths)), root) => {
             let cwd = std::env::current_dir().unwrap_or_default();
             let Some(root) = root.or_else(|| changeset::toplevel(&cwd).ok()) else {
-                eprintln!("lenz merge: not inside a git repository");
+                eprintln!("lenz diff merge: not inside a git repository");
                 return ExitCode::from(2);
             };
             let filter = ui::conflict_list::from_top(&root, &cwd, paths);
@@ -91,7 +91,7 @@ pub fn run() -> ExitCode {
         (cli::Launch::Pr(target), root) => {
             let root = root.or_else(|| changeset::toplevel(&std::env::current_dir().unwrap_or_default()).ok());
             let Some(root) = root else {
-                eprintln!("lenz pr: run it inside a clone of the pull request's repository");
+                eprintln!("lenz diff pr: run it inside a clone of the pull request's repository");
                 return ExitCode::from(2);
             };
             match ui::pr_view::open(&root, target.as_deref()) {
@@ -142,7 +142,7 @@ pub fn run() -> ExitCode {
     }
     if set.comparisons.is_empty() && request.launch!=cli::Launch::About {
         if merging.is_some() || picking.is_some() {
-            eprintln!("lenz merge: nothing to merge, the versions are identical");
+            eprintln!("lenz diff merge: nothing to merge, the versions are identical");
             return ExitCode::from(2);
         }
         eprintln!("no differences");
@@ -356,7 +356,7 @@ fn open_chosen(args: &[String]) -> u8 {
         }
         Err(error) => error,
     };
-    crate::diagnostics::failure("Open repository", &error.to_string(), "Run lenz inside the repository.");
+    crate::diagnostics::failure("Open repository", &error.to_string(), "Run lenz diff inside the repository.");
     2
 }
 
@@ -380,7 +380,7 @@ fn load(args: &[String]) -> Result<Loaded, LoadError> {
     let cwd = std::env::current_dir().map_err(|e| LoadError::Failed(format!("lenz: current directory: {e}")))?;
     let mut request = cli::parse(args, &cwd).map_err(|cli::UsageError(msg)| LoadError::Usage(msg))?;
     if matches!(request.launch, cli::Launch::Merge(cli::Merge::List(_))) && changeset::toplevel(&cwd).is_err() {
-        return Err(LoadError::Usage("lenz merge: not inside a git repository (give BASE LOCAL REMOTE MERGED to merge plain files)".into()));
+        return Err(LoadError::Usage("lenz diff merge: not inside a git repository (give BASE LOCAL REMOTE MERGED to merge plain files)".into()));
     }
     if matches!(request.spec, changeset::Spec::Git { .. }) && changeset::toplevel(&cwd).is_err() {
         return Err(LoadError::Usage("lenz: not inside a git repository (run it in one, or give two files or folders to compare)".into()));

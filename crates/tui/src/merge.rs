@@ -134,7 +134,7 @@ impl Merger {
         if let Some(result)=self.report_request.poll(){
             changed=true;
             match result {
-                Ok(report)=>{self.workspace.notice=Some(format!("Review report: {}",report.path.display()));if let Err(error)=lenz::open::browse(&report.issue_url){self.workspace.notice=Some(format!("{error}; use lenz-tui report --last --print"));}},
+                Ok(report)=>{self.workspace.notice=Some(format!("Review report: {}",report.path.display()));if let Err(error)=lenz::open::browse(&report.issue_url){self.workspace.notice=Some(format!("{error}; use lenz diff --tui report --last --print"));}},
                 Err(error)=>self.workspace.notice=Some(error.to_string()),
             }
         }

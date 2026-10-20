@@ -44,8 +44,8 @@ impl PrError {
         match self {
             PrError::GhMissing => "Install the GitHub CLI (gh), then retry.",
             PrError::GhLoggedOut => "Sign in with gh auth login, then retry.",
-            PrError::NoPullRequest => "Name a pull request: lenz pr <number> or lenz pr <url>.",
-            PrError::NotInClone(_) => "Run lenz pr from inside a clone of the pull request's repository.",
+            PrError::NoPullRequest => "Name a pull request: lenz diff pr <number> or lenz diff pr <url>.",
+            PrError::NotInClone(_) => "Run lenz diff pr from inside a clone of the pull request's repository.",
             PrError::Gh(_) => "Check gh auth status and network access, then retry.",
             PrError::Git(_) => "Check the repository's Git state and remotes, then retry.",
         }
@@ -63,7 +63,7 @@ impl fmt::Display for PrError {
             PrError::NoPullRequest => write!(f, "lenz: no pull request for the current branch"),
             PrError::NotInClone(repo) => write!(
                 f,
-                "lenz: this pull request belongs to {repo}; run `lenz pr` inside a clone of it (e.g. `gh repo clone {repo}`)"
+                "lenz: this pull request belongs to {repo}; run `lenz diff pr` inside a clone of it (e.g. `gh repo clone {repo}`)"
             ),
             PrError::Gh(msg) => write!(f, "lenz: gh: {msg}"),
             PrError::Git(msg) => write!(f, "lenz: git: {msg}"),

@@ -504,7 +504,7 @@ impl ReportRequest {
             Ok(result) => result,
             Err(TryRecvError::Empty) => return None,
             Err(TryRecvError::Disconnected) => Err(io::Error::other(
-                "Report lookup was interrupted; use lenz report --last --print",
+                "Report lookup was interrupted; use lenz diff report --last --print",
             )),
         };
         self.inbox = None;

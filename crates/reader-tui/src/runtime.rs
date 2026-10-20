@@ -24,8 +24,9 @@ use reader_core::session::{Completion, Config};
 use crate::app::App;
 
 const HELP: &str = "Lenz Reader terminal
-Usage: lenz-reader-tui [FILE|FOLDER]
-       lenz-reader-tui --help | --version
+Usage: lenz --tui [FILE|FOLDER]
+       lenz --tui --help | --version
+lenz-code-tui takes the same arguments without the --tui prefix.
 
 F10 or : commands; F1 help; Ctrl-K search everywhere; Ctrl-P find file;
 Ctrl-Alt-Shift-N symbols; Ctrl-Shift-A actions; Tab switches search scope;
@@ -240,7 +241,7 @@ pub fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        eprintln!("lenz-reader-tui needs an interactive terminal on stdin and stdout");
+        eprintln!("lenz --tui needs an interactive terminal on stdin and stdout");
         return ExitCode::from(2);
     }
     let path = reader_core::session::launch_target(

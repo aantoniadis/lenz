@@ -66,13 +66,14 @@ pub struct UsageError(pub String);
 /// `--help` or `-h` on its own.
 pub fn wants_help(args: &[String]) -> bool { matches!(args, [a] if a == "--help" || a == "-h") }
 
-pub const USAGE: &str = "usage: lenz [options] [--staged] [<rev> [<rev>]] [-- <path>...]
-       lenz [options] [--no-index] <left> <right>
-       lenz log [<rev>...] [-- <path>...] | lenz log --follow <file>
-       lenz --about
-       lenz report --last [--print]
-       lenz pr [<number>|<url>]
-       lenz merge [[--] <path>...] | lenz merge <base> <local> <remote> <merged>
+pub const USAGE: &str = "usage: lenz diff [options] [--staged] [<rev> [<rev>]] [-- <path>...]
+       lenz diff [options] [--no-index] <left> <right>
+       lenz diff log [<rev>...] [-- <path>...] | lenz diff log --follow <file>
+       lenz diff --about
+       lenz diff report --last [--print]
+       lenz diff pr [<number>|<url>]
+       lenz diff merge [[--] <path>...] | lenz diff merge <base> <local> <remote> <merged>
+lenz-diff takes the same arguments without the diff prefix.
 options: --no-untracked, --name <label>, -w | --whitespace=default|trim|ignore|ignore-chunks, -i,
          --highlight=word|char|line, --scroll=shared|aligned|padded|independent, --blame, --line <n>";
 
