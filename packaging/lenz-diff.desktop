@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Lenz Diff
+Comment=Side-by-side diff viewer, Git client and merge tool
+Exec=lenz-diff
+Icon=lenz
+Terminal=false
+Categories=Development;
+StartupWMClass=lenz

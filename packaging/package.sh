@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Build a release tarball for this machine's target into target/package/ (nothing is uploaded):
 #   packaging/package.sh 0.2.0
-# Produces lenz-<version>-<target>.tar.gz (lenz, lenz-tui, README, licences) and its .sha256. On macOS the GUI
-# is inside Lenz.app, so the Dock shows the logo from launch to quit, and `lenz` is a symlink into it.
+# Produces lenz-<version>-<target>.tar.gz (the lenz launcher and its four apps, README, licences) and its .sha256.
+# On macOS the executables are inside Lenz.app, so the Dock shows the logo from launch to quit, with a top-level
+# symlink into it for each.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 version=${1:?usage: packaging/package.sh <version>}
@@ -23,10 +24,11 @@ artifact_json=$(mktemp)
 trap 'rm -f "$artifact_json"' EXIT
 # Packaging is host-only; Cargo's reported path also respects CARGO_TARGET_DIR. Each package builds on its own so
 # the TUI does not pick up the GUI's features through Cargo feature unification.
+# build <package> <executable>
 build() {
     LENZ_BUILD_ID="$version ($(git rev-parse --short HEAD))" cargo build --profile dist --locked -p "$1" \
         --target "$target" --message-format=json-render-diagnostics > "$artifact_json"
-    python3 - "$artifact_json" "$1" <<'PY'
+    python3 - "$artifact_json" "$2" <<'PY'
 import json
 from pathlib import Path
 import sys
@@ -55,9 +57,15 @@ case "$checkout$cargo_home" in *[[:space:]]*) echo "build paths must not contain
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$checkout=/lenz --remap-path-prefix=$cargo_home=/cargo"
 cmap="-ffile-prefix-map=$checkout=/lenz -ffile-prefix-map=$cargo_home=/cargo"
 export CFLAGS="${CFLAGS:+$CFLAGS }$cmap" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$cmap"
-gui=$(build lenz)
-tui=$(build lenz-tui)
-for binary in "$gui" "$tui"; do
+# The installed name of each executable, and the package and Cargo executable it comes from.
+names=(lenz lenz-code lenz-code-tui lenz-diff lenz-diff-tui)
+packages=(lenz-launcher reader-gui reader-tui lenz lenz-tui)
+executables=(lenz-launcher lenz-reader lenz-reader-tui lenz lenz-tui)
+built=()
+for i in "${!names[@]}"; do
+    built+=("$(build "${packages[$i]}" "${executables[$i]}")")
+done
+for binary in "${built[@]}"; do
     if grep -qaF "$HOME/" "$binary"; then
         echo "$binary still contains $HOME/; nothing packaged:" >&2
         strings -n 8 "$binary" 2>/dev/null | sed -n "s|.*\($HOME/[^\"' ]*\).*|\1|p" | sort | uniq -c | sort -rn | head -10 >&2 || true
@@ -71,7 +79,9 @@ mkdir -p "$out/$name"
 if [[ $target == *-apple-darwin ]]; then
     app="$out/$name/Lenz.app/Contents"
     mkdir -p "$app/MacOS" "$app/Resources"
-    cp "$gui" "$app/MacOS/lenz"
+    for i in "${!names[@]}"; do
+        cp "${built[$i]}" "$app/MacOS/${names[$i]}"
+    done
     cp assets/lenz.icns "$app/Resources/lenz.icns"
     cat > "$app/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -91,15 +101,18 @@ if [[ $target == *-apple-darwin ]]; then
 PLIST
     # The linker's ad-hoc signature covers the bare executable, not the bundle around it; sign the bundle.
     codesign --force --sign - "$out/$name/Lenz.app"
-    ln -s Lenz.app/Contents/MacOS/lenz "$out/$name/lenz"
+    for executable in "${names[@]}"; do
+        ln -s "Lenz.app/Contents/MacOS/$executable" "$out/$name/$executable"
+    done
 else
-    cp "$gui" "$out/$name/lenz"
+    for i in "${!names[@]}"; do
+        cp "${built[$i]}" "$out/$name/${names[$i]}"
+    done
 fi
-cp "$tui" "$out/$name/lenz-tui"
 cp README.md LICENSE-MIT LICENSE-THEMES "$out/$name/"
 cp crates/engine/LICENSE "$out/$name/LICENSE-APACHE"
 cp crates/engine/NOTICE "$out/$name/NOTICE"
-cp packaging/lenz.desktop assets/lenz-icon.png "$out/$name/"
+cp packaging/lenz.desktop packaging/lenz-diff.desktop assets/lenz-icon.png "$out/$name/"
 # Files owned by root, without the builder's user or (on macOS) extended attributes and ._ files.
 if tar --version 2>/dev/null | grep -q bsdtar; then
     COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname root --gname wheel --no-xattrs --no-mac-metadata \

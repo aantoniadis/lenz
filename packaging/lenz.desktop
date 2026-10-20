@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Lenz
-Comment=Side-by-side diff viewer, Git client and merge tool
-Exec=lenz
+Name=Lenz Code
+Comment=Fast code reader with language-server navigation
+Exec=lenz-code %f
 Icon=lenz
 Terminal=false
 Categories=Development;
-StartupWMClass=lenz
+StartupWMClass=lenz-reader
