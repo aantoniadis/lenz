@@ -8,8 +8,9 @@ use lenz_content::{
     theme::{ThemeCommand, ThemeSelection},
 };
 use reader_core::{
-    actions::{CatalogAction, InterfaceAction},
+    actions::{CatalogAction, CommandGroup, InterfaceAction},
     breadcrumbs::SiblingTarget,
+    chrome::MenuTarget,
     navigation::{Chosen, DoubleShift, Scope},
     search::{Group, Row},
     session::{
@@ -34,6 +35,8 @@ pub(crate) enum Focus {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Prompt {
     Commands,
+    /// The application menu under the toolbar's button: its groups (`None`) or one group's commands.
+    Menu(Option<CommandGroup>),
     LanguageServer,
     Context {
         x: u16,
@@ -648,6 +651,12 @@ impl App {
         self.drag = None;
         self.hover = None;
     }
+    pub(crate) fn open_menu(&mut self, group: Option<CommandGroup>, at: usize) {
+        self.prompt(Prompt::Menu(group));
+        if let Some(modal) = &mut self.modal {
+            modal.at = at;
+        }
+    }
     fn open_navigation(&mut self, scope: Scope) {
         self.close_modal();
         self.prompt(Prompt::Navigation);
@@ -809,6 +818,20 @@ impl App {
                         .collect(),
                 })
                 .collect(),
+            Prompt::Menu(group) => self
+                .session
+                .menu(group)
+                .into_iter()
+                .map(|r| Choice {
+                    label: r.label,
+                    detail: None,
+                    disabled: r.disabled,
+                    target: match r.target {
+                        MenuTarget::Run(id) => ChoiceTarget::Action(id),
+                        _ => ChoiceTarget::Information,
+                    },
+                })
+                .collect(),
             Prompt::Commands => self
                 .session
                 .actions()
@@ -888,7 +911,7 @@ impl App {
             match &m.kind {
                 Prompt::LanguageServer => "Language server status · ↑↓ scroll · Enter runs action",
                 Prompt::Commands => "Commands · type to filter",
-                Prompt::Context { .. } => "",
+                Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
@@ -997,6 +1020,7 @@ impl App {
                 | Prompt::Details(_)
                 | Prompt::Mnemonic
                 | Prompt::Context { .. }
+                | Prompt::Menu(_)
                 | Prompt::LanguageServer
                 | Prompt::Themes
         ) {
@@ -1050,6 +1074,14 @@ impl App {
         {
             self.copy = Some(body.clone());
             return;
+        }
+        // As in the GUI: Left or Escape goes back from a group to the groups, Right opens a group.
+        match (&kind, key.code) {
+            (Prompt::Menu(Some(group)), KeyCode::Left | KeyCode::Esc) => {
+                return self.open_menu(None, CommandGroup::ALL.iter().position(|g| g == group).unwrap_or(0));
+            }
+            (Prompt::Menu(None), KeyCode::Right) => return self.accept(),
+            _ => {}
         }
         if key.code == KeyCode::Esc {
             self.close_modal();
@@ -1219,6 +1251,19 @@ impl App {
                     self.accept_navigation(search.revision, at);
                 }
             }
+            Prompt::Menu(group) => match self.session.menu(group).get(at).map(|r| r.target) {
+                Some(MenuTarget::Group(group)) => self.open_menu(Some(group), 1),
+                Some(MenuTarget::Back) => self.open_menu(
+                    None,
+                    CommandGroup::ALL.iter().position(|g| Some(*g) == group).unwrap_or(0),
+                ),
+                Some(MenuTarget::Run(id)) => {
+                    self.close_modal();
+                    self.run(id);
+                }
+                Some(MenuTarget::AllCommands) => self.open_navigation(Scope::Actions),
+                None => {}
+            },
             Prompt::Context { .. } => {
                 let choice = self.choices().get(at).cloned();
                 self.close_modal();
@@ -1773,7 +1818,7 @@ impl App {
         if event.kind == MouseEventKind::Moved {
             if matches!(
                 self.modal.as_ref().map(|m| &m.kind),
-                Some(Prompt::Context { .. })
+                Some(Prompt::Context { .. } | Prompt::Menu(_))
             ) {
                 if self.layout.modal_rows.contains(point)
                     && let Some(&at) = self
@@ -1874,6 +1919,10 @@ impl App {
                     .min(count.saturating_sub(visible));
                 }
             }
+            return;
+        }
+        if event.kind == MouseEventKind::Down(MouseButton::Left) && self.layout.app_menu.contains(point) {
+            self.open_menu(None, 0);
             return;
         }
         if event.kind == MouseEventKind::Down(MouseButton::Left)

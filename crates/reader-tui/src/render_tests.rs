@@ -714,7 +714,7 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
                 assert!(rect.right() <= width);
                 assert!(rect.bottom() <= height);
             }
-            for rect in &a.layout.command_menus {
+            for rect in a.layout.command_menus.iter().chain([&a.layout.app_menu]) {
                 assert!(rect.right() <= width);
                 assert!(rect.bottom() <= height);
             }

@@ -84,8 +84,10 @@ multiplexers and SSH paths may omit them; **Ctrl-K** and the catalog's Search Ev
 typing, selection, held-key repeats and focus loss do not count as double Shift. Ordinary held arrows and query
 characters continue to repeat. Ctrl-Shift-N now finds files; New Window remains in the command palette.
 
-The F10 palette labels commands with the same File, View, Navigate, Find, Selection and Language Servers groups
-as the GUI's ☰ menu; type a group name followed by `:` to filter that group. The GUI additionally has a clickable
+The toolbar's **☰ Menu** opens the same dropdown as the GUI's ☰ button: the File, View, Navigate, Find, Selection
+and Language Servers groups, Change theme and All commands…; Enter or → opens a group, ← or Esc goes back, and a
+disabled command's reason shows in the footer. The F10 palette labels commands with the same groups; type a group
+name followed by `:` to filter that group. The GUI additionally has a clickable
 Commands button in its status bar; the terminal keeps F10 / Ctrl-Shift-P access to the same catalog.
 
 The top row follows the GUI: explorer toggle, Back/Forward and the current Markdown or SVG source/preview

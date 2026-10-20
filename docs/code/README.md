@@ -27,7 +27,7 @@ implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy, Ctrl+H type hierar
 Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
 Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition.
 
-The GUI's **☰** button opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
+The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
 existing commands with setting values and disabled reasons; scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go
 back to the groups. **All commands…** and the bottom-right **Commands** button open searchable Actions.
 F10 retains the plain full command menu. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10

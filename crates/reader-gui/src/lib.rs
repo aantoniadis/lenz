@@ -19,6 +19,7 @@ use reader_core::{
     markdown::Preview,
     search::{Fold, Group, Row},
     semantics::hierarchy::Direction,
+    chrome::MenuTarget,
     session::{Command, CommandId, Completion, Config, Layout, MenuEntry, Motion, PlaceList, Rendering, SearchIn, Selection, Session, Split},
     tabs::{Tab, TabId},
 };
@@ -1093,18 +1094,14 @@ impl ReaderView {
             Some(Modal::Commands { at }) => {
                 if let Some(&id) = CommandId::ALL.get(at) { self.run(id, window, cx); }
             }
-            Some(Modal::AppMenu { at }) => {
-                match CommandGroup::ALL.get(at) {
-                    Some(CommandGroup::Application) => self.run(CommandId::ChooseTheme, window, cx),
-                    Some(&group) => self.modal = Some(Modal::CommandGroup { group, at: 1 }),
-                    None => self.open_navigation(reader_core::navigation::Scope::Actions, cx),
-                }
-            }
-            Some(Modal::CommandGroup { group, at }) => {
-                if at == 0 {
-                    self.modal = Some(Modal::AppMenu { at: CommandGroup::ALL.iter().position(|g| *g == group).unwrap_or(0) });
-                } else if let Some(id) = CommandId::ALL.iter().copied().filter(|id| id.group() == group).nth(at - 1) {
-                    self.run(id, window, cx);
+            Some(m @ (Modal::AppMenu { at } | Modal::CommandGroup { at, .. })) => {
+                let group = match m { Modal::CommandGroup { group, .. } => Some(group), _ => None };
+                match self.session.menu(group).get(at).map(|r| r.target) {
+                    Some(MenuTarget::Group(group)) => self.modal = Some(Modal::CommandGroup { group, at: 1 }),
+                    Some(MenuTarget::Back) => self.modal = Some(Modal::AppMenu { at: CommandGroup::ALL.iter().position(|g| Some(*g) == group).unwrap_or(0) }),
+                    Some(MenuTarget::Run(id)) => self.run(id, window, cx),
+                    Some(MenuTarget::AllCommands) => self.open_navigation(reader_core::navigation::Scope::Actions, cx),
+                    None => {}
                 }
             }
             Some(Modal::Themes { ids, at }) => {
@@ -1450,8 +1447,8 @@ impl ReaderView {
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
-            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.len() + 1,
-            Some(Modal::CommandGroup { group, .. }) => CommandId::ALL.iter().filter(|id| id.group() == *group).count() + 1,
+            Some(Modal::AppMenu { .. }) => self.session.menu(None).len(),
+            Some(Modal::CommandGroup { group, .. }) => self.session.menu(Some(*group)).len(),
             Some(Modal::Themes { ids, .. }) => ids.len(),
             Some(Modal::Recent { .. }) => self.session.state().recent().len(),
             None => 0,
@@ -3228,19 +3225,13 @@ impl ReaderView {
                 rows
             }
             Some(Modal::LanguageServer { .. }) => self.server_rows().into_iter().map(|(text, action)| (text, action.and_then(|id| self.session.disabled(id)))).collect(),
-            Some(Modal::AppMenu { .. }) => CommandGroup::ALL.iter().map(|g| match g {
-                CommandGroup::Application => (CommandId::ChooseTheme.label().to_string(), self.session.disabled(CommandId::ChooseTheme)),
-                _ => (format!("{} ›", g.label()), None),
-            }).chain([("All commands…".to_string(), None)]).collect(),
-            Some(Modal::Commands { .. } | Modal::CommandGroup { .. }) => {
-                let group = match self.modal { Some(Modal::CommandGroup { group, .. }) => Some(group), _ => None };
-                let heading = group.map(|g| (format!("‹ All menus — {}", g.label()), None));
-                heading.into_iter().chain(self.session.actions().into_iter().filter(|a| group.is_none_or(|g| a.id.group() == g)).map(|a| (match a.on {
-                    Some(true) => format!("{} (on)", a.label),
-                    Some(false) => format!("{} (off)", a.label),
-                    None => a.label.to_string(),
-                }, a.disabled))).collect()
-            },
+            Some(Modal::AppMenu { .. }) => self.session.menu(None).into_iter().map(|r| (r.label, r.disabled)).collect(),
+            Some(Modal::CommandGroup { group, .. }) => self.session.menu(Some(*group)).into_iter().map(|r| (r.label, r.disabled)).collect(),
+            Some(Modal::Commands { .. }) => self.session.actions().into_iter().map(|a| (match a.on {
+                Some(true) => format!("{} (on)", a.label),
+                Some(false) => format!("{} (off)", a.label),
+                None => a.label.to_string(),
+            }, a.disabled)).collect(),
             Some(Modal::Context { entries, .. }) => entries
                 .iter()
                 .map(|e| match e {

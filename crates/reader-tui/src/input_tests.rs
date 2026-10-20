@@ -1802,12 +1802,80 @@ fn chrome_status_click_opens_copyable_snapshot_and_keeps_document_input_modal() 
 }
 
 #[test]
-fn chrome_menu_button_opens_shared_commands_without_moving_caret() {
+fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_caret() {
     let dir = tempfile::tempdir().unwrap();
-    let mut a = app(dir.path());
+    let path = dir.path().join("note.txt");
+    let bytes = "first\nsecond\n";
+    std::fs::write(&path, bytes).unwrap();
+    let mut a = App::new(config(dir.path()), Some(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    let caret = a.session.state().selection();
+    let kind = |a: &App| a.modal.as_ref().map(|m| m.kind.clone());
+    let labels = |a: &App| a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>();
     draw(&mut a, 100, 26);
     click(&mut a, 2, 0);
-    assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::Commands)));
+    assert_eq!(kind(&a), Some(Prompt::Menu(None)));
+    assert_eq!(labels(&a)[0], "File ›");
+    assert_eq!(labels(&a).last().map(String::as_str), Some("All commands…"));
+    // Typing does not filter the menu.
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(labels(&a).len(), CommandGroup::ALL.len() + 1);
+    // Down Enter opens View; its first row goes back, then the commands with their states.
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Menu(Some(CommandGroup::View))));
+    assert_eq!(labels(&a)[0], "‹ All menus — View");
+    assert!(labels(&a).iter().any(|l| l == "Soft Wrap (off)"));
+    // Left and Escape go back to the groups, at the group left.
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Menu(None)));
+    assert_eq!(a.modal.as_ref().unwrap().at, 1);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Menu(None)));
+    // A click on the heading row goes back too; a click on a command runs it.
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    draw(&mut a, 100, 26);
+    let rows = a.layout.modal_rows;
+    click(&mut a, rows.x + 1, rows.y);
+    assert_eq!(kind(&a), Some(Prompt::Menu(None)));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    draw(&mut a, 100, 26);
+    let wrap = a.choices().iter().position(|c| c.label == "Soft Wrap (off)").unwrap();
+    let row = a.layout.modal_items.iter().position(|i| *i == wrap).unwrap();
+    click(&mut a, rows.x + 1, rows.y + row as u16);
+    assert!(a.modal.is_none() && a.session.state().soft_wrap());
+    // All commands opens the shared action search; a click outside closes the menu.
+    click(&mut a, 2, 0);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Navigation));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut a, 100, 26);
+    click(&mut a, 2, 0);
+    draw(&mut a, 100, 26);
+    click(&mut a, 80, 20);
+    assert!(a.modal.is_none());
+    assert_eq!(a.session.state().selection(), caret);
+    // F10 keeps the full command list, as in the GUI.
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Commands));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // Tiny terminals keep the dropdown inside the frame.
+    for (w, h) in [(30, 8), (12, 4), (2, 2), (1, 1), (0, 0)] {
+        a.handle(Event::Resize(w, h));
+        a.open_menu(Some(CommandGroup::View), 1);
+        draw(&mut a, w, h);
+        let m = a.layout.modal;
+        assert!(m.right() <= w && m.bottom() <= h, "{w}x{h}: {m:?}");
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(a.modal.is_none());
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), bytes);
 }
 
 #[test]
