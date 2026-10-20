@@ -263,7 +263,7 @@ pub fn versions(named: Vec<(String, Option<Vec<u8>>)>) -> Vec<Version> {
         .collect()
 }
 
-/// `lenz merge BASE LOCAL REMOTE MERGED` for a file that can't be merged line by line; `None` when it can.
+/// `lenz diff merge BASE LOCAL REMOTE MERGED` for a file that can't be merged line by line; `None` when it can.
 pub fn open_files(
     base: &Path,
     ours: &Path,
@@ -271,7 +271,7 @@ pub fn open_files(
     merged: &Path,
     cwd: &Path,
 ) -> Result<Option<Opened>, String> {
-    let read = |p: &Path| std::fs::read(p).map_err(|e| format!("lenz merge: {}: {e}", p.display()));
+    let read = |p: &Path| std::fs::read(p).map_err(|e| format!("lenz diff merge: {}: {e}", p.display()));
     let (b, o, t) = (read(base)?, read(ours)?, read(theirs)?);
     let Some(why) = [&o, &t, &b].iter().find_map(|x| unmergeable(x)) else {
         return Ok(None);

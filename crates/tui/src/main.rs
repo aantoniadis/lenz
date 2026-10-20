@@ -45,20 +45,21 @@ use crossterm::{event::{self, EnableMouseCapture, DisableMouseCapture, EnableBra
 use lenz::cli::{self, Launch, Request};
 
 const HELP: &str = "Lenz terminal
-usage: lenz-tui [options] [--staged] [<rev> [<rev>]] [-- <path>...]
-       lenz-tui [options] [--no-index] <left> <right>
-       lenz-tui log [<rev>...] [-- <path>...] | log --follow <file>
-       lenz-tui pr [<number>|<url>]
-       lenz-tui merge [[--] <path>...] | merge <base> <local> <remote> <merged>
+usage: lenz diff --tui [options] [--staged] [<rev> [<rev>]] [-- <path>...]
+       lenz diff --tui [options] [--no-index] <left> <right>
+       lenz diff --tui log [<rev>...] [-- <path>...] | log --follow <file>
+       lenz diff --tui pr [<number>|<url>]
+       lenz diff --tui merge [[--] <path>...] | merge <base> <local> <remote> <merged>
+lenz-diff-tui takes the same arguments without the diff --tui prefix.
 
-Same comparison options as lenz, including --blame and --line N.
+Same comparison options as lenz diff, including --blame and --line N.
 Optional icons: LENZ_ICONS=nerd (Nerd Font Mono); View menu toggles icons.
 n/p changes; [/] files; / find; f files; : commands; Ctrl-R repository;
 A applied history; Ctrl-Z/Ctrl-Y undo/redo drafts; Ctrl-S saves;
 Alt-Shift-arrows apply to draft; commands discard unsaved/revert hunk; b blame; ? help.
-lenz-tui report --last [--print] retrieves the last error and GitHub issue draft.";
+lenz diff --tui report --last [--print] retrieves the last error and GitHub issue draft.";
 
-fn request(args:&[String],cwd:&std::path::Path)->Result<Request,String>{cli::parse(args,cwd).map_err(|e|e.0.replace("lenz","lenz-tui"))}
+fn request(args:&[String],cwd:&std::path::Path)->Result<Request,String>{cli::parse(args,cwd).map_err(|e|e.0.replace("lenz-diff takes the same arguments without the diff prefix","lenz-diff-tui takes the same arguments without the diff --tui prefix").replace("lenz diff","lenz diff --tui"))}
 
 enum Screen { Diff(Box<app::App>), Merge{controller:Box<merge::Merger>,parent:Option<usize>} }
 struct Screens {themes:lenz::theme::ThemeService,chooser:Option<themes::Chooser>, views:Vec<Screen>, active:usize, exit_code:Option<u8>, /** Pixel artwork via kitty graphics (kitty, Ghostty). */ kitty:bool, about_graphics:Option<(md_images::Picture,md_images::Images)>, sixel:Option<bool>, about_sixel:Option<about_sixel::Logo>, cell_pixels:Option<crossterm::terminal::WindowSize>, sixel_repaint:bool, /** Image deletes of closed views, written with the next frame. */ backlog:Vec<String>, #[cfg(test)] _theme_scratch:Option<tempfile::TempDir> }
@@ -248,9 +249,9 @@ fn main() -> ExitCode {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let request = request(&args, &cwd)?;
         if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-            return Err("lenz-tui needs an interactive terminal on stdin and stdout".into());
+            return Err("lenz diff --tui needs an interactive terminal on stdin and stdout".into());
         }
-        run(&args, request, cwd).map_err(|e| { lenz::diagnostics::failure("Terminal input/output", &e.to_string(), "Check that the terminal is available, then restart lenz-tui."); format!("lenz-tui: {e}") })
+        run(&args, request, cwd).map_err(|e| { lenz::diagnostics::failure("Terminal input/output", &e.to_string(), "Check that the terminal is available, then restart lenz diff --tui."); format!("lenz diff --tui: {e}") })
     })();
     match result {
         Ok(code) => ExitCode::from(code),

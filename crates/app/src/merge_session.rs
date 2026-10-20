@@ -142,14 +142,14 @@ fn lines_of(text: &str) -> Vec<&str> {
 }
 
 fn read(path: &Path) -> Result<crate::encoding::Decoded, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("lenz merge: {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path).map_err(|e| format!("lenz diff merge: {}: {e}", path.display()))?;
     decode(&bytes, &path.display().to_string())
 }
 
 fn decode(bytes: &[u8], what: &str) -> Result<crate::encoding::Decoded, String> {
     if crate::changeset::looks_binary(bytes) {
         return Err(format!(
-            "lenz merge: {what} is binary; it opens in the Version Picker"
+            "lenz diff merge: {what} is binary; it opens in the Version Picker"
         ));
     }
     lossless(what, crate::encoding::decode(bytes, None))
@@ -159,7 +159,7 @@ fn decode(bytes: &[u8], what: &str) -> Result<crate::encoding::Decoded, String> 
 fn lossless(what: &str, d: crate::encoding::Decoded) -> Result<crate::encoding::Decoded, String> {
     if d.lossy {
         return Err(format!(
-            "lenz merge: {what} has bytes that aren't valid {}; merging it as text would corrupt them",
+            "lenz diff merge: {what} has bytes that aren't valid {}; merging it as text would corrupt them",
             d.encoding
         ));
     }
@@ -263,7 +263,7 @@ pub fn open_conflict(root: &Path, file: &conflicts::ConflictedFile) -> Result<Op
     Ok(opened)
 }
 
-/// `lenz merge BASE LOCAL REMOTE MERGED`: the three versions git wrote to temp files, the Result to `merged`.
+/// `lenz diff merge BASE LOCAL REMOTE MERGED`: the three versions git wrote to temp files, the Result to `merged`.
 pub fn open_files(
     base: &Path,
     ours: &Path,
@@ -341,7 +341,7 @@ fn assemble(
     let (snapshot, file) = match write::Snapshot::read(merged, None) {
         Ok((s, d)) => (s, Some(lossless(&path, d)?.text)),
         Err(_) if !merged.exists() => (write::Snapshot::missing(merged, &o), None),
-        Err(e) => return Err(format!("lenz merge: {e}")),
+        Err(e) => return Err(format!("lenz diff merge: {e}")),
     };
     let style = marker_style(setup.style);
     let (ol, bl, tl) = (lines_of(&o.text), lines_of(&b.text), lines_of(&t.text));
