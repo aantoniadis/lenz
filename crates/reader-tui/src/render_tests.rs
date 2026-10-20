@@ -780,3 +780,66 @@ fn search_dialog_shows_labelled_fields_toggles_and_refusal_in_both_appearances_a
         }
     }
 }
+
+#[test]
+fn breadcrumbs_separate_crumbs_shrink_outer_ones_and_keep_the_focused_one_in_both_appearances() {
+    use crate::app::{Focus, Prompt};
+    use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use reader_core::breadcrumbs::Crumb;
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("proj");
+        std::fs::create_dir_all(root.join("crates/reader/src/ui")).unwrap();
+        let mut a = app(dir.path(), dark);
+        a.dispatch(Command::OpenRoot(root.clone()));
+        settle(&mut a, |a| a.session.state().project().is_some());
+        let source = b"struct S;\nimpl S {\n    fn render_toolbar(&self) {\n        let x = 1;\n    }\n}\n";
+        open(&mut a, &root, "crates/reader/src/ui/widgets.rs", source);
+        a.dispatch(Command::SetBreadcrumbs(true));
+        a.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 4, column: None }));
+        settle(&mut a, |a| {
+            a.session.state().breadcrumbs_for(0).is_some_and(|b| {
+                b.crumbs.first().is_some_and(|c| c.name() == "crates")
+                    && b.crumbs.iter().filter(|c| matches!(c, Crumb::Decl { .. })).count() == 2
+            })
+        });
+        let row = |buffer: &Buffer, y: u16| {
+            (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()
+        };
+        let buffer = draw(&mut a, 100, 8);
+        let y = a.layout.panes[0].crumbs[0].1.y;
+        let bar = row(&buffer, y);
+        assert!(bar.contains(" crates › reader › src › ui › widgets.rs › impl S › render_toolbar "), "{bar}");
+        assert!(!bar.contains("render_toolbar ›"), "no separator after the innermost: {bar}");
+        let (_, innermost) = *a.layout.panes[0].crumbs.last().unwrap();
+        assert!(buffer[(innermost.x + 1, y)].modifier.contains(Modifier::BOLD));
+        // Narrow: folders, then the outer declaration, shrink to "…"; the file and the innermost stay.
+        let shown = |a: &App| a.layout.panes[0].crumbs.iter().map(|c| c.0).collect::<Vec<_>>();
+        let buffer = draw(&mut a, 60, 8);
+        let bar = row(&buffer, y);
+        assert!(bar.contains(" … › widgets.rs › impl S › render_toolbar "), "{bar}");
+        assert_eq!(shown(&a), vec![4, 5, 6], "{bar}");
+        let buffer = draw(&mut a, 52, 8);
+        let bar = row(&buffer, y);
+        assert!(bar.contains(" … › widgets.rs › … › render_toolbar"), "{bar}");
+        assert_eq!(shown(&a), vec![4, 6], "{bar}");
+        // A focused crumb stays shown, highlighted.
+        a.focus = Focus::Breadcrumbs;
+        a.crumb_at = 1;
+        let buffer = draw(&mut a, 60, 8);
+        let bar = row(&buffer, y);
+        assert!(bar.contains(" reader "), "{bar}");
+        let (_, r) = *a.layout.panes[0].crumbs.iter().find(|c| c.0 == 1).unwrap();
+        assert_eq!(buffer[(r.x + 1, y)].bg, color(a.session.state().palette().selected_bg));
+        a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: r.x + 1, row: r.y, modifiers: KeyModifiers::NONE }));
+        assert_eq!(a.modal.as_ref().map(|m| &m.kind), Some(&Prompt::Siblings { pane: 0, crumb: 1 }));
+        for (width, height) in [(34, 8), (12, 4), (3, 3), (1, 2), (0, 0)] {
+            a.handle(Event::Resize(width, height));
+            draw(&mut a, width, height);
+            for (_, r) in a.layout.panes.iter().flat_map(|p| &p.crumbs) {
+                assert!(r.right() <= width && r.bottom() <= height, "{width}x{height}: {r:?}");
+            }
+        }
+        assert_eq!(std::fs::read(root.join("crates/reader/src/ui/widgets.rs")).unwrap(), source);
+    }
+}

@@ -1426,39 +1426,109 @@ fn draw_pane(
         x += width;
     }
     if state.breadcrumbs() && area.height > 1 {
-        let mut x = area.x;
+        let bar_row = Rect::new(area.x, area.y + 1, area.width, 1);
+        fill(frame.buffer_mut(), bar_row, style(p.fg, p.bg));
         if let Some(bar) = state.breadcrumbs_for(pane) {
+            use lenz_content::highlight::DeclKind;
+            use reader_core::breadcrumbs::Crumb;
+            let nerd = app.nerd_icons;
+            let file = bar.crumbs.iter().find_map(|c| match c {
+                Crumb::File { name } => Some(name.as_ref()),
+                _ => None,
+            });
+            let note = if bar.large { " large file " } else { "" };
+            let focused =
+                (focus == Focus::Breadcrumbs && pane == state.focused_pane()).then_some(crumb_at);
+            // Each crumb is padded by a cell on each side, with a "›" between; a file's icon takes two more.
+            let kept = bar.fit(
+                |name| (name.width() + 2 + if nerd && file == Some(name) { 2 } else { 0 }) as f32,
+                1.0,
+                f32::from(area.width.saturating_sub(note.width() as u16)),
+                focused,
+            );
+            let last = bar.crumbs.len().saturating_sub(1);
+            let (mut x, mut gap) = (area.x, false);
             for (i, crumb) in bar.crumbs.iter().enumerate() {
-                use reader_core::breadcrumbs::Crumb;
-                let name = match crumb {
-                    Crumb::Folder { name, .. } | Crumb::File { name } => name.as_ref(),
-                    Crumb::Decl { name, .. } => name.as_ref(),
+                let shown = if kept.get(i) == Some(&true) {
+                    gap = false;
+                    Some(crumb)
+                } else if !gap {
+                    gap = true;
+                    None
+                } else {
+                    continue;
                 };
-                let text = format!("{name} › ");
-                let width = (UnicodeWidthStr::width(text.as_str()) as u16)
-                    .min(area.right().saturating_sub(x));
+                if x > area.x {
+                    line(
+                        frame.buffer_mut(),
+                        Rect::new(x, bar_row.y, area.right().saturating_sub(x).min(1), 1),
+                        "›",
+                        style(p.dim, p.bg),
+                    );
+                    x += 1;
+                }
+                let text = match shown {
+                    Some(Crumb::File { name }) => {
+                        format!(" {} ", lenz_content::file_icons::file(name).label(nerd, name))
+                    }
+                    Some(c) => format!(" {} ", c.name()),
+                    None => " … ".to_owned(),
+                };
+                let width = (text.width() as u16).min(area.right().saturating_sub(x));
                 if width == 0 {
                     break;
                 }
-                let r = Rect::new(x, area.y + 1, width, 1);
-                geometry.crumbs.push((i, r));
+                let r = Rect::new(x, bar_row.y, width, 1);
+                let is_focused = shown.is_some() && focused == Some(i);
+                let fg = match shown {
+                    None | Some(Crumb::Folder { .. }) => p.dim,
+                    Some(Crumb::File { .. }) => p.fg,
+                    Some(Crumb::Decl { kind, .. }) => match kind {
+                        DeclKind::Function | DeclKind::Method | DeclKind::Component => {
+                            p.syntax.function
+                        }
+                        DeclKind::Type | DeclKind::Interface | DeclKind::Impl | DeclKind::Module => {
+                            p.syntax.type_
+                        }
+                        DeclKind::Constant => p.syntax.constant,
+                        DeclKind::Macro => p.syntax.macro_,
+                        DeclKind::Element | DeclKind::Selector => p.syntax.tag,
+                        DeclKind::Heading => p.accent,
+                    },
+                };
+                let bg = if is_focused { p.selected_bg } else { p.bg };
                 line(
                     frame.buffer_mut(),
                     r,
                     &text,
-                    style(
-                        if focus == Focus::Breadcrumbs
-                            && pane == state.focused_pane()
-                            && i == crumb_at
-                        {
-                            p.accent
+                    style(if is_focused { p.accent } else { fg }, bg).add_modifier(
+                        if is_focused || (shown.is_some() && i == last) {
+                            Modifier::BOLD
                         } else {
-                            p.dim
+                            Modifier::empty()
                         },
-                        p.header_bg,
                     ),
                 );
+                if let Some(Crumb::File { name }) = shown
+                    && nerd
+                    && width > 1
+                {
+                    let icon = lenz_content::file_icons::file(name);
+                    frame.buffer_mut()[(r.x + 1, r.y)].set_fg(color(icon.color_on(p, bg)));
+                }
+                if shown.is_some() {
+                    geometry.crumbs.push((i, r));
+                }
                 x += width;
+            }
+            let note_w = note.width() as u16;
+            if note_w > 0 && area.right().saturating_sub(note_w) >= x {
+                line(
+                    frame.buffer_mut(),
+                    Rect::new(area.right() - note_w, bar_row.y, note_w, 1),
+                    note,
+                    style(p.dim, p.bg).add_modifier(Modifier::ITALIC),
+                );
             }
         }
     }
