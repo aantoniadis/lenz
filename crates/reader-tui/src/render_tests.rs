@@ -176,6 +176,25 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
                 ),
             ));
         }
+        // An error it logs: marked first in the footer (kept when narrow), its words in the details.
+        app.apply(reader_core::session::Completion::Semantic(reader_core::semantics::Event::Message {
+                session: 1,
+                message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
+            }));
+        for (width, height) in [(100, 30), (60, 15)] {
+            assert!(text(&draw(&mut app, width, height)).contains("LSP error"));
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::F(2), crossterm::event::KeyModifiers::NONE,
+            )));
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE,
+            )));
+            let shown = text(&draw(&mut app, width, height));
+            assert!(shown.contains("Server error: Error processing"), "{shown}");
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE,
+            )));
+        }
         assert_eq!(
             std::fs::read(dir.path().join("main.rs")).unwrap(),
             b"fn main() {}\n"

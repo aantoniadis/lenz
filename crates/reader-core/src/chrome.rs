@@ -240,6 +240,7 @@ mod tests {
             limits: "",
             memory: None,
             supports: vec![],
+            error: None,
         };
         let before = provider_message(provider.clone());
         provider.memory = Some((150 << 20, 30 << 20));

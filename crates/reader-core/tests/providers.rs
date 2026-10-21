@@ -1090,6 +1090,46 @@ fn real_ruby() {
     assert_eq!(gems(), installed_before, "no gem installed or updated");
 }
 
+/// Installed versions of a Ruby LSP add-on gem that conflict (each activates its own version of another gem), as
+/// in a version manager's gem set that has seen several: indexing finishes, because only the bundle's add-ons load
+/// (0.0.3 launched it outside a bundle, its `initialized` failed with `Gem::ConflictError` and indexing stayed at 0%).
+/// The composed bundle stays in the reader's cache.
+#[test]
+#[ignore = "needs an installed Ruby LSP and RubyGems; run in release, alone"]
+fn real_ruby_conflicting_addon_versions() {
+    let Some((exe, path)) = installed("ruby-lsp", "RUBY_LSP") else {
+        println!("SKIPPED: Ruby LSP is not installed (set READER_RUBY_LSP / READER_RUBY_LSP_PATH)");
+        return;
+    };
+    let gems = tempfile::tempdir().unwrap();
+    let home = gems.path().join("home");
+    for (name, version, addon, dependency) in [("sharedep", "1.0.0", "", ""), ("sharedep", "2.0.0", "", ""),
+        ("lspaddon", "1.0.0", "gem \"sharedep\", \"1.0.0\"\n", "s.add_dependency \"sharedep\", \"1.0.0\""),
+        ("lspaddon", "2.0.0", "gem \"sharedep\", \"2.0.0\"\n", "s.add_dependency \"sharedep\", \"2.0.0\"")] {
+        let src = gems.path().join(format!("{name}-{version}"));
+        write(&src, &format!("lib/ruby_lsp/{name}/addon.rb"), addon);
+        write(&src, &format!("lib/{name}.rb"), "");
+        write(&src, &format!("{name}.gemspec"), &format!("Gem::Specification.new {{ |s| s.name = {name:?}; s.version = {version:?}; s.summary = \"x\"; s.authors = [\"x\"]; s.files = Dir[\"lib/**/*.rb\"]; {dependency} }}\n"));
+        let run = |args: &[&str]| std::process::Command::new("gem").args(args).current_dir(&src).output().is_ok_and(|o| o.status.success());
+        // An explicit directory: a default `--user-install` (Arch's gemrc) would ignore GEM_HOME.
+        assert!(run(&["build", &format!("{name}.gemspec")]) && run(&["install", "--local", "--ignore-dependencies", "--no-user-install", "--install-dir", &home.to_string_lossy(), &format!("{name}-{version}.gem")]), "fixture gem {name}-{version}");
+    }
+    let gem_path = std::process::Command::new("gem").args(["env", "gempath"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap();
+    // Visible to the server as to `gem` itself.
+    // SAFETY: a live test run alone; no other thread reads the environment meanwhile.
+    unsafe { std::env::set_var("GEM_PATH", format!("{}:{gem_path}", home.display())) };
+    let mut f = real("ruby-lsp", &exe, path.as_deref(), &[("Gemfile", "source \"https://rubygems.org\"\n"), ("Gemfile.lock", RB_LOCK), ("lib/shapes.rb", RB_SHAPES), ("lib/app.rb", RB_APP)]);
+    let before = files(&f.root);
+    f.open_ready("lib/app.rb");
+    // Launched as 0.0.3 did, no index was ever built: definitions stayed unanswered (red within 30 s).
+    f.definition_until("Círculo.new(2)", 1, "shapes.rb");
+    assert_eq!(f.s.state().provider().unwrap().error, None, "{}", f.s.language_server_details());
+    assert_eq!(files(&f.root), before, "nothing written into the project (no .ruby-lsp)");
+    assert_eq!(std::fs::read_to_string(f.root.join("Gemfile.lock")).unwrap(), RB_LOCK, "the lockfile is untouched");
+    let listed = std::process::Command::new("gem").args(["list", "--local", "lspaddon"]).env_remove("GEM_PATH").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned()).unwrap();
+    assert!(!listed.contains("lspaddon"), "fixture gems stay in their own directory: {listed}");
+}
+
 const KT_POM: &str = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">\n  <modelVersion>4.0.0</modelVersion>\n  <groupId>fixture</groupId><artifactId>mixed</artifactId><version>1</version>\n  <properties><kotlin.version>2.2.21</kotlin.version><maven.compiler.release>21</maven.compiler.release></properties>\n  <dependencies>\n    <dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>${kotlin.version}</version></dependency>\n  </dependencies>\n  <build>\n    <plugins>\n      <plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>${kotlin.version}</version>\n        <configuration><sourceDirs><sourceDir>src/main/kotlin</sourceDir><sourceDir>src/main/java</sourceDir></sourceDirs></configuration>\n      </plugin>\n    </plugins>\n  </build>\n</project>\n";
 const KT_SHAPES: &str = "package geo\n\nclass Círculo(val radio: Double) {\n    fun área(): Double = 3.14 * radio * radio\n}\n\nfun make(r: Double) = Círculo(r)\n\nfun useJava() = app.Helper.twice(2)\n";
 const KT_MAIN: &str = "package geo\r\n\r\nfun main() {\r\n    val s = \"𝄞\"; val c = make(2.0)\r\n    println(s + c.área() + make(1.0).área())\r\n}\r\n";

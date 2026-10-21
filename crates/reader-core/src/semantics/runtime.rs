@@ -152,6 +152,11 @@ pub fn version_in(path: &Path, flag: &str, env: &[(String, String)], cwd: Option
 }
 
 pub fn version_args_in(path: &Path, args: &[&str], env: &[(String, String)], cwd: Option<&Path>) -> Result<String, String> {
+    run_args_in(path, args, env, cwd, std::time::Duration::from_secs(3))
+}
+
+/// `path args` with bounded output, given at most `timeout`: its output, or why it failed with that output.
+pub fn run_args_in(path: &Path, args: &[&str], env: &[(String, String)], cwd: Option<&Path>, timeout: std::time::Duration) -> Result<String, String> {
     let flags = args.join(" ");
     use std::{io::Read, process::{Command, Stdio}, time::{Duration, Instant}};
     let mut command = Command::new(path);
@@ -172,7 +177,7 @@ pub fn version_args_in(path: &Path, args: &[&str], env: &[(String, String)], cwd
                 output.extend_from_slice(&buffer[..kept]);
                 truncated |= kept < count;
             }
-            if truncated { output.extend_from_slice(b"\n[version output truncated]\n"); }
+            if truncated { output.extend_from_slice(b"\n[output truncated]\n"); }
             let _ = send.send(output);
         });
         recv
@@ -184,12 +189,12 @@ pub fn version_args_in(path: &Path, args: &[&str], env: &[(String, String)], cwd
     };
     let stdout = capture(stdout);
     let stderr = capture(stderr);
-    let deadline = Instant::now() + Duration::from_secs(3);
+    let deadline = Instant::now() + timeout;
     let result = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
             Err(e) => break Err(e.to_string()),
-            _ if Instant::now() >= deadline => break Err(format!("{} {flags} did not finish within 3 seconds", path.display())),
+            _ if Instant::now() >= deadline => break Err(format!("{} {flags} did not finish within {} seconds", path.display(), timeout.as_secs())),
             _ => std::thread::sleep(Duration::from_millis(10)),
         }
     };
