@@ -51,10 +51,12 @@ PY
 # Source paths end up in the binaries: Rust's panic locations, and C's __FILE__ in the assert messages of
 # tree-sitter and its grammars. Map the checkout and Cargo's home to fixed prefixes in both compilers, so no
 # builder's home directory (and user name) ships. Both flag variables split on whitespace.
+# With rustup's rust-src installed, rustc maps std's /rustc/<hash> paths back to the local toolchain; map that too.
 checkout=$(pwd -P)
 cargo_home=${CARGO_HOME:-$HOME/.cargo}
-case "$checkout$cargo_home" in *[[:space:]]*) echo "build paths must not contain whitespace: $checkout, $cargo_home" >&2; exit 1;; esac
-export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$checkout=/lenz --remap-path-prefix=$cargo_home=/cargo"
+sysroot=$(rustc --print sysroot)
+case "$checkout$cargo_home$sysroot" in *[[:space:]]*) echo "build paths must not contain whitespace: $checkout, $cargo_home, $sysroot" >&2; exit 1;; esac
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--remap-path-prefix=$checkout=/lenz --remap-path-prefix=$cargo_home=/cargo --remap-path-prefix=$sysroot=/rustc"
 cmap="-ffile-prefix-map=$checkout=/lenz -ffile-prefix-map=$cargo_home=/cargo"
 export CFLAGS="${CFLAGS:+$CFLAGS }$cmap" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$cmap"
 # The installed name of each executable, and the package and Cargo executable it comes from.

@@ -37,7 +37,7 @@ class PackageTests(unittest.TestCase):
                         CARGO_TARGET_DIR=str(self.root / 'custom target'),
                         CARGO_BUILD_TARGET='aarch64-other-target',
                         LENZ_TEST_ARTIFACT=str(self.artifact), LENZ_TEST_CALLS=str(self.root / 'calls.json'))
-        self.fake('rustc', "print('host: x86_64-test-linux-gnu')")
+        self.fake_rustc('x86_64-test-linux-gnu')
         self.fake('git', "print('974d7df')")
         self.fake('cargo', '''import json, os, pathlib, sys
 calls = pathlib.Path(os.environ['LENZ_TEST_CALLS'])
@@ -58,6 +58,9 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         path = self.tools / name
         path.write_text('#!/usr/bin/env python3\n' + body + '\n')
         path.chmod(0o755)
+
+    def fake_rustc(self, host):
+        self.fake('rustc', f"import sys; print('/rustup/toolchain' if '--print' in sys.argv else 'host: {host}')")
 
     def package(self, version='0.2.0'):
         return subprocess.run(['bash', 'packaging/package.sh', version], cwd=self.root,
@@ -101,6 +104,7 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
         flags = json.loads((self.root / 'flags.json').read_text())
         self.assertIn(f'--remap-path-prefix={self.root.resolve()}=/lenz', flags['RUSTFLAGS'])
         self.assertIn('=/cargo', flags['RUSTFLAGS'])
+        self.assertIn('--remap-path-prefix=/rustup/toolchain=/rustc', flags['RUSTFLAGS'])
         for var in ('CFLAGS', 'CXXFLAGS'):
             self.assertIn(f'-ffile-prefix-map={self.root.resolve()}=/lenz', flags[var])
         self.assertFalse((self.root / 'target/package/lenz-0.2.0-x86_64-test-linux-gnu.tar.gz').exists())
@@ -114,7 +118,7 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
 
     def test_macos_package_bundles_the_gui_with_its_icon(self):
         # The Dock shows a bare executable's generic icon at launch and quit; a bundle carries the logo.
-        self.fake('rustc', "print('host: aarch64-apple-darwin')")
+        self.fake_rustc('aarch64-apple-darwin')
         self.fake('codesign', "import os, pathlib, sys; pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('codesign.txt').write_text(' '.join(sys.argv[1:]))")
         self.artifact = self.root / 'custom target/aarch64-apple-darwin/dist/lenz'
         self.env['LENZ_TEST_ARTIFACT'] = str(self.artifact)
