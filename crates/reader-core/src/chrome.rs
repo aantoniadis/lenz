@@ -32,6 +32,18 @@ fn provider_message(mut provider: ProviderView) -> String {
     provider.summary()
 }
 
+/// Lenz Code's About title; its text is [`about`].
+pub const ABOUT_TITLE: &str = "About Lenz Code";
+
+/// Lenz Code's About text, the same in both frontends: what it is, then the shared application rows.
+pub fn about() -> String {
+    std::iter::once("Code reader with language-server navigation".to_owned())
+        .chain(std::iter::once(String::new()))
+        .chain(lenz_content::about::ROWS.iter().map(|(k, v)| format!("{k}: {v}")))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 impl Session {
     /// Frequent actions in both toolbars. Overflow remains available in the command menu.
     pub fn toolbar(&self) -> Vec<(CommandId, &'static str)> {
@@ -49,20 +61,18 @@ impl Session {
         controls
     }
 
-    /// The application menu in both frontends: the command groups (`None`; Application is its theme chooser) and
-    /// All commands, or `group`'s way back and its commands with their states.
+    /// The application menu in both frontends: the command groups (`None`; Application is its theme chooser and
+    /// About) and All commands, or `group`'s way back and its commands with their states.
     pub fn menu(&self, group: Option<CommandGroup>) -> Vec<MenuRow> {
         let row = |label, disabled, target| MenuRow { label, disabled, target };
         match group {
             None => CommandGroup::ALL
                 .iter()
-                .map(|&g| match g {
-                    CommandGroup::Application => row(
-                        CommandId::ChooseTheme.label().to_string(),
-                        self.disabled(CommandId::ChooseTheme),
-                        MenuTarget::Run(CommandId::ChooseTheme),
-                    ),
-                    _ => row(format!("{} ›", g.label()), None, MenuTarget::Group(g)),
+                .flat_map(|&g| match g {
+                    CommandGroup::Application => [CommandId::ChooseTheme, CommandId::About]
+                        .map(|id| row(id.label().to_string(), self.disabled(id), MenuTarget::Run(id)))
+                        .to_vec(),
+                    _ => vec![row(format!("{} ›", g.label()), None, MenuTarget::Group(g))],
                 })
                 .chain([row("All commands…".to_string(), None, MenuTarget::AllCommands)])
                 .collect(),
@@ -240,6 +250,7 @@ mod tests {
             limits: "",
             memory: None,
             supports: vec![],
+            error: None,
         };
         let before = provider_message(provider.clone());
         provider.memory = Some((150 << 20, 30 << 20));

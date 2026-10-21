@@ -33,6 +33,7 @@ pub enum InterfaceAction {
     RecentFiles,
     RecentLocations,
     ChooseTheme,
+    About,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -107,6 +108,7 @@ impl Session {
             CommandId::RecentFiles => return CatalogAction::Interface(InterfaceAction::RecentFiles),
             CommandId::RecentLocations => return CatalogAction::Interface(InterfaceAction::RecentLocations),
             CommandId::ChooseTheme => return CatalogAction::Interface(InterfaceAction::ChooseTheme),
+            CommandId::About => return CatalogAction::Interface(InterfaceAction::About),
             CommandId::NewWindow => return CatalogAction::Interface(InterfaceAction::NewWindow),
             CommandId::FocusBreadcrumbs => return CatalogAction::Interface(InterfaceAction::FocusBreadcrumbs),
             CommandId::ToggleExplorer => return CatalogAction::Interface(InterfaceAction::ToggleExplorer),
@@ -165,6 +167,7 @@ impl Session {
             CommandId::TypeHierarchySubtypes => Command::HierarchyDirection(Direction::Subtypes),
             CommandId::Documentation => Command::Documentation,
             CommandId::DocumentationOnHover => Command::SetDocumentationOnHover(!state.documentation_on_hover()),
+            CommandId::FileIcons => Command::SetFileIcons(!state.file_icons()),
             CommandId::InlayTypes => Command::SetInlayTypes(!state.inlay_types()),
             CommandId::InlayParameters => Command::SetInlayParameters(!state.inlay_parameters()),
             CommandId::SemanticHighlighting => Command::SetSemanticHighlighting(!state.semantic_highlighting()),
@@ -241,7 +244,7 @@ impl CommandId {
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
-            | Self::DocumentationOnHover | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
+            | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
@@ -260,7 +263,7 @@ impl CommandId {
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
-            Self::ChooseTheme => G::Application,
+            Self::ChooseTheme | Self::About => G::Application,
         }
     }
 }

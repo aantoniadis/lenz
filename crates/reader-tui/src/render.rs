@@ -65,6 +65,25 @@ pub(crate) struct TextHit {
     pub byte: usize,
 }
 
+/// The terminal About logo as half-block cells (two pixel rows per cell), blended over `bg`.
+fn draw_about_logo(buf: &mut Buffer, area: Rect, bg: u32) {
+    let size = lenz_content::about::LOGO_TERMINAL_SIZE;
+    let pixel = |x: usize, y: usize| {
+        let i = (y * size + x) * 4;
+        let [r, g, b, a] = [0, 1, 2, 3].map(|k| u32::from(lenz_content::about::LOGO_TERMINAL[i + k]));
+        let mix = |c: u32, shift: u32| (c * a + ((bg >> shift) & 0xFF) * (255 - a)) / 255;
+        Color::Rgb(mix(r, 16) as u8, mix(g, 8) as u8, mix(b, 0) as u8)
+    };
+    for row in 0..area.height.min((size / 2) as u16) {
+        for col in 0..area.width.min(size as u16) {
+            let (x, y) = (col as usize, row as usize * 2);
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.set_symbol("▀").set_fg(pixel(x, y)).set_bg(pixel(x, y + 1));
+            }
+        }
+    }
+}
+
 pub(crate) fn color(rgb: u32) -> Color {
     Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
@@ -411,7 +430,7 @@ impl App {
             &format!(
                 " {}",
                 Icon::FolderOpen.label(
-                    self.nerd_icons,
+                    self.nerd_icons(),
                     &title
                 )
             ),
@@ -453,7 +472,7 @@ impl App {
                 Some(open) => lenz_content::file_icons::folder(open),
                 None => lenz_content::file_icons::file(&entry.name),
             };
-            let name = icon.label(self.nerd_icons, &entry.name);
+            let name = icon.label(self.nerd_icons(), &entry.name);
             line(
                 frame.buffer_mut(),
                 r,
@@ -467,7 +486,7 @@ impl App {
                 ),
             );
             let icon_x = r.x.saturating_add(3 + 2 * entry.depth.min(20) as u16);
-            if self.nerd_icons && icon_x < r.right() {
+            if self.nerd_icons() && icon_x < r.right() {
                 frame.buffer_mut()[(icon_x, r.y)].set_fg(color(icon.color_on(p, bg)));
             }
         }
@@ -499,7 +518,7 @@ impl App {
         line(
             frame.buffer_mut(),
             area,
-            &Icon::Search.label(self.nerd_icons, &title),
+            &Icon::Search.label(self.nerd_icons(), &title),
             style(
                 if self.focus == Focus::Results {
                     p.accent
@@ -797,6 +816,7 @@ impl App {
         p: &Palette,
     ) {
         let status = self.session.navigation_status();
+        let nerd = self.nerd_icons();
         let Some(search) = self.session.state().navigation() else {
             return;
         };
@@ -917,9 +937,9 @@ impl App {
             };
             let icon = match result.kind {
                 Kind::File => lenz_content::file_icons::file(&result.label)
-                    .label(self.nerd_icons, &result.label),
-                Kind::Symbol => Icon::Book.label(self.nerd_icons, &result.label),
-                Kind::Action => Icon::Commands.label(self.nerd_icons, &result.label),
+                    .label(nerd, &result.label),
+                Kind::Symbol => Icon::Book.label(nerd, &result.label),
+                Kind::Action => Icon::Commands.label(nerd, &result.label),
             };
             let setting = result.on.map_or("", |on| if on { "✓ " } else { "○ " });
             let label = format!(
@@ -1107,6 +1127,12 @@ impl App {
                 Prompt::Details { body, .. } => body.as_str(),
                 _ => HELP,
             };
+            // About's logo at the right, when the text keeps at least 30 columns beside it.
+            let logo = lenz_content::about::LOGO_TERMINAL_SIZE as u16;
+            if matches!(modal.kind, Prompt::Details { logo: true, .. }) && content.width >= logo + 32 && content.height >= logo / 2 {
+                draw_about_logo(frame.buffer_mut(), Rect::new(content.right() - logo, content.y, logo, logo / 2), p.status_bg);
+                content.width -= logo + 2;
+            }
             let wrapped = wrap_text(body, content.width.max(1) as usize);
             geometry.modal_content_rows = wrapped.len();
             geometry.modal_rows = content;
@@ -1381,7 +1407,7 @@ fn draw_pane(
         .map(|tab| {
             (UnicodeWidthStr::width(tab.title().as_str()) as u16
                 + 4
-                + if app.nerd_icons { 2 } else { 0 })
+                + if app.nerd_icons() { 2 } else { 0 })
             .min(32)
             .min(tab_width)
         })
@@ -1399,7 +1425,7 @@ fn draw_pane(
     for (i, tab) in tabs.iter().enumerate().skip(first) {
         let text = format!(
             " {}{} ",
-            lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons, &tab.title()),
+            lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons(), &tab.title()),
             if tab.retained() { "" } else { " ◇" }
         );
         let width = widths[i].min(tab_end.saturating_sub(x));
@@ -1435,7 +1461,7 @@ fn draw_pane(
                 Modifier::empty()
             }),
         );
-        if app.nerd_icons && width > 1 {
+        if app.nerd_icons() && width > 1 {
             let icon = lenz_content::file_icons::file(&tab.title());
             let bg = if Some(tab.id()) == active {
                 p.bg
@@ -1452,7 +1478,7 @@ fn draw_pane(
         if let Some(bar) = state.breadcrumbs_for(pane) {
             use lenz_content::highlight::DeclKind;
             use reader_core::breadcrumbs::Crumb;
-            let nerd = app.nerd_icons;
+            let nerd = app.nerd_icons();
             let file = bar.crumbs.iter().find_map(|c| match c {
                 Crumb::File { name } => Some(name.as_ref()),
                 _ => None,

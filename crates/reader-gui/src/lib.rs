@@ -52,6 +52,22 @@ const THEME_HEADER_ROWS: usize = 2;
 /// The AZERTY digit row's keys for 0–9 without Shift, as GPUI on Linux names them (the accented ones by keysym name).
 const AZERTY_DIGITS: [&str; 10] = ["agrave", "&", "eacute", "\"", "'", "(", "-", "egrave", "_", "ccedilla"];
 
+/// About's logo, decoded when About opens; its texture leaves the atlas once About is closed.
+#[derive(Clone)]
+pub struct AboutLogo(pub Arc<gpui::RenderImage>);
+
+impl std::fmt::Debug for AboutLogo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AboutLogo")
+    }
+}
+
+impl PartialEq for AboutLogo {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.id == other.0.id
+    }
+}
+
 /// A list over the text that takes all input until dismissed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Modal {
@@ -62,8 +78,8 @@ pub enum Modal {
     CommandGroup { group: CommandGroup, at: usize },
     /// Shared server management actions, with diagnostics in Server Details.
     LanguageServer { at: usize },
-    /// A frozen, read-only diagnostic snapshot; Copy preserves the complete text.
-    StatusDetails { title: &'static str, text: String },
+    /// A frozen, read-only diagnostic snapshot (or About, with its logo); Copy preserves the complete text.
+    StatusDetails { title: &'static str, text: String, logo: Option<AboutLogo> },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
@@ -173,6 +189,9 @@ pub struct ReaderView {
     /// is shown.
     pub tree_sel: Option<std::sync::Arc<str>>,
     tree_scroll: usize,
+    /// Fractional wheel rows of the tree and of the results, as the text keeps its own.
+    tree_wheel: f32,
+    results_wheel: f32,
     tree_reveal: bool,
     pub tree_focus: bool,
     tree_shown: bool,
@@ -223,6 +242,8 @@ pub struct ReaderView {
     logos: std::collections::HashMap<&'static str, Arc<gpui::RenderImage>>,
     logo_px: u32,
     logo_uploads: lenz_gpui::image::Uploads,
+    /// About's logo texture while About is open.
+    pub about_upload: lenz_gpui::image::Uploads,
     /// How a new window's session is configured (tests use disposable directories).
     make_config: std::rc::Rc<dyn Fn(bool) -> Config>,
     /// The image shown: its pixels (weakly: the document owns them), its texture once made off the UI thread, and
@@ -438,7 +459,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -772,7 +793,17 @@ impl ReaderView {
                     } else {
                         ("Status details", self.session.status_details())
                     };
-                    self.modal = Some(Modal::StatusDetails { title, text });
+                    self.modal = Some(Modal::StatusDetails { title, text, logo: None });
+                    cx.notify();
+                }
+                InterfaceAction::About => {
+                    self.dispatch(Command::CloseDocumentation, cx);
+                    self.modal_scroll.set(0);
+                    // The small checked-in PNG is decoded only now; no filesystem reads.
+                    let logo = lenz_content::image::decode(lenz_content::about::LOGO_PNG, lenz_content::image::Format::Png)
+                        .ok()
+                        .map(|d| AboutLogo(lenz_gpui::image::texture(d.pixels)));
+                    self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo });
                     cx.notify();
                 }
                 InterfaceAction::OpenRecent => {
@@ -1934,22 +1965,15 @@ impl ReaderView {
         }
         // Over the results panel the wheel scrolls the results.
         if f32::from(ev.position.y) >= self.panel_list_y - line_h() {
-            let rows = match ev.delta {
-                ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(),
-                ScrollDelta::Lines(l) => -l.y * 3.0,
-            };
             let len = self.session.state().results().map_or(0, |r| r.rows().len());
-            self.results_scroll = ((self.results_scroll as f32 + rows.round()).max(0.0) as usize).min(len.saturating_sub(self.panel_list_rows.max(1)));
+            let max = len.saturating_sub(self.panel_list_rows.max(1));
+            self.results_scroll = list_wheel(&mut self.results_wheel, ev.delta, self.results_scroll, max);
             cx.notify();
             return;
         }
         if f32::from(ev.position.x) < self.sidebar_w {
-            let rows = match ev.delta {
-                ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(),
-                ScrollDelta::Lines(l) => -l.y * 3.0,
-            };
             let max = self.tree_len().saturating_sub(self.tree_rows.max(1));
-            self.tree_scroll = ((self.tree_scroll as f32 + rows.round()).max(0.0) as usize).min(max);
+            self.tree_scroll = list_wheel(&mut self.tree_wheel, ev.delta, self.tree_scroll, max);
             self.tree_reveal = false;
             cx.notify();
             return;
@@ -3265,7 +3289,7 @@ impl ReaderView {
     /// The modal's rows: label and disabled reason. Search headers precede their result rows.
     pub fn modal_rows(&self) -> Vec<(String, Option<&'static str>)> {
         match &self.modal {
-            Some(Modal::StatusDetails { title, text }) => std::iter::once((title.to_string(), None)).chain(text.lines().map(|line| (line.to_owned(), None))).collect(),
+            Some(Modal::StatusDetails { title, text, .. }) => std::iter::once((title.to_string(), None)).chain(text.lines().map(|line| (line.to_owned(), None))).collect(),
             Some(Modal::Navigation { .. }) => self.navigation_rows(),
             Some(Modal::ServerRuntime { path, .. }) => {
                 let model = self.session.state().server_runtime();
@@ -3487,7 +3511,7 @@ impl Render for ReaderView {
             let mut x = g.bar.0;
             let mut row: Vec<(String, bool, bool, f32, f32, TabId)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
-                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icons::SIZE + ICON_GAP;
+                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icon_w(state.file_icons());
                 x += w;
                 (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id())
             }).collect();
@@ -3550,7 +3574,15 @@ impl Render for ReaderView {
             }
         }
         self.logo_uploads.keep(self.logos.values().cloned().collect(), window);
+        // About's logo stays in the atlas only while About is open.
+        let about = match &self.modal {
+            Some(Modal::StatusDetails { logo: Some(logo), .. }) => vec![logo.0.clone()],
+            _ => Vec::new(),
+        };
+        self.about_upload.keep(about, window);
         let logos = self.logos.clone();
+        let file_icons = self.session.state().file_icons();
+        let icon_w = icon_w(file_icons);
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
         let max = self.max_column();
@@ -3703,6 +3735,10 @@ impl Render for ReaderView {
             eprintln!("lenz-reader: slow render {:.1} ms", render_started.elapsed().as_secs_f64() * 1000.0);
         }
         let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
+        let about_logo = match &self.modal {
+            Some(Modal::StatusDetails { logo: Some(logo), .. }) => Some(logo.0.clone()),
+            _ => None,
+        };
         let nav_hover = self.nav_hover;
         let preview_hover = self.preview_hover;
         let app_menu_button = self.app_menu_button();
@@ -3781,9 +3817,10 @@ impl Render for ReaderView {
                                         }
                                     }
                                     let color = if *retained { palette.fg } else { palette.dim };
-                                    let icon = icons::file(title);
-                                    paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icon, x0 + tx0 + char_w, y);
-                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icons::SIZE + ICON_GAP, y, title, color);
+                                    if file_icons {
+                                        paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
+                                    }
+                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icon_w, y, title, color);
                                     lenz_gpui::text(window, cx, m, x0 + tx1 - char_w * 2.0, y, "×", palette.dim);
                                     lenz_gpui::fill(window, x0 + tx1 - 1.0, y + 3.0, 1.0, tabs_h - 6.0, palette.border);
                                 }
@@ -3839,8 +3876,10 @@ impl Render for ReaderView {
                                     if let Some(open) = line.expanded {
                                         lenz_gpui::text(window, cx, m, x, y, if open { "▾" } else { "▸" }, palette.dim);
                                     }
-                                    paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
-                                    lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icons::SIZE + ICON_GAP, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
+                                    if file_icons {
+                                        paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
+                                    }
+                                    lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icon_w, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
                                 }
                             });
                             lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0 + toolbar_h(), 1.0, body_h + tabs_h, palette.border);
@@ -3955,8 +3994,10 @@ impl Render for ReaderView {
                                     let mut x = px0 + 8.0 + row.depth as f32 * 2.0 * char_w;
                                     if let Some((icon, open)) = row.node {
                                         lenz_gpui::text(window, cx, m, x, y, if open { "▾" } else { "▸" }, palette.dim);
-                                        paint_icon(window, cx, icon_font.as_ref(), &logos, panel, &palette, icon, x + 1.5 * char_w, y);
-                                        x += 1.5 * char_w + icons::SIZE + ICON_GAP;
+                                        if file_icons {
+                                            paint_icon(window, cx, icon_font.as_ref(), &logos, panel, &palette, icon, x + 1.5 * char_w, y);
+                                        }
+                                        x += 1.5 * char_w + icon_w;
                                     }
                                     let row_fg: &[_] = if row.stale { &[] } else { &row.fg };
                                     lenz_gpui::colored_text(window, cx, m, fg, x, y, &row.label, row_fg, &bg);
@@ -3999,6 +4040,11 @@ impl Render for ReaderView {
                                         lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg);
                                     }
                                     lenz_gpui::text(window, cx, m, mx + 12.0, y, line, if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
+                                }
+                                // About's logo, right of its short lines, when the box has room for it.
+                                if let Some(logo) = about_logo.as_ref().filter(|_| mw >= 520.0 && mh >= 160.0) {
+                                    let at = Bounds { origin: gpui::point(px(mx + mw - 112.0), px(my + 12.0)), size: gpui::size(px(96.0), px(96.0)) };
+                                    let _ = window.paint_image(menu, at, Default::default(), logo.clone(), 0, false);
                                 }
                             });
                         }
@@ -4212,6 +4258,11 @@ pub struct TreeLine {
 /// Space between an icon and the name after it.
 const ICON_GAP: f32 = 6.0;
 
+/// The width a file-type icon and its gap take before a name (none with File Icons off).
+fn icon_w(file_icons: bool) -> f32 {
+    if file_icons { icons::SIZE + ICON_GAP } else { 0.0 }
+}
+
 /// A file or folder icon in the [`icons::SIZE`] square at `x` on the row at `y`: its logo, else its Nerd Font glyph,
 /// else a shape in its colour (a folder with a tab, a page for a file).
 #[allow(clippy::too_many_arguments)]
@@ -4331,4 +4382,16 @@ mod tests;
 
 impl Drop for ReaderView {
     fn drop(&mut self) { self.remember_explorer(); }
+}
+
+/// A list's first row after a wheel event: whole rows move it, the fraction waits for the next event (a trackpad's
+/// small movements add up, as in the text) and is dropped at an edge so reversing responds at once.
+fn list_wheel(fraction: &mut f32, delta: ScrollDelta, first: usize, max: usize) -> usize {
+    if matches!(delta, ScrollDelta::Lines(_)) {
+        *fraction = 0.0;
+    }
+    let rows = lenz_gpui::scroll::steps(fraction, lenz_gpui::scroll::pixels(delta, line_h(), 1.0).y / line_h());
+    let first = first.saturating_add_signed(rows).min(max);
+    lenz_gpui::scroll::clamp(fraction, first == 0, first == max);
+    first
 }

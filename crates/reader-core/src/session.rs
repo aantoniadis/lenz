@@ -230,6 +230,8 @@ pub enum Command {
     CloseDocumentation,
     /// Whether resting the pointer on a name shows its documentation; remembered.
     SetDocumentationOnHover(bool),
+    /// Whether files show their file-type icons (Nerd Font glyphs in a terminal); remembered.
+    SetFileIcons(bool),
     /// Copy the active file's path (relative to the open folder), with `:line` of the caret when `line`.
     CopyPath { line: bool },
     /// Mark the occurrences of the name at the caret (asked in the background; never cancels another request).
@@ -341,6 +343,8 @@ pub enum CommandId {
     ExtendSelection,
     ShrinkSelection,
     ChooseTheme,
+    /// The application's name, version, platform, licence and project page (the adapter shows it).
+    About,
     /// A separate window with its own session (the adapter creates it).
     NewWindow,
     Definition,
@@ -360,6 +364,8 @@ pub enum CommandId {
     Documentation,
     /// Whether resting the pointer on a name shows its documentation; remembered.
     DocumentationOnHover,
+    /// File-type icons beside file names; remembered.
+    FileIcons,
     /// Inlay hints naming types; remembered.
     InlayTypes,
     /// Inlay hints naming parameters; remembered.
@@ -422,7 +428,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 94] = [
+    pub const ALL: [CommandId; 96] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -471,6 +477,7 @@ impl CommandId {
         Self::ExtendSelection,
         Self::ShrinkSelection,
         Self::ChooseTheme,
+        Self::About,
         Self::NewWindow,
         Self::Definition,
         Self::PeekDefinition,
@@ -485,6 +492,7 @@ impl CommandId {
         Self::TypeHierarchySubtypes,
         Self::Documentation,
         Self::DocumentationOnHover,
+        Self::FileIcons,
         Self::InlayTypes,
         Self::InlayParameters,
         Self::SemanticHighlighting,
@@ -571,6 +579,7 @@ impl CommandId {
             Self::ExtendSelection => "Extend Selection",
             Self::ShrinkSelection => "Shrink Selection",
             Self::ChooseTheme => "Change theme",
+            Self::About => crate::chrome::ABOUT_TITLE,
             Self::NewWindow => "New Window",
             Self::Definition => "Go to Definition",
             Self::PeekDefinition => "Peek Definition",
@@ -584,6 +593,7 @@ impl CommandId {
             Self::TypeHierarchySubtypes => "Type Hierarchy: Subtypes",
             Self::Documentation => "Quick Documentation",
             Self::DocumentationOnHover => "Documentation on Hover",
+            Self::FileIcons => "File Icons",
             Self::InlayTypes => "Inlay Hints: Types",
             Self::InlayParameters => "Inlay Hints: Parameter Names",
             Self::SemanticHighlighting => "Semantic Highlighting",
@@ -1222,6 +1232,7 @@ impl State {
             CommandId::StickyScroll => Some(self.settings.sticky_scroll),
             CommandId::Breadcrumbs => Some(self.settings.breadcrumbs),
             CommandId::DocumentationOnHover => Some(self.settings.documentation_on_hover),
+            CommandId::FileIcons => Some(self.settings.file_icons),
             _ => None,
         }
     }
@@ -1263,6 +1274,11 @@ impl State {
 
     pub fn documentation_on_hover(&self) -> bool {
         self.settings.documentation_on_hover
+    }
+
+    /// Whether files show their file-type icons (the setting; a terminal may override it at startup).
+    pub fn file_icons(&self) -> bool {
+        self.settings.file_icons
     }
 
     pub fn asking(&self) -> Option<String> {
@@ -1636,7 +1652,7 @@ impl Session {
         let open = self.state.document().is_some();
         let tabs = self.state.pane_tabs(self.state.focused).count();
         match id {
-            CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
+            CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
             CommandId::Unsplit | CommandId::FocusOtherPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
@@ -1720,7 +1736,7 @@ impl Session {
             // The shown hierarchy turns around from its own root.
             CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees if self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|h| !h.direction.is_type()) => None,
             CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes if self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|h| h.direction.is_type()) => None,
-            CommandId::DocumentationOnHover => None,
+            CommandId::DocumentationOnHover | CommandId::FileIcons => None,
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::CopyPathLine => match self.state.active() {
@@ -1847,6 +1863,10 @@ impl Session {
             None => "Open a source file to start its language server automatically.".into(),
         };
         rows.push(summary);
+        // Right below its status: the reason it may not be working.
+        if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()) {
+            rows.push(format!("Server error: {error}\nThe server may keep running with reduced results."));
+        }
         if let Some((p, root)) = self.state.project_provider() {
             rows.push(format!("Project settings for {}: {}", root.display(), if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "project overrides global settings" } else { "inheriting global settings" }));
             if semantics::provider::PROVIDERS[p].id == "ruby-lsp" {
@@ -2612,6 +2632,11 @@ impl Session {
             }
             Command::SetDocumentationOnHover(on) => {
                 self.state.settings.documentation_on_hover = on;
+                self.save_settings();
+                Effect { repaint: true, copy: None }
+            }
+            Command::SetFileIcons(on) => {
+                self.state.settings.file_icons = on;
                 self.save_settings();
                 Effect { repaint: true, copy: None }
             }
@@ -5850,6 +5875,8 @@ struct Settings {
     persistent_index: bool,
     folders_first: bool,
     documentation_on_hover: bool,
+    /// File-type icons beside file names (Nerd Font glyphs in a terminal).
+    file_icons: bool,
     /// Long lines wrap at the pane's width.
     soft_wrap: bool,
     /// The enclosing declarations stay pinned at the top of each pane.
@@ -5868,7 +5895,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
     }
 }
 

@@ -5,7 +5,7 @@ pub(super) struct About {pub image:Arc<gpui::RenderImage>,pub scroll:usize}
 impl About {
     pub fn open()->Self {
         // This small, checked-in PNG is trusted and tested; no filesystem reads.
-        let pixels=image::load_from_memory(include_bytes!("../../../../assets/lenz-about.png"))
+        let pixels=image::load_from_memory(lenz_content::about::LOGO_PNG)
             .map_or_else(|_|image::RgbaImage::new(1,1),|image|image.into_rgba8());
         Self{image:lenz_gpui::image::texture(pixels),scroll:0}
     }

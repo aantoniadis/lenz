@@ -7,6 +7,7 @@
 pub mod perf;
 #[cfg(any(test, feature = "perf-probe"))]
 pub mod memory_probe;
+pub mod about;
 pub mod appearance;
 pub mod display;
 pub mod encoding;

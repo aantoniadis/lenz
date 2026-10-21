@@ -176,6 +176,25 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
                 ),
             ));
         }
+        // An error it logs: marked first in the footer (kept when narrow), its words in the details.
+        app.apply(reader_core::session::Completion::Semantic(reader_core::semantics::Event::Message {
+                session: 1,
+                message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
+            }));
+        for (width, height) in [(100, 30), (60, 15)] {
+            assert!(text(&draw(&mut app, width, height)).contains("LSP error"));
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::F(2), crossterm::event::KeyModifiers::NONE,
+            )));
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE,
+            )));
+            let shown = text(&draw(&mut app, width, height));
+            assert!(shown.contains("Server error: Error processing"), "{shown}");
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Esc, crossterm::event::KeyModifiers::NONE,
+            )));
+        }
         assert_eq!(
             std::fs::read(dir.path().join("main.rs")).unwrap(),
             b"fn main() {}\n"
@@ -197,7 +216,7 @@ fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
                 .project()
                 .is_some_and(|p| p.rows().iter().any(|r| r.name.as_ref() == "sample.rs"))
         });
-        app.nerd_icons = true;
+        app.icons_override = Some(true);
         let buffer = draw(&mut app, 100, 24);
         assert!(text(&buffer).contains("\u{e7a8} sample.rs"));
         let glyphs: Vec<_> = buffer
@@ -228,10 +247,21 @@ fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
         for (w, h) in [(48, 12), (18, 5), (1, 1), (0, 0)] {
             draw(&mut app, w, h);
         }
-        app.nerd_icons = false;
+        app.icons_override = Some(false);
         let buffer = draw(&mut app, 100, 24);
         assert!(!text(&buffer).contains('\u{e7a8}'));
         assert!(text(&buffer).contains("sample.rs"));
+        // Without LENZ_ICONS the File Icons setting decides: on by default.
+        app.icons_override = None;
+        assert!(text(&draw(&mut app, 100, 24)).contains("\u{e7a8} sample.rs"));
+        // The View menu's File Icons turns them off (remembered), and on again; it replaces LENZ_ICONS.
+        app.run(CommandId::FileIcons);
+        assert!(!text(&draw(&mut app, 100, 24)).contains('\u{e7a8}'));
+        assert!(!app.session.state().file_icons());
+        app.icons_override = Some(false);
+        app.run(CommandId::FileIcons);
+        assert_eq!((app.icons_override, app.session.state().file_icons()), (None, true));
+        assert!(text(&draw(&mut app, 100, 24)).contains("\u{e7a8} sample.rs"));
         assert_eq!(
             std::fs::read(dir.path().join("sample.rs")).unwrap(),
             b"fn main() {}\n"

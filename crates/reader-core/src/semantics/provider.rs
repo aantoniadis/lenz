@@ -46,9 +46,10 @@ pub struct Provider {
     pub virtual_contents: Option<&'static str>,
     /// Known limits, as the user is told them.
     pub limits: &'static str,
-    /// Variables its launch needs for workspace `root`, given its folder in the reader's cache (computed off the UI
-    /// thread when it starts; the user's `env` wins).
-    pub root_env: fn(&Path, &Path) -> Vec<(String, String)>,
+    /// Variables its launch needs for workspace `root`, given its folder in the reader's cache, the executable found
+    /// and the launch's own `env` (computed off the UI thread when it starts; the user's `env` wins). An error stops
+    /// the launch.
+    pub root_env: RootEnv,
     /// It is offered UTF-8 positions (else only UTF-16, for a server whose UTF-8 positions are wrong).
     pub utf8: bool,
     /// Arguments always passed before the launch's own (which settings may replace): what keeps it read-only and
@@ -94,7 +95,7 @@ const DEFAULT: Provider = Provider {
     workspace_data: None,
     virtual_contents: None,
     limits: "",
-    root_env: |_, _| Vec::new(),
+    root_env: |_, _, _, _| Ok(Vec::new()),
     utf8: true,
     watched_files: false,
     navigates: &[],
@@ -127,7 +128,7 @@ Provider {
     reports_status: true,
     limits: "Definitions inside macro expansions or generated code may point at sources rust-analyzer cannot show",
     // Build-script and proc-macro data are built into the reader's cache, never the project's `target/`.
-    root_env: rust_env,
+    root_env: |root, cache, _, _| Ok(rust_env(root, cache)),
     ..DEFAULT
 },
 Provider {
@@ -289,7 +290,7 @@ Provider {
     // Its index answers in characters even with UTF-8 negotiated (0.26.11: `Círculo` in a file not open ends a
     // byte short); characters are UTF-16 units outside the astral planes.
     utf8: false,
-    limits: "Definitions and usages come from Ruby LSP's static index of the project and its installed gems: dynamically defined methods, `method_missing` and metaprogramming are not followed; method usages are matched by name (any receiver); usages include the declaration; workspace symbols match qualified names (`Shapes::Círculo`: a short name in a long namespace may not be found); gems in the Gemfile that are not installed are not indexed; it evaluates the Gemfile and loads Ruby LSP add-ons found in installed gems and in the project (`**/ruby_lsp/**/addon.rb`), as editors running it do",
+    limits: "Definitions and usages come from Ruby LSP's static index of the project and its installed gems: dynamically defined methods, `method_missing` and metaprogramming are not followed; method usages are matched by name (any receiver); usages include the declaration; workspace symbols match qualified names (`Shapes::Círculo`: a short name in a long namespace may not be found); it runs in the project's bundle (with `ruby-lsp` added in the reader's cache when the project does not lock it), so every locked gem must be installed (`bundle install`; the reader never installs one) or it does not start; Bundler evaluates the Gemfile and Ruby LSP loads the add-ons of gems in that bundle and in the project (`**/ruby_lsp/**/addon.rb`), as editors running it do",
     ..DEFAULT
 },
 Provider {
@@ -317,19 +318,92 @@ Provider {
 },
 ];
 
-/// Ruby LSP's bundle: the project's own Gemfile (at or above the root), else an empty one in the reader's cache. Either way
-/// `BUNDLE_GEMFILE` is set, so `ruby-lsp` runs directly: it never composes a bundle in the project
-/// (`.ruby-lsp/`), runs `bundle install` or updates itself.
-fn ruby_env(root: &Path, cache: &Path) -> Vec<(String, String)> {
+/// A provider's launch variables for a workspace root: see [`Provider::root_env`].
+pub type RootEnv = fn(&Path, &Path, &Path, &[(String, String)]) -> Result<Vec<(String, String)>, String>;
+
+/// Ruby LSP runs in a bundle Bundler sets up (`-rbundler/setup`, as editors' `bundle exec` does): outside one it
+/// loads the add-ons of every installed version of every gem, and a version conflict among them ends its
+/// `initialized` before indexing starts (0.26.11: `Gem::ConflictError`, indexing at 0% for good). The bundle is the
+/// project's own when it already locks `ruby-lsp`, else the project's plus `ruby-lsp`, composed in the reader's cache
+/// from installed gems only (`bundle lock --local`) and kept while its inputs stay the same. Nothing is written to the
+/// project and nothing is downloaded; the project's `.bundle/config` still applies.
+fn ruby_env(root: &Path, cache: &Path, exe: &Path, env: &[(String, String)]) -> Result<Vec<(String, String)>, String> {
     // At or above the root: a root set inside a project keeps its bundle.
-    let gemfile = root.ancestors().find_map(gemfile_in).unwrap_or_else(|| {
-        let empty = cache.join("Gemfile");
-        if !empty.is_file() {
-            let _ = std::fs::create_dir_all(cache).and_then(|_| std::fs::write(&empty, ""));
+    let gemfile = root.ancestors().find_map(gemfile_in);
+    let project = gemfile.as_deref().and_then(Path::parent).unwrap_or(root);
+    let lock = gemfile.as_ref().map(|g| g.with_file_name(if g.ends_with("gems.rb") { "gems.locked" } else { "Gemfile.lock" }));
+    let lock = lock.and_then(|l| std::fs::read_to_string(l).ok());
+    let rubyopt = std::iter::once("-rbundler/setup".to_owned()).chain(std::env::var("RUBYOPT").ok().filter(|o| !o.is_empty())).collect::<Vec<_>>().join(" ");
+    let mut vars = vec![("RUBYOPT".to_owned(), rubyopt)];
+    let config = project.join(".bundle");
+    if config.is_dir() {
+        vars.push(("BUNDLE_APP_CONFIG".into(), config.display().to_string()));
+        // A relative install path is the project's, not the composed bundle's.
+        let path = std::fs::read_to_string(config.join("config")).ok().and_then(|c| c.lines().find_map(|l| l.strip_prefix("BUNDLE_PATH:").map(|v| v.trim().trim_matches(['"', '\'']).to_owned())));
+        if let Some(path) = path.filter(|p| !p.is_empty() && Path::new(p).is_relative()) {
+            vars.push(("BUNDLE_PATH".into(), project.join(path).display().to_string()));
         }
-        empty
-    });
-    vec![("BUNDLE_GEMFILE".into(), gemfile.display().to_string())]
+    }
+    if let (Some(gemfile), Some(lock)) = (&gemfile, &lock) && locks(lock, "ruby-lsp") {
+        vars.push(("BUNDLE_GEMFILE".into(), gemfile.display().to_string()));
+        return Ok(vars);
+    }
+    let dir = cache.join("bundles").join(format!("{}-{:016x}", project.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()), fnv(&project.to_string_lossy())));
+    let composed = dir.join("Gemfile");
+    let text = match &gemfile {
+        Some(g) => format!("# The project's bundle with Ruby LSP, composed by the Lenz reader.\neval_gemfile({:?})\ngem \"ruby-lsp\", require: false\n", g.display().to_string()),
+        None => "# Ruby LSP alone, composed by the Lenz reader.\nsource \"https://rubygems.org\"\ngem \"ruby-lsp\", require: false\n".into(),
+    };
+    // A Rails app also gets the Rails add-on, as Ruby LSP composes it, when it is installed.
+    const RAILS: &str = "gem \"ruby-lsp-rails\", require: false\n";
+    let rails = lock.as_deref().is_some_and(|l| l.contains("\n    railties (") && !locks(l, "ruby-lsp-rails"));
+    let text = if rails { format!("{text}{RAILS}") } else { text };
+    vars.push(("BUNDLE_GEMFILE".into(), composed.display().to_string()));
+    // What the lock depends on: the bundle, its lock and which installed gems are visible.
+    let visible = ["PATH", "GEM_HOME", "GEM_PATH"].map(|k| env.iter().find(|(e, _)| e == k).map(|(_, v)| v.clone()).or_else(|| std::env::var(k).ok()).unwrap_or_default());
+    let inputs = format!("{text}\0{}\0{}", lock.as_deref().unwrap_or_default(), visible.join("\0"));
+    let stamp = dir.join("inputs");
+    if std::fs::read_to_string(&stamp).is_ok_and(|s| s == inputs) && dir.join("Gemfile.lock").is_file() {
+        return Ok(vars);
+    }
+    let failed = |e: String| format!("Cannot compose Ruby LSP's bundle in {}: {e}", dir.display());
+    let _ = std::fs::remove_file(&stamp);
+    std::fs::create_dir_all(&dir).map_err(|e| failed(e.to_string()))?;
+    let copy = lock.as_deref().map_or_else(String::new, |l| absolute_path_sources(l, project));
+    let lock_env: Vec<_> = vars.iter().filter(|(k, _)| k != "RUBYOPT").cloned().chain(env.iter().cloned()).collect();
+    // The Ruby's own `bundle`, beside `ruby-lsp` (a version manager's bin or shims folder), else the one on PATH.
+    let bundle = exe.parent().map(|d| d.join("bundle")).filter(|b| b.is_file()).unwrap_or_else(|| PathBuf::from("bundle"));
+    let compose = |text: &str| {
+        std::fs::write(&composed, text).and_then(|_| std::fs::write(dir.join("Gemfile.lock"), &copy)).map_err(|e| failed(e.to_string()))?;
+        super::runtime::run_args_in(&bundle, &["lock", "--local"], &lock_env, Some(project), std::time::Duration::from_secs(120))
+            .map_err(|e| failed(format!("`bundle lock --local` (installed gems only; install missing ones with `bundle install` in the project): {e}")))
+    };
+    if let Err(e) = compose(&text) {
+        if !rails {
+            return Err(e);
+        }
+        compose(&text.replace(RAILS, ""))?;
+    }
+    std::fs::write(&stamp, inputs).map_err(|e| failed(e.to_string()))?;
+    Ok(vars)
+}
+
+/// Whether Gemfile.lock text lists `name` among its bundle's own dependencies.
+fn locks(lock: &str, name: &str) -> bool {
+    lock.lines().skip_while(|l| *l != "DEPENDENCIES").skip(1).take_while(|l| l.starts_with("  "))
+        .any(|l| l.trim_start().split([' ', '!']).next() == Some(name))
+}
+
+/// Gemfile.lock text with its relative path sources made absolute from `project`, so a copy elsewhere still names them.
+fn absolute_path_sources(lock: &str, project: &Path) -> String {
+    let mut section = "";
+    lock.lines().map(|l| {
+        if !l.starts_with(' ') { section = l; }
+        match l.strip_prefix("  remote: ") {
+            Some(remote) if section == "PATH" && Path::new(remote).is_relative() => format!("  remote: {}\n", project.join(remote).display()),
+            _ => format!("{l}\n"),
+        }
+    }).collect()
 }
 
 /// rust-analyzer's builds (build scripts, proc macros) go to a target folder of the root's own in the reader's
@@ -1252,6 +1326,87 @@ mod tests {
         assert_eq!(bundled_server(&roots, "html-language-features/server/dist/node/htmlServerMain.js"), None);
     }
 
+    /// Ruby LSP runs in a bundle Bundler sets up: the project's own when it locks `ruby-lsp`, else one composed in the
+    /// cache from installed gems, relocked only when its inputs change; nothing is written into the project.
+    #[cfg(unix)]
+    #[test]
+    fn ruby_runs_in_a_bundle_composed_in_the_cache() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let write = |path: &Path, text: &str| {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        };
+        // `bundle` records how it was run, and fails while `fail` exists (or, for the Rails add-on, `no-rails`).
+        let bin = d.path().join("bin");
+        let log = d.path().join("bundle.log");
+        write(&bin.join("bundle"), &format!("#!/bin/sh\necho \"$* $BUNDLE_GEMFILE $PWD $BUNDLE_PATH $RUBYOPT\" >> {0}\n[ -e {1} ] && echo 'Could not find gem ruby-lsp in locally installed gems' >&2 && exit 7\n[ -e {2} ] && grep -q ruby-lsp-rails \"$BUNDLE_GEMFILE\" && exit 7\nexit 0\n", log.display(), d.path().join("fail").display(), d.path().join("no-rails").display()));
+        std::fs::set_permissions(bin.join("bundle"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Beside `ruby-lsp`, so it is the one run even with another `bundle` on PATH.
+        let exe = bin.join("ruby-lsp");
+        let env = [("PATH".to_string(), "/usr/bin:/bin".to_string())];
+        let runs = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(str::to_owned).collect::<Vec<_>>();
+        let var = |vars: &[(String, String)], k: &str| vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let cache = d.path().join("cache/ruby-lsp");
+        let app = d.path().join("app");
+        let lock = "PATH\n  remote: engines/billing\n  specs:\n    billing (0.1)\n\nPATH\n  remote: /abs/gem\n  specs:\n    abs (1)\n\nGIT\n  remote: git@github.com:o/r.git\n  specs:\n\nDEPENDENCIES\n  billing!\n  rails (~> 8.0)\n";
+        write(&app.join("Gemfile"), "gem \"rails\"\n");
+        write(&app.join("Gemfile.lock"), lock);
+        write(&app.join(".bundle/config"), "---\nBUNDLE_PATH: \"vendor/bundle\"\n");
+        let vars = ruby_env(&app.join("lib"), &cache, &exe, &env).unwrap();
+        let composed = PathBuf::from(var(&vars, "BUNDLE_GEMFILE").unwrap());
+        assert!(composed.starts_with(cache.join("bundles")) && composed.ends_with("Gemfile"), "{vars:?}");
+        assert_eq!(std::fs::read_to_string(&composed).unwrap(), format!("# The project's bundle with Ruby LSP, composed by the Lenz reader.\neval_gemfile({:?})\ngem \"ruby-lsp\", require: false\n", app.join("Gemfile").display().to_string()));
+        assert_eq!(std::fs::read_to_string(composed.with_file_name("Gemfile.lock")).unwrap(), lock.replace("remote: engines/billing", &format!("remote: {}", app.join("engines/billing").display())), "relative path sources made absolute, others kept");
+        assert!(var(&vars, "RUBYOPT").unwrap().starts_with("-rbundler/setup"), "{vars:?}");
+        assert_eq!(var(&vars, "BUNDLE_APP_CONFIG"), Some(app.join(".bundle").display().to_string()));
+        assert_eq!(var(&vars, "BUNDLE_PATH"), Some(app.join("vendor/bundle").display().to_string()), "the project's install path");
+        // Locked from installed gems only, in the project, with the composed Gemfile; without bundler/setup itself.
+        assert_eq!(runs(), [format!("lock --local {} {} {} ", composed.display(), app.display(), app.join("vendor/bundle").display())]);
+        // The same inputs: not locked again; a changed lock: locked again.
+        ruby_env(&app, &cache, &exe, &env).unwrap();
+        assert_eq!(runs().len(), 1);
+        write(&app.join("Gemfile.lock"), &format!("{lock}\n"));
+        ruby_env(&app, &cache, &exe, &env).unwrap();
+        assert_eq!(runs().len(), 2);
+        // A failed lock stops the launch with bundler's words, and is retried next time.
+        write(&app.join("Gemfile.lock"), lock);
+        write(&d.path().join("fail"), "");
+        let e = ruby_env(&app, &cache, &exe, &env).unwrap_err();
+        assert!(e.contains("bundle lock --local") && e.contains("Could not find gem ruby-lsp") && e.contains("bundle install"), "{e}");
+        std::fs::remove_file(d.path().join("fail")).unwrap();
+        ruby_env(&app, &cache, &exe, &env).unwrap();
+        assert_eq!(runs().len(), 4);
+        // A project that locks ruby-lsp itself: its own bundle, nothing composed.
+        let own = d.path().join("own");
+        write(&own.join("Gemfile"), "gem \"ruby-lsp\"\n");
+        write(&own.join("Gemfile.lock"), "GEM\n  specs:\n\nDEPENDENCIES\n  ruby-lsp (~> 0.26)\n");
+        let vars = ruby_env(&own, &cache, &exe, &env).unwrap();
+        assert_eq!(var(&vars, "BUNDLE_GEMFILE"), Some(own.join("Gemfile").display().to_string()));
+        assert_eq!(runs().len(), 4);
+        // A Rails app: with the Rails add-on when it is installed, else without it.
+        let rails = d.path().join("rails");
+        write(&rails.join("Gemfile"), "gem \"rails\"\n");
+        write(&rails.join("Gemfile.lock"), "GEM\n  specs:\n    railties (8.0.2)\n\nDEPENDENCIES\n  rails\n");
+        let gemfile = PathBuf::from(var(&ruby_env(&rails, &cache, &exe, &env).unwrap(), "BUNDLE_GEMFILE").unwrap());
+        assert!(std::fs::read_to_string(&gemfile).unwrap().ends_with("gem \"ruby-lsp-rails\", require: false\n"));
+        write(&rails.join("Gemfile.lock"), "GEM\n  specs:\n    railties (8.0.3)\n\nDEPENDENCIES\n  rails\n");
+        write(&d.path().join("no-rails"), "");
+        ruby_env(&rails, &cache, &exe, &env).unwrap();
+        assert!(!std::fs::read_to_string(&gemfile).unwrap().contains("ruby-lsp-rails"), "locked again without it");
+        assert_eq!(runs().len(), 7);
+        // No Gemfile at all: Ruby LSP alone.
+        let bare = d.path().join("bare");
+        std::fs::create_dir_all(&bare).unwrap();
+        let vars = ruby_env(&bare, &cache, &exe, &env).unwrap();
+        assert!(std::fs::read_to_string(var(&vars, "BUNDLE_GEMFILE").unwrap()).unwrap().contains("gem \"ruby-lsp\", require: false\n"));
+        for project in [&app, &own, &bare, &rails] {
+            assert!(!project.join(".ruby-lsp").exists(), "nothing written into the project");
+        }
+        assert_eq!(std::fs::read_dir(&bare).unwrap().count(), 0);
+        assert!(locks("DEPENDENCIES\n  ruby-lsp!\n", "ruby-lsp") && !locks("DEPENDENCIES\n  ruby-lsp-rails\n", "ruby-lsp") && !locks("GEM\n  specs:\n    ruby-lsp (0.26.11)\n", "ruby-lsp"));
+    }
+
     #[test]
     fn ruby_roots_are_bundles_and_its_launch_never_composes_one_in_the_project() {
         let d = tempfile::tempdir().unwrap();
@@ -1265,12 +1420,6 @@ mod tests {
         std::fs::remove_file(root.join("Gemfile")).unwrap();
         assert_eq!(ruby_root(&root.join("scripts/c.rb"), Some(&root)), Some(root.clone()), "no Gemfile: the browsing root");
         assert_eq!(ruby_root(&root.join("scripts/c.rb"), None), Some(root.join("scripts")));
-        // BUNDLE_GEMFILE is always set: the project's Gemfile, else an empty one in the reader's cache.
-        let cache = d.path().join("cache/ruby-lsp");
-        assert_eq!(ruby_env(&root.join("engines/billing"), &cache), [("BUNDLE_GEMFILE".to_string(), root.join("engines/billing/Gemfile").display().to_string())]);
-        assert_eq!(ruby_env(&root, &cache), [("BUNDLE_GEMFILE".to_string(), cache.join("Gemfile").display().to_string())]);
-        assert_eq!(std::fs::read(cache.join("Gemfile")).unwrap(), b"");
-        assert_eq!(ruby_env(&root.join("engines/billing/lib"), &cache)[0].1, root.join("engines/billing/Gemfile").display().to_string(), "a root set inside a bundle keeps it");
         // Installed gems and RBS signatures by their install folders; a project's own `gems/` folder is not one.
         assert_eq!(origin(Path::new("/home/u/.local/share/gem/ruby/3.4.0/gems/thor-1.4.0/lib/thor.rb"), Some(Language::Ruby)), "an installed gem");
         assert_eq!(origin(Path::new("/usr/lib/ruby/gems/3.4.0/gems/rbs-4.2.0/core/file.rbs"), None), "RBS core signatures");

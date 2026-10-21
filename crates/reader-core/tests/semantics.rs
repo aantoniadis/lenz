@@ -849,6 +849,31 @@ fn indexing_progress_keeps_percentage_title_and_partial_reports() {
     assert!(label.contains("indexing") && !label.contains('%'), "{label}");
 }
 
+/// An error the server logs or shows (Ruby LSP 0.26.11 logs a failed `initialized` and keeps running) is kept and
+/// shown, without stopping the server; other log levels are not.
+#[test]
+fn server_errors_are_shown_while_it_keeps_running() {
+    let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
+    let mut message = |method: &str, kind: u64, text: &str| {
+        f.s.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+            session: 1,
+            message: serde_json::json!({"jsonrpc":"2.0", "method":method, "params":{"type":kind, "message":text}}),
+        }));
+        (f.s.state().language_server_label(), f.s.language_server_details(), f.s.state().provider().unwrap().status.clone())
+    };
+    let (label, details, _) = message("window/logMessage", 4, "Finished initializing");
+    assert_eq!(label, "LSP ready");
+    assert!(!details.contains("Server error"), "{details}");
+    let (label, details, status) = message("window/logMessage", 1, "Error processing initialized: Unable to activate rubocop-1.73.2 (Gem::ConflictError)\n\tfrom specification.rb:1383");
+    assert_eq!((label.as_str(), status), ("LSP error · ready", Status::Ready), "shown, still running");
+    assert!(details.contains("Server error: Error processing initialized") && details.contains("Gem::ConflictError") && details.contains("specification.rb:1383"), "{details}");
+    let (_, details, _) = message("window/showMessage", 1, "Error while indexing");
+    assert!(details.contains("Error while indexing") && !details.contains("Gem::ConflictError"), "the latest error: {details}");
+    assert!(f.s.state().notices().iter().any(|n| n.contains("Error while indexing")), "a shown error is still a notice");
+}
+
 /// Release timing with the fake server: the reader's own cost of a definition round trip (the fake answers
 /// instantly), and dispatch latency while a server floods progress during startup.
 #[test]

@@ -222,6 +222,8 @@ pub struct ProviderView {
     pub memory: Option<(u64, u64)>,
     /// What it offers, once initialized (empty until then).
     pub supports: Vec<Question>,
+    /// The last error it logged or showed (`window/logMessage`, `window/showMessage`); it may keep working.
+    pub error: Option<String>,
 }
 
 impl ProviderView {
@@ -230,13 +232,18 @@ impl ProviderView {
         match &self.status {
             Status::Queued => "LSP waiting",
             Status::Starting => "LSP starting",
-            Status::Indexing(what) if !what.is_empty() => return format!("LSP indexing {what}"),
-            Status::Indexing(_) => "LSP indexing",
-            Status::Ready => "LSP ready",
+            Status::Indexing(what) if !what.is_empty() => return format!("LSP {}indexing {what}", self.error_mark()),
+            Status::Indexing(_) => return format!("LSP {}indexing", self.error_mark()),
+            Status::Ready => return format!("LSP {}ready", self.error_mark()),
             Status::Missing(_) => "LSP unavailable",
             Status::Failed(_) => "LSP stopped",
             Status::Disabled => "LSP off",
         }.to_owned()
+    }
+
+    /// First, so a narrow status bar keeps it.
+    fn error_mark(&self) -> &'static str {
+        if self.error.is_some() { "error · " } else { "" }
     }
 
     /// Whether it offers `question` (false until it has initialized).
@@ -373,6 +380,8 @@ struct Server {
     session: u64,
     status: Status,
     version: Option<String>,
+    /// The last error-level message it logged or showed.
+    error: Option<String>,
     capabilities: Value,
     encoding: Encoding,
     outbox: async_channel::Sender<Outgoing>,
@@ -543,7 +552,7 @@ impl Semantics {
     pub fn view(&self, doc: &Document) -> Option<ProviderView> {
         let (p, root) = self.resolved(doc)?;
         let provider = &PROVIDERS[p];
-        let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new() };
+        let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None };
         if doc.is_large() {
             return Some(view(None, Status::Missing("not used for large files".into())));
         }
@@ -683,6 +692,7 @@ impl Semantics {
             dirty_open: HashMap::new(),
             pending: HashMap::new(),
             progress: HashMap::new(),
+            error: None,
             busy: false,
             held: true,
             idle_since: None,
@@ -1241,6 +1251,7 @@ impl Server {
             limits: p.limits,
             memory: self.memory,
             supports: Question::ALL.into_iter().filter(|q| self.initialized() && self.supports(*q)).collect(),
+            error: self.error.clone(),
         }
     }
 
@@ -1483,7 +1494,15 @@ impl Server {
                 }
                 _ => return Outcome::default(),
             },
+            // An error it reports (Ruby LSP 0.26.11 logs a failed `initialized` and keeps running): kept to be shown.
+            "window/logMessage" if params["type"].as_u64() == Some(1) => {
+                self.error = Some(error_text(params["message"].as_str().unwrap_or_default()));
+                return Outcome { repaint: true, ..Outcome::default() };
+            }
             "window/showMessage" if params["type"].as_u64().is_some_and(|t| t <= 2) => {
+                if params["type"].as_u64() == Some(1) {
+                    self.error = Some(error_text(params["message"].as_str().unwrap_or_default()));
+                }
                 notices.push(format!("{}: {}", PROVIDERS[self.key.provider].name, params["message"].as_str().unwrap_or_default()));
                 return Outcome { repaint: true, ..Outcome::default() };
             }
@@ -1558,6 +1577,15 @@ fn kill_group(child: &mut Child) {
         let _ = Command::new("kill").args(["-KILL", &format!("-{}", child.id())]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
     }
     let _ = child.kill();
+}
+
+/// A server's error message as shown: its first lines, displayable and bounded.
+fn error_text(message: &str) -> String {
+    let mut text = message.lines().take(12).map(|l| lenz_content::display::display_line(l).0).collect::<Vec<_>>().join("\n");
+    let mut end = text.len().min(2000);
+    while !text.is_char_boundary(end) { end -= 1; }
+    if end < text.len() { text.truncate(end); text.push('…'); }
+    text
 }
 
 /// Keep the start and end of stderr, including unterminated lines, within 8 KiB of raw bytes.
@@ -1691,7 +1719,14 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
             command.arg(flag).arg(folder);
         }
         // The provider's own variables for this root first; the user's `env` wins.
-        command.envs((provider.root_env)(&key.root, &cache)).envs(key.launch.env.iter().map(|(k, v)| (k, v))).current_dir(&key.root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let root_env = match (provider.root_env)(&key.root, &cache, &exe, &key.launch.env) {
+            Ok(env) => env,
+            Err(reason) => {
+                send(Event::Exited { session, reason: lenz_content::display::expand_tabs(&reason).0 });
+                return;
+            }
+        };
+        command.envs(root_env).envs(key.launch.env.iter().map(|(k, v)| (k, v))).current_dir(&key.root).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut command, 0);
         let mut child = match command.spawn() {

@@ -2078,10 +2078,29 @@ fn gui_file_menu_undo_targets_the_clicked_file_and_keeps_the_other_file(cx:&mut 
     assert_ne!(std::fs::read_to_string(&path).unwrap(),changed);
 }
 
+/// Shared, Aligned and Padded move both Sides sideways together (to the end of the wider one); clicks on either
+/// land on the character drawn there; leaving Independent lines them up.
+#[gpui::test]
+fn gui_horizontal_wheel_moves_both_sides_unless_independent(cx: &mut TestAppContext) {
+    let f=fixture(cx,&"left ".repeat(100),&"right ".repeat(10));
+    f.viewer.update(cx,|v,_|{v.char_w=8.;v.layout.set_files(false);});
+    let (lx,rx,y)=f.window.update(cx,|v,w,_|{let width=(f32::from(w.viewport_size().width)-v.diff_x()-GUTTER_W)/2.;(v.diff_x()+num_w()+16.,v.diff_x()+width+GUTTER_W+num_w()+16.,v.top()+line_h()/2.)}).unwrap();
+    click(cx,&f,lx,y);let before=f.viewer.read_with(cx,|v,_|v.sel.unwrap());
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
+    let h=f.viewer.read_with(cx,|v,_|v.hscroll);assert!(h[0]>0.&&h[0]==h[1],"{h:?}");
+    click(cx,&f,lx,y);assert!(f.viewer.read_with(cx,|v,_|v.sel.unwrap().head.col)>before.head.col,"the left Side moved under the pointer");
+    // The shared position reaches the end of the wider Side, though the pointer is over the shorter one.
+    f.window.update(cx,|v,w,cx|{for _ in 0..200{v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx);}}).unwrap();
+    let end=f.viewer.read_with(cx,|v,_|v.hscroll);assert_eq!(end[0],end[1]);assert!(end[0]>10.*6.*8.,"{end:?}");
+    f.window.update(cx,|v,w,cx|{v.comparison.view.set_mode(ScrollMode::Independent);v.hscroll=[0.,16.];v.comparison.view.set_mode(ScrollMode::Shared);let _=v.render(w,cx);}).unwrap();
+    let h=f.viewer.read_with(cx,|v,_|v.hscroll);assert_eq!(h[0],h[1]);
+    assert_eq!(text(&f),"right ".repeat(10));
+}
+
 #[gpui::test]
 fn gui_horizontal_wheel_keeps_the_other_text_panes_hit_positions(cx: &mut TestAppContext) {
     let f=fixture(cx,&"left ".repeat(100),&"right ".repeat(100));
-    f.viewer.update(cx,|v,_|{v.char_w=8.;v.layout.set_files(false);});
+    f.viewer.update(cx,|v,_|{v.char_w=8.;v.layout.set_files(false);v.comparison.view.set_mode(ScrollMode::Independent);});
     let (lx,rx,y)=f.window.update(cx,|v,w,_|{let width=(f32::from(w.viewport_size().width)-v.diff_x()-GUTTER_W)/2.;(v.diff_x()+num_w()+16.,v.diff_x()+width+GUTTER_W+num_w()+16.,v.top()+line_h()/2.)}).unwrap();
     click(cx,&f,lx,y);let before=f.viewer.read_with(cx,|v,_|v.sel.unwrap());
     f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
@@ -2150,7 +2169,7 @@ fn gui_horizontal_shift_wheel_clamps_tabs_and_unicode_without_moving_the_caret(c
         let _=v.render(w,cx);let pos=point(px(f32::from(w.viewport_size().width)-60.),px(v.top()+5.0));
         let anchor=v.comparison.view.anchor_line();
         let wheel=ScrollWheelEvent{position:pos,delta:ScrollDelta::Pixels(point(px(0.),px(-40.))),modifiers:gpui::Modifiers{shift:true,..Default::default()},..Default::default()};
-        v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll,[0.,40.]);assert_eq!(v.comparison.view.anchor_line(),anchor);
+        v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll,[40.;2],"both Sides in Shared");assert_eq!(v.comparison.view.anchor_line(),anchor);
         for _ in 0..1000{v.on_wheel(&wheel,w,cx);}let at_end=v.hscroll[1];assert!(at_end>40.);v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll[1],at_end);
         v.menu=Some(Menu{x:0.,y:0.,hover:None,items:vec![("Copy".into(),MenuAction::InteractionCommand(commands::Interaction::Copy))]});v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll[1],at_end);v.menu=None;
         v.text_w=[10000.;2];v.clamp_horizontal(Side::Right);assert_eq!(v.hscroll,[0.;2]);

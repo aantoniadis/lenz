@@ -62,7 +62,8 @@ pub(crate) enum Prompt {
         crumb: usize,
     },
     Help,
-    Details { title: &'static str, body: String },
+    /// Read-only text (About adds its half-block logo when there is room).
+    Details { title: &'static str, body: String, logo: bool },
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -104,7 +105,8 @@ struct Hover {
     due: Instant,
 }
 pub(crate) struct App {
-    pub nerd_icons: bool,
+    /// `LENZ_ICONS=nerd|plain` for this run, over the File Icons setting until that is toggled here.
+    pub icons_override: Option<bool>,
     pub session: Session,
     pub modal: Option<Modal>,
     pub focus: Focus,
@@ -130,7 +132,8 @@ pub(crate) struct App {
 impl App {
     pub fn new(config: Config, path: Option<PathBuf>) -> Self {
         let mut app = Self {
-            nerd_icons: std::env::var("LENZ_ICONS").is_ok_and(|v| v == "nerd"),
+            // Unit tests read plain labels unless they choose glyphs (the default has its own test).
+            icons_override: if cfg!(test) { Some(false) } else { std::env::var("LENZ_ICONS").ok().map(|v| v == "nerd") },
             session: Session::new(config),
             modal: None,
             focus: Focus::Text,
@@ -384,13 +387,23 @@ impl App {
         if self.modal.is_none()
             && let Some(doc) = self.session.state().documentation()
         {
-            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone() });
+            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false });
         }
     }
     fn open_root(&mut self, path: PathBuf) {
         self.dispatch(Command::OpenRoot(path));
     }
+    /// Whether file names show Nerd Font file-type glyphs (the File Icons setting, on by default).
+    pub fn nerd_icons(&self) -> bool {
+        self.icons_override.unwrap_or_else(|| self.session.state().file_icons())
+    }
     pub fn run(&mut self, id: CommandId) {
+        // Toggling flips what is shown, then the setting alone decides.
+        if id == CommandId::FileIcons {
+            let on = !self.nerd_icons();
+            self.icons_override = None;
+            return self.dispatch(Command::SetFileIcons(on));
+        }
         match self.session.action(id) {
             CatalogAction::Disabled(why) => self.notice = Some(why.into()),
             CatalogAction::Command(command) => {
@@ -555,8 +568,9 @@ impl App {
                     details.push_str("\n\nTerminal notice\n");
                     details.push_str(notice);
                 }
-                Prompt::Details { title, body: details }
+                Prompt::Details { title, body: details, logo: false }
             },
+            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;

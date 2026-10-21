@@ -676,6 +676,16 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     assert_eq!(scroll, 15);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll);
+    // A trackpad's small movements add up, as in the text (each alone is under half a row).
+    let pad = |v: &mut gpui::VisualTestContext, dy: f32| v.simulate_event(ScrollWheelEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), ..Default::default() });
+    for _ in 0..10 { pad(&mut v, -line_h() / 5.0); }
+    assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll + 2);
+    // At the top, movement beyond the edge is dropped: reversing responds at once.
+    f.view.update(&mut v, |v, _| v.tree_scroll = 0);
+    for _ in 0..10 { pad(&mut v, line_h() / 5.0); }
+    pad(&mut v, -line_h());
+    assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), 1);
+    f.view.update(&mut v, |v, _| v.tree_scroll = scroll);
     // Highlight a file, then files arrive that sort above it: the highlight stays on the same file.
     let body = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     v.simulate_click(point(px(20.0), body.origin.y + px(line_h() / 2.0)), Modifiers::default());
@@ -1068,9 +1078,14 @@ fn focus_moves_out_of_the_results_and_the_wheel_scrolls_them(cx: &mut TestAppCon
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12, "kept across a repaint");
+    // A trackpad's small movements add up there too.
+    for _ in 0..10 {
+        v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() / 5.0))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14);
     // The status bar below the panel takes no wheel.
     v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(500.0 - status_h() / 2.0)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
-    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12, "the status bar does not scroll the results");
+    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14, "the status bar does not scroll the results");
     // Focusing the tree takes the keys from the results.
     v.simulate_keystrokes("ctrl-shift-e");
     assert!(f.view.read_with(&v, |v, _| v.tree_focus && !v.results_focus));
@@ -1290,6 +1305,19 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestA
         assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).contains("42%"));
         v.simulate_keystrokes("f2 enter");
         assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("42%"))));
+        v.simulate_keystrokes("escape");
+    }
+    // An error it logs: marked first in the footer (kept when narrow), its words in the details.
+    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
+    }), cx));
+    for (w, h) in [(900.0, 500.0), (480.0, 300.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP error"));
+        v.simulate_keystrokes("f2 enter");
+        assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("Server error: Error processing"))));
         v.simulate_keystrokes("escape");
     }
     assert_eq!(std::fs::read(f.dir.path().join("main.rs")).unwrap(), b"fn main() {}\n");
@@ -4883,7 +4911,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
             // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
             let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
-            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone() }); cx.notify(); });
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
             v.simulate_keystrokes("end up");
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
@@ -4901,4 +4929,63 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
         }
     }
     assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), b"unchanged\n");
+}
+
+/// File Icons (View menu, remembered): off, names lose their icons and tabs the icon's width; tabs still answer
+/// clicks; on again, the width comes back.
+#[gpui::test]
+fn file_icons_toggle_from_the_menu_and_tabs_keep_their_targets(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let width = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.tab_hits.first().map(|h| h.1 - h.0).unwrap());
+    let with = width(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session().state().file_icons()), "on by default");
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::FileIcons, w, cx));
+    draw(&mut v);
+    assert!(!f.view.read_with(&v, |r, _| r.session().state().file_icons()));
+    assert_eq!(with - width(&mut v), crate::icons::SIZE + 6.0, "the icon and its gap are gone");
+    let (hit, y) = f.view.read_with(&v, |r, _| (r.tab_hits[0], toolbar_h() + line_h() / 2.0));
+    v.simulate_click(point(px(hit.0 + 10.0), px(y)), Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().map(|t| t.id())), Some(hit.2));
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::FileIcons, w, cx));
+    draw(&mut v);
+    assert_eq!(width(&mut v), with);
+}
+
+/// About: the shared text and its logo, decoded only when About opens and out of the atlas (and memory) once it
+/// closes; reopening keeps one texture; the dialog takes keys and a tiny window still draws.
+#[gpui::test]
+fn about_shows_the_shared_text_and_releases_its_logo_on_close(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.about_upload.len()), 0, "nothing decoded before About opens");
+    let mut weak = None;
+    for _ in 0..3 {
+        f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::About, w, cx));
+        draw(&mut v);
+        let (title, text, logo) = f.view.read_with(&v, |r, _| match &r.modal {
+            Some(Modal::StatusDetails { title, text, logo }) => (*title, text.clone(), logo.as_ref().map(|l| Arc::downgrade(&l.0))),
+            other => panic!("{other:?}"),
+        });
+        assert_eq!(title, "About Lenz Code");
+        assert!(text.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))), "{text}");
+        assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, line, _)| line.contains("Licence"))));
+        assert_eq!(f.view.read_with(&v, |r, _| r.about_upload.len()), 1, "one texture while open");
+        weak = logo;
+        v.simulate_keystrokes("x escape");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.about_upload.is_empty()), "out of the atlas after closing");
+    }
+    assert!(weak.unwrap().upgrade().is_none(), "the pixels are freed too");
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::About, w, cx));
+    for (w, h) in [(1.0, 1.0), (300.0, 120.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+    }
+    v.simulate_keystrokes("end up escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"fn a() {}\n");
 }

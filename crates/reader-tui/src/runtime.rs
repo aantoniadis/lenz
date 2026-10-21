@@ -34,8 +34,8 @@ Ctrl-O open; Ctrl-F find;
 Ctrl-Shift-F project search; Ctrl-G line; F5 reload; Ctrl-F4 close tab;
 Tab focus panes; Ctrl-Tab next tab; F8/Shift-F8 independent views;
 Ctrl-Q close view; Ctrl-Shift-Q quit all. Files are read-only.
-Optional icons: LENZ_ICONS=nerd (configure a Nerd Font Mono in your terminal);
-LENZ_ICONS=plain keeps ordinary labels.";
+Icons: Nerd Font glyphs by default (configure a Nerd Font Mono in your terminal);
+View > File Icons turns them off, and LENZ_ICONS=plain|nerd overrides it for one run.";
 
 /// An owned terminal's input modes are restored on success, I/O failure and panic.
 struct Restore;

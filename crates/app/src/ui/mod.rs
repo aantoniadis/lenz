@@ -3419,6 +3419,7 @@ impl Viewer {
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.restore_and_record_place(cx);
+        self.sync_horizontal();
         self.markdown_release_images(window);
         // a PR details tab, however it opened, closes a Folder Summary: they share the diff area
         if self.pr_details_shown() && self.summary_shown() { self.comparison.folders.close_summary(); self.comparison.folders.reveal(&self.set.comparisons, self.comparison.current); }
