@@ -33,6 +33,7 @@ pub enum InterfaceAction {
     RecentFiles,
     RecentLocations,
     ChooseTheme,
+    About,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -107,6 +108,7 @@ impl Session {
             CommandId::RecentFiles => return CatalogAction::Interface(InterfaceAction::RecentFiles),
             CommandId::RecentLocations => return CatalogAction::Interface(InterfaceAction::RecentLocations),
             CommandId::ChooseTheme => return CatalogAction::Interface(InterfaceAction::ChooseTheme),
+            CommandId::About => return CatalogAction::Interface(InterfaceAction::About),
             CommandId::NewWindow => return CatalogAction::Interface(InterfaceAction::NewWindow),
             CommandId::FocusBreadcrumbs => return CatalogAction::Interface(InterfaceAction::FocusBreadcrumbs),
             CommandId::ToggleExplorer => return CatalogAction::Interface(InterfaceAction::ToggleExplorer),
@@ -261,7 +263,7 @@ impl CommandId {
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
-            Self::ChooseTheme => G::Application,
+            Self::ChooseTheme | Self::About => G::Application,
         }
     }
 }

@@ -127,7 +127,7 @@ impl Screens {
         if self.kitty && !logo.is_empty() {
             if self.about_graphics.is_none() {
                 // The same small PNG as the GUI, decoded only while a visible dialog needs it.
-                if let Ok(decoded)=lenz::images::decode(include_bytes!("../../../assets/lenz-about.png"),lenz::images::Format::Png) {
+                if let Ok(decoded)=lenz::images::decode(lenz::about::LOGO_PNG,lenz::images::Format::Png) {
                     let mut images=md_images::Images::default();images.enable_kitty();
                     self.about_graphics=Some((std::sync::Arc::new(decoded.pixels),images));
                 }

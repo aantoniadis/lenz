@@ -3,7 +3,7 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind
 use ratatui::{Frame, layout::Rect, style::{Color, Style}, widgets::{Block, Borders, Clear}};
 use crate::chrome::{color, style_with};
 
-const LOGO: &[u8; 24 * 24 * 4] = include_bytes!("../../../assets/lenz-about-terminal.rgba");
+const LOGO: &[u8] = lenz::about::LOGO_TERMINAL;
 #[derive(Default)]
 pub struct About { scroll:usize, close:Rect, rect:Rect, pub(crate) logo_rect:Rect }
 impl About {

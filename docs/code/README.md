@@ -129,6 +129,10 @@ text and Ctrl+C copies it.
 
 Choose **Change theme** directly from the ☰ app menu (or Find Action). The chooser works like Diff: arrows and Page/Home/End preview a theme, Enter or a click selects it, and Escape or an outside click restores the current theme. Scrolling moves the list without changing the highlighted theme.
 
+**About Lenz Code**, below Change theme in the ☰ app menu (or Find Action), shows the version, platform, licence and project page shared with Lenz Diff's About, with the Lenz logo when the dialog has room (a half-block logo in the terminal). Copy copies the text; Escape, Enter or an outside click closes it. The logo is decoded only while About is open.
+
+**File Icons** in the View menu shows or hides file-type icons beside file names in the explorer, tabs and results; the choice is remembered and shared with the terminal reader, where the icons are Nerd Font glyphs.
+
 The reader never writes the files it shows. It shares Diff's theme choice in
 `$XDG_CONFIG_HOME/lenz/appearance.json`, user themes in `lenz/themes`, and font preferences
 (`[gui] font_family`, `font_size`, `reading_font`) in `lenz/settings.toml`.

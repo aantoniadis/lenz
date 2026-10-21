@@ -90,7 +90,7 @@ typing, selection, held-key repeats and focus loss do not count as double Shift.
 characters continue to repeat. Ctrl-Shift-N now finds files; New Window remains in the command palette.
 
 The toolbar's **☰ Menu** opens the same dropdown as the GUI's ☰ button: the File, View, Navigate, Find, Selection
-and Language Servers groups, Change theme and All commands…; Enter or → opens a group, ← or Esc goes back, and a
+and Language Servers groups, Change theme, About Lenz Code and All commands…; Enter or → opens a group, ← or Esc goes back, and a
 disabled command's reason shows in the footer. The F10 palette labels commands with the same groups; type a group
 name followed by `:` to filter that group. The GUI additionally has a clickable
 Commands button in its status bar; the terminal keeps F10 / Ctrl-Shift-P access to the same catalog.
