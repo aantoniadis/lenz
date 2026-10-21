@@ -676,6 +676,16 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     assert_eq!(scroll, 15);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll);
+    // A trackpad's small movements add up, as in the text (each alone is under half a row).
+    let pad = |v: &mut gpui::VisualTestContext, dy: f32| v.simulate_event(ScrollWheelEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), ..Default::default() });
+    for _ in 0..10 { pad(&mut v, -line_h() / 5.0); }
+    assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll + 2);
+    // At the top, movement beyond the edge is dropped: reversing responds at once.
+    f.view.update(&mut v, |v, _| v.tree_scroll = 0);
+    for _ in 0..10 { pad(&mut v, line_h() / 5.0); }
+    pad(&mut v, -line_h());
+    assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), 1);
+    f.view.update(&mut v, |v, _| v.tree_scroll = scroll);
     // Highlight a file, then files arrive that sort above it: the highlight stays on the same file.
     let body = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     v.simulate_click(point(px(20.0), body.origin.y + px(line_h() / 2.0)), Modifiers::default());
@@ -1068,9 +1078,14 @@ fn focus_moves_out_of_the_results_and_the_wheel_scrolls_them(cx: &mut TestAppCon
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12, "kept across a repaint");
+    // A trackpad's small movements add up there too.
+    for _ in 0..10 {
+        v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() / 5.0))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14);
     // The status bar below the panel takes no wheel.
     v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(500.0 - status_h() / 2.0)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
-    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12, "the status bar does not scroll the results");
+    assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14, "the status bar does not scroll the results");
     // Focusing the tree takes the keys from the results.
     v.simulate_keystrokes("ctrl-shift-e");
     assert!(f.view.read_with(&v, |v, _| v.tree_focus && !v.results_focus));
