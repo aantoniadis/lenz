@@ -173,6 +173,9 @@ pub struct ReaderView {
     /// is shown.
     pub tree_sel: Option<std::sync::Arc<str>>,
     tree_scroll: usize,
+    /// Fractional wheel rows of the tree and of the results, as the text keeps its own.
+    tree_wheel: f32,
+    results_wheel: f32,
     tree_reveal: bool,
     pub tree_focus: bool,
     tree_shown: bool,
@@ -438,7 +441,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1934,22 +1937,15 @@ impl ReaderView {
         }
         // Over the results panel the wheel scrolls the results.
         if f32::from(ev.position.y) >= self.panel_list_y - line_h() {
-            let rows = match ev.delta {
-                ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(),
-                ScrollDelta::Lines(l) => -l.y * 3.0,
-            };
             let len = self.session.state().results().map_or(0, |r| r.rows().len());
-            self.results_scroll = ((self.results_scroll as f32 + rows.round()).max(0.0) as usize).min(len.saturating_sub(self.panel_list_rows.max(1)));
+            let max = len.saturating_sub(self.panel_list_rows.max(1));
+            self.results_scroll = list_wheel(&mut self.results_wheel, ev.delta, self.results_scroll, max);
             cx.notify();
             return;
         }
         if f32::from(ev.position.x) < self.sidebar_w {
-            let rows = match ev.delta {
-                ScrollDelta::Pixels(p) => -f32::from(p.y) / line_h(),
-                ScrollDelta::Lines(l) => -l.y * 3.0,
-            };
             let max = self.tree_len().saturating_sub(self.tree_rows.max(1));
-            self.tree_scroll = ((self.tree_scroll as f32 + rows.round()).max(0.0) as usize).min(max);
+            self.tree_scroll = list_wheel(&mut self.tree_wheel, ev.delta, self.tree_scroll, max);
             self.tree_reveal = false;
             cx.notify();
             return;
@@ -4331,4 +4327,16 @@ mod tests;
 
 impl Drop for ReaderView {
     fn drop(&mut self) { self.remember_explorer(); }
+}
+
+/// A list's first row after a wheel event: whole rows move it, the fraction waits for the next event (a trackpad's
+/// small movements add up, as in the text) and is dropped at an edge so reversing responds at once.
+fn list_wheel(fraction: &mut f32, delta: ScrollDelta, first: usize, max: usize) -> usize {
+    if matches!(delta, ScrollDelta::Lines(_)) {
+        *fraction = 0.0;
+    }
+    let rows = lenz_gpui::scroll::steps(fraction, lenz_gpui::scroll::pixels(delta, line_h(), 1.0).y / line_h());
+    let first = first.saturating_add_signed(rows).min(max);
+    lenz_gpui::scroll::clamp(fraction, first == 0, first == max);
+    first
 }
