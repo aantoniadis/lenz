@@ -1292,6 +1292,19 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestA
         assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("42%"))));
         v.simulate_keystrokes("escape");
     }
+    // An error it logs: marked first in the footer (kept when narrow), its words in the details.
+    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
+    }), cx));
+    for (w, h) in [(900.0, 500.0), (480.0, 300.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP error"));
+        v.simulate_keystrokes("f2 enter");
+        assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("Server error: Error processing"))));
+        v.simulate_keystrokes("escape");
+    }
     assert_eq!(std::fs::read(f.dir.path().join("main.rs")).unwrap(), b"fn main() {}\n");
 }
 

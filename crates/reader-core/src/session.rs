@@ -1847,6 +1847,10 @@ impl Session {
             None => "Open a source file to start its language server automatically.".into(),
         };
         rows.push(summary);
+        // Right below its status: the reason it may not be working.
+        if let Some(error) = view.as_ref().and_then(|v| v.error.as_ref()) {
+            rows.push(format!("Server error: {error}\nThe server may keep running with reduced results."));
+        }
         if let Some((p, root)) = self.state.project_provider() {
             rows.push(format!("Project settings for {}: {}", root.display(), if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "project overrides global settings" } else { "inheriting global settings" }));
             if semantics::provider::PROVIDERS[p].id == "ruby-lsp" {
