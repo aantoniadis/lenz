@@ -583,7 +583,7 @@ Ctrl-Alt keyboard/menu commands. Geometry and width caches stay in the adapters.
 
 | Approach | Outcome |
 | --- | --- |
-| One shared horizontal offset | Replaced. Native right-pane input changed 67 samples of the left source rectangle; separate offsets preserve every sampled left frame. |
+| One shared horizontal offset | Replaced. Native right-pane input changed 67 samples of the left source rectangle; separate offsets preserve every sampled left frame. Revisited 2026-10-22 at the maintainer's request: the comparison Sides share their position again in every Scroll Mode but Independent (`ScrollMode::shares_horizontal`), kept as two adapter offsets written together, so the left rectangle now moves with right-pane input by design; Merge panes stay separate. Not re-measured. |
 | Width scans on every input/render | Avoided. Lazy per-source widths use an ASCII fast path, capped Unicode/tab projection and invalidation on document/result changes; ordinary first paint does no width scan. |
 | Pixel/cell offsets reused for hit-testing and caret reveal | Kept. Real input tests preserve the other pane's selection and exact bytes through menus/questions, resize and reload. |
 | Merge width invalidation coupled to visible file list | Fixed. A real two-file conflict test at 60 columns reproduced stale offsets after switching to a short file. Invalidation now also runs while the list is hidden; final production PTY stress and conflict workflows pass. |
