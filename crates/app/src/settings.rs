@@ -77,7 +77,7 @@ pub const TEMPLATE: &str = "\
 
 [tools]
 # editor = \"nvim --clean\"
-# icons = \"nerd\"                   # plain | nerd (TUI)
+# icons = \"plain\"                  # nerd (default) | plain (TUI)
 # crash_dir = \"~/lenz-crashes\"
 
 [session]

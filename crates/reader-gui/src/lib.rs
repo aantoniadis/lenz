@@ -3483,7 +3483,7 @@ impl Render for ReaderView {
             let mut x = g.bar.0;
             let mut row: Vec<(String, bool, bool, f32, f32, TabId)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
-                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icons::SIZE + ICON_GAP;
+                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icon_w(state.file_icons());
                 x += w;
                 (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id())
             }).collect();
@@ -3547,6 +3547,8 @@ impl Render for ReaderView {
         }
         self.logo_uploads.keep(self.logos.values().cloned().collect(), window);
         let logos = self.logos.clone();
+        let file_icons = self.session.state().file_icons();
+        let icon_w = icon_w(file_icons);
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
         let max = self.max_column();
@@ -3777,9 +3779,10 @@ impl Render for ReaderView {
                                         }
                                     }
                                     let color = if *retained { palette.fg } else { palette.dim };
-                                    let icon = icons::file(title);
-                                    paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icon, x0 + tx0 + char_w, y);
-                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icons::SIZE + ICON_GAP, y, title, color);
+                                    if file_icons {
+                                        paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
+                                    }
+                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icon_w, y, title, color);
                                     lenz_gpui::text(window, cx, m, x0 + tx1 - char_w * 2.0, y, "×", palette.dim);
                                     lenz_gpui::fill(window, x0 + tx1 - 1.0, y + 3.0, 1.0, tabs_h - 6.0, palette.border);
                                 }
@@ -3835,8 +3838,10 @@ impl Render for ReaderView {
                                     if let Some(open) = line.expanded {
                                         lenz_gpui::text(window, cx, m, x, y, if open { "▾" } else { "▸" }, palette.dim);
                                     }
-                                    paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
-                                    lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icons::SIZE + ICON_GAP, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
+                                    if file_icons {
+                                        paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
+                                    }
+                                    lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icon_w, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
                                 }
                             });
                             lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0 + toolbar_h(), 1.0, body_h + tabs_h, palette.border);
@@ -3951,8 +3956,10 @@ impl Render for ReaderView {
                                     let mut x = px0 + 8.0 + row.depth as f32 * 2.0 * char_w;
                                     if let Some((icon, open)) = row.node {
                                         lenz_gpui::text(window, cx, m, x, y, if open { "▾" } else { "▸" }, palette.dim);
-                                        paint_icon(window, cx, icon_font.as_ref(), &logos, panel, &palette, icon, x + 1.5 * char_w, y);
-                                        x += 1.5 * char_w + icons::SIZE + ICON_GAP;
+                                        if file_icons {
+                                            paint_icon(window, cx, icon_font.as_ref(), &logos, panel, &palette, icon, x + 1.5 * char_w, y);
+                                        }
+                                        x += 1.5 * char_w + icon_w;
                                     }
                                     let row_fg: &[_] = if row.stale { &[] } else { &row.fg };
                                     lenz_gpui::colored_text(window, cx, m, fg, x, y, &row.label, row_fg, &bg);
@@ -4207,6 +4214,11 @@ pub struct TreeLine {
 
 /// Space between an icon and the name after it.
 const ICON_GAP: f32 = 6.0;
+
+/// The width a file-type icon and its gap take before a name (none with File Icons off).
+fn icon_w(file_icons: bool) -> f32 {
+    if file_icons { icons::SIZE + ICON_GAP } else { 0.0 }
+}
 
 /// A file or folder icon in the [`icons::SIZE`] square at `x` on the row at `y`: its logo, else its Nerd Font glyph,
 /// else a shape in its colour (a folder with a tab, a page for a file).

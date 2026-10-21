@@ -139,16 +139,18 @@ core's Copy Text command. An SVG can switch between image and source. Images use
 The terminal controls fonts, cell aspect ratio and support for italic, underline and strike. These are display
 limits rather than different document behavior.
 
-Set `LENZ_ICONS=nerd` to decorate the command bar, explorer, tabs, search results heading and status bar with
-the same Nerd Font glyphs as the comparison TUI. Configure a [Nerd Font Mono](https://www.nerdfonts.com/)
-in your terminal, for example JetBrainsMono Nerd Font Mono, so icons occupy one cell. `LENZ_ICONS=plain`
-(the default) keeps ordinary labels; fonts are never installed or changed by the app. Active reading tabs use
+Nerd Font glyphs decorate the command bar, explorer, tabs, search results heading and status bar by default,
+as in the comparison TUI. **File Icons** in the View menu turns them off (and on again); the choice is
+remembered and shared with the GUI reader, which then hides its file icons too. `LENZ_ICONS=plain|nerd`
+overrides it for one run, until File Icons is toggled. Configure a [Nerd Font Mono](https://www.nerdfonts.com/)
+in your terminal, for example JetBrainsMono Nerd Font Mono, so icons occupy one cell; fonts are never installed
+or changed by the app. Active reading tabs use
 bold accent text and an underline when focused; pane headings and rounded dialogs follow the selected theme.
 Files use the GUI reader's file-type glyphs and colors, including special names such as `Cargo.toml`,
 `Dockerfile` and `.gitignore`. Folder icons distinguish open and closed directories.
 
 `NO_COLOR` disables **all** terminal colors, including syntax and diff highlighting. If the entire app is
-monochrome, use `env -u NO_COLOR LENZ_ICONS=nerd lenz --tui` with the staged launcher (or run
+monochrome, use `env -u NO_COLOR lenz --tui` with the staged launcher (or run
 `lenz-reader-tui` directly). The app leaves your terminal and shell configuration unchanged.
 
 **Change theme** is an application command in the F10 menu. Its chooser highlights the current selection and previews themes with arrows, Home/End and Page Up/Down. Enter or a click saves the choice; Escape or an outside click cancels the preview. The wheel scrolls the list without changing the highlighted theme.
