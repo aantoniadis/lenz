@@ -235,6 +235,45 @@ Plain `lenz diff` and `lenz diff log` in a repository reopen where you left off:
 
 The terminal frontend has the same toolbar, menus and palette, with terminal-specific keys (`:` or F10 commands, Alt+0 Focus, F8 switches independent views, F6 moves between panes, Ctrl-Q quits). Clipboard uses OSC 52 and images render as terminal cells. See [terminal controls and capability limits](docs/tui.md).
 
+### Terminal icons (Nerd Fonts)
+
+Both terminal apps (`lenz --tui` and `lenz diff --tui`) show file-type icons by default. They are [Nerd Font](https://www.nerdfonts.com/) glyphs, so the terminal needs a Nerd Font, ideally a **Mono** variant so each icon takes one cell. Without one you see boxes or question marks. Lenz never installs fonts. Any Nerd Font Mono works; JetBrainsMono is used below.
+
+1. Install the font:
+
+   ```sh
+   # macOS (Homebrew)
+   brew install --cask font-jetbrains-mono-nerd-font
+
+   # Arch Linux
+   sudo pacman -S ttf-jetbrains-mono-nerd
+
+   # Other Linux: from the Nerd Fonts release
+   mkdir -p ~/.local/share/fonts/JetBrainsMonoNerd
+   curl -fLo /tmp/JetBrainsMono.tar.xz https://github.com/ryanoasis/nerd-fonts/releases/latest/download/JetBrainsMono.tar.xz
+   tar -xJf /tmp/JetBrainsMono.tar.xz -C ~/.local/share/fonts/JetBrainsMonoNerd
+   fc-cache -f
+   ```
+
+2. Select **JetBrainsMono Nerd Font Mono** as your terminal's font, then restart the terminal:
+
+   | Terminal | Setting |
+   | --- | --- |
+   | Ghostty | `font-family = "JetBrainsMono Nerd Font Mono"` in `~/.config/ghostty/config` |
+   | Kitty | `font_family JetBrainsMono Nerd Font Mono` in `~/.config/kitty/kitty.conf` |
+   | Alacritty | `[font.normal]` then `family = "JetBrainsMono Nerd Font Mono"` in `~/.config/alacritty/alacritty.toml` |
+   | WezTerm | `config.font = wezterm.font("JetBrainsMono Nerd Font Mono")` in `~/.wezterm.lua` |
+   | foot | `font=JetBrainsMono Nerd Font Mono:size=11` in `~/.config/foot/foot.ini` |
+   | iTerm2 | Settings → Profiles → Text → Font |
+   | Terminal.app | Settings → Profiles → Text → Font → Change… |
+
+3. Check: `fc-list | grep -i "JetBrainsMono Nerd Font Mono"` on Linux lists it, and file names in `lenz --tui` show their icons.
+
+To turn icons off:
+- **Lenz Code:** **File Icons** in the View menu (remembered).
+- **Lenz Diff:** the ☰ toggle, or `icons = "plain"` under `[tools]` in the [settings file](#settings-and-last-position).
+- **Either, for one run:** `LENZ_ICONS=plain`.
+
 ### Editing and saving
 
 Editable text comparisons keep **Undo**, **Redo** and **Save** directly accessible, with **Discard unsaved changes** in the Edit menu. Hunk moves stay pending until **Ctrl/Cmd+S** (Ctrl-S in the TUI comparison pane). **Revert hunk** restores the left version on the right working-tree side. Drafts survive file switches and repository refresh, and Lenz asks before closing or changing comparisons with unsaved drafts.
