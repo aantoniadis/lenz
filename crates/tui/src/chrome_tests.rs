@@ -435,9 +435,9 @@ fn tui_commit_right_click_compares_with_working_tree_and_exposes_details(){
 }
 
 #[test]
-fn horizontal_wheel_and_keyboard_scroll_only_the_target_text_pane() {
+fn horizontal_wheel_and_keyboard_scroll_only_the_target_text_pane_in_independent() {
     let (_dir,mut app)=pair(&format!("LEFT{}\n","x".repeat(300)),&format!("RIGHT{}\n","y".repeat(300)));
-    app.navigator.visible=Some(false);draw(&mut app,100,20);
+    app.navigator.visible=Some(false);draw(&mut app,100,20);independent(&mut app);
     let at=(app.diff_area.x+app.diff_area.width-10,app.diff_area.y+2);
     let anchor=app.session.view().anchor_line();
     app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollRight,column:at.0,row:at.1,modifiers:KeyModifiers::NONE}));
@@ -450,9 +450,32 @@ fn horizontal_wheel_and_keyboard_scroll_only_the_target_text_pane() {
     assert!(text(&draw(&mut app,100,20)).contains("LEFT"));
 }
 
+/// Shared, Aligned and Padded move both Sides sideways together, to the end of the wider one, by wheel, keys and
+/// caret; switching out of Independent lines them up.
+#[test]
+fn horizontal_scroll_moves_both_sides_unless_independent() {
+    let (_dir,mut app)=pair(&format!("LEFT{}\n","x".repeat(300)),&format!("RIGHT{}\n","y".repeat(30)));
+    app.navigator.visible=Some(false);draw(&mut app,100,20);
+    let at=(app.diff_area.x+app.diff_area.width-10,app.diff_area.y+2);
+    app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollRight,column:at.0,row:at.1,modifiers:KeyModifiers::NONE}));
+    let screen=text(&draw(&mut app,100,20));assert!(!screen.contains("LEFT")&&!screen.contains("RIGHT"),"both Sides moved");
+    assert!(app.horizontal[0]>0);assert_eq!(app.horizontal[0],app.horizontal[1]);
+    // To the end of the wider (left) Side, though the pointer is over the shorter one.
+    for _ in 0..200{app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollRight,column:at.0,row:at.1,modifiers:KeyModifiers::NONE}));}
+    let end=app.horizontal;assert_eq!(end[0],end[1]);assert!(end[0]>30,"{end:?}");
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Left,KeyModifiers::CONTROL|KeyModifiers::ALT)));
+    assert!(app.horizontal[0]<end[0]);assert_eq!(app.horizontal[0],app.horizontal[1]);
+    // Independent keeps them apart; leaving it lines them up again.
+    independent(&mut app);app.horizontal=[0,5];key(&mut app,KeyCode::Char('s'));draw(&mut app,100,20);
+    assert_eq!(app.horizontal[0],app.horizontal[1]);
+}
+fn independent(app:&mut App){
+    for _ in 0..3{key(app,KeyCode::Char('s'));}assert_eq!(app.session.view().mode(),lenz::view::ScrollMode::Independent);
+}
+
 #[test]
 fn horizontal_scroll_clamps_wide_tabs_on_resize_and_stays_inside_modals(){
-    let (dir,mut app)=pair("LEFT\n",&format!("{}END\n","界\t".repeat(20)));app.navigator.visible=Some(false);draw(&mut app,100,20);
+    let (dir,mut app)=pair("LEFT\n",&format!("{}END\n","界\t".repeat(20)));app.navigator.visible=Some(false);draw(&mut app,100,20);independent(&mut app);
     let at=(app.diff_area.right()-10,app.diff_area.y+2);
     for _ in 0..100{app.handle(Event::Mouse(MouseEvent{kind:MouseEventKind::ScrollRight,column:at.0,row:at.1,modifiers:KeyModifiers::NONE}));}
     let screen=text(&draw(&mut app,100,20));assert!(screen.contains("END"));assert!(screen.contains("LEFT"));let offsets=app.horizontal;
@@ -602,7 +625,7 @@ fn markdown_tui_all_themes_and_tiny_sizes_keep_unicode_and_clamp_end_up() {
 fn markdown_tui_code_tables_keep_horizontal_input_and_pointer_side() {
     use lenz::view::Side;
     let src="```rust\nfn very_long_name() { let 安全 = 123456789; } // beyond viewport\n```\n\n| Name | Amount |\n| :--- | ---: |\n| a long column with 安全 | 12345678901234567890 |\n";
-    let (_dir,mut app)=pair_markdown(&src.replace("123456789", "987654321"),src);let screen=rendered_markdown(&mut app,100,24);
+    let (_dir,mut app)=pair_markdown(&src.replace("123456789", "987654321"),src);independent(&mut app);let screen=rendered_markdown(&mut app,100,24);
     assert!(text(&screen).contains("fn very_long_name"));let old_focus=app.focus;
     app.handle(Event::Mouse(MouseEvent {kind:MouseEventKind::ScrollRight,column:app.diff_area.x+2,row:app.diff_area.y+2,modifiers:KeyModifiers::NONE}));
     assert!(app.horizontal[0]>0);assert_eq!(app.horizontal[1],0);assert_eq!(app.focus,old_focus);

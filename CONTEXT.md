@@ -52,7 +52,7 @@ The visual band linking a **Change Block** on the left **Side** to its counterpa
 _Avoid_: ribbon, curve
 
 **Scroll Mode**:
-How the two **Sides** move together when scrolling. One of **Shared** (default — both Sides follow one position; a Side pauses while the other passes lines it lacks), **Aligned** (matching lines stay level while each Side scrolls its own lines), **Padded** (**Filler Rows** keep Sides aligned row for row), or **Independent** (each Side scrolls on its own; the other never moves).
+How the two **Sides** move together when scrolling. One of **Shared** (default — both Sides follow one position; a Side pauses while the other passes lines it lacks), **Aligned** (matching lines stay level while each Side scrolls its own lines), **Padded** (**Filler Rows** keep Sides aligned row for row), or **Independent** (each Side scrolls on its own; the other never moves). Sideways, both Sides move together in every mode but Independent.
 _Avoid_: sync mode, alignment mode
 
 **Filler Row**:

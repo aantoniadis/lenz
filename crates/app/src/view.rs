@@ -36,6 +36,9 @@ impl ScrollMode {
     /// Each Side keeps its own top (Aligned and Independent), rather than one shared position.
     pub fn separate_tops(self) -> bool { matches!(self, ScrollMode::Aligned | ScrollMode::Independent) }
 
+    /// Both Sides scroll sideways together, except in Independent, where each keeps its own position.
+    pub fn shares_horizontal(self) -> bool { self != ScrollMode::Independent }
+
     pub fn next(self) -> Self {
         match self {
             ScrollMode::Shared => ScrollMode::Aligned,

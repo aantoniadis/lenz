@@ -908,6 +908,7 @@ impl App {
 
     pub fn render(&mut self,frame:&mut ratatui::Frame){let area=frame.area();self.render_in(frame,area);}
     pub fn render_in(&mut self,frame:&mut ratatui::Frame,area:ratatui::layout::Rect){
+        self.sync_horizontal();
         self.yield_summary();
         if self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.markdown.clear();}
         let palette=self.palette.clone();
@@ -964,19 +965,29 @@ impl App {
         if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered{return self.markdown.horizontal_max(side);}
         let Some(doc)=self.session.document()else{return 0;};
         let mut widest=*self.columns[side as usize].get_or_insert_with(||crate::render::source_width(doc.lines_on(side)));
-        // Unified scrolls both Sides together: the wider of the two
-        if self.unified(){let other=if side==Side::Left{Side::Right}else{Side::Left};widest=widest.max(*self.columns[other as usize].get_or_insert_with(||crate::render::source_width(doc.lines_on(other))));}
+        // Unified, and every Scroll Mode but Independent, scroll both Sides together: the wider of the two
+        if self.unified()||self.shared_horizontal(){let other=if side==Side::Left{Side::Right}else{Side::Left};widest=widest.max(*self.columns[other as usize].get_or_insert_with(||crate::render::source_width(doc.lines_on(other))));}
         let width=usize::from(self.source_rect(side).width);
         widest.saturating_sub(width)
     }
+    /// Whether both Sides share one sideways position (every Scroll Mode but Independent).
+    pub(crate) fn shared_horizontal(&self)->bool{self.session.view().mode().shares_horizontal()}
+    /// Moving `side` moves both when they share a position.
+    fn set_horizontal(&mut self,side:Side,x:usize){
+        if self.shared_horizontal(){self.horizontal=[x;2];}else{self.horizontal[side as usize]=x;}
+    }
     pub(crate) fn clamp_horizontal(&mut self,side:Side){
-        if self.horizontal[side as usize]==0{return;}
-        let max=self.horizontal_max(side);self.horizontal[side as usize]=self.horizontal[side as usize].min(max);
+        if self.horizontal[side as usize]==0&&!self.shared_horizontal(){return;}
+        let max=self.horizontal_max(side);self.set_horizontal(side,self.horizontal[side as usize].min(max));
     }
     fn scroll_horizontal(&mut self,side:Side,delta:isize){
         if self.visual.image().is_some(){return;}
         if delta<=0&&self.horizontal[side as usize]==0{return;}
-        let max=self.horizontal_max(side);self.horizontal[side as usize]=self.horizontal[side as usize].saturating_add_signed(delta).min(max);
+        let max=self.horizontal_max(side);self.set_horizontal(side,self.horizontal[side as usize].saturating_add_signed(delta).min(max));
+    }
+    /// After a switch out of Independent, the Sides take the focused one's position.
+    fn sync_horizontal(&mut self){
+        if self.shared_horizontal()&&self.horizontal[0]!=self.horizontal[1]{let side=self.pane_side(self.focus);self.clamp_horizontal(side);}
     }
 }
 
