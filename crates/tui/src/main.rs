@@ -53,7 +53,7 @@ usage: lenz diff --tui [options] [--staged] [<rev> [<rev>]] [-- <path>...]
 lenz-diff-tui takes the same arguments without the diff --tui prefix.
 
 Same comparison options as lenz diff, including --blame and --line N.
-Optional icons: LENZ_ICONS=nerd (Nerd Font Mono); View menu toggles icons.
+Icons: Nerd Font Mono glyphs by default; LENZ_ICONS=plain (or [tools] icons = plain) turns them off, and the ☰ menu toggles them.
 n/p changes; [/] files; / find; f files; : commands; Ctrl-R repository;
 A applied history; Ctrl-Z/Ctrl-Y undo/redo drafts; Ctrl-S saves;
 Alt-Shift-arrows apply to draft; commands discard unsaved/revert hunk; b blame; ? help.

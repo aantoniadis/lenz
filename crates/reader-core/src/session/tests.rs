@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -3904,16 +3904,23 @@ fn every_toggle_shows_its_state_in_the_menu() {
     let d = tempfile::tempdir().unwrap();
     let mut s = session(d.path());
     let on = |s: &Session, id: CommandId| s.actions().into_iter().find(|a| a.id == id).and_then(|a| a.on);
-    let ids = [CommandId::SoftWrap, CommandId::StickyScroll, CommandId::Breadcrumbs, CommandId::DocumentationOnHover, CommandId::MatchCase, CommandId::WholeWord, CommandId::RegularExpression];
-    assert_eq!(ids.map(|id| on(&s, id)), [Some(false), Some(true), Some(true), Some(true), Some(false), Some(false), Some(false)]);
+    let ids = [CommandId::SoftWrap, CommandId::StickyScroll, CommandId::Breadcrumbs, CommandId::DocumentationOnHover, CommandId::FileIcons, CommandId::MatchCase, CommandId::WholeWord, CommandId::RegularExpression];
+    assert_eq!(ids.map(|id| on(&s, id)), [Some(false), Some(true), Some(true), Some(true), Some(true), Some(false), Some(false), Some(false)]);
     s.dispatch(Command::SetSoftWrap(true));
     s.dispatch(Command::SetStickyScroll(false));
     s.dispatch(Command::SetBreadcrumbs(false));
     s.dispatch(Command::SetDocumentationOnHover(false));
+    s.dispatch(Command::SetFileIcons(false));
     for o in [FindOption::Case, FindOption::Word, FindOption::Regex] {
         s.dispatch(Command::ToggleFindOption(o));
     }
-    assert_eq!(ids.map(|id| on(&s, id)), [Some(true), Some(false), Some(false), Some(false), Some(true), Some(true), Some(true)]);
+    assert_eq!(ids.map(|id| on(&s, id)), [Some(true), Some(false), Some(false), Some(false), Some(false), Some(true), Some(true), Some(true)]);
+    // File Icons: in the View menu, always available, and remembered.
+    assert_eq!((CommandId::FileIcons.group(), s.disabled(CommandId::FileIcons)), (crate::actions::CommandGroup::View, None));
+    let saved = d.path().join("state/lenz-reader/settings.json");
+    settle(&mut s, |_| !read_settings(&saved).file_icons);
+    drop(s);
+    assert!(!session(d.path()).state().file_icons());
 }
 
 #[test]

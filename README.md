@@ -212,7 +212,7 @@ markdown_layout = "inline"       # inline | side-by-side (Preview)
 
 [tools]
 editor = "nvim --clean"
-icons = "nerd"                   # plain | nerd (TUI)
+icons = "plain"                  # nerd (default) | plain (TUI)
 crash_dir = "~/lenz-crashes"
 
 [session]

@@ -4930,3 +4930,25 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
     }
     assert_eq!(std::fs::read(f.dir.path().join("note.txt")).unwrap(), b"unchanged\n");
 }
+
+/// File Icons (View menu, remembered): off, names lose their icons and tabs the icon's width; tabs still answer
+/// clicks; on again, the width comes back.
+#[gpui::test]
+fn file_icons_toggle_from_the_menu_and_tabs_keep_their_targets(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let width = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.tab_hits.first().map(|h| h.1 - h.0).unwrap());
+    let with = width(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session().state().file_icons()), "on by default");
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::FileIcons, w, cx));
+    draw(&mut v);
+    assert!(!f.view.read_with(&v, |r, _| r.session().state().file_icons()));
+    assert_eq!(with - width(&mut v), crate::icons::SIZE + 6.0, "the icon and its gap are gone");
+    let (hit, y) = f.view.read_with(&v, |r, _| (r.tab_hits[0], toolbar_h() + line_h() / 2.0));
+    v.simulate_click(point(px(hit.0 + 10.0), px(y)), Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().map(|t| t.id())), Some(hit.2));
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::FileIcons, w, cx));
+    draw(&mut v);
+    assert_eq!(width(&mut v), with);
+}
