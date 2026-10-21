@@ -65,6 +65,25 @@ pub(crate) struct TextHit {
     pub byte: usize,
 }
 
+/// The terminal About logo as half-block cells (two pixel rows per cell), blended over `bg`.
+fn draw_about_logo(buf: &mut Buffer, area: Rect, bg: u32) {
+    let size = lenz_content::about::LOGO_TERMINAL_SIZE;
+    let pixel = |x: usize, y: usize| {
+        let i = (y * size + x) * 4;
+        let [r, g, b, a] = [0, 1, 2, 3].map(|k| u32::from(lenz_content::about::LOGO_TERMINAL[i + k]));
+        let mix = |c: u32, shift: u32| (c * a + ((bg >> shift) & 0xFF) * (255 - a)) / 255;
+        Color::Rgb(mix(r, 16) as u8, mix(g, 8) as u8, mix(b, 0) as u8)
+    };
+    for row in 0..area.height.min((size / 2) as u16) {
+        for col in 0..area.width.min(size as u16) {
+            let (x, y) = (col as usize, row as usize * 2);
+            if let Some(cell) = buf.cell_mut((area.x + col, area.y + row)) {
+                cell.set_symbol("▀").set_fg(pixel(x, y)).set_bg(pixel(x, y + 1));
+            }
+        }
+    }
+}
+
 pub(crate) fn color(rgb: u32) -> Color {
     Color::Rgb((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8)
 }
@@ -1108,6 +1127,12 @@ impl App {
                 Prompt::Details { body, .. } => body.as_str(),
                 _ => HELP,
             };
+            // About's logo at the right, when the text keeps at least 30 columns beside it.
+            let logo = lenz_content::about::LOGO_TERMINAL_SIZE as u16;
+            if matches!(modal.kind, Prompt::Details { logo: true, .. }) && content.width >= logo + 32 && content.height >= logo / 2 {
+                draw_about_logo(frame.buffer_mut(), Rect::new(content.right() - logo, content.y, logo, logo / 2), p.status_bg);
+                content.width -= logo + 2;
+            }
             let wrapped = wrap_text(body, content.width.max(1) as usize);
             geometry.modal_content_rows = wrapped.len();
             geometry.modal_rows = content;

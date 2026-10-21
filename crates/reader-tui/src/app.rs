@@ -62,7 +62,8 @@ pub(crate) enum Prompt {
         crumb: usize,
     },
     Help,
-    Details { title: &'static str, body: String },
+    /// Read-only text (About adds its half-block logo when there is room).
+    Details { title: &'static str, body: String, logo: bool },
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -386,7 +387,7 @@ impl App {
         if self.modal.is_none()
             && let Some(doc) = self.session.state().documentation()
         {
-            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone() });
+            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false });
         }
     }
     fn open_root(&mut self, path: PathBuf) {
@@ -567,8 +568,9 @@ impl App {
                     details.push_str("\n\nTerminal notice\n");
                     details.push_str(notice);
                 }
-                Prompt::Details { title, body: details }
+                Prompt::Details { title, body: details, logo: false }
             },
+            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;

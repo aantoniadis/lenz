@@ -343,6 +343,8 @@ pub enum CommandId {
     ExtendSelection,
     ShrinkSelection,
     ChooseTheme,
+    /// The application's name, version, platform, licence and project page (the adapter shows it).
+    About,
     /// A separate window with its own session (the adapter creates it).
     NewWindow,
     Definition,
@@ -426,7 +428,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 95] = [
+    pub const ALL: [CommandId; 96] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -475,6 +477,7 @@ impl CommandId {
         Self::ExtendSelection,
         Self::ShrinkSelection,
         Self::ChooseTheme,
+        Self::About,
         Self::NewWindow,
         Self::Definition,
         Self::PeekDefinition,
@@ -576,6 +579,7 @@ impl CommandId {
             Self::ExtendSelection => "Extend Selection",
             Self::ShrinkSelection => "Shrink Selection",
             Self::ChooseTheme => "Change theme",
+            Self::About => crate::chrome::ABOUT_TITLE,
             Self::NewWindow => "New Window",
             Self::Definition => "Go to Definition",
             Self::PeekDefinition => "Peek Definition",
@@ -1648,7 +1652,7 @@ impl Session {
         let open = self.state.document().is_some();
         let tabs = self.state.pane_tabs(self.state.focused).count();
         match id {
-            CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::NewWindow => None,
+            CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
             CommandId::Unsplit | CommandId::FocusOtherPane => self.state.settings.split.is_none().then_some("The file panel is not split"),

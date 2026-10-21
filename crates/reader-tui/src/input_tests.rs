@@ -490,7 +490,7 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y);
     click(&mut a, x, y);
     let details = match &a.modal.as_ref().unwrap().kind {
-        Prompt::Details { title: "Server details", body } => body.clone(),
+        Prompt::Details { title: "Server details", body, .. } => body.clone(),
         other => panic!("unexpected prompt: {other:?}"),
     };
     assert!(details.contains("was not found") && details.contains("rustup component add rust-analyzer") && details.contains("providers.json"));
@@ -1592,7 +1592,7 @@ fn help_and_wrapped_details_wheel_scroll_without_selection_and_clamp_on_resize()
     let mut a = app(dir.path());
     for prompt in [
         Prompt::Help,
-        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200) },
+        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200), logo: false },
     ] {
         a.prompt(prompt);
         draw(&mut a, 24, 10);
@@ -1836,7 +1836,8 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
     assert_eq!(labels(&a).last().map(String::as_str), Some("All commands…"));
     // Typing does not filter the menu.
     key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
-    assert_eq!(labels(&a).len(), CommandGroup::ALL.len() + 1);
+    // Each group, but Application as Change theme and About; then All commands.
+    assert_eq!(labels(&a).len(), CommandGroup::ALL.len() + 2);
     // Down Enter opens View; its first row goes back, then the commands with their states.
     key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -1977,4 +1978,46 @@ fn search_dialog_fields_and_toggles_take_clicks_and_a_bad_expression_does_not_se
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(a.modal.is_none() && a.session.state().results().is_some());
     assert_eq!(std::fs::read_to_string(dir.path().join("a.rs")).unwrap(), "Foo foo\n");
+}
+
+/// About from ☰: the shared text with the half-block logo when wide enough (text only when narrow), modal,
+/// bounded End then Up, Esc back to the unchanged document; tiny terminals still draw.
+#[test]
+fn about_opens_from_the_application_menu_with_its_logo_and_closes_to_the_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    std::fs::write(&path, "first\n").unwrap();
+    let mut a = App::new(config(dir.path()), Some(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    let screen = |a: &mut App, w: u16, h: u16| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let text: String = buffer.content.iter().map(|c| c.symbol()).collect();
+        (text, buffer.content.iter().filter(|c| c.symbol() == "▀").count())
+    };
+    draw(&mut a, 100, 30);
+    click(&mut a, 2, 0);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    assert_eq!(a.choices()[a.modal.as_ref().unwrap().at].label, "About Lenz Code");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::Details { title: "About Lenz Code", logo: true, .. })));
+    let (text, logo) = screen(&mut a, 100, 30);
+    assert!(text.contains("About Lenz Code") && text.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))), "{text}");
+    assert_eq!(logo, 24 * 12, "the whole logo");
+    let (text, logo) = screen(&mut a, 40, 12);
+    assert_eq!(logo, 0, "no room: text only");
+    assert!(text.contains("Version"));
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    assert!(screen(&mut a, 40, 12).0.contains("Licence"), "End then Up stays within the text");
+    for (w, h) in [(1, 1), (0, 0), (20, 5)] {
+        draw(&mut a, w, h);
+    }
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(), b"first\n");
+    assert!(a.session.state().document().is_some_and(|d| d.text().to_string() == "first\n"));
 }

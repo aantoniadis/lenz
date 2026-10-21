@@ -4911,7 +4911,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
             // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
             let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
-            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone() }); cx.notify(); });
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
             v.simulate_keystrokes("end up");
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
@@ -4951,4 +4951,41 @@ fn file_icons_toggle_from_the_menu_and_tabs_keep_their_targets(cx: &mut TestAppC
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::FileIcons, w, cx));
     draw(&mut v);
     assert_eq!(width(&mut v), with);
+}
+
+/// About: the shared text and its logo, decoded only when About opens and out of the atlas (and memory) once it
+/// closes; reopening keeps one texture; the dialog takes keys and a tiny window still draws.
+#[gpui::test]
+fn about_shows_the_shared_text_and_releases_its_logo_on_close(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.about_upload.len()), 0, "nothing decoded before About opens");
+    let mut weak = None;
+    for _ in 0..3 {
+        f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::About, w, cx));
+        draw(&mut v);
+        let (title, text, logo) = f.view.read_with(&v, |r, _| match &r.modal {
+            Some(Modal::StatusDetails { title, text, logo }) => (*title, text.clone(), logo.as_ref().map(|l| Arc::downgrade(&l.0))),
+            other => panic!("{other:?}"),
+        });
+        assert_eq!(title, "About Lenz Code");
+        assert!(text.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))), "{text}");
+        assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, line, _)| line.contains("Licence"))));
+        assert_eq!(f.view.read_with(&v, |r, _| r.about_upload.len()), 1, "one texture while open");
+        weak = logo;
+        v.simulate_keystrokes("x escape");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.about_upload.is_empty()), "out of the atlas after closing");
+    }
+    assert!(weak.unwrap().upgrade().is_none(), "the pixels are freed too");
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::About, w, cx));
+    for (w, h) in [(1.0, 1.0), (300.0, 120.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+    }
+    v.simulate_keystrokes("end up escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"fn a() {}\n");
 }
