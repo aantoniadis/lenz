@@ -1,9 +1,9 @@
 //! JDT LS runtime selection. Discovery and validation run only when requested, on the session's workers.
-use serde_json::{Value, json};
+use serde_json::json;
+use super::provider::update_settings;
 use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
@@ -146,84 +146,10 @@ pub fn save(file: &Path, path: Option<PathBuf>) -> Result<Option<PathBuf>, Strin
     Ok(path)
 }
 
-/// Atomically change one provider while preserving unrelated and unknown settings.
-pub(super) fn update_settings(
-    file: &Path,
-    provider_id: &str,
-    label: &str,
-    update: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<(), String>,
-) -> Result<(), String> {
-    let original = match std::fs::symlink_metadata(file) {
-        Ok(_) => Some(
-            lenz_content::theme::read_bounded(file)
-                .map_err(|e| format!("Cannot read provider settings: {e}"))?,
-        ),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(format!("Cannot read provider settings: {e}")),
-    };
-    let mut value: Value = original
-        .as_deref()
-        .map(serde_json::from_slice)
-        .transpose()
-        .map_err(|e| format!("Provider settings contain invalid JSON: {e}"))?
-        .unwrap_or_else(|| json!({}));
-    let object = value
-        .as_object_mut()
-        .ok_or("Provider settings must be a JSON object")?;
-    let providers = object
-        .entry("providers")
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or("providers must be a JSON object")?;
-    let provider = providers
-        .entry(provider_id)
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .ok_or_else(|| format!("{provider_id} settings must be a JSON object"))?;
-    update(provider)?;
-    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
-    if bytes.len() > 65536 {
-        return Err("Provider settings exceed 64 KiB".into());
-    }
-    let parent = file
-        .parent()
-        .ok_or("Provider settings have no parent folder")?;
-    std::fs::create_dir_all(parent)
-        .map_err(|e| format!("Cannot create provider settings folder: {e}"))?;
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let temp = file.with_extension(format!(
-        "runtime-{}-{}.tmp",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
-    let result = (|| {
-        use std::io::Write;
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        let mut output = options.open(&temp)?;
-        if let Ok(metadata) = std::fs::metadata(file) {
-            output.set_permissions(metadata.permissions())?;
-        }
-        output.write_all(&bytes)?;
-        if lenz_content::theme::read_bounded(file).ok() != original {
-            return Err(std::io::Error::other(
-                "Provider settings changed; try again",
-            ));
-        }
-        std::fs::rename(&temp, file)
-    })();
-    if let Err(e) = result {
-        let _ = std::fs::remove_file(temp);
-        return Err(format!("Could not save {label} runtime: {e}"));
-    }
-    Ok(())
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::os::unix::fs::PermissionsExt;
 
     fn executable(dir: &Path, body: &str) -> PathBuf {

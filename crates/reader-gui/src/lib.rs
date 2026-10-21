@@ -60,10 +60,10 @@ pub enum Modal {
     /// The app menu and its shared command groups.
     AppMenu { at: usize },
     CommandGroup { group: CommandGroup, at: usize },
-    /// Full server status, troubleshooting and shared recovery actions.
+    /// Shared server management actions, with diagnostics in Server Details.
     LanguageServer { at: usize },
     /// A frozen, read-only diagnostic snapshot; Copy preserves the complete text.
-    StatusDetails { text: String },
+    StatusDetails { title: &'static str, text: String },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
@@ -116,6 +116,18 @@ struct ModalLayout {
     at: usize,
 }
 
+impl ModalLayout {
+    fn details_buttons(&self, char_w: f32) -> [Bounds<Pixels>; 2] {
+        let width = ((f32::from(self.bounds.size.width) - 24.0).max(0.0) / 2.0).min(7.0 * char_w + 16.0);
+        let height = line_h().min((f32::from(self.bounds.size.height) - 8.0).max(0.0));
+        let right = f32::from(self.bounds.right()) - 8.0;
+        [2.0, 1.0].map(|i| Bounds {
+            origin: gpui::point(px(right - i * width - (i - 1.0) * 8.0), px(f32::from(self.bounds.bottom()) - 4.0 - height)),
+            size: gpui::size(px(width), px(height)),
+        })
+    }
+}
+
 pub struct ReaderView {
     session: Session,
     focus: FocusHandle,
@@ -152,6 +164,9 @@ pub struct ReaderView {
     /// Popup viewport and fractional wheel steps, independent of the highlighted option.
     modal_scroll: std::cell::Cell<usize>,
     modal_wheel: std::cell::Cell<f32>,
+    /// Fractional trackpad movement belongs to its pane and tab.
+    wheel: [gpui::Point<f32>; 2],
+    wheel_tab: [Option<(TabId, u64)>; 2],
     modal_seen: std::cell::Cell<Option<(std::mem::Discriminant<Modal>, usize)>>,
     /// The project tree's highlighted row (by path, so arriving files above it do not move it), its first
     /// visible row, whether the next paint brings the highlight into view, whether keys go to it and whether it
@@ -199,6 +214,7 @@ pub struct ReaderView {
     split_at: f32,
     /// The toolbar button under the pointer.
     pub nav_hover: Option<CommandId>,
+    preview_hover: Option<u8>,
     app_menu_hover: bool,
     commands_hover: bool,
     /// The installed Nerd Font for file icons (looked up once; `Some(None)`: none, shapes are drawn).
@@ -422,7 +438,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -489,8 +505,8 @@ impl ReaderView {
     }
 
     fn scroll_to_x(&mut self, x: f32, cx: &mut Context<Self>) {
-        let x = x.clamp(0.0, self.max_hscroll());
-        self.dispatch(Command::ScrollColumn((x / self.char_w).round() as usize), cx);
+        let column = (x / self.char_w).round().clamp(0.0, self.max_column() as f32) as usize;
+        self.dispatch(Command::ScrollColumn(column), cx);
     }
 
     pub fn open_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -499,35 +515,26 @@ impl ReaderView {
         self.dispatch(Command::OpenRoot(root), cx);
     }
 
-    /// Activate a project-tree row: a directory toggles, a file opens.
+    /// Activate an explorer row: a directory toggles, a file opens.
     fn activate_row(&mut self, i: usize, retain: bool, cx: &mut Context<Self>) {
-        let Some(p) = self.session.state().project() else { return };
-        let Some(row) = p.rows().get(i).cloned() else { return };
-        let path = p.root().join(&*row.path);
+        let Some(row) = self.session.state().tree_rows().nth(i).cloned() else { return };
         self.tree_sel = Some(row.path.clone());
         self.tree_reveal = true;
-        match row.dir {
-            Some(_) if !retain => self.dispatch(Command::ToggleDir(row.path.to_string()), cx),
-            Some(_) => {}
-            None if retain => self.dispatch(Command::OpenRetained(path), cx),
-            None => self.open(path, cx),
-        }
+        self.dispatch(Command::ActivateTree { path: row.path, retain }, cx);
         cx.notify();
     }
 
     fn tree_len(&self) -> usize {
-        self.session.state().project().map_or(0, |p| p.rows().len())
+        self.session.state().tree_rows().count()
     }
 
     /// The highlighted tree row's index in the current rows (the first row when none is highlighted yet).
     pub fn tree_at(&self) -> usize {
-        let rows = self.session.state().project().map_or(&[][..], |p| p.rows());
-        self.tree_sel.as_ref().and_then(|sel| rows.iter().position(|r| r.path == *sel)).unwrap_or(0)
+        self.tree_sel.as_ref().and_then(|sel| self.session.state().tree_rows().position(|r| r.path == *sel)).unwrap_or(0)
     }
 
     fn tree_move(&mut self, to: usize) {
-        let Some(p) = self.session.state().project() else { return };
-        self.tree_sel = p.rows().get(to.min(p.rows().len().saturating_sub(1))).map(|r| r.path.clone());
+        self.tree_sel = self.session.state().tree_rows().nth(to.min(self.tree_len().saturating_sub(1))).map(|r| r.path.clone());
         self.tree_reveal = true;
     }
 
@@ -582,7 +589,7 @@ impl ReaderView {
 
     fn remember_explorer(&mut self) {
         if self.pending_explorer.is_some() || self.session.state().project().is_none() { return; }
-        let explorer = reader_core::workspace::Explorer { visible: self.tree_shown, selected: self.tree_sel.as_ref().map(ToString::to_string), top: self.session.state().project().and_then(|p| p.rows().get(self.tree_scroll)).map(|r| r.path.to_string()) };
+        let explorer = reader_core::workspace::Explorer { visible: self.tree_shown, selected: self.tree_sel.as_ref().map(ToString::to_string), top: self.session.state().tree_rows().nth(self.tree_scroll).map(|r| r.path.to_string()) };
         if self.session.state().explorer() != &explorer { self.session.dispatch(Command::SetExplorer(explorer)); }
     }
 
@@ -630,9 +637,19 @@ impl ReaderView {
         let theme_update = matches!(&input, reader_core::session::Input::Command(Command::Theme(_)) | reader_core::session::Input::Completion(Completion::Theme(_)));
         if matches!(&input, reader_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
         let workspace = self.session.state().workspace_revision();
+        let tree_revision = self.session.state().tree_revision();
+        let library_read = matches!(&input, reader_core::session::Input::Completion(Completion::LibraryRead { .. }));
         let effect = self.session.dispatch(input);
         if theme_update { self.refresh_theme_entries(cx); }
         self.sync_workspace(workspace);
+        if self.session.state().tree_revision() != tree_revision {
+            self.pending_explorer = None;
+            self.tree_shown = true;
+            self.tree_sel = self.session.state().active_in_tree();
+            self.tree_reveal = true;
+        } else if library_read && self.tree_sel == self.session.state().active_in_tree() {
+            self.tree_reveal = true;
+        }
         #[cfg(feature = "perf-probe")]
         if started.elapsed().as_millis() >= 30 {
             eprintln!("lenz-reader: slow dispatch {kind} {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
@@ -747,10 +764,15 @@ impl ReaderView {
                     self.modal = Some(Modal::LanguageServer { at: 0 });
                     cx.notify();
                 }
-                InterfaceAction::StatusDetails => {
+                InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
                     self.dispatch(Command::CloseDocumentation, cx);
                     self.modal_scroll.set(0);
-                    self.modal = Some(Modal::StatusDetails { text: self.session.status_details() });
+                    let (title, text) = if action == InterfaceAction::ServerDetails {
+                        ("Server details", self.session.language_server_details())
+                    } else {
+                        ("Status details", self.session.status_details())
+                    };
+                    self.modal = Some(Modal::StatusDetails { title, text });
                     cx.notify();
                 }
                 InterfaceAction::OpenRecent => {
@@ -1018,7 +1040,7 @@ impl ReaderView {
             ("f", true, false) => self.run(CommandId::FindInFile, window, cx),
             ("g", true, false) => self.run(CommandId::GoToLine, window, cx),
             ("e", true, true) => {
-                self.tree_focus = self.session.state().project().is_some();
+                self.tree_focus = self.session.state().has_tree();
                 self.results_focus &= !self.tree_focus;
                 self.tree_shown |= self.tree_focus;
                 cx.notify();
@@ -1136,10 +1158,7 @@ impl ReaderView {
     /// accept it; in the key chooser a bookmark's row sets its key on the caret's line; header and input rows do
     /// nothing.
     fn modal_click(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(Modal::StatusDetails { text }) = &self.modal {
-            if row == 0 { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); }
-            return;
-        }
+        if matches!(self.modal, Some(Modal::StatusDetails { .. })) { return; }
         if matches!(self.modal, Some(Modal::Mnemonic)) {
             // Row 0 is the prompt; each other row starts with its key.
             let key = row.checked_sub(1).and_then(|i| self.keyed_bookmarks().into_iter().nth(i)).and_then(|r| r.label.chars().next());
@@ -1170,7 +1189,7 @@ impl ReaderView {
             return self.navigation_key(ev, window, cx);
         }
         let key = ev.keystroke.key.as_str();
-        if let Some(Modal::StatusDetails { text }) = &self.modal {
+        if let Some(Modal::StatusDetails { text, .. }) = &self.modal {
             if key == "c" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform) {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             } else if matches!(key, "escape" | "enter" | "f2") {
@@ -1840,7 +1859,7 @@ impl ReaderView {
     /// Keys while the project tree has focus; `false` lets the key fall through to the text.
     fn tree_key(&mut self, key: &str, ctrl: bool, cx: &mut Context<Self>) -> bool {
         let (len, at) = (self.tree_len(), self.tree_at());
-        let expanded = self.session.state().project().and_then(|p| p.rows().get(at)).and_then(|r| r.dir);
+        let expanded = self.session.state().tree_rows().nth(at).and_then(|r| r.dir);
         match (key, ctrl) {
             ("up", false) => self.tree_move(at.saturating_sub(1)),
             ("down", false) => self.tree_move(at + 1),
@@ -1950,16 +1969,32 @@ impl ReaderView {
             let to = m.top + dy;
             return self.scroll_preview(to, cx);
         }
-        let (dx, rows) = match ev.delta {
-            ScrollDelta::Pixels(p) => (-f32::from(p.x), -f32::from(p.y) / line_h()),
-            ScrollDelta::Lines(l) => (-l.x * 3.0 * line_h(), -l.y * 3.0),
-        };
-        let (dx, rows) = if ev.modifiers.shift && dx == 0.0 { (rows * 3.0 * line_h(), 0.0) } else { (dx, rows) };
-        if dx != 0.0 {
-            self.scroll_to_x(self.hscroll() + dx, cx);
+        let delta = lenz_gpui::scroll::shifted(lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w), ev.modifiers.shift);
+        let pane = self.session.state().focused_pane() as usize;
+        let tab = self.session.state().active().and_then(|t| Some((t.id(), t.document()?.version())));
+        if self.wheel_tab[pane] != tab || matches!(ev.delta, ScrollDelta::Lines(_)) {
+            self.wheel[pane] = Default::default();
+            self.wheel_tab[pane] = tab;
         }
-        self.dispatch(Command::ScrollRows(rows.round() as isize), cx);
+        let dx = lenz_gpui::scroll::steps(&mut self.wheel[pane].x, delta.x / self.char_w);
+        let rows = lenz_gpui::scroll::steps(&mut self.wheel[pane].y, delta.y / line_h());
+        if dx != 0 {
+            self.scroll_to_x(self.hscroll() + dx as f32 * self.char_w, cx);
+        }
+        if rows != 0 {
+            self.dispatch(Command::ScrollRows(rows), cx);
+        }
+        if let Some(t) = self.session.state().active() {
+            let at_end = self.wheel[pane].y > 0.0 && t.visible().step(t.top_line(), 1) == t.top_line()
+                && t.rows(2, self.session.state().wrap_cols(t)).len() < 2;
+            lenz_gpui::scroll::clamp(&mut self.wheel[pane].y, t.top_line() == 0 && t.top_row() == 0, at_end);
+            let at_right = self.wheel[pane].x > 0.0 && t.column() >= self.max_column();
+            lenz_gpui::scroll::clamp(&mut self.wheel[pane].x, t.column() == 0, at_right);
+        }
     }
+
+    /// Include a partial last column so its final glyph can become fully visible.
+    fn max_column(&self) -> usize { (self.max_hscroll() / self.char_w).ceil() as usize }
 
     /// The widest visible line's drawn width, generously estimated, so a long line can be scrolled to its end.
     fn max_hscroll(&self) -> f32 {
@@ -2209,6 +2244,12 @@ impl ReaderView {
             let inside = self.modal_layout().filter(|l| l.bounds.contains(&ev.position) && !matches!(self.modal, Some(Modal::GoTo { .. })));
             match inside {
                 Some(l) => {
+                    if let Some(Modal::StatusDetails { text, .. }) = &self.modal {
+                        let [copy, close] = l.details_buttons(self.char_w);
+                        if copy.contains(&ev.position) { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); }
+                        else if close.contains(&ev.position) { self.close_modal(cx); }
+                        return cx.notify();
+                    }
                     let n = ((f32::from(ev.position.y) - f32::from(l.bounds.origin.y) - 4.0) / line_h()).floor();
                     if n >= 0.0 && (n as usize) < l.visible && let Some(&(row, ..)) = l.lines.get(l.first + n as usize) {
                         self.modal_click(row, window, cx);
@@ -2296,6 +2337,11 @@ impl ReaderView {
         }
         if y < toolbar_h() || (y < toolbar_h() + line_h() && x < self.sidebar_w) {
             return;
+        }
+        if let Some(pane) = self.panes.iter().find(|g| self.preview_button(**g).is_some_and(|(b, _)| b.contains(&ev.position))).map(|g| g.pane) {
+            self.tree_focus = false;
+            self.dispatch(Command::FocusPane(pane), cx);
+            return self.run(CommandId::MarkdownSource, window, cx);
         }
         // A pane's tab bar: a tab is shown (its pane focused) and can be dragged; elsewhere the click focuses the pane.
         if let Some(g) = self.panes.iter().find(|g| (g.bar.2..g.bar.2 + line_h()).contains(&y) && (g.bar.0..g.bar.1).contains(&x)).copied() {
@@ -2499,6 +2545,11 @@ impl ReaderView {
                     else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
             });
+        let preview_hover = self.modal.is_none().then(|| self.panes.iter().find(|g| self.preview_button(**g).is_some_and(|(b, _)| b.contains(&ev.position))).map(|g| g.pane)).flatten();
+        if preview_hover != self.preview_hover {
+            self.preview_hover = preview_hover;
+            cx.notify();
+        }
         if hover != self.nav_hover {
             self.nav_hover = hover;
             cx.notify();
@@ -2632,8 +2683,7 @@ impl ReaderView {
 
     /// The tree's visible lines (from its scroll), with `selected` the highlighted row's index.
     pub fn tree_lines(&self, selected: usize) -> Vec<TreeLine> {
-        self.session.state().project().map_or_else(Vec::new, |p| {
-            p.rows().iter().enumerate().skip(self.tree_scroll).take(self.tree_rows).map(|(i, r)| TreeLine {
+        self.session.state().tree_rows().enumerate().skip(self.tree_scroll).take(self.tree_rows).map(|(i, r)| TreeLine {
                 depth: r.depth,
                 expanded: r.dir,
                 icon: match r.dir { Some(open) => icons::folder(open), None => icons::file(&r.name) },
@@ -2641,7 +2691,6 @@ impl ReaderView {
                 selected: i == selected,
                 hidden: r.hidden(),
             }).collect()
-        })
     }
 
     fn app_menu_button(&self) -> Bounds<Pixels> {
@@ -2661,27 +2710,36 @@ impl ReaderView {
         let right = self.commands_button().map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
         let label = self.session.state().language_server_label();
-        let server_w = ((lenz_content::wrap::width(label) as f32 + 2.0) * self.char_w).min(room * 0.4);
+        let server_w = ((lenz_content::wrap::width(&label) as f32 + 2.0) * self.char_w).min(room * 0.4);
         let position = self.session.status_position();
         let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
         let cell = |x: f32, w: f32, text: &str| {
             let cols = (w.max(0.0) / self.char_w).floor() as usize;
             (Bounds { origin: gpui::point(px(x), px(self.body_bottom())), size: gpui::size(px(w.max(0.0)), px(self.status_h())) }, reader_core::chrome::ellipsize(text, cols))
         };
-        (cell(left, server_w, label), cell(left + server_w, (room - server_w - position_w).max(0.0), &self.session.status_message()), cell(right - position_w, position_w, &position))
+        (cell(left, server_w, &label), cell(left + server_w, (room - server_w - position_w).max(0.0), &self.session.status_message()), cell(right - position_w, position_w, &position))
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
     pub fn nav_buttons(&self) -> Vec<(f32, f32, CommandId, bool, &'static str)> {
         let mut x = f32::from(self.app_menu_button().right()) + 6.0;
         self.session.toolbar().into_iter().filter_map(|(id, label)| {
-            if matches!(id, CommandId::Open | CommandId::MarkdownSource | CommandId::ImageSource) { x += 8.0; }
+            if matches!(id, CommandId::Open | CommandId::ImageSource) { x += 8.0; }
             let drawn = matches!(id, CommandId::ToggleExplorer | CommandId::Back | CommandId::Forward);
             let end = x + if drawn { (self.char_w * 3.0).max(line_h()) } else { (label.len() as f32 + 2.0) * self.char_w };
             let button = (x, end, id, self.session.disabled(id).is_none(), label);
             x = end + 4.0;
             (end <= self.width - 4.0).then_some(button)
         }).collect()
+    }
+
+    /// Reserve the right edge of the file header; narrow panes keep the keyboard/menu action.
+    pub fn preview_button(&self, pane: PaneGeom) -> Option<(Bounds<Pixels>, reader_core::session::Action)> {
+        let control = self.session.preview_control(pane.pane)?;
+        let width = 9.0 * self.char_w;
+        let x = pane.bar.1 - width - 4.0;
+        if x < pane.bar.0 + 8.0 * self.char_w || pane.bar.2 + line_h() > self.body_bottom() { return None; }
+        Some((Bounds { origin: gpui::point(px(x), px(pane.bar.2)), size: gpui::size(px(width), px(line_h())) }, control))
     }
 
     /// The explorer's title-row buttons, in window coordinates (as [`Self::nav_buttons`]): select the opened file.
@@ -3171,7 +3229,7 @@ impl ReaderView {
         let mw = self.modal_width();
         if matches!(self.modal, Some(Modal::StatusDetails { .. })) {
             let h = (self.height - 16.0).clamp(0.0, 480.0);
-            let visible = (((h - 8.0).max(0.0) / line_h()).floor() as usize).min(lines.len());
+            let visible = (((h - 8.0 - line_h()).max(0.0) / line_h()).floor() as usize).min(lines.len());
             let first = self.modal_scroll.get().min(lines.len().saturating_sub(visible));
             self.modal_scroll.set(first);
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
@@ -3201,19 +3259,13 @@ impl ReaderView {
     }
 
     fn server_rows(&self) -> Vec<(String, Option<CommandId>)> {
-        let cols = self.columns(menu_width(self.width) - 24.0);
-        self.session.language_server_rows().into_iter().flat_map(|(text, action)| {
-            match action {
-                Some(id) => vec![(text, Some(id))],
-                None => wrap(&text, cols).into_iter().map(|line| (line, None)).collect(),
-            }
-        }).collect()
+        self.session.language_server_rows()
     }
 
     /// The modal's rows: label and disabled reason. Search headers precede their result rows.
     pub fn modal_rows(&self) -> Vec<(String, Option<&'static str>)> {
         match &self.modal {
-            Some(Modal::StatusDetails { text }) => std::iter::once(("Status details · Copy (Ctrl+C) · Esc close".to_string(), None)).chain(text.lines().map(|line| (line.to_owned(), None))).collect(),
+            Some(Modal::StatusDetails { title, text }) => std::iter::once((title.to_string(), None)).chain(text.lines().map(|line| (line.to_owned(), None))).collect(),
             Some(Modal::Navigation { .. }) => self.navigation_rows(),
             Some(Modal::ServerRuntime { path, .. }) => {
                 let model = self.session.state().server_runtime();
@@ -3339,10 +3391,7 @@ impl Render for ReaderView {
         // while it has focus. The files panel, its toolbar and tabs, takes the rest.
         let narrow = self.width < 320.0;
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
-        self.sidebar_w = match self.session.state().project() {
-            Some(_) if self.tree_shown && (!narrow || self.tree_focus) => if narrow { self.width } else { explorer_w },
-            _ => 0.0,
-        };
+        self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
         let (server_cell, message_cell, position_cell) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
@@ -3351,7 +3400,7 @@ impl Render for ReaderView {
         let tabs_h = line_h();
         let nav = self.nav_buttons();
         let explorer_buttons = self.explorer_buttons();
-        let explorer_title = self.session.state().project().map(|p| p.root().file_name().map_or_else(|| p.root().display().to_string(), |n| n.to_string_lossy().into_owned())).unwrap_or_default();
+        let explorer_title = self.session.state().project().map(|p| p.root().file_name().map_or_else(|| p.root().display().to_string(), |n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "Files".into());
         let nav_end = self.sidebar_w;
         let body_top = toolbar_h() + tabs_h;
         // The results panel: a status line, the list and a preview, below the panes and above the status bar: 45% of
@@ -3442,7 +3491,8 @@ impl Render for ReaderView {
                 x += w;
                 (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id())
             }).collect();
-            let shift = row.iter().find(|r| r.2).map_or(0.0, |r| (r.4 - g.bar.1).min(r.3 - g.bar.0).max(0.0));
+            let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
+            let shift = row.iter().find(|r| r.2).map_or(0.0, |r| (r.4 - right).min(r.3 - g.bar.0).max(0.0));
             for r in &mut row {
                 r.3 -= shift;
                 r.4 -= shift;
@@ -3466,7 +3516,7 @@ impl Render for ReaderView {
             Some(Drag::Explorer) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split) if split == Some(Split::Columns) => Some(gpui::CursorStyle::ResizeLeftRight),
             Some(Drag::Split | Drag::Results) => Some(gpui::CursorStyle::ResizeUpDown),
-            None if self.link.is_some() || self.app_menu_hover || self.commands_hover || self.nav_hover.is_some() => Some(gpui::CursorStyle::PointingHand),
+            None if self.link.is_some() || self.app_menu_hover || self.commands_hover || self.nav_hover.is_some() || self.preview_hover.is_some() => Some(gpui::CursorStyle::PointingHand),
             _ => None,
         };
         // Bring a newly highlighted tree row into view once; the wheel's scroll otherwise stands, within the rows.
@@ -3503,9 +3553,9 @@ impl Render for ReaderView {
         let logos = self.logos.clone();
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
-        let max = self.max_hscroll();
-        if self.session.state().document().is_some() && self.hscroll() > max {
-            self.session.dispatch(Command::ScrollColumn((max / self.char_w).floor() as usize));
+        let max = self.max_column();
+        if self.session.state().document().is_some() && self.session.state().column() > max {
+            self.session.dispatch(Command::ScrollColumn(max));
         }
         // Each pane's content: an image, a Markdown preview laid out for its width, or its text rows.
         let mut frames = Vec::new();
@@ -3575,7 +3625,7 @@ impl Render for ReaderView {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            frames.push(PaneFrame { find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor });
+            frames.push(PaneFrame { preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor });
         }
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
@@ -3654,6 +3704,7 @@ impl Render for ReaderView {
         }
         let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
         let nav_hover = self.nav_hover;
+        let preview_hover = self.preview_hover;
         let app_menu_button = self.app_menu_button();
         let app_menu_active = self.app_menu_hover || matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
         let commands_button = self.commands_button();
@@ -3716,7 +3767,8 @@ impl Render for ReaderView {
                             if by > 0.0 {
                                 lenz_gpui::fill(window, x0 + bx0, y, bx1 - bx0, tabs_h, palette.header_bg);
                             }
-                            let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((bx1 - bx0).max(0.0)), px(tabs_h)) };
+                            let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
+                            let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
                                 for (title, retained, shown, tx0, tx1) in &f.tabs {
                                     if *tx1 < bx0 {
@@ -3739,6 +3791,13 @@ impl Render for ReaderView {
                                     lenz_gpui::fill(window, x0 + dx - 1.0, y + 2.0, 2.0, tabs_h - 4.0, palette.accent);
                                 }
                             });
+                            if let Some((b, action)) = &f.preview_button {
+                                let x = x0 + f32::from(b.left());
+                                let width = f32::from(b.size.width);
+                                lenz_gpui::fill(window, x, y + 2.0, width, tabs_h - 4.0, if preview_hover == Some(f.geom.pane) { palette.selected_bg } else { palette.fold_bg });
+                                let text_w = action.label.len() as f32 * char_w;
+                                lenz_gpui::text(window, cx, m, x + (width - text_w) / 2.0, y, action.label, if action.disabled.is_none() { palette.fg } else { palette.dim });
+                            }
                         }
                         // The status bar along the bottom, over the whole width.
                         if status_h > 0.0 {
@@ -3924,6 +3983,16 @@ impl Render for ReaderView {
                             lenz_gpui::fill(window, mx, my, mw, mh, bg);
                             let menu = Bounds { origin: gpui::point(px(mx), px(my)), size: l.bounds.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
+                                if details_modal {
+                                    for (b, label) in l.details_buttons(char_w).into_iter().zip(["Copy", "Close"]) {
+                                        let (x, y) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y));
+                                        let clip = Bounds { origin: gpui::point(px(x), px(y)), size: b.size };
+                                        window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
+                                            lenz_gpui::fill(window, x, y, f32::from(b.size.width), f32::from(b.size.height), palette.selected_bg);
+                                            lenz_gpui::text(window, cx, m, x + 8.0, y, label, palette.fg);
+                                        });
+                                    }
+                                }
                                 for (n, (row, line, disabled)) in l.lines.iter().enumerate().skip(l.first).take(l.visible) {
                                     let y = my + 4.0 + (n - l.first) as f32 * line_h();
                                     if !details_modal && *row == l.at {
@@ -4053,6 +4122,7 @@ struct CrumbCell {
 
 struct PaneFrame {
     geom: PaneGeom,
+    preview_button: Option<(Bounds<Pixels>, reader_core::session::Action)>,
     /// The pane's find box, when its tab has a find.
     find: Option<FindBox>,
     /// The focused pane while split (its shown tab is marked).

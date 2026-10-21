@@ -42,7 +42,7 @@ pub enum Coverage {
 pub struct TreeRow {
     pub depth: usize,
     pub name: Arc<str>,
-    /// The row's path relative to the root, without a trailing `/`.
+    /// Stable identity: project-relative path, absolute library path, or a library/source URI.
     pub path: Arc<str>,
     /// `Some(expanded)` for a directory.
     pub dir: Option<bool>,
@@ -51,7 +51,7 @@ pub struct TreeRow {
 impl TreeRow {
     /// Hidden: its name starts with a dot, or it is inside a folder whose name does.
     pub fn hidden(&self) -> bool {
-        self.path.split('/').any(|part| part.starts_with('.'))
+        if Path::new(self.path.as_ref()).is_absolute() { self.name.starts_with('.') } else { self.path.split('/').any(|part| part.starts_with('.')) }
     }
 }
 

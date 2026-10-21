@@ -11,9 +11,14 @@ Shared behaviour, for every provider:
 - A selected name is asked about at its start.
 - A provider that relies on the client for files it does not hold open (Ruby LSP; the others watch files
   themselves and are neither offered nor sent this) hears of files the reader's watcher sees change under its root
-  (`workspace/didChangeWatchedFiles`: changed when the file exists, else deleted; a rename as both ends). Not
-  reported: a watcher overflow, folders outside what the watcher covers, and the files of a folder created or moved
-  in (Restart Language Server re-indexes).
+  (`workspace/didChangeWatchedFiles`: changed when the file exists, else deleted; a rename as both ends).
+  Directory events and watcher overflow also reconcile the browsing root's inventory, reporting affected
+  surviving files, additions and deletions. The shared declaration index and open symbol searches refresh too.
+  Changed open Ruby documents also request a document-symbol refresh, which makes Ruby LSP update their index;
+  closing a changed document reports its disk state again. These internal replies do not replace navigation results.
+  Watch registration checks for missed changes without replaying every unchanged file. Folders outside watcher
+  coverage remain a limit. Source-only branch checkouts keep the server running; after changing the bundle or
+  Ruby runtime, use **Restart Language Server** to reload that environment.
 - Dependency files show their origin, outside the project or inside it (`node_modules`, a project virtualenv).
 - A dependency file outside the browsing root and every running server's workspace (a Cargo registry or git
   checkout, the standard library, installed packages: by the provider's origins) is served by a running server of
@@ -43,10 +48,12 @@ Shared behaviour, for every provider:
 
 Both readers keep the active file's LSP status visible at the start of the footer, including unavailable,
 stopped, off, starting, indexing and ready. Click the status, press F2, or choose **Language Server Status…**
-from the command menu for full errors, the selected executable, workspace, provider settings path and known
-provider limits. **Copy Language Server Details** copies the full, unwrapped diagnostic report, including the
-error, workspace, executable and settings path. Ctrl-C (Cmd-C on macOS) in the dialog copies the same report
-without closing it or copying the source selection; terminal copying uses OSC 52. The wrapped dialog scrolls with arrows and Page Up/Down; Home/End reach its ends.
+from the command menu for server controls. **Server Details…**, also first in the **Language Servers** menu,
+opens one scrollable snapshot with full errors, the selected executable, workspace, project settings, versions,
+indexing status and provider limits. Its **Copy** button copies the complete, unwrapped report and stays
+visible while scrolling; **Close** or Esc dismisses it. Ctrl-C (Cmd-C on macOS) also copies without closing
+or copying the source selection; terminal copying uses OSC 52. Arrows, Page Up/Down and Home/End scroll
+the report. Reopen it to refresh the snapshot. **Copy Language Server Details** remains in Find Action/F10.
 
 - **Unavailable:** read the specific reason. A missing executable or runtime gets that provider's existing
   installation guidance. Install it yourself, or correct `executable`, `args` and `env` in
@@ -58,13 +65,100 @@ without closing it or copying the source selection; terminal copying uses OSC 52
 - **Off:** **Enable Language Server for This Folder** activates it. This is an explicit per-folder preference;
   opening the status dialog does not enable it.
 - **Starting/indexing:** a supported source starts its installed provider automatically. Initialization has a
-  120-second timeout. Indexing can produce incomplete results until the server reports completion.
+  120-second timeout. The footer shows the server's current task and percentage when reported; F2 → **Server Details…** shows the
+  full description. Percentages describe that task, not all concurrent work, and servers without percentages
+  show their task text. Indexing can produce incomplete results until the server reports completion.
 - **Unsupported/no file:** the dialog explains that a supported source file is needed. No installation is
   offered for unsupported document types.
 
 Lenz never installs or upgrades language servers automatically. Their existing provider-specific discovery and
 fallback rules still apply. Restart reloads provider settings and checks setup again; actions unavailable in
-the current state display their reason. Source documents are unaffected by recovery actions.
+the current state display their reason. Recovery actions never write source files.
+
+## Project language server settings
+
+Both GUI and terminal readers offer **Exclude Ruby Tooling Gems for This Project** and **Reset LSP Settings
+for This Project** in F2 and the Language Servers command group. Open a Ruby source file, wait for its
+workspace to resolve, then use the exclusion toggle. It defaults to **On**, excluding Parser, AST, Syntax Tree and
+the RuboCop tooling gems measured in the [large-project trial](performance.md#editor-lsp-practices-trial-2026-10-21),
+preserving normal project-file coverage. Navigation into those tooling gems becomes unavailable. Existing
+custom exclusions and unrelated settings are preserved. Turning it off restores navigation into those tooling
+gems without resetting other project settings; turning it on overrides conflicting `includedGems` entries
+for this project. Explicit global/project `excludedGems` arrays override the default preset. The action refuses a legacy `.index.yml`, which Ruby LSP would read instead of editor
+indexing settings; migrate that file first.
+
+Settings are saved outside the checkout in `$XDG_CONFIG_HOME/lenz-reader/providers.json` (normally
+`~/.config/lenz-reader/providers.json`). The key is the **resolved language-server workspace root** shown in
+F2, not the browsing folder or the active file's parent. Ruby uses the Gemfile folder unless overridden.
+Only that provider/workspace is restarted after a successful save; other projects keep running. Saving
+temporarily disables conflicting provider actions. A failed save leaves the running server and file intact.
+Reset removes the active provider's complete project override, including any custom project options, and
+restores its inherited defaults and global settings.
+
+Any provider can also have project initialization settings edited in this file. For example:
+
+```json
+{
+  "providers": {
+    "ruby-lsp": {
+      "settings": { "indexing": { "excludedGems": ["global-tool"] } },
+      "projects": {
+        "/absolute/path/to/rails-app": {
+          "indexing": {
+            "excludedGems": ["project-tool"],
+            "excludedPatterns": ["generated/**/*.rb"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+Use the exact absolute workspace path from F2. Precedence is provider defaults, global `settings`, then the
+matching `projects` entry. Objects merge recursively; arrays and scalar values replace the inherited value.
+In this example the project excludes `project-tool` instead of `global-tool`; include both names to retain
+both exclusions. `initialize` and `workspace/configuration` use the same merged settings. After editing,
+choose **Restart Language Server**. Executable, arguments and environment remain provider-wide.
+
+To disable the default tooling exclusions globally, set `providers.ruby-lsp.settings.indexing.excludedGems`
+to `[]`. A project can override this with its own array, as above. The F2 toggle saves only that workspace.
+
+## Saved declarations and rebuilding
+
+F2 and the Language Servers command group expose the same two controls in GUI and TUI:
+
+- **Reuse Saved Declaration Index: On/Off** defaults to On. It saves Lenz's local declarations outside the
+  checkout and reuses them only after checking current source contents. Turning it off stops cache reads/writes
+  and rebuilds local declarations normally; it leaves the saved copy available if you turn reuse back on.
+  It also disables content-based filtering of language-server notifications after watcher overflow.
+- **Rebuild Project Index** drops the current project's saved declarations, refreshes open documents, rebuilds
+  local declarations from disk and restarts that project's language servers. It works with cache reuse off too.
+  It preserves settings and source files. Disabled servers stay disabled. Other servers' own persistent caches
+  are managed by those servers; this action does not erase their workspace/build directories.
+
+Cache reuse is a Reader-wide preference in `$XDG_CONFIG_HOME/lenz-reader/settings.json`:
+
+```json
+{ "persistent_index": false }
+```
+
+The saved index lives under `$XDG_CACHE_HOME/lenz-reader/declarations-v1` (normally
+`~/.cache/lenz-reader/declarations-v1`). It contains declarations, not copies of whole source files. Content
+hashes and extractor/dependency identity validate reuse; corrupt or incompatible records fall back to parsing.
+The current inventory determines which paths can appear in results. Recent content versions can be reused
+after switching branches or renaming files. Rebuilding rejects older in-flight results and cache snapshots.
+
+After watcher overflow, the indexer's existing background reads compare current contents with the last indexed
+contents. Files verified unchanged need no duplicate notification to Ruby LSP; changed, added and deleted files
+still update the server. Ordinary file and directory events keep their existing behavior. Missing fingerprints,
+unreadable files, index limits, servers still initializing and overlapping overflow recovery retain conservative
+notifications. This improves recovery from lost events; it does not skip the server's initial project indexing.
+
+Reusable records have a 32 MiB accounted memory budget per active project, shared with the live index where
+possible. Completed snapshots are capped at 64 MiB per project; saving prunes the store to eight project
+directories. All hashing, loading, writing and removal run in background jobs. A project's first opening and
+an explicit rebuild still parse sources; the main cache benefit is reopening unchanged content.
 
 ## rust-analyzer (Rust)
 
@@ -169,7 +263,7 @@ the current state display their reason. Source documents are unaffected by recov
 | --- | --- |
 | Tested version | **ruby-lsp 0.26.11** (`gem install --user-install ruby-lsp`), Ruby 3.4.10 (Arch), RubyGems 4.0.15, Bundler 4.0.15, Linux, 2026-10-13. Fixture: `real_ruby` in `crates/reader-core/tests/providers.rs` (a CRLF file with a non-BMP character, non-ASCII class and method names, a nested bundle, a bundle locked offline to the installed `thor` 1.4.0), pinned in its source; `real_ruby_through_the_window` in the GUI tests. |
 | Launch recipe | `ruby-lsp` from PATH (or `executable`/`env` under `providers.ruby-lsp`), always with `BUNDLE_GEMFILE` set: the workspace root's `Gemfile` (or `gems.rb`), else an empty `Gemfile` in the reader's cache (`$XDG_CACHE_HOME/lenz-reader/ruby-lsp/Gemfile`). With it set, `ruby-lsp` skips its bundle composition and runs directly with the installed gems: verified it creates no `.ruby-lsp/` folder, runs no `bundle install`/`bundle update`, leaves `Gemfile.lock` untouched (or absent) and installs or updates no gem (`gem list` unchanged). Its default launch (no `BUNDLE_GEMFILE`) is not compliant: it writes `.ruby-lsp/` (a composed Gemfile, lockfile and markers) into the project, runs `bundle install` (network) and every four hours `bundle update ruby-lsp debug prism` (an upgrade of the server); the reader never uses it. A user `env.BUNDLE_GEMFILE` wins. Version from `ruby-lsp --version` (it exits before any bundle work). |
-| Initialization | `formatter: "none"`, `linters: []` (no RuboCop: it would load the project's configuration and plugins); the user's `settings` merged over them. Positions: UTF-16 only (0.26.11 answers index positions in characters even with UTF-8 negotiated: a non-ASCII name in a file it does not hold open ended a byte short); characters outside the BMP in such names would still be off. |
+| Initialization | `formatter: "none"`, `linters: []` (no RuboCop: it would load the project's configuration and plugins), and the [tooling-gem exclusion preset](#project-language-server-settings); the user's global/project `settings` are merged over them. Positions: UTF-16 only (0.26.11 answers index positions in characters even with UTF-8 negotiated: a non-ASCII name in a file it does not hold open ended a byte short); characters outside the BMP in such names would still be off. |
 | Workspace root | The nearest folder with a `Gemfile`/`gems.rb` under the browsing root (each bundle is its own project: engines, nested apps), else the browsing root; without one, the nearest such folder, else the file's. Override per browsing root (verified through the command menu's modal); an overridden root inside a bundle keeps that bundle's Gemfile (the nearest at or above the root). |
 | Readiness | No readiness status: for 10 s after it initializes, answers are marked possibly incomplete; on the fixture it indexed within 0.2–0.3 s, RBS core signatures and gems shortly after. |
 | Operations | Definition: classes and modules (constants), constant assignments (the whole assignment is selected), methods (by name), across files; into RBS core signatures (`File` → `file.rbs`) and into installed gems (`Thor` is reopened in many of its files: candidates). Usages (from a use or the declaration; the declaration is included: it ignores `includeDeclaration: false`): a constant's (`AREA_UNIT`: its use and assignment) separately from a method's (`área`: every call by name, any receiver, and its `def`). Workspace symbols: fuzzy over qualified names (`Shapes::Círculo` finds it; a short name inside a long namespace can fall below its threshold); file symbols (nested). Never text matches. |
@@ -178,6 +272,62 @@ the current state display their reason. Source documents are unaffected by recov
 | Limits | Static index: dynamic definitions, `method_missing` and metaprogramming are not followed; method usages are by name; external edits reach it through the reader's changed-file reports (verified: a moved class is found at its new line). |
 | Measured (release, fixture, 100 samples after 5) | Ready 0.2–0.3 s. Warm definition to target shown: median 2.1 ms, p95 3.2 ms (the harness's polling floor is about 2 ms). Memory: 109–117 MiB (three runs; raw samples in the code-reader build evidence, `real-ruby-3x.txt`). |
 | Platforms | Linux verified through the session and GPUI's test platform (Ctrl-click, Back, Shift+F12, the root modal; no Xvfb); macOS unverified. |
+
+### Rails setup and large projects
+
+Use Ruby LSP; **0.26.11** is the version tested above. Activate the project's Ruby version in your terminal,
+then launch Lenz from the Rails root (the folder containing `Gemfile`):
+
+```sh
+cd /path/to/rails-app
+ruby -v
+ruby-lsp --version
+lenz .
+```
+
+Opening a `.rb` file starts the server. F2 shows its workspace, executable and version. Lenz inherits the
+launch environment and does not read shell startup files. If a Dock launch cannot find your Ruby, set an
+absolute `executable` and the matching `env.PATH`/gem environment in `providers.ruby-lsp` in
+`~/.config/lenz-reader/providers.json` (or `$XDG_CONFIG_HOME/lenz-reader/providers.json`). With rbenv, for example,
+the executable can be `/Users/your-name/.rbenv/shims/ruby-lsp`;
+[Ruby LSP's editor instructions](https://shopify.github.io/ruby-lsp/editors.html) explain version-manager setup.
+
+For Rails-specific navigation, install `ruby-lsp-rails` with the same Ruby. Lenz disables automatic bundle
+composition, so the add-on must already be installed; it is not installed automatically as in the standard
+Ruby LSP launch. The [Rails add-on](https://shopify.github.io/ruby-lsp/rails-add-on) loads the Rails application
+for runtime introspection. Its VS Code-specific controls are not Reader features.
+
+For large projects, merge exclusions for generated or copied Ruby sources you do not navigate into the existing
+provider settings, then choose **Restart Language Server**. For example (replace these paths with your own):
+
+```json
+{
+  "providers": {
+    "ruby-lsp": {
+      "settings": {
+        "indexing": {
+          "excludedPatterns": ["generated/**/*.rb", "vendor/legacy/**/*.rb"]
+        }
+      }
+    }
+  }
+}
+```
+
+These are Ruby LSP's [indexing options](https://shopify.github.io/ruby-lsp/editors.html#all-initialization-options),
+separate from Lenz's local declaration index. Use `**/*.rb` to cover nested Ruby files; a trailing `/**` alone
+does not cover arbitrary nested paths with this server's matching flags. Ruby LSP 0.26.11 already skips
+top-level `tmp`, `node_modules` and `sorbet`, common test/spec filenames, fixtures and the configured bundle path
+during project indexing. Repeating those defaults may save nothing. `includedPatterns` adds paths to the
+defaults; it does not restrict the index to an allowlist.
+
+Choose only folders whose symbols you do not need. Installed gems are indexed separately; `excludedGems` can
+omit particular gems at the cost of their navigation coverage, even when linting is disabled. Global provider
+settings apply to all Ruby workspaces; use a [project override](#project-language-server-settings) to scope
+exclusions to one workspace.
+An existing `.index.yml` takes precedence over these options in Ruby LSP 0.26.11. Indexing progress improves
+visibility; it does not shorten the server's indexing work. The [large Rails experiment](performance.md#large-rails-indexing-experiment-2026-10-21)
+compares exclusions with competing Lenz work; it does not enable exclusions by default.
 
 ## Kotlin LSP (Kotlin)
 
@@ -211,7 +361,7 @@ servers still require installation; disabled servers can be enabled from the sam
 
 ## Version context and Pyright runtime repair
 
-F2 and **Copy Language Server Details** include the detected server version (or explicitly unknown) and the
+**Server Details…** and **Copy Language Server Details** include the detected server version (or explicitly unknown) and the
 version tested with Lenz. A different version is unverified, not automatically incompatible. Failed launches
 retain up to 8 KiB of stderr, keeping the beginning and end with an omission marker for larger logs, and show
 the resolved executable. Pyright/Java failures also probe the selected Node.js/Java executable and version in

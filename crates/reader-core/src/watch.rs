@@ -25,6 +25,8 @@ pub const MAX_WATCHED: usize = 8192;
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Change {
     pub paths: BTreeSet<PathBuf>,
+    /// Newly registered folders: check for missed changes without treating every file as rewritten.
+    pub registered: BTreeSet<PathBuf>,
     /// Renames reported with both ends, oldest first.
     pub moves: Vec<(PathBuf, PathBuf)>,
     /// The platform dropped events or failed: everything must be rechecked.
@@ -36,7 +38,7 @@ pub struct Change {
 impl Change {
     /// Whether `path` itself, or a directory above it, changed.
     pub fn touches(&self, path: &Path) -> bool {
-        self.overflow || self.paths.iter().any(|p| path.starts_with(p))
+        self.overflow || path.ancestors().any(|p| self.paths.contains(p) || self.registered.contains(p))
     }
 
     fn merge(&mut self, event: notify::Result<notify::Event>) {
@@ -44,6 +46,10 @@ impl Change {
             Ok(e) => e,
             Err(_) => return self.overflow = true,
         };
+        if event.info() == Some("reader-watch-registration") {
+            self.registered.extend(event.paths);
+            return;
+        }
         if event.need_rescan() {
             self.overflow = true;
         }
@@ -108,10 +114,9 @@ impl Watcher {
                     }
                 }
                 watched = now;
-                // Anything that changed in a folder before its watch took effect: report the folder as touched, so
-                // its open files are rechecked (content-only, so no rescan).
+                // Check for changes between discovery and registration without claiming a directory rewrite.
                 if !added.is_empty() {
-                    let event = notify::Event::new(EventKind::Modify(ModifyKind::Any));
+                    let event = notify::Event::new(EventKind::Modify(ModifyKind::Any)).set_info("reader-watch-registration");
                     let _ = missed.send(Ok(added.into_iter().fold(event, notify::Event::add_path)));
                 }
                 for d in waiting.into_iter().chain(done) {
@@ -165,7 +170,7 @@ fn coalesce(rx: &mpsc::Receiver<notify::Result<notify::Event>>, send: &impl Fn(C
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,
             }
         }
-        if (!change.paths.is_empty() || change.overflow) && !send(change) {
+        if (!change.paths.is_empty() || !change.registered.is_empty() || change.overflow) && !send(change) {
             return;
         }
     }
@@ -176,6 +181,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn registration_does_not_hide_real_changes_in_the_same_burst() {
+        let mut change = Change::default();
+        change.merge(Ok(notify::Event::new(EventKind::Modify(ModifyKind::Any)).set_info("reader-watch-registration").add_path("/project/app".into())));
+        change.merge(Ok(notify::Event::new(EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Any))).add_path("/project/app/a.rb".into())));
+        assert_eq!(change.registered, [PathBuf::from("/project/app")].into());
+        assert_eq!(change.paths, [PathBuf::from("/project/app/a.rb")].into());
+        assert!(change.touches(Path::new("/project/app/b.rb")));
+        assert!(!change.touches(Path::new("/project/apple/b.rb")));
+    }
+
+    #[test]
     fn bursts_coalesce_and_renames_keep_both_ends() {
         let d = tempfile::tempdir().unwrap();
         let dir = d.path().canonicalize().unwrap();
@@ -183,7 +199,7 @@ mod tests {
         let mut w = Watcher::new(move |c| tx.send(c).is_ok());
         assert!(w.available());
         assert!(w.set([dir.clone()].into()));
-        std::thread::sleep(Duration::from_millis(50)); // registration runs on its own thread
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().registered.contains(&dir));
         let a = dir.join("a.txt");
         for i in 0..20 {
             std::fs::write(&a, format!("{i}")).unwrap();
@@ -212,7 +228,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let mut w = Watcher::new(move |c| tx.send(c).is_ok());
         w.set([dir.clone()].into());
-        std::thread::sleep(Duration::from_millis(50));
+        assert!(rx.recv_timeout(Duration::from_secs(5)).unwrap().registered.contains(&dir));
         let writer = std::thread::spawn(move || {
             let until = Instant::now() + Duration::from_millis(2500);
             let mut i = 0;

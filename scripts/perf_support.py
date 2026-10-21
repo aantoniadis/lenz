@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import platform
 import re
+import selectors
 import signal
 import shutil
 import statistics
@@ -14,6 +15,28 @@ import subprocess
 import time
 
 GUI_ABOUT_ORACLE_VERSION = 3
+
+
+def read_display_number(fd, timeout=10):
+    """Read the complete Xvfb readiness line before the caller closes its pipe."""
+    deadline = time.monotonic() + timeout
+    data = bytearray()
+    with selectors.DefaultSelector() as events:
+        events.register(fd, selectors.EVENT_READ)
+        while b'\n' not in data:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not events.select(remaining):
+                raise TimeoutError('Xvfb did not publish a complete display number')
+            chunk = os.read(fd, 32 - len(data))
+            if not chunk:
+                raise RuntimeError('Xvfb returned an incomplete display number')
+            data.extend(chunk)
+            if len(data) >= 32:
+                raise RuntimeError('Xvfb returned an oversized display number')
+    number = data.removesuffix(b'\n')
+    if not number.isdigit():
+        raise RuntimeError('Xvfb returned an invalid display number')
+    return number.decode('ascii')
 
 
 def gui_about_visible(text):

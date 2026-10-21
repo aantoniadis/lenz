@@ -230,4 +230,9 @@ Add a deterministic workload with correctness assertions, a stable metric name/u
 
 Run `python3 -B scripts/test_perf_suite.py`, the workspace tests, Clippy, `scripts/perf-check.sh`, and a complete `full` run after changing collectors. Test failures, timeout cleanup, malformed records and baseline comparison are part of collector correctness. A successful Linux run does not validate the native Mac path.
 
+Private-display collectors use `read_display_number` to consume Xvfb's complete newline-terminated
+readiness message before closing its pipe. A single pipe read can return only the digits; closing then
+can terminate Xvfb while it writes the newline. The helper has a deadline and rejects incomplete or
+invalid messages. This setup fix leaves application timing endpoints and workload version unchanged.
+
 The runner's `WORKLOAD_VERSION` is currently **6**. `--compare` refuses results saved with a different workload version; save a new baseline instead of comparing across versions. Version 3 requires the commit inspection modal's author/email line before reporting readiness, and uses the outside-Git merge fixture described above. Version 4 cycles all four Scroll Modes in the GUI diff scenario, so its find phases run in Shared again (version 3 left them in Independent). Version 5 reports the physical footprint instead of the `ps` resident size on macOS, and samples the terminal independent-views `initial` memory before its 4K fixtures are encoded; Linux metrics are unchanged except that `initial`. Version 6 runs the `syntax/*` and `decode/*` workloads from the `lenz-content` test binary, which on macOS uses the system allocator rather than the binaries' `LargeBlocks`; Linux workloads are unchanged.

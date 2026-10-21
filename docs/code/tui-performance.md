@@ -1,5 +1,15 @@
 # Reader TUI workspace integration — 2026-10-18
 
+Collector update, 2026-10-21: `scripts/code-tui-bench.py` now emits **schema 2**.
+`first_feedback_ms` ends when the fixture's filename appears in the reconstructed terminal screen;
+`first_content_ms` still requires the first source-line marker. The removed `Lenz Reader` label is no
+longer a startup oracle. Do not compare the new feedback metric with schema 1's `first_paint_ms`;
+both versions measure received terminal bytes, not displayed pixels. The dated measurements below
+retain their original schema and endpoints.
+
+The [final Linux validation](../release-validation.md) records the successful
+schema-2 workflow, fresh release comparisons and live dependency navigation.
+
 The terminal reader now uses this workspace's `reader-core` and `lenz-content`.
 The command-family trial exposes it through `lenz --tui [file-or-folder]` and
 `lenz-code-tui`. Release packaging remains a separate migration.

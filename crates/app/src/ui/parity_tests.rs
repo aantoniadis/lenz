@@ -2113,6 +2113,37 @@ fn gui_horizontal_merge_wheel_keyboard_and_modal_use_separate_panes(cx:&mut Test
 }
 
 #[gpui::test]
+fn gui_trackpad_diagonal_scroll_keeps_small_movements_in_every_scroll_mode(cx: &mut TestAppContext) {
+    let source = format!("{}\n", "x".repeat(300)).repeat(100);
+    let right = format!("{source}changed\n");
+    let f = fixture(cx, &source, &right);
+    f.viewer.update(cx, |v, _| v.layout.set_files(false));
+    f.window.update(cx, |v, w, cx| {
+        let _ = v.render(w, cx);
+        for mode in [ScrollMode::Shared, ScrollMode::Aligned, ScrollMode::Padded, ScrollMode::Independent] {
+            v.comparison.view.set_mode(mode);
+            v.comparison.view.set_collapsed(false);
+            for side in [Side::Left, Side::Right] {
+                v.comparison.view.scroll_by(f32::NEG_INFINITY, Side::Left);
+                v.comparison.view.scroll_by(f32::NEG_INFINITY, Side::Right);
+                v.hscroll = [0.; 2];
+                let widths = v.comparison_widths(f32::from(w.viewport_size().width) - v.diff_x());
+                let x = v.diff_x() + if side == Side::Left { widths[0] / 2. } else { widths[0] + widths[1] / 2. };
+                let position = point(px(x), px(v.top() + 10.));
+                for _ in 0..4 {
+                    v.on_wheel(&ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-v.char_w * 0.25), px(-line_h() * 0.25))), ..Default::default() }, w, cx);
+                }
+                assert!((v.comparison.view.top_line_on(side) - 1.).abs() < 0.001, "{mode:?} {side:?} dropped diagonal vertical movement");
+                assert!((v.hscroll[side as usize] - v.char_w).abs() < 0.001);
+                if mode == ScrollMode::Independent { assert_eq!(v.comparison.view.top_line_on(if side == Side::Left { Side::Right } else { Side::Left }), 0.); }
+            }
+        }
+    }).unwrap();
+    assert_eq!(std::fs::read(f.dir.path().join("left.txt")).unwrap(), source.as_bytes());
+    assert_eq!(std::fs::read(f.dir.path().join("right.txt")).unwrap(), right.as_bytes());
+}
+
+#[gpui::test]
 fn gui_horizontal_shift_wheel_clamps_tabs_and_unicode_without_moving_the_caret(cx:&mut TestAppContext){
     let f=fixture(cx,"short\n",&format!("{}END\n","界\t".repeat(150)));f.viewer.update(cx,|v,_|v.layout.set_files(false));
     f.window.update(cx,|v,w,cx|{

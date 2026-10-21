@@ -4,6 +4,10 @@ Lenz aims to keep both frontends fast to open, responsive while you work, and sm
 
 This page summarizes the current results. The [benchmark guide](benchmarking.md) explains how to run the suite, and the [optimization notebook](optimization-notebook.md) records the experiments behind them.
 
+The [2026-10-21 release validation](release-validation.md) records the latest
+full Linux suite and fresh paired Diff/Reader comparisons. Historical tables
+below retain their original workloads and measurement endpoints.
+
 ## Dependency refresh (2026-10-18)
 
 The direct-dependency audit checked 64 registry crates and the two GPUI git

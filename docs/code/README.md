@@ -53,8 +53,31 @@ Symbols come from the existing bounded project declaration index, including type
 constants supported by its syntax grammars. They work without a language server; indexing, syntax errors and
 coverage limits remain visible. Open a folder to index project symbols. Language-server workspace symbols
 remain separately available as **Find Symbol (language server)…**, including that provider's own coverage.
+
+F2 and the Language Servers command group offer **Reuse Saved Declaration Index** (On by default),
+**Exclude Ruby Tooling Gems for This Project** (On unless overridden), and **Rebuild Project Index**.
+Both optimizations can be turned off. Rebuild clears saved local declarations, refreshes open documents and
+restarts the project's language servers without changing source files or settings. See
+[index settings and rebuilding](providers.md#saved-declarations-and-rebuilding).
+
 Ctrl+Shift+N now finds files; **New Window** remains in the app/command menus. These workflows are also in the
 [terminal reader](tui.md), with a portable shortcut when bare Shift cannot be reported.
+
+Following a definition into a dependency or standard library reveals it under **Libraries** in the explorer,
+including dependencies excluded by the project's ignore rules. Expand its folders and open sibling files as
+usual. This also works when reading a single file without an open project. Libraries are discovered as you
+visit them; only expanded folders are listed, in background jobs. Adding a library does not add files to the
+local project declaration index. The browsing root stays unchanged.
+
+Collapse and expand a library folder to refresh its listing after a dependency update or branch checkout.
+Listings are limited to 2,000 entries per directory and 20,000 overall, with a status message when truncated;
+the definition you followed remains visible. At the overall limit, following another definition releases old
+listings. Up to 128 library roots and 128 retrieved sources are kept for the current project session. Changing
+projects clears them. Unrecognized dependency layouts use the nearest package manifest or containing folder.
+Filenames that cannot be represented as Unicode are omitted with a partial-listing message.
+Sources retrieved from a server, such as Java class sources, appear under that server's name; only visited
+sources are listed, since the protocol does not provide a directory listing. Reopening one asks its original
+server session for the text; after that session ends, follow the definition again.
 
 Holding Ctrl over a name underlines it and shows a hand pointer: a click there follows it. A right-click in the text
 opens a menu with every navigation action and Copy Path / Copy Path:Line. The call hierarchy lists callers (Tab:
@@ -78,7 +101,7 @@ for a wrapped, scrollable snapshot. Ctrl+C copies the complete snapshot. Routine
 samples stay in details so they do not continually change the footer.
 
 Click the LSP footer status or press F2
-for the error log, version/runtime context, setup instructions and Restart/Enable actions. Java and Pyright also offer in-app runtime selection. See [status and recovery](providers.md#status-and-recovery).
+for Restart/Enable actions and **Server Details…**, a scrollable diagnostic popup with Copy and Close buttons. Java and Pyright also offer in-app runtime selection. Ruby projects offer an opt-in **Exclude Ruby Tooling Gems for This Project** action; **Reset LSP Settings for This Project** restores inherited settings. See [project settings](providers.md#project-language-server-settings) for scope and navigation limits, and [status and recovery](providers.md#status-and-recovery).
 
 The language servers also add inlay hints and semantic colours to the text panes (sticky lines included). Type and
 parameter-name hints are drawn inline and dim (cut at 30 characters); semantic tokens recolour names over the syntax
@@ -187,8 +210,10 @@ from the root, and a folder means everything in it. Matches list as a tree of fo
 the file's language with the match emphasized; a click or Left/Right folds a folder or file. A line's colours come
 from that line alone, so one inside a multi-line comment or string may read differently than in the file.
 
-Markdown files open as their source; the toolbar's Preview button (or Ctrl+Shift+V, or the command menu) switches
-the tab to its preview and back at the same line, and a file switched to its preview opens that way again. The preview shows local raster images only: inside the
+Markdown files open as their source. **Preview / Source** sits at the right edge of each file pane's header
+and controls that pane's document, including in split views. Ctrl+Shift+V and the command menu remain available
+when the pane is too narrow for the button. Switching preserves the reading line, and a file switched to its
+preview opens that way again. The preview shows local raster images only: inside the
 browsing root, or beside the Markdown file when it is outside the root, resolved through symlinks, at most 64 per
 document and 64 MiB each. Remote, missing and outside images say why in place. Links are not followed and folded
 callouts are shown open.

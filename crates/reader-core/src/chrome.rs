@@ -66,6 +66,11 @@ impl Session {
                 })
                 .chain([row("All commands…".to_string(), None, MenuTarget::AllCommands)])
                 .collect(),
+            Some(CommandGroup::LanguageServers) => std::iter::once(row(
+                "‹ All menus — Language Servers".into(), None, MenuTarget::Back,
+            )).chain(self.language_server_rows().into_iter().filter_map(|(label, id)| {
+                id.map(|id| row(label, self.disabled(id), MenuTarget::Run(id)))
+            })).collect(),
             Some(g) => std::iter::once(row(format!("‹ All menus — {}", g.label()), None, MenuTarget::Back))
                 .chain(self.actions().into_iter().filter(|a| a.id.group() == g).map(|a| {
                     let label = match a.on {
@@ -181,11 +186,7 @@ impl Session {
             .chain(image)
             .chain(project)
             .chain(state.provider().map(|p| p.summary()))
-            .chain(
-                self.language_server_rows()
-                    .into_iter()
-                    .filter_map(|(text, action)| action.is_none().then_some(text)),
-            )
+            .chain([self.language_server_details()])
             .collect::<Vec<_>>()
             .join("\n\n")
     }

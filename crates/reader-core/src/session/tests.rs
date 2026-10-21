@@ -58,6 +58,147 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
     s.cache_entries().iter().find(|d| d.source().ends_with(name)).map_or(0, |d| d.bytes())
 }
 
+#[test]
+fn rebuild_discards_saved_and_inflight_records_and_cache_optout_survives_reopen() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let path = write(&root, "a.rb", b"class Alpha; end\n");
+    let mut s = session(d.path());
+    assert!(s.disabled(CommandId::RebuildIndex).is_some());
+    s.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut s, |s| s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete());
+    open(&mut s, Command::Open(path.clone()), "a.rb");
+    s.watcher = Watcher::new(|_| true);
+    let saved = d.path().join("cache/declarations-v1").join(crate::index_cache::digest(root.as_os_str().as_encoded_bytes())).join("records");
+    settle(&mut s, |_| saved.exists());
+    let generation = s.project_generation.load(Ordering::Relaxed);
+    let revision = s.index_revision.load(Ordering::Relaxed);
+    let old = index::index_file(&root, "a.rb", || true);
+    s.dispatch(Command::FindDeclarations("Omega".into()));
+    std::fs::write(&path, "class Omega; end\n").unwrap();
+    s.dispatch(Command::RebuildIndex);
+    assert!(s.disabled(CommandId::RebuildIndex).is_some());
+    s.dispatch(Completion::Indexed { generation, revision, files: vec![(Arc::from("a.rb"), old)] });
+    assert_eq!(s.state.index.coverage().indexed, 0, "held pre-rebuild chunk is obsolete");
+    settle(&mut s, |s| !s.index_rebuilding && s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete()
+        && s.state.results.as_ref().is_some_and(|r| r.done && r.hits.len() == 1)
+        && s.state.document().is_some_and(|d| d.text().contains("Omega")));
+    assert_eq!(index::rank(&s.state.index.snapshot(), "Alpha", || true).unwrap().1, 0);
+    assert_eq!(index::rank(&s.state.index.snapshot(), "Omega", || true).unwrap().1, 1);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "class Omega; end\n");
+    s.dispatch(Command::SetPersistentIndex(false));
+    assert!(s.index_cache.is_none());
+    settle(&mut s, |s| s.state.index.coverage().complete()
+        && !read_settings(&d.path().join("state/lenz-reader/settings.json")).persistent_index);
+    drop(s);
+    let mut reopened = session(d.path());
+    assert_eq!(reopened.on(CommandId::PersistentIndex), Some(false));
+    reopened.dispatch(Command::OpenRoot(root));
+    settle(&mut reopened, |s| s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete());
+    assert!(reopened.index_cache.is_none());
+}
+
+#[test]
+fn a_rebuild_completion_cannot_reset_a_different_project() {
+    let d = tempfile::tempdir().unwrap();
+    let one = d.path().join("one"); let two = d.path().join("two");
+    std::fs::create_dir(&one).unwrap(); std::fs::create_dir(&two).unwrap();
+    write(&one, "a.rb", b"class Alpha; end\n"); write(&two, "b.rb", b"class Beta; end\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(one));
+    settle(&mut s, |s| s.state.index.coverage().indexed == 1);
+    s.dispatch(Command::RebuildIndex);
+    let rx = s.completions();
+    let completion = loop {
+        let c = rx.recv_blocking_timeout().unwrap();
+        if matches!(c, Completion::IndexReset { .. }) { break c; }
+        s.dispatch(c);
+    };
+    s.dispatch(Command::OpenRoot(two.clone()));
+    s.dispatch(completion);
+    settle(&mut s, |s| s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete());
+    assert_eq!(s.state.project().unwrap().root(), two);
+    assert!(!s.index_rebuilding);
+    assert_eq!(index::rank(&s.state.index.snapshot(), "Beta", || true).unwrap().1, 1);
+}
+
+#[test]
+fn saved_declarations_match_fresh_extraction_across_languages_and_content_changes() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let fixtures = [
+        ("a.rs", "// café 𝄞\r\npub struct Alpha;\r\nimpl Alpha { pub fn call(&self) {} }\r\n"),
+        ("a.py", "# café 𝄞\r\nclass Alpha:\r\n    def call(self):\r\n        return 1\r\n"),
+        ("a.java", "// café 𝄞\r\nclass Alpha { int call() { return 1; } }\r\n"),
+        ("a.kt", "// café 𝄞\r\nclass Alpha { fun call(): Int { return 1 } }\r\n"),
+        ("a.js", "// café 𝄞\r\nexport class Alpha { call() { return 1; } }\r\n"),
+        ("a.ts", "// café 𝄞\r\nexport interface Alpha { call(): number; }\r\n"),
+        ("a.tsx", "// café 𝄞\r\nexport function Alpha() { return <div>hello</div>; }\r\n"),
+        ("a.html", "<!-- café 𝄞 -->\r\n<div id=\"Alpha\"><span>hello</span></div>\r\n"),
+        ("a.css", "/* café 𝄞 */\r\n.Alpha { color: red; }\r\n"),
+    ];
+    let mut modified = Vec::new();
+    for (name, text) in fixtures {
+        let path = write(&root, name, text.as_bytes());
+        modified.push(std::fs::metadata(path).unwrap().modified().unwrap());
+    }
+    let snapshot = |s: &Session| {
+        let mut got: Vec<_> = s.state.index.snapshot().into_iter().map(|(p, items)| (p.to_string(), format!("{items:?}"))).collect();
+        got.sort();
+        got
+    };
+    let check = |s: &Session| {
+        let got = snapshot(s);
+        let mut errors = 0;
+        let expected: Vec<_> = got.iter().map(|(path, _)| {
+            let index::FileIndex::Done { items, syntax_errors, .. } = index::index_file(&root, path, || true) else { panic!("{path}") };
+            errors += usize::from(syntax_errors);
+            assert!(!items.is_empty(), "{path}");
+            (path.clone(), format!("{items:?}"))
+        }).collect();
+        assert_eq!(got, expected, "names, kinds, ranges, Unicode offsets and parents must survive persistence");
+        assert_eq!(s.state.index.coverage().syntax_errors, errors);
+    };
+    let complete = |s: &Session| s.state.index.coverage().indexed == fixtures.len() && s.state.index.coverage().complete();
+    let saved = d.path().join("cache/declarations-v1").join(crate::index_cache::digest(root.as_os_str().as_encoded_bytes())).join("records");
+    let mut cold = session(d.path());
+    cold.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut cold, |s| complete(s) && saved.exists());
+    check(&cold);
+    let original = snapshot(&cold);
+    drop(cold);
+    let mut warm = session(d.path());
+    warm.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut warm, complete);
+    check(&warm);
+    assert_eq!(snapshot(&warm), original);
+    warm.dispatch(Command::SetPersistentIndex(false));
+    settle(&mut warm, complete);
+    assert!(warm.index_cache.is_none());
+    assert_eq!(snapshot(&warm), original);
+    warm.dispatch(Command::SetPersistentIndex(true));
+    settle(&mut warm, complete);
+    drop(warm);
+    // Branch-like rewrites keep byte lengths and mtimes: only content can authorize reuse.
+    for ((name, text), time) in fixtures.iter().zip(&modified) {
+        let path = root.join(name);
+        std::fs::write(&path, text.replace("Alpha", "Omega")).unwrap();
+        std::fs::File::options().write(true).open(path).unwrap().set_times(std::fs::FileTimes::new().set_modified(*time)).unwrap();
+    }
+    let mut changed = session(d.path());
+    changed.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut changed, complete);
+    check(&changed);
+    assert_eq!(index::rank(&changed.state.index.snapshot(), "Alpha", || true).unwrap().1, 0);
+    assert!(snapshot(&changed).iter().all(|(_, records)| records.contains("Omega")));
+    changed.watcher = Watcher::new(|_| true);
+    for (name, text) in fixtures { std::fs::write(root.join(name), text).unwrap(); }
+    changed.dispatch(Command::RebuildIndex);
+    settle(&mut changed, |s| !s.index_rebuilding && complete(s));
+    assert_eq!(snapshot(&changed), original);
+    for (name, text) in fixtures { assert_eq!(std::fs::read(root.join(name)).unwrap(), text.as_bytes()); }
+}
+
 fn opened(s: &Session) -> bool {
     s.state().loading().is_none() && (s.state().document().is_some() || !s.state().notices().is_empty())
 }
@@ -78,9 +219,9 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
-    assert_eq!(disabled(CommandId::LocateFile), Some("No folder is open"));
+    assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
     assert_eq!(disabled(CommandId::MarkdownSource), Some("Not a Markdown file"));
     assert_eq!(disabled(CommandId::Symbols), Some("No folder is open"));
@@ -455,7 +596,7 @@ fn the_tree_order_is_remembered_and_the_opened_file_can_be_located() {
     std::fs::write(d.path().join("outside.rs"), "").unwrap();
     s.dispatch(Command::Open(d.path().join("outside.rs")));
     settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("outside.rs")));
-    assert_eq!(s.disabled(CommandId::LocateFile), Some("The file is not in the open folder's tree"));
+    assert_eq!(s.disabled(CommandId::LocateFile), Some("The file is not in the explorer"));
     s.dispatch(Command::SetFoldersFirst(false));
     assert_eq!(names(&s), ["a.md", "src", "src/lib.rs", "src/ui", "src/ui/view.rs"]);
     // A new session reads the order back.
@@ -1366,6 +1507,110 @@ fn indexed(s: &Session) -> bool {
     scanned(s) && c.candidates > 0 && c.pending == 0
 }
 
+/// Deliver only explicit watch events, so a precise OS event cannot hide a coarse-event regression.
+fn settle_without_watch(s: &mut Session, done: impl Fn(&Session) -> bool) {
+    let rx = s.completions();
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while !done(s) {
+        assert!(std::time::Instant::now() < until, "timed out");
+        if let Ok(c) = rx.recv_blocking_timeout() && !matches!(c, Completion::Changed(_)) {
+            s.dispatch(c);
+        }
+    }
+}
+
+#[test]
+fn coarse_changes_refresh_closed_files_and_an_open_declaration_search() {
+    for overflow in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("project");
+        tree(&root, &["app/a.rb", "app/gone.rb", "app/move.rb", "apple/stable.rb"]);
+        std::fs::write(root.join("app/a.rb"), "class Alpha; end\n").unwrap();
+        std::fs::write(root.join("app/gone.rb"), "class Removed; end\n").unwrap();
+        std::fs::write(root.join("app/move.rb"), "class Moved; end\n").unwrap();
+        std::fs::write(root.join("apple/stable.rb"), "class Stable; end\n").unwrap();
+        let mut s = session(d.path());
+        s.dispatch(Command::OpenRoot(root.clone()));
+        settle_without_watch(&mut s, indexed);
+        s.dispatch(Command::FindDeclarations("".into()));
+        settle_without_watch(&mut s, searched);
+        assert_eq!(s.state().results().unwrap().hits().len(), 4);
+        let stable = s.state.index.snapshot().into_iter().find(|(p, _)| &**p == "apple/stable.rb").unwrap().1;
+        std::fs::write(root.join("app/a.rb"), "class Omega; end\n").unwrap();
+        std::fs::remove_file(root.join("app/gone.rb")).unwrap();
+        std::fs::rename(root.join("app/move.rb"), root.join("app/renamed.rb")).unwrap();
+        std::fs::write(root.join("app/new.rb"), "class Added; end\n").unwrap();
+        s.dispatch(Completion::Changed(Change { paths: if overflow { Default::default() } else { [root.join("app")].into() }, overflow, ..Default::default() }));
+        settle_without_watch(&mut s, |s| indexed(s) && !s.state().project().unwrap().refreshing() && searched(s));
+        let mut names: Vec<_> = s.state().results().unwrap().hits().iter().map(|h| (h.path.to_string(), h.text.to_string())).collect();
+        names.sort();
+        assert_eq!(names, [("app/a.rb".into(), "Omega".into()), ("app/new.rb".into(), "Added".into()), ("app/renamed.rb".into(), "Moved".into()), ("apple/stable.rb".into(), "Stable".into())], "overflow={overflow}");
+        if !overflow {
+            let after = s.state.index.snapshot().into_iter().find(|(p, _)| &**p == "apple/stable.rb").unwrap().1;
+            assert!(Arc::ptr_eq(&stable, &after), "app must not invalidate apple");
+        }
+        // A deleted directory cannot be recognized by is_dir(); the old inventory still identifies it.
+        std::fs::remove_dir_all(root.join("app")).unwrap();
+        s.dispatch(Completion::Changed(Change { paths: [root.join("app")].into(), structure: true, ..Default::default() }));
+        settle_without_watch(&mut s, |s| indexed(s) && !s.state().project().unwrap().refreshing() && searched(s));
+        assert_eq!(s.state().results().unwrap().hits().iter().map(|h| h.text.as_ref()).collect::<Vec<_>>(), ["Stable"]);
+    }
+}
+
+#[test]
+fn coarse_changes_reject_a_chunk_and_ranking_started_before_the_change() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.rb"]);
+    std::fs::write(root.join("a.rb"), "class Alpha; end\n").unwrap();
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root.clone()));
+    settle_without_watch(&mut s, indexed);
+    s.dispatch(Command::FindDeclarations("Alpha".into()));
+    let old_search = s.state().results().unwrap().id;
+    let rel: Arc<str> = "a.rb".into();
+    s.state.index.invalidate(&rel, true);
+    assert_eq!(s.state.index.next_chunk().as_slice(), std::slice::from_ref(&rel));
+    let old_index = index::index_file(&root, &rel, || true);
+    let generation = s.state().project().unwrap().generation();
+    for name in ["Omega", "Sigma"] {
+        std::fs::write(root.join("a.rb"), format!("class {name}; end\n")).unwrap();
+        s.dispatch(Completion::Changed(Change { overflow: true, ..Default::default() }));
+    }
+    assert_ne!(s.state().results().unwrap().id, old_search, "an old ranking must not publish after invalidation");
+    s.dispatch(Completion::Indexed { generation, revision: s.index_revision.load(Ordering::Relaxed), files: vec![(rel, old_index)] });
+    assert!(s.state.index.snapshot().is_empty(), "the old worker result must be rejected");
+    settle_without_watch(&mut s, |s| indexed(s) && !s.state().project().unwrap().refreshing() && searched(s));
+    assert!(s.state().results().unwrap().hits().is_empty());
+    s.dispatch(Command::FindDeclarations("Sigma".into()));
+    settle_without_watch(&mut s, searched);
+    assert_eq!(s.state().results().unwrap().hits().len(), 1);
+}
+
+#[test]
+fn watch_registration_checks_missed_edits_without_rebuilding_unchanged_records() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.rb", "stable.rb", "gone.rb"]);
+    std::fs::write(root.join("a.rb"), "class Alpha; end\n").unwrap();
+    std::fs::write(root.join("stable.rb"), "class Stable; end\n").unwrap();
+    let mut s = session(d.path());
+    s.watcher = Watcher::new(|_| true); // only the explicit registration below reaches this session
+    s.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut s, indexed);
+    let stable = s.state.index.snapshot().into_iter().find(|(p, _)| &**p == "stable.rb").unwrap().1;
+    std::fs::write(root.join("a.rb"), "class OmegaChanged; end\n").unwrap();
+    std::fs::remove_file(root.join("gone.rb")).unwrap();
+    std::fs::write(root.join("new.rb"), "class Added; end\n").unwrap();
+    s.dispatch(Command::FindDeclarations("OmegaChanged".into()));
+    s.dispatch(Completion::Changed(Change { registered: [root].into(), ..Default::default() }));
+    settle(&mut s, |s| indexed(s) && !s.state().project().unwrap().refreshing() && s.state().results().is_some_and(|r| r.done() && r.hits().len() == 1));
+    let records = s.state.index.snapshot();
+    assert_eq!(records.len(), 3);
+    assert!(Arc::ptr_eq(&stable, &records.iter().find(|(p, _)| &**p == "stable.rb").unwrap().1));
+    assert!(records.iter().any(|(p, _)| &**p == "new.rb"));
+}
+
 #[test]
 fn the_outline_lists_declarations_in_order_and_opens_one_as_a_step() {
     let d = tempfile::tempdir().unwrap();
@@ -1626,10 +1871,14 @@ fn markdown_opens_as_source_and_previews_on_request_in_place() {
     settle(&mut s, |s| s.state().document().is_some());
     assert_eq!(s.disabled(CommandId::MarkdownSource), Some("Not a Markdown file"));
     assert!(s.state().rendering().is_none());
+    assert!(s.preview_control(0).is_none());
     s.dispatch(Command::Open(md.clone()));
     // The source first: no preview is made until asked for.
     settle(&mut s, |s| matches!(s.state().rendering(), Some(Rendering::Source)));
     assert!(s.state().active().unwrap().markdown_source());
+    assert_eq!(s.preview_control(0).map(|a| (a.id, a.label, a.disabled)), Some((CommandId::MarkdownSource, "Preview", None)));
+    assert!(s.preview_control(2).is_none());
+    assert!(!s.toolbar().iter().any(|(id, _)| *id == CommandId::MarkdownSource));
     s.dispatch(Command::ToggleMarkdownSource);
     // The preview, made off the UI thread: its blocks map back to source lines, code blocks are highlighted.
     settle(&mut s, |s| rendered(s).is_some());
@@ -1639,6 +1888,7 @@ fn markdown_opens_as_source_and_previews_on_request_in_place() {
     assert_eq!(lines, [0, 2, 4, 8, 10]);
     assert!(p.syntax.get(&2).is_some_and(|s| !s.is_empty()), "the Rust block's keywords");
     assert_eq!(s.disabled(CommandId::MarkdownSource), None);
+    assert_eq!(s.preview_control(0).unwrap().label, "Source");
     // Reading on in the preview and switching to the source keeps the place, without a history step.
     let back = s.state().can_back();
     s.dispatch(Command::Scroll(8));
@@ -1719,6 +1969,7 @@ fn markdown_previews_follow_external_changes_and_say_when_they_cannot_be_shown()
     assert!(matches!(s.state().rendering(), Some(Rendering::Source)));
     assert_eq!(s.state().notices().iter().find(|n| n.starts_with("Markdown")).unwrap(), "Markdown preview unavailable: its source bytes exceed the preview's limit; showing the source");
     assert_eq!(s.disabled(CommandId::MarkdownSource), Some("This document cannot be previewed (the notice says why)"));
+    assert_eq!(s.preview_control(0).unwrap().disabled, s.disabled(CommandId::MarkdownSource));
 }
 
 /// Release timing and memory for Markdown: a 200 KiB document with code blocks and four local 512×512 images opened
@@ -4227,7 +4478,7 @@ fn unified_navigation_refreshes_symbols_when_a_same_size_index_snapshot_is_repla
     assert_eq!(s.state.index.next_chunk().as_slice(),std::slice::from_ref(&rel));
     let indexed=index::index_file(dir.path(),&rel,||true);
     let generation=s.state().project().unwrap().generation();
-    s.dispatch(Completion::Indexed{generation,files:vec![(rel,indexed)]});
+    s.dispatch(Completion::Indexed{generation,revision:s.index_revision.load(Ordering::Relaxed),files:vec![(rel,indexed)]});
     assert!(s.state().navigation().unwrap().dirty);
     settle(&mut s,|s|s.state().navigation().is_some_and(|n|!n.pending&&n.request!=request));
     assert!(s.state().navigation().unwrap().rows.is_empty(),"the old declaration must not survive a same-count replacement");
@@ -4259,9 +4510,9 @@ fn pyright_failures_offer_runtime_repair_and_version_context() {
     let mut s = session(d.path());
     s.dispatch(Command::Open(path)); settle(&mut s, opened);
     assert_eq!(s.disabled(CommandId::ServerRuntime), None, "Python must offer an in-app runtime repair");
-    let rows = s.language_server_rows();
-    assert!(rows.iter().any(|(label, _)| label.contains("Server version:")));
-    assert!(rows.iter().any(|(label, _)| label.contains("1.1.414")), "show the tested Pyright version independently of a failed launch");
+    let details = s.language_server_details();
+    assert!(details.contains("Server version:"));
+    assert!(details.contains("1.1.414"), "show the tested Pyright version independently of a failed launch");
     s.dispatch(Command::OpenServerRuntime);
     assert!(s.state().server_runtime().is_some());
     assert!(s.state().server_runtime().unwrap().message.contains("Node"));
@@ -4352,4 +4603,45 @@ fn status_details_keeps_complete_messages_while_brief_and_controls_stay_bounded(
     assert_eq!(s.action(CommandId::StatusDetails), crate::actions::CatalogAction::Interface(crate::actions::InterfaceAction::StatusDetails));
     assert!(s.toolbar().iter().any(|(id, _)| *id == CommandId::FindFile));
     assert_eq!(CommandId::StatusDetails.shortcut(), Some("Shift+F2"));
+}
+
+#[test]
+fn server_menus_share_actions_and_keep_diagnostics_in_copyable_details() {
+    use crate::{actions::{CatalogAction, CommandGroup, InterfaceAction}, chrome::MenuTarget};
+    let d = tempfile::tempdir().unwrap();
+    let mut s = session(d.path());
+    for path in [None, Some(write(d.path(), "note.txt", b"plain text")), Some(write(d.path(), "main.py", b"def main(): pass"))] {
+        if let Some(path) = path { s.dispatch(Command::Open(path)); settle(&mut s, opened); }
+        let rows = s.language_server_rows();
+        assert_eq!(rows.len(), 9);
+        assert_eq!(rows[0].1, Some(CommandId::ServerDetails));
+        assert!(rows.iter().all(|(_, action)| action.is_some() && *action != Some(CommandId::CopyServerDetails)));
+        let menu = s.menu(Some(CommandGroup::LanguageServers));
+        assert_eq!(menu.len(), rows.len() + 1);
+        for (menu, (label, id)) in menu.iter().skip(1).zip(rows) {
+            let id = id.unwrap();
+            assert_eq!((&menu.label, menu.target, menu.disabled), (&label, MenuTarget::Run(id), s.disabled(id)));
+        }
+        assert_eq!(s.action(CommandId::ServerDetails), CatalogAction::Interface(InterfaceAction::ServerDetails));
+        assert_eq!(s.action(CommandId::CopyServerDetails), CatalogAction::Command(Command::CopyText(s.language_server_details())));
+        assert!(s.status_details().contains(&s.language_server_details()));
+    }
+}
+
+#[test]
+fn changing_projects_rejects_pending_library_discovery() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(dir.path());
+    let root = dir.path().join("one");
+    std::fs::create_dir_all(&root).unwrap();
+    s.dispatch(Command::OpenRoot(root));
+    let generation = s.project_generation.load(Ordering::Relaxed);
+    let path = dir.path().join("node_modules/package/index.ts");
+    let read = s.state.libraries.reveal(&path, true).pop().unwrap().read(|| true);
+    let next = dir.path().join("two");
+    std::fs::create_dir_all(&next).unwrap();
+    s.dispatch(Command::OpenRoot(next.clone()));
+    assert!(!s.dispatch(Completion::LibraryRead { generation, read }).repaint);
+    assert_eq!(s.state.project.as_ref().unwrap().root(), next);
+    assert!(!s.state.tree_rows().any(|r| r.name.as_ref() == "Libraries"));
 }

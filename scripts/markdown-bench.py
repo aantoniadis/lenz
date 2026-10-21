@@ -20,7 +20,7 @@ import subprocess
 import tempfile
 import time
 
-from perf_support import process_stats, isolate_user_state
+from perf_support import process_stats, isolate_user_state, read_display_number
 
 
 def load(name, filename):
@@ -296,7 +296,6 @@ class NativeGui:
     def start(self, binary, args, cwd, output, xvfb):
         import ctypes as C
         import ctypes.util
-        import selectors
         self.C=C; self.output=output; output.mkdir(parents=True,exist_ok=True)
         self.scratch=tempfile.TemporaryDirectory(prefix='lenz-markdown-display-')
         self.env=dict(os.environ, GIT_CONFIG_GLOBAL='/dev/null', GIT_CONFIG_NOSYSTEM='1', LENZ_TIMINGS='1',
@@ -314,11 +313,8 @@ class NativeGui:
         r,w=os.pipe(); self.server_log=(output/'xvfb.log').open('w')
         self.server=subprocess.Popen([str(xvfb),'-displayfd',str(w),'-screen','0','1600x1000x24','-nolisten','tcp','-noreset'],pass_fds=(w,),stdout=self.server_log,stderr=self.server_log,env=self.env)
         os.close(w)
-        with selectors.DefaultSelector() as events:
-            events.register(r,selectors.EVENT_READ)
-            if not events.select(10):raise RuntimeError('Xvfb timeout')
-        number=os.read(r,100).decode().strip();os.close(r)
-        if not number.isdigit():raise RuntimeError('invalid private display number')
+        try:number=read_display_number(r)
+        finally:os.close(r)
         self.env['DISPLAY']=':'+number;self.display=self.x.XOpenDisplay(self.env['DISPLAY'].encode())
         if not self.display:raise RuntimeError('cannot open private display')
         self.log=(output/'application.log').open('w')

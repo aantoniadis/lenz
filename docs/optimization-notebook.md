@@ -4,6 +4,33 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## 2026-10-21 final release validation
+
+The full Linux suite passed 133 cases and 394 metrics, alongside local CI,
+absolute performance gates, ten real language-server lifecycle checks and live
+Ruby dependency navigation in both adapters. Fresh paired runs measured Reader
+wheel feedback at 26.00→26.01 ms and overflow recovery on Discourse at
+6.79→0.95 seconds. Three-minute core stress completed 32,380 iterations and 647
+external rewrites; sampled RSS windows stayed between 56.20 and 57.04 MiB.
+
+The earlier Reader GUI startup difference did not recur in six fresh pairs
+(158.13→159.41 ms), and paired Diff launches did not reproduce the larger
+differences against historical measurements. Small timing/RSS differences on
+this shared host remain inconclusive; saved local declarations still do not
+remove Ruby's initial 12–13-second server indexing.
+
+Two failed collectors needed corrections. Xvfb's fragmented display-number
+write caused 8 failures in 150 starts when readers closed before the newline;
+the shared bounded readiness reader passed all 150 repeats without retries.
+Reader TUI's obsolete title oracle was replaced by filename feedback and its
+schema advanced to 2; the real source-content endpoint is unchanged. These are
+collector fixes, with no application Rust/Cargo changes in this pass.
+
+See [release validation](release-validation.md) for complete paired measurements,
+actual stress durations, failed attempts, limits and reproduction. Raw samples,
+identities and drivers are under `target/perf/release-check-20261021/`. Native
+macOS, hardware rendering and distribution packaging remain unverified here.
+
 ## 2026-10-18 Reader toolbar and status
 
 Reader now follows Diff's separate toolbar/tab layout in both adapters. Shared
@@ -1279,3 +1306,344 @@ close to baseline; exact preservation is not proven. New Recent stress lasted 15
 and 15.02 seconds/73 cycles in terminal, with RSS ranges 182.73–182.88 MiB and 9.742–9.797 MiB respectively.
 These short bounded samples are not leak proof. Native macOS/Windows, GPU memory and hardware display latency
 remain unverified.
+
+## 2026-10-21 Reader trackpad input and LSP indexing progress
+
+Quarter-row trackpad events were rounded to zero, while Ruby LSP's reported percentages were discarded.
+Accumulating movement per pane/document and retaining structured work-done reports fixes those reproduced
+client defects. Tests also caught fractional overscroll delaying reversal at EOF/right and preview-tab ID
+reuse carrying movement into another document. Both footers expose progress; no server coverage was reduced.
+The complete local gate and the real Ruby LSP 0.26.11 fixture pass.
+
+The [verification record](code/performance.md#trackpad-scrolling-and-indexing-progress-2026-10-21) retains
+raw identities and the limits of the measurements. Final alternating GUI first content measured
+126.78→126.65 ms; the software-rendered scroll probe remained near 48 ms with text and a loading Ruby
+project. Fifteen-second text scrolling used 7.51→7.52 seconds of reader CPU and settled at 166.04→165.15 MiB.
+An intermediate +4 MiB RSS difference did not reproduce with the final executable or idle-memory attribution.
+
+An initial Ruby fixture lost the installed user gems through XDG isolation; explicit GEM_PATH and a
+server-presence assertion corrected it. Early semantic/terminal artifacts with uncertain provenance were
+excluded and rebuilt from the unchanged source. These checks do not prove faster server indexing or native
+macOS responsiveness. The reported Rails app, native platforms, long sessions and GPU memory remain unverified.
+
+## 2026-10-21 shared GUI wheel handling
+
+Wheel conversion, Shift redirection, fractional steps and overscroll discard now live in `lenz-gpui::scroll`.
+Reader and Diff share the input arithmetic while their existing cores retain document state. Diff's source
+view already kept fractional positions, but discarded small vertical movement on diagonal events; a
+red/green regression now exercises both sides in all four modes. Its PR description and Reader use the
+same step/clamp helpers. A repaint regression also caught Reader clipping the last partial column; one
+ceiling in columns now governs input and render limits. No dependency or background worker was added.
+
+The [verification record](code/performance.md#shared-gui-wheel-input-2026-10-21) retains the full local gate,
+actual adapter checks, repeated production timing, RSS attribution and ten-second scroll stress. Final
+wheel feedback measured Diff 27.04→27.23 ms and Reader 25.53→26.11 ms; the earlier repeat moved in the other
+direction. An earlier 2.8 MiB Reader RSS difference reduced to 0.46 MiB in the final repeat, predominantly
+file-backed pages; exact preservation remains unproven. A failed private-display connection attempt was
+excluded and repeated with one owned display for the batch. Native macOS/Windows, physical trackpad and
+display latency, long sessions and GPU memory remain unverified.
+
+## 2026-10-21 large Rails initial indexing
+
+A pinned Discourse 3.5.0 checkout (8,294 Ruby files, 277 installed bundle gems) reproduced substantial
+one-time indexing with Ruby LSP 0.26.11. The [experiment record](code/performance.md#large-rails-indexing-experiment-2026-10-21)
+retains exact exclusions, phase measurements, raw samples, executable/source identity and limits.
+Without Ruby timing hooks, selected project and tooling-gem exclusions reduced readiness from 13.20 to
+10.67 seconds (19.2%) and peak summed driver/server RSS from 747.8 to 648.0 MiB, across three samples per case.
+Every sample completed the full local declaration index and a real cross-file definition check.
+
+Dependency parsing dominated; disabling linting does not remove RuboCop/Parser source from navigation
+indexing. Pausing Lenz's crawl had a modest server gain but delayed local symbols from 8.60 to 22.04 seconds
+and increased peak RSS in the instrumented matrix, so it was rejected. Disabling automatic decorations was
+inconclusive; YJIT did not improve startup in the uninstrumented confirmation (13.45 seconds).
+An initial recursive-glob check corrected `/**` to `/**/*.rb` before exclusion measurements. Ruby timing
+hooks inflated the apparent gain, which is why the final claim uses the confirmation without those hooks.
+
+Exclusions remain opt-in because they remove navigation coverage; no runtime defaults or user settings
+changed. These are short Linux shared-core/provider runs, not frontend latency or sustained stress.
+Native macOS, the reported private Rails project and Rails add-on boot remain unverified.
+
+## 2026-10-21 practices from other LSP editors
+
+[Primary-source research](research/large-workspace-lsp.md) found explicit tooling-gem exclusions, scoped
+configuration, correct roots and server reuse in other editors. The narrower [follow-up trial](code/performance.md#editor-lsp-practices-trial-2026-10-21)
+kept Discourse’s default project-file coverage while excluding eleven tooling gems: Ruby LSP readiness measured
+13.33→11.94 seconds (10.4%), peak summed core/server RSS 724.5→682.8 MiB, across three fresh sessions per case.
+All samples completed the full local index and navigated into both an application concern and ActiveRecord.
+
+A 30.082-second, 1,062-switch run retained one Ruby LSP process and returned nonempty file symbols after
+every switch (median 28.86 ms). Lenz already implements this reuse; no new orchestration was added. A
+preflight dependency check needed to wait for the actual asynchronously opened target, rather than only
+request/loading state. The measured driver does so. Project-scoped initialization settings remain a useful
+gap; global exclusions would also affect unrelated projects. Watcher exclusions and server-owned caches
+cannot be assumed to reduce Ruby LSP's first index. Tooling exclusions remain opt-in, and source navigation
+into those gems is lost. Native macOS, the private app, Rails add-on boot and long sessions remain unverified.
+
+## 2026-10-21 project-scoped language-server tuning
+
+Per-workspace initialization/configuration settings now live in user-owned provider configuration, with
+shared F2/menu actions for the measured Ruby tooling-gem profile and complete project reset. Only the
+saved provider/root restarts; atomic writes preserve unrelated settings, failures leave servers intact,
+and held-completion tests cover switching projects and cancelling an in-flight symbol search. Actual
+GUI/TUI input replay covers both appearances and tiny layouts; the full local gate passed.
+
+The [verification record](code/performance.md#project-scoped-lsp-settings-2026-10-21) retains all twelve
+standalone release Rails samples: default readiness 13.86→13.78 seconds; the new binary's
+scoped tooling profile 12.92 seconds (6.2% below its defaults), with peak summed RSS
+761.3→673.6 MiB. Every sample completed the full local declaration index and application/Rails-gem
+navigation assertions. A 30.043-second, 1,020-switch run retained one Ruby LSP process.
+
+An initial combined Cargo build enabled GUI test dependencies and unified GUI image features into the
+core example, making its release workload incomparable. Executable sizes exposed the issue. Those
+measurements and investigation repeats are retained as diagnostics; production GUI, standalone core and
+terminal builds were separated and all accepted workloads repeated. Review also caught a cancelled Symbols
+request retaining its spinner; a red/green regression now finishes the result with a retry message.
+
+Saved GUI binaries initially measured first image 156.81→163.63 ms, and a repeat retained that startup
+difference. A fresh build of the exact pre-change source snapshot did not reproduce it: six alternating
+pairs measured first image 165.06→162.13 ms and wheel feedback 26.15→25.12 ms. Both source identities and
+comparisons are retained; preservation against the older executable remains unproven. No deliberate startup
+tradeoff was accepted. Terminal source receipt measured 6.50→6.62 ms. Ten-second GUI and five-second terminal stress retain durations and RSS
+ranges in the record. No default coverage was reduced; opting in loses navigation into the excluded
+tooling gems. Native macOS/Windows, Rails add-on boot, the private app, GPU memory and long sessions remain
+unverified; short Linux timing/RSS samples do not establish exact preservation or leak freedom.
+
+## 2026-10-21 persistent declaration and Ruby gem cache prototypes
+
+The [experiment record](code/performance.md#persistent-index-prototypes-2026-10-21) compares two isolated
+prototypes on the pinned large Discourse fixture. Saving the existing local declaration records and validating
+every source file reduced full local coverage from 7.364 to 0.168 seconds in the component probe. In five
+real Session pairs, local completion improved 7.895→0.488 seconds, Ruby LSP Ready 14.451→13.550 seconds,
+and sampled CPU use 22.67→13.95 CPU-seconds, with all local candidates and application/Rails-gem navigation
+checks preserved. This selects content-validated local persistence as the next implementation direction;
+no production cache or server-startup policy was added.
+
+The single-root prototype's driver peak fell about 273→43 MiB, while combined startup peak RSS increased
+732.6→759.3 MiB due to Ruby LSP's measured residency. The two 30-second stress trials did not retain the same
+combined-peak increase; overall memory preservation remains unproven. Cold creation has one sample only.
+Production lifecycle, schema/digest validation, bounded storage, cancellation and adapter checks remain work;
+no performance tradeoff has been accepted.
+
+Metadata-only validation saved about 31 ms but returned stale names after an equal-size, preserved-mtime edit,
+so it was rejected. Parser-gem record replay reduced instrumented server readiness 15.30→14.43 seconds,
+but an application reopening Parser::Base produced duplicate singleton-class records after replay. The simple
+replay design is rejected; dependency records need current-project ownership/resolution. Initial harness
+failures involved normalizing lazy empty mixin lists and reusing a mutation fixture; corrected checks retain
+the actual prototype counterexamples. Native platforms, frontend display/scrolling, Rails add-on boot,
+the private app and long sessions remain unverified. Raw sources, identities, samples and check logs remain
+under `target/perf/index-cache-prototypes/`; both production adapters and runtime sources were preserved.
+
+
+### 2026-10-21 branch switching and cache identity follow-up
+
+The [follow-up record](code/performance.md#branch-switch-follow-up-2026-10-21) exercises an actual disposable
+A → B → A checkout. All local-index results match fresh extraction, but returning to identical A source
+still reparses 3/4 files because the prototype requires inode/mtime equality. The next cache design should
+reuse by content plus parsing context, with bounded recent versions and a separate current inventory.
+This improvement is proposed, not measured or implemented.
+
+A cache-disabled shared-core probe also reproduces an existing stale-listing gap after synthetic watcher
+overflow or a directory-only event: a rescan discovers paths but retains old records for surviving files.
+Exact-file notifications repair the index. Fixing coarse/full invalidation and validating live checkout
+races takes priority over changing cache formats or adding parallel hashing. No production code changed;
+macOS notifications and live Rails/LSP branch switching remain unverified. Evidence is retained under
+`target/perf/index-cache-followup/`.
+
+## 2026-10-21 live checkout and watcher recovery
+
+The shared core now repairs the stale declaration listings reproduced above: directory changes invalidate
+descendants, overflow rebuilds known declarations, and completed scans reconcile added/deleted files with
+Ruby LSP. Open searches rerank, obsolete work is rejected, and both adapters' actual keys/results are tested.
+Registration validates missed changes without discarding unchanged records. No persistent cache was added.
+
+The [verification record](code/performance.md#checkout-and-watcher-recovery-2026-10-21) exercises actual
+Discourse A → B → A checkouts twice while suppressing precise OS events. The changed subtree recovers local
+symbols in 0.104–0.109 seconds; simulated overflow takes 7.537–7.584 seconds for the full background rebuild.
+Exact definition checks exposed Ruby LSP's deferred indexing of changed open documents. An internal
+document-symbol refresh and a disk-state report after closing a dirty document repair that gap without
+replacing navigation requests or restarting the server. The final live test and full local gate pass.
+
+Four final default-coverage pairs measured local completion 7.262→7.377 seconds, Ruby LSP Ready
+12.830→12.610 seconds and peak summed RSS 740.1→740.9 MiB. An earlier equivalent-settings comparison had
+a larger Ruby RSS shift; identical-configuration repetition did not retain it. GUI first image/wheel feedback
+measured 156.04→154.83 / 26.61→24.17 ms; TUI first source bytes 6.04→6.20 ms. The after binary completed
+1,041 successful switch/symbol cycles in 30.036 seconds with one server. Exact preservation and leak freedom
+are not established; detailed ranges and the larger after stress maximum remain in the report.
+
+Rejected experiments include treating watch registration as a rewrite (local startup 8.204→9.430 seconds),
+requeuing the currently running chunk during unchanged rescans, and accepting stale Cargo artifacts from
+the prior prototype as a baseline. Separate clean source builds, registration handling and a queue regression
+test resolve those issues. Fuzzy symbol matching was also an inadequate checkout oracle; exact definitions
+exposed the real Ruby defect. Native macOS/Windows, GPU memory, Rails add-on boot and long sessions remain
+unverified. Bundle/runtime changes may still need a manual server restart. Raw evidence is retained under
+`target/perf/watch-invalidation/`; the bounded content-version cache remains the next separate experiment.
+
+## 2026-10-21 configurable content reuse and index rebuild
+
+The [implemented comparison](code/performance.md#configurable-index-reuse-and-rebuild-2026-10-21) now uses
+bounded, content-validated declaration persistence in the shared core. Cache reuse and Ruby tooling exclusions
+default on, both have GUI/TUI opt-outs, and **Rebuild Project Index** drops local saved/current declarations,
+refreshes open documents and restarts the project's servers. Explicit Ruby overrides retain precedence.
+Source bytes and settings survive rebuild; server-owned workspace/build caches remain server-managed.
+
+Four alternating release rounds measured previous → both-enabled reopening local completion at
+**8.122→0.523 seconds**, Ruby LSP Ready **14.046→11.611 seconds**, sampled CPU **22.84→12.41 CPU-s** and
+peak summed RSS **726.6→682.0 MiB**. First uncached local completion stayed **8.054 seconds**, with Ruby Ready
+at **12.070 seconds**. Cache-only mode retained a combined-memory cost: **750.8 MiB** initially and
+**762.9 MiB** in a four-round investigation repeat, versus **727.7 MiB** for the repeated previous binary.
+Most combined variation is in Ruby; warm driver residency also increases. The report preserves this tradeoff.
+
+Actual A → B → A checkouts twice validate declarations and exact old/new definitions. Simulated event loss
+recovers local coverage in **0.516–0.526 seconds**, with Ruby checks finishing by **5.557–5.831 seconds**.
+Explicit drop/rebuild then takes **11.335 seconds**. A 30.020-second after run completes 1,038 successful
+switch/symbol cycles with one server. Storage tests cover bad checksums, extractor changes, same-size edits,
+recent versions, late writers, cancellation and bounds. The full local gate passes, including actual adapter
+input in both appearances and narrow layouts.
+
+Initial GUI and TUI startup differences prompted repeats. The six-pair GUI repeat and sixteen-pair isolated
+TUI startup check did not retain them; twelve pinned TUI pairs also had essentially equal startup/CPU times.
+Raw original/repeated results and short stress ranges remain in the report; exact preservation and leak
+freedom are not claimed. A real pending-symbol spinner defect found during review was reproduced and fixed;
+the initial interrupted timing collection is excluded from final claims. Native platforms, physical scrolling,
+GPU memory, Rails add-on boot and long sessions remain unverified. Evidence is under `target/perf/index-settings/`.
+
+## 2026-10-21 cross-language saved-index validation
+
+The [cross-language record](code/performance.md#cross-language-index-validation-2026-10-21) validates the
+unchanged implementation on all nine other declaration grammars. Three samples per setting on generated
+1,200-file corpora measure complete local coverage at **164–347 ms with reuse off**, **174–360 ms for first
+cache creation**, and **21–23 ms with saved declarations**: **7.6–15.7×** faster reopening. First creation adds
+5–16 ms here; this cost and the synthetic nature of the workload are explicit. Short process samples do not
+establish precise memory preservation.
+
+Ten real-server scenarios pass: Rust, Python, Java, Kotlin, JavaScript, TypeScript, TSX, HTML, CSS and a second
+TypeScript run through tsserver. Exact definitions, file symbols, A → B → A content changes with synthetic
+overflow, rebuild, opt-out and unchanged source bytes are checked. Java/Kotlin answer the checked definition
+while background indexing continues; semantic indexing speedups are unproven. Newer Rust/Java/VS Code server
+versions retain the existing compatibility notices because this is focused coverage.
+
+A normal core regression compares all declaration fields and syntax-error counts with fresh extraction,
+including Unicode/CRLF, persisted reopen and same-size/preserved-mtime edits. The first test wrongly assumed
+a compact Kotlin fixture would be warning-free; the corrected oracle preserves the extractor's warnings.
+All large fixtures are warning-free. A probe build was corrected to use the public action catalog without
+changing runtime APIs. The full local gate passes. No runtime behavior changed, new dependency was installed,
+or user configuration was edited. Raw evidence is in `target/perf/index-languages/`; native macOS, full-server
+completion, production dependency graphs, physical scrolling and long sessions remain unverified.
+
+## 2026-10-21 further indexing experiments
+
+The [three isolated prototypes](code/performance.md#further-indexing-experiments-2026-10-21) leave production
+runtime and frontend executables unchanged. On Discourse, content-aware notifications reduce watcher-overflow
+recovery through exact semantic checks from **5.503 to 0.809 seconds**. Three alternating rounds cover two
+A → B → A cycles each, exact old/new definitions, no-op overflow, missing fingerprints and explicit rebuild.
+Full hashing costs about 267 ms; even directory-scoped discovery/comparison costs 71 ms and regresses normal
+directory recovery from **0.548 to 0.636 seconds**. The extra directory scan is rejected. Next integration
+should reuse inventory/index reads, with background validation and conservative fallback; fingerprints must
+also stay current after ordinary edits to avoid stale results on a later checkout back.
+
+A borrowed-UTF-8 cache-hit path reduces isolated warm local indexing **250→237 ms** and sampled peak RSS
+**44.6→38.2 MiB**. First cache creation is 29 ms slower; nine smaller language corpora show mixed shifts
+around 22–23 ms. Defer this small gain. The candidate passes 340 core tests (16 existing ignored), all 12,077
+Discourse candidates against fresh extraction, and encoding/offset/line-boundary checks. Fingerprint checks
+cover preserved-mtime edits, rename and missing snapshots. Initial probe build errors were corrected in
+isolated examples; their logs are retained.
+
+A serial-client helper retains a whole headless Session and real Ruby server across new client processes.
+Reopen medians improve **12.329→0.956 seconds**; disconnected checkouts, an injected reconnect edit,
+lockfile/config changes, rebuild and expiry pass. Initial startup stays 12.6–12.8 seconds. A 29.906-second idle
+interval holds **699.1 MiB** and uses **0.09 CPU-seconds**. Expiry at 35 seconds stops Ruby but leaves a
+**66.8 MiB** helper until shutdown. This remains an opt-in design candidate, with simultaneous-view isolation,
+full runtime identity, crash recovery and daemon security unproven.
+
+Raw sources, binaries, identities, configs, 92 cache samples, nine recovery scenarios and both helper
+scenarios are retained in `target/perf/index-next/`. Only README/report/notebook text changes in the normal
+tree. The prior full application gate is not rerun; local links and whitespace are checked. Native macOS,
+frontend integration, physical scrolling, GPU memory, multi-project limits and long sessions remain unverified.
+
+## 2026-10-21 integrated content-aware overflow recovery
+
+The [shared-core implementation](code/performance.md#content-aware-overflow-recovery-2026-10-21) retains the
+digests already computed by saved declaration indexing and compares them through the existing background
+reads after overflow. It adds no extra directory walk, read or content hash. Ordinary file/directory updates retain
+their behavior; precise edits, registration during recovery, overlapping overflows, missing reads and index
+limits have conservative handling. The existing saved-index opt-out disables filtering, and explicit rebuild
+still clears records and restarts the project's servers. Both frontends use the same implementation.
+
+Initial paired release results on Discourse improve overflow recovery through exact semantic checks
+**5.560→1.137 seconds** (about **4.9×**), ordinary directory recovery **0.576→0.501 seconds**, and no-change
+overflow **5.658→1.244 seconds**. Three further pairs confirm overflow **5.761→1.053 seconds**. Both sets
+verify two A → B → A cycles, exact local/server names, old/new definitions, deletion, opt-out and rebuild.
+Complete-scenario sampled CPU falls **83.67→69.06 CPU-s** initially and **87.72→75.06 CPU-s** in the repeat.
+Pre-restart summed peak RSS falls in both sets. Full-scenario RSS rises initially (983.48→1,049.51 MiB),
+then reverses in the repeat (1,066.57→1,043.61 MiB); the report preserves both. Per-file fingerprint storage
+adds roughly 1–2 MiB to measured reader residency within the existing accounted index bound.
+
+Cold startup is not improved. Initial Ruby Ready timings rise 11.318→11.598 seconds cold and
+11.043→11.189 seconds warm; four more pairs give 11.417→11.558 cold and 11.034→10.932 warm. Separate opt-out
+startup improves local coverage 7.638→7.560 seconds while Ruby Ready rises 11.360→11.575. Rebuild and
+post-opt-out timings in the longer sequence also prompted investigation. A real protocol trace proves the
+same initialization, request counts and one identical 16,405-path opt-out notification; the delay mainly
+precedes the final symbol query. The shared development host has unrelated active work, so small timing/RSS
+differences are not attributed confidently to the change. All unfavorable samples and traces are retained.
+
+Two final pairs on fixed CPUs retain the overflow gain (**6.930→1.404 seconds**) with ordinary directory
+recovery **0.680→0.592 seconds**. Opt-out times are 8.783 / 10.950 seconds before and 10.157 / 10.339 after;
+the second pair reverses the previous difference. Baseline variation contains both candidate times. This
+does not establish a consistent opt-out regression, or prove exact preservation on an exclusive host.
+Fixed-affinity full-scenario RSS is 1,072.11→1,069.47 MiB. The robust benefit is avoiding redundant overflow
+work; native-machine startup and long-session resource behavior still need validation.
+
+A deterministic completion-order test caught duplicate notifications when registration caused a follow-up
+scan; preserving the baseline through that final inventory fixed it. Another test's initial candidate count
+forgot Gemfile; the assertion was corrected. Exact-file events now remove their own pending entry directly,
+without scanning the whole fingerprint map. The complete local gate passes. One existing GUI navigation test
+timed out in an earlier gate, then passed alone and in the full rerun without a code change; its cause remains
+unconfirmed. GUI/TUI input, startup and short stress checks pass; 30-second real-Ruby switch/symbol loops
+retain one Ready server and complete 1,059 / 1,086 cycles.
+
+Raw evidence, final production binaries, before/after source identities, configs, failed runs, protocol logs
+and collectors are under `target/perf/overflow-content/`. Native macOS/Windows, physical scrolling, GPU memory,
+long sessions and real-server speed in other languages remain unverified. The lighter UTF-8 cache path and
+retained-server helper remain deferred.
+
+## 2026-10-21 Language Servers menu refinement
+
+Moved the diagnostic paragraphs behind one shared **Server Details…** action and reused each adapter's
+scrollable snapshot popup with fixed Copy/Close controls. F2 and the application menu use the same compact
+management actions; the full report remains available through Find Action. The [validation report](code/performance.md#language-servers-menu-and-details-popup-2026-10-21)
+records the local gate, input/render parity, screenshots and paired release measurements. Initial GUI menu
+feedback was a few milliseconds slower, but four repeated pairs reversed the difference; there is no
+consistent menu regression in these samples. Other startup/input/RSS measurements are similar. Raw evidence
+is in `target/perf/server-menu/`. Native macOS, GPU memory and long sessions remain unverified.
+
+## 2026-10-21 Markdown control in the file header
+
+Moved Preview/Source into each Markdown pane's header in both adapters, retaining the shared toggle and
+keyboard/menu access in narrow panes. [Validation](code/performance.md#markdown-file-header-control-2026-10-21)
+covers actual input, split-pane isolation, labels, themes, tiny layouts and paired release workloads.
+Initial wheel feedback was slower; a second four-pair set reversed the difference, while ten-second scroll
+throughput is nearly identical. Startup and sampled memory are similar. Raw evidence is under
+`target/perf/markdown-control/`; native macOS, GPU memory and long sessions remain unverified.
+
+
+## 2026-10-21 Lazy library browsing
+
+Dependency definitions now reveal a shared Libraries tree. Directory reads are lazy, bounded and cancelled on
+collapse, with request identities rejecting late results; sibling navigation keeps the existing project and
+its declaration inventory. The [validation report](code/performance.md#dependency-libraries-in-the-explorer--2026-10-21)
+covers the complete gate, actual GUI/TUI input and render parity, live Ruby LSP, virtual-source reopening,
+limits and release comparisons. A 1,000-file library revealed in 0.811 ms in the core, while its unopened
+10,000-file subtree stayed unread. The ten-second loop completed 21,907 collapse/expand cycles.
+
+An intermediate build added about 3.8 MiB of mapped executable pages in GUI samples; smaps showed steady heap
+use. Marking infrequent library mutations cold returned sampled RSS to the baseline range in repeated runs;
+the final ordinary comparison measured 168.78→168.88 MiB. Extracting tree activation from the shared command
+dispatcher into a cold function reduced an intermediate TUI executable-page increase. Final GUI startup was
+13.18 ms slower, with a CPU-affinity control reducing the difference to 5.16 ms; earlier runs changed sign.
+Capture/scheduling variability leaves the startup effect inconclusive. TUI RSS varied between samples,
+including while syntax work was still running. Four final stress pairs measured 15.82→16.24 MiB median
+terminal RSS, with nearly all the remaining increase in mapped executable pages and anonymous mappings
+6.094→6.098 MiB. The cold extraction reduced but did not eliminate that increase. Failed collectors and all raw
+samples remain in `target/perf/library-tree/`. Native macOS/Windows, GPU memory and long sessions are unverified;
+virtual sources can only list visited files, and unfamiliar package layouts fall back to a nearby manifest or
+containing folder. This work does not speed up a language server's own indexing.

@@ -31,6 +31,8 @@ pub(crate) struct Geometry {
     pub modal_rows: Rect,
     pub modal_content_rows: usize,
     pub modal_items: Vec<usize>,
+    pub details_copy: Rect,
+    pub details_close: Rect,
     pub navigation_scopes: Vec<(Scope, Rect)>,
     pub navigation_revision: Option<u64>,
     /// Project search: its text and file-pattern fields, and each option's toggle.
@@ -124,7 +126,7 @@ impl App {
             area.height.saturating_sub(1 + u16::from(area.height >= 2)),
         );
         let tree_width =
-            if self.tree_shown && self.session.state().project().is_some() && area.width >= 36 {
+            if self.tree_shown && self.session.state().has_tree() && area.width >= 36 {
                 (area.width / 4).clamp(16, 32)
             } else {
                 0
@@ -310,13 +312,7 @@ impl App {
             }
             let rect = Rect::new(x, area.y, width, 1);
             let disabled = self.session.disabled(id).is_some();
-            let active = id == CommandId::ToggleExplorer && self.tree_shown
-                || id == CommandId::MarkdownSource
-                    && self
-                        .session
-                        .state()
-                        .rendering()
-                        .is_some_and(|rendering| matches!(rendering, Rendering::Preview(_)));
+            let active = id == CommandId::ToggleExplorer && self.tree_shown;
             let bg = if active { p.selected_bg } else { p.header_bg };
             let st = style(if disabled { p.dim } else { p.fg }, bg).add_modifier(if active {
                 Modifier::BOLD | Modifier::UNDERLINED
@@ -408,15 +404,7 @@ impl App {
             return;
         }
         fill(frame.buffer_mut(), area, style(p.fg, p.sidebar_bg));
-        let Some(project) = self.session.state().project() else {
-            line(
-                frame.buffer_mut(),
-                area,
-                " No folder open",
-                style(p.dim, p.sidebar_bg),
-            );
-            return;
-        };
+        let title = self.session.state().project().map(|p| p.root().file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Files".into());
         line(
             frame.buffer_mut(),
             area,
@@ -424,11 +412,7 @@ impl App {
                 " {}",
                 Icon::FolderOpen.label(
                     self.nerd_icons,
-                    &project
-                        .root()
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
+                    &title
                 )
             ),
             style(
@@ -441,15 +425,14 @@ impl App {
             )
             .add_modifier(Modifier::BOLD),
         );
-        let rows = project.rows();
+        let rows = self.session.state().tree_rows();
         clamp(
             &mut self.tree_at,
             &mut self.tree_top,
-            rows.len(),
+            rows.clone().count(),
             area.height.saturating_sub(1) as usize,
         );
         for (i, entry) in rows
-            .iter()
             .enumerate()
             .skip(self.tree_top)
             .take(area.height.saturating_sub(1) as usize)
@@ -1110,9 +1093,18 @@ impl App {
             area,
         );
         let content = inner(area);
-        if matches!(modal.kind, Prompt::Help | Prompt::Details(_)) {
+        if matches!(modal.kind, Prompt::Help | Prompt::Details { .. }) {
+            let mut content = content;
+            if matches!(modal.kind, Prompt::Details { .. }) && content.height > 0 {
+                content.height -= 1;
+                let width = (content.width / 2).min(16);
+                geometry.details_copy = Rect::new(content.x, content.bottom(), width, 1);
+                geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
+                line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
+                line(frame.buffer_mut(), geometry.details_close, "[Close Esc]", style(p.fg, p.selected_bg));
+            }
             let body = match &modal.kind {
-                Prompt::Details(body) => body.as_str(),
+                Prompt::Details { body, .. } => body.as_str(),
                 _ => HELP,
             };
             let wrapped = wrap_text(body, content.width.max(1) as usize);
@@ -1372,8 +1364,17 @@ fn draw_pane(
     }
     let active = state.shown(pane).map(Tab::id);
     fill(frame.buffer_mut(), row(area, 0), style(p.fg, p.header_bg));
+    let mut tab_end = area.right();
+    if let Some(control) = app.session.preview_control(pane).filter(|_| area.width >= 17) {
+        let button = Rect::new(area.right() - 9, area.y, 9, 1);
+        let st = style(if control.disabled.is_none() { p.fg } else { p.dim }, p.fold_bg);
+        fill(frame.buffer_mut(), button, st);
+        line(frame.buffer_mut(), button, &format!(" {} ", control.label), st);
+        geometry.controls.push((control.id, button));
+        tab_end = button.x;
+    }
     let mut x = area.x;
-    let tab_width = area.right().saturating_sub(x);
+    let tab_width = tab_end.saturating_sub(x);
     let tabs: Vec<_> = state.pane_tabs(pane).collect();
     let widths: Vec<_> = tabs
         .iter()
@@ -1401,7 +1402,7 @@ fn draw_pane(
             lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons, &tab.title()),
             if tab.retained() { "" } else { " ◇" }
         );
-        let width = widths[i].min(area.right().saturating_sub(x));
+        let width = widths[i].min(tab_end.saturating_sub(x));
         if width == 0 {
             break;
         }

@@ -1,12 +1,13 @@
 //! Single-pane text presentation shared by Lenz and its code reader: shaping a line with syntax and background
 //! spans, painting numbered rows with selection and caret, hit-testing a pointer to a source byte, picking the
-//! monospace font, and converting theme colours for GPUI. It takes content, viewport geometry and decorations
+//! monospace font, converting theme colours and normalizing wheel input for GPUI. It takes content, viewport geometry and decorations
 //! and returns hit locations; each product computes its own rows, decorations and commands.
 #![deny(unsafe_code)]
 
 pub mod find;
 pub mod image;
 pub mod markdown;
+pub mod scroll;
 
 use std::ops::Range;
 

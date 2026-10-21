@@ -62,7 +62,7 @@ pub(crate) enum Prompt {
         crumb: usize,
     },
     Help,
-    Details(String),
+    Details { title: &'static str, body: String },
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -166,16 +166,11 @@ impl App {
         if self.pending_explorer.is_some() {
             return;
         }
-        let Some(project) = self.session.state().project() else {
-            return;
-        };
+        if !self.session.state().has_tree() { return; }
         let explorer = reader_core::workspace::Explorer {
             visible: self.tree_shown,
-            selected: project.rows().get(self.tree_at).map(|r| r.path.to_string()),
-            top: project
-                .rows()
-                .get(self.tree_top)
-                .map(|r| r.path.to_string()),
+            selected: self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.to_string()),
+            top: self.session.state().tree_rows().nth(self.tree_top).map(|r| r.path.to_string()),
         };
         if self.session.state().explorer() != &explorer {
             self.session.dispatch(Command::SetExplorer(explorer));
@@ -260,6 +255,7 @@ impl App {
             command,
             Command::Open(_)
                 | Command::OpenRetained(_)
+                | Command::ActivateTree { .. }
                 | Command::OpenAt { .. }
                 | Command::ActivateTab(_)
                 | Command::Close
@@ -284,8 +280,14 @@ impl App {
             self.remember_explorer();
         }
         let workspace = self.session.state().workspace_revision();
+        let tree_revision = self.session.state().tree_revision();
         let effect = self.session.dispatch(command);
         self.sync_workspace(workspace);
+        if self.session.state().tree_revision() != tree_revision {
+            self.pending_explorer = None;
+            self.tree_shown = true;
+            self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
+        }
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
             self.notice = Some("Copied to terminal clipboard".into());
@@ -343,12 +345,8 @@ impl App {
     }
     pub fn apply(&mut self, completion: Completion) -> bool {
         let theme = self.highlighted_theme();
-        let tree_path = self
-            .session
-            .state()
-            .project()
-            .and_then(|p| p.rows().get(self.tree_at))
-            .map(|r| r.path.clone());
+        let tree_path = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
+        let tree_revision = self.session.state().tree_revision();
         let restoring = self.pending_explorer.is_some();
         let results_id = self.session.state().results().map(|r| r.id());
         let preview_positions = self.preview_positions();
@@ -358,19 +356,13 @@ impl App {
             self.select_theme_row(&id);
         }
         self.sync_workspace(workspace);
-        if !restoring
-            && let Some(path) = tree_path
-            && let Some(project) = self.session.state().project()
-            && project
-                .rows()
-                .get(self.tree_at)
-                .is_none_or(|r| r.path != path)
-        {
-            self.tree_at = project
-                .rows()
-                .iter()
-                .position(|r| r.path == path)
-                .unwrap_or(0);
+        if self.session.state().tree_revision() != tree_revision {
+            self.pending_explorer = None;
+            self.tree_shown = true;
+            self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
+        } else if !restoring && let Some(path) = tree_path
+            && self.session.state().tree_rows().nth(self.tree_at).is_none_or(|r| r.path != path) {
+            self.tree_at = self.session.state().tree_rows().position(|r| r.path == path).unwrap_or(0);
         }
         if self.session.state().results().map(|r| r.id()) != results_id {
             self.results_at = 0;
@@ -392,7 +384,7 @@ impl App {
         if self.modal.is_none()
             && let Some(doc) = self.session.state().documentation()
         {
-            self.prompt(Prompt::Details(doc.preview.doc.text.clone()));
+            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone() });
         }
     }
     fn open_root(&mut self, path: PathBuf) {
@@ -409,15 +401,7 @@ impl App {
                 if id == CommandId::LocateFile {
                     self.tree_shown = true;
                     self.focus = Focus::Tree;
-                    self.tree_at = self
-                        .session
-                        .state()
-                        .project()
-                        .and_then(|p| {
-                            let path = self.session.state().active_in_tree()?;
-                            p.rows().iter().position(|r| r.path == path)
-                        })
-                        .unwrap_or(0);
+                    self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
                     self.clamp();
                 }
             }
@@ -561,13 +545,17 @@ impl App {
             }
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
-            InterfaceAction::StatusDetails => {
-                let mut details = self.session.status_details();
+            InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
+                let (title, mut details) = if action == InterfaceAction::ServerDetails {
+                    ("Server details", self.session.language_server_details())
+                } else {
+                    ("Status details", self.session.status_details())
+                };
                 if let Some(notice) = &self.notice {
                     details.push_str("\n\nTerminal notice\n");
                     details.push_str(notice);
                 }
-                Prompt::Details(details)
+                Prompt::Details { title, body: details }
             },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
@@ -594,7 +582,7 @@ impl App {
         self.prompt(kind);
     }
     pub(crate) fn prompt(&mut self, kind: Prompt) {
-        if !matches!(kind, Prompt::Details(_)) {
+        if !matches!(kind, Prompt::Details { .. }) {
             self.dispatch(Command::CloseDocumentation);
         }
         let mut input = String::new();
@@ -719,7 +707,7 @@ impl App {
                 Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
-                Prompt::Details(_) if self.session.state().documentation().is_some() => {
+                Prompt::Details { .. } if self.session.state().documentation().is_some() => {
                     self.dispatch(Command::CloseDocumentation)
                 }
                 _ => {}
@@ -800,24 +788,13 @@ impl App {
                             .collect()
                     })
             }
-            Prompt::LanguageServer => self
-                .session
-                .language_server_rows()
-                .into_iter()
-                .chain(self.notice.iter().cloned().map(|text| (text, None)))
-                .flat_map(|(text, action)| match action {
-                    Some(id) => vec![Choice {
-                        label: text,
-                        detail: None,
-                        disabled: self.session.disabled(id),
-                        target: ChoiceTarget::Action(id),
-                    }],
-                    None => crate::render::wrap_text(&text, width)
-                        .into_iter()
-                        .map(|label| simple(label, ChoiceTarget::Information))
-                        .collect(),
-                })
-                .collect(),
+            Prompt::LanguageServer => self.session.language_server_rows().into_iter()
+                .filter_map(|(label, action)| action.map(|id| Choice {
+                    label,
+                    detail: None,
+                    disabled: self.session.disabled(id),
+                    target: ChoiceTarget::Action(id),
+                })).collect(),
             Prompt::Menu(group) => self
                 .session
                 .menu(group)
@@ -932,7 +909,7 @@ impl App {
                 Prompt::Mnemonic => "Bookmark key · press 0–9 or A–Z",
                 Prompt::Siblings { .. } => "Breadcrumb entries",
                 Prompt::Help => "Reader help",
-                Prompt::Details(_) => "Details · Ctrl+C copies · Esc closes",
+                Prompt::Details { title, .. } => title,
             }
             .to_owned()
         })
@@ -1017,7 +994,7 @@ impl App {
         if matches!(
             modal.kind,
             Prompt::Help
-                | Prompt::Details(_)
+                | Prompt::Details { .. }
                 | Prompt::Mnemonic
                 | Prompt::Context { .. }
                 | Prompt::Menu(_)
@@ -1069,7 +1046,7 @@ impl App {
             self.run(CommandId::CopyServerDetails);
             return;
         }
-        if let Prompt::Details(body) = &kind
+        if let Prompt::Details { body, .. } = &kind
             && control && !alt && matches!(key.code, KeyCode::Char('c' | 'C'))
         {
             self.copy = Some(body.clone());
@@ -1200,7 +1177,7 @@ impl App {
             | KeyCode::PageDown
             | KeyCode::Home
             | KeyCode::End => {
-                let count = if matches!(kind, Prompt::Help | Prompt::Details(_)) {
+                let count = if matches!(kind, Prompt::Help | Prompt::Details { .. }) {
                     self.layout.modal_content_rows
                 } else {
                     self.modal_len()
@@ -1214,7 +1191,7 @@ impl App {
                     height
                 };
                 let m = self.modal.as_mut().unwrap();
-                if matches!(kind, Prompt::Help | Prompt::Details(_)) {
+                if matches!(kind, Prompt::Help | Prompt::Details { .. }) {
                     m.top = stepped(m.top, count, key.code, page.max(1) as usize)
                         .min(count.saturating_sub(height as usize));
                 } else {
@@ -1349,7 +1326,7 @@ impl App {
                 self.close_modal();
                 self.focus = Focus::Results;
             }
-            Prompt::Help | Prompt::Details(_) => self.close_modal(),
+            Prompt::Help | Prompt::Details { .. } => self.close_modal(),
             Prompt::Mnemonic => {}
             _ => {
                 let Some(choice) = self.choices().get(at).cloned() else {
@@ -1581,7 +1558,7 @@ impl App {
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
             let mut available = vec![Focus::Text];
-            if self.tree_shown && self.session.state().project().is_some() {
+            if self.tree_shown && self.session.state().has_tree() {
                 available.push(Focus::Tree);
             }
             if self.session.state().results().is_some() {
@@ -1601,7 +1578,7 @@ impl App {
         }
         match self.focus {
             Focus::Tree => {
-                let len = self.session.state().project().map_or(0, |p| p.rows().len());
+                let len = self.session.state().tree_rows().count();
                 if matches!(
                     key.code,
                     KeyCode::Enter | KeyCode::Right | KeyCode::Left | KeyCode::Char(' ')
@@ -1721,20 +1698,13 @@ impl App {
         self.clamp();
     }
     fn tree_activate(&mut self, key: KeyCode) {
-        let Some((root, row)) = self
-            .session
-            .state()
-            .project()
-            .and_then(|p| Some((p.root().to_owned(), p.rows().get(self.tree_at)?.clone())))
-        else {
-            return;
-        };
+        let Some(row) = self.session.state().tree_rows().nth(self.tree_at).cloned() else { return };
         if let Some(open) = row.dir {
             if !(key == KeyCode::Left && !open || key == KeyCode::Right && open) {
                 self.dispatch(Command::ToggleDir(row.path.to_string()));
             }
         } else if key != KeyCode::Left {
-            self.dispatch(Command::Open(root.join(&*row.path)));
+            self.dispatch(Command::ActivateTree { path: row.path, retain: false });
             self.focus = Focus::Text;
         }
     }
@@ -1889,6 +1859,18 @@ impl App {
                 }
             }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(Modal { kind: Prompt::Details { body, .. }, .. }) = &self.modal
+            {
+                if self.layout.details_copy.contains(point) {
+                    self.copy = Some(body.clone());
+                    return;
+                }
+                if self.layout.details_close.contains(point) {
+                    self.close_modal();
+                    return;
+                }
+            }
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.layout.modal_rows.contains(point)
             {
                 let screen_row = y.saturating_sub(self.layout.modal_rows.y) as usize;
@@ -1943,6 +1925,10 @@ impl App {
                 .find(|(_, rect)| rect.contains(point))
                 .copied()
         {
+            if let Some(pane) = self.layout.panes.iter().find(|p| p.controls.iter().any(|(_, r)| r.contains(point))).map(|p| p.pane) {
+                self.focus = Focus::Text;
+                self.dispatch(Command::FocusPane(pane));
+            }
             self.run(id);
             return;
         }
@@ -1957,11 +1943,7 @@ impl App {
             let drag = matches!(event.kind, MouseEventKind::Drag(_));
             if !drag && self.layout.tree.contains(point) {
                 let row = self.tree_top + y.saturating_sub(self.layout.tree.y) as usize;
-                if self
-                    .session
-                    .state()
-                    .project()
-                    .is_some_and(|p| row < p.rows().len())
+                if row < self.session.state().tree_rows().count()
                 {
                     self.focus = Focus::Tree;
                     self.tree_at = row;
@@ -2183,7 +2165,7 @@ impl App {
         self.prompt(Prompt::Context { x, y, entries });
     }
     pub(crate) fn clamp(&mut self) {
-        let tree = self.session.state().project().map_or(0, |p| p.rows().len());
+        let tree = self.session.state().tree_rows().count();
         clamp_list(
             &mut self.tree_at,
             &mut self.tree_top,
@@ -2201,7 +2183,7 @@ impl App {
             self.focus = Focus::Text;
         }
         if self.focus == Focus::Tree
-            && (!self.tree_shown || self.session.state().project().is_none())
+            && (!self.tree_shown || !self.session.state().has_tree())
         {
             self.focus = Focus::Text;
         }
@@ -2212,7 +2194,7 @@ impl App {
                 .min(self.layout.modal_content_rows.saturating_sub(visible));
         }
         if let Some(modal) = &self.modal
-            && !matches!(modal.kind, Prompt::Help | Prompt::Details(_))
+            && !matches!(modal.kind, Prompt::Help | Prompt::Details { .. })
         {
             let len = self.modal_len();
             if let Some(modal) = &mut self.modal {

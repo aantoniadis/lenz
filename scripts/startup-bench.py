@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import platform
-from perf_support import process_stats, prepare_gui_launch, isolate_user_state
+from perf_support import process_stats, prepare_gui_launch, isolate_user_state, read_display_number
 
 
 def measure(binary, args, env, seconds, cwd=None):
@@ -122,13 +122,7 @@ def main():
                 os.close(write_fd)
                 write_fd = None
                 try:
-                    with selectors.DefaultSelector() as events:
-                        events.register(read_fd, selectors.EVENT_READ)
-                        if not events.select(10):
-                            raise RuntimeError("Xvfb did not start within 10 seconds")
-                    display = os.read(read_fd, 100).decode().strip()
-                    if not display.isdigit():
-                        raise RuntimeError("Xvfb failed to allocate a private display")
+                    display = read_display_number(read_fd)
                     env["DISPLAY"] = ":" + display
                     launches()
                 finally:

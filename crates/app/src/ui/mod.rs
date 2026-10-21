@@ -3094,10 +3094,8 @@ impl Viewer {
         if self.switcher.is_some() || self.goto.is_some() || self.help
             || self.search.as_ref().is_some_and(|s| s.editing)
             || self.repo.as_ref().map(|r| &r.picker).is_some_and(|p| p.filter_editing) { return; }
-        let (mut dx, mut rows) = match ev.delta {
-            ScrollDelta::Pixels(p) => (-f32::from(p.x), -f32::from(p.y) / line_h()),
-            ScrollDelta::Lines(l) => (-l.x * 3.0 * self.char_w, -l.y * 3.0),
-        };
+        let delta = lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w);
+        let rows = delta.y / line_h();
         if let Some(menu)=self.menu.as_mut(){let at=menu.hover.unwrap_or(0) as f32;menu.hover=Some((at+rows).clamp(0.0,menu.items.len().saturating_sub(1)as f32)as usize);cx.notify();return;}
         if self.message_wheel(f32::from(ev.position.x), f32::from(ev.position.y), rows, cx) { return; }
         if self.menu.is_none() && self.command_palette.is_none() && self.diff_options.is_none() && self.pr_dialog_wheel(ev,cx){return;}
@@ -3130,7 +3128,8 @@ impl Viewer {
         }
         if x < sw || y < self.top() { return; }
         // Horizontal wheel input belongs to the pointed text pane, including merges.
-        if ev.modifiers.shift && dx == 0.0 { (dx, rows) = (rows * line_h(), 0.0); }
+        let delta = lenz_gpui::scroll::shifted(delta, ev.modifiers.shift);
+        let (mut dx, rows) = (delta.x, delta.y / line_h());
         if let Some(s) = self.merge.as_mut() {
             let pane=s.pane_at(x-sw);
             if dx!=0.0{s.scroll_horizontal(pane,dx,self.char_w);}
@@ -3145,7 +3144,6 @@ impl Viewer {
             self.text_w=widths.map(|w|(w-num_w()-16.0).max(0.0));
             self.scroll_horizontal(side,dx);
             cx.notify();
-            if rows.abs() < 0.5 { return; }
         }
         if self.image_doc().is_some() {
             self.zoom_image_at(1.15f32.powf(-rows / 3.0), x, f32::from(ev.position.y), window);
@@ -3154,8 +3152,10 @@ impl Viewer {
         }
         // the Side under the pointer leads (matters in Independent mode)
         let lead = self.pane_at(window,x).map_or(self.diff_focus,|p|p.0);
-        self.comparison.view.scroll_by(rows, lead);
-        cx.notify();
+        if rows != 0.0 {
+            self.comparison.view.scroll_by(rows, lead);
+            cx.notify();
+        }
     }
 }
 

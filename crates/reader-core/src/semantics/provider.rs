@@ -280,7 +280,7 @@ Provider {
     // project's own `gems/` folder; most specific first (RBS ships as a gem).
     origins: &[("/gems/rbs-", "RBS core signatures"), ("/gem/ruby/", "an installed gem"), ("/ruby/gems/", "an installed gem"), ("/bundle/ruby/", "an installed gem"), ("/lib/ruby/3.", "the Ruby standard library")],
     // No formatter or linters: the reader never formats, and RuboCop would load the project's configuration.
-    initialization: || json!({ "formatter": "none", "linters": [] }),
+    initialization: || json!({ "formatter": "none", "linters": [], "indexing": { "excludedGems": RUBY_TOOLING_GEMS } }),
     config_section: "rubyLsp",
     root_env: ruby_env,
     // It updates its index of closed files only from the client's reports.
@@ -467,7 +467,7 @@ fn typescript_go_serves(tls: &Provider, root: &Path, settings: &Settings) -> boo
         return false;
     }
     // A named tsserver it ignores when the file is not there, as it does.
-    let named = settings.initialization(tls).get("tsserver").is_some_and(|t| ["path", "fallbackPath"].iter().any(|k| t.get(k).and_then(Value::as_str).is_some_and(|p| Path::new(p).is_file())));
+    let named = settings.initialization(tls, Some(root)).get("tsserver").is_some_and(|t| ["path", "fallbackPath"].iter().any(|k| t.get(k).and_then(Value::as_str).is_some_and(|p| Path::new(p).is_file())));
     if named {
         return false;
     }
@@ -689,6 +689,9 @@ pub struct ProviderSettings {
     /// `workspace/configuration` for its section.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub settings: Option<serde_json::Value>,
+    /// Resolved language-server workspace root → initialization settings merged over the global settings.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub projects: std::collections::BTreeMap<PathBuf, serde_json::Value>,
     /// Browsing roots for which it is not used.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub disabled: std::collections::BTreeSet<PathBuf>,
@@ -698,6 +701,20 @@ pub struct ProviderSettings {
 }
 
 impl Settings {
+    pub fn has_project(&self, provider: &str, root: &Path) -> bool {
+        self.providers.get(provider).is_some_and(|s| s.projects.contains_key(root))
+    }
+
+    pub fn ruby_tooling_excluded(&self, root: &Path) -> bool {
+        let Some((_, ruby)) = for_language(Language::Ruby) else { return false };
+        let options = self.initialization(ruby, Some(root));
+        let excluded = options["indexing"]["excludedGems"].as_array();
+        let included = options["indexing"]["includedGems"].as_array();
+        RUBY_TOOLING_GEMS.iter().all(|gem|
+            excluded.is_some_and(|list| list.iter().any(|v| v.as_str() == Some(gem)))
+            && !included.is_some_and(|list| list.iter().any(|v| v.as_str() == Some(gem))))
+    }
+
     /// Settings from `file` (JSON, at most 64 KiB); a missing or malformed file is no settings.
     pub fn read(file: &Path) -> Self {
         lenz_content::theme::read_bounded(file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
@@ -742,7 +759,7 @@ impl Settings {
 
     /// `provider`'s `initializationOptions`: its defaults with the user's settings merged over them, object by
     /// object (a user's `settings.java.format` keeps the default `settings.java.autobuild`).
-    pub fn initialization(&self, provider: &Provider) -> serde_json::Value {
+    pub fn initialization(&self, provider: &Provider, root: Option<&Path>) -> serde_json::Value {
         fn merge(into: &mut serde_json::Value, from: serde_json::Value) {
             match (into, from) {
                 (serde_json::Value::Object(o), serde_json::Value::Object(f)) => {
@@ -757,13 +774,16 @@ impl Settings {
         if let Some(user) = self.providers.get(provider.id).and_then(|s| s.settings.clone()) {
             merge(&mut options, user);
         }
+        if let Some(project) = root.and_then(|root| self.providers.get(provider.id)?.projects.get(root)) {
+            merge(&mut options, project.clone());
+        }
         options
     }
 
     /// The answer to `workspace/configuration` for `section` (dotted): the provider's settings as initialized
     /// (its defaults with the user's merged over them) under it; nothing for other sections.
-    pub fn configuration(&self, provider: &Provider, section: Option<&str>) -> serde_json::Value {
-        let settings = self.initialization(provider);
+    pub fn configuration(&self, provider: &Provider, root: Option<&Path>, section: Option<&str>) -> serde_json::Value {
+        let settings = self.initialization(provider, root);
         let rest = match section {
             None => return settings,
             Some(s) if s == provider.config_section => return settings,
@@ -784,9 +804,217 @@ impl Settings {
     }
 }
 
+/// Default tooling exclusions; explicit global/project arrays override these. Project files stay indexed.
+pub const RUBY_TOOLING_GEMS: &[&str] = &[
+    "parser", "ast", "rubocop", "rubocop-ast", "rubocop-capybara", "rubocop-discourse",
+    "rubocop-factory_bot", "rubocop-rails", "rubocop-rspec", "rubocop-rspec_rails", "syntax_tree",
+];
+
+pub fn exclude_ruby_tooling(file: &Path, root: &Path) -> Result<(), String> {
+    set_ruby_tooling_excluded(file, root, true)
+}
+
+pub fn set_ruby_tooling_excluded(file: &Path, root: &Path, enabled: bool) -> Result<(), String> {
+    if root.join(".index.yml").exists() {
+        return Err("Ruby LSP reads this project's .index.yml instead of editor indexing settings. Migrate that file before applying project exclusions.".into());
+    }
+    let key = root.to_str().ok_or("Project path must be valid UTF-8")?;
+    update_settings(file, "ruby-lsp", "Ruby project", |provider| {
+        let typed = serde_json::from_value::<ProviderSettings>(Value::Object(provider.clone()))
+            .map_err(|e| format!("Invalid Ruby provider settings: {e}"))?;
+        let settings = Settings { providers: [("ruby-lsp".into(), typed)].into_iter().collect() };
+        let (_, ruby) = for_language(Language::Ruby).ok_or("Ruby provider is unavailable")?;
+        let options = settings.initialization(ruby, Some(root));
+        let indexing = options.get("indexing");
+        if indexing.is_some_and(|v| !v.is_object()) {
+            return Err("Ruby indexing settings must be an object".into());
+        }
+        let strings = |name: &str| -> Result<Vec<String>, String> {
+            match indexing.and_then(|i| i.get(name)) {
+                None => Ok(Vec::new()),
+                Some(Value::Array(values)) => values.iter().map(|v| v.as_str().map(str::to_owned).ok_or_else(|| format!("{name} must contain only gem names"))).collect(),
+                _ => Err(format!("{name} must be an array of gem names")),
+            }
+        };
+        let mut excluded = strings("excludedGems")?;
+        let mut included = strings("includedGems")?;
+        let restore = included.iter().any(|g| RUBY_TOOLING_GEMS.contains(&g.as_str()));
+        if enabled {
+            included.retain(|g| !RUBY_TOOLING_GEMS.contains(&g.as_str()));
+            for &gem in RUBY_TOOLING_GEMS {
+                if !excluded.iter().any(|g| g == gem) { excluded.push(gem.into()); }
+            }
+        } else {
+            excluded.retain(|g| !RUBY_TOOLING_GEMS.contains(&g.as_str()));
+        }
+        let projects = provider.entry("projects").or_insert_with(|| json!({})).as_object_mut().ok_or("projects must be an object")?;
+        let project = projects.entry(key).or_insert_with(|| json!({})).as_object_mut().ok_or("Project settings must be an object")?;
+        let indexing = project.entry("indexing").or_insert_with(|| json!({})).as_object_mut().ok_or("Project indexing settings must be an object")?;
+        indexing.insert("excludedGems".into(), json!(excluded));
+        if enabled && restore { indexing.insert("includedGems".into(), json!(included)); }
+        Ok(())
+    })
+}
+
+/// Remove only this provider/workspace override; global and other projects' settings remain intact.
+pub fn reset_project(file: &Path, provider: &str, root: &Path) -> Result<(), String> {
+    let key = root.to_str().ok_or("Project path must be valid UTF-8")?;
+    update_settings(file, provider, "project language server", |provider| {
+        serde_json::from_value::<ProviderSettings>(Value::Object(provider.clone()))
+            .map_err(|e| format!("Invalid provider settings: {e}"))?;
+        if let Some(projects) = provider.get_mut("projects") {
+            let projects = projects.as_object_mut().ok_or("projects must be an object")?;
+            projects.remove(key);
+            if projects.is_empty() { provider.remove("projects"); }
+        }
+        Ok(())
+    })
+}
+
+/// Atomically change one provider while preserving unrelated and unknown settings.
+pub(super) fn update_settings(
+    file: &Path,
+    provider_id: &str,
+    label: &str,
+    update: impl FnOnce(&mut serde_json::Map<String, Value>) -> Result<(), String>,
+) -> Result<(), String> {
+    let original = match std::fs::symlink_metadata(file) {
+        Ok(_) => Some(
+            lenz_content::theme::read_bounded(file)
+                .map_err(|e| format!("Cannot read provider settings: {e}"))?,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Cannot read provider settings: {e}")),
+    };
+    let mut value: Value = original
+        .as_deref()
+        .map(serde_json::from_slice)
+        .transpose()
+        .map_err(|e| format!("Provider settings contain invalid JSON: {e}"))?
+        .unwrap_or_else(|| json!({}));
+    let object = value
+        .as_object_mut()
+        .ok_or("Provider settings must be a JSON object")?;
+    let providers = object
+        .entry("providers")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or("providers must be a JSON object")?;
+    let provider = providers
+        .entry(provider_id)
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .ok_or_else(|| format!("{provider_id} settings must be a JSON object"))?;
+    update(provider)?;
+    let bytes = serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?;
+    if bytes.len() > 65536 {
+        return Err("Provider settings exceed 64 KiB".into());
+    }
+    let parent = file
+        .parent()
+        .ok_or("Provider settings have no parent folder")?;
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("Cannot create provider settings folder: {e}"))?;
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let temp = file.with_extension(format!(
+        "runtime-{}-{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    let result = (|| {
+        use std::io::Write;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let mut output = options.open(&temp)?;
+        if let Ok(metadata) = std::fs::metadata(file) {
+            output.set_permissions(metadata.permissions())?;
+        }
+        output.write_all(&bytes)?;
+        if lenz_content::theme::read_bounded(file).ok() != original {
+            return Err(std::io::Error::other(
+                "Provider settings changed; try again",
+            ));
+        }
+        std::fs::rename(&temp, file)
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(temp);
+        return Err(format!("Could not save {label} settings: {e}"));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tooling_defaults_can_be_disabled_without_resetting_project_settings() {
+        let d = tempfile::tempdir().unwrap(); let root = d.path(); let file = root.join("providers.json");
+        assert!(Settings::default().ruby_tooling_excluded(root));
+        std::fs::write(&file, json!({"providers":{"ruby-lsp":{"projects":{root.to_str().unwrap():{"keep":true,"indexing":{"excludedPatterns":["generated/**/*.rb"]}}}}}}).to_string()).unwrap();
+        set_ruby_tooling_excluded(&file, root, false).unwrap();
+        let settings = Settings::read(&file);
+        assert!(!settings.ruby_tooling_excluded(root));
+        let (_, ruby) = for_language(Language::Ruby).unwrap();
+        let opts = settings.initialization(ruby, Some(root));
+        assert_eq!(opts["keep"], true);
+        assert_eq!(opts["indexing"]["excludedGems"], json!([]));
+        assert_eq!(opts["indexing"]["excludedPatterns"], json!(["generated/**/*.rb"]));
+        set_ruby_tooling_excluded(&file, root, true).unwrap();
+        assert!(Settings::read(&file).ruby_tooling_excluded(root));
+    }
+
+    #[test]
+    fn ruby_project_exclusions_preserve_user_settings_and_reset_only_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("rails");
+        std::fs::create_dir(&root).unwrap();
+        let file = dir.path().join("providers.json");
+        let original = json!({"future":true,"providers":{"ruby-lsp":{
+            "env":{"KEEP":"yes"},"future":42,
+            "settings":{"indexing":{"excludedGems":["global-tool"],"includedGems":["parser","keep-me"]}},
+            "projects":{root.to_str().unwrap():{"keep":true,"indexing":{"excludedGems":["local-tool"],"excludedPatterns":["generated/**/*.rb"]}},"/other":{"keep":"other"}}
+        },"pyright":{"settings":{"keep":true}}}});
+        std::fs::write(&file, original.to_string()).unwrap();
+        exclude_ruby_tooling(&file, &root).unwrap();
+        let value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(value["future"], true);
+        assert_eq!(value["providers"]["ruby-lsp"]["future"], 42);
+        assert_eq!(value["providers"]["ruby-lsp"]["settings"], original["providers"]["ruby-lsp"]["settings"]);
+        let project = &value["providers"]["ruby-lsp"]["projects"][root.to_str().unwrap()];
+        assert_eq!(project["keep"], true);
+        assert_eq!(project["indexing"]["excludedPatterns"], json!(["generated/**/*.rb"]));
+        assert!(project["indexing"]["excludedGems"].as_array().unwrap().contains(&json!("local-tool")));
+        assert_eq!(project["indexing"]["includedGems"], json!(["keep-me"]));
+        let s = Settings::read(&file);
+        assert!(s.ruby_tooling_excluded(&root));
+        assert!(!s.ruby_tooling_excluded(Path::new("/other")));
+        assert_eq!(s.initialization(for_language(Language::Ruby).unwrap().1, Some(Path::new("/other")))["indexing"]["excludedGems"], json!(["global-tool"]));
+        reset_project(&file, "ruby-lsp", &root).unwrap();
+        let mut expected = original;
+        expected["providers"]["ruby-lsp"]["projects"].as_object_mut().unwrap().remove(root.to_str().unwrap());
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(&file).unwrap()).unwrap(), expected);
+    }
+
+    #[test]
+    fn ruby_project_exclusions_refuse_malformed_or_legacy_configuration_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("providers.json");
+        for bytes in ["{bad", r#"{"providers":{"ruby-lsp":{"projects":[]}}}"#,
+            r#"{"providers":{"ruby-lsp":{"settings":{"indexing":{"excludedGems":"bad"}}}}}"#,
+            r#"{"providers":{"ruby-lsp":{"settings":{"indexing":{"includedGems":[1]}}}}}"#] {
+            std::fs::write(&file, bytes).unwrap();
+            assert!(exclude_ruby_tooling(&file, dir.path()).is_err(), "{bytes}");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), bytes);
+        }
+        std::fs::write(&file, "{}").unwrap();
+        std::fs::write(dir.path().join(".index.yml"), "excluded_gems: []\n").unwrap();
+        assert!(exclude_ruby_tooling(&file, dir.path()).unwrap_err().contains(".index.yml"));
+        assert_eq!(std::fs::read_to_string(file).unwrap(), "{}");
+    }
 
     #[test]
     fn pyright_node_override_selects_matching_server_and_preserves_custom_launch() {
@@ -1074,7 +1302,7 @@ mod tests {
         assert_eq!(s.launch(jdt).args, ["--jvm-arg=-Xmx2G"]);
         assert_eq!(jdt.fixed_args, [JDT_NO_PROJECT_METADATA]);
         // Settings merge object by object: the user's `settings.java.format` keeps `settings.java.autobuild`.
-        let init = s.initialization(jdt);
+        let init = s.initialization(jdt, None);
         assert_eq!((&init["settings"]["java"]["autobuild"]["enabled"], &init["settings"]["java"]["format"]["enabled"]), (&json!(false), &json!(false)));
         assert_eq!(init["extendedClientCapabilities"]["classFileContentsSupport"], json!(true));
     }
@@ -1107,15 +1335,15 @@ mod tests {
         let l = s.launch(ra);
         assert_eq!((l.executable, l.args), (PathBuf::from("/opt/ra"), vec!["--log".to_string()]));
         assert_eq!(s.launch(ra).path(), Some(std::ffi::OsStr::new("/opt/bin")));
-        assert_eq!(s.initialization(ra), serde_json::json!({ "checkOnSave": true, "cargo": { "features": "all" } }), "the user's settings win");
-        assert_eq!(s.configuration(ra, Some("rust-analyzer")), serde_json::json!({ "checkOnSave": true, "cargo": { "features": "all" } }));
-        assert_eq!(s.configuration(ra, Some("rust-analyzer.cargo")), serde_json::json!({ "features": "all" }));
-        assert_eq!(s.configuration(ra, Some("rust-analyzer.missing")), serde_json::Value::Null);
-        assert_eq!(s.configuration(ra, Some("editor")), serde_json::Value::Null);
-        assert_eq!(s.configuration(ra, Some("rust-analyzercargo")), serde_json::Value::Null, "a section boundary, not a prefix");
+        assert_eq!(s.initialization(ra, None), serde_json::json!({ "checkOnSave": true, "cargo": { "features": "all" } }), "the user's settings win");
+        assert_eq!(s.configuration(ra, None, Some("rust-analyzer")), serde_json::json!({ "checkOnSave": true, "cargo": { "features": "all" } }));
+        assert_eq!(s.configuration(ra, None, Some("rust-analyzer.cargo")), serde_json::json!({ "features": "all" }));
+        assert_eq!(s.configuration(ra, None, Some("rust-analyzer.missing")), serde_json::Value::Null);
+        assert_eq!(s.configuration(ra, None, Some("editor")), serde_json::Value::Null);
+        assert_eq!(s.configuration(ra, None, Some("rust-analyzercargo")), serde_json::Value::Null, "a section boundary, not a prefix");
         // Defaults are answered too once the user sets something else.
         let only: Settings = serde_json::from_value(serde_json::json!({ "providers": { "rust-analyzer": { "settings": { "cargo": {} } } } })).unwrap();
-        assert_eq!(only.configuration(ra, Some("rust-analyzer"))["checkOnSave"], false);
+        assert_eq!(only.configuration(ra, None, Some("rust-analyzer"))["checkOnSave"], false);
         assert_eq!(find_executable(Path::new("tool"), Some(std::ffi::OsStr::new(""))), None, "an empty PATH entry is not the current directory");
         assert!(s.disabled(ra, Some(Path::new("/b"))) && !s.disabled(ra, Some(Path::new("/c"))));
         // A PATH of the launch's own, without reading shell startup files.

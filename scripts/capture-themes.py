@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Capture GUI palettes on an owned private display (Pillow and python-xlib)."""
-import argparse, json, os, selectors, shutil, subprocess, tempfile, time, hashlib
+import argparse, json, os, shutil, subprocess, tempfile, time, hashlib
 from pathlib import Path
-from perf_support import process_stats
+from perf_support import process_stats, read_display_number
 from PIL import Image
 from Xlib import display, X, XK
 from Xlib.ext import xtest
@@ -19,8 +19,9 @@ records=[]
 with tempfile.TemporaryDirectory(prefix='lenz-theme-gui-') as scratch:
     root=Path(scratch); env=dict(os.environ,XDG_RUNTIME_DIR=scratch,XDG_CACHE_HOME=str(root/'cache'),XDG_CONFIG_HOME=str(root/'config'),XDG_STATE_HOME=str(root/'state'),LENZ_TIMINGS='1',LENZ_APPEARANCE='');env.pop('WAYLAND_DISPLAY',None)
     r,w=os.pipe(); server=subprocess.Popen([opt.xvfb,'-displayfd',str(w),'-screen','0','1600x1000x24','-nolisten','tcp','-noreset'],pass_fds=(w,),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL);os.close(w)
-    with selectors.DefaultSelector()as sel:sel.register(r,selectors.EVENT_READ);assert sel.select(10)
-    env['DISPLAY']=':'+os.read(r,100).decode().strip();os.close(r); d=display.Display(env['DISPLAY'])
+    try:env['DISPLAY']=':'+read_display_number(r)
+    finally:os.close(r)
+    d=display.Display(env['DISPLAY'])
     for n,text in [('left.rs','fn value() {\n    let old = "old";\n}\n'),('right.rs','fn value() {\n    let new = "new";\n}\n'),('base','base\n'),('ours','ours\n'),('theirs','theirs\n'),('result','ours\n')]: (root/n).write_text(text)
     def start(theme,args):
         log=(root/'app.log').open('w');proc=subprocess.Popen([str(binary),*args],cwd=root,env=dict(env,LENZ_THEME=theme),stdout=log,stderr=log)

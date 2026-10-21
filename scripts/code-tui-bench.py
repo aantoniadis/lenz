@@ -297,9 +297,9 @@ def identity(binary):
 def exercise(probe, fixture, original, args):
     metrics = {}
     checks = []
-    metrics['first_paint_ms'] = probe.expect('Lenz Reader')
+    metrics['first_feedback_ms'] = probe.expect(fixture.name)
     metrics['first_content_ms'] = probe.expect('READER_LINE_000000')
-    checks.append('first paint and generated content')
+    checks.append('first filename feedback and generated content')
     probe.quiet(.1)
     # Opening is a reading viewport with no caret until the user chooses a source location.
     probe.send(b'\x071\r')
@@ -416,7 +416,7 @@ def main():
         parser.error('lines must be >= 2; rounds and stress-seconds must be positive')
     binary = args.binary.resolve(strict=True)
     args.out.mkdir(parents=True, exist_ok=False)
-    result = dict(schema=1, identity=identity(binary), configuration=dict(lines=args.lines, rounds=args.rounds, requested_stress_seconds=args.stress_seconds),
+    result = dict(schema=2, identity=identity(binary), configuration=dict(lines=args.lines, rounds=args.rounds, requested_stress_seconds=args.stress_seconds),
                   latency_semantics='first PTY bytes observed after input/resize; not physical display latency', status='failed')
     probe = None
     try:

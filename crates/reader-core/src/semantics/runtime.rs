@@ -78,7 +78,7 @@ pub fn save(kind: Kind, file: &Path, path: Option<PathBuf>) -> Result<Option<Pat
                     return Err(format!("{} did not report a Node.js version (expected vMAJOR.MINOR.PATCH): {version}", path.display()));
                 }
             }
-            java::update_settings(file, "pyright", "Node.js", |provider| {
+            provider::update_settings(file, "pyright", "Node.js", |provider| {
                 if let Some(path) = &path {
                     let custom = provider.get("executable").and_then(serde_json::Value::as_str)
                         .is_some_and(|name| name != "pyright-langserver");
