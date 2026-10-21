@@ -17,6 +17,52 @@ class PerformanceTools(unittest.TestCase):
         spec.loader.exec_module(module)
         return module
 
+    def test_private_display_number_waits_for_fragmented_line(self):
+        import threading
+        import time
+        support = self.support()
+        read_fd, write_fd = os.pipe()
+        errors = []
+        def publish():
+            try:
+                for chunk in [b'12', b'3', b'\n']:
+                    os.write(write_fd, chunk)
+                    time.sleep(.01)
+            except OSError as error:
+                errors.append(error)
+            finally:
+                os.close(write_fd)
+        writer = threading.Thread(target=publish)
+        writer.start()
+        try:
+            self.assertEqual(support.read_display_number(read_fd), '123')
+        finally:
+            os.close(read_fd)
+            writer.join(timeout=1)
+        self.assertFalse(writer.is_alive())
+        self.assertEqual(errors, [], 'closing before the newline kills Xvfb with a broken pipe')
+
+    def test_private_display_number_rejects_incomplete_invalid_and_stalled_writes(self):
+        support = self.support()
+        for data in [b'', b'12', b'wrong\n', b'1' * 40]:
+            with self.subTest(data=data):
+                read_fd, write_fd = os.pipe()
+                os.write(write_fd, data)
+                os.close(write_fd)
+                try:
+                    with self.assertRaises(RuntimeError):
+                        support.read_display_number(read_fd)
+                finally:
+                    os.close(read_fd)
+        read_fd, write_fd = os.pipe()
+        try:
+            os.write(write_fd, b'12')
+            with self.assertRaises(TimeoutError):
+                support.read_display_number(read_fd, timeout=.02)
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+
     def test_benchmarks_never_read_the_users_settings_or_places(self):
         support = self.support()
         saved = {k: os.environ.get(k) for k in ('XDG_CONFIG_HOME', 'XDG_STATE_HOME')}

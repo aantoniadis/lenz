@@ -99,6 +99,91 @@ fn open(app: &mut App, dir: &std::path::Path, name: &str, bytes: &[u8]) {
 }
 
 #[test]
+fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
+    let profile = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned();
+    let mut build =
+        std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]);
+    if profile.ends_with("release") {
+        build.arg("--release");
+    }
+    assert!(build.status().unwrap().success());
+    let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
+    for dark in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        std::fs::write(
+            base.join("providers.json"),
+            serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}}}).to_string(),
+        )
+        .unwrap();
+        let mut app = App::new(
+            reader_core::session::Config {
+                themes: lenz_content::theme::ThemePaths::under(
+                    &base.join("config"),
+                    &base.join("state"),
+                    "lenz-reader",
+                ),
+                recent: base.join("recent.json"),
+                settings: base.join("settings.json"),
+                providers: base.join("providers.json"),
+                cache: base.join("cache"),
+                idle: reader_core::semantics::IDLE,
+                clock: std::sync::Arc::new(std::time::Instant::now),
+                overrides: Default::default(),
+                dark,
+            },
+            None,
+        );
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname='progress'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+        open(&mut app, dir.path(), "main.rs", b"fn main() {}\n");
+        settle(&mut app, |a| {
+            a.session
+                .state()
+                .provider()
+                .is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+        });
+        app.apply(reader_core::session::Completion::Semantic(reader_core::semantics::Event::Message {
+                session: 1,
+                message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
+            }));
+        for (width, height) in [(100, 30), (60, 15)] {
+            assert!(text(&draw(&mut app, width, height)).contains("42%"));
+            app.handle(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::F(2),
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+            app.handle(crossterm::event::Event::Key(crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter, crossterm::event::KeyModifiers::NONE,
+            )));
+            assert!(text(&draw(&mut app, width, height)).contains("42%"));
+            app.handle(crossterm::event::Event::Key(
+                crossterm::event::KeyEvent::new(
+                    crossterm::event::KeyCode::Esc,
+                    crossterm::event::KeyModifiers::NONE,
+                ),
+            ));
+        }
+        assert_eq!(
+            std::fs::read(dir.path().join("main.rs")).unwrap(),
+            b"fn main() {}\n"
+        );
+    }
+}
+
+#[test]
 fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     for dark in [true, false] {

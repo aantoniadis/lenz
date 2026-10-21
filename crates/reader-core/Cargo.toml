@@ -25,6 +25,11 @@ grep-regex = "0.1"
 grep-matcher = "0.1"
 # File patterns for project search (ripgrep's, already in the tree through `ignore`).
 globset = "0.4"
+# Content validation; already in the workspace dependency graph.
+sha2 = "0.10.9"
+
+[build-dependencies]
+sha2 = "0.10.9"
 
 [dev-dependencies]
 tempfile = "3"

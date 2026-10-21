@@ -54,6 +54,9 @@ native macOS validation is pending. The Reader is read-only, with desktop and te
 - **Navigate** with bookmarks, recent files and locations, and back/forward history.
   Installed language servers add definitions, usages, documentation, call/type
   hierarchies, semantic colours and inlay hints; availability depends on the provider.
+  Dependency definitions reveal a lazy **Libraries** section for browsing their source files.
+  F2 offers [project-scoped LSP settings](docs/code/providers.md#project-language-server-settings),
+  including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
 - **Find** within a file or across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
 - **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
@@ -278,6 +281,13 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+The [final Linux validation on 2026-10-21](docs/release-validation.md) passed the
+full suite: **133 cases, 394 metrics**, plus ten live language-server lifecycle
+checks. Fresh paired runs measured Reader wheel feedback at **26.00→26.01 ms**
+and Rails recovery after lost watcher events at **6.79→0.95 seconds**. The report
+records startup, memory, stress, collector corrections and remaining native macOS
+checks. The measurements below retain their original fixtures and endpoints.
+
 ### Code Reader
 
 Linux release build on a private Xvfb display with Mesa software rendering;
@@ -300,6 +310,11 @@ The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
 60-second navigation run. Timings end at PTY bytes, and RSS excludes GPU and
 language-server memory. See [Reader TUI verification](docs/code/tui-performance.md)
 for the standalone comparison, raw evidence and unverified workloads.
+
+Lazy library browsing revealed a 1,000-file library in 0.811 ms in the shared core, leaving an unopened
+10,000-file subtree unread. Paired GUI RSS was 168.78→168.88 MiB; this is a Linux software-rendered sample,
+not a native macOS guarantee. See [library browsing validation](docs/code/performance.md#dependency-libraries-in-the-explorer--2026-10-21)
+for startup, interaction, cancellation, memory and test limits.
 
 ### Diff and merge
 
@@ -343,6 +358,67 @@ first client image and 24.13→24.40 ms menu feedback; TUI source receipt was
 rose slightly while sustained RSS settled below baseline in both rounds; see the
 [chrome measurements](docs/code/performance.md#reader-chrome-parity-2026-10-18)
 for the complete results and 60-second status/copy/resize checks.
+
+Reader trackpad/progress checks measured first content at 126.78→126.65 ms in
+four alternating release pairs, with comparable scrolling and memory during a
+2,001-file Ruby project load. See the [scrolling checks](docs/code/performance.md#trackpad-scrolling-and-indexing-progress-2026-10-21)
+for server setup, repeated measurements and unverified native macOS behavior.
+
+Diff and Reader now share GUI wheel conversion and fractional-step handling. Final
+release pairs measured wheel feedback at 27.04→27.23 ms for Diff and 25.53→26.11 ms
+for Reader; see the [shared scrolling checks](docs/code/performance.md#shared-gui-wheel-input-2026-10-21)
+for startup, repeated timing variation, memory, short stress and native-platform limits.
+
+On a pinned large Discourse Rails checkout, optional project/tooling-gem exclusions reduced Ruby LSP 0.26.11
+readiness from 13.20 to 10.67 seconds (19.2%) and peak combined core/server RSS from 748 to 648 MiB.
+Project-file exclusions remain opt-in; tooling-gem exclusions now default on and can be disabled. See the [Rails indexing experiment](docs/code/performance.md#large-rails-indexing-experiment-2026-10-21)
+for configuration, rejected approaches and the Linux-only measurement limits.
+An [editor-practices follow-up](docs/code/performance.md#editor-lsp-practices-trial-2026-10-21) kept default
+project-file coverage and excluded tooling gems only: readiness measured 13.33→11.94 seconds (10.4%), with one server
+reused across 1,062 file switches in a 30-second shared-core check.
+The implemented [project settings check](docs/code/performance.md#project-scoped-lsp-settings-2026-10-21)
+measured default readiness at 13.86→13.78 seconds and the new binary's scoped tooling profile at 12.92 seconds
+(6.2% below its defaults). The full local gate passed; native macOS remains unverified.
+
+An isolated [persistent-index experiment](docs/code/performance.md#persistent-index-prototypes-2026-10-21)
+made the complete local declaration index available in 7.89→0.49 seconds on reopening Discourse,
+with Ruby LSP readiness at 14.45→13.55 seconds and sampled CPU time at 22.67→13.95 CPU-seconds.
+Those were prototype measurements: combined startup peak RSS was 26.7 MiB higher;
+metadata-only validation and simple Ruby gem-record replay failed correctness checks.
+
+The shared [checkout recovery fix](docs/code/performance.md#checkout-and-watcher-recovery-2026-10-21)
+now refreshes local declarations and Ruby LSP after directory changes or lost watcher events.
+In a live Discourse A → B → A test, affected-directory declarations recovered in about 0.11 seconds;
+simulated event loss required a full background rebuild of about 7.6 seconds. Default Ruby LSP startup
+measured 12.83→12.61 seconds; this fixes stale results without introducing the experimental cache.
+
+Saved declaration reuse and Ruby tooling-gem exclusions now have **On/Off** controls in F2 and the shared
+command menu, alongside **Rebuild Project Index**. Both optimizations default on; explicit Ruby settings
+take precedence. In the [implemented settings comparison](docs/code/performance.md#configurable-index-reuse-and-rebuild-2026-10-21),
+reopening Discourse completed local declarations in **8.12→0.52 seconds**, Ruby LSP reached Ready in
+**14.05→11.61 seconds**, and peak combined RSS measured **727→682 MiB**. First-time Ruby startup measured
+**12.07 seconds**. Cache-only mode retained higher combined RSS; see the report for that tradeoff, frontend
+repeats and unverified native macOS behavior. [Controls and settings](docs/code/providers.md#saved-declarations-and-rebuilding).
+
+The [cross-language check](docs/code/performance.md#cross-language-index-validation-2026-10-21) covers all nine
+other declaration grammars. On generated 1,200-file corpora, saved declarations complete in **21–23 ms**,
+versus **164–347 ms** with reuse disabled (three samples per case). First-time cache creation adds **5–16 ms**.
+Ten real-server scenarios pass definition, changed-content, rebuild and opt-out checks. These are local-index
+timings and focused semantic checks; full language-server indexing and native macOS performance remain separate.
+
+Further [isolated experiments](docs/code/performance.md#further-indexing-experiments-2026-10-21) reduce
+content-validated overflow recovery **5.50→0.81 seconds**, but extra directory scanning regresses routine
+updates. A lighter saved-index path improves isolated local indexing **250→237 ms**. A retained Ruby-server
+helper reduces checked reconnect **12.33→0.96 seconds**, at about **699 MiB** idle residency. These prototypes
+are recorded separately from the implementation below; the lighter cache path and retained-server helper
+remain deferred.
+
+The implemented [overflow recovery](docs/code/performance.md#content-aware-overflow-recovery-2026-10-21)
+reuses existing background index reads to skip Ruby LSP notifications for unchanged contents. On Discourse,
+three paired runs improve recovery through exact semantic checks **5.56→1.14 seconds** (about **4.9×**),
+with ordinary directory updates **0.58→0.50 seconds**. The existing saved-index toggle disables this filtering,
+and explicit rebuild remains available in both frontends. Cold server indexing remains around **11–12 seconds**;
+the report includes repeat measurements, the small retained-digest memory cost and unverified native macOS behavior.
 
 See the [performance overview](docs/performance.md) for method and accepted costs, and the [benchmark guide](docs/benchmarking.md) to run the suite yourself.
 

@@ -38,6 +38,35 @@ fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
         }
     }
 }
+
+#[test]
+fn declaration_search_follows_a_coarse_checkout_through_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    let path = root.join("app/a.rb");
+    std::fs::write(&path, "class WatchAlpha; end\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut a, |a| a.session.state().index_coverage().indexed == 1 && a.session.state().index_coverage().complete());
+    draw(&mut a, 100, 26);
+    key(&mut a, KeyCode::Char('t'), KeyModifiers::CONTROL);
+    for c in "watch".chars() { key(&mut a, KeyCode::Char(c), KeyModifiers::NONE); }
+    settle(&mut a, |a| a.session.state().results().is_some_and(|r| r.done() && r.hits().len() == 1));
+    std::fs::write(&path, "class WatchOmega; end\n").unwrap();
+    a.apply(Completion::Changed(reader_core::watch::Change { overflow: true, ..Default::default() }));
+    settle(&mut a, |a| a.session.state().results().is_some_and(|r| r.done() && r.hits().first().is_some_and(|h| &*h.text == "WatchOmega")));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    for (w, h) in [(26, 8), (100, 26)] { draw(&mut a, w, h); }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 26)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let text: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+    assert!(text.contains("WatchOmega"), "{text}");
+    assert!(!text.contains("WatchAlpha"));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.state().selected_text() == Some("WatchOmega"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
+}
 #[test]
 fn right_click_uses_the_shared_context_actions_and_left_click_selects_text() {
     let dir = tempfile::tempdir().unwrap();
@@ -456,18 +485,15 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     click(&mut a, control.x, control.y);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::LanguageServer);
     draw(&mut a, 100, 26);
-    let details = a
-        .choices()
-        .iter()
-        .map(|c| c.label.as_str())
-        .collect::<Vec<_>>()
-        .join("");
-    assert!(
-        details.contains("was not found")
-            && details.contains("rustup component add rust-analyzer")
-            && details.contains("providers.json"),
-        "{details}"
-    );
+    assert_eq!(a.choices().len(), 9);
+    assert!(a.choices().iter().all(|c| matches!(c.target, ChoiceTarget::Action(_))));
+    let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y);
+    click(&mut a, x, y);
+    let details = match &a.modal.as_ref().unwrap().kind {
+        Prompt::Details { title: "Server details", body } => body.clone(),
+        other => panic!("unexpected prompt: {other:?}"),
+    };
+    assert!(details.contains("was not found") && details.contains("rustup component add rust-analyzer") && details.contains("providers.json"));
     key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
     key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
     assert_eq!(a.session.state().selection(), selected);
@@ -476,7 +502,7 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
         key(&mut a, KeyCode::End, KeyModifiers::NONE);
         key(&mut a, KeyCode::Up, KeyModifiers::NONE);
         draw(&mut a, w, h);
-        assert!(a.modal.as_ref().unwrap().at < a.choices().len());
+        assert!(a.modal.as_ref().unwrap().top <= a.layout.modal_content_rows.saturating_sub(a.layout.modal_rows.height as usize));
     }
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     let copied = a
@@ -491,24 +517,14 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     );
     assert!(!copied.contains("\nRestart Language Server\n"));
     assert_eq!(a.session.state().selection(), selected);
-    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::LanguageServer);
-    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details { .. }));
     draw(&mut a, 80, 24);
-    let copy = a
-        .choices()
-        .iter()
-        .position(|c| matches!(c.target, ChoiceTarget::Action(CommandId::CopyServerDetails)))
-        .unwrap();
-    let row = a
-        .layout
-        .modal_items
-        .iter()
-        .position(|i| *i == copy)
-        .unwrap();
-    let (x, y) = (a.layout.modal_rows.x, a.layout.modal_rows.y + row as u16);
-    click(&mut a, x, y);
-    assert!(a.modal.is_none());
+    let copy = a.layout.details_copy;
+    click(&mut a, copy.x, copy.y);
     assert_eq!(a.copy.take().as_deref(), Some(copied.as_str()));
+    let close = a.layout.details_close;
+    click(&mut a, close.x, close.y);
+    assert!(a.modal.is_none());
     key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
     draw(&mut a, 80, 24);
     let activate = |a: &mut App, id| {
@@ -531,6 +547,7 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
     draw(&mut a, 80, 24);
     activate(&mut a, CommandId::DisableServer);
     assert_eq!(a.session.state().language_server_label(), "LSP off");
+    settle(&mut a, |a| a.session.disabled(CommandId::EnableServer).is_none());
     key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
     draw(&mut a, 80, 24);
     assert!(a.choices().iter().any(|c| matches!(
@@ -973,7 +990,7 @@ fn hover_is_debounced_cancelled_and_uses_real_core_documentation_request() {
         a.session.state().documentation().unwrap().trigger,
         reader_core::session::DocTrigger::Pointer
     );
-    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details(_)));
+    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details { .. }));
     assert_eq!(a.session.state().selection(), selection);
     let messages = std::fs::read_to_string(&log).unwrap();
     assert_eq!(
@@ -1575,7 +1592,7 @@ fn help_and_wrapped_details_wheel_scroll_without_selection_and_clamp_on_resize()
     let mut a = app(dir.path());
     for prompt in [
         Prompt::Help,
-        Prompt::Details("long wrapped detail ".repeat(200)),
+        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200) },
     ] {
         a.prompt(prompt);
         draw(&mut a, 24, 10);
@@ -1779,7 +1796,7 @@ fn chrome_status_click_opens_copyable_snapshot_and_keeps_document_input_modal() 
     let before = a.session.state().selection();
     click(&mut a, 30, 25);
     let snapshot = match &a.modal.as_ref().expect("status click opens details").kind {
-        Prompt::Details(body) => body.clone(),
+        Prompt::Details { body, .. } => body.clone(),
         other => panic!("unexpected prompt: {other:?}"),
     };
     assert!(snapshot.contains(a.notice.as_deref().unwrap()));
@@ -1845,6 +1862,15 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
     let row = a.layout.modal_items.iter().position(|i| *i == wrap).unwrap();
     click(&mut a, rows.x + 1, rows.y + row as u16);
     assert!(a.modal.is_none() && a.session.state().soft_wrap());
+    click(&mut a, 2, 0);
+    for _ in 0..5 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(kind(&a), Some(Prompt::Menu(Some(CommandGroup::LanguageServers))));
+    draw(&mut a, 100, 26);
+    let rows = a.layout.modal_rows;
+    click(&mut a, rows.x + 1, rows.y + 1);
+    assert!(matches!(kind(&a), Some(Prompt::Details { title: "Server details", .. })));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     // All commands opens the shared action search; a click outside closes the menu.
     click(&mut a, 2, 0);
     key(&mut a, KeyCode::End, KeyModifiers::NONE);
@@ -1907,7 +1933,7 @@ fn chrome_toolbar_controls_and_footer_commands_run_catalog_actions() {
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Commands);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::F(2), KeyModifiers::SHIFT);
-    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details(_)));
+    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details { .. }));
     draw(&mut a, 120, 26);
     // A toolbar click dismisses the dialog, without opening its underlying command.
     click(&mut a, 2, 0);

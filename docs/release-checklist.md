@@ -2,6 +2,10 @@
 
 Run on **Linux and macOS** before each release, on the release commit, with a release build. Tick each box on both and note the machine (CPU, display refresh rate) and the numbers next to the timed items. The automated checks run locally through `scripts/ci-local.sh`; this list covers what they cannot: physical-display behavior, mouse input and packaging.
 
+Latest automated record: [Linux validation, 2026-10-21](release-validation.md).
+It covers the pending working tree, not a packaged release; manual boxes below
+remain for the final release commit.
+
 ## Setup
 
 ```sh

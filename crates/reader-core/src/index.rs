@@ -34,14 +34,14 @@ impl Indexed {
         Self { decl, line, line_start, lower }
     }
 
-    fn bytes(&self) -> usize {
+    pub(crate) fn bytes(&self) -> usize {
         std::mem::size_of::<Self>() - std::mem::size_of::<Declaration>() + self.decl.bytes() + self.lower.len()
     }
 }
 
 /// What indexing one file found.
 pub enum FileIndex {
-    Done { stamp: Option<Stamp>, items: Arc<[Indexed]>, syntax_errors: bool },
+    Done { stamp: Option<Stamp>, items: Arc<[Indexed]>, syntax_errors: bool, fingerprint: Option<[u8; 32]> },
     /// Over the large-file thresholds: not parsed.
     TooLarge,
     Unreadable,
@@ -69,7 +69,7 @@ impl Coverage {
 }
 
 /// One file's records: the stamp it was read as, its declarations, and whether it had syntax errors.
-type Records = (Option<Stamp>, Arc<[Indexed]>, bool);
+type Records = (Option<Stamp>, Arc<[Indexed]>, bool, Option<[u8; 32]>);
 /// Accounted per indexed file beyond its records: the map entry, the path and the shared slice's header.
 const FILE_OVERHEAD: usize = std::mem::size_of::<(Arc<str>, Records)>() + 2 * std::mem::size_of::<usize>();
 /// Ranked declarations (file and record) and how many matched in all.
@@ -116,13 +116,13 @@ impl DeclIndex {
             if !Self::wants(&p) {
                 continue;
             }
-            self.known.insert(p.clone());
+            let new = self.known.insert(p.clone());
             if first {
                 if !self.queued.insert(p.clone()) {
                     self.queue.retain(|q| *q != p);
                 }
                 self.queue.push_front(p);
-            } else if !self.has(&p) && self.queued.insert(p.clone()) {
+            } else if new && !self.has(&p) && self.queued.insert(p.clone()) {
                 self.queue.push_back(p);
             }
         }
@@ -133,14 +133,29 @@ impl DeclIndex {
         self.files.contains_key(path) || self.failed.contains_key(path)
     }
 
+    pub(crate) fn fingerprint(&self, path: &str) -> Option<[u8; 32]> {
+        self.files.get(path).and_then(|record| record.3)
+    }
+
+    /// None while a fresh read is pending; unknown or unavailable contents require notification.
+    pub(crate) fn changed_since(&self, path: &str, fingerprint: [u8; 32]) -> Option<bool> {
+        (self.has(path) || self.limited || !self.known.contains(path))
+            .then(|| self.fingerprint(path) != Some(fingerprint))
+    }
+
+    /// Only current, successfully indexed files can authorize suppressing an overflow notification.
+    pub(crate) fn fingerprints(&self) -> HashMap<Arc<str>, [u8; 32]> {
+        self.files.iter().filter_map(|(path, record)| record.3.map(|hash| (path.clone(), hash))).collect()
+    }
+
     /// Forget `path`'s records (it changed or went) and index it again if it was a candidate and still exists.
     pub fn invalidate(&mut self, path: &Arc<str>, exists: bool) {
-        if let Some((_, items, _)) = self.files.remove(path) {
+        if let Some((_, items, _, _)) = self.files.remove(path) {
             self.bytes -= file_bytes(path, &items);
             self.limited = self.limited && self.bytes >= self.limit;
         }
         self.failed.remove(path);
-        if exists && self.known.contains(path) {
+        if exists && self.known.remove(path) {
             self.enqueue([path.clone()], false);
         } else {
             self.known.remove(path);
@@ -150,8 +165,36 @@ impl DeclIndex {
         }
     }
 
+    /// Rebuild affected descendants, including queued/in-flight files. The rescan removes vanished paths.
+    pub(crate) fn invalidate_changed(&mut self, root: &Path, change: &crate::watch::Change) {
+        let affected: Vec<_> = self.known.iter().filter(|p| change.touches(&root.join(p.as_ref()))).cloned().collect();
+        for path in affected {
+            self.invalidate(&path, true);
+        }
+    }
+
+    /// Check completed reads made before a watch was registered; in-flight/failed reads must try again.
+    pub(crate) fn registration_checks(&mut self, root: &Path, folders: &std::collections::BTreeSet<std::path::PathBuf>) -> Vec<(std::path::PathBuf, Stamp)> {
+        let mut checks = Vec::new();
+        let mut retry = Vec::new();
+        for rel in &self.known {
+            let path = root.join(rel.as_ref());
+            if !path.ancestors().any(|p| folders.contains(p)) { continue; }
+            match self.files.get(rel).and_then(|(stamp, _, _, _)| *stamp) {
+                Some(stamp) => checks.push((path, stamp)),
+                None if !self.queued.contains(rel) => retry.push(rel.clone()),
+                None => {}
+            }
+        }
+        for rel in retry { self.invalidate(&rel, true); }
+        checks
+    }
+
     /// Keep only candidates still in the inventory `now` (after a rescan), and queue the new ones.
     pub fn retain(&mut self, now: &std::collections::HashSet<Arc<str>>) {
+        // A removed directory can discard thousands of queued files; compact the queue once.
+        self.queue.retain(|p| now.contains(p));
+        self.queued.retain(|p| now.contains(p));
         let gone: Vec<Arc<str>> = self.known.iter().filter(|p| !now.contains(*p)).cloned().collect();
         for p in &gone {
             self.invalidate(p, false);
@@ -180,7 +223,7 @@ impl DeclIndex {
         self.invalidate(&path, false); // replaced records (re-indexing a visible file) are no longer counted
         self.known.insert(path.clone());
         match result {
-            FileIndex::Done { stamp, items, syntax_errors } => {
+            FileIndex::Done { stamp, items, syntax_errors, fingerprint } => {
                 let bytes = file_bytes(&path, &items);
                 if self.limited || self.bytes + bytes > self.limit {
                     // Over budget: stop here, keep what fits, and say the index is limited.
@@ -190,7 +233,7 @@ impl DeclIndex {
                     return;
                 }
                 self.bytes += bytes;
-                self.files.insert(path, (stamp, items, syntax_errors));
+                self.files.insert(path, (stamp, items, syntax_errors, fingerprint));
             }
             FileIndex::TooLarge => _ = self.failed.insert(path, true),
             FileIndex::Unreadable => _ = self.failed.insert(path, false),
@@ -216,7 +259,7 @@ impl DeclIndex {
 
     /// The records as they are now, shared, for a ranking job.
     pub fn snapshot(&self) -> Vec<(Arc<str>, Arc<[Indexed]>)> {
-        self.files.iter().map(|(p, (_, items, _))| (p.clone(), items.clone())).collect()
+        self.files.iter().map(|(p, (_, items, _, _))| (p.clone(), items.clone())).collect()
     }
 }
 
@@ -227,6 +270,11 @@ fn file_bytes(path: &str, items: &[Indexed]) -> usize {
 /// Index one file off the UI thread: read, decode, extract declarations, keep only records. A cancelled job's
 /// `Unreadable` is never counted: cancellation only follows a new root, whose index discards this one's results.
 pub fn index_file(root: &Path, rel: &str, current: impl Fn() -> bool + Send + Clone + 'static) -> FileIndex {
+    index_file_cached(root, rel, current, None)
+}
+
+pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bool + Send + Clone + 'static, mut cache: Option<&mut crate::index_cache::Cache>) -> FileIndex {
+    if !current() { return FileIndex::Unreadable; }
     let path = root.join(rel);
     let Ok(meta) = std::fs::metadata(&path) else { return FileIndex::Unreadable };
     if meta.len() as usize > crate::document::LARGE_BYTES {
@@ -234,15 +282,34 @@ pub fn index_file(root: &Path, rel: &str, current: impl Fn() -> bool + Send + Cl
     }
     let stamp = Some(Stamp::from(&meta));
     let Ok(bytes) = std::fs::read(&path) else { return FileIndex::Unreadable };
+    if !current() || Stamp::of(&path) != stamp { return FileIndex::Unreadable; }
     let doc = crate::document::Document::decode(path, 0, &bytes);
+    let fingerprint = cache.as_ref().and_then(|_| doc.language()).map(|language| {
+        use sha2::{Digest, Sha256};
+        let mut hash = Sha256::new(); hash.update(format!("{language:?}\0")); hash.update(&bytes);
+        hash.finalize()
+    });
+    let key = fingerprint.as_ref().map(|hash| format!("{hash:x}"));
+    let fingerprint = fingerprint.map(Into::into);
     drop(bytes);
     if doc.is_large() {
         return FileIndex::TooLarge;
     }
     let Some(lang) = doc.language() else { return FileIndex::Unreadable };
-    let Some(found) = highlight::declarations_while(lang, doc.text().clone(), current) else { return FileIndex::Unreadable };
+    if let Some((items, syntax_errors)) = key.as_ref().and_then(|key| cache.as_mut()?.get(key))
+        && items.iter().all(|i| {
+            let d = &i.decl;
+            d.range.start <= d.range.end && d.name_range.start <= d.name_range.end
+                && d.range.end as usize <= doc.text().len() && d.name_range.end as usize <= doc.text().len()
+                && doc.text().is_char_boundary(d.name_range.start as usize) && doc.text().is_char_boundary(d.name_range.end as usize)
+                && (i.line as usize) < doc.line_count() && doc.line_range(i.line as usize).start == i.line_start as usize
+                && doc.line_of(d.name_range.start as usize) == i.line as usize
+        }) {
+        return FileIndex::Done { stamp, items, syntax_errors, fingerprint };
+    }
+    let Some(found) = highlight::declarations_while(lang, doc.text().clone(), current.clone()) else { return FileIndex::Unreadable };
     // `impl` blocks and Markdown sections are scopes for sticky lines and breadcrumbs, not names to search for.
-    let items = found
+    let items: Arc<[Indexed]> = found
         .items
         .into_iter()
         .filter(|d| !matches!(d.kind, highlight::DeclKind::Impl | highlight::DeclKind::Heading))
@@ -252,7 +319,8 @@ pub fn index_file(root: &Path, rel: &str, current: impl Fn() -> bool + Send + Cl
             Indexed::new(d, line as u32, start as u32)
         })
         .collect();
-    FileIndex::Done { stamp, items, syntax_errors: found.syntax_errors }
+    if current() && let (Some(cache), Some(key)) = (cache, key) { cache.insert(key, items.clone(), found.syntax_errors); }
+    FileIndex::Done { stamp, items, syntax_errors: found.syntax_errors, fingerprint }
 }
 
 /// The best [`DECL_LIMIT`] declarations for `query` (Lenz's fuzzy ranking over names), with how many matched.
@@ -288,6 +356,53 @@ fn keep_best(hits: &mut Vec<(i64, &Arc<str>, &Indexed)>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn overflow_content_checks_wait_for_current_reads_and_fall_back_at_limits() {
+        let d = tempfile::tempdir().unwrap();
+        let file = d.path().join("a.rb");
+        std::fs::write(&file, "class Alpha; end\n").unwrap();
+        let time = std::fs::metadata(&file).unwrap().modified().unwrap();
+        let mut cache = crate::index_cache::Cache::new(d.path(), d.path()); cache.load();
+        let read = |cache: &mut crate::index_cache::Cache| index_file_cached(d.path(), "a.rb", || true, Some(cache));
+        let mut ix = DeclIndex::new(INDEX_BYTES);
+        let path: Arc<str> = "a.rb".into();
+        ix.enqueue([path.clone()], false); ix.next_chunk(); ix.add(path.clone(), read(&mut cache)); ix.running = false;
+        let old = ix.fingerprint(&path).unwrap();
+        assert_eq!(ix.changed_since(&path, old), Some(false));
+        ix.invalidate(&path, true); ix.next_chunk();
+        let stale = read(&mut cache);
+        std::fs::write(&file, "class Omega; end\n").unwrap();
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(time).unwrap();
+        ix.invalidate(&path, true); ix.add(path.clone(), stale); ix.running = false;
+        assert_eq!(ix.changed_since(&path, old), None, "a requeued read cannot settle recovery");
+        ix.next_chunk(); ix.add(path.clone(), read(&mut cache)); ix.running = false;
+        assert_eq!(ix.changed_since(&path, old), Some(true), "same size and mtime do not establish equality");
+        ix.invalidate(&path, true); ix.next_chunk(); ix.add(path.clone(), FileIndex::Unreadable); ix.running = false;
+        assert_eq!(ix.changed_since(&path, old), Some(true));
+        let mut limited = DeclIndex::new(0); limited.enqueue([path.clone()], false); limited.next_chunk();
+        limited.add(path.clone(), read(&mut cache)); limited.running = false;
+        assert_eq!(limited.changed_since(&path, old), Some(true), "a byte-budget stop must not wait forever");
+        ix.invalidate(&path, true); ix.next_chunk(); ix.add(path.clone(), index_file(d.path(), "a.rb", || true)); ix.running = false;
+        assert!(ix.fingerprints().is_empty(), "reuse off has no suppression baseline");
+        assert_eq!(ix.changed_since(&path, old), Some(true));
+    }
+
+    #[test]
+    fn an_unchanged_inventory_does_not_queue_the_running_chunk_again() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::write(d.path().join("a.rb"), "class Alpha; end\n").unwrap();
+        let mut ix = DeclIndex::new(INDEX_BYTES);
+        let path: Arc<str> = "a.rb".into();
+        ix.enqueue([path.clone()], false);
+        assert_eq!(ix.next_chunk().len(), 1);
+        ix.retain(&[path.clone()].into());
+        assert_eq!(ix.coverage().pending, 1, "only the running job, no duplicate queued read");
+        ix.add(path, index_file(d.path(), "a.rb", || true));
+        ix.running = false;
+        assert_eq!(ix.coverage().indexed, 1);
+        assert!(ix.coverage().complete());
+    }
 
     #[test]
     fn indexing_is_bounded_invalidated_and_honest_about_coverage() {

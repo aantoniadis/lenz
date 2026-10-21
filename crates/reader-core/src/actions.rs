@@ -3,7 +3,7 @@ use lenz_content::find::FindOption;
 
 use crate::{
     semantics::hierarchy::Direction,
-    session::{Command, CommandId, Session, Split},
+    session::{Action, Command, CommandId, Session, Split},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,43 +38,44 @@ pub enum InterfaceAction {
     ToggleExplorer,
     WorkspaceRoot,
     LanguageServer,
+    ServerDetails,
     ServerRuntime,
     StatusDetails,
 }
 
 impl Session {
-    /// Navigation controls shared by the GUI and terminal tab bars; adapters own their geometry.
+    /// Window navigation controls shared by the GUI and terminal toolbars.
     pub fn navigation(&self) -> Vec<(CommandId, &'static str)> {
         let state = self.state();
         let explorer = state
-            .project()
-            .is_some()
+            .has_tree()
             .then_some((CommandId::ToggleExplorer, ""));
         let mut buttons: Vec<_> = explorer
             .into_iter()
             .chain([(CommandId::Back, "←"), (CommandId::Forward, "→")])
             .collect();
-        let toggle = match (state.rendering(), state.active()) {
-            (Some(_), Some(tab)) => Some((
-                CommandId::MarkdownSource,
-                if tab.markdown_source() {
-                    "Preview"
-                } else {
-                    "Source"
-                },
-            )),
-            _ if self.disabled(CommandId::ImageSource).is_none() => Some((
+        if self.disabled(CommandId::ImageSource).is_none() {
+            buttons.push((
                 CommandId::ImageSource,
                 if state.active().is_some_and(|t| t.image_source()) {
                     "Image"
                 } else {
                     "Source"
                 },
-            )),
-            _ => None,
-        };
-        buttons.extend(toggle);
+            ));
+        }
         buttons
+    }
+
+    /// The Markdown toggle belongs to the file shown in this pane, including an unfocused pane.
+    pub fn preview_control(&self, pane: u8) -> Option<Action> {
+        let tab = self.state().shown(pane).filter(|t| t.rendering().is_some())?;
+        Some(Action {
+            id: CommandId::MarkdownSource,
+            label: if tab.markdown_source() { "Preview" } else { "Source" },
+            disabled: matches!(tab.preview, Some(Err(_))).then_some("This document cannot be previewed (the notice says why)"),
+            on: None,
+        })
     }
 
     /// Resolve against the current state, including availability and toggle values. Dispatch a returned command
@@ -90,6 +91,7 @@ impl Session {
             CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
             CommandId::FindSymbol => return CatalogAction::Interface(InterfaceAction::FindSymbol),
             CommandId::ServerRuntime => return CatalogAction::Interface(InterfaceAction::ServerRuntime),
+            CommandId::ServerDetails => return CatalogAction::Interface(InterfaceAction::ServerDetails),
             CommandId::LanguageServer => return CatalogAction::Interface(InterfaceAction::LanguageServer),
             CommandId::Open => return CatalogAction::Interface(InterfaceAction::Open),
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
@@ -169,9 +171,12 @@ impl Session {
             CommandId::CopyPath => Command::CopyPath { line: false },
             CommandId::CopyPathLine => Command::CopyPath { line: true },
             CommandId::FileSymbols => Command::FileSymbols,
-            CommandId::CopyServerDetails => Command::CopyText(self.language_server_rows().into_iter()
-                .filter_map(|(text, action)| action.is_none().then_some(text)).collect::<Vec<_>>().join("\n\n")),
+            CommandId::CopyServerDetails => Command::CopyText(self.language_server_details()),
             CommandId::RestartServer => Command::RestartServer,
+            CommandId::ExcludeRubyTooling => Command::SetRubyToolingExclusions(!state.setting(id).unwrap_or(false)),
+            CommandId::PersistentIndex => Command::SetPersistentIndex(!state.setting(id).unwrap_or(false)),
+            CommandId::RebuildIndex => Command::RebuildIndex,
+            CommandId::ResetProjectServerSettings => Command::ResetProjectServerSettings,
             CommandId::DisableServer => Command::SetServerEnabled(false),
             CommandId::EnableServer => Command::SetServerEnabled(true),
             CommandId::ImageSource => Command::ToggleImageSource,
@@ -252,8 +257,9 @@ impl CommandId {
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
             Self::SelectAll | Self::Copy | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
-            Self::WorkspaceRoot | Self::LanguageServer | Self::CopyServerDetails | Self::ServerRuntime
-            | Self::RestartServer | Self::DisableServer | Self::EnableServer => G::LanguageServers,
+            Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
+            | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
+            | Self::DisableServer | Self::EnableServer => G::LanguageServers,
             Self::ChooseTheme => G::Application,
         }
     }

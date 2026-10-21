@@ -102,6 +102,203 @@ fn write(root: &Path, name: &str, text: &str) -> PathBuf {
     p
 }
 
+#[test]
+fn project_initialization_settings_are_isolated_by_language_server_root() {
+    let mut f = fixture_as("ruby-lsp", &[], &[
+        ("one/Gemfile", ""), ("one/app/a.rb", "class One; end\n"),
+        ("two/Gemfile", ""), ("two/app/b.rb", "class Two; end\n"),
+    ], serde_json::json!({"settings":{"indexing":{"excludedGems":["global-tool"]},"keep":true}}), std::sync::Arc::new(Instant::now));
+    f.open("one/app/a.rb");
+    let config = f._dir.path().join("config/providers.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+    value["providers"]["ruby-lsp"]["projects"] = serde_json::json!({
+        f.root.join("one").to_str().unwrap(): {"indexing":{"excludedGems":["project-tool"]}}
+    });
+    std::fs::write(config, value.to_string()).unwrap();
+    f.s.dispatch(Command::RestartServer);
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "initialize").count() >= 2);
+    f.settle(ready);
+    f.open("two/app/b.rb");
+    let all = messages(&f.log);
+    let init: Vec<_> = all.iter().filter(|m| m["method"] == "initialize").collect();
+    assert_eq!(init.len(), 3);
+    assert_eq!(init[1]["params"]["initializationOptions"]["indexing"]["excludedGems"], serde_json::json!(["project-tool"]));
+    assert_eq!(init[2]["params"]["initializationOptions"]["indexing"]["excludedGems"], serde_json::json!(["global-tool"]));
+    assert_eq!(init[1]["params"]["initializationOptions"]["keep"], true);
+    assert_eq!(init[1]["params"]["initializationOptions"]["formatter"], "none");
+}
+
+#[test]
+fn project_workspace_configuration_matches_its_initialization_options() {
+    let mut f = fixture(&[("FAKE_LSP_ASK_CONFIG", "1")], &[("src/lib.rs", "pub fn one() {}\n")]);
+    f.open("src/lib.rs");
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().any(|m| m["id"] == "cfg-1" && m.get("result").is_some()));
+    let file = f._dir.path().join("config/providers.json");
+    let mut value: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    value["providers"]["rust-analyzer"]["settings"] = serde_json::json!({"cargo":{"features":"global"},"keep":true});
+    value["providers"]["rust-analyzer"]["projects"] = serde_json::json!({f.root.to_str().unwrap():{"cargo":{"features":["local"]}}});
+    std::fs::write(file, value.to_string()).unwrap();
+    f.s.dispatch(Command::RestartServer);
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["id"] == "cfg-1" && m.get("result").is_some()).count() >= 2);
+    let all = messages(&f.log);
+    let init = all.iter().rev().find(|m| m["method"] == "initialize").unwrap();
+    let reply = all.iter().rev().find(|m| m["id"] == "cfg-1" && m.get("result").is_some()).unwrap();
+    assert_eq!(init["params"]["initializationOptions"]["cargo"]["features"], serde_json::json!(["local"]));
+    assert_eq!(reply["result"][0], init["params"]["initializationOptions"]);
+    assert_eq!(reply["result"][1], serde_json::json!({"features":["local"]}));
+    assert_eq!(reply["result"][0]["keep"], true);
+}
+
+#[test]
+fn rebuilding_the_project_index_restarts_its_server_and_preserves_sources() {
+    let source = "class Alpha; end\n";
+    let mut f = fixture_as("ruby-lsp", &[], &[("Gemfile", ""), ("a.rb", source)], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("a.rb");
+    f.settle(|s| s.state().index_coverage().indexed >= 1 && s.state().index_coverage().complete());
+    f.s.dispatch(Command::RebuildIndex);
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "initialize").count() >= 2);
+    f.settle(|s| ready(s) && s.state().index_coverage().complete());
+    assert_eq!(f.s.state().servers().len(), 1);
+    assert_eq!(std::fs::read_to_string(f.root.join("a.rb")).unwrap(), source);
+    let init: Vec<_> = messages(&f.log).into_iter().filter(|m| m["method"] == "initialize").collect();
+    assert_eq!(init.len(), 2);
+    assert_eq!(init[0]["params"]["initializationOptions"], init[1]["params"]["initializationOptions"]);
+}
+
+#[test]
+fn rebuilding_finishes_symbol_searches_started_before_or_during_the_reset() {
+    let mut f = fixture_as("ruby-lsp", &[("FAKE_LSP_SILENT_SYMBOLS", "1")], &[("Gemfile", ""), ("a.rb", "class A; end\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone())); f.open("a.rb");
+    f.s.dispatch(Command::Symbols("A".into()));
+    f.s.dispatch(Command::RebuildIndex);
+    assert!(f.s.state().asking().is_none());
+    assert!(f.s.state().results().unwrap().done());
+    let rx = f.s.completions();
+    let reset = loop {
+        if let Ok(c) = recv(&rx) {
+            if matches!(c, Completion::IndexReset { .. }) { break c; }
+            f.s.dispatch(c);
+        }
+    };
+    f.s.dispatch(Command::Symbols("A".into()));
+    assert!(f.s.state().asking().is_some());
+    f.s.dispatch(reset);
+    assert!(f.s.state().asking().is_none());
+    assert!(f.s.state().results().unwrap().done());
+    assert!(f.s.state().results().unwrap().error().unwrap().contains("rebuilding"));
+}
+
+#[test]
+fn project_exclusion_commands_save_restart_reset_and_preserve_other_servers() {
+    let mut f = fixture_as("ruby-lsp", &[], &[
+        ("one/Gemfile", ""), ("one/app/a.rb", "class One; end\n"),
+        ("two/Gemfile", ""), ("two/app/b.rb", "class Two; end\n"),
+    ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.open("one/app/a.rb");
+    f.open("two/app/b.rb");
+    f.open("one/app/a.rb");
+    assert!(f.s.disabled(CommandId::ExcludeRubyTooling).is_none());
+    f.s.dispatch(Command::ExcludeRubyTooling);
+    assert!(f.s.disabled(CommandId::ResetProjectServerSettings).is_some());
+    f.s.dispatch(Command::ExcludeRubyTooling); // a duplicate while saving is ignored
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "initialize").count() >= 3);
+    f.settle(ready);
+    assert!(f.s.disabled(CommandId::ExcludeRubyTooling).is_none(), "exclusions can be turned off without resetting other settings");
+    assert!(f.s.disabled(CommandId::ResetProjectServerSettings).is_none());
+    let settings = reader_core::semantics::provider::Settings::read(&f._dir.path().join("config/providers.json"));
+    assert!(settings.ruby_tooling_excluded(&f.root.join("one")));
+    assert!(!settings.has_project("ruby-lsp", &f.root.join("two")));
+    f.s.dispatch(Command::ResetProjectServerSettings);
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "initialize").count() >= 4);
+    f.settle(ready);
+    assert!(f.s.disabled(CommandId::ExcludeRubyTooling).is_none());
+    assert!(f.s.disabled(CommandId::ResetProjectServerSettings).is_some());
+    let all = messages(&f.log);
+    let init: Vec<_> = all.iter().filter(|m| m["method"] == "initialize").collect();
+    assert_eq!(init.len(), 4);
+    assert_eq!(init.iter().filter(|m| m["params"]["rootUri"].as_str().unwrap().ends_with("/two")).count(), 1, "other projects keep their server");
+    assert!(init[2]["params"]["initializationOptions"]["indexing"]["excludedGems"].as_array().unwrap().contains(&serde_json::json!("parser")));
+    assert!(init[3]["params"]["initializationOptions"]["indexing"]["excludedGems"].as_array().unwrap().contains(&serde_json::json!("parser")));
+}
+
+#[test]
+fn project_settings_save_failure_leaves_the_server_and_file_unchanged() {
+    let mut f = fixture_as("ruby-lsp", &[], &[("Gemfile", ""), ("a.rb", "class A; end\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.open("a.rb");
+    let file = f._dir.path().join("config/providers.json");
+    std::fs::write(&file, "{broken").unwrap();
+    f.s.dispatch(Command::ExcludeRubyTooling);
+    f.settle(|s| s.state().notices().iter().any(|n| n.contains("were not changed")));
+    assert!(ready(&f.s));
+    assert_eq!(std::fs::read_to_string(file).unwrap(), "{broken");
+    assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "initialize").count(), 1);
+    assert!(f.s.disabled(CommandId::ExcludeRubyTooling).is_none());
+}
+
+#[test]
+fn a_project_save_completion_does_not_retarget_after_switching_projects() {
+    let mut f = fixture_as("ruby-lsp", &[], &[
+        ("one/Gemfile", ""), ("one/a.rb", "class One; end\n"),
+        ("two/Gemfile", ""), ("two/b.rb", "class Two; end\n"),
+    ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.open("one/a.rb");
+    f.s.dispatch(Command::ExcludeRubyTooling);
+    let next = f.root.join("two/b.rb");
+    f.s.dispatch(Command::Open(next.clone()));
+    let rx = f.s.completions();
+    let mut saved = None;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while saved.is_none() || !ready(&f.s) || f.s.state().document().is_none_or(|d| d.source() != next) {
+        assert!(Instant::now() < deadline);
+        if let Ok(c) = recv(&rx) {
+            if matches!(&c, Completion::ProjectProviderSaved { .. }) { saved = Some(c); }
+            else { f.s.dispatch(c); }
+        }
+    }
+    f.s.dispatch(saved.unwrap());
+    let settings = reader_core::semantics::provider::Settings::read(&f._dir.path().join("config/providers.json"));
+    assert!(settings.ruby_tooling_excluded(&f.root.join("one")));
+    assert!(!settings.has_project("ruby-lsp", &f.root.join("two")));
+    assert_eq!(f.s.state().document().unwrap().source(), next);
+    assert!(ready(&f.s));
+    f.open("one/a.rb");
+    let all = messages(&f.log);
+    let init: Vec<_> = all.iter().filter(|m| m["method"] == "initialize").collect();
+    assert_eq!(init.len(), 3);
+    assert_eq!(init.iter().filter(|m| m["params"]["rootUri"].as_str().unwrap().ends_with("/two")).count(), 1);
+}
+
+#[test]
+fn a_project_save_finishes_a_symbol_search_started_while_saving() {
+    let mut f = fixture_as("ruby-lsp", &[("FAKE_LSP_SILENT_SYMBOLS", "1")], &[("Gemfile", ""), ("a.rb", "class A; end\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.open("a.rb");
+    f.s.dispatch(Command::ExcludeRubyTooling);
+    let rx = f.s.completions();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let saved = loop {
+        assert!(Instant::now() < deadline);
+        if let Ok(c) = recv(&rx) {
+            if matches!(&c, Completion::ProjectProviderSaved { .. }) { break c; }
+            f.s.dispatch(c);
+        }
+    };
+    f.s.dispatch(Command::Symbols("A".into()));
+    assert!(f.s.state().asking().is_some());
+    assert!(!f.s.state().results().unwrap().done());
+    f.s.dispatch(saved);
+    assert!(f.s.state().asking().is_none());
+    let results = f.s.state().results().unwrap();
+    assert!(results.done());
+    assert!(results.error().unwrap().contains("settings changed"));
+}
+
 impl Fixture {
     /// Apply background results until `done` holds; `each` checks every state on the way.
     fn settle_checking(&mut self, done: impl Fn(&Session) -> bool, each: impl Fn(&Session)) {
@@ -296,8 +493,8 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
     let Status::Missing(why) = f.s.state().provider().unwrap().status else { unreachable!() };
     assert!(why.contains("was not found") && why.contains("rustup component add rust-analyzer"), "{why}");
     let rows = f.s.language_server_rows();
-    assert!(rows.iter().any(|(text, _)| text.contains("rustup component add rust-analyzer")));
-    assert!(rows.iter().any(|(text, _)| text.contains("config/providers.json")));
+    assert!(f.s.language_server_details().contains("rustup component add rust-analyzer"));
+    assert!(f.s.language_server_details().contains("config/providers.json"));
     assert!(rows.iter().any(|(_, action)| *action == Some(CommandId::RestartServer)));
     let reader_core::actions::CatalogAction::Command(copy) = f.s.action(CommandId::CopyServerDetails) else { panic!("copy must be available") };
     let copied = f.s.dispatch(copy).copy.unwrap();
@@ -335,8 +532,8 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
 #[test]
 fn recovery_rows_keep_their_command_identity_while_server_status_changes() {
     let mut f = fixture(&[("FAKE_LSP_INIT_DELAY_MS", "200")], &[("src/main.rs", "fn main() { crash_now(); }\n")]);
-    let actions = |s: &Session| s.language_server_rows().into_iter().take(3).map(|(_, id)| id).collect::<Vec<_>>();
-    let expected = vec![Some(CommandId::RestartServer), Some(CommandId::DisableServer), Some(CommandId::WorkspaceRoot)];
+    let actions = |s: &Session| s.language_server_rows().into_iter().take(4).map(|(_, id)| id).collect::<Vec<_>>();
+    let expected = vec![Some(CommandId::ServerDetails), Some(CommandId::RestartServer), Some(CommandId::DisableServer), Some(CommandId::WorkspaceRoot)];
     f.s.dispatch(Command::Open(f.root.join("src/main.rs")));
     f.settle_checking(ready, |s| assert_eq!(actions(s), expected));
     assert_eq!(actions(&f.s), expected);
@@ -585,6 +782,7 @@ fn large_files_are_never_sent_and_dependencies_show_their_origin() {
     let dir = tempfile::tempdir().unwrap();
     let dep = dir.path().join("home/.cargo/registry/src/index/dep-1.0");
     write(&dep, "src/lib.rs", "pub fn from_dep() {}\n");
+    write(&dep, "src/sibling.rs", "pub fn sibling() {}\n");
     let extra = dep.to_str().unwrap().to_owned();
     let big = "fn x() {}\n".repeat(reader_core::document::LARGE_LINES + 1);
     let mut f = fixture(&[("FAKE_LSP_EXTRA", &extra)], &[("src/main.rs", "fn main() { from_dep(); }\n"), ("src/big.rs", &big)]);
@@ -598,11 +796,57 @@ fn large_files_are_never_sent_and_dependencies_show_their_origin() {
     f.settle(|s| s.state().document().is_some_and(|d| d.source().starts_with(&dep)));
     assert_eq!(f.selected_text(), "from_dep");
     assert!(f.notice("Read-only source from a Cargo dependency"), "{:?}", f.s.state().notices());
+    f.settle(|s| s.state().tree_rows().any(|r| r.name.as_ref() == "sibling.rs"));
+    assert!(f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
+    assert_eq!(f.s.state().project().unwrap().root(), f.root);
+    assert_eq!(f.s.disabled(CommandId::LocateFile), None);
+    assert!(!f.s.state().project().unwrap().children("src").iter().any(|(name, _)| name.as_ref() == "sibling.rs"));
+    let sibling = dep.join("src/sibling.rs");
+    f.s.dispatch(Command::ActivateTree { path: sibling.to_str().unwrap().into(), retain: false });
+    f.settle(|s| s.state().document().is_some_and(|d| d.source() == sibling));
+    assert_eq!(f.s.state().document().unwrap().text().as_ref(), "pub fn sibling() {}\n");
+    assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "initialize").count(), 1, "library browsing reuses the project's server");
+    f.s.dispatch(Command::OpenRoot(f._dir.path().join("another")));
+    f.settle(|s| s.state().project().is_some_and(|p| !matches!(p.coverage(), reader_core::project::Coverage::Scanning(_))));
+    assert!(!f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
 }
 
 fn percentile(samples: &mut [f64], p: f64) -> f64 {
     samples.sort_by(f64::total_cmp);
     samples[((samples.len() - 1) as f64 * p).round() as usize]
+}
+
+#[test]
+fn indexing_progress_keeps_percentage_title_and_partial_reports() {
+    let mut f = fixture(&[], &[("src/main.rs", MAIN)]);
+    f.open("src/main.rs");
+    f.settle(|s| s.state().provider().is_some_and(|p| p.status == Status::Ready));
+    let mut progress = |token: Value, value: Value| {
+        f.s.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+            session: 1,
+            message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":token,"value":value}}),
+        }));
+        (f.s.state().language_server_label(), f.s.state().provider().unwrap().summary())
+    };
+    let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"begin", "title":"Indexing Ruby files", "message":"app/models", "percentage":0}));
+    assert!(label.contains("0%"), "{label}");
+    assert!(detail.contains("Indexing Ruby files") && detail.contains("app/models"), "{detail}");
+    let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"report", "percentage":42}));
+    assert!(label.contains("42%"), "{label}");
+    assert!(detail.contains("Indexing Ruby files") && detail.contains("app/models"), "{detail}");
+    let (label, detail) = progress(serde_json::json!(7), serde_json::json!({"kind":"report", "message":"app/controllers"}));
+    assert!(label.contains("42%") && detail.contains("Indexing Ruby files") && detail.contains("app/controllers"), "{label}: {detail}");
+    for percentage in [serde_json::json!(-1), serde_json::json!(101), serde_json::json!("80"), Value::Null] {
+        let (label, _) = progress(serde_json::json!(7), serde_json::json!({"kind":"report", "percentage":percentage}));
+        assert!(label.contains("42%"), "invalid percentage replaced the last valid report: {label}");
+    }
+    progress(serde_json::json!("other"), serde_json::json!({"kind":"begin", "title":"Loading gems"}));
+    let (label, _) = progress(serde_json::json!(7), serde_json::json!({"kind":"end"}));
+    assert!(label.contains("indexing") && !label.contains('%'), "another task is still running: {label}");
+    let (label, _) = progress(serde_json::json!("other"), serde_json::json!({"kind":"end"}));
+    assert_eq!(label, "LSP ready");
+    let (label, _) = progress(serde_json::json!("next"), serde_json::json!({"kind":"begin", "title":"Loading gems"}));
+    assert!(label.contains("indexing") && !label.contains('%'), "{label}");
 }
 
 /// Release timing with the fake server: the reader's own cost of a definition round trip (the fake answers
@@ -798,6 +1042,189 @@ fn only_servers_relying_on_the_client_hear_of_changed_files() {
     assert!(log.iter().all(|m| m["method"] != "workspace/didChangeWatchedFiles"));
     let init = log.iter().find(|m| m["method"] == "initialize").unwrap();
     assert!(init["params"]["capabilities"]["workspace"].get("didChangeWatchedFiles").is_none());
+}
+
+#[test]
+fn ruby_receives_coarse_changes_for_closed_added_renamed_and_deleted_files() {
+    for overflow in [false, true] {
+        let mut f = fixture_as("ruby-lsp", &[], &[
+            ("Gemfile", ""), ("main.rb", "class Main; end\n"),
+            ("app/a.rb", "class Alpha; end\n"), ("app/gone.rb", "class Gone; end\n"),
+            ("app/move.rb", "class Moved; end\n"), ("apple/stable.rb", "class Stable; end\n"),
+        ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+        f.s.dispatch(Command::OpenRoot(f.root.clone()));
+        f.open("main.rb");
+        f.settle(|s| s.state().project().is_some_and(|p| !p.refreshing() && matches!(p.coverage(), reader_core::project::Coverage::Complete(_))) && s.state().index_coverage().complete());
+        let start = messages(&f.log).len();
+        write(&f.root, "app/a.rb", "class Omega; end\n");
+        std::fs::remove_file(f.root.join("app/gone.rb")).unwrap();
+        std::fs::rename(f.root.join("app/move.rb"), f.root.join("app/renamed.rb")).unwrap();
+        write(&f.root, "app/new.rb", "class Added; end\n");
+        f.s.dispatch(Completion::Changed(reader_core::watch::Change {
+            paths: if overflow { Default::default() } else { [f.root.join("app")].into() }, overflow, ..Default::default()
+        }));
+        let rx = f.s.completions();
+        let until = Instant::now() + Duration::from_secs(10);
+        // Precise OS notifications would hide a missing directory/overflow notification.
+        while f.s.state().project().unwrap().refreshing() || !f.s.state().index_coverage().complete() {
+            assert!(Instant::now() < until);
+            if let Ok(c) = rx.try_recv() && !matches!(c, Completion::Changed(_)) { f.s.dispatch(c); }
+            std::thread::yield_now();
+        }
+        f.s.dispatch(Command::FileSymbols);
+        assert!(f.s.state().asking().is_some());
+        while f.s.state().asking().is_some() {
+            assert!(Instant::now() < until);
+            if let Ok(c) = rx.try_recv() && !matches!(c, Completion::Changed(_)) { f.s.dispatch(c); }
+            std::thread::yield_now();
+        }
+        let log = messages(&f.log);
+        let events: Vec<_> = log[start..].iter().filter(|m| m["method"] == "workspace/didChangeWatchedFiles")
+            .flat_map(|m| m["params"]["changes"].as_array().unwrap()).collect();
+        for (name, kind) in [("app/a.rb", 2), ("app/gone.rb", 3), ("app/move.rb", 3), ("app/renamed.rb", 2), ("app/new.rb", 2)] {
+            let uri = reader_core::semantics::lsp::file_uri(&f.root.join(name));
+            assert!(events.iter().any(|e| e["uri"] == uri && e["type"] == kind), "missing {name} ({kind}), overflow={overflow}: {events:?}");
+        }
+        assert!(!events.iter().any(|e| e["uri"].as_str().unwrap().ends_with("apple/stable.rb")), "unchanged file was reported, overflow={overflow}");
+        assert_eq!(log.iter().filter(|m| m["method"] == "initialize").count(), 1, "file changes must not restart the server");
+    }
+}
+
+// Suppress real watch delivery so it cannot conceal a missing recovery notification.
+fn settle_without_watch(f: &mut Fixture, done: impl Fn(&Session) -> bool) {
+    let until = Instant::now() + Duration::from_secs(10);
+    while !done(&f.s) {
+        assert!(Instant::now() < until, "recovery timed out: {:?}; {:?}; {:?}", f.s.state().index_coverage(), f.s.state().provider(), f.s.state().notices());
+        if let Ok(c) = f.s.completions().try_recv() && !matches!(c, Completion::Changed(_)) { f.s.dispatch(c); }
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn ruby_overflow_skips_unchanged_contents_but_preserves_updates_reversals_and_optout() {
+    let mut f = fixture_as("ruby-lsp", &[], &[
+        ("Gemfile", ""), ("main.rb", "class Main; end\n"),
+        ("app/a.rb", "class Alpha; end\n"), ("app/stable.rb", "class Stable; end\n"),
+    ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone())); f.open("main.rb");
+    settle_without_watch(&mut f, |s| ready(s) && s.state().index_coverage().complete() && s.state().index_coverage().indexed == 4);
+    let path = f.root.join("app/a.rb");
+    let time = std::fs::metadata(&path).unwrap().modified().unwrap();
+    // An exact-file change, a directory change and the subsequent overflow must all advance the baseline.
+    for (text, event, changed) in [
+        ("class Omega; end\n", 0, true), ("class Omega; end\n", 0, false),
+        ("class Alpha; end\n", 1, true), ("class Omega; end\n", 0, true),
+        ("class Alpha; end\n", 2, true), ("class Omega; end\n", 0, true),
+        ("class Alpha; end\n", 3, true),
+    ] {
+        std::fs::write(&path, text).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(time).unwrap();
+        let start = messages(&f.log).len();
+        f.s.dispatch(Completion::Changed(reader_core::watch::Change {
+            overflow: event == 0 || event == 3,
+            paths: match event { 1 | 3 => [path.clone()].into(), 2 => [f.root.join("app")].into(), _ => Default::default() },
+            ..Default::default()
+        }));
+        settle_without_watch(&mut f, |s| !s.state().project().unwrap().refreshing() && s.state().index_coverage().complete());
+        f.s.dispatch(Command::FileSymbols); settle_without_watch(&mut f, |s| s.state().asking().is_none());
+        let all = messages(&f.log);
+        let events: Vec<_> = all[start..].iter().filter(|m| m["method"] == "workspace/didChangeWatchedFiles")
+            .flat_map(|m| m["params"]["changes"].as_array().unwrap()).collect();
+        assert_eq!(events.iter().any(|e| e["uri"] == reader_core::semantics::lsp::file_uri(&path)), changed, "{text}, event={event}: {events:?}");
+        assert_eq!(events.iter().any(|e| e["uri"].as_str().unwrap().ends_with("app/stable.rb")), event == 2, "only ordinary directory events retain broad reports");
+    }
+    f.s.dispatch(Command::SetPersistentIndex(false));
+    settle_without_watch(&mut f, |s| s.state().index_coverage().complete());
+    let start = messages(&f.log).len();
+    f.s.dispatch(Completion::Changed(reader_core::watch::Change { overflow: true, ..Default::default() }));
+    settle_without_watch(&mut f, |s| !s.state().project().unwrap().refreshing() && s.state().index_coverage().complete());
+    f.s.dispatch(Command::FileSymbols); settle_without_watch(&mut f, |s| s.state().asking().is_none());
+    assert!(messages(&f.log)[start..].iter().filter(|m| m["method"] == "workspace/didChangeWatchedFiles")
+        .flat_map(|m| m["params"]["changes"].as_array().unwrap()).any(|e| e["uri"].as_str().unwrap().ends_with("app/stable.rb")), "opt-out restores full recovery");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "class Alpha; end\n");
+}
+
+#[test]
+fn ruby_overflow_handles_both_completion_orders_registration_and_newer_changes() {
+    for scan_first in [false, true] {
+        for overlap in [false, true] {
+            let mut f = fixture_as("ruby-lsp", &[], &[
+                ("Gemfile", ""), ("main.rb", "class Main; end\n"),
+                ("a.rb", "class Alpha; end\n"), ("stable.rb", "class Stable; end\n"),
+            ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+            f.s.dispatch(Command::OpenRoot(f.root.clone())); f.open("main.rb");
+            settle_without_watch(&mut f, |s| ready(s) && s.state().index_coverage().complete() && s.state().index_coverage().indexed == 4);
+            let start = messages(&f.log).len();
+            let path = write(&f.root, "a.rb", "class Omega; end\n");
+            f.s.dispatch(Completion::Changed(reader_core::watch::Change { overflow: true, ..Default::default() }));
+            let mut scan = Vec::new(); let mut scan_done = false; let mut indexed = None;
+            let until = Instant::now() + Duration::from_secs(10);
+            while !scan_done || indexed.is_none() {
+                assert!(Instant::now() < until);
+                match f.s.completions().try_recv() {
+                    Ok(c @ Completion::Indexed { .. }) => indexed = Some(c),
+                    Ok(c @ Completion::Scanned { .. }) => {
+                        if let Completion::Scanned { batch, .. } = &c { scan_done |= batch.done; }
+                        scan.push(c);
+                    }
+                    Ok(Completion::Changed(_)) => {},
+                    Ok(c) => { f.s.dispatch(c); },
+                    Err(_) => std::thread::yield_now(),
+                }
+            }
+            if scan_first { for c in scan.drain(..) { f.s.dispatch(c); } }
+            else { f.s.dispatch(indexed.take().unwrap()); }
+            f.s.dispatch(Completion::Changed(reader_core::watch::Change { registered: [f.root.clone()].into(), ..Default::default() }));
+            write(&f.root, "a.rb", "class Gamma; end\n");
+            f.s.dispatch(Completion::Changed(reader_core::watch::Change {
+                paths: if overlap { Default::default() } else { [path].into() }, overflow: overlap, ..Default::default()
+            }));
+            if scan_first { f.s.dispatch(indexed.take().unwrap()); }
+            else { for c in scan { f.s.dispatch(c); } }
+            settle_without_watch(&mut f, |s| !s.state().project().unwrap().refreshing() && s.state().index_coverage().complete());
+            f.s.dispatch(Command::FindDeclarations("Gamma".into()));
+            settle_without_watch(&mut f, |s| s.state().results().is_some_and(|r| r.done()));
+            assert!(f.s.state().results().unwrap().hits().iter().any(|h| h.text.as_ref() == "Gamma"));
+            f.s.dispatch(Command::FileSymbols); settle_without_watch(&mut f, |s| s.state().asking().is_none());
+            let log = messages(&f.log);
+            let events: Vec<_> = log[start..].iter().filter(|m| m["method"] == "workspace/didChangeWatchedFiles")
+                .flat_map(|m| m["params"]["changes"].as_array().unwrap()).collect();
+            assert!(events.iter().any(|e| e["uri"].as_str().unwrap().ends_with("/a.rb")));
+            assert_eq!(events.iter().any(|e| e["uri"].as_str().unwrap().ends_with("/stable.rb")), overlap,
+                "overlap falls back; registration alone does not lose deferred comparisons: scan_first={scan_first}");
+        }
+    }
+}
+
+#[test]
+fn ruby_refreshes_a_changed_open_document_and_rechecks_it_after_close() {
+    let mut f = fixture_as("ruby-lsp", &[], &[
+        ("Gemfile", ""), ("a.rb", "class Alpha; end\n"), ("b.rb", "class Beta; end\n"),
+    ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("a.rb");
+    let start = messages(&f.log).len();
+    write(&f.root, "a.rb", "class Omega; end\n");
+    f.s.dispatch(Completion::Changed(reader_core::watch::Change { paths: [f.root.join("a.rb")].into(), ..Default::default() }));
+    f.settle(|s| s.state().document().is_some_and(|d| d.text().contains("Omega")));
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log)[start..].iter().any(|m| m["method"] == "textDocument/didChange"));
+    f.open("b.rb");
+    let log = f.log.clone();
+    let uri = reader_core::semantics::lsp::file_uri(&f.root.join("a.rb"));
+    f.settle_until(move || {
+        let messages = messages(&log);
+        let tail = &messages[start..];
+        let Some(closed) = tail.iter().position(|m| m["method"] == "textDocument/didClose" && m["params"]["textDocument"]["uri"] == uri) else { return false };
+        tail[closed + 1..].iter().any(|m| m["method"] == "workspace/didChangeWatchedFiles" && m["params"]["changes"].as_array().unwrap().iter().any(|c| c["uri"] == uri && c["type"] == 2))
+    });
+    let log = messages(&f.log);
+    let tail = &log[start..];
+    let changed = tail.iter().position(|m| m["method"] == "textDocument/didChange").unwrap();
+    let closed = tail.iter().position(|m| m["method"] == "textDocument/didClose").unwrap();
+    assert!(tail[changed + 1..closed].iter().any(|m| m["method"] == "textDocument/documentSymbol"), "refresh must follow the new text");
+    assert!(f.s.state().results().is_none(), "the internal reply must not open a symbol panel");
+    assert!(f.s.state().asking().is_none());
 }
 
 #[test]
@@ -1017,7 +1444,7 @@ fn disable_and_restart_are_per_folder_and_invalidate_old_answers() {
     f.settle(|s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Failed(_))));
     assert_eq!(f.s.disabled(CommandId::RestartServer), None);
     assert_eq!(f.s.state().language_server_label(), "LSP stopped");
-    assert!(f.s.language_server_rows().iter().any(|(text, _)| text.contains("After fixing setup")));
+    assert!(f.s.language_server_details().contains("After fixing setup"));
     f.s.dispatch(Command::RestartServer);
     f.settle(ready);
     assert_eq!(pids(&f.log).len(), 3);
@@ -1029,6 +1456,7 @@ fn disable_and_restart_are_per_folder_and_invalidate_old_answers() {
     assert_eq!(f.s.state().provider().unwrap().status, Status::Disabled);
     assert!(f.s.state().servers().is_empty());
     assert_eq!(f.s.disabled(CommandId::Definition), Some("The language server is disabled for this folder"));
+    f.settle(|s| s.disabled(CommandId::EnableServer).is_none());
     assert_eq!(f.s.disabled(CommandId::DisableServer), Some("Already disabled for this folder"));
     let file = f.root.parent().unwrap().join("config/providers.json");
     let saved = || std::fs::read_to_string(&file).unwrap_or_default();
@@ -1242,6 +1670,12 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
     f.s.dispatch(Command::Forward);
     f.settle(|s| s.state().active().is_some_and(|t| t.retrieved().is_some()));
+    let uri = f.s.state().active().unwrap().source().to_string_lossy().into_owned();
+    assert!(f.s.state().tree_rows().any(|r| r.path.as_ref() == uri));
+    f.s.dispatch(Command::Close);
+    f.s.dispatch(Command::ActivateTree { path: uri.clone().into(), retain: false });
+    f.settle(|s| s.state().active().is_some_and(|t| t.retrieved().is_some()));
+    assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "java/classFileContents").count(), 2);
     // Its server restarted: still shown, said to be from an ended session.
     f.s.dispatch(Command::Back);
     f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
@@ -1256,6 +1690,8 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
     f.s.dispatch(Command::Back);
     assert!(f.notice("was retrieved from a language server and is no longer held"), "{:?}", f.s.state().notices());
+    f.s.dispatch(Command::ActivateTree { path: uri.into(), retain: false });
+    assert!(f.notice("Library source unavailable"));
 }
 
 #[test]
@@ -2086,4 +2522,49 @@ fn server_runtime_selection_saves_restarts_and_keeps_disabled_servers_disabled()
     f.settle(|s| s.state().server_runtime().unwrap().message.contains("saved."));
     f.settle(|s| s.state().language_server_label() == "LSP off");
     assert_eq!(std::fs::read_to_string(f.root.join("Main.java")).unwrap(), "class Main {}\n");
+}
+
+#[test]
+fn an_ignored_dependency_inside_the_project_appears_in_libraries_only() {
+    let mut f = fixture_as("typescript-language-server", &[], &[
+        ("package.json", "{}"), (".gitignore", "node_modules/\n"), ("main.ts", "from_dep();\n"),
+        ("node_modules/@test/library/index.ts", "export function from_dep() {}\n"),
+        ("node_modules/@test/library/sibling.ts", "export function sibling() {}\n"),
+    ], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("main.ts");
+    f.definition("from_dep", false);
+    f.settle(|s| s.state().tree_rows().any(|r| r.name.as_ref() == "sibling.ts"));
+    assert!(f.s.state().document().unwrap().source().ends_with("node_modules/@test/library/index.ts"));
+    assert!(f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
+    assert!(!f.s.state().project().unwrap().children("").iter().any(|(name, _)| name.as_ref() == "node_modules"));
+    assert_eq!(f.s.state().project().unwrap().root(), f.root);
+}
+
+#[test]
+fn a_library_source_held_in_another_pane_opens_without_reading_a_uri_from_disk() {
+    let mut f = fixture_as("jdtls", &[("FAKE_LSP_JDT", "1")], &[("pom.xml", ""), ("src/A.java", "class A { void m() { virt(); } }\n")], serde_json::json!({}), std::sync::Arc::new(Instant::now));
+    f.open("src/A.java");
+    f.definition("virt()", false);
+    f.settle(|s| s.state().active().is_some_and(|t| t.retrieved().is_some()));
+    let uri = f.s.state().active().unwrap().source().to_string_lossy().into_owned();
+    let doc = f.s.state().document().unwrap().clone();
+    f.s.dispatch(Command::Split(reader_core::session::Split::Columns));
+    f.s.dispatch(Command::Close);
+    f.s.dispatch(Command::FocusPane(1));
+    f.s.dispatch(Command::ActivateTree { path: uri.into(), retain: false });
+    assert_eq!(f.s.state().focused_pane(), 1);
+    assert!(f.s.state().active().unwrap().retrieved().is_some());
+    assert!(std::sync::Arc::ptr_eq(f.s.state().document().unwrap(), &doc));
+    assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "java/classFileContents").count(), 1);
+}
+
+#[test]
+fn standalone_navigation_within_the_servers_workspace_does_not_create_a_library() {
+    let mut f = fixture(&[], &[("src/main.rs", "fn main() { helper(); }\n"), ("src/inner/helper.rs", "pub fn helper() {}\n")]);
+    f.open("src/main.rs");
+    assert!(f.s.state().project().is_none());
+    f.definition("helper()", false);
+    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("inner/helper.rs")));
+    assert!(!f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
 }

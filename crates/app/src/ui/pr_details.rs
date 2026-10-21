@@ -424,10 +424,10 @@ impl Viewer {
             d.pending_scroll = None;
             // A full wheel step must not inherit a trackpad's fractional remainder.
             if matches!(ev.delta,ScrollDelta::Lines(_))&&delta.abs()>=1. { d.wheel=0.; }
-            d.wheel -= delta;
-            let rows = d.wheel.trunc() as isize;
-            d.wheel -= rows as f32;
-            d.scroll = d.scroll.saturating_add_signed(rows).min(d.max_scroll(rect));
+            let rows = lenz_gpui::scroll::steps(&mut d.wheel, -delta);
+            let max = d.max_scroll(rect);
+            d.scroll = d.scroll.saturating_add_signed(rows).min(max);
+            lenz_gpui::scroll::clamp(&mut d.wheel, d.scroll == 0, d.scroll == max);
         }
         cx.notify();
         true

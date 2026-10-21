@@ -23,9 +23,14 @@ state through the same core as the GUI. Switching directories saves and replaces
 or quitting saves it too. Files load lazily and missing files are skipped. See [workspace persistence](README.md)
 for limits and concurrent-window behavior.
 
+Dependency definitions reveal the same lazy **Libraries** section as the GUI, including when no project folder
+is open. Ctrl+Shift+E focuses the explorer; arrows expand or collapse folders and Enter opens a file. Collapse
+and expand to refresh a listing. Server-retrieved sources list visited files only. See the
+[Reader guide](README.md) for listing limits and server-session behavior.
+
 ## Controls
 
-F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all 89 shared
+F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared
 commands, their setting states and disabled reasons, including provider controls and features without a terminal
 shortcut. F1 opens wrapped, scrollable help; F2 opens language-server status and recovery.
 A dedicated toolbar above the tabs exposes Menu and frequent navigation/file/search actions.
@@ -90,19 +95,33 @@ disabled command's reason shows in the footer. The F10 palette labels commands w
 name followed by `:` to filter that group. The GUI additionally has a clickable
 Commands button in its status bar; the terminal keeps F10 / Ctrl-Shift-P access to the same catalog.
 
-The top row follows the GUI: explorer toggle, Back/Forward and the current Markdown or SVG source/preview
-control sit beside the tabs. The explorer title has Select Opened File. Narrow panes omit controls that do not
+The toolbar follows the GUI: explorer toggle, Back/Forward, SVG Source/Image and frequent file/search actions.
+Markdown's **Preview / Source** button sits at the right edge of its file header; each split pane controls its
+own document, focusing that pane before switching. The explorer title has Select Opened File. Narrow panes omit controls that do not
 fit; every action remains available through F10. Left-click selects source text; right-click in either reading
 pane opens the same contextual command list as the GUI, with shared availability and separators. Clicking
 outside a menu dismisses it without acting on the document underneath.
 
 The footer keeps a clickable LSP status before paths and notices. Click it, press F2, or choose **Language Server
-Status…** in F10 to read the full error and setup guidance. Press Ctrl-C in that dialog or choose **Copy Language
-Server Details** to copy the full, unwrapped error and troubleshooting context through OSC 52. The dialog offers Restart, Enable/Disable for This
+Status…** in F10 for the compact actions menu. Choose **Server Details…** for the full error, setup guidance,
+project settings and indexing context. Its clickable **Copy** and **Close** controls stay visible while scrolling;
+Ctrl-C copies the full, unwrapped snapshot through OSC 52, and Esc closes it. Reopen the popup to refresh its
+contents. **Copy Language Server Details** remains in F10. The menu offers Restart, Enable/Disable for This
 Folder and Set Workspace Root with shared disabled reasons. Recovery actions stay in fixed positions while
 background status changes. Missing servers need user installation or an executable/PATH correction; restarting
 rechecks setup. Disabled servers stay off until explicitly enabled. Unsupported documents explain that no server
 is available; text search and syntax highlighting remain usable. See [provider setup](providers.md#status-and-recovery).
+
+F2 and the Language Servers command group also offer **Exclude Ruby Tooling Gems for This Project** and
+**Reset LSP Settings for This Project**. These use the resolved server workspace, save outside the checkout,
+and restart only the affected provider/workspace. Exclusions default to On and reduce navigation into tooling
+gems; toggle them Off to restore that coverage without clearing unrelated settings. Reset restores inherited settings for that provider/project. See [project settings](providers.md#project-language-server-settings)
+for JSON overrides, precedence and legacy Ruby `.index.yml` handling.
+
+The same menu offers **Reuse Saved Declaration Index: On/Off** (On by default) and **Rebuild Project Index**.
+Rebuild discards the current project's saved declarations, refreshes open documents and restarts its language
+servers while rebuilding local symbols. Both controls also appear in F10 and Find Action. See
+[cache and rebuild controls](providers.md#saved-declarations-and-rebuilding) for settings and limits.
 
 The finder accepts `name:line[:column]`. Go to line accepts `line`, `line:column` or `line,column` and reports
 invalid input. Find updates while typing; Enter leaves its matches available for F3, while Esc closes find.

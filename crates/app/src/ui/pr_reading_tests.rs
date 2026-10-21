@@ -22,6 +22,28 @@ fn gui_pr_reading_wheel_preserves_small_pixel_and_horizontal_input(cx: &mut Test
 }
 
 #[test]
+fn gui_pr_trackpad_overscroll_does_not_delay_reversal() {
+    let mut cx = TestAppContext::single();
+    let f = pr_fixture(&mut cx);
+    f.viewer.update(&mut cx, |v, _| v.repo.as_mut().unwrap().pr.as_mut().unwrap().pr.body = "Paragraph.\n\n".repeat(80));
+    run(&mut cx, &f, crate::catalog::Action::Pr(crate::catalog::PrAction::Details(crate::pr_session::DetailsTab::Conversation)));
+    f.window.update(&mut cx, |v, w, cx| {
+        let _ = v.render(w, cx);
+        let rect = v.pr_pane();
+        let max = v.pr_dialog.as_ref().unwrap().max_scroll(rect);
+        assert!(max > 1);
+        for (start, outward, expected) in [(max, -0.25, max - 1), (0, 0.25, 1)] {
+            let d = v.pr_dialog.as_mut().unwrap();
+            d.scroll = start; d.wheel = 0.;
+            for delta in [outward, outward, outward, -outward, -outward, -outward, -outward] {
+                v.on_wheel(&ScrollWheelEvent { position: point(px(rect.0 + 40.), px(rect.1 + 60.)), delta: ScrollDelta::Pixels(point(px(0.), px(delta * line_h()))), ..Default::default() }, w, cx);
+            }
+            assert_eq!(v.pr_dialog.as_ref().unwrap().scroll, expected);
+        }
+    }).unwrap();
+}
+
+#[test]
 fn gui_pr_native_reading_reuses_markdown_typography_and_measured_targets() {
     let mut cx = TestAppContext::build_with_text_system(gpui::TestDispatcher::new(0), None, native_text_system());
     let f = pr_fixture(&mut cx);

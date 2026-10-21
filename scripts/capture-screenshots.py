@@ -6,6 +6,7 @@ private Xvfb, and writes PNGs to docs/images/. Never touches the user's desktop 
 """
 import argparse, os, shutil, subprocess, tempfile, time
 from pathlib import Path
+from perf_support import read_display_number
 from PIL import Image
 from Xlib import display, X, XK
 from Xlib.ext import xtest
@@ -212,8 +213,10 @@ class Display:
         self.server = subprocess.Popen([opt.xvfb, '-displayfd', str(w), '-screen', '0', '1920x1200x24', '-nolisten', 'tcp', '-noreset'],
                                        pass_fds=(w,), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         os.close(w)
-        number = os.read(r, 100).decode().strip()
-        os.close(r)
+        try:
+            number = read_display_number(r)
+        finally:
+            os.close(r)
         self.name = ':' + number
         self.d = display.Display(self.name)
         self.env = dict(os.environ, DISPLAY=self.name, XDG_RUNTIME_DIR=str(scratch), XDG_CONFIG_HOME=str(scratch/'config'),

@@ -7,9 +7,9 @@ Only use disposable fixtures: the scenarios change selections and in-memory merg
 """
 import ctypes as C
 import ctypes.util
-import argparse, json, os, re, selectors, shutil, statistics, subprocess, tempfile, time
+import argparse, json, os, re, shutil, statistics, subprocess, tempfile, time
 from pathlib import Path
-from perf_support import prepare_gui_launch, gui_about_visible, GUI_ABOUT_ORACLE_VERSION, isolate_user_state
+from perf_support import prepare_gui_launch, gui_about_visible, GUI_ABOUT_ORACLE_VERSION, isolate_user_state, read_display_number
 
 # Open only the private server created below; never connect to the user's DISPLAY.
 x=C.CDLL(ctypes.util.find_library('X11'))
@@ -79,11 +79,8 @@ server=subprocess.Popen([opt.xvfb,'-displayfd',str(w),'-screen','0','1600x1000x2
 os.close(w)
 proc=None; display=None
 try:
-    with selectors.DefaultSelector() as s:
-        s.register(r,selectors.EVENT_READ)
-        if not s.select(10): raise RuntimeError('private display failed')
-    number=os.read(r,100).decode().strip(); os.close(r)
-    if not number.isdigit(): raise RuntimeError('private display returned no display number')
+    try: number=read_display_number(r)
+    finally: os.close(r)
     env['DISPLAY']=':'+number
     display=x.XOpenDisplay(env['DISPLAY'].encode()); assert display
     log=(root/'lenz.log').open('w')

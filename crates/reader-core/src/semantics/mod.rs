@@ -226,16 +226,17 @@ pub struct ProviderView {
 
 impl ProviderView {
     /// Short, persistent status control; full errors and recovery actions live in the status dialog.
-    pub fn status_label(&self) -> &'static str {
-        match self.status {
+    pub fn status_label(&self) -> String {
+        match &self.status {
             Status::Queued => "LSP waiting",
             Status::Starting => "LSP starting",
+            Status::Indexing(what) if !what.is_empty() => return format!("LSP indexing {what}"),
             Status::Indexing(_) => "LSP indexing",
             Status::Ready => "LSP ready",
             Status::Missing(_) => "LSP unavailable",
             Status::Failed(_) => "LSP stopped",
             Status::Disabled => "LSP off",
-        }
+        }.to_owned()
     }
 
     /// Whether it offers `question` (false until it has initialized).
@@ -383,11 +384,13 @@ struct Server {
     initializing: Option<i64>,
     /// Documents the server has open, with the snapshot it was sent.
     open: HashMap<PathBuf, Arc<Document>>,
+    /// External changes a client-watched server may defer while it holds the document open.
+    dirty_open: HashMap<PathBuf, bool>,
     /// The definition request in flight: the session's request id and the protocol id.
     /// Each lane's pending request: the session request and its JSON-RPC id.
     pending: HashMap<Lane, (u64, i64)>,
     /// Work-done progress in progress, by token.
-    progress: HashMap<String, String>,
+    progress: HashMap<String, Progress>,
     /// rust-analyzer's `experimental/serverStatus`: not quiescent while loading the workspace.
     busy: bool,
     /// A tab holds one of its documents (shown or released).
@@ -404,6 +407,25 @@ struct Server {
     asked: [HashMap<PathBuf, (u64, i64, bool)>; 2],
     /// Decoration requests in flight, by id: the document, its version and the kind.
     decor: HashMap<i64, (PathBuf, u64, Decor)>,
+}
+
+#[derive(Default)]
+struct Progress {
+    title: String,
+    message: String,
+    percentage: Option<u64>,
+}
+
+impl Progress {
+    fn update(&mut self, value: &Value) {
+        if let Some(message) = value["message"].as_str() { self.message = message.to_owned(); }
+        if let Some(percentage) = value["percentage"].as_u64().filter(|p| *p <= 100) { self.percentage = Some(percentage); }
+    }
+
+    fn summary(&self) -> String {
+        let percentage = self.percentage.map_or(String::new(), |p| format!("{p}% "));
+        format!("{percentage}{}{}{}", self.title, if self.message.is_empty() { "" } else { " " }, self.message)
+    }
 }
 
 /// A message for a server's input. Document text travels shared and is encoded by the writer thread, so the UI
@@ -503,7 +525,7 @@ impl Semantics {
     }
 
     /// The provider for `doc`'s language and, once resolved, its workspace root and the provider serving it.
-    fn resolved(&self, doc: &Document) -> Option<(usize, Option<Option<PathBuf>>)> {
+    pub(crate) fn resolved(&self, doc: &Document) -> Option<(usize, Option<Option<PathBuf>>)> {
         let (p, _) = provider::for_language(doc.language()?)?;
         let dir = doc.source().parent()?.to_owned();
         Some(match self.roots.get(&(p, dir)) {
@@ -658,6 +680,7 @@ impl Semantics {
             next_id: 0,
             initializing: None,
             open: HashMap::new(),
+            dirty_open: HashMap::new(),
             pending: HashMap::new(),
             progress: HashMap::new(),
             busy: false,
@@ -691,7 +714,7 @@ impl Semantics {
                     "clientInfo": { "name": "lenz-reader" },
                     "rootUri": lsp::file_uri(&s.key.root),
                     "workspaceFolders": [{ "uri": lsp::file_uri(&s.key.root), "name": name }],
-                    "initializationOptions": self.settings.initialization(provider),
+                    "initializationOptions": self.settings.initialization(provider, Some(&s.key.root)),
                     "capabilities": {
                         "general": { "positionEncodings": if provider.utf8 { json!(["utf-8", "utf-16"]) } else { json!(["utf-16"]) } },
                         "textDocument": {
@@ -943,6 +966,22 @@ impl Semantics {
         stop.into_iter().for_each(Server::stop);
     }
 
+    /// Reload saved overrides and stop only the affected workspace/provider; other projects keep running.
+    pub fn reload_project(&mut self, provider: usize, root: &Path) {
+        self.reload();
+        let primary = provider::primary(provider);
+        if self.waiting.as_ref().is_some_and(|w| w.path.parent().is_some_and(|dir|
+            self.roots.get(&(primary, dir.to_owned())).is_some_and(|r|
+                r.as_ref().is_some_and(|r| r.as_ref().is_some_and(|(p, at)| *p == provider && at == root))))) {
+            self.waiting = None;
+        }
+        self.roots.retain(|_, r| !r.as_ref().is_some_and(|r| r.as_ref().is_some_and(|(p, at)| *p == provider && at == root)));
+        let (stop, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut self.servers).into_iter().partition(|s| s.key.provider == provider && s.key.root == root);
+        self.servers = keep;
+        self.queued.retain(|id| self.servers.iter().any(|s| s.session == *id));
+        stop.into_iter().for_each(Server::stop);
+    }
+
     /// Process groups of running servers, for memory sampling.
     pub fn groups(&self) -> Vec<(u64, u32)> {
         self.servers.iter().filter_map(|s| Some((s.session, s.process.lock().ok()?.child.as_ref()?.id()))).collect()
@@ -975,20 +1014,29 @@ impl Semantics {
         Some(format!("{} · {root}", PROVIDERS[s.key.provider].name))
     }
 
-    /// Tell each initialized server that relies on the client for it about the changed `paths` under its root:
-    /// changed when the file exists (Ruby LSP indexes a file new to it too), else deleted. Only such servers cost a
-    /// look at the file system; folders are left out (their files are not listed: a folder moved in is not
-    /// reported).
-    pub fn files_changed(&self, paths: &std::collections::BTreeSet<PathBuf>) {
-        let servers: Vec<&Server> = self.servers.iter().filter(|s| s.initialized() && PROVIDERS[s.key.provider].watched_files).collect();
-        if servers.is_empty() {
-            return;
+    /// Initializing/restarting servers have no settled baseline for content-based watch recovery.
+    pub(crate) fn can_filter_changes(&self) -> bool {
+        let mut found = false;
+        for s in self.servers.iter().filter(|s| PROVIDERS[s.key.provider].watched_files) {
+            if s.status != Status::Ready { return false; }
+            found = true;
         }
-        let changes: Vec<(&PathBuf, bool)> = paths.iter().filter(|p| !p.is_dir()).map(|p| (p, p.exists())).collect();
-        for s in servers {
+        found
+    }
+
+    /// Tell client-watched servers about files under their root: true means changed/present, false deleted.
+    /// Ruby LSP also indexes previously unknown files on Changed. Directory events are expanded by the session.
+    pub fn files_changed(&mut self, changes: &[(PathBuf, bool)]) {
+        for s in self.servers.iter_mut().filter(|s| s.initialized() && PROVIDERS[s.key.provider].watched_files) {
             let events: Vec<Value> = changes.iter().filter(|(p, _)| p.starts_with(&s.key.root)).map(|(p, exists)| json!({ "uri": lsp::file_uri(p), "type": if *exists { 2 } else { 3 } })).collect();
             if !events.is_empty() {
                 s.notify("workspace/didChangeWatchedFiles", json!({ "changes": events }));
+            }
+            for (path, exists) in changes {
+                if path.starts_with(&s.key.root) && s.open.contains_key(path) {
+                    s.dirty_open.insert(path.clone(), *exists);
+                    if *exists { s.refresh_index(path); }
+                }
             }
         }
     }
@@ -1090,6 +1138,12 @@ impl Semantics {
         self.queued.retain(|q| servers.iter().any(|s| s.session == *q));
         stop.into_iter().for_each(Server::stop);
         self.settings.clone()
+    }
+
+    pub fn restart_project(&mut self, browse: &Path) {
+        let targets: Vec<_> = self.servers.iter().filter(|s| s.key.root.starts_with(browse) || browse.starts_with(&s.key.root))
+            .map(|s| (s.key.provider, s.key.root.clone())).collect();
+        for (provider, root) in targets { self.reload_project(provider, &root); }
     }
 
     /// Stop every server now (project closure): `shutdown` and `exit`, then the process group is killed if it
@@ -1270,6 +1324,17 @@ impl Server {
         let _ = self.send(json!({ "jsonrpc": "2.0", "method": method, "params": params }));
     }
 
+    fn refresh_index(&mut self, path: &Path) {
+        // Ruby LSP indexes open-file changes during document requests; watcher reports alone are ignored.
+        if PROVIDERS[self.key.provider].id != "ruby-lsp" || !self.supports(Question::FileSymbols) { return; }
+        self.next_id += 1;
+        // No pending lane: the reply is intentionally discarded and cannot replace a user's navigation.
+        if let Err(why) = self.send(json!({ "jsonrpc": "2.0", "id": self.next_id, "method": Question::FileSymbols.method(), "params": { "textDocument": { "uri": lsp::file_uri(path) } } })) {
+            self.status = Status::Failed(why);
+            self.halt();
+        }
+    }
+
     /// Open, update or close documents so the server holds exactly `docs`, each as the snapshot shown.
     fn reconcile(&mut self, docs: HashMap<PathBuf, Arc<Document>>) {
         let gone: Vec<PathBuf> = self.open.keys().filter(|p| !docs.contains_key(*p)).cloned().collect();
@@ -1279,6 +1344,9 @@ impl Server {
                 a.remove(&path);
             });
             self.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::file_uri(&path) } }));
+            if let Some(exists) = self.dirty_open.remove(&path) {
+                self.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": lsp::file_uri(&path), "type": if exists { 2 } else { 3 } }] }));
+            }
         }
         let language_id = PROVIDERS[self.key.provider].language_id;
         for (path, doc) in docs {
@@ -1293,6 +1361,10 @@ impl Server {
                 self.open.clear();
                 self.halt();
                 return;
+            }
+            if language.is_none() && PROVIDERS[self.key.provider].watched_files {
+                self.dirty_open.insert(path.clone(), true);
+                self.refresh_index(&path);
             }
             self.open.insert(path, doc);
         }
@@ -1311,7 +1383,7 @@ impl Server {
                     "workspace/configuration" => {
                         let provider = &PROVIDERS[self.key.provider];
                         let items = m["params"]["items"].as_array().map_or(&[][..], Vec::as_slice);
-                        Ok(Value::Array(items.iter().map(|i| settings.configuration(provider, i["section"].as_str())).collect()))
+                        Ok(Value::Array(items.iter().map(|i| settings.configuration(provider, Some(&self.key.root), i["section"].as_str())).collect()))
                     }
                     "window/workDoneProgress/create" | "client/registerCapability" | "client/unregisterCapability" | "window/showMessageRequest" => Ok(Value::Null),
                     // Its results changed: forget what was asked; the next sync asks again.
@@ -1390,15 +1462,12 @@ impl Server {
                         self.progress.remove(&token);
                     }
                     Some("begin") => {
-                        let title = value["title"].as_str().unwrap_or_default();
-                        let detail = value["message"].as_str().map_or(title.to_owned(), |m| format!("{title} {m}"));
-                        self.progress.insert(token, detail);
+                        let mut progress = Progress { title: value["title"].as_str().unwrap_or_default().to_owned(), ..Progress::default() };
+                        progress.update(value);
+                        self.progress.insert(token, progress);
                     }
                     Some("report") => {
-                        if let (Some(entry), Some(m)) = (self.progress.get_mut(&token), value["message"].as_str()) {
-                            let title = entry.split(' ').next().unwrap_or_default().to_owned();
-                            *entry = format!("{title} {m}");
-                        }
+                        if let Some(progress) = self.progress.get_mut(&token) { progress.update(value); }
                     }
                     _ => return Outcome::default(),
                 }
@@ -1444,10 +1513,8 @@ impl Server {
         if !self.initialized() {
             return;
         }
-        let mut work: Vec<&String> = self.progress.values().collect();
-        work.sort();
-        self.status = match (work.first(), self.busy) {
-            (Some(w), _) => Status::Indexing((*w).clone()),
+        self.status = match (self.progress.iter().min_by(|a, b| a.0.cmp(b.0)), self.busy) {
+            (Some((_, w)), _) => Status::Indexing(w.summary()),
             (None, true) => Status::Indexing("loading the workspace".into()),
             (None, false) => Status::Ready,
         };

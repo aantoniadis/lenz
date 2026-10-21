@@ -163,11 +163,15 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
     v.simulate_click(point(px(20.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 9 && r.server_rows().iter().all(|(_, id)| id.is_some())));
+    let button = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().bounds.origin + point(px(20.0), px(4.0 + line_h() / 2.0)));
+    v.simulate_click(button, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { title: "Server details", .. }))));
     let text = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>().join(""));
     assert!(text.contains("was not found") && text.contains("rustup component add rust-analyzer") && text.contains("providers.json"), "{text}");
     v.simulate_keystrokes("ctrl-a f5");
     v.simulate_event(gpui::MouseDownEvent { button: MouseButton::Right, position: point(px(600.0), px(75.0)), modifiers: Modifiers::default(), click_count: 1, first_mouse: false });
-    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
     for (w, h) in [(180.0, 90.0), (1.0, 1.0), (800.0, 400.0)] {
         v.simulate_resize(size(px(w), px(h)));
@@ -175,12 +179,19 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| !r.modal_lines().is_empty()));
     }
-    let expected = f.view.read_with(&v, |r, _| r.session().language_server_rows().into_iter().filter_map(|(text, action)| action.is_none().then_some(text)).collect::<Vec<_>>().join("\n\n"));
+    let expected = f.view.read_with(&v, |r, _| r.session().language_server_details());
     v.simulate_keystrokes("ctrl-c");
     assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
     assert!(expected.contains("was not found") && expected.contains("rustup component add rust-analyzer"));
-    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+    draw(&mut v);
+    let [copy, close] = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w));
+    v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into())));
+    v.simulate_click(copy.center(), Modifiers::default());
+    assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
+    v.simulate_click(close.center(), Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
     let activate = |v: &mut VisualTestContext, id: CommandId| {
         v.simulate_keystrokes("home");
         let at = f.view.read_with(v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(id)).unwrap());
@@ -188,11 +199,12 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
         v.simulate_keystrokes("enter");
         assert!(f.view.read_with(v, |r, _| r.modal.is_none()));
     };
-    activate(&mut v, CommandId::CopyServerDetails);
-    assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::DisableServer);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().language_server_label()), "LSP off");
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::EnableServer).is_none());
+    let mut v = visual(cx, &f);
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::EnableServer);
     drop(v);
@@ -202,6 +214,77 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     activate(&mut v, CommandId::RestartServer);
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
+}
+
+#[gpui::test]
+fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut TestAppContext) {
+    let source = format!("{}\n", "x".repeat(300)).repeat(200);
+    let f = fixture(cx, Some(("main.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    let position = f.view.read_with(&v, |r, _| r.text_bounds.unwrap().center());
+    let char_w = f.view.read_with(&v, |r, _| r.char_w);
+    for _ in 0..8 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-0.25 * char_w), px(-line_h() * 0.25))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 2);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column()), 2);
+    v.simulate_keystrokes("home");
+    for _ in 0..11 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
+    }
+    for _ in 0..4 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 1);
+    v.simulate_keystrokes("end");
+    let last = f.view.read_with(&v, |r, _| r.session().state().top_line());
+    for _ in 0..3 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+    }
+    for _ in 0..4 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), last - 1);
+    f.view.update(&mut v, |r, cx| r.scroll_to_x(f32::MAX, cx));
+    let right = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column());
+    for dx in [-0.25, -0.25, -0.25, 0.25, 0.25, 0.25, 0.25] {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(dx * char_w), px(0.0))), ..Default::default() });
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column()), right - 1);
+    for _ in 0..3 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+    }
+    let other = f.dir.path().join("other.txt");
+    std::fs::write(&other, &source).unwrap();
+    f.view.update(&mut v, |r, cx| r.open(other.clone(), cx));
+    drop(v);
+    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source() == other));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 0, "a new tab must not inherit the previous tab's fraction");
+    assert_eq!(std::fs::read(f.dir.path().join("main.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppContext) {
+    let source = format!("{}\n", "x".repeat(80));
+    let f = fixture(cx, Some(("wide.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(480.0), px(300.0)));
+    draw(&mut v);
+    let (position, char_w, max) = f.view.read_with(&v, |r, _| (r.text_bounds.unwrap().center(), r.char_w, r.max_hscroll()));
+    assert!(max > char_w && (max / char_w).fract() > 0.01, "fixture needs a partly visible last column");
+    for _ in 0..((max / char_w).ceil() as usize + 1) * 4 {
+        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-char_w * 0.25), px(0.0))), ..Default::default() });
+        draw(&mut v);
+    }
+    let offset = f.view.read_with(&v, |r, _| r.hscroll());
+    assert!(offset >= max && offset < max + char_w, "last partial column remains clipped: {offset} < {max}");
 }
 
 #[gpui::test]
@@ -1043,6 +1126,35 @@ fn outline_and_declaration_search_through_keys(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn declaration_search_follows_a_coarse_checkout_through_keys(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["app/a.rb"]);
+    let path = root.join("app/a.rb");
+    std::fs::write(&path, "class WatchAlpha; end\n").unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, |v| scanned(v) && v.session().state().index_coverage().indexed == 1 && v.session().state().index_coverage().complete());
+    let mut window = visual(cx, &f);
+    window.simulate_keystrokes("ctrl-t w a t c h");
+    drop(window);
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().len() == 1));
+    std::fs::write(&path, "class WatchOmega; end\n").unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Completion::Changed(reader_core::watch::Change { paths: [root.join("app")].into(), ..Default::default() }), cx));
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().first().is_some_and(|h| &*h.text == "WatchOmega")));
+    let mut window = visual(cx, &f);
+    for (w, h) in [(220., 90.), (900., 500.)] {
+        window.simulate_resize(size(px(w), px(h)));
+        draw(&mut window);
+    }
+    let (rows, _) = f.view.update(&mut window, |v, _| v.panel_contents(6, 3));
+    assert!(rows.iter().any(|r| r.label.contains("WatchOmega")));
+    assert!(!rows.iter().any(|r| r.label.contains("WatchAlpha")));
+    window.simulate_keystrokes("enter enter");
+    drop(window);
+    settle(cx, &f, |v| v.session().state().selected_text() == Some("WatchOmega"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
+}
+
+#[gpui::test]
 fn a_rust_trait_is_labelled_trait_in_the_outline(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let root = project(f.dir.path(), &["src/lib.rs"]);
@@ -1163,6 +1275,27 @@ fn fake_lsp() -> PathBuf {
 }
 
 #[gpui::test]
+fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestAppContext) {
+    let f = fixture_with(cx, Some(("main.rs", b"fn main() {}\n")), &fake_lsp());
+    std::fs::write(f.dir.path().join("Cargo.toml"), "[package]\nname='progress'\nversion='0.1.0'\n").unwrap();
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+        session: 1,
+        message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
+    }), cx));
+    let mut v = visual(cx, &f);
+    for (w, h) in [(900.0, 500.0), (480.0, 300.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).contains("42%"));
+        v.simulate_keystrokes("f2 enter");
+        assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("42%"))));
+        v.simulate_keystrokes("escape");
+    }
+    assert_eq!(std::fs::read(f.dir.path().join("main.rs")).unwrap(), b"fn main() {}\n");
+}
+
+#[gpui::test]
 fn definition_candidates_and_peek_preview_in_the_panel_and_open_on_enter(cx: &mut TestAppContext) {
     let f = fixture_with(cx, None, &fake_lsp());
     let pkg = f.dir.path().join("pkg");
@@ -1272,6 +1405,9 @@ fn usages_symbols_and_server_controls_through_keys_and_the_menu(cx: &mut TestApp
     };
     run(&mut v, "Disable Language Server for This Folder");
     assert!(f.view.read_with(&v, |r, _| r.status()).contains("rust-analyzer: disabled for this folder"));
+    drop(v);
+    settle(cx, &f, |r| r.session().disabled(CommandId::EnableServer).is_none());
+    let mut v = visual(cx, &f);
     run(&mut v, "Enable Language Server for This Folder");
     drop(v);
     settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
@@ -1565,19 +1701,19 @@ fn markdown_reads_as_a_preview_and_switches_to_source_at_the_same_place(cx: &mut
     let md = f.dir.path().join("README.md");
     std::fs::write(&md, &source).unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(md.clone()), cx));
-    // Opened as source; the toolbar offers the preview.
+    // Opened as source; the file header offers the preview.
     settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(700.0), px(400.0)));
     show(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.visible_rows()).first().is_some_and(|r| r.text == "# Title"));
-    assert_eq!(click_toolbar(&mut v, &f, CommandId::MarkdownSource), "Preview");
+    assert_eq!(click_preview(&mut v, &f, 0), "Preview");
     drop(v);
     settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Preview(p)) if p.images.is_some()));
     let mut v = visual(cx, &f);
     show(&mut v);
     show(&mut v);
-    assert_eq!(f.view.read_with(&v, |r, _| r.nav_buttons().iter().find(|b| b.2 == CommandId::MarkdownSource).map(|b| b.4)), Some("Source"), "the button now goes back to the source");
+    assert_eq!(f.view.read_with(&v, |r, _| r.panes.first().and_then(|g| r.preview_button(*g)).map(|(_, control)| control.label)), Some("Source"), "the button now goes back to the source");
     // The rendered text, its image drawn, no source rows.
     let rows = f.view.read_with(&v, |r, _| r.preview_rows());
     assert_eq!(rows[0], (0, "Title".to_string()));
@@ -1646,7 +1782,7 @@ fn history_returns_to_a_markdown_preview_at_its_reading_line(cx: &mut TestAppCon
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(700.0), px(400.0)));
     draw(&mut v);
-    click_toolbar(&mut v, &f, CommandId::MarkdownSource);
+    click_preview(&mut v, &f, 0);
     drop(v);
     settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Preview(_))));
     let mut v = visual(cx, &f);
@@ -2098,6 +2234,12 @@ fn a_folder_given_at_launch_opens_as_the_project(cx: &mut TestAppContext) {
     }
     assert_eq!(view.read_with(cx, |v, _| v.session().state().project().map(|p| p.root().to_owned())), Some(proj.clone()));
     assert!(view.read_with(cx, |v, _| v.session().state().document().is_none()));
+}
+
+fn click_preview(v: &mut VisualTestContext, f: &Fixture, pane: u8) -> &'static str {
+    let (button, control) = f.view.read_with(v, |r, _| r.preview_button(*r.panes.iter().find(|g| g.pane == pane).unwrap()).unwrap());
+    v.simulate_click(button.center(), Modifiers::default());
+    control.label
 }
 
 /// Click the toolbar button for `id` (it must be shown) and return its label before the click.
@@ -4242,7 +4384,12 @@ fn menu_groups_support_pointer_back_disabled_actions_and_tiny_appearances(cx: &m
         assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, why)| s == "Reload" && *why == Some("No file is open"))));
         click_row(&mut v, "‹ All menus");
         click_row(&mut v, "Language Servers");
-        assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s == CommandId::LanguageServer.label())));
+        assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s == CommandId::ServerDetails.label())));
+        click_row(&mut v, "Server Details");
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { title: "Server details", .. }))));
+        v.simulate_keystrokes("escape");
+        v.simulate_click(button, Modifiers::default());
+        click_row(&mut v, "Language Servers");
         v.simulate_keystrokes("escape end enter");
         assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
         v.simulate_keystrokes("escape");
@@ -4736,7 +4883,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
             // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
             let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
-            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { text: text.clone() }); cx.notify(); });
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone() }); cx.notify(); });
             v.simulate_keystrokes("end up");
             draw(&mut v);
             f.view.read_with(&v, |r, _| {

@@ -150,6 +150,8 @@ pub enum Command {
     /// Expand or collapse a project-tree directory (its path relative to the root); a folder whose only entry is a
     /// folder opens that one too, down to a folder with more.
     ToggleDir(String),
+    /// Activate a current explorer row by stable identity.
+    ActivateTree { path: Arc<str>, retain: bool },
     /// Open the tree's folders above the active file, so its row shows.
     Locate,
     /// List each folder's folders before its files (else everything by name); remembered.
@@ -250,6 +252,11 @@ pub enum Command {
     OpenServerRuntime,
     CloseServerRuntime,
     SetServerRuntime(Option<PathBuf>),
+    ExcludeRubyTooling,
+    SetRubyToolingExclusions(bool),
+    ResetProjectServerSettings,
+    SetPersistentIndex(bool),
+    RebuildIndex,
     /// An SVG: switch between its rendering and its source text.
     ToggleImageSource,
     /// A Markdown file: switch between its preview and its source, at the same place.
@@ -366,9 +373,14 @@ pub enum CommandId {
     FileSymbols,
     WorkspaceRoot,
     LanguageServer,
+    ServerDetails,
     CopyServerDetails,
     ServerRuntime,
     RestartServer,
+    ExcludeRubyTooling,
+    ResetProjectServerSettings,
+    PersistentIndex,
+    RebuildIndex,
     DisableServer,
     EnableServer,
     ImageSource,
@@ -410,7 +422,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 89] = [
+    pub const ALL: [CommandId; 94] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -480,9 +492,14 @@ impl CommandId {
         Self::FileSymbols,
         Self::WorkspaceRoot,
         Self::LanguageServer,
+        Self::ServerDetails,
         Self::CopyServerDetails,
         Self::ServerRuntime,
         Self::RestartServer,
+        Self::ExcludeRubyTooling,
+        Self::ResetProjectServerSettings,
+        Self::PersistentIndex,
+        Self::RebuildIndex,
         Self::DisableServer,
         Self::EnableServer,
         Self::ImageSource,
@@ -577,9 +594,14 @@ impl CommandId {
             Self::Symbols => "Find Symbol (language server)…",
             Self::FileSymbols => "File Symbols (language server)",
             Self::LanguageServer => "Language Server Status…",
+            Self::ServerDetails => "Server Details…",
             Self::CopyServerDetails => "Copy Language Server Details",
             Self::ServerRuntime => "Choose Language Server Runtime…",
             Self::RestartServer => "Restart Language Server",
+            Self::ExcludeRubyTooling => "Exclude Ruby Tooling Gems for This Project",
+            Self::ResetProjectServerSettings => "Reset LSP Settings for This Project",
+            Self::PersistentIndex => "Reuse Saved Declaration Index",
+            Self::RebuildIndex => "Rebuild Project Index",
             Self::DisableServer => "Disable Language Server for This Folder",
             Self::EnableServer => "Enable Language Server for This Folder",
             Self::ImageSource => "Image Source / Rendered",
@@ -650,10 +672,12 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    LibraryRead { generation: u64, read: crate::libraries::Read },
     Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
     ServerRuntimes { request: u64, paths: Vec<PathBuf> },
     ServerRuntimeSaved { request: u64, kind: semantics::runtime::Kind, result: Result<Option<PathBuf>, String> },
     ProviderSettingsSaved { ok: bool },
+    ProjectProviderSaved { provider: usize, root: PathBuf, reset: bool, result: Result<(), String> },
     /// The project's saved places read from `from` (or why not), for saving to `file` (a different file when `from`
     /// is its name before names were canonical).
     PlacesRead { generation: u64, file: PathBuf, from: PathBuf, result: Result<crate::places::Places, crate::places::ReadError> },
@@ -698,7 +722,8 @@ pub enum Completion {
     /// snapshot (and stamp, when read from disk), or why not.
     Validated { id: u64, open: u64, index: usize, result: Result<(Option<Stamp>, Arc<Document>), String> },
     /// Declaration records for files of root generation `generation`.
-    Indexed { generation: u64, files: Vec<(Arc<str>, FileIndex)> },
+    Indexed { generation: u64, revision: u64, files: Vec<(Arc<str>, FileIndex)> },
+    IndexReset { generation: u64, revision: u64, result: Result<(), String> },
     /// A tab's source was renamed, confirmed by file identity.
     Moved { tab: TabId, token: u64, to: PathBuf, stamp: Option<Stamp>, canonical: Option<PathBuf> },
     /// A semantic provider's event.
@@ -759,6 +784,7 @@ impl Input {
                 Completion::Rendered { .. } => "rendered",
                 Completion::PreviewImages { .. } => "preview images",
                 Completion::Scanned { .. } => "scanned",
+                Completion::LibraryRead { .. } => "library read",
                 Completion::Ranked { .. } => "ranked",
                 Completion::Navigation { .. } => "navigation",
                 Completion::Theme(_) => "theme",
@@ -770,11 +796,13 @@ impl Input {
                 Completion::ResultSpans { .. } => "result spans",
                 Completion::Validated { .. } => "validated",
                 Completion::Indexed { .. } => "indexed",
+                Completion::IndexReset { .. } => "index reset",
                 Completion::Moved { .. } => "moved",
                 Completion::Semantic(_) => "semantic",
                 Completion::ServerRuntimes { .. } => "Server runtimes",
                 Completion::ServerRuntimeSaved { .. } => "Server runtime saved",
                 Completion::ProviderSettingsSaved { .. } => "provider settings saved",
+                Completion::ProjectProviderSaved { .. } => "project provider settings saved",
                 Completion::Watch { .. } => "watch",
                 Completion::Retrieved { .. } => "retrieved",
                 Completion::Targets { .. } => "targets",
@@ -821,6 +849,8 @@ pub struct State {
     messages: Vec<String>,
     palette: Arc<Palette>,
     project: Option<Project>,
+    libraries: crate::libraries::Libraries,
+    tree_revision: u64,
     explorer: crate::workspace::Explorer,
     workspace_revision: u64,
     recent: Vec<PathBuf>,
@@ -1017,9 +1047,17 @@ impl State {
     pub fn folders_first(&self) -> bool {
         self.settings.folders_first
     }
-    /// The active file's row in the project tree (relative to the root), when the tree holds it.
+    /// Cached project and library rows, with stable identities shared by both explorers.
+    pub fn tree_rows(&self) -> impl DoubleEndedIterator<Item = &project::TreeRow> + Clone {
+        self.project.as_ref().map_or(&[][..], |p| p.rows()).iter().chain(self.libraries.rows())
+    }
+    pub fn has_tree(&self) -> bool { self.project.is_some() || !self.libraries.rows().is_empty() }
+    /// Changes when navigation asks the adapters to reveal the active library file.
+    pub fn tree_revision(&self) -> u64 { self.tree_revision }
     pub fn active_in_tree(&self) -> Option<Arc<str>> {
-        let (p, t) = (self.project.as_ref()?, self.active()?);
+        let t = self.active()?;
+        if self.libraries.contains(&t.source) { return Some(t.source.to_string_lossy().as_ref().into()); }
+        let p = self.project.as_ref()?;
         p.relative(&t.source).filter(|rel| p.has_file(rel))
     }
     /// Every tab, of both panes, in order.
@@ -1129,9 +1167,13 @@ impl State {
         }
         self.semantics.view(self.document()?)
     }
+    fn project_provider(&self) -> Option<(usize, PathBuf)> {
+        let (provider, Some(Some(root))) = self.semantics.resolved(self.document()?)? else { return None };
+        Some((provider, root))
+    }
     /// Compact status shown before paths and other notices so setup failures remain visible.
-    pub fn language_server_label(&self) -> &'static str {
-        self.provider().map_or(if self.document().is_some() { "LSP unsupported" } else { "LSP no file" }, |v| v.status_label())
+    pub fn language_server_label(&self) -> String {
+        self.provider().map_or_else(|| if self.document().is_some() { "LSP unsupported" } else { "LSP no file" }.to_owned(), |v| v.status_label())
     }
     pub fn server_runtime(&self) -> Option<&semantics::runtime::Runtime> { self.server_runtime.as_ref() }
     /// Every language server of this session and its state.
@@ -1169,8 +1211,10 @@ impl State {
         self.settings.breadcrumbs
     }
     /// Setting `id`'s state, for the menus (`None`: `id` is not one of these settings).
-    fn setting(&self, id: CommandId) -> Option<bool> {
+    pub(crate) fn setting(&self, id: CommandId) -> Option<bool> {
         match id {
+            CommandId::PersistentIndex => Some(self.settings.persistent_index),
+            CommandId::ExcludeRubyTooling => self.project_provider().map(|(_, root)| self.semantics.settings().ruby_tooling_excluded(&root)),
             CommandId::InlayTypes => Some(self.settings.inlay_types),
             CommandId::InlayParameters => Some(self.settings.inlay_parameters),
             CommandId::SemanticHighlighting => Some(self.settings.semantic_highlighting),
@@ -1294,6 +1338,10 @@ enum Goto {
 pub struct Session {
     state: State,
     cache: InactiveCache,
+    index_cache_dir: PathBuf,
+    index_cache: Option<Arc<std::sync::Mutex<crate::index_cache::Cache>>>,
+    index_revision: Arc<AtomicU64>,
+    index_rebuilding: bool,
     jobs: Jobs,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -1344,6 +1392,10 @@ pub struct Session {
     /// A project rescan is running; another one is due when it ends.
     rescanning: bool,
     rescan_again: bool,
+    /// Coarse watch events stay pending through overlapping scans, so servers see the final inventory.
+    rescan_changes: Change,
+    /// Pre-overflow content, bounded by the declaration index; fresh indexing reads resolve these reports.
+    overflow_fingerprints: std::collections::HashMap<Arc<str>, [u8; 32]>,
     refresh_seq: u64,
     /// The current search, for its job to stop when superseded.
     search_latest: Arc<AtomicU64>,
@@ -1413,6 +1465,8 @@ impl Session {
                 messages,
                 palette: themes.snapshot().palette,
                 project: None,
+            libraries: Default::default(),
+            tree_revision: 0,
                 explorer: Default::default(), workspace_revision: 0,
                 recent,
                 places: Default::default(),
@@ -1423,12 +1477,16 @@ impl Session {
                 results: None,
                 navigation: None,
                 index: DeclIndex::new(index::INDEX_BYTES),
-                semantics: Semantics::new(config.providers, config.cache, config.idle, config.clock),
+                semantics: Semantics::new(config.providers, config.cache.clone(), config.idle, config.clock),
                 asking: None,
                 occurrences: None,
                 documentation: None,
             },
             cache: InactiveCache::new(INACTIVE_BYTES),
+            index_cache_dir: config.cache,
+            index_cache: None,
+            index_revision: Arc::new(AtomicU64::new(0)),
+            index_rebuilding: false,
             jobs: Jobs::new(),
             themes,
             theme_preview: None,
@@ -1464,6 +1522,8 @@ impl Session {
             previewed: Default::default(),
             rescanning: false,
             rescan_again: false,
+            rescan_changes: Change::default(),
+            overflow_fingerprints: Default::default(),
             refresh_seq: 0,
             search_latest: Arc::new(AtomicU64::new(0)),
             find_options: Default::default(),
@@ -1567,8 +1627,10 @@ impl Session {
     }
 
     pub fn disabled(&self, id: CommandId) -> Option<&'static str> {
-        if self.state.runtime_saving.is_some() && matches!(id, CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot) {
-            return Some("Saving the Java runtime…");
+        if (self.state.runtime_saving.is_some() || self.state.provider_saves > 0) && matches!(id,
+            CommandId::ServerRuntime | CommandId::EnableServer | CommandId::DisableServer | CommandId::WorkspaceRoot
+            | CommandId::RestartServer | CommandId::RebuildIndex | CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings) {
+            return Some("Waiting for language server settings to finish saving");
         }
 
         let open = self.state.document().is_some();
@@ -1584,11 +1646,10 @@ impl Session {
                 _ => None,
             },
             CommandId::FoldersFirst | CommandId::AllByName => ((id == CommandId::FoldersFirst) == self.state.settings.folders_first).then_some("Already sorted this way"),
-            CommandId::ToggleExplorer => self.state.project.is_none().then_some("No folder is open"),
-            CommandId::LocateFile => match (&self.state.project, self.state.active()) {
-                (None, _) => Some("No folder is open"),
-                (_, None) => Some("No file is open"),
-                _ if self.state.active_in_tree().is_none() => Some("The file is not in the open folder's tree"),
+            CommandId::ToggleExplorer => (!self.state.has_tree()).then_some("No folder or library is open"),
+            CommandId::LocateFile => match self.state.active() {
+                None => Some("No file is open"),
+                _ if self.state.active_in_tree().is_none() => Some("The file is not in the explorer"),
                 _ => None,
             },
             CommandId::Back => (!self.state.can_back()).then_some("Nothing to go back to"),
@@ -1624,7 +1685,8 @@ impl Session {
                 Some((t, _)) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("The preview wraps already; Ctrl+Shift+V shows the source"),
                 _ => None,
             },
-            CommandId::StickyScroll | CommandId::Breadcrumbs => None,
+            CommandId::StickyScroll | CommandId::Breadcrumbs | CommandId::PersistentIndex => None,
+            CommandId::RebuildIndex => if self.state.project.is_none() { Some("Open a project folder first") } else if self.index_rebuilding { Some("The project index is being cleared") } else { None },
             CommandId::FocusBreadcrumbs if !self.state.settings.breadcrumbs => Some("Breadcrumbs are off"),
             CommandId::FocusBreadcrumbs => self.state.active().is_none().then_some("No file is open"),
             CommandId::GoToLine => match self.state.active() {
@@ -1674,11 +1736,8 @@ impl Session {
                 Some(_) => None,
                 None => Some("Nothing is selected"),
             },
-            CommandId::MarkdownSource => match self.state.active().filter(|_| self.state.rendering().is_some()) {
-                None => Some("Not a Markdown file"),
-                Some(t) if matches!(t.preview, Some(Err(_))) => Some("This document cannot be previewed (the notice says why)"),
-                Some(_) => None,
-            },
+            CommandId::MarkdownSource => self.preview_control(self.state.focused_pane())
+                .map_or(Some("Not a Markdown file"), |control| control.disabled),
             CommandId::ImageSource => match self.state.document().and_then(|d| d.image()) {
                 Some(i) if i.format == lenz_content::image::Format::Svg && i.pixels.is_ok() => None,
                 Some(i) if i.format == lenz_content::image::Format::Svg => Some("This SVG cannot be rendered"),
@@ -1689,7 +1748,14 @@ impl Session {
                 None => Some("No folder is open"),
                 Some(p) => self.state.semantics.symbols_unavailable(Some(p.root())),
             },
-            CommandId::LanguageServer | CommandId::CopyServerDetails => None,
+            CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails => None,
+            CommandId::ExcludeRubyTooling | CommandId::ResetProjectServerSettings => match self.state.project_provider() {
+                None => Some("Open a source file and wait for its language server workspace"),
+                Some((p, _)) if id == CommandId::ExcludeRubyTooling && semantics::provider::PROVIDERS[p].id != "ruby-lsp" => Some("Open a Ruby source file to configure Ruby indexing"),
+                Some((_, root)) if id == CommandId::ExcludeRubyTooling && root.join(".index.yml").exists() => Some("Ruby indexing is configured by this project’s .index.yml"),
+                Some((p, root)) if id == CommandId::ResetProjectServerSettings && !self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) => Some("This project already inherits global language server settings"),
+                _ => None,
+            },
             CommandId::ServerRuntime => if self.state.provider_saves > 0 { Some("Waiting for provider settings to finish saving") }
                 else if self.runtime_kind().is_none() { Some("Open a Java or Python source file to choose its server runtime") } else { None },
             CommandId::RestartServer => match self.state.provider() {
@@ -1742,12 +1808,13 @@ impl Session {
         }
     }
 
-    /// Status, recovery commands and troubleshooting shared by both adapters. Informational rows have no action.
+    /// Stable management actions shared by the application menu and server status menu.
     pub fn language_server_rows(&self) -> Vec<(String, Option<CommandId>)> {
         let mut rows = Vec::new();
         let view = self.state.provider();
         // Recovery rows keep their identity while asynchronous status text changes or wraps.
         for id in [
+            CommandId::ServerDetails,
             CommandId::RestartServer,
             if view
                 .as_ref()
@@ -1758,62 +1825,78 @@ impl Session {
                 CommandId::DisableServer
             },
             CommandId::WorkspaceRoot,
-            CommandId::CopyServerDetails,
             CommandId::ServerRuntime,
+            CommandId::ExcludeRubyTooling,
+            CommandId::ResetProjectServerSettings,
+            CommandId::PersistentIndex,
+            CommandId::RebuildIndex,
         ] {
-            rows.push((id.label().into(), Some(id)));
+            let label = self.on(id).map_or_else(|| id.label().to_owned(), |on| format!("{}: {}", id.label(), if on { "On" } else { "Off" }));
+            rows.push((label, Some(id)));
         }
+        rows
+    }
+
+    /// Full, unwrapped diagnostic snapshot for display and copying in either adapter.
+    pub fn language_server_details(&self) -> String {
+        let mut rows = Vec::new();
+        let view = self.state.provider();
         let summary = match &view {
             Some(v) => v.summary(),
             None if self.state.document().is_some() => "No language server supports this document. Syntax highlighting and text search remain available.".into(),
             None => "Open a source file to start its language server automatically.".into(),
         };
-        rows.push((summary, None));
+        rows.push(summary);
+        if let Some((p, root)) = self.state.project_provider() {
+            rows.push(format!("Project settings for {}: {}", root.display(), if self.state.semantics.settings().has_project(semantics::provider::PROVIDERS[p].id, &root) { "project overrides global settings" } else { "inheriting global settings" }));
+            if semantics::provider::PROVIDERS[p].id == "ruby-lsp" {
+                rows.push(format!("Ruby tooling gem exclusions: {}. Exclusions reduce navigation into tooling gems; project files keep their normal coverage. A project .index.yml takes precedence over editor indexing settings.", if self.state.semantics.settings().ruby_tooling_excluded(&root) { "enabled" } else { "not applied" }));
+            }
+        }
         if let Some(v) = view {
             let has_root = v.root.is_some();
             if let Some(root) = v.root {
-                rows.push((format!("Workspace: {}", root.display()), None));
+                rows.push(format!("Workspace: {}", root.display()));
             }
             if let Some(p) = semantics::provider::PROVIDERS
                 .iter()
                 .find(|p| p.name == v.name)
             {
                 let launch = self.state.semantics.settings().launch(p);
-                rows.push((format!("Executable: {}", launch.executable.display()), None));
-                if !launch.args.is_empty() { rows.push((format!("Arguments: {}", launch.args.join(" ")), None)); }
-                rows.push((format!("Server version: {}", v.version.as_deref().unwrap_or("unknown (the server has not reported a version)")), None));
+                rows.push(format!("Executable: {}", launch.executable.display()));
+                if !launch.args.is_empty() { rows.push(format!("Arguments: {}", launch.args.join(" "))); }
+                rows.push(format!("Server version: {}", v.version.as_deref().unwrap_or("unknown (the server has not reported a version)")));
                 if let Some(tested) = p.tested {
-                    rows.push((format!("Tested with Lenz: {} {tested}. Other versions may work; compatibility is unverified.", p.name), None));
+                    rows.push(format!("Tested with Lenz: {} {tested}. Other versions may work; compatibility is unverified.", p.name));
                 }
                 if matches!(v.status, semantics::Status::Missing(_) | semantics::Status::Failed(_)) {
-                    rows.push((format!("Setup: {}", p.setup), None));
+                    rows.push(format!("Setup: {}", p.setup));
                     if self.runtime_kind().is_some() {
-                        rows.push(("Choose Language Server Runtime to select an existing installation, validate it and restart the server. The failure may be a runtime selection or version problem; an exit code alone does not prove incompatibility.".into(), None));
+                        rows.push("Choose Language Server Runtime to select an existing installation, validate it and restart the server. The failure may be a runtime selection or version problem; an exit code alone does not prove incompatibility.".into());
                     }
                 }
                 match v.status {
-                    semantics::Status::Disabled => rows.push(("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into(), None)),
-                    semantics::Status::Missing(_) if self.state.document().is_some_and(|d| d.is_large()) => rows.push(("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into(), None)),
-                    semantics::Status::Missing(_) if !has_root => rows.push(("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into(), None)),
+                    semantics::Status::Disabled => rows.push("Disabled by your folder settings. Choose Enable Language Server for This Folder to activate it.".into()),
+                    semantics::Status::Missing(_) if self.state.document().is_some_and(|d| d.is_large()) => rows.push("Large files do not start a language server. Open a smaller source file to use semantic navigation.".into()),
+                    semantics::Status::Missing(_) if !has_root => rows.push("No workspace was found. Choose Set Workspace Root, or open a file inside a supported project.".into()),
                     semantics::Status::Missing(_) | semantics::Status::Failed(_) => {
-                        rows.push(("Check the error above, the executable and its runtime/toolchain in the same environment as Lenz. Check executable, args, env and workspace root in your provider settings. After fixing setup, choose Restart Language Server; if no workspace was found, set its root first. Lenz never installs servers automatically.".into(), None));
+                        rows.push("Check the error above, the executable and its runtime/toolchain in the same environment as Lenz. Check executable, args, env and workspace root in your provider settings. After fixing setup, choose Restart Language Server; if no workspace was found, set its root first. Lenz never installs servers automatically.".into());
                     }
-                    semantics::Status::Queued | semantics::Status::Starting => rows.push(("Starts automatically when you open a supported source file. Startup is limited to 120 seconds; a failure will be shown here.".into(), None)),
-                    semantics::Status::Indexing(_) => rows.push(("The server is still loading the project. Results may be incomplete until indexing finishes.".into(), None)),
-                    semantics::Status::Ready => rows.push(("The server is running. If navigation fails, check the workspace root and server capabilities, or restart it.".into(), None)),
+                    semantics::Status::Queued | semantics::Status::Starting => rows.push("Starts automatically when you open a supported source file. Startup is limited to 120 seconds; a failure will be shown here.".into()),
+                    semantics::Status::Indexing(_) => rows.push("The server is still loading the project. Results may be incomplete until indexing finishes.".into()),
+                    semantics::Status::Ready => rows.push("The server is running. If navigation fails, check the workspace root and server capabilities, or restart it.".into()),
                 }
-                rows.push((format!("Provider limits: {}", p.limits), None));
+                rows.push(format!("Provider limits: {}", p.limits));
             }
         }
-        rows.push((
+        rows.push(
             format!(
                 "Provider settings: {}",
                 self.state.semantics.settings_file().display()
             ),
-            None,
-        ));
-        rows.extend(self.state.notices().into_iter().map(|text| (text, None)));
-        rows
+        );
+        rows.extend(self.state.notices());
+        rows.join("\n\n")
     }
 
     /// The context menu for the active tab: navigation and copying for text; for an image or a Markdown preview
@@ -1842,7 +1925,7 @@ impl Session {
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
         let input = input.into();
-        if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let reveal_selection = matches!(&input,
             Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)
             | Input::Completion(Completion::SelectionSteps { .. }));
@@ -2191,11 +2274,22 @@ impl Session {
                 self.open_root(root);
                 repaint
             }
+            Command::ActivateTree { path, retain } => self.activate_tree(path, retain),
             Command::ToggleDir(dir) => {
+                if self.state.libraries.rows().iter().any(|r| r.path.as_ref() == dir) {
+                    let requests = self.state.libraries.toggle(&dir, self.state.settings.folders_first);
+                    self.read_libraries(requests);
+                    return repaint;
+                }
                 let changed = self.state.project.as_mut().is_some_and(|p| p.toggle(&dir));
                 Effect { repaint: changed, copy: None }
             }
             Command::Locate => {
+                if let Some(path) = self.state.active().map(|t| t.source.clone()) && self.state.libraries.contains(&path) {
+                    let requests = self.state.libraries.reveal(&path, self.state.settings.folders_first);
+                    self.read_libraries(requests);
+                    return repaint;
+                }
                 let rel = self.state.active_in_tree();
                 let changed = rel.zip(self.state.project.as_mut()).is_some_and(|(rel, p)| p.reveal(&rel));
                 Effect { repaint: changed, copy: None }
@@ -2205,6 +2299,7 @@ impl Session {
                     return Effect::default();
                 }
                 self.state.settings.folders_first = on;
+                self.state.libraries.rebuild(on);
                 if let Some(p) = &mut self.state.project {
                     p.set_folders_first(on);
                 }
@@ -2589,6 +2684,7 @@ impl Session {
                 repaint
             }
             Command::RestartServer => {
+                if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
                 let Some(doc) = self.state.document().cloned() else { return Effect::default() };
                 self.state.asking = None;
                 self.state.semantics.cancel();
@@ -2599,7 +2695,7 @@ impl Session {
                 repaint
             }
             Command::SetServerEnabled(enabled) => {
-                if self.state.runtime_saving.is_some() { return Effect::default(); }
+                if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
                 let (Some(doc), Some(browse)) = (self.state.document(), self.state.project.as_ref().map(|p| p.root().to_owned())) else { return Effect::default() };
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
@@ -2614,7 +2710,7 @@ impl Session {
                 Effect { repaint: asked, copy: None }
             }
             Command::SetWorkspaceRoot(root) => {
-                if self.state.runtime_saving.is_some() { return Effect::default(); }
+                if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
                 let (Some(doc), Some(browse)) = (self.state.document(), self.state.project.as_ref().map(|p| p.root().to_owned())) else { return Effect::default() };
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
@@ -2622,6 +2718,21 @@ impl Session {
                 let settings = self.state.semantics.set_root(provider, browse, root);
                 self.synced = 0;
                 self.save_provider_settings(settings);
+                repaint
+            }
+            Command::ExcludeRubyTooling => self.save_project_provider(Some(true)),
+            Command::SetRubyToolingExclusions(on) => self.save_project_provider(Some(on)),
+            Command::ResetProjectServerSettings => self.save_project_provider(None),
+            Command::SetPersistentIndex(on) => {
+                if self.state.settings.persistent_index != on {
+                    self.state.settings.persistent_index = on;
+                    self.save_settings();
+                    self.reset_index(false);
+                }
+                repaint
+            }
+            Command::RebuildIndex => {
+                if self.disabled(CommandId::RebuildIndex).is_none() { self.reset_index(true); }
                 repaint
             }
         }
@@ -2888,6 +2999,21 @@ impl Session {
         self.jobs.submit(Priority::Background, move || { let ok = settings.save(&file); let _ = tx.send_blocking(Completion::ProviderSettingsSaved { ok }); });
     }
 
+    fn save_project_provider(&mut self, excluded: Option<bool>) -> Effect {
+        let reset = excluded.is_none();
+        let id = if reset { CommandId::ResetProjectServerSettings } else { CommandId::ExcludeRubyTooling };
+        if self.disabled(id).is_some() { return Effect::default(); }
+        let Some((provider, root)) = self.state.project_provider() else { return Effect::default() };
+        let (file, tx) = (self.state.semantics.settings_file().to_owned(), self.tx.clone());
+        self.state.provider_saves += 1;
+        self.jobs.submit(Priority::Visible, move || {
+            let result = if reset { semantics::provider::reset_project(&file, semantics::provider::PROVIDERS[provider].id, &root) }
+                else { semantics::provider::set_ruby_tooling_excluded(&file, &root, excluded == Some(true)) };
+            let _ = tx.send_blocking(Completion::ProjectProviderSaved { provider, root, reset, result });
+        });
+        Effect { repaint: true, copy: None }
+    }
+
     fn sync_documents(&mut self) {
         // Each snapshot's identity: a rename keeps the version but is a new snapshot (made while the old one lives,
         // so at another address).
@@ -3032,6 +3158,28 @@ impl Session {
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
                 Effect { repaint: true, copy: None }
             }
+            Completion::ProjectProviderSaved { provider, root, reset, result } => {
+                self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
+                match result {
+                    Ok(()) => {
+                        if self.state.project_provider() == Some((provider, root.clone())) || self.state.asking.as_ref().is_some_and(|a| a.ask == Ask::Symbols) {
+                            if self.state.asking.as_ref().is_some_and(|a| a.ask == Ask::Symbols)
+                                && let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Symbols)
+                            {
+                                r.done = true;
+                                r.error = Some("Language server settings changed; find symbols again".into());
+                            }
+                            self.state.asking = None;
+                            self.state.semantics.cancel();
+                        }
+                        self.state.semantics.reload_project(provider, &root);
+                        self.synced = 0;
+                        self.state.messages.push(format!("{} for {}. Its enabled language server will restart.", if reset { "Project language server settings reset to inherited defaults" } else if self.state.semantics.settings().ruby_tooling_excluded(&root) { "Ruby tooling gem exclusions enabled; navigation into those gems is unavailable" } else { "Ruby tooling gem exclusions disabled" }, root.display()));
+                    }
+                    Err(why) => self.state.messages.push(format!("Project language server settings were not changed: {why}")),
+                }
+                Effect { repaint: true, copy: None }
+            }
             Completion::ServerRuntimes { request, paths } => {
                 if request != self.runtime_request { return Effect::default(); }
                 if let Some(model) = &mut self.state.server_runtime { model.candidates = paths; model.message = format!("Enter {}, or choose an installed runtime below", model.kind.input_label()); }
@@ -3068,6 +3216,14 @@ impl Session {
                     None => self.load(tab, false),
                 }
                 self.load_other();
+                Effect { repaint: true, copy: None }
+            }
+            Completion::LibraryRead { generation, read } => {
+                if generation != self.project_generation.load(Ordering::Relaxed) { return Effect::default(); }
+                let (requests, message, revealed) = self.state.libraries.apply(read, self.state.settings.folders_first);
+                self.read_libraries(requests);
+                if let Some(message) = message { self.state.messages.push(message); }
+                if revealed.as_ref().is_some_and(|p| self.state.active().is_some_and(|t| t.source == *p)) { self.state.tree_revision += 1; }
                 Effect { repaint: true, copy: None }
             }
             Completion::Loaded { request, tab, path, result } => {
@@ -3284,18 +3440,29 @@ impl Session {
                 let done = batch.done;
                 let paths: Vec<Arc<str>> = batch.paths.iter().map(|p| Arc::from(p.as_str())).collect();
                 let rescan = p.refreshing();
+                let before = if rescan && done { p.paths() } else { Vec::new() };
                 p.add(batch);
                 if !rescan {
                     self.state.index.enqueue(paths, false);
                 } else if done {
                     // A rescan's inventory replaced the old one: drop records of files that went, queue new ones.
-                    let now: std::collections::HashSet<Arc<str>> = self.state.project.as_ref().map(|p| p.paths().into_iter().collect()).unwrap_or_default();
+                    let now: std::collections::HashSet<Arc<str>> = p.paths().into_iter().collect();
                     self.state.index.retain(&now);
+                    let before: std::collections::HashSet<_> = before.into_iter().collect();
+                    let coarse = self.rescan_changes.overflow || !self.rescan_changes.paths.is_empty();
+                    let changes: Vec<_> = before.difference(&now).map(|rel| (rel.clone(), false))
+                        .chain(now.iter().filter(|rel| coarse || !before.contains(*rel)).filter_map(|rel| {
+                            let path = p.root().join(rel.as_ref());
+                            (!before.contains(rel) || self.rescan_changes.touches(&path)).then_some((rel.clone(), true))
+                        })).collect();
+                    self.notify_project_changes(changes);
+                    if !self.rescan_again { self.rescan_changes = Change::default(); }
                 }
                 self.pump_index();
                 if done {
                     self.rewatch(); // folders the walk found
-                    if std::mem::take(&mut self.rescanning) && std::mem::take(&mut self.rescan_again) {
+                    self.rescanning = false;
+                    if std::mem::take(&mut self.rescan_again) {
                         self.rescan();
                     }
                 }
@@ -3414,15 +3581,24 @@ impl Session {
                     }
                 }
             }
-            Completion::Indexed { generation, files } => {
-                if self.state.project.as_ref().is_none_or(|p| p.generation() != generation) {
+            Completion::Indexed { generation, revision, files } => {
+                if self.index_revision.load(Ordering::Relaxed) != revision || self.state.project.as_ref().is_none_or(|p| p.generation() != generation) {
                     return Effect::default(); // a replaced root's index
                 }
+                let mut checked = Vec::new();
                 for (path, result) in files {
+                    if self.overflow_fingerprints.contains_key(&path) { checked.push((path.clone(), true)); }
                     self.state.index.add(path, result);
                 }
                 self.state.index.running = false;
                 let coverage = self.state.index.coverage();
+                if !self.rescan_changes.overflow {
+                    if coverage.limited || coverage.pending == 0 {
+                        // A byte-budget stop must not leave semantic recovery waiting for unqueued reads.
+                        checked = self.overflow_fingerprints.keys().map(|p| (p.clone(), true)).collect();
+                    }
+                    self.notify_project_changes(checked);
+                }
                 let mut rerun = None;
                 if let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Declarations) {
                     // Once indexing settles, a query ranked over fewer files runs again to include the rest.
@@ -3440,23 +3616,81 @@ impl Session {
                 self.pump_index();
                 Effect { repaint: self.state.results.as_ref().is_some_and(|r| r.kind == ResultsKind::Declarations), copy: None }
             }
-            Completion::Changed(change) => {
+            Completion::IndexReset { generation, revision, result } => {
+                if self.project_generation.load(Ordering::Relaxed) != generation || self.index_revision.load(Ordering::Relaxed) != revision { return Effect::default(); }
+                self.index_rebuilding = false;
+                match result {
+                    Ok(()) => self.state.messages.push("Saved declarations cleared; rebuilding the project index and restarting its language servers…".into()),
+                    Err(why) => {
+                        self.index_cache = None;
+                        self.state.messages.push(format!("Could not clear the saved index: {why}. Rebuilding without cache reuse this session."));
+                    }
+                }
+                if let Some(p) = &self.state.project {
+                    self.state.index.enqueue(p.paths(), false);
+                    self.state.semantics.restart_project(p.root());
+                }
+                self.cancel_for_index_rebuild(); self.synced = 0;
+                self.changed(Change { overflow: true, ..Change::default() }); self.pump_index();
+                Effect { repaint: true, copy: None }
+            }
+            Completion::Changed(mut change) => {
                 // Changed files' declaration records go and are rebuilt.
-                if self.state.project.is_some() {
+                let mut coarse = Change { overflow: change.overflow, ..Change::default() };
+                let mut files = Vec::new();
+                if let Some(p) = &self.state.project {
+                    if change.overflow {
+                        // Overlapping recovery has no single validated baseline: retain full notifications.
+                        self.overflow_fingerprints = if self.overflow_fingerprints.is_empty() && !self.rescan_changes.overflow
+                            && self.state.semantics.can_filter_changes() {
+                            self.state.index.fingerprints()
+                        } else { Default::default() };
+                    }
+                    if !change.registered.is_empty() {
+                        let checks = self.state.index.registration_checks(p.root(), &change.registered);
+                        let (tx, generation, current) = (self.tx.clone(), p.generation(), self.project_generation.clone());
+                        self.jobs.submit(Priority::Background, move || {
+                            let paths = checks.into_iter().filter_map(|(path, stamp)| (Stamp::of(&path) != Some(stamp)).then_some(path)).collect::<std::collections::BTreeSet<_>>();
+                            if !paths.is_empty() && current.load(Ordering::Relaxed) == generation {
+                                let _ = tx.send_blocking(Completion::Changed(Change { paths, structure: true, ..Change::default() }));
+                            }
+                        });
+                    }
                     for path in &change.paths {
-                        if let Some(rel) = self.state.project.as_ref().and_then(|p| p.relative(path)) {
+                        if let Some(rel) = p.relative(path) {
+                            if rel.is_empty() || p.has_dir(&rel) || path.is_dir() {
+                                coarse.paths.insert(path.clone());
+                                continue;
+                            }
+                            // Exact reports are sent now, including precise paths accompanying an overflow.
+                            self.overflow_fingerprints.remove(&rel);
                             self.state.index.invalidate(&rel, path.exists());
                         }
+                        if !path.is_dir() { files.push((path.clone(), path.exists())); }
+                    }
+                    if coarse.overflow || !coarse.paths.is_empty() {
+                        if !coarse.overflow && !self.overflow_fingerprints.is_empty() {
+                            self.overflow_fingerprints.retain(|rel, _| !coarse.touches(&p.root().join(rel.as_ref())));
+                        }
+                        self.state.index.invalidate_changed(p.root(), &coarse);
+                        self.rescan_changes.overflow |= coarse.overflow;
+                        self.rescan_changes.paths.extend(coarse.paths.iter().cloned());
+                        change.structure = true;
                     }
                     self.pump_index();
+                } else {
+                    files.extend(change.paths.iter().filter(|p| !p.is_dir()).map(|p| (p.clone(), p.exists())));
+                }
+                if let Some(query) = self.state.results.as_ref().filter(|r| r.kind == ResultsKind::Declarations).map(|r| r.query.clone()) {
+                    self.find_declarations(query);
                 }
                 // Deletions may leave no indexing job to refresh an open symbol search.
                 if let Some(n) = &mut self.state.navigation
                     && matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Symbols)
-                { n.dirty = true; if !n.pending { self.rank_navigation(); } }
+                { n.rows.clear(); self.rank_navigation(); }
                 // Servers that rely on the client hear of changed files they do not hold open (a rename's ends are
                 // among the paths).
-                self.state.semantics.files_changed(&change.paths);
+                self.state.semantics.files_changed(&files);
                 // A workspace manifest changed: language-server roots are resolved again.
                 if change.overflow || change.paths.iter().any(|p| p.file_name().is_some_and(|n| n == "Cargo.toml" || n == "rust-project.json")) {
                     self.state.semantics.manifests_changed();
@@ -3474,6 +3708,8 @@ impl Session {
                     }
                     if change.overflow {
                         r.stale.extend(r.hits.iter().map(|h| h.path.clone()));
+                    } else if !coarse.paths.is_empty() {
+                        r.stale.extend(r.hits.iter().filter(|h| r.root.as_ref().is_some_and(|(root, _)| coarse.touches(&root.join(h.path.as_ref())))).map(|h| h.path.clone()));
                     }
                 }
                 self.changed(change)
@@ -3602,6 +3838,8 @@ impl Session {
                     line,
                     offset: start - bounds.start,
                 };
+                self.state.libraries.add_virtual(target.source.clone(), self.state.settings.folders_first);
+                self.state.tree_revision += 1;
                 // A kept tab: its content cannot be read again once replaced.
                 let effect = self.navigate_to(PathBuf::from(&*target.source.uri), true, Some(at), true, Some((doc, target.source)));
                 Effect { repaint: true, ..effect }
@@ -3901,6 +4139,13 @@ impl Session {
     /// Open `path` in the preview tab at `hit`, from `doc` (the snapshot it was checked against, read as `stamp`
     /// when it came from disk): a committed navigation.
     fn open_at(&mut self, path: PathBuf, hit: &search::Hit, stamp: Option<Stamp>, doc: Arc<Document>) -> Effect {
+        let dependency = semantics::provider::origin(&path, doc.language()) != semantics::provider::OUTSIDE;
+        let outside = self.state.project.as_ref().map_or_else(|| self.state.provider().and_then(|p| p.root).is_some_and(|root| !path.starts_with(root)), |p| !path.starts_with(p.root()));
+        if dependency || outside || self.state.libraries.contains(&path) {
+            let requests = self.state.libraries.reveal(&path, self.state.settings.folders_first);
+            self.read_libraries(requests);
+            if self.state.libraries.contains(&path) { self.state.tree_revision += 1; }
+        }
         let start = doc.line_range(hit.line).start;
         let mut at = Location {
             source: path.clone(),
@@ -3922,6 +4167,48 @@ impl Session {
         }
         let effect = self.navigate(path, false, Some(at), true);
         Effect { repaint: true, ..effect }
+    }
+
+    /// Keep tree activation out of the dispatcher used by scrolling and startup.
+    #[cold]
+    fn activate_tree(&mut self, path: Arc<str>, retain: bool) -> Effect {
+        let Some(row) = self.state.tree_rows().find(|r| r.path == path).cloned() else { return Effect::default() };
+        if row.dir.is_some() {
+            return if retain { Effect::default() } else { self.command(Command::ToggleDir(path.to_string())) };
+        }
+        if let Some(source) = self.state.libraries.virtual_source(&path).cloned() {
+            if let Some((doc, held)) = self.state.tabs.iter().find(|t| t.source == Path::new(path.as_ref()))
+                .and_then(|t| Some((t.doc.clone()?, t.retrieved.clone()?)))
+            {
+                return self.navigate_to(PathBuf::from(path.as_ref()), true, None, true, Some((doc, held)));
+            }
+            self.state.semantics.cancel();
+            self.semantic_seq += 1;
+            let request = self.semantic_seq;
+            let target = semantics::VirtualTarget { source, range: serde_json::Value::Null };
+            match self.state.semantics.retrieve(&target.source, request) {
+                Ok(()) => self.state.asking = Some(Asking { request, ask: Ask::Definition, at: None, project: self.project_generation.load(Ordering::Relaxed), remaining: 1, since: std::time::Instant::now(), retrieving: Some(target), root: None }),
+                Err(why) => { self.state.asking = None; self.state.messages.push(format!("Library source unavailable: {why}")); }
+            }
+            return Effect { repaint: true, copy: None };
+        }
+        let file = if Path::new(path.as_ref()).is_absolute() || is_virtual(Path::new(path.as_ref())) {
+            PathBuf::from(path.as_ref())
+        } else if let Some(p) = &self.state.project { p.root().join(path.as_ref()) } else { return Effect::default() };
+        self.navigate(file, retain, None, true)
+    }
+
+    fn read_libraries(&self, requests: Vec<crate::libraries::Request>) {
+        for request in requests {
+            let (tx, latest) = (self.tx.clone(), self.project_generation.clone());
+            let generation = latest.load(Ordering::Relaxed);
+            self.jobs.submit(Priority::Background, move || {
+                let current = || latest.load(Ordering::Relaxed) == generation;
+                if !current() { return; }
+                let read = request.read(current);
+                if current() && read.current() { let _ = tx.send_blocking(Completion::LibraryRead { generation, read }); }
+            });
+        }
     }
 
     /// Start a search, replacing (and stopping) any earlier one.
@@ -4184,6 +4471,13 @@ impl Session {
                 && self.state.project.as_ref().is_some_and(|p| change.paths.iter().any(|c| c.starts_with(p.root()) && !c.components().any(|x| x.as_os_str() == ".git")));
         if structural {
             self.rescan();
+        } else if self.state.project.as_ref().is_some_and(|p| change.registered.iter().any(|d| d.starts_with(p.root()))) {
+            // Finish the first walk before checking the discovery/registration gap.
+            if self.state.project.as_ref().is_some_and(|p| matches!(p.coverage(), project::Coverage::Scanning(_))) {
+                self.rescan_again = true;
+            } else {
+                self.rescan();
+            }
         }
         Effect::default()
     }
@@ -4394,12 +4688,15 @@ impl Session {
         }
         self.restore_workspace = self.state.tabs.is_empty();
         self.state.explorer = Default::default(); self.state.workspace_revision += 1;
+        self.state.libraries = Default::default();
         let root = normalized(&root);
         self.pending_goto = None;
         let generation = self.root_generation.fetch_add(1, Ordering::Relaxed) + 1;
         self.query_latest.fetch_add(1, Ordering::Relaxed); // stops a ranking over the old root
         self.rescanning = false;
         self.rescan_again = false;
+        self.rescan_changes = Change::default();
+        self.overflow_fingerprints.clear();
         // Results belong to the root they searched.
         if self.state.results.as_ref().is_some_and(|r| r.scope == Scope::Project) {
             self.state.results = None;
@@ -4416,6 +4713,9 @@ impl Session {
         self.state.project = Some(Project::new(root.clone(), generation, self.state.settings.folders_first));
         self.project_generation.store(generation, Ordering::Relaxed);
         self.state.index = DeclIndex::new(index::INDEX_BYTES);
+        self.index_revision.fetch_add(1, Ordering::Relaxed);
+        self.index_rebuilding = false;
+        self.index_cache = self.state.settings.persistent_index.then(|| Arc::new(std::sync::Mutex::new(crate::index_cache::Cache::new(&self.index_cache_dir, &root))));
         self.rewatch();
         self.state.recent.retain(|r| *r != root);
         self.state.recent.insert(0, root.clone());
@@ -4864,22 +5164,80 @@ impl Session {
         }
     }
 
+    fn cancel_for_index_rebuild(&mut self) {
+        self.state.asking = None;
+        self.state.semantics.cancel();
+        if let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Symbols) {
+            r.done = true;
+            r.error = Some("Project index is rebuilding; find symbols again".into());
+        }
+    }
+
+    fn reset_index(&mut self, clear: bool) {
+        let Some(p) = &self.state.project else { return };
+        let (root, generation, paths) = (p.root().to_owned(), p.generation(), p.paths());
+        let revision = self.index_revision.fetch_add(1, Ordering::Relaxed) + 1;
+        self.index_rebuilding = clear;
+        self.state.index = DeclIndex::new(index::INDEX_BYTES);
+        self.state.index.enqueue(paths, false);
+        let cache = Arc::new(std::sync::Mutex::new(crate::index_cache::Cache::new(&self.index_cache_dir, &root)));
+        self.index_cache = self.state.settings.persistent_index.then(|| cache.clone());
+        if let Some(query) = self.state.results.as_ref().filter(|r| r.kind == ResultsKind::Declarations).map(|r| r.query.clone()) { self.find_declarations(query); }
+        if let Some(n) = &mut self.state.navigation { n.rows.clear(); self.rank_navigation(); }
+        if clear {
+            self.overflow_fingerprints.clear(); // the replacement servers read the entire project
+            self.cancel_for_index_rebuild();
+            let (tx, latest) = (self.tx.clone(), self.index_revision.clone());
+            self.state.messages.push("Clearing the saved project index…".into());
+            self.jobs.submit(Priority::Visible, move || {
+                if latest.load(Ordering::Relaxed) != revision { return; }
+                let result = cache.lock().unwrap_or_else(|e| e.into_inner()).clear();
+                let _ = tx.send_blocking(Completion::IndexReset { generation, revision, result });
+            });
+        } else { self.pump_index(); }
+    }
+
+    /// Reuse the indexer's current reads; no second walk, file read, or hash runs on the event thread.
+    fn notify_project_changes(&mut self, paths: impl IntoIterator<Item = (Arc<str>, bool)>) {
+        let Some(project) = &self.state.project else { return };
+        let mut changes = Vec::new();
+        for (path, exists) in paths {
+            if exists && let Some(old) = self.overflow_fingerprints.get(&path) {
+                // Keep the baseline through registration-triggered follow-up scans of the same overflow.
+                if self.rescan_changes.overflow && self.rescan_again { continue; }
+                let Some(changed) = self.state.index.changed_since(&path, *old) else { continue };
+                self.overflow_fingerprints.remove(&path);
+                if !changed { continue; }
+            } else { self.overflow_fingerprints.remove(&path); }
+            changes.push((project.root().join(path.as_ref()), exists));
+        }
+        self.state.semantics.files_changed(&changes);
+    }
+
     /// Start the next indexing chunk in the background, if any is due.
     fn pump_index(&mut self) {
+        if self.index_rebuilding { return; }
         let Some(p) = &self.state.project else { return };
         let chunk = self.state.index.next_chunk();
-        if chunk.is_empty() {
-            return;
-        }
+        let settled = matches!(p.coverage(), project::Coverage::Complete(_)) && self.state.index.coverage().pending <= 1;
+        if chunk.is_empty() && (!settled || self.index_cache.is_none() || self.state.index.running) { return; }
         let (root, generation, project, tx) = (p.root().to_owned(), p.generation(), self.project_generation.clone(), self.tx.clone());
+        let (revision, latest, cache) = (self.index_revision.load(Ordering::Relaxed), self.index_revision.clone(), self.index_cache.clone());
         self.jobs.submit(Priority::Background, move || {
-            // Indexing stops when the root is replaced (rescans of the same root keep it going).
-            let current = move || project.load(Ordering::Relaxed) == generation;
+            let current = move || project.load(Ordering::Relaxed) == generation && latest.load(Ordering::Relaxed) == revision;
+            if !current() { return; }
+            let mut cache = cache.as_ref().map(|c| c.lock().unwrap_or_else(|e| e.into_inner()));
+            if let Some(c) = &mut cache { c.load(); }
+            if chunk.is_empty() {
+                if let Some(c) = &mut cache { c.flush(current); }
+                return;
+            }
             let files = chunk.into_iter().map(|rel| {
-                let result = index::index_file(&root, &rel, current.clone());
+                let result = index::index_file_cached(&root, &rel, current.clone(), cache.as_deref_mut());
                 (rel, result)
             }).collect();
-            let _ = tx.send_blocking(Completion::Indexed { generation, files });
+            if settled && let Some(c) = &mut cache { c.flush(current.clone()); }
+            let _ = tx.send_blocking(Completion::Indexed { generation, revision, files });
         });
     }
 
@@ -5489,6 +5847,7 @@ fn read_recent(file: &Path) -> Vec<PathBuf> {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Settings {
+    persistent_index: bool,
     folders_first: bool,
     documentation_on_hover: bool,
     /// Long lines wrap at the pane's width.
@@ -5509,7 +5868,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { folders_first: true, documentation_on_hover: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
     }
 }
 
