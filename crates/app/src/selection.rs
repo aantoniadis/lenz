@@ -159,27 +159,7 @@ fn last(lines: &[String]) -> Pos {
     Pos::new(n, line_text(lines, n).len())
 }
 
-/// Byte range of the word (alphanumerics and `_`), whitespace run, or punctuation run at `col`.
-pub fn word_at(line: &str, col: usize) -> Range<usize> {
-    let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            0
-        } else if c.is_whitespace() {
-            1
-        } else {
-            2
-        }
-    };
-    // the character under the caret, or the one before it at the end of the line
-    let Some((at, c)) = line[col..].chars().next().map(|c| (col, c)).or_else(|| line[..col].char_indices().next_back())
-    else {
-        return col..col;
-    };
-    let k = class(c);
-    let start = line[..at].char_indices().rev().take_while(|&(_, c)| class(c) == k).last().map_or(at, |(i, _)| i);
-    let end = line[at..].char_indices().find(|&(_, c)| class(c) != k).map_or(line.len(), |(i, _)| at + i);
-    start..end
-}
+pub use lenz_content::select::word_at;
 
 #[cfg(test)]
 mod tests {
@@ -207,16 +187,6 @@ mod tests {
         assert_eq!(Selection::line(Side::Right, &l, 1).text(&l), "bb\n");
         assert_eq!(Selection::line(Side::Right, &l, 2).text(&l), "ccc");
         assert_eq!(Selection::all(Side::Right, &l).text(&l), "a\nbb\nccc");
-    }
-
-    #[test]
-    fn double_click_picks_the_word_or_symbol_run_under_the_pointer() {
-        assert_eq!(word_at("let foo_bar = 1;", 6), 4..11);
-        assert_eq!(word_at("let foo_bar = 1;", 4), 4..11);
-        assert_eq!(word_at("a  ->  b", 3), 3..5);
-        assert_eq!(word_at("end", 3), 0..3);
-        assert_eq!(word_at("", 0), 0..0);
-        assert_eq!(word_at("héllo wörld", 8), 7..13);
     }
 
     #[test]
