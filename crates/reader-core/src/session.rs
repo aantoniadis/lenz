@@ -790,9 +790,9 @@ pub enum Completion {
     HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
-    /// Blame of `tab`'s request `request`: runs of lines (the repository root with the first batch), then `done`.
     /// The details of the commit popup's commit, for request `request`.
     CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
+    /// Blame of `tab`'s request `request`: the repository root first, then runs of lines, then `done`.
     Blamed { tab: TabId, request: u64, root: Option<PathBuf>, hunks: Vec<(std::ops::Range<usize>, Arc<lenz_content::blame::Commit>)>, done: Option<Result<(), String>> },
 }
 
@@ -1810,7 +1810,9 @@ impl Session {
                 Some(t) if t.blame.is_some() => None,
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
-                Some(t) if t.doc.as_ref().is_none_or(|d| d.image().is_some()) => Some("Only text can be annotated"),
+                Some(t) if t.doc.is_none() && self.state.loading().is_some() => Some("The file is still loading"),
+                // An SVG shown as its source is text.
+                Some(t) if t.doc.as_ref().is_none_or(|d| d.image().is_some() && !t.image_source) => Some("Only text can be annotated"),
                 Some(t) if id == CommandId::CloseAnnotations && t.blame.is_none() => Some("Annotations are off"),
                 Some(_) => None,
             },
@@ -2054,8 +2056,9 @@ impl Session {
     /// The caret line's annotation in the active tab (the status line's commit).
     pub fn caret_annotation(&self) -> Option<crate::blame::Annotation<'_>> {
         let t = self.state.active()?;
+        let b = t.blame.as_ref()?; // nothing more while annotations are off
         let line = t.doc.as_ref().zip(t.selection).map(|(d, s)| d.line_of(s.head))?;
-        crate::blame::annotation(t.blame.as_ref()?, line)
+        crate::blame::annotation(b, line)
     }
 
     /// The commit popup's text, the same in both frontends.
@@ -2076,13 +2079,6 @@ impl Session {
         Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: vec![base, sha], cwd: Some(root) })
     }
 
-    /// The annotation column's width in cells for tab `tab` (0 while its annotations are off).
-    pub fn annotation_cols(&self, tab: TabId) -> usize {
-        match self.state.tabs.iter().find(|t| t.id == tab).is_some_and(|t| t.blame.is_some()) {
-            true => crate::blame::ANNOTATION_COLS,
-            false => 0,
-        }
-    }
 
     /// The active tab, when its file is on disk for another app to open.
     fn external_tab(&self) -> Result<&Tab, &'static str> {

@@ -79,7 +79,8 @@ pub fn line_count(bytes: &[u8]) -> usize {
 pub fn repository(file: &Path) -> Result<(PathBuf, String), String> {
     let file = std::fs::canonicalize(file).map_err(|e| format!("{}: {e}", file.display()))?;
     let dir = file.parent().ok_or("Not in a Git repository")?;
-    let out = git::run(dir, &["rev-parse", "--show-toplevel"]).map_err(|_| "Not in a Git repository".to_string())?;
+    // A git that cannot run says why; otherwise a failure here means no repository holds the file.
+    let out = git::run(dir, &["rev-parse", "--show-toplevel"]).map_err(|e| if git::version().is_some() { "Not in a Git repository".to_string() } else { e })?;
     let top = PathBuf::from(String::from_utf8_lossy(&out).trim_end_matches(['\n', '\r']));
     let root = std::fs::canonicalize(&top).unwrap_or(top);
     let relative = file.strip_prefix(&root).map_err(|_| "Not in a Git repository".to_string())?;

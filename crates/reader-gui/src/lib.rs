@@ -173,8 +173,8 @@ pub struct ReaderView {
     pub(crate) crumb_hits: Vec<CrumbHit>,
     /// The breadcrumb bar has the keys: its pane and highlighted crumb.
     pub(crate) crumb_focus: Option<(u8, usize)>,
-    /// The annotation under the pointer: its tab, line and the pointer (for the tooltip and the commit's rows).
-    ann_hover: Option<(TabId, usize, gpui::Point<Pixels>)>,
+    /// The pointer over a blame column; what it is over is found when drawn (it follows scrolling).
+    ann_hover: Option<gpui::Point<Pixels>>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -2124,7 +2124,11 @@ impl ReaderView {
         (widest as f32 * self.char_w - (width - num_w() - 16.0)).max(0.0)
     }
 
-    /// The source byte under a window point in the text area, if a document is shown.
+    /// The annotation under the pointer, as laid out now (none while a dialog is open).
+    pub(crate) fn ann_hovered(&self) -> Option<(u8, TabId, usize)> {
+        self.ann_hover.filter(|_| self.modal.is_none()).and_then(|at| self.annotation_at(at))
+    }
+
     /// The blame column under a window point: the pane, its tab and the line whose first row is there.
     fn annotation_at(&self, at: gpui::Point<Pixels>) -> Option<(u8, TabId, usize)> {
         let g = self.panes.iter().find(|g| {
@@ -2143,6 +2147,7 @@ impl ReaderView {
         Some((g.pane, tab.id(), r.line))
     }
 
+    /// The source byte under a window point in the text area, if a document is shown.
     fn byte_at(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
         self.byte_in(window, self.session.state().active()?, self.text_bounds?, x, y).map(|(line, col)| self.session.state().document().map_or(0, |d| d.line_range(line).start) + col)
     }
@@ -2682,11 +2687,11 @@ impl ReaderView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
-        let ann_hover = self.modal.is_none().then(|| self.annotation_at(ev.position)).flatten().map(|(_, t, line)| (t, line, ev.position));
-        if ann_hover.map(|h| (h.0, h.1)) != self.ann_hover.map(|h| (h.0, h.1)) {
+        let over = self.annotation_at(ev.position);
+        if over != self.ann_hovered() {
             cx.notify();
         }
-        self.ann_hover = ann_hover;
+        self.ann_hover = over.is_some().then_some(ev.position);
         let app_menu_hover = self.app_menu_button().contains(&ev.position);
         let commands_hover = self.modal.is_none() && self.commands_button().is_some_and(|(b, _)| b.contains(&ev.position));
         if (app_menu_hover, commands_hover) != (self.app_menu_hover, self.commands_hover) {
@@ -3644,7 +3649,7 @@ impl Render for ReaderView {
             let state = self.session.state();
             let Some(t) = state.shown(g.pane) else { continue };
             let text = t.document().is_some_and(|d| d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
-            let w = self.session.annotation_cols(t.id()) as f32 * self.char_w + 12.0;
+            let w = t.annotation_cols() as f32 * self.char_w + 12.0;
             if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
                 g.ann = w;
                 g.text.origin.x += px(w);
@@ -3817,7 +3822,7 @@ impl Render for ReaderView {
             // Rows under the sticky band are hidden by it; its own marks are painted over it.
             let band = sticky.iter().map(|(_, r)| r.y + 1.0).reduce(f32::max).unwrap_or(0.0);
             // Annotations of the rows below the band (a line's first row): row, label, age shade, of the hovered commit.
-            let hovered = self.ann_hover.and_then(|(t, line, _)| Some(self.session.annotation(t, line)?.commit.sha.clone()));
+            let hovered = self.ann_hovered().and_then(|(_, t, line)| Some(self.session.annotation(t, line)?.commit.sha.clone()));
             let ann: Vec<(f32, String, Option<f32>, bool)> = match tab {
                 Some(t) if g.ann > 0.0 => rows.iter().filter(|r| r.number > 0 && r.y >= band).filter_map(|r| {
                     let a = self.session.annotation(t.id(), r.number as usize - 1)?;
@@ -3913,7 +3918,7 @@ impl Render for ReaderView {
         let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
         let modal_commit = matches!(self.modal, Some(Modal::StatusDetails { commit: true, .. }));
         // The hovered annotation's commit, beside the pointer.
-        let ann_tip = self.ann_hover.and_then(|(t, line, at)| {
+        let ann_tip = self.ann_hovered().zip(self.ann_hover).and_then(|((_, t, line), at)| {
             let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
             let c = a.commit;
             let lines = [format!("{} · {} · {}", c.sha.get(..7).unwrap_or(&c.sha), c.author, lenz_content::blame::date(c.author_time)), c.summary.clone()];

@@ -5,11 +5,11 @@ use std::{
     ops::Range,
     path::PathBuf,
     sync::{
-        Arc, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        Arc, Mutex, OnceLock, PoisonError,
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use lenz_content::blame::{self as git_blame, Commit, CommitDetails};
@@ -95,7 +95,7 @@ pub(crate) fn annotation(blame: &Blame, line: usize) -> Option<Annotation<'_>> {
     Some(Annotation { label: format!("{} {author}", git_blame::date(commit.author_time)), shade, commit })
 }
 
-/// Batches go out at this many lines or this long after the last, so a big file fills in as git goes without
+/// Batches go out at this many lines, and this often while git is quiet, so a big file fills in as git goes without
 /// flooding the session's channel.
 const BATCH_LINES: usize = 256;
 const BATCH_AFTER: Duration = Duration::from_millis(50);
@@ -112,21 +112,47 @@ fn run(tab: TabId, file: &std::path::Path, request: u64, latest: &AtomicU64, tx:
         Ok(found) => found,
         Err(e) => return send(None, Vec::new(), Some(Err(e))),
     };
-    let dir = root.clone();
-    // Sent once, with the first batch.
-    let mut root = Some(root);
-    let (mut batch, mut lines, mut since) = (Vec::new(), 0, Instant::now());
-    let result = git_blame::blame_worktree(&dir, &path, &current, |h| {
-        lines += h.lines.len();
-        batch.push((h.lines, h.commit));
-        if lines >= BATCH_LINES || since.elapsed() >= BATCH_AFTER {
-            send(root.take(), std::mem::take(&mut batch), None);
-            (lines, since) = (0, Instant::now());
+    send(Some(root.clone()), Vec::new(), None);
+    stream(&current, |on| git_blame::blame_worktree(&root, &path, &current, on), &|hunks, done| send(None, hunks, done));
+}
+
+type Hunks = Vec<(Range<usize>, Arc<Commit>)>;
+
+/// Runs `blame`, sending its runs of lines in batches: at [`BATCH_LINES`], and every [`BATCH_AFTER`] while git is
+/// quiet, so what it reported shows before its next output. Then the rest with the result (always last).
+fn stream(current: &(dyn Fn() -> bool + Sync), blame: impl FnOnce(&mut dyn FnMut(git_blame::Hunk)) -> Result<(), String>, send: &(dyn Fn(Hunks, Option<Result<(), String>>) + Sync)) {
+    // Sent while holding the lock, so batches leave in order and the result after every one of them.
+    let pending: Mutex<(Hunks, usize)> = Mutex::new((Vec::new(), 0));
+    let flush = |p: &mut (Hunks, usize), done: Option<Result<(), String>>| {
+        let hunks = std::mem::take(&mut p.0);
+        p.1 = 0;
+        if current() && (!hunks.is_empty() || done.is_some()) {
+            send(hunks, done);
         }
+    };
+    let finished = AtomicBool::new(false);
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            while !finished.load(Ordering::Relaxed) {
+                std::thread::sleep(BATCH_AFTER);
+                let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
+                if !finished.load(Ordering::Relaxed) {
+                    flush(&mut p, None);
+                }
+            }
+        });
+        let result = blame(&mut |h| {
+            let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
+            p.1 += h.lines.len();
+            p.0.push((h.lines, h.commit));
+            if p.1 >= BATCH_LINES {
+                flush(&mut p, None);
+            }
+        });
+        let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
+        finished.store(true, Ordering::Relaxed);
+        flush(&mut p, Some(result));
     });
-    if current() {
-        send(root, batch, Some(result));
-    }
 }
 
 type Job = Box<dyn FnOnce() + Send>;
@@ -188,5 +214,30 @@ impl CommitPopup {
             rows.push(format!("… {} more files", d.files.len() - FILES));
         }
         rows.join("\n")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn lines_already_reported_go_out_while_git_is_quiet() {
+        let (tx, rx) = mpsc::channel();
+        let started = Instant::now();
+        let send = |hunks: Vec<(Range<usize>, Arc<Commit>)>, done: Option<Result<(), String>>| {
+            let _ = tx.send((started.elapsed(), hunks.len(), done.is_some()));
+        };
+        stream(&|| true, |on: &mut dyn FnMut(git_blame::Hunk)| {
+            on(git_blame::not_committed(1, "a"));
+            std::thread::sleep(Duration::from_millis(400));
+            on(git_blame::not_committed(2, "a"));
+            Ok(())
+        }, &send);
+        let got: Vec<_> = rx.try_iter().collect();
+        assert!(got[0].0 < Duration::from_millis(300) && got[0].1 == 1 && !got[0].2, "the first run before git's next output: {got:?}");
+        assert_eq!(got.iter().map(|g| g.1).sum::<usize>(), 2, "{got:?}");
+        assert!(got.last().unwrap().2, "done last: {got:?}");
     }
 }

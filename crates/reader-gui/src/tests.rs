@@ -5134,3 +5134,26 @@ fn gui_the_column_beside_a_sticky_line_belongs_to_that_line(cx: &mut TestAppCont
     v.simulate_click(at, Modifiers::default());
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 0..0, "the sticky line, not the row under it");
 }
+
+#[gpui::test]
+fn gui_the_hovered_annotation_follows_a_scroll(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git};
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let f = fixture(cx, Some(("a.txt", text.as_bytes())));
+    git(f.dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
+    commit_all(f.dir.path(), "First line");
+    settle(cx, &f, |v| v.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    draw(&mut v);
+    let g = f.view.read_with(&v, |r, _| r.panes[0]);
+    v.simulate_mouse_move(point(g.text.origin.x - px(g.ann / 2.0), g.text.origin.y + px(line_h() * 0.5)), None, Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.ann_hovered().map(|h| h.2)), Some(0));
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(5), cx));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.ann_hovered().map(|h| h.2)), Some(5), "the line now under the pointer");
+}

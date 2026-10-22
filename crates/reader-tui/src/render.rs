@@ -1360,6 +1360,11 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+/// Cells for the largest line number `lines` (no allocation: this runs for every drawn row).
+fn number_cells(lines: usize) -> u16 {
+    lines.checked_ilog10().map_or(1, |d| d as u16 + 1)
+}
+
 /// The blame column's cells left of the line numbers in pane `pane` of `width` columns (0: none, also when it would
 /// leave the text fewer than 8 columns).
 fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
@@ -1367,7 +1372,7 @@ fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
     let Some(d) = t.document() else { return 0 };
     let text = (d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
     let cells = t.annotation_cols() as u16 + 1;
-    let digits = d.line_count().to_string().len() as u16 + 3;
+    let digits = number_cells(d.line_count()) + 3;
     if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
 }
 
@@ -1376,7 +1381,7 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let gutter = state
         .shown(pane)
         .and_then(|t| t.document())
-        .map_or(3, |d| d.line_count().to_string().len() as u16 + 3)
+        .map_or(3, |d| number_cells(d.line_count()) + 3)
         .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
     Rect::new(
@@ -1855,7 +1860,7 @@ fn draw_source_row(
     let mark = if bookmark.is_some() { "●" } else { " " };
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
     // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
-    let digits = doc.line_count().to_string().len() + 3;
+    let digits = number_cells(doc.line_count()) as usize + 3;
     let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
     if ann > 0 {
         let a = tab.annotation(r.line).filter(|_| r.index == 0 && !sticky);

@@ -4861,17 +4861,17 @@ mod blame {
         let mut s = session(r.path());
         s.dispatch(Command::Open(r.path().join("a.txt")));
         settle(&mut s, opened);
-        assert_eq!(s.annotation_cols(s.state().active().unwrap().id()), 0, "off: no column");
+        assert_eq!(s.state().active().unwrap().annotation_cols(), 0, "off: no column");
         assert_eq!(s.on(CommandId::AnnotateBlame), Some(false));
         annotate(&mut s);
         let label = format!("{} t", today());
         assert_eq!(&labels(&s)[..2], [label.clone(), label]);
         let t = s.state().active().unwrap().id();
-        assert_eq!(s.annotation_cols(t), ANNOTATION_COLS);
+        assert_eq!(s.state().active().unwrap().annotation_cols(), ANNOTATION_COLS);
         assert_eq!(s.annotation(t, 0).unwrap().shade, Some(1.0), "one commit: all newest");
         assert_eq!(s.on(CommandId::AnnotateBlame), Some(true));
         s.dispatch(Command::SetAnnotate(false));
-        assert_eq!((s.annotation_cols(t), s.annotation(t, 0).is_none()), (0, true));
+        assert_eq!((s.state().active().unwrap().annotation_cols(), s.annotation(t, 0).is_none()), (0, true));
     }
 
     #[test]
@@ -5101,6 +5101,27 @@ mod blame {
         assert!(s.state().commit_popup().is_some());
         s.dispatch(Command::CloseTab(t));
         assert!(s.state().commit_popup().is_none());
+    }
+
+    #[test]
+    fn loading_and_svg_source_reasons() {
+        let r = repo();
+        put(r.path(), "a.txt", "one\n");
+        put(r.path(), "i.svg", "<svg xmlns='http://www.w3.org/2000/svg' width='2' height='2'/>\n");
+        commit_all(r.path(), "first");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("The file is still loading"));
+        settle(&mut s, opened);
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), None);
+        s.dispatch(Command::Open(r.path().join("i.svg")));
+        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.image().is_some()));
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("Only text can be annotated"), "the rendered image");
+        s.dispatch(Command::ToggleImageSource);
+        assert!(s.state().active().unwrap().image_source());
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), None, "an SVG shown as its source");
+        annotate(&mut s);
+        assert_eq!(labels(&s)[0], format!("{} t", today()));
     }
 
     #[test]
