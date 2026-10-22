@@ -45,6 +45,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | --- | --- |
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
 | Open file / go to line | Ctrl-O / Ctrl-G |
+| Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare With… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
@@ -95,7 +96,7 @@ disabled command's reason shows in the footer. The F10 palette labels commands w
 name followed by `:` to filter that group. The GUI additionally has a clickable
 Commands button in its status bar; the terminal keeps F10 / Ctrl-Shift-P access to the same catalog.
 
-The toolbar follows the GUI: explorer toggle, Back/Forward, SVG Source/Image and frequent file/search actions.
+The toolbar follows the GUI: explorer toggle, Back/Forward, SVG Source/Image, Find file and Search (Open is in the File menu and on Ctrl-O).
 Markdown's **Preview / Source** button sits at the right edge of its file header; each split pane controls its
 own document, focusing that pane before switching. The explorer title has Select Opened File. Narrow panes omit controls that do not
 fit; every action remains available through F10. Left-click selects source text; right-click in either reading

@@ -80,7 +80,8 @@ sources are listed, since the protocol does not provide a directory listing. Reo
 server session for the text; after that session ends, follow the definition again.
 
 Holding Ctrl over a name underlines it and shows a hand pointer: a click there follows it. A right-click in the text
-opens a menu with every navigation action and Copy Path / Copy Path:Line. The call hierarchy lists callers (Tab:
+opens a menu with every navigation action, Copy Path / Copy Path:Line, Open in Editor, Open with Default App,
+Compare With… and Split Right / Split Down (Close Split once split). The call hierarchy lists callers (Tab:
 callees) in the results panel, a level loading as it unfolds (Right/Left). Type Hierarchy (Ctrl+H) lists the subtypes of the type at
 the caret the same way (Tab: supertypes). It comes from the server's own type hierarchy where it has one (JDT LS,
 ruby-lsp), else from the server's usages read against the syntax of the files they are in: Rust `impl … for` and
@@ -150,10 +151,19 @@ before files; the command menu's "Explorer: All by Name" switches to plain name 
 capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`.
 
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
-and "Close Split" in the command menu). Each pane has its own tabs and shows its own place, also in the same file;
+and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
 Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Tabs drag within a bar to reorder or
 into the other pane. The explorer's edge, the results panel's top and the split's divider drag; the sizes and the
 split are remembered in `settings.json` (a remembered split starts with an empty second pane).
+
+**Open in Editor** (File menu, right-click) opens the active file in your editor at the caret, as Lenz Diff's `o`
+does: `LENZ_EDITOR`, else `$VISUAL`, else `$EDITOR`, else `[tools] editor` in `$XDG_CONFIG_HOME/lenz/settings.toml`
+(for a Lenz Code started from the Dock or a desktop menu, which rarely has the shell's variables). A terminal editor
+opens in a new terminal window. With no editor, and for images, the file goes to the system's default app with a
+message; **Open with Default App** always does. **Compare With…** compares the active file, or the explorer's
+highlighted file or folder when the explorer has focus, with a file or folder you pick (the system dialog in the GUI,
+a typed path in the terminal), in Lenz Diff: its window from the GUI; from the terminal, Lenz Diff's terminal app
+takes over the terminal until you quit it. Lenz Diff must sit beside Lenz Code, as release packages install it.
 
 Find (Ctrl+F) opens a box over the pane's text: matches are tinted as you type and the counter says which one is
 selected (at most 10,000 are listed); Enter / Shift+Enter or F3 / Shift+F3 step, Alt+Enter lists every match in the

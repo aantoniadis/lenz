@@ -772,6 +772,42 @@ fn path_validation_and_empty_independent_view_preserve_open_document() {
 }
 
 #[test]
+fn open_in_editor_starts_the_launch_and_compare_with_asks_for_the_other_side() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("one.txt");
+    std::fs::write(&path, "one").unwrap();
+    std::fs::create_dir(dir.path().join("sub")).unwrap();
+    std::fs::write(dir.path().join("sub/two.txt"), "two").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some() && a.session.state().tree_rows().any(|r| &*r.name == "sub"));
+    a.run(CommandId::OpenInEditor);
+    a.run(CommandId::OpenWithDefaultApp);
+    assert_eq!(a.launched.len(), 2);
+    assert_eq!(a.launched[1].args.last().map(String::as_str), Some(&*path.to_string_lossy()));
+    assert!(a.modal.is_none());
+    // From the text: the active file; the other side must exist, and Lenz Diff must sit beside this executable.
+    a.run(CommandId::CompareWith);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Compare(path.clone()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("Enter a file or folder path"));
+    a.handle(Event::Paste("gone.txt".into()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.modal.as_ref().unwrap().error.as_deref().unwrap().contains("no such file"));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // From the explorer: its highlighted row, a folder here.
+    a.focus = Focus::Tree;
+    a.tree_at = a.session.state().tree_rows().position(|r| &*r.name == "sub").unwrap();
+    a.run(CommandId::CompareWith);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Compare(dir.path().join("sub")));
+    a.handle(Event::Paste("one.txt".into()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.modal.as_ref().unwrap().error.as_deref().unwrap().contains("a folder with a folder"));
+    assert!(a.foreground.is_none());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one");
+}
+
+#[test]
 fn markdown_preview_selects_and_copies_rendered_text_without_source_selection() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("notes.md");
@@ -1910,8 +1946,12 @@ fn chrome_toolbar_controls_and_footer_commands_run_catalog_actions() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
     settle(&mut a, |a| a.session.state().project().is_some());
+    draw(&mut a, 120, 26);
+    assert!(!a.layout.controls.iter().any(|(control, _)| *control == CommandId::Open), "Open is in the File menu and on Ctrl+O");
+    key(&mut a, KeyCode::Char('o'), KeyModifiers::CONTROL);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Open);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     for (id, expected) in [
-        (CommandId::Open, Prompt::Open),
         (CommandId::FindFile, Prompt::Navigation),
         (CommandId::SearchProject, Prompt::Search),
     ] {

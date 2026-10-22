@@ -54,7 +54,6 @@ impl Session {
             }
         }
         controls.extend([
-            (CommandId::Open, "Open"),
             (CommandId::FindFile, "Find file"),
             (CommandId::SearchProject, "Search"),
         ]);

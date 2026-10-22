@@ -45,6 +45,8 @@ pub(crate) enum Prompt {
     },
     Open,
     OpenFolder,
+    /// Compare With: the other file or folder for this one.
+    Compare(PathBuf),
     WorkspaceRoot,
     ServerRuntime,
     RecentRoots,
@@ -121,6 +123,11 @@ pub(crate) struct App {
     pub quit: bool,
     pub new_view: bool,
     pub copy: Option<String>,
+    /// Lenz Diff's terminal app, for the runtime to run in this terminal until it quits.
+    pub foreground: Option<lenz_content::open::Launch>,
+    /// What Open in Editor started; tests record here instead of starting anything.
+    #[cfg(test)]
+    pub launched: Vec<lenz_content::open::Launch>,
     pub layout: crate::render::Geometry,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
@@ -148,6 +155,9 @@ impl App {
             quit: false,
             new_view: false,
             copy: None,
+            foreground: None,
+            #[cfg(test)]
+            launched: Vec::new(),
             layout: Default::default(),
             crumb_at: 0,
             drag: None,
@@ -530,10 +540,36 @@ impl App {
         }
         true
     }
+    /// Starts `launch` detached (a terminal editor gets its own window, as in Lenz Diff); a failure, or else
+    /// `toast`, shows with the core's messages.
+    fn start(&mut self, launch: lenz_content::open::Launch, toast: Option<String>) {
+        #[cfg(test)]
+        let started = { self.launched.push(launch.clone()); Ok::<(), std::io::Error>(()) };
+        #[cfg(not(test))]
+        let started = lenz_content::open::spawn(&launch);
+        if let Some(message) = started.err().map(|e| format!("Cannot start {}: {e}", launch.program)).or(toast) {
+            self.dispatch(Command::Notice(message));
+        }
+    }
     fn interface(&mut self, action: InterfaceAction) {
         let kind = match action {
             InterfaceAction::Open => Prompt::Open,
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
+            InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
+                let default_app = action == InterfaceAction::OpenWithDefaultApp;
+                match self.session.editor_plan(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
+                    Ok(plan) => self.start(plan.launch, plan.toast),
+                    Err(why) => self.dispatch(Command::Notice(why.into())),
+                }
+                return;
+            }
+            InterfaceAction::CompareWith => {
+                let row = (self.focus == Focus::Tree).then(|| self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone())).flatten();
+                match self.session.compare_source(row.as_deref()) {
+                    Ok(left) => Prompt::Compare(left),
+                    Err(why) => return self.dispatch(Command::Notice(why.into())),
+                }
+            }
             InterfaceAction::OpenRecent => Prompt::RecentRoots,
             InterfaceAction::FindFile => return self.open_navigation(Scope::Files),
             InterfaceAction::SearchEverywhere => return self.open_navigation(Scope::All),
@@ -905,6 +941,7 @@ impl App {
                 Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
                 Prompt::OpenFolder => "Open folder · enter path",
+                Prompt::Compare(_) => "Compare with · enter a file or folder path",
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
                 Prompt::ServerRuntime => {
                     "Server runtime executable / install folder · Enter saves and restarts"
@@ -1276,6 +1313,24 @@ impl App {
                         Some("Enter a positive line or line:column".into())
                 }
             },
+            Prompt::Compare(left) => {
+                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                let launch = match input.trim().is_empty() {
+                    true => Err("Enter a file or folder path".to_string()),
+                    false => self.session.compare_launch(&left, &self.resolve_path(&input), &exe, true),
+                };
+                match launch {
+                    Ok(launch) => {
+                        self.close_modal();
+                        self.foreground = Some(launch);
+                    }
+                    Err(e) => {
+                        if let Some(modal) = self.modal.as_mut() {
+                            modal.error = Some(e);
+                        }
+                    }
+                }
+            }
             Prompt::Open | Prompt::OpenFolder => {
                 let path = self.resolve_path(&input);
                 if input.trim().is_empty()

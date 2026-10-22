@@ -234,6 +234,8 @@ pub enum Command {
     SetFileIcons(bool),
     /// Copy the active file's path (relative to the open folder), with `:line` of the caret when `line`.
     CopyPath { line: bool },
+    /// A message from the adapter (a launch it could not start), shown with the core's own.
+    Notice(String),
     /// Mark the occurrences of the name at the caret (asked in the background; never cancels another request).
     HighlightAt,
     /// Stop waiting for a semantic answer; reading continues undisturbed.
@@ -375,6 +377,11 @@ pub enum CommandId {
     /// The active file's path (relative to the open folder), and with the caret's line.
     CopyPath,
     CopyPathLine,
+    /// The active file in the user's editor at the caret, or with the system's default app.
+    OpenInEditor,
+    OpenWithDefaultApp,
+    /// The active file, or the explorer's folder or file, against another in Lenz Diff.
+    CompareWith,
     Symbols,
     FileSymbols,
     WorkspaceRoot,
@@ -428,7 +435,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 96] = [
+    pub const ALL: [CommandId; 99] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -469,6 +476,9 @@ impl CommandId {
         Self::Copy,
         Self::CopyPath,
         Self::CopyPathLine,
+        Self::OpenInEditor,
+        Self::OpenWithDefaultApp,
+        Self::CompareWith,
         Self::Collapse,
         Self::Expand,
         Self::CollapseAll,
@@ -599,6 +609,9 @@ impl CommandId {
             Self::SemanticHighlighting => "Semantic Highlighting",
             Self::CopyPath => "Copy Path",
             Self::CopyPathLine => "Copy Path:Line",
+            Self::OpenInEditor => "Open in Editor",
+            Self::OpenWithDefaultApp => "Open with Default App",
+            Self::CompareWith => "Compare With…",
             Self::WorkspaceRoot => "Set Workspace Root…",
             Self::Usages => "Find Usages",
             Self::Symbols => "Find Symbol (language server)…",
@@ -1739,6 +1752,9 @@ impl Session {
             CommandId::DocumentationOnHover | CommandId::FileIcons => None,
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
+            CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
+            // The explorer's selection, which only the adapter knows, is checked when it asks.
+            CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
             CommandId::CopyPathLine => match self.state.active() {
                 None => Some("No file is open"),
                 Some(t) if t.doc.is_none() => Some("No text to point at"),
@@ -1920,7 +1936,7 @@ impl Session {
     }
 
     /// The context menu for the active tab: navigation and copying for text; for an image or a Markdown preview
-    /// only its path and its place in the explorer.
+    /// only its path and its place in the explorer. Then opening elsewhere, comparing and splitting.
     pub fn context_menu(&self) -> Vec<MenuEntry> {
         use MenuEntry::{Command as C, Separator};
         let tab = self.state.active();
@@ -1940,7 +1956,79 @@ impl Session {
             }
         }
         entries.push(C(CommandId::LocateFile));
+        entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith)]);
+        entries.extend([Separator, C(CommandId::SplitRight), C(CommandId::SplitDown)]);
+        if self.state.settings.split.is_some() {
+            entries.push(C(CommandId::Unsplit));
+        }
         entries
+    }
+
+    /// The active tab, when its file is on disk for another app to open.
+    fn external_tab(&self) -> Result<&Tab, &'static str> {
+        match self.state.active() {
+            None => Err("No file is open"),
+            Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
+            Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
+            Some(t) => Ok(t),
+        }
+    }
+
+    /// Open in Editor (`default_app` false: the user's editor at the caret, from the environment, else `configured`,
+    /// the settings file's) or Open with Default App; the adapter spawns the launch and shows its toast.
+    pub fn editor_plan(&self, host: &lenz_content::open::Host, configured: Option<&str>, default_app: bool) -> Result<lenz_content::open::Plan, &'static str> {
+        let t = self.external_tab()?;
+        let at = t.doc.as_ref().zip(t.selection).map(|(d, s)| {
+            let line = d.line_of(s.head);
+            let before = d.text().get(d.line_range(line).start..s.head).unwrap_or_default();
+            (line + 1, before.chars().count() + 1)
+        });
+        let target = lenz_content::open::Target {
+            file: &t.source,
+            // Images and other files without text go to the system.
+            binary: t.doc.is_none(),
+            line: Some(at.map_or(1, |a| a.0)),
+            column: at.map(|a| a.1),
+            cwd: self.state.project.as_ref().map(|p| p.root()),
+        };
+        Ok(lenz_content::open::plan_with(host, &target, configured, default_app))
+    }
+
+    /// The left side of Compare With: the explorer row `tree_row` (its stable path) when the explorer has focus,
+    /// else the active file.
+    pub fn compare_source(&self, tree_row: Option<&str>) -> Result<PathBuf, &'static str> {
+        let Some(row) = tree_row else { return self.external_tab().map(|t| t.source.clone()) };
+        if row.contains("://") {
+            return Err("This entry has no file on disk");
+        }
+        match (Path::new(row).is_absolute(), self.state.project.as_ref()) {
+            (true, _) => Ok(PathBuf::from(row)),
+            (false, Some(p)) => Ok(p.root().join(row)),
+            (false, None) => Err("No folder is open"),
+        }
+    }
+
+    /// Lenz Diff comparing `left` with `right` (two files or two folders), started from `exe`'s folder: the window
+    /// app, or the terminal app when `terminal`.
+    pub fn compare_launch(&self, left: &Path, right: &Path, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
+        let right = std::path::absolute(right).map_err(|e| format!("Compare With: {e}"))?;
+        let (Ok(l), Ok(r)) = (std::fs::metadata(left), std::fs::metadata(&right)) else {
+            return Err(format!("Compare With: no such file or folder: {}", right.display()));
+        };
+        if l.is_dir() != r.is_dir() {
+            return Err("Compare With: pick a file to compare with a file, or a folder with a folder".into());
+        }
+        if std::fs::canonicalize(left).ok() == std::fs::canonicalize(&right).ok() {
+            return Err("Compare With: pick a different file or folder".into());
+        }
+        let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
+        if !program.is_file() {
+            return Err(format!("Compare With: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
+        }
+        // ponytail: non-UTF-8 paths go lossy, as in lenz_content::open
+        let args = ["--no-index".into(), left.to_string_lossy().into_owned(), right.to_string_lossy().into_owned()];
+        let cwd = self.state.project.as_ref().map(|p| p.root().to_path_buf());
+        Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: args.to_vec(), cwd })
     }
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
@@ -2515,6 +2603,10 @@ impl Session {
                 Effect { repaint: false, copy: Some(if line { format!("{path}:{at}") } else { path }) }
             }
             Command::CopyText(text) => Effect { repaint: false, copy: (!text.is_empty()).then_some(text) },
+            Command::Notice(text) => {
+                self.state.messages.push(text);
+                Effect { repaint: true, copy: None }
+            }
             Command::Copy => {
                 let (Some(doc), Some(s)) = (self.state.document(), self.state.selection()) else { return Effect::default() };
                 // No selection: the caret's line with its line ending.

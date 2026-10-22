@@ -836,7 +836,7 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
             if width >= 60 {
                 let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
                 assert!(top.contains("Menu"), "top: {top:?}");
-                assert!(top.contains("Open"));
+                assert!(top.contains("Find file") && !top.contains("Open"), "top: {top:?}");
                 let footer: String = (0..width).map(|x| buffer[(x, height - 1)].symbol()).collect();
                 assert!(footer.contains("F10 Commands"));
                 assert!(footer.contains("View 2/3"));
