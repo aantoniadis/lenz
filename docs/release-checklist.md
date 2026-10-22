@@ -78,7 +78,7 @@ In a throwaway repository with a merge conflict in a text file, a binary (PNG) f
 
 ## Package and publish
 
-Packaging is manual and needs Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own.
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`: native runners (Ubuntu 22.04 x86_64 and arm64, macOS 15 Apple Silicon) run `packaging/package.sh` and attach the tarballs and `.sha256` files to a draft release. The tag must match the workspace version. Rerun it for an existing tag from the Actions tab. The steps below also work locally and need Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own.
 
 - [ ] From the unpacked tarball (and, on macOS, through the Homebrew-style symlinks into `Lenz.app`): `lenz --help` lists the commands; `lenz <folder>` opens the Code Reader; `lenz --tui <file>` opens the terminal reader; `lenz diff <left> <right>` and `lenz diff --tui <left> <right>` open the comparisons; `lenz diff --bogus` prints `usage: lenz diff`.
 - [ ] macOS: the Dock shows the Lenz logo from launch to quit for both a Code and a Diff window, launched from Finder (`Lenz.app` opens the Reader) and from a terminal through the symlinks; `codesign -v --strict Lenz.app` passes.
@@ -86,8 +86,8 @@ Packaging is manual and needs Python 3. Each tarball holds the launcher `lenz` a
 
 - [ ] Linux: `packaging/build-linux.sh <version>` builds `x86_64` and `aarch64` tarballs in Ubuntu 22.04 containers (glibc 2.35; `aarch64` runs under qemu-user and is slow). A tarball built directly on a newer distribution needs that distribution's glibc.
 - [ ] macOS: `packaging/package.sh <version>` on an Apple Silicon Mac. It builds the `dist` profile (thin LTO, function symbols kept for crash reports, `panic = abort`) and writes `target/package/lenz-<version>-<target>.tar.gz` and its `.sha256`. The GUI goes into an ad-hoc signed `Lenz.app` (Info.plist with the version, `assets/lenz.icns`) with a top-level `lenz` symlink; check `codesign -v --strict` on it and that the Dock shows the logo from launch to quit. The release identifier and Git revision are embedded in crash diagnostics; the version in About comes from the workspace version, not the filename.
-- [ ] Copy every tarball and `.sha256` into `target/package/` on one machine, then run `packaging/bump.sh <version>` to point the Homebrew formula (`packaging/homebrew/lenz.rb`) and the AUR `PKGBUILD` (`packaging/aur/PKGBUILD`) at that release's checksums.
-- [ ] Upload the tarballs to the GitHub release, then publish the Homebrew formula to the tap and the AUR package.
+- [ ] Copy every tarball and `.sha256` into `target/package/` on one machine (`gh release download v<version> -p '*.sha256' -D target/package`), then run `packaging/bump.sh <version>` to point the Homebrew formula (`packaging/homebrew/lenz.rb`) and the AUR `PKGBUILD` (`packaging/aur/PKGBUILD`) at that release's checksums.
+- [ ] Upload the tarballs to the GitHub release (the workflow does this), then publish the Homebrew formula to the tap and the AUR package.
 
 ## Making the repository public
 

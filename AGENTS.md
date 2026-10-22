@@ -57,7 +57,8 @@ work, read [current coverage and capability limits](docs/tui.md).
   performance validation. Compilation and tests provide evidence of parity,
   not a guarantee that every visual or interaction bug is absent.
 
-There is no hosted CI: `scripts/ci-local.sh` is the gate (the pre-push hook runs it).
+There is no hosted test CI: `scripts/ci-local.sh` is the gate (the pre-push hook runs it). A pushed version tag
+builds the release tarballs on GitHub Actions (`.github/workflows/release.yml`).
 For parity changes, run workspace/core tests, the actual GUI adapter tests
 (`cargo test -p lenz --features gui-test gui_`), and relevant TUI event/render
 checks. Cover supported appearances and narrow layouts when presentation changes.
