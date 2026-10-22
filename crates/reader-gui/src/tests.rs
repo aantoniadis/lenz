@@ -186,7 +186,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
     draw(&mut v);
-    let [copy, close] = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w));
+    let [copy, close] = f.view.read_with(&v, |r, _| <[_; 2]>::try_from(r.modal_layout().unwrap().details_buttons(r.char_w, details_labels(false))).unwrap());
     v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into())));
     v.simulate_click(copy.center(), Modifiers::default());
     assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
@@ -4911,7 +4911,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
             // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
             let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
-            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { commit: false, title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
             v.simulate_keystrokes("end up");
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
@@ -4967,7 +4967,7 @@ fn about_shows_the_shared_text_and_releases_its_logo_on_close(cx: &mut TestAppCo
         f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::About, w, cx));
         draw(&mut v);
         let (title, text, logo) = f.view.read_with(&v, |r, _| match &r.modal {
-            Some(Modal::StatusDetails { title, text, logo }) => (*title, text.clone(), logo.as_ref().map(|l| Arc::downgrade(&l.0))),
+            Some(Modal::StatusDetails { title, text, logo, .. }) => (*title, text.clone(), logo.as_ref().map(|l| Arc::downgrade(&l.0))),
             other => panic!("{other:?}"),
         });
         assert_eq!(title, "About Lenz Code");
@@ -5016,4 +5016,144 @@ fn gui_double_and_triple_click_select_word_and_group(cx: &mut TestAppContext) {
     click(&mut v, 4);
     assert_eq!(sel(&mut v), "", "a fourth click starts over");
     assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), src.as_bytes(), "the file is unchanged");
+}
+
+/// A fixture whose folder is a git repository with `a.txt` (two lines) committed as "First line".
+fn blame_fixture(cx: &mut TestAppContext) -> (Fixture, String) {
+    use lenz_content::git::testing::{commit_all, git};
+    let f = fixture(cx, Some(("a.txt", b"one\ntwo\n")));
+    git(f.dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
+    commit_all(f.dir.path(), "First line");
+    let sha = git(f.dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    settle(cx, &f, |v| v.session().state().document().is_some());
+    (f, sha)
+}
+
+fn annotated(v: &ReaderView) -> bool {
+    let s = v.session();
+    s.state().active().is_some_and(|t| s.annotation(t.id(), 1).is_some())
+}
+
+#[gpui::test]
+fn gui_annotation_column_shifts_text_and_click_opens_the_commit(cx: &mut TestAppContext) {
+    let (f, sha) = blame_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    let before = f.view.read_with(&v, |r, _| r.text_bounds.unwrap().origin.x);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    draw(&mut v);
+    let (g, char_w) = f.view.read_with(&v, |r, _| (r.panes[0], r.char_w));
+    assert_eq!(g.ann, reader_core::blame::ANNOTATION_COLS as f32 * char_w + 12.0);
+    assert_eq!(g.text.origin.x, before + px(g.ann), "the text moves right of the column");
+    // A click on the first line's annotation opens its commit.
+    let at = point(g.text.origin.x - px(g.ann / 2.0), g.text.origin.y + px(line_h() * 1.5));
+    v.simulate_click(at, Modifiers::default());
+    settle(cx, &f, |r| r.session().state().commit_popup().is_some_and(|p| p.details.is_some()));
+    draw(&mut v);
+    let text = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::StatusDetails { commit: true, text, .. }) => text.clone(), _ => String::new() });
+    assert!(text.starts_with(&format!("commit {sha}")), "{text}");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 4..4, "the caret is on the clicked line");
+    // Copy Revision, then Show Diff (Lenz Diff is not beside the test binary: it says so).
+    let button = |v: &mut VisualTestContext, i: usize| f.view.read_with(v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, details_labels(true))[i].center());
+    let copy = button(&mut v, 1);
+    v.simulate_click(copy, Modifiers::default());
+    assert_eq!(cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text())), Some(sha.clone()));
+    let diff = button(&mut v, 0);
+    v.simulate_click(diff, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().commit_popup().is_none()), "Show Diff closes the popup");
+    let status = f.view.read_with(&v, |r, _| (r.status(), r.launched.clone()));
+    assert!(status.0.contains("Show Diff: Lenz Diff is not beside Lenz Code") && status.1.is_empty(), "{status:?}");
+    // Escape closes a reopened popup; the file is unchanged.
+    v.simulate_click(at, Modifiers::default());
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().commit_popup().is_none()));
+    assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"one\ntwo\n");
+}
+
+#[gpui::test]
+fn gui_annotation_column_hides_in_a_narrow_pane(cx: &mut TestAppContext) {
+    let (f, _) = blame_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.panes[0].ann) > 0.0);
+    v.simulate_resize(size(px(220.0), px(200.0)));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.panes[0].ann), 0.0, "no room: no column");
+}
+
+#[gpui::test]
+fn gui_right_click_in_the_column_moves_the_caret_and_offers_the_commit(cx: &mut TestAppContext) {
+    let (f, _) = blame_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    draw(&mut v);
+    let g = f.view.read_with(&v, |r, _| r.panes[0]);
+    let at = point(g.text.origin.x - px(g.ann / 2.0), g.text.origin.y + px(line_h() * 1.5));
+    v.simulate_event(MouseDownEvent { button: MouseButton::Right, position: at, modifiers: Modifiers::default(), click_count: 1, first_mouse: false });
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 4..4);
+    let entries = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::Context { entries, .. }) => entries.clone(), _ => Vec::new() });
+    for id in [CommandId::ShowCommit, CommandId::ShowCommitDiff, CommandId::CopyRevision, CommandId::CloseAnnotations] {
+        assert!(entries.contains(&MenuEntry::Command(id)), "{id:?}");
+    }
+}
+
+#[gpui::test]
+fn gui_the_column_beside_a_sticky_line_belongs_to_that_line(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git};
+    let body: String = (0..80).map(|i| format!("    let v{i} = {i};\n")).collect();
+    let src = format!("fn f() {{\n{body}}}\n");
+    let f = fixture(cx, Some(("a.rs", src.as_bytes())));
+    git(f.dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.rs\n!.gitignore\n").unwrap();
+    commit_all(f.dir.path(), "First line");
+    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.language().is_some()));
+    f.view.update(cx, |v, cx| v.dispatch(Command::SetStickyScroll(true), cx));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Scroll(40), cx));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    draw(&mut v);
+    draw(&mut v);
+    let (g, band) = f.view.read_with(&v, |r, _| (r.panes[0], r.sticky_hits.first().map(|h| (h.0, h.2))));
+    let (bounds, line) = band.expect("a sticky line over the top row");
+    assert_eq!(line, 0, "fn f() is pinned");
+    let at = point(g.text.origin.x - px(g.ann / 2.0), bounds.origin.y + px(line_h() / 2.0));
+    v.simulate_click(at, Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 0..0, "the sticky line, not the row under it");
+}
+
+#[gpui::test]
+fn gui_the_hovered_annotation_follows_a_scroll(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git};
+    let text: String = (0..40).map(|i| format!("line {i}\n")).collect();
+    let f = fixture(cx, Some(("a.txt", text.as_bytes())));
+    git(f.dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
+    commit_all(f.dir.path(), "First line");
+    settle(cx, &f, |v| v.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    draw(&mut v);
+    let g = f.view.read_with(&v, |r, _| r.panes[0]);
+    v.simulate_mouse_move(point(g.text.origin.x - px(g.ann / 2.0), g.text.origin.y + px(line_h() * 0.5)), None, Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.ann_hovered().map(|h| h.2)), Some(0));
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(5), cx));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.ann_hovered().map(|h| h.2)), Some(5), "the line now under the pointer");
 }

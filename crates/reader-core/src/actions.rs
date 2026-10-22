@@ -37,6 +37,7 @@ pub enum InterfaceAction {
     OpenInEditor,
     OpenWithDefaultApp,
     CompareWith,
+    ShowCommitDiff,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -101,6 +102,7 @@ impl Session {
             CommandId::OpenInEditor => return CatalogAction::Interface(InterfaceAction::OpenInEditor),
             CommandId::OpenWithDefaultApp => return CatalogAction::Interface(InterfaceAction::OpenWithDefaultApp),
             CommandId::CompareWith => return CatalogAction::Interface(InterfaceAction::CompareWith),
+            CommandId::ShowCommitDiff => return CatalogAction::Interface(InterfaceAction::ShowCommitDiff),
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
             CommandId::FindFile => return CatalogAction::Interface(InterfaceAction::FindFile),
@@ -174,6 +176,13 @@ impl Session {
             CommandId::Documentation => Command::Documentation,
             CommandId::DocumentationOnHover => Command::SetDocumentationOnHover(!state.documentation_on_hover()),
             CommandId::FileIcons => Command::SetFileIcons(!state.file_icons()),
+            CommandId::AnnotateBlame => Command::SetAnnotate(state.active().is_none_or(|t| t.blame.is_none())),
+            CommandId::CloseAnnotations => Command::SetAnnotate(false),
+            CommandId::CopyRevision => Command::CopyRevision,
+            CommandId::ShowCommit => match state.active().and_then(|t| Some((t.id(), t.document()?.line_of(t.selection()?.head)))) {
+                Some((tab, line)) => Command::ShowCommitAt { tab, line },
+                None => return CatalogAction::Disabled("No line is selected"),
+            },
             CommandId::InlayTypes => Command::SetInlayTypes(!state.inlay_types()),
             CommandId::InlayParameters => Command::SetInlayParameters(!state.inlay_parameters()),
             CommandId::SemanticHighlighting => Command::SetSemanticHighlighting(!state.semantic_highlighting()),
@@ -253,7 +262,7 @@ impl CommandId {
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
-            | Self::FoldersFirst | Self::AllByName | Self::SplitRight | Self::SplitDown | Self::Unsplit
+            | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
             | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
@@ -299,6 +308,7 @@ impl CommandId {
             Self::PeekDefinition => Some("Alt+F12"),
             Self::TypeDefinition => Some("Ctrl+Shift+B"),
             Self::Implementation => Some("Ctrl+Alt+B"),
+            Self::AnnotateBlame | Self::CloseAnnotations => Some("Alt+B"),
             Self::Usages => Some("Shift+F12"),
             Self::CallHierarchy => Some("Ctrl+Alt+H"),
             Self::TypeHierarchy => Some("Ctrl+H"),

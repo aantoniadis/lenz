@@ -9,8 +9,12 @@ publish.workspace = true
 [features]
 # In-process memory probe for benchmark and test targets; never in shipping binaries.
 perf-probe = []
+# `git::testing` repositories and `git::trust`, for dependent crates' tests; never in shipping binaries.
+git-testing = ["dep:tempfile"]
 
 [dependencies]
+# Throwaway repositories for `git::testing` (feature `git-testing` only).
+tempfile = { version = "3", optional = true }
 # Zero-width detection for the combining-mark cap (src/display.rs).
 unicode-width = "0.2"
 # In-document find (src/find.rs); already linked through tree-sitter.

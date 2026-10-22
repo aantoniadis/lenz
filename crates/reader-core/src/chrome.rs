@@ -111,6 +111,15 @@ impl Session {
         {
             return provider_message(provider);
         }
+        if let Some(a) = self.caret_annotation() {
+            return match a.shade {
+                None => a.label,
+                Some(_) => {
+                    let c = a.commit;
+                    format!("{} · {} · {} · {}", c.sha.get(..7).unwrap_or(&c.sha), c.author, lenz_content::blame::date(c.author_time), c.summary)
+                }
+            };
+        }
         state.document().map_or_else(
             || "No file open — Ctrl+O file, F10 commands".into(),
             |d| d.source().display().to_string(),

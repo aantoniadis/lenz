@@ -1659,7 +1659,7 @@ fn help_and_wrapped_details_wheel_scroll_without_selection_and_clamp_on_resize()
     let mut a = app(dir.path());
     for prompt in [
         Prompt::Help,
-        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200), logo: false },
+        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200), logo: false, commit: false },
     ] {
         a.prompt(prompt);
         draw(&mut a, 24, 10);
@@ -2091,4 +2091,110 @@ fn about_opens_from_the_application_menu_with_its_logo_and_closes_to_the_documen
     assert!(a.modal.is_none());
     assert_eq!(std::fs::read(&path).unwrap(), b"first\n");
     assert!(a.session.state().document().is_some_and(|d| d.text().to_string() == "first\n"));
+}
+
+/// An app on a git repository with `a.txt` (two lines) committed as "First line", annotated with Alt+B.
+fn annotated_app() -> (tempfile::TempDir, App, String) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    let r = repo();
+    write(r.path(), "a.txt", "one\ntwo\n");
+    commit_all(r.path(), "First line");
+    let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    let mut a = app(r.path());
+    a.dispatch(Command::Open(r.path().join("a.txt")));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.annotation(1).is_some()));
+    draw(&mut a, 100, 20);
+    (r, a, sha)
+}
+struct Pane {
+    gutter_x: u16,
+    ann: u16,
+    text: ratatui::layout::Rect,
+}
+fn mouse(a: &mut App, button: MouseButton, x: u16, y: u16) {
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(button), column: x, row: y, modifiers: KeyModifiers::NONE }));
+}
+fn commit_body(a: &App) -> Option<String> {
+    match &a.modal.as_ref()?.kind {
+        Prompt::Details { commit: true, body, .. } => Some(body.clone()),
+        _ => None,
+    }
+}
+
+#[test]
+fn annotate_click_opens_the_commit_and_its_buttons_run() {
+    let (r, mut a, sha) = annotated_app();
+    let p = { let g = &a.layout.panes[0]; (g.gutter_x, g.ann, g.text) };
+    let p = Pane { gutter_x: p.0, ann: p.1, text: p.2 };
+    assert_eq!(p.ann as usize, reader_core::blame::ANNOTATION_COLS + 1);
+    // The second line's annotation: the caret goes there and the commit opens.
+    mouse(&mut a, MouseButton::Left, p.gutter_x + 2, p.text.y + 1);
+    assert_eq!(a.session.state().selection().unwrap().range(), 4..4);
+    settle(&mut a, |a| a.session.state().commit_popup().is_some_and(|c| c.details.is_some()));
+    draw(&mut a, 100, 20);
+    assert!(commit_body(&a).unwrap().starts_with(&format!("commit {sha}\nAuthor: t <t@t>")));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::NONE);
+    assert_eq!(a.copy.take().as_deref(), Some(sha.as_str()));
+    // Show Diff: Lenz Diff is not beside the test binary, so it says so; the popup closes.
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    assert!(a.modal.is_none() && a.session.state().commit_popup().is_none());
+    assert!(a.session.status_message().starts_with("Show Diff: Lenz Diff is not beside Lenz Code"), "{}", a.session.status_message());
+    // Escape closes a reopened popup; the file is unchanged.
+    mouse(&mut a, MouseButton::Left, p.gutter_x + 2, p.text.y);
+    draw(&mut a, 100, 20);
+    assert!(commit_body(&a).is_some());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    assert!(a.modal.is_none() && a.session.state().commit_popup().is_none());
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\n");
+}
+
+#[test]
+fn right_click_on_the_gutter_opens_the_context_menu_at_that_line() {
+    let (_r, mut a, _) = annotated_app();
+    let p = { let g = &a.layout.panes[0]; (g.gutter_x, g.ann, g.text) };
+    let p = Pane { gutter_x: p.0, ann: p.1, text: p.2 };
+    for x in [p.gutter_x, p.text.x - 2] {
+        a.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+        mouse(&mut a, MouseButton::Right, x, p.text.y + 1);
+        assert_eq!(a.session.state().selection().unwrap().range(), 4..4, "x {x}");
+        let entries = match &a.modal.as_ref().unwrap().kind { Prompt::Context { entries, .. } => entries.clone(), k => panic!("{k:?}") };
+        assert!(entries.contains(&MenuEntry::Command(CommandId::ShowCommit)) && entries.contains(&MenuEntry::Command(CommandId::CloseAnnotations)));
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    }
+}
+
+#[test]
+fn annotation_column_takes_text_columns_and_hides_in_a_tiny_terminal() {
+    let (_r, mut a, _) = annotated_app();
+    let with = a.layout.panes[0].text.width;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+    let today = lenz_content::blame::date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
+    assert!(screen.contains(&format!("{today} t")), "{screen}");
+    key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
+    draw(&mut a, 100, 20);
+    assert_eq!(a.layout.panes[0].text.width - with, reader_core::blame::ANNOTATION_COLS as u16 + 1, "off: the text takes the columns back");
+    key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.annotation(1).is_some()));
+    for (w, h) in [(20, 6), (12, 3)] {
+        draw(&mut a, w, h);
+        assert_eq!(a.layout.panes[0].ann, 0, "{w}×{h}: no room");
+        key(&mut a, KeyCode::End, KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        draw(&mut a, w, h);
+    }
+}
+
+#[test]
+fn right_click_on_the_gutter_inside_a_selection_still_moves_the_caret() {
+    let (_r, mut a, _) = annotated_app();
+    let p = { let g = &a.layout.panes[0]; (g.gutter_x, g.text.y) };
+    a.dispatch(Command::Select(Selection { anchor: 0, head: 8 }));
+    mouse(&mut a, MouseButton::Right, p.0 + 2, p.1 + 1);
+    assert_eq!(a.session.state().selection().unwrap().range(), 4..4, "the clicked line, not the selection's head");
 }

@@ -32,6 +32,8 @@ pub(crate) struct Geometry {
     pub modal_content_rows: usize,
     pub modal_items: Vec<usize>,
     pub details_copy: Rect,
+    /// The commit popup's Show Diff button.
+    pub details_diff: Rect,
     pub details_close: Rect,
     pub navigation_scopes: Vec<(Scope, Rect)>,
     pub navigation_revision: Option<u64>,
@@ -52,6 +54,9 @@ pub(crate) struct PaneGeometry {
     pub tabs: Vec<(TabId, Rect)>,
     pub crumbs: Vec<(usize, Rect)>,
     pub text: Rect,
+    /// Where the gutter starts, and the blame column's width there (0: none).
+    pub gutter_x: u16,
+    pub ann: u16,
     pub rows: Vec<(u16, usize, usize)>,
     pub hits: Vec<TextHit>,
 }
@@ -1117,10 +1122,19 @@ impl App {
             let mut content = content;
             if matches!(modal.kind, Prompt::Details { .. }) && content.height > 0 {
                 content.height -= 1;
-                let width = (content.width / 2).min(16);
-                geometry.details_copy = Rect::new(content.x, content.bottom(), width, 1);
-                geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
-                line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
+                if matches!(modal.kind, Prompt::Details { commit: true, .. }) {
+                    let width = (content.width / 3).min(18);
+                    geometry.details_diff = Rect::new(content.x, content.bottom(), width, 1);
+                    geometry.details_copy = Rect::new(content.x + width, content.bottom(), width, 1);
+                    geometry.details_close = Rect::new(content.x + 2 * width, content.bottom(), width, 1);
+                    line(frame.buffer_mut(), geometry.details_diff, "[Show Diff d]", style(p.fg, p.selected_bg));
+                    line(frame.buffer_mut(), geometry.details_copy, "[Copy Revision c]", style(p.fg, p.selected_bg));
+                } else {
+                    let width = (content.width / 2).min(16);
+                    geometry.details_copy = Rect::new(content.x, content.bottom(), width, 1);
+                    geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
+                    line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
+                }
                 line(frame.buffer_mut(), geometry.details_close, "[Close Esc]", style(p.fg, p.selected_bg));
             }
             let body = match &modal.kind {
@@ -1346,12 +1360,29 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     )
 }
 
+/// Cells for the largest line number `lines` (no allocation: this runs for every drawn row).
+fn number_cells(lines: usize) -> u16 {
+    lines.checked_ilog10().map_or(1, |d| d as u16 + 1)
+}
+
+/// The blame column's cells left of the line numbers in pane `pane` of `width` columns (0: none, also when it would
+/// leave the text fewer than 8 columns).
+fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
+    let Some(t) = state.shown(pane) else { return 0 };
+    let Some(d) = t.document() else { return 0 };
+    let text = (d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+    let cells = t.annotation_cols() as u16 + 1;
+    let digits = number_cells(d.line_count()) + 3;
+    if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
+}
+
 fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let bars = 1 + u16::from(state.breadcrumbs());
     let gutter = state
         .shown(pane)
         .and_then(|t| t.document())
-        .map_or(3, |d| d.line_count().to_string().len() as u16 + 3)
+        .map_or(3, |d| number_cells(d.line_count()) + 3)
+        .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
     Rect::new(
         area.x + gutter,
@@ -1383,6 +1414,8 @@ fn draw_pane(
     let mut geometry = PaneGeometry {
         pane,
         text: text_area(state, pane, area),
+        gutter_x: area.x,
+        ann: annotation_cells(state, pane, area.width),
         ..Default::default()
     };
     if area.is_empty() {
@@ -1826,6 +1859,22 @@ fn draw_source_row(
     };
     let mark = if bookmark.is_some() { "●" } else { " " };
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
+    // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
+    let digits = number_cells(doc.line_count()) as usize + 3;
+    let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
+    if ann > 0 {
+        let a = tab.annotation(r.line).filter(|_| r.index == 0 && !sticky);
+        let bg = match a.as_ref().and_then(|a| a.shade) {
+            Some(s) => lenz_content::theme::mix(p.gutter_bg, p.blame_new, s * 0.6),
+            None => p.gutter_bg,
+        };
+        let fg = if a.as_ref().is_some_and(|a| a.shade.is_some()) { p.fg } else { p.dim };
+        let label = a.map_or(String::new(), |a| format!("{:<1$}", a.label, ann as usize));
+        let cell = Rect::new(gutter_x, y, ann, 1);
+        fill(buf, cell, style(fg, bg));
+        line(buf, cell, &label, style(fg, bg));
+    }
+    let gutter_x = gutter_x + ann;
     let gutter = area.x.saturating_sub(gutter_x) as usize;
     let number = if r.index == 0 {
         format!(
@@ -2340,7 +2389,7 @@ pub(crate) fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
-const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
+const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Cycle explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nClick or drag  Select source text (double: word, triple: its syntax group)\nAlt+B  Annotate with Git blame (click an annotation for its commit)\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection\nCtrl+Q  Quit\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nF10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll and source/preview presentation.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nThis reader never edits source files.\n\nEsc closes this help.";
 
 #[cfg(test)]
 #[path = "render_tests.rs"]
