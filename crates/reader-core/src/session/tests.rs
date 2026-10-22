@@ -2457,6 +2457,37 @@ fn a_split_shows_the_source_twice_and_each_pane_keeps_its_tabs_and_place() {
 }
 
 #[test]
+fn closing_a_split_panes_last_tab_closes_the_pane() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "a.rs", b"fn a() {}\n");
+    let b = write(d.path(), "b.rs", b"fn b() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(a.clone()));
+    settle(&mut s, opened);
+    // The new pane's last tab, closed with Close: the left pane remains, focused.
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Open(b.clone()));
+    settle(&mut s, opened);
+    s.dispatch(Command::Close);
+    assert_eq!((pane_names(&s, 1), s.state().split()), (vec!["a.rs".to_string()], Some(Split::Columns)), "a tab is left");
+    s.dispatch(Command::Close);
+    assert_eq!(s.state().split(), None);
+    assert_eq!((pane_names(&s, 0), shown_name(&s, 0).as_deref(), s.state().focused_pane()), (vec!["a.rs".to_string()], Some("a.rs"), 0));
+    // The left pane's last tab, closed from its tab bar while the right is focused: the right pane's files remain.
+    s.dispatch(Command::Split(Split::Rows));
+    s.dispatch(Command::Open(b.clone()));
+    settle(&mut s, opened);
+    let left = s.state().pane_tabs(0).next().unwrap().id();
+    s.dispatch(Command::CloseTab(left));
+    assert_eq!(s.state().split(), None);
+    assert_eq!((pane_names(&s, 0), shown_name(&s, 0).as_deref()), (vec!["a.rs".to_string(), "b.rs".to_string()], Some("b.rs")));
+    // Unsplit, the last tab closes and leaves an empty window.
+    s.dispatch(Command::Close);
+    s.dispatch(Command::Close);
+    assert_eq!((s.state().tabs().len(), s.state().split()), (0, None));
+}
+
+#[test]
 fn tabs_move_within_and_across_panes_and_the_split_is_remembered() {
     let d = tempfile::tempdir().unwrap();
     let files: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs"].iter().map(|n| write(d.path(), n, format!("// {n}\n").as_bytes())).collect();
@@ -4089,9 +4120,9 @@ fn closing_the_split_from_an_empty_pane_keeps_a_file_shown() {
     open(&mut s, Command::Open(a), "a.rs");
     s.dispatch(Command::Split(Split::Columns));
     let t = s.state().shown(1).unwrap().id();
+    // Closing the pane's last tab closes the split from that empty pane.
     s.dispatch(Command::CloseTab(t));
-    assert!(s.state().shown(1).is_none() && s.state().focused_pane() == 1, "precondition: pane 1 empty and focused");
-    s.dispatch(Command::Unsplit);
+    assert_eq!(s.state().split(), None);
     assert!(s.state().active().is_some(), "a.rs is still shown");
 }
 

@@ -5538,11 +5538,16 @@ impl Session {
     }
 
     fn close_tab(&mut self, id: TabId) -> Effect {
-        if !self.state.tabs.iter().any(|t| t.id == id) {
+        let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else {
             return Effect::default();
-        }
+        };
         self.release(id);
         self.remove_tab(id, false);
+        // A split pane's last tab takes the pane with it.
+        if self.state.settings.split.is_some() && !self.state.tabs.iter().any(|t| t.pane == pane) {
+            self.focus_pane(pane);
+            return self.command(Command::Unsplit);
+        }
         self.rewatch();
         Effect { repaint: true, copy: None }
     }
