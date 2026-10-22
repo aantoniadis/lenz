@@ -10,6 +10,7 @@ pub mod memory_probe;
 pub mod about;
 pub mod appearance;
 pub mod blame;
+pub mod branches;
 pub mod display;
 pub mod encoding;
 pub mod find;

@@ -117,6 +117,26 @@ fn usable() -> &'static Result<(u32, u32), String> {
 }
 
 /// Runs git in `cwd` and returns its stdout; a non-zero exit becomes git's stderr.
+/// A `git` command in `cwd` as the user's own terminal would run it: the repository's hooks, filters and config all
+/// apply. Only for changes the user asked for (a checkout, a new branch); everything else uses [`command`], which keeps
+/// a repository's programs from running when it is merely read. Messages in the C locale (callers read git's
+/// refusals), paths unquoted, never waiting on a prompt.
+pub fn command_as_user(cwd: &Path) -> Result<Command, String> {
+    usable().clone()?;
+    let mut cmd = Command::new("git");
+    cmd.current_dir(cwd)
+        .args(["-c", "core.quotePath=false"])
+        .env("LC_ALL", "C")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .stdin(Stdio::null());
+    Ok(cmd)
+}
+
+/// [`run`] as the user: see [`command_as_user`].
+pub fn run_as_user(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    finish(command_as_user(cwd)?.args(args))
+}
+
 pub fn run(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     finish(command(cwd)?.args(args))
 }
