@@ -395,6 +395,14 @@ impl Tab {
         self.expansion = None;
         self.preview = None;
     }
+    /// The annotation column's width in cells (0 while Annotate with Git Blame is off).
+    pub fn annotation_cols(&self) -> usize {
+        if self.blame.is_some() { crate::blame::ANNOTATION_COLS } else { 0 }
+    }
+    /// Line `line`'s blame annotation, once git has reached it.
+    pub fn annotation(&self, line: usize) -> Option<crate::blame::Annotation<'_>> {
+        crate::blame::annotation(self.blame.as_ref()?, line)
+    }
     /// For source a language server returned (not a file): where it came from.
     pub fn retrieved(&self) -> Option<&crate::semantics::VirtualSource> {
         self.retrieved.as_ref()

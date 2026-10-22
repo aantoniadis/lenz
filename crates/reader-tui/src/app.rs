@@ -65,7 +65,8 @@ pub(crate) enum Prompt {
     },
     Help,
     /// Read-only text (About adds its half-block logo when there is room).
-    Details { title: &'static str, body: String, logo: bool },
+    /// `commit`: the core's commit popup (its text follows the core; Show Diff / Copy Revision / Close).
+    Details { title: &'static str, body: String, logo: bool, commit: bool },
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -397,10 +398,17 @@ impl App {
         effect.repaint
     }
     pub(crate) fn show_documentation(&mut self) {
+        // The core's commit popup opens, follows and closes its dialog.
+        match (self.session.commit_text(), self.modal.as_mut()) {
+            (Some(text), Some(Modal { kind: Prompt::Details { commit: true, body, .. }, .. })) => *body = text,
+            (None, Some(Modal { kind: Prompt::Details { commit: true, .. }, .. })) => self.modal = None,
+            (Some(body), None) => self.prompt(Prompt::Details { title: "Commit", body, logo: false, commit: true }),
+            _ => {}
+        }
         if self.modal.is_none()
             && let Some(doc) = self.session.state().documentation()
         {
-            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false });
+            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false, commit: false });
         }
     }
     fn open_root(&mut self, path: PathBuf) {
@@ -617,9 +625,9 @@ impl App {
                     details.push_str("\n\nTerminal notice\n");
                     details.push_str(notice);
                 }
-                Prompt::Details { title, body: details, logo: false }
+                Prompt::Details { title, body: details, logo: false, commit: false }
             },
-            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true },
+            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true, commit: false },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;
@@ -770,6 +778,7 @@ impl App {
                 Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
+                Prompt::Details { commit: true, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { .. } if self.session.state().documentation().is_some() => {
                     self.dispatch(Command::CloseDocumentation)
                 }
@@ -1109,6 +1118,15 @@ impl App {
         {
             self.run(CommandId::CopyServerDetails);
             return;
+        }
+        if let Prompt::Details { commit: true, .. } = &kind
+            && !alt
+        {
+            match key.code {
+                KeyCode::Char('c' | 'C') => return self.run(CommandId::CopyRevision),
+                KeyCode::Char('d' | 'D') if !control => return self.run(CommandId::ShowCommitDiff),
+                _ => {}
+            }
         }
         if let Prompt::Details { body, .. } = &kind
             && control && !alt && matches!(key.code, KeyCode::Char('c' | 'C'))
@@ -1568,6 +1586,7 @@ impl App {
             (KeyCode::Char('e'), true, false, true) => Some(CommandId::RecentLocations),
             (KeyCode::Char('e'), true, false, false) => Some(CommandId::RecentFiles),
             (KeyCode::Char('b'), true, false, true) => Some(CommandId::Implementation),
+            (KeyCode::Char('b'), false, false, true) => Some(CommandId::AnnotateBlame),
             (KeyCode::Char('b' | 'B'), true, true, _) => Some(CommandId::TypeDefinition),
             (KeyCode::Char('b'), true, false, false) => Some(CommandId::ToggleExplorer),
             (KeyCode::Char('h'), true, _, true) => Some(CommandId::CallHierarchy),
@@ -1941,8 +1960,16 @@ impl App {
                 }
             }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(Modal { kind: Prompt::Details { body, .. }, .. }) = &self.modal
+                && let Some(Modal { kind: Prompt::Details { body, commit, .. }, .. }) = &self.modal
             {
+                if *commit {
+                    if self.layout.details_diff.contains(point) {
+                        return self.run(CommandId::ShowCommitDiff);
+                    }
+                    if self.layout.details_copy.contains(point) {
+                        return self.run(CommandId::CopyRevision);
+                    }
+                }
                 if self.layout.details_copy.contains(point) {
                     self.copy = Some(body.clone());
                     return;
@@ -2062,6 +2089,18 @@ impl App {
                     self.dispatch(Command::FocusPane(pane));
                     self.crumb_at = crumb;
                     self.prompt(Prompt::Siblings { pane, crumb });
+                    return;
+                }
+                // A click on an annotation opens its commit.
+                if !drag
+                    && (pane.gutter_x..pane.gutter_x + pane.ann).contains(&x)
+                    && let Some(&(_, line, 0)) = pane.rows.iter().find(|(row, _, _)| *row == y)
+                    && let Some(tab) = self.session.state().shown(pane.pane).map(|t| t.id())
+                {
+                    let pane = pane.pane;
+                    self.dispatch(Command::FocusPane(pane));
+                    self.dispatch(Command::ShowCommitAt { tab, line });
+                    self.focus = Focus::Text;
                     return;
                 }
                 if pane.text.contains(point)
@@ -2224,7 +2263,7 @@ impl App {
             .layout
             .panes
             .iter()
-            .find(|p| p.text.contains((x, y).into()))
+            .find(|p| p.text.contains((x, y).into()) || ((p.gutter_x..p.text.x).contains(&x) && (p.text.y..p.text.bottom()).contains(&y)))
         else {
             return;
         };
@@ -2233,10 +2272,11 @@ impl App {
         let offset = (!preview)
             .then(|| {
                 let line = pane.rows.iter().find(|(row, _, _)| *row == y)?.1;
+                // In the gutter (numbers, folds, blame): the line's start.
                 let byte = pane
                     .hits
                     .iter()
-                    .filter(|h| h.y == y && h.line == line && h.x <= x)
+                    .filter(|h| h.y == y && h.line == line && h.x <= x && x >= pane.text.x)
                     .max_by_key(|h| h.x)
                     .map_or(0, |h| h.byte);
                 let doc = self.session.state().shown(pane_id)?.document()?;
