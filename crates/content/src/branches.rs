@@ -28,14 +28,24 @@ impl Head {
 
 /// The repository's git directory (a worktree's own, for a linked worktree).
 pub fn git_dir(root: &Path) -> Result<PathBuf, String> {
-    let out = git::run(root, &["rev-parse", "--absolute-git-dir"]).map_err(|e| not_git(e))?;
+    let out = git::run(root, &["rev-parse", "--absolute-git-dir"]).map_err(not_git)?;
     Ok(PathBuf::from(git::path_text(out.strip_suffix(b"\n").unwrap_or(&out))?))
 }
 
 /// The work tree's top-level folder.
 pub fn toplevel(dir: &Path) -> Result<PathBuf, String> {
-    let out = git::run(dir, &["rev-parse", "--show-toplevel"]).map_err(|e| not_git(e))?;
+    let out = git::run(dir, &["rev-parse", "--show-toplevel"]).map_err(not_git)?;
     Ok(PathBuf::from(git::path_text(out.strip_suffix(b"\n").unwrap_or(&out))?))
+}
+
+/// The work tree's top-level folder and its git directory, in one git run.
+pub fn locate(dir: &Path) -> Result<(PathBuf, PathBuf), String> {
+    let out = git::run(dir, &["rev-parse", "--show-toplevel", "--absolute-git-dir"]).map_err(not_git)?;
+    let text = git::path_text(&out)?;
+    match text.lines().collect::<Vec<_>>()[..] {
+        [top, dir] => Ok((PathBuf::from(top), PathBuf::from(dir))),
+        _ => Err("Not in a Git repository".into()),
+    }
 }
 
 fn not_git(e: String) -> String {

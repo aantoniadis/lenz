@@ -38,6 +38,10 @@ pub enum InterfaceAction {
     OpenWithDefaultApp,
     CompareWith,
     ShowCommitDiff,
+    /// Ask for a new branch's name (from HEAD).
+    NewBranch,
+    /// Ask for a tag or revision to check out.
+    CheckoutRevision,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -103,6 +107,9 @@ impl Session {
             CommandId::OpenWithDefaultApp => return CatalogAction::Interface(InterfaceAction::OpenWithDefaultApp),
             CommandId::CompareWith => return CatalogAction::Interface(InterfaceAction::CompareWith),
             CommandId::ShowCommitDiff => return CatalogAction::Interface(InterfaceAction::ShowCommitDiff),
+            CommandId::NewBranch => return CatalogAction::Interface(InterfaceAction::NewBranch),
+            CommandId::CheckoutRevision => return CatalogAction::Interface(InterfaceAction::CheckoutRevision),
+            CommandId::GitBranches => Command::OpenBranches,
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
             CommandId::FindFile => return CatalogAction::Interface(InterfaceAction::FindFile),
@@ -231,12 +238,13 @@ pub enum CommandGroup {
     Navigate,
     Find,
     Selection,
+    Git,
     LanguageServers,
     Application,
 }
 
 impl CommandGroup {
-    pub const ALL: [Self; 7] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::LanguageServers, Self::Application];
+    pub const ALL: [Self; 8] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Application];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -245,6 +253,7 @@ impl CommandGroup {
             Self::Navigate => "Navigate",
             Self::Find => "Find",
             Self::Selection => "Selection",
+            Self::Git => "Git",
             Self::LanguageServers => "Language Servers",
             Self::Application => "Application",
         }
@@ -264,6 +273,7 @@ impl CommandId {
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
+            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision => G::Git,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
             | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
             | Self::RecentFiles | Self::RecentLocations | Self::NextTab | Self::PreviousTab

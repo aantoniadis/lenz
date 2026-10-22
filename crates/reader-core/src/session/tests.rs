@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -5178,6 +5178,119 @@ mod blame {
             let per_frame = frame.elapsed() / 100;
             eprintln!("round {round}: first annotation {first:?}, done {done:?}, line table {} KiB, {} commits, 60 labels {per_frame:?}", bytes / 1024, commits.len());
         }
+    }
+}
+
+mod git_branches {
+    use super::*;
+    use crate::branches::{BranchAction, BranchTarget};
+    use lenz_content::git::testing::{commit_all, git, repo, write as put};
+
+    /// A repository on `main` with `a.txt`, branches `other` and `feature/x`, tag `v1`, a remote branch and a second
+    /// worktree; a session with it open as its folder.
+    pub(super) fn repo_session() -> (tempfile::TempDir, tempfile::TempDir, Session) {
+        let r = repo();
+        git(r.path(), &["config", "user.name", "t"]);
+        git(r.path(), &["config", "user.email", "t@t"]);
+        put(r.path(), "a.txt", "main\n");
+        commit_all(r.path(), "main");
+        for b in ["other", "feature/x"] {
+            git(r.path(), &["branch", b]);
+        }
+        git(r.path(), &["tag", "v1"]);
+        git(r.path(), &["remote", "add", "origin", &r.path().to_string_lossy()]);
+        git(r.path(), &["update-ref", "refs/remotes/origin/topic", "HEAD"]);
+        let wt = tempfile::tempdir().unwrap();
+        git(r.path(), &["worktree", "add", "-q", &wt.path().join("second").to_string_lossy(), "other"]);
+        let mut s = session(&r.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+        settle(&mut s, |s| s.branch_label().is_some());
+        (r, wt, s)
+    }
+    fn tick(s: &mut Session) {
+        s.dispatch(Input::Completion(Completion::Semantic(crate::semantics::Event::Tick)));
+    }
+    fn open_branches(s: &mut Session) {
+        s.dispatch(Command::OpenBranches);
+        settle(s, |s| s.state().branches().is_some_and(|b| !b.loading));
+    }
+
+    #[test]
+    fn the_branch_shows_and_follows_a_switch_made_elsewhere() {
+        let (r, _wt, mut s) = repo_session();
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
+        git(r.path(), &["switch", "-q", "feature/x"]);
+        tick(&mut s);
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ feature/x"));
+        let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        git(r.path(), &["switch", "-q", "--detach", "HEAD"]);
+        tick(&mut s);
+        assert_eq!(s.branch_label(), Some(format!("⎇ {}", &sha[..7])));
+    }
+
+    #[test]
+    fn outside_git_there_is_no_branch_and_the_git_commands_say_why() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = session(d.path());
+        s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
+        settle(&mut s, opened);
+        settle(&mut s, |s| s.state().repo_checked());
+        assert_eq!(s.branch_label(), None);
+        for id in [CommandId::GitBranches, CommandId::NewBranch, CommandId::CheckoutRevision] {
+            assert_eq!(s.disabled(id), Some("Not in a Git repository"), "{id:?}");
+            assert_eq!(id.group(), crate::actions::CommandGroup::Git);
+        }
+        // An unborn branch: the branch to be.
+        let r = repo();
+        let mut s = session(&r.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+        settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
+        assert_eq!(s.disabled(CommandId::GitBranches), None);
+    }
+
+    #[test]
+    fn the_popup_lists_sections_marks_the_current_one_and_filters() {
+        let (r, wt, mut s) = repo_session();
+        git(r.path(), &["switch", "-q", "feature/x"]);
+        git(r.path(), &["switch", "-q", "main"]);
+        open_branches(&mut s);
+        let rows = s.state().branch_rows("");
+        let shown: Vec<(&str, &str, bool)> = rows.iter().map(|r| (r.section, r.label.as_str(), r.current)).collect();
+        assert_eq!(&shown[..2], [("", "New Branch…", false), ("", "Checkout Tag or Revision…", false)]);
+        assert!(shown.contains(&("Recent", "feature/x", false)));
+        for (section, label) in [("Local", "feature/x"), ("Local", "other"), ("Remote", "origin/topic"), ("Tags", "v1")] {
+            assert!(shown.contains(&(section, label, false)), "{section} {label}: {shown:?}");
+        }
+        assert!(shown.contains(&("Local", "main", true)), "the current branch is marked");
+        let worktrees: Vec<_> = rows.iter().filter(|r| r.section == "Worktrees").collect();
+        assert_eq!(worktrees.len(), 2);
+        assert!(worktrees.iter().any(|w| w.current && w.label.starts_with("main ")));
+        assert!(worktrees.iter().any(|w| matches!(&w.target, BranchTarget::Worktree(p) if p.ends_with("second")) && w.label.starts_with("other ")));
+        let _ = wt;
+        // Filtering keeps only matching rows (any case), sections and all.
+        let found: Vec<_> = s.state().branch_rows("TOP").into_iter().map(|r| r.label).collect();
+        assert_eq!(found, ["origin/topic"]);
+        assert!(s.state().branch_rows("nothing like it").is_empty());
+        s.dispatch(Command::CloseBranches);
+        assert!(s.state().branches().is_none());
+    }
+
+    #[test]
+    fn each_row_offers_its_actions() {
+        let (_r, _wt, mut s) = repo_session();
+        open_branches(&mut s);
+        let rows = s.state().branch_rows("");
+        let actions = |label: &str| {
+            let row = rows.iter().find(|r| r.label == label || r.label.starts_with(&format!("{label} "))).unwrap();
+            s.branch_actions(&row.target).into_iter().map(|(l, _)| l).collect::<Vec<_>>()
+        };
+        assert_eq!(actions("other"), ["Checkout", "New Branch from Here…"]);
+        assert_eq!(actions("main"), ["New Branch from Here…"], "the current branch is not checked out again");
+        assert_eq!(actions("origin/topic"), ["Checkout", "New Branch from Here…"]);
+        assert_eq!(actions("v1"), ["Checkout", "New Branch from Here…"]);
+        let second = rows.iter().find(|r| matches!(&r.target, BranchTarget::Worktree(p) if p.ends_with("second"))).unwrap();
+        assert_eq!(s.branch_actions(&second.target).into_iter().map(|(l, a)| (l, a)).collect::<Vec<_>>(), [("Open", BranchAction::Open), ("Open in New Window", BranchAction::OpenInNewWindow)]);
     }
 }
 

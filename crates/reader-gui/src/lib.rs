@@ -870,6 +870,8 @@ impl ReaderView {
                 }
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
+                // Placeholder until the Git prompts land (this branch's Task 4).
+                InterfaceAction::NewBranch | InterfaceAction::CheckoutRevision => {}
                 InterfaceAction::ShowCommitDiff => {
                     let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
                     let launch = self.session.commit_diff_launch(&exe, false);

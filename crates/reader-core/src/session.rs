@@ -184,6 +184,9 @@ pub enum Command {
     ClickSelect { at: usize, clicks: u8 },
     /// Annotate the active tab with Git blame, or stop.
     SetAnnotate(bool),
+    /// Open the Git Branches popup (its lists load in the background), or close it.
+    OpenBranches,
+    CloseBranches,
     /// The commit that last changed line `line` of `tab`: the caret goes to the line and its details open.
     ShowCommitAt { tab: TabId, line: usize },
     CloseCommit,
@@ -414,6 +417,9 @@ pub enum CommandId {
     /// The tree's order: each folder's folders before its files, or everything by name.
     FoldersFirst,
     AllByName,
+    GitBranches,
+    NewBranch,
+    CheckoutRevision,
     AnnotateBlame,
     CloseAnnotations,
     ShowCommit,
@@ -450,7 +456,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 104] = [
+    pub const ALL: [CommandId; 107] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -541,6 +547,9 @@ impl CommandId {
         Self::LocateFile,
         Self::FoldersFirst,
         Self::AllByName,
+        Self::GitBranches,
+        Self::NewBranch,
+        Self::CheckoutRevision,
         Self::AnnotateBlame,
         Self::CloseAnnotations,
         Self::ShowCommit,
@@ -623,6 +632,9 @@ impl CommandId {
             Self::TypeHierarchySubtypes => "Type Hierarchy: Subtypes",
             Self::Documentation => "Quick Documentation",
             Self::DocumentationOnHover => "Documentation on Hover",
+            Self::GitBranches => "Git Branches…",
+            Self::NewBranch => "New Branch…",
+            Self::CheckoutRevision => "Checkout Tag or Revision…",
             Self::AnnotateBlame => "Annotate with Git Blame",
             Self::CloseAnnotations => "Close Annotations",
             Self::ShowCommit => "Show Commit…",
@@ -790,6 +802,10 @@ pub enum Completion {
     HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
+    /// The repository holding `anchor` (or why there is none).
+    Repo { anchor: PathBuf, result: Result<crate::branches::Repo, String> },
+    /// The Git Branches popup's lists for the repository at `root`.
+    Branches { root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
     /// The details of the commit popup's commit, for request `request`.
     CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
     /// Blame of `tab`'s request `request`: the repository root first, then runs of lines, then `done`.
@@ -862,6 +878,8 @@ impl Input {
                 Completion::HierarchyRootKind { .. } => "hierarchy root kind",
                 Completion::Blamed { .. } => "blamed",
                 Completion::CommitLoaded { .. } => "commit loaded",
+                Completion::Repo { .. } => "repository",
+                Completion::Branches { .. } => "branches",
                 Completion::DocumentationReady { .. } => "documentation",
             },
         }
@@ -930,6 +948,12 @@ pub struct State {
     documentation: Option<Documentation>,
     /// The commit an annotation opened, while shown.
     commit: Option<crate::blame::CommitPopup>,
+    /// The repository of what is shown, the path it was looked up for, and the last path answered.
+    pub(crate) repo: Option<crate::branches::Repo>,
+    pub(crate) repo_anchor: Option<PathBuf>,
+    pub(crate) repo_answered: Option<PathBuf>,
+    /// The Git Branches popup's lists, while it is open.
+    pub(crate) branches: Option<crate::branches::BranchesView>,
 }
 
 /// What asked for documentation: a key or menu (about the caret), or the pointer resting on a name.
@@ -1557,6 +1581,10 @@ impl Session {
                 occurrences: None,
                 documentation: None,
                 commit: None,
+                repo: None,
+                repo_anchor: None,
+                repo_answered: None,
+                branches: None,
             },
             cache: InactiveCache::new(INACTIVE_BYTES),
             index_cache_dir: config.cache,
@@ -1804,6 +1832,7 @@ impl Session {
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
             CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
+            CommandId::GitBranches | CommandId::NewBranch | CommandId::CheckoutRevision => self.state.repo.is_none().then_some("Not in a Git repository"),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
                 // Turning annotations off always works, also once the file has gone.
@@ -2038,6 +2067,27 @@ impl Session {
         crate::blame::annotation(self.state.tabs.iter().find(|t| t.id == tab)?.blame.as_ref()?, line)
     }
 
+    /// Looks up the repository when what it is looked up for changed: the folder, else the active file's folder.
+    fn sync_repo(&mut self) {
+        let anchor = self.state.project.as_ref().map(|p| p.root().to_path_buf())
+            .or_else(|| self.state.active().filter(|t| t.retrieved.is_none()).and_then(|t| t.source.parent().map(Path::to_path_buf)));
+        if anchor == self.state.repo_anchor {
+            return;
+        }
+        self.state.repo_anchor = anchor.clone();
+        self.state.repo = None;
+        self.state.branches = None;
+        let Some(anchor) = anchor else { return };
+        let tx = self.tx.clone();
+        self.jobs.submit(Priority::Background, move || {
+            let result = lenz_content::branches::locate(&anchor).and_then(|(root, git_dir)| {
+                let head = lenz_content::branches::head_of(&git_dir).ok_or("HEAD is unreadable")?;
+                Ok(crate::branches::Repo { root, git_dir, head })
+            });
+            let _ = tx.send_blocking(Completion::Repo { anchor, result });
+        });
+    }
+
     /// The commit the commit commands act on: the popup's, else the caret line's. (Its id and repository root.)
     fn commit_target(&self) -> Result<(String, PathBuf), &'static str> {
         if let Some(c) = self.state.commit_popup() {
@@ -2164,6 +2214,7 @@ impl Session {
         }
         // Language servers follow the documents shown (cheap: a pass over the tabs).
         self.sync_semantics();
+        self.sync_repo();
         // Search rows retain their identity while background server availability changes.
         if let Some(n) = &self.state.navigation {
             let updates: Vec<_> = n.rows.iter().enumerate().filter_map(|(i, row)| match row.target {
@@ -2622,6 +2673,17 @@ impl Session {
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
             }
+            Command::OpenBranches => {
+                let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+                self.state.branches = Some(crate::branches::BranchesView { loading: true, ..Default::default() });
+                let tx = self.tx.clone();
+                self.jobs.submit(Priority::Visible, move || {
+                    let result = lenz_content::branches::refs(&root).and_then(|r| Ok((r, lenz_content::branches::worktrees(&root)?)));
+                    let _ = tx.send_blocking(Completion::Branches { root, result });
+                });
+                repaint
+            }
+            Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
             Command::SetAnnotate(on) => {
                 if on && self.disabled(CommandId::AnnotateBlame).is_some() {
                     return Effect::default();
@@ -3043,6 +3105,13 @@ impl Session {
     /// Idle servers stop; running ones have their process groups' memory sampled off the UI thread.
     fn tick(&mut self) -> Effect {
         let mut repaint = self.state.semantics.expire();
+        // A branch switched elsewhere (a terminal, another app): HEAD's file says so; no git process.
+        if let Some(r) = self.state.repo.as_mut()
+            && let Some(head) = lenz_content::branches::head_of(&r.git_dir).filter(|h| *h != r.head)
+        {
+            r.head = head;
+            repaint = true;
+        }
         // Symbols wait for every server asked, but not for one that never answers.
         let now = self.state.semantics.now();
         if let Some(a) = self.state.asking.as_ref().filter(|a| a.ask == Ask::Symbols && now.duration_since(a.since) >= SYMBOLS_WAIT) {
@@ -3582,6 +3651,25 @@ impl Session {
                 Effect { repaint: true, copy: None }
             }
             // For each shown tab of that version (both panes may show one snapshot).
+            Completion::Repo { anchor, result } => {
+                if self.state.repo_anchor.as_ref() != Some(&anchor) {
+                    return Effect::default();
+                }
+                self.state.repo_answered = Some(anchor);
+                self.state.repo = result.ok();
+                Effect { repaint: true, copy: None }
+            }
+            Completion::Branches { root, result } => match self.state.branches.as_mut().filter(|_| self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
+                Some(v) => {
+                    v.loading = false;
+                    match result {
+                        Ok((refs, worktrees)) => (v.refs, v.worktrees) = (refs, worktrees),
+                        Err(e) => v.error = Some(e),
+                    }
+                    Effect { repaint: true, copy: None }
+                }
+                None => Effect::default(),
+            },
             Completion::CommitLoaded { request, result } => match self.state.commit.as_mut().filter(|c| c.request == request) {
                 Some(c) => {
                     c.details = Some(result);

@@ -5,6 +5,7 @@
 
 pub mod actions;
 pub mod blame;
+pub mod branches;
 pub mod cache;
 pub mod chrome;
 pub mod decor;
