@@ -5104,6 +5104,18 @@ mod blame {
     }
 
     #[test]
+    fn annotations_turn_off_after_the_file_goes() {
+        let (r, mut s, _) = annotated_repo();
+        std::fs::remove_file(r.path().join("a.txt")).unwrap();
+        settle(&mut s, |s| s.state().active().is_some_and(|t| t.unavailable.is_some()));
+        assert_eq!(s.disabled(CommandId::CloseAnnotations), None, "turning off is always possible");
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), None);
+        s.dispatch(Command::SetAnnotate(false));
+        assert!(s.state().active().unwrap().blame.is_none());
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("The file is unavailable"), "and not back on");
+    }
+
+    #[test]
     #[ignore = "timing: cargo test -p reader-core --release --lib blame_timing -- --ignored --nocapture"]
     fn blame_timing_on_a_large_file_with_a_long_history() {
         let r = repo();

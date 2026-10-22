@@ -2133,6 +2133,10 @@ impl ReaderView {
         })?;
         let state = self.session.state();
         let tab = state.shown(g.pane)?;
+        // Beside a sticky line: that line (the rows under the band are hidden).
+        if let Some(&(_, _, line)) = self.sticky_hits.iter().find(|(b, pane, _)| *pane == g.pane && at.y >= b.origin.y && at.y < b.origin.y + b.size.height) {
+            return Some((g.pane, tab.id(), line));
+        }
         let row = ((f32::from(at.y) - f32::from(g.text.origin.y)) / line_h()).floor() as usize;
         let rows = tab.rows(row + 1, state.wrap_cols(tab));
         let r = rows.get(row).filter(|r| r.index == 0)?;

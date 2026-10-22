@@ -5106,3 +5106,31 @@ fn gui_right_click_in_the_column_moves_the_caret_and_offers_the_commit(cx: &mut 
         assert!(entries.contains(&MenuEntry::Command(id)), "{id:?}");
     }
 }
+
+#[gpui::test]
+fn gui_the_column_beside_a_sticky_line_belongs_to_that_line(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git};
+    let body: String = (0..80).map(|i| format!("    let v{i} = {i};\n")).collect();
+    let src = format!("fn f() {{\n{body}}}\n");
+    let f = fixture(cx, Some(("a.rs", src.as_bytes())));
+    git(f.dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.rs\n!.gitignore\n").unwrap();
+    commit_all(f.dir.path(), "First line");
+    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.language().is_some()));
+    f.view.update(cx, |v, cx| v.dispatch(Command::SetStickyScroll(true), cx));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, annotated);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Scroll(40), cx));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    draw(&mut v);
+    draw(&mut v);
+    let (g, band) = f.view.read_with(&v, |r, _| (r.panes[0], r.sticky_hits.first().map(|h| (h.0, h.2))));
+    let (bounds, line) = band.expect("a sticky line over the top row");
+    assert_eq!(line, 0, "fn f() is pinned");
+    let at = point(g.text.origin.x - px(g.ann / 2.0), bounds.origin.y + px(line_h() / 2.0));
+    v.simulate_click(at, Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 0..0, "the sticky line, not the row under it");
+}

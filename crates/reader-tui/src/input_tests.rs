@@ -2189,3 +2189,12 @@ fn annotation_column_takes_text_columns_and_hides_in_a_tiny_terminal() {
         draw(&mut a, w, h);
     }
 }
+
+#[test]
+fn right_click_on_the_gutter_inside_a_selection_still_moves_the_caret() {
+    let (_r, mut a, _) = annotated_app();
+    let p = { let g = &a.layout.panes[0]; (g.gutter_x, g.text.y) };
+    a.dispatch(Command::Select(Selection { anchor: 0, head: 8 }));
+    mouse(&mut a, MouseButton::Right, p.0 + 2, p.1 + 1);
+    assert_eq!(a.session.state().selection().unwrap().range(), 4..4, "the clicked line, not the selection's head");
+}

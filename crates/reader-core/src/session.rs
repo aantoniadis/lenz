@@ -1806,6 +1806,8 @@ impl Session {
             CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
+                // Turning annotations off always works, also once the file has gone.
+                Some(t) if t.blame.is_some() => None,
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
                 Some(t) if t.doc.as_ref().is_none_or(|d| d.image().is_some()) => Some("Only text can be annotated"),

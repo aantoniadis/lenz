@@ -2286,13 +2286,11 @@ impl App {
         if self.session.state().shown(pane_id).is_none() {
             return;
         }
+        let gutter = x < pane.text.x;
         self.dispatch(Command::FocusPane(pane_id));
+        // In the text, a click inside the selection keeps it; in the gutter the caret goes to that line.
         if let Some(at) = offset
-            && !self
-                .session
-                .state()
-                .selection()
-                .is_some_and(|s| s.range().contains(&at))
+            && (gutter || !self.session.state().selection().is_some_and(|s| s.range().contains(&at)))
         {
             self.dispatch(Command::Select(Selection {
                 anchor: at,
