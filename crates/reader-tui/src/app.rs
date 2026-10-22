@@ -1561,14 +1561,14 @@ impl App {
                     self.close_modal();
                     self.dispatch(Command::NewBranch { name: input.trim().to_string(), from, checkout });
                 }
-                Err(e) => self.modal.as_mut().unwrap().error = Some(e),
+                Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
             Prompt::Revision => match self.session.validate_revision(&input) {
                 Ok(_) => {
                     self.close_modal();
                     self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(input.trim().to_string())));
                 }
-                Err(e) => self.modal.as_mut().unwrap().error = Some(e),
+                Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
             Prompt::Mnemonic => {}
             _ => {
