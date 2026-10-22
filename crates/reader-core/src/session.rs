@@ -1547,6 +1547,8 @@ pub struct Session {
     blame_requests: u64,
     commit_requests: u64,
     checkout_requests: u64,
+    /// The last lookup found no repository though a `.git` was there: the tick does not ask again.
+    repo_git_seen: bool,
     /// The running checkout's target, for its dialog when git refuses.
     pending_target: Option<lenz_content::branches::Target>,
     tx: async_channel::Sender<Completion>,
@@ -1675,6 +1677,7 @@ impl Session {
             blame_requests: 0,
             commit_requests: 0,
             checkout_requests: 0,
+            repo_git_seen: false,
             pending_target: None,
             tx,
             rx,
@@ -3212,6 +3215,15 @@ impl Session {
     /// Idle servers stop; running ones have their process groups' memory sampled off the UI thread.
     fn tick(&mut self) -> Effect {
         let mut repaint = self.state.semantics.expire();
+        // No repository yet, but a `.git` appeared (git init, a clone): look again. A file check, no git process.
+        if self.state.repo.is_none()
+            && self.state.repo_checked()
+            && self.state.repo_anchor.as_ref().is_some_and(|a| a.ancestors().any(|d| d.join(".git").exists()))
+            && !self.repo_git_seen
+        {
+            self.state.repo_anchor = None;
+            self.sync_repo();
+        }
         // A branch switched elsewhere (a terminal, another app): HEAD's file says so; no git process.
         if let Some(r) = self.state.repo.as_mut()
             && let Some(head) = lenz_content::branches::head_of(&r.git_dir).filter(|h| *h != r.head)
@@ -3801,6 +3813,8 @@ impl Session {
                 if self.state.repo_anchor.as_ref() != Some(&anchor) {
                     return Effect::default();
                 }
+                // Not a repository although a `.git` is there (unreadable, not trusted): not retried every tick.
+                self.repo_git_seen = result.is_err() && anchor.ancestors().any(|d| d.join(".git").exists());
                 self.state.repo_answered = Some(anchor);
                 self.state.repo = result.ok();
                 Effect { repaint: true, copy: None }
@@ -5236,6 +5250,8 @@ impl Session {
 
     fn open_root(&mut self, root: PathBuf) {
         self.command(Command::CloseSearchEverywhere);
+        // Opening a folder looks its repository up again (it may have become one since).
+        self.state.repo_anchor = None;
         self.checkpoint_workspace();
         if self.state.project.is_some() {
             for id in [self.state.other, self.state.active].into_iter().flatten() { self.release(id); }

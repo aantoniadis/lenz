@@ -117,7 +117,8 @@ pub(crate) fn rank(snapshot: Snapshot, scope: Scope, query: &str, current: impl 
     }
     if !current() { return None; }
     ranked.sort_by(|a,b| b.0.cmp(&a.0).then(a.1.kind.cmp(&b.1.kind)).then(a.1.label.cmp(&b.1.label)).then(a.1.detail.cmp(&b.1.detail)));
-    ranked.truncate(LIMIT);
+    // Commands are few and every one must stay reachable by scrolling; files and symbols are capped.
+    if scope != Scope::Actions { ranked.truncate(LIMIT); }
     Some((ranked.into_iter().map(|(_,row)| row).collect(), matched))
 }
 

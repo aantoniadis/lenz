@@ -4598,6 +4598,18 @@ fn unified_navigation_refreshes_symbols_when_a_same_size_index_snapshot_is_repla
 }
 
 #[test]
+fn find_action_lists_every_command_however_many() {
+    use crate::navigation::Scope as N;
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = session(dir.path());
+    s.dispatch(Command::SearchEverywhere { scope: N::Actions, query: String::new() });
+    settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let listed = s.state().navigation().unwrap().rows.len();
+    assert!(crate::navigation::LIMIT < CommandId::ALL.len(), "more commands than the other lists' limit");
+    assert_eq!(listed, s.actions().len(), "every command is reachable without typing");
+}
+
+#[test]
 fn unified_navigation_removes_symbols_after_the_last_source_is_deleted() {
     use crate::navigation::Scope as N;
     let dir = tempfile::tempdir().unwrap();
@@ -5247,6 +5259,30 @@ mod git_branches {
         settle(&mut s, |s| s.branch_label().is_some());
         assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
         assert_eq!(s.disabled(CommandId::GitBranches), None);
+    }
+
+    #[test]
+    fn a_folder_that_becomes_a_repository_shows_its_branch() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = session(&d.path().join(".lenz-test"));
+        s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
+        settle(&mut s, |s| opened(s) && s.state().repo_checked());
+        assert_eq!(s.branch_label(), None);
+        git(d.path(), &["init", "-q", "-b", "main"]);
+        // Opening the folder looks again …
+        s.dispatch(Command::OpenRoot(d.path().to_path_buf()));
+        settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
+        // … and so does the tick once a `.git` appears where there was none.
+        let e = tempfile::tempdir().unwrap();
+        let mut s = session(&e.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(e.path().to_path_buf()));
+        settle(&mut s, |s| s.state().repo_checked());
+        assert_eq!(s.branch_label(), None);
+        git(e.path(), &["init", "-q", "-b", "trunk"]);
+        tick(&mut s);
+        settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ trunk"));
     }
 
     #[test]

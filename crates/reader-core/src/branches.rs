@@ -220,3 +220,8 @@ impl crate::session::Session {
         Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: vec!["merge".into()], cwd: Some(root) })
     }
 }
+
+/// How both frontends show a popup row: its section, the current marker, its text.
+pub fn row_text(r: &BranchRow) -> String {
+    format!("{:<10}{}{}", r.section, if r.current { "● " } else { "  " }, r.label)
+}
