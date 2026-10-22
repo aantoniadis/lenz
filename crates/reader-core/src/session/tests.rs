@@ -2659,6 +2659,40 @@ fn extend_and_shrink_selection_follow_the_syntax() {
 }
 
 #[test]
+fn click_select_word_then_group_then_ctrl_w_continues() {
+    let d = tempfile::tempdir().unwrap();
+    let src = "fn f() {\n    g(\"hello world\", 1);\n}\n";
+    let mut s = folded(d.path(), src);
+    let sel = |s: &Session| src[s.state().selection().unwrap().range()].to_string();
+    let at = src.find("world").unwrap() + 2;
+    s.dispatch(Command::ClickSelect { at, clicks: 2 });
+    assert_eq!(sel(&s), "world");
+    s.dispatch(Command::ClickSelect { at, clicks: 3 });
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| x.range().len() > "world".len()));
+    assert_eq!(sel(&s), "hello world", "the next Extend Selection step");
+    s.dispatch(Command::ExtendSelection);
+    assert_eq!(sel(&s), "\"hello world\"", "Ctrl+W goes on from the group");
+    s.dispatch(Command::ClickSelect { at, clicks: 1 });
+    assert_eq!(s.state().selection().unwrap().range(), at..at);
+    let comma = src.find(", 1").unwrap();
+    s.dispatch(Command::ClickSelect { at: comma, clicks: 2 });
+    assert_eq!(sel(&s), "\",", "a punctuation run is a word");
+}
+
+#[test]
+fn click_select_in_plain_text_triple_is_the_line() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "a.txt", b"alpha beta\ngamma\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path));
+    settle(&mut s, opened);
+    s.dispatch(Command::ClickSelect { at: 7, clicks: 3 });
+    assert_eq!(s.state().selection().unwrap().range(), 0..10, "at once: no parse");
+    s.dispatch(Command::ClickSelect { at: 16, clicks: 2 });
+    assert_eq!(s.state().selection().unwrap().range(), 11..16, "at the end of a line: the word before it");
+}
+
+#[test]
 fn extend_without_a_grammar_uses_words_lines_and_paragraphs() {
     let d = tempfile::tempdir().unwrap();
     let path = write(d.path(), "a.txt", b"alpha beta\ngamma\n\ndelta\n");

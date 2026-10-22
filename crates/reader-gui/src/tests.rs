@@ -4989,3 +4989,31 @@ fn about_shows_the_shared_text_and_releases_its_logo_on_close(cx: &mut TestAppCo
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
     assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"fn a() {}\n");
 }
+
+#[gpui::test]
+fn gui_double_and_triple_click_select_word_and_group(cx: &mut TestAppContext) {
+    let src = "fn f() { g(\"hello world\", 1); }\n";
+    let f = fixture(cx, Some(("a.rs", src.as_bytes())));
+    settle(cx, &f, |v| v.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let char_w = f.view.read_with(&v, |r, _| r.char_w);
+    let at = point(px(f32::from(text.origin.x) + num_w() + 8.0 + (src.find("world").unwrap() as f32 + 2.5) * char_w), text.origin.y + px(line_h() / 2.0));
+    let click = |v: &mut VisualTestContext, n: usize| {
+        v.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: n, first_mouse: false });
+        v.simulate_event(gpui::MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count: n });
+    };
+    let sel = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| src[r.session().state().selection().unwrap().range()].to_string());
+    click(&mut v, 1);
+    assert_eq!(sel(&mut v), "");
+    click(&mut v, 2);
+    assert_eq!(sel(&mut v), "world");
+    click(&mut v, 3);
+    settle(cx, &f, |r| r.session().state().selection().is_some_and(|s| s.range().len() > 5));
+    assert_eq!(sel(&mut v), "hello world");
+    click(&mut v, 4);
+    assert_eq!(sel(&mut v), "", "a fourth click starts over");
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), src.as_bytes(), "the file is unchanged");
+}

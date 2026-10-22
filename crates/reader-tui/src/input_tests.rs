@@ -665,6 +665,37 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "α界 z\nsecond\n");
 }
 #[test]
+fn double_and_triple_click_select_word_and_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "fn f() { g(\"hello world\", 1); }\n";
+    let path = dir.path().join("a.rs");
+    std::fs::write(&path, src).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    draw(&mut a, 80, 20);
+    let (x, y) = {
+        let p = &a.layout.panes[0];
+        (p.text.x + src.find("world").unwrap() as u16 + 2, p.text.y)
+    };
+    let sel = |a: &App| a.session.state().selected_text().unwrap_or_default().to_string();
+    click(&mut a, x, y);
+    click(&mut a, x, y);
+    assert_eq!(sel(&a), "world");
+    click(&mut a, x, y);
+    settle(&mut a, |a| a.session.state().selected_text().is_some_and(|t| t.len() > 5));
+    assert_eq!(sel(&a), "hello world");
+    click(&mut a, x, y);
+    assert_eq!(sel(&a), "", "a fourth click starts over");
+    // A second click after the pause, or on another cell, is a new first click.
+    std::thread::sleep(Duration::from_millis(450));
+    click(&mut a, x, y);
+    assert_eq!(sel(&a), "");
+    click(&mut a, x + 1, y);
+    assert_eq!(sel(&a), "");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), src);
+}
+#[test]
 fn split_tab_and_bookmark_shortcuts_reach_shared_state() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("one.txt");

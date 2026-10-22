@@ -179,6 +179,9 @@ pub enum Command {
     /// Close the active tab.
     Close,
     Select(Selection),
+    /// A click's selection at `at`: one click the caret, two the word, three the word's syntax group (Extend
+    /// Selection's next step; the line without a grammar), which Extend Selection then goes on from.
+    ClickSelect { at: usize, clicks: u8 },
     SelectAll,
     Copy,
     /// Copy text the adapter selected (a Markdown preview's rendered text).
@@ -2498,6 +2501,23 @@ impl Session {
                 t.selection = Some(s);
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
+            }
+            Command::ClickSelect { at, clicks } => {
+                let Some(doc) = self.state.document() else { return Effect::default() };
+                let at = floor_char_boundary(doc.text(), at.min(doc.text().len()));
+                let line = doc.line_range(doc.line_of(at));
+                let s = match clicks {
+                    0 | 1 => Selection { anchor: at, head: at },
+                    _ => {
+                        let word = lenz_content::select::word_at(&doc.text()[line.clone()], at.clamp(line.start, line.end) - line.start);
+                        Selection { anchor: line.start + word.start, head: line.start + word.end }
+                    }
+                };
+                let effect = self.command(Command::Select(s));
+                match clicks {
+                    0..=2 => effect,
+                    _ => Effect { repaint: effect.repaint | self.command(Command::ExtendSelection).repaint, copy: None },
+                }
             }
             Command::MoveCaret(motion) => {
                 if matches!(self.state.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Effect::default(); }
