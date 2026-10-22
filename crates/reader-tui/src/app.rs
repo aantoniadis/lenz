@@ -1597,7 +1597,7 @@ impl App {
                     ChoiceTarget::Branch(target) => match target {
                         reader_core::branches::BranchTarget::Action(id) => self.run(id),
                         t => {
-                            if let Some(&(_, action)) = self.session.branch_actions(&t).first() {
+                            if let Some(action) = self.session.branch_enter(&t) {
                                 self.branch_action(t, action);
                             }
                         }

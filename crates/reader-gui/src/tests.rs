@@ -5308,7 +5308,7 @@ fn gui_a_worktree_opens_here_or_in_a_new_window(cx: &mut TestAppContext) {
     assert_eq!(&menu[1..], ["Open", "Open in New Window"]);
     v.simulate_keystrokes("down enter");
     let second = std::fs::canonicalize(wt.path().join("second")).unwrap();
-    assert_eq!(f.view.read_with(&v, |r, _| r.opened_windows.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>()), [second.clone()]);
+    assert_eq!(f.view.read_with(&v, |r, _| r.opened_windows.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>()), [second]);
     v.simulate_keystrokes("ctrl-shift-`");
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     type_text(&mut v, "second");

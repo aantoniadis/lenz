@@ -5286,6 +5286,16 @@ mod git_branches {
     }
 
     #[test]
+    fn a_worktree_whose_folder_is_gone_is_marked_and_offers_nothing() {
+        let (_r, wt, mut s) = repo_session();
+        std::fs::remove_dir_all(wt.path().join("second")).unwrap();
+        open_branches(&mut s);
+        let row = s.state().branch_rows("second").into_iter().next().unwrap();
+        assert!(row.label.ends_with(" · missing"), "{}", row.label);
+        assert!(s.branch_actions(&row.target).is_empty());
+    }
+
+    #[test]
     fn the_popup_lists_sections_marks_the_current_one_and_filters() {
         let (r, wt, mut s) = repo_session();
         git(r.path(), &["switch", "-q", "feature/x"]);
@@ -5323,10 +5333,14 @@ mod git_branches {
         };
         assert_eq!(actions("other"), ["Checkout", "New Branch from Here…"]);
         assert_eq!(actions("main"), ["New Branch from Here…"], "the current branch is not checked out again");
+        let enter = |label: &str| s.branch_enter(&rows.iter().find(|r| r.label == label || r.label.starts_with(&format!("{label} "))).unwrap().target);
+        assert_eq!((enter("main"), enter("other"), enter("v1")), (None, Some(BranchAction::Checkout), Some(BranchAction::Checkout)), "Enter never opens a prompt");
         assert_eq!(actions("origin/topic"), ["Checkout", "New Branch from Here…"]);
         assert_eq!(actions("v1"), ["Checkout", "New Branch from Here…"]);
         let second = rows.iter().find(|r| matches!(&r.target, BranchTarget::Worktree(p) if p.ends_with("second"))).unwrap();
-        assert_eq!(s.branch_actions(&second.target).into_iter().map(|(l, a)| (l, a)).collect::<Vec<_>>(), [("Open", BranchAction::Open), ("Open in New Window", BranchAction::OpenInNewWindow)]);
+        assert_eq!(s.branch_actions(&second.target).into_iter().collect::<Vec<_>>(), [("Open", BranchAction::Open), ("Open in New Window", BranchAction::OpenInNewWindow)]);
+        let here = rows.iter().find(|r| r.section == "Worktrees" && r.current).unwrap();
+        assert_eq!(s.branch_enter(&here.target), None, "Enter on the current worktree opens nothing");
     }
 
     use crate::branches::CheckoutChoice;

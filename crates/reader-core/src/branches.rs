@@ -106,7 +106,8 @@ impl State {
             rows.extend(v.worktrees.iter().map(|w| {
                 let name = w.branch.clone().or_else(|| w.head.as_ref().map(|h| h.get(..7).unwrap_or(h).to_string())).unwrap_or_else(|| "(bare)".into());
                 let changed = w.dirty.filter(|&n| n > 0).map_or(String::new(), |n| format!(" · {n} changed"));
-                let label = format!("{name}  {}{changed}", w.path.display());
+                let missing = if w.path.is_dir() { "" } else { " · missing" };
+                let label = format!("{name}  {}{changed}{missing}", w.path.display());
                 row("Worktrees", &label, w.current, BranchTarget::Worktree(w.path.clone()))
             }));
         }
@@ -117,6 +118,11 @@ impl State {
 }
 
 impl crate::session::Session {
+    /// What Enter on a row does: check it out, or open the worktree (nothing for the current branch or worktree;
+    /// the row's other actions are in its menu).
+    pub fn branch_enter(&self, target: &BranchTarget) -> Option<BranchAction> {
+        self.branch_actions(target).into_iter().map(|(_, a)| a).find(|a| matches!(a, BranchAction::Checkout | BranchAction::Open))
+    }
     /// The status bar's branch: `⎇ main`, or the detached commit.
     pub fn branch_label(&self) -> Option<String> {
         self.state().repo().map(|r| format!("⎇ {}", r.head.label()))
@@ -128,6 +134,8 @@ impl crate::session::Session {
             BranchTarget::Action(_) => Vec::new(),
             BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom)],
             BranchTarget::Branch(_) | BranchTarget::Remote(_) | BranchTarget::Tag(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom)],
+            // A worktree whose folder is gone (`git worktree prune` tidies it): nothing to open.
+            BranchTarget::Worktree(p) if !p.is_dir() => Vec::new(),
             BranchTarget::Worktree(p) => {
                 let here = self.state().branches().is_some_and(|v| v.worktrees.iter().any(|w| w.current && &w.path == p));
                 let mut actions = vec![("Open in New Window", BranchAction::OpenInNewWindow)];

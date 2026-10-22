@@ -1298,19 +1298,17 @@ impl ReaderView {
                 }
             }
             Some(Modal::Branches { query, at }) => {
-                use reader_core::branches::{BranchAction, BranchTarget};
+                use reader_core::branches::BranchTarget;
                 let Some(row) = self.session.state().branch_rows(&query).into_iter().nth(at) else { return self.modal = Some(Modal::Branches { query, at }) };
                 match &row.target {
                     BranchTarget::Action(id) => {
                         self.dispatch(Command::CloseBranches, cx);
                         self.run(*id, window, cx);
                     }
-                    BranchTarget::Worktree(_) => match self.session.branch_actions(&row.target).first() {
-                        Some(&(_, action)) => self.branch_action(&row.target, action, window, cx),
+                    t => match self.session.branch_enter(t) {
+                        Some(action) => self.branch_action(t, action, window, cx),
                         None => self.modal = Some(Modal::Branches { query, at }),
                     },
-                    _ if self.session.branch_actions(&row.target).iter().any(|a| a.1 == BranchAction::Checkout) => self.branch_action(&row.target, BranchAction::Checkout, window, cx),
-                    _ => self.modal = Some(Modal::Branches { query, at }),
                 }
             }
             Some(Modal::BranchMenu { target, label, at, query, row }) => match self.session.branch_actions(&target).get(at) {
