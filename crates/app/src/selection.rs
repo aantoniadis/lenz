@@ -47,6 +47,35 @@ pub struct Selection {
     pub head: Pos,
 }
 
+/// A triple click's work, made from `word` on the UI thread and run off it: the syntax group around `word`
+/// (`lenz_content::select::group_around`), else `word`'s whole line as before. `text` is the Side's text that `lines`
+/// were split from.
+pub fn group_job(word: Selection, lines: &[String], text: std::sync::Arc<str>, lang: Option<lenz_content::highlight::Language>) -> impl FnOnce() -> Selection + Send + 'static {
+    let line = Selection::line(word.side, lines, word.anchor.line);
+    // Each line's start in `text`, past its line ending; `None` when the lines are not `text`'s.
+    let mut at = 0;
+    let starts: Option<Vec<usize>> = lines.iter().map(|l| {
+        let start = at;
+        (text.get(at..at + l.len()) == Some(l)).then(|| {
+            at += l.len();
+            at += [&b"\r\n"[..], b"\n", b"\r"].iter().find(|e| text.as_bytes()[at..].starts_with(e)).map_or(0, |e| e.len());
+            start
+        })
+    }).collect();
+    let lens: Vec<usize> = lines.iter().map(String::len).collect();
+    move || {
+        let Some(starts) = starts.filter(|s| !s.is_empty()) else { return line };
+        let byte = |p: Pos| starts.get(p.line as usize).map_or(text.len(), |s| s + p.col);
+        let pos = |b: usize| {
+            let l = starts.partition_point(|&s| s <= b).saturating_sub(1);
+            Pos::new(l as u32, (b - starts[l]).min(lens[l]))
+        };
+        let (a, b) = (byte(word.anchor.min(word.head)), byte(word.anchor.max(word.head)));
+        let r = lenz_content::select::group_around(lang, &text, a..b, byte(line.anchor)..byte(line.head));
+        Selection { side: word.side, anchor: pos(r.start), head: pos(r.end) }
+    }
+}
+
 impl Selection {
     pub fn caret(side: Side, at: Pos) -> Self {
         Selection { side, anchor: at, head: at }
@@ -159,27 +188,7 @@ fn last(lines: &[String]) -> Pos {
     Pos::new(n, line_text(lines, n).len())
 }
 
-/// Byte range of the word (alphanumerics and `_`), whitespace run, or punctuation run at `col`.
-pub fn word_at(line: &str, col: usize) -> Range<usize> {
-    let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            0
-        } else if c.is_whitespace() {
-            1
-        } else {
-            2
-        }
-    };
-    // the character under the caret, or the one before it at the end of the line
-    let Some((at, c)) = line[col..].chars().next().map(|c| (col, c)).or_else(|| line[..col].char_indices().next_back())
-    else {
-        return col..col;
-    };
-    let k = class(c);
-    let start = line[..at].char_indices().rev().take_while(|&(_, c)| class(c) == k).last().map_or(at, |(i, _)| i);
-    let end = line[at..].char_indices().find(|&(_, c)| class(c) != k).map_or(line.len(), |(i, _)| at + i);
-    start..end
-}
+pub use lenz_content::select::word_at;
 
 #[cfg(test)]
 mod tests {
@@ -202,21 +211,28 @@ mod tests {
     }
 
     #[test]
+    fn group_job_finds_the_syntax_group_and_maps_it_back_to_positions() {
+        use lenz_content::highlight::Language;
+        let text = "fn f() {\r\n    g(\"héllo wörld\",\r\n      1);\r\n}\r\n";
+        let l: Vec<String> = lenz_engine::split_lines(text).into_iter().map(String::from).collect();
+        let col = l[1].find("wörld").unwrap();
+        let word = Selection::word(Side::Left, &l, Pos::new(1, col));
+        let group = group_job(word, &l, text.into(), Some(Language::Rust))();
+        assert_eq!(group.text(&l), "héllo wörld");
+        let one = Selection::word(Side::Left, &l, Pos::new(2, 6));
+        assert_eq!(group_job(one, &l, text.into(), Some(Language::Rust))().text(&l), "\"héllo wörld\",\n      1", "multi-line");
+        let plain = group_job(word, &l, text.into(), None)();
+        assert_eq!(plain, Selection::line(Side::Left, &l, 1), "without a grammar: the line, as before");
+        // Lines that are not the text's (a placeholder Side): the line.
+        assert_eq!(group_job(word, &l, "".into(), Some(Language::Rust))(), Selection::line(Side::Left, &l, 1));
+    }
+
+    #[test]
     fn whole_line_and_select_all() {
         let l = lines(&["a", "bb", "ccc"]);
         assert_eq!(Selection::line(Side::Right, &l, 1).text(&l), "bb\n");
         assert_eq!(Selection::line(Side::Right, &l, 2).text(&l), "ccc");
         assert_eq!(Selection::all(Side::Right, &l).text(&l), "a\nbb\nccc");
-    }
-
-    #[test]
-    fn double_click_picks_the_word_or_symbol_run_under_the_pointer() {
-        assert_eq!(word_at("let foo_bar = 1;", 6), 4..11);
-        assert_eq!(word_at("let foo_bar = 1;", 4), 4..11);
-        assert_eq!(word_at("a  ->  b", 3), 3..5);
-        assert_eq!(word_at("end", 3), 0..3);
-        assert_eq!(word_at("", 0), 0..0);
-        assert_eq!(word_at("héllo wörld", 8), 7..13);
     }
 
     #[test]

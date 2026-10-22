@@ -131,6 +131,8 @@ pub(crate) struct App {
     pub layout: crate::render::Geometry,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
+    /// The last text click (when, where) and how many came in a row there: two take the word, three its group.
+    clicks: Option<(Instant, (u8, TabId, usize), u8)>,
     hover: Option<Hover>,
     double_shift: DoubleShift,
     pub(crate) preview_selection: Option<(TabId, u64, Selection)>,
@@ -161,6 +163,7 @@ impl App {
             layout: Default::default(),
             crumb_at: 0,
             drag: None,
+            clicks: None,
             hover: None,
             double_shift: DoubleShift::default(),
             preview_selection: None,
@@ -2116,6 +2119,23 @@ impl App {
                         return;
                     }
                     let offset = (doc.line_range(line).start + byte).min(doc.text().len());
+                    if !drag && !event.modifiers.contains(KeyModifiers::CONTROL) {
+                        // Clicks on one cell within 400 ms count up: caret, word, group, then caret again.
+                        let now = Instant::now();
+                        let at = (pane_id, id, offset);
+                        let count = self
+                            .clicks
+                            .filter(|(t, a, _)| *a == at && now.duration_since(*t) < Duration::from_millis(400))
+                            .map_or(1, |(_, _, n)| n % 3 + 1);
+                        self.clicks = Some((now, at, count));
+                        if count > 1 {
+                            self.dispatch(Command::FocusPane(pane_id));
+                            self.dispatch(Command::ClickSelect { at: offset, clicks: count });
+                            self.focus = Focus::Text;
+                            self.drag = None;
+                            return;
+                        }
+                    }
                     let anchor = if drag {
                         self.drag
                             .filter(|(p, t, v, _)| *p == pane_id && *t == id && *v == version)

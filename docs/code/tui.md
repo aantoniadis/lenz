@@ -55,7 +55,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
 | Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
-| Select / copy | Click or drag, Shift-arrows, Ctrl-A / Ctrl-C |
+| Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
 | Split right / down; focus pane | Ctrl-\ / Ctrl-Shift-\; Ctrl-1 / Ctrl-2 |

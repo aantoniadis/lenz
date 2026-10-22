@@ -2492,12 +2492,14 @@ impl ReaderView {
             self.run(CommandId::Definition, window, cx);
             return;
         }
-        let anchor = match self.session.state().selection() {
-            Some(s) if ev.modifiers.shift => s.anchor,
-            _ => at,
-        };
-        self.dragging = true;
-        self.dispatch(Command::Select(Selection { anchor, head: at }), cx);
+        if let Some(s) = self.session.state().selection().filter(|_| ev.modifiers.shift) {
+            self.dragging = true;
+            return self.dispatch(Command::Select(Selection { anchor: s.anchor, head: at }), cx);
+        }
+        // One click places the caret (a drag selects), two take the word, three its syntax group; then again.
+        let clicks = ((ev.click_count.max(1) - 1) % 3 + 1) as u8;
+        self.dragging = clicks == 1;
+        self.dispatch(Command::ClickSelect { at, clicks }, cx);
     }
 
     /// A mouse side button: Back or Forward, unless a menu or dialog is open.
@@ -2876,6 +2878,14 @@ impl ReaderView {
             let x = f32::from(b.origin.x) + p.x + f32::from(p.shaped.x_for_index(at + 1));
             Some((x, f32::from(b.origin.y) + r.y - m.top + r.h / 2.0))
         })
+    }
+
+    /// For tests: the window point over byte `at` of the focused text, on the first shown line, unwrapped, ASCII.
+    pub fn text_point_of(&self, at: usize) -> Option<(f32, f32)> {
+        let b = self.text_bounds?;
+        let line = self.session.state().document()?.line_range(0);
+        let x = f32::from(b.origin.x) + num_w() + 8.0 + (at.checked_sub(line.start)? as f32 + 0.5) * self.char_w;
+        Some((x, f32::from(b.origin.y) + line_h() / 2.0))
     }
 
     fn scroll_preview(&mut self, to: f32, cx: &mut Context<Self>) {

@@ -1203,3 +1203,44 @@ fn dependency_definitions_reveal_browsable_libraries_in_both_explorers(cx: &mut 
         }
     }
 }
+
+#[gpui::test]
+fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: &mut TestAppContext) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.rs");
+    let src = "fn f() { g(\"hello world\", 1); }\n";
+    std::fs::write(&path, src).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.document().is_some());
+    visual.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    let at = src.find("world").unwrap() + 2;
+    let (gx, gy) = gui.read_with(&visual, |v, _| v.text_point_of(at)).unwrap();
+    let text = tui.layout.panes[0].text;
+    let selected = |s: &State| s.selected_text().unwrap_or_default().to_string();
+    for clicks in 1..=3 {
+        visual.simulate_event(gpui::MouseDownEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks, first_mouse: false });
+        visual.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks });
+        tui.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: text.x + at as u16, row: text.y, modifiers: KeyModifiers::NONE }));
+        let want = ["", "world", "hello world"][clicks - 1];
+        settle(&mut visual, &mut tui, &|s| selected(s) == want);
+        assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()), "{clicks} clicks");
+    }
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
+}

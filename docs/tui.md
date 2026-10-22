@@ -43,7 +43,7 @@ cargo build --locked --release -p lenz-tui
 | File finder / go to position | f or Ctrl-P (`name:line[:column]`); g (`line:column` or `line,column`; bad input is reported) |
 | Find / next / previous | / or Ctrl-F; F3 / Shift-F3; Alt-C / Alt-W / Alt-R match case, whole word, regular expression (shown as `[Aa W .*]`; a bad expression shows its reason) |
 | Find across the Change Set | Ctrl-Shift-F searches both sides; Alt-O limits to changed lines; Alt-C / Alt-W / Alt-R as in find; Enter searches |
-| Select / copy | Click or drag, double/triple click for word/line, Shift-arrows, Ctrl-A; y or Ctrl-Shift-C |
+| Select / copy | Click or drag, double click for the word, triple click for its syntax group (the line without a grammar), Shift-arrows, Ctrl-A; y or Ctrl-Shift-C |
 | Apply left/right / undo / redo | Alt-Shift-Left/Right; Ctrl-Z; Ctrl-Y or Ctrl-Shift-Z |
 | Save | Ctrl-S (in the Sources pane of a repository view Ctrl-S toggles the sidebar; use the toolbar or palette) |
 | Applied history / selective undo | A; choose a record and Enter, or click it |

@@ -2457,6 +2457,55 @@ fn a_split_shows_the_source_twice_and_each_pane_keeps_its_tabs_and_place() {
 }
 
 #[test]
+fn closing_a_split_panes_last_tab_closes_the_pane() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "a.rs", b"fn a() {}\n");
+    let b = write(d.path(), "b.rs", b"fn b() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(a.clone()));
+    settle(&mut s, opened);
+    // The new pane's last tab, closed with Close: the left pane remains, focused.
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Open(b.clone()));
+    settle(&mut s, opened);
+    s.dispatch(Command::Close);
+    assert_eq!((pane_names(&s, 1), s.state().split()), (vec!["a.rs".to_string()], Some(Split::Columns)), "a tab is left");
+    s.dispatch(Command::Close);
+    assert_eq!(s.state().split(), None);
+    assert_eq!((pane_names(&s, 0), shown_name(&s, 0).as_deref(), s.state().focused_pane()), (vec!["a.rs".to_string()], Some("a.rs"), 0));
+    // The left pane's last tab, closed from its tab bar while the right is focused: the right pane's files remain.
+    s.dispatch(Command::Split(Split::Rows));
+    s.dispatch(Command::Open(b.clone()));
+    settle(&mut s, opened);
+    let left = s.state().pane_tabs(0).next().unwrap().id();
+    s.dispatch(Command::CloseTab(left));
+    assert_eq!(s.state().split(), None);
+    assert_eq!((pane_names(&s, 0), shown_name(&s, 0).as_deref()), (vec!["a.rs".to_string(), "b.rs".to_string()], Some("b.rs")));
+    // Dragging a pane's last tab into the other pane closes the split too, with or without a twin there.
+    for twin in [false, true] {
+        s.dispatch(Command::Split(Split::Columns));
+        if !twin {
+            s.dispatch(Command::Open(a.clone()));
+            settle(&mut s, opened);
+            let dup = s.state().pane_tabs(1).find(|t| t.title() == "b.rs").map(|t| t.id());
+            if let Some(dup) = dup { s.dispatch(Command::CloseTab(dup)); }
+            let a0 = s.state().pane_tabs(0).find(|t| t.title() == "a.rs").unwrap().id();
+            s.dispatch(Command::CloseTab(a0));
+        }
+        assert_eq!(s.state().split(), Some(Split::Columns), "precondition, twin {twin}");
+        let only: Vec<_> = s.state().pane_tabs(1).map(|t| t.id()).collect();
+        assert_eq!(only.len(), 1, "twin {twin}: {:?}", pane_names(&s, 1));
+        s.dispatch(Command::MoveTab { tab: only[0], pane: 0, index: 0 });
+        assert_eq!(s.state().split(), None, "twin {twin}");
+        assert!(s.state().active().is_some(), "twin {twin}");
+    }
+    // Unsplit, the last tab closes and leaves an empty window.
+    s.dispatch(Command::Close);
+    s.dispatch(Command::Close);
+    assert_eq!((s.state().tabs().len(), s.state().split()), (0, None));
+}
+
+#[test]
 fn tabs_move_within_and_across_panes_and_the_split_is_remembered() {
     let d = tempfile::tempdir().unwrap();
     let files: Vec<PathBuf> = ["a.rs", "b.rs", "c.rs"].iter().map(|n| write(d.path(), n, format!("// {n}\n").as_bytes())).collect();
@@ -2656,6 +2705,59 @@ fn extend_and_shrink_selection_follow_the_syntax() {
     s.dispatch(Command::ExtendSelection);
     s.dispatch(Command::Select(Selection { anchor: 0, head: 2 }));
     assert_eq!(s.disabled(CommandId::ShrinkSelection), Some("Nothing to shrink"));
+}
+
+#[test]
+fn click_select_word_then_group_then_ctrl_w_continues() {
+    let d = tempfile::tempdir().unwrap();
+    let src = "fn f() {\n    g(\"hello world\", 1);\n}\n";
+    let mut s = folded(d.path(), src);
+    let sel = |s: &Session| src[s.state().selection().unwrap().range()].to_string();
+    let at = src.find("world").unwrap() + 2;
+    s.dispatch(Command::ClickSelect { at, clicks: 2 });
+    assert_eq!(sel(&s), "world");
+    s.dispatch(Command::ClickSelect { at, clicks: 3 });
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| x.range().len() > "world".len()));
+    assert_eq!(sel(&s), "hello world", "the next Extend Selection step");
+    s.dispatch(Command::ExtendSelection);
+    assert_eq!(sel(&s), "\"hello world\"", "Ctrl+W goes on from the group");
+    s.dispatch(Command::ClickSelect { at, clicks: 1 });
+    assert_eq!(s.state().selection().unwrap().range(), at..at);
+    let comma = src.find(", 1").unwrap();
+    s.dispatch(Command::ClickSelect { at: comma, clicks: 2 });
+    assert_eq!(sel(&s), "\",", "a punctuation run is a word");
+}
+
+#[test]
+fn a_triple_click_keeps_the_view_where_it_was_clicked() {
+    let d = tempfile::tempdir().unwrap();
+    let body: String = (0..100).map(|i| format!("    let v{i} = {i};\n")).collect();
+    let src = format!("fn f() {{\n{body}}}\n");
+    let mut s = folded(d.path(), &src);
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 80, rows: 10 });
+    s.dispatch(Command::ClickSelect { at: 1, clicks: 3 });
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| x.range().len() > 2));
+    assert_eq!(&src[s.state().selection().unwrap().range()], src.trim_end(), "the whole function");
+    assert_eq!(s.state().top_line(), 0, "the clicked line stays in view");
+    // Ctrl+W still brings the selection's end into view.
+    s.dispatch(Command::Select(Selection { anchor: 1, head: 1 }));
+    s.dispatch(Command::ExtendSelection);
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| !x.range().is_empty()));
+    s.dispatch(Command::ExtendSelection);
+    assert!(s.state().top_line() > 0, "Ctrl+W reveals the end");
+}
+
+#[test]
+fn click_select_in_plain_text_triple_is_the_line() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "a.txt", b"alpha beta\ngamma\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path));
+    settle(&mut s, opened);
+    s.dispatch(Command::ClickSelect { at: 7, clicks: 3 });
+    assert_eq!(s.state().selection().unwrap().range(), 0..10, "at once: no parse");
+    s.dispatch(Command::ClickSelect { at: 16, clicks: 2 });
+    assert_eq!(s.state().selection().unwrap().range(), 11..16, "at the end of a line: the word before it");
 }
 
 #[test]
@@ -4055,9 +4157,9 @@ fn closing_the_split_from_an_empty_pane_keeps_a_file_shown() {
     open(&mut s, Command::Open(a), "a.rs");
     s.dispatch(Command::Split(Split::Columns));
     let t = s.state().shown(1).unwrap().id();
+    // Closing the pane's last tab closes the split from that empty pane.
     s.dispatch(Command::CloseTab(t));
-    assert!(s.state().shown(1).is_none() && s.state().focused_pane() == 1, "precondition: pane 1 empty and focused");
-    s.dispatch(Command::Unsplit);
+    assert_eq!(s.state().split(), None);
     assert!(s.state().active().is_some(), "a.rs is still shown");
 }
 

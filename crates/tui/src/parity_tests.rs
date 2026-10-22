@@ -1428,3 +1428,35 @@ fn whitespace_output_change_requires_save_before_close() {
     assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'),KeyModifiers::CONTROL))));
     assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b" a\nb\n");
 }
+
+#[test]
+fn double_and_triple_click_select_the_word_and_its_syntax_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = "fn f() { g(\"hello world\", 1); }\n";
+    std::fs::write(dir.path().join("left.rs"), "x\n").unwrap();
+    std::fs::write(dir.path().join("right.rs"), src).unwrap();
+    let mut app = open(dir.path(), &["left.rs", "right.rs"]);
+    let (x, y) = cell_of(&draw(&mut app, 160, 30), "world");
+    let at = (x + 2, y);
+    let selected = |app: &App| {
+        let lines = app.session.document().map_or(&[][..], |d| d.lines_on(lenz::view::Side::Right));
+        app.selection.map(|s| s.text(lines)).unwrap_or_default()
+    };
+    left_click(&mut app, at);
+    left_click(&mut app, at);
+    assert_eq!(selected(&app), "world");
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: at.0, row: at.1, modifiers: KeyModifiers::NONE }));
+    // The main loop sleeps until input unless busy: the pending group keeps it polling.
+    assert!(app.busy() || selected(&app) != "world", "the group is awaited");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while selected(&app) == "world" {
+        assert!(Instant::now() < deadline, "the group did not arrive");
+        thread::sleep(Duration::from_millis(2));
+        app.poll();
+    }
+    assert_eq!(selected(&app), "hello world");
+    left_click(&mut app, at);
+    assert_eq!(selected(&app), "", "a fourth click starts over");
+    assert_eq!(std::fs::read_to_string(dir.path().join("right.rs")).unwrap(), src);
+}

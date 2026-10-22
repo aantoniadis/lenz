@@ -3965,6 +3965,40 @@ fn gui_unified_selects_and_copies_either_side(cx:&mut TestAppContext) {
 }
 
 #[gpui::test]
+fn gui_double_and_triple_click_select_word_and_syntax_group(cx:&mut TestAppContext) {
+    let src="fn f() { g(\"hello world\", 1); }\n";
+    let f=fixture_named(cx,"x\n",src,"rs");
+    workflow_wait(cx,&f,|v|v.doc().is_some());
+    unified(cx,&f,true);
+    // rows: x (deleted, left), the code (inserted, right)
+    let col=src.find("world").unwrap() as f32+2.5;
+    let (x,y)=f.viewer.read_with(cx,|v,_|(v.diff_x()+GUTTER_W+num_w()+8.+v.char_w*col,v.top()+1.5*line_h()));
+    let click=|cx:&mut TestAppContext,n:usize|{
+        f.window.update(cx,|v,w,cx|v.on_mouse_down(&MouseDownEvent{button:MouseButton::Left,position:point(px(x),px(y)),modifiers:Default::default(),click_count:n,first_mouse:false},w,cx)).unwrap();
+        f.window.update(cx,|v,w,cx|v.on_mouse_up(&MouseUpEvent{button:MouseButton::Left,position:point(px(x),px(y)),modifiers:Default::default(),click_count:n},w,cx)).unwrap();
+        cx.run_until_parked();
+    };
+    let sel=|cx:&mut TestAppContext|f.viewer.read_with(cx,|v,_|v.sel.map(|s|s.text(v.raw(Side::Right))).unwrap_or_default());
+    click(cx,2);
+    assert_eq!(sel(cx),"world");
+    click(cx,3);
+    assert_eq!(sel(cx),"hello world","the word's syntax group");
+    click(cx,4);
+    assert_eq!(sel(cx),"","a fourth click starts over");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("right.rs")).unwrap(),src,"selecting changes nothing");
+}
+
+#[gpui::test]
+fn gui_triple_click_without_a_grammar_selects_the_line(cx:&mut TestAppContext) {
+    let f=fixture(cx,"a\n","a\nbeta gamma\nc\n");
+    unified(cx,&f,true);
+    let (x,y)=f.viewer.read_with(cx,|v,_|(v.diff_x()+GUTTER_W+num_w()+8.+v.char_w*6.5,v.top()+1.5*line_h()));
+    f.window.update(cx,|v,w,cx|v.on_mouse_down(&MouseDownEvent{button:MouseButton::Left,position:point(px(x),px(y)),modifiers:Default::default(),click_count:3,first_mouse:false},w,cx)).unwrap();
+    cx.run_until_parked();
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.sel.map(|s|s.text(v.raw(Side::Right)))),Some("beta gamma\n".into()));
+}
+
+#[gpui::test]
 fn gui_focus_names_the_selection_above_files(cx:&mut TestAppContext) {
     let (f,_repo)=repository_fixture(cx);
     workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|r.picker.refs.is_some()));

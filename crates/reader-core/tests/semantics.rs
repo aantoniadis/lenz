@@ -2575,7 +2575,10 @@ fn a_library_source_held_in_another_pane_opens_without_reading_a_uri_from_disk()
     let uri = f.s.state().active().unwrap().source().to_string_lossy().into_owned();
     let doc = f.s.state().document().unwrap().clone();
     f.s.dispatch(Command::Split(reader_core::session::Split::Columns));
-    f.s.dispatch(Command::Close);
+    // Pane 1 keeps a file of its own (closing its last tab would close the split) and lets go of the source.
+    f.open("src/A.java");
+    let twin = f.s.state().pane_tabs(1).find(|t| t.retrieved().is_some()).unwrap().id();
+    f.s.dispatch(Command::CloseTab(twin));
     f.s.dispatch(Command::FocusPane(1));
     f.s.dispatch(Command::ActivateTree { path: uri.into(), retain: false });
     assert_eq!(f.s.state().focused_pane(), 1);

@@ -123,7 +123,9 @@ lines; a collapsed one shows a boxed `…` and its closing brace, and a click on
 own; a jump into a collapsed block opens it, and a reload keeps the folds that still match. Folds come from the same
 background parse as the syntax colours, so large files and files without a grammar have none. Ctrl+W grows the
 selection through the syntax around it (word, string or block inside, expression, statement, block, … whole file;
-without a grammar word, line, paragraph, file) and Ctrl+Shift+W walks back. Copy with no selection copies the caret's
+without a grammar word, line, paragraph, file) and Ctrl+Shift+W walks back. A double click selects the word (or
+the run of spaces or punctuation) under the pointer, a triple click Ctrl+W's next step from that word, and a fourth
+starts over; Ctrl+W then goes on from there. Copy with no selection copies the caret's
 line; a selection over collapsed code copies the hidden source too; on Linux every selection is also the primary
 selection (middle-click paste). In a Markdown preview, drag, double-click, Shift-click and Ctrl+A select the rendered
 text and Ctrl+C copies it.
@@ -152,7 +154,8 @@ capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`.
 
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
-Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Tabs drag within a bar to reorder or
+Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Closing a pane's last tab, or dragging
+it into the other pane, closes the split. Tabs drag within a bar to reorder or
 into the other pane. The explorer's edge, the results panel's top and the split's divider drag; the sizes and the
 split are remembered in `settings.json` (a remembered split starts with an empty second pane).
 

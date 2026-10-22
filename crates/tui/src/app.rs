@@ -69,6 +69,8 @@ pub struct App {
     pub new_view:Option<(lenz::cli::Request,std::path::PathBuf)>,
     comparison_name:Option<String>,initial_line:Option<u32>,
     mouse_click:Option<(std::time::Instant,Side,lenz::selection::Pos,u8)>,
+    /// A triple click's syntax group being found for this word (applied while the word is still selected).
+    grouping:Option<(lenz::selection::Selection,std::sync::mpsc::Receiver<lenz::selection::Selection>)>,
     /// The last file clicked in Files, for a double click.
     files_click:Option<(std::time::Instant,usize)>,
     /// Focus's commit message panel, below Files and the diff.
@@ -90,7 +92,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -193,6 +195,7 @@ impl App {
             }
         }
         if !self.session.loading() && let Some(hit)=self.pending_hit.take()&&hit.index==self.session.current() && self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.selection=Some(lenz::selection::Selection{side:hit.side,anchor:lenz::selection::Pos::new(hit.line,hit.range.start),head:lenz::selection::Pos::new(hit.line,hit.range.end)});}
+        if let Some((word,rx))=&self.grouping{match rx.try_recv(){Ok(group)=>{if self.selection==Some(*word){self.selection=Some(group);changed=true;}self.grouping=None;},Err(std::sync::mpsc::TryRecvError::Disconnected)=>self.grouping=None,Err(std::sync::mpsc::TryRecvError::Empty)=>{}}}
         if let Some(job)=&self.opening_editor && let Ok(result)=job.try_recv(){self.opening_editor=None;changed=true;match result{Some(Ok(plan))=>{if let Err(e)=lenz::open::spawn(&plan.launch){self.session.set_notice(format!("Cannot start editor: {e}"));}else if let Some(note)=plan.toast{self.session.set_notice(note);}},Some(Err(e))=>self.session.set_notice(e),None=>{}}}
         if self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.markdown.clear();}
         changed|=self.restore_and_record_place();
@@ -201,7 +204,7 @@ impl App {
         changed|=self.navigator.poll_search();changed|=self.markdown.poll();changed|=self.visual.poll();changed
     }
     pub fn failed(&self)->bool{self.session.failed()||self.repository.as_ref().is_some_and(|r|r.core.failed)}
-    pub fn busy(&self)->bool {self.navigator.busy()||self.report_request.busy()||self.session.busy()||self.markdown.busy()||self.visual.busy()||self.opening_editor.is_some()||self.repository.as_ref().is_some_and(|r|r.busy())||self.set_search.as_ref().is_some_and(|s|s.busy())}
+    pub fn busy(&self)->bool {self.navigator.busy()||self.report_request.busy()||self.session.busy()||self.markdown.busy()||self.visual.busy()||self.opening_editor.is_some()||self.grouping.is_some()||self.repository.as_ref().is_some_and(|r|r.busy())||self.set_search.as_ref().is_some_and(|s|s.busy())}
     pub(crate) fn repository_effect(&mut self,effect:lenz::repository_session::RepositoryEffect){
         use lenz::repository_session::RepositoryEffect::*;
         match effect {
@@ -802,7 +805,7 @@ impl App {
                     MouseEventKind::ScrollUp => self.session.scroll(-3.0, side),
                     MouseEventKind::Down(MouseButton::Left) if let Some((side,line))=self.sticky_at(mouse.column,mouse.row) => {self.focus=self.pane_side(side);self.session.go_to_line(side,line+1);}
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some((side,pos,annotation))=self.mouse_position(mouse.column,mouse.row){self.focus=side;if annotation{self.visual.inspect_blame(side,pos.line as usize);}else if mouse.modifiers.contains(KeyModifiers::SHIFT)&&let Some(selection)=self.selection.as_mut().filter(|s|s.side==side){selection.head=pos;}else{let now=std::time::Instant::now();let count=self.mouse_click.filter(|(time,old_side,old_pos,_)|now.duration_since(*time)<std::time::Duration::from_millis(400)&&*old_side==side&&*old_pos==pos).map_or(1,|(_,_,_,count)|count%3+1);self.mouse_click=Some((now,side,pos,count));let lines=self.session.document().map_or(&[][..],|d|d.lines_on(side));self.selection=Some(match count{2=>lenz::selection::Selection::word(side,lines,pos),3=>lenz::selection::Selection::line(side,lines,pos.line),_=>lenz::selection::Selection::caret(side,pos)});}}else{self.focus=side;if mouse.row>=self.diff_area.y+2{self.session.expand(side,mouse.row-self.diff_area.y-2);}}
+                        if let Some((side,pos,annotation))=self.mouse_position(mouse.column,mouse.row){self.focus=side;if annotation{self.visual.inspect_blame(side,pos.line as usize);}else if mouse.modifiers.contains(KeyModifiers::SHIFT)&&let Some(selection)=self.selection.as_mut().filter(|s|s.side==side){selection.head=pos;}else{let now=std::time::Instant::now();let count=self.mouse_click.filter(|(time,old_side,old_pos,_)|now.duration_since(*time)<std::time::Duration::from_millis(400)&&*old_side==side&&*old_pos==pos).map_or(1,|(_,_,_,count)|count%3+1);self.mouse_click=Some((now,side,pos,count));let lines=self.session.document().map_or(&[][..],|d|d.lines_on(side));self.selection=Some(match count{2|3=>lenz::selection::Selection::word(side,lines,pos),_=>lenz::selection::Selection::caret(side,pos)});if count==3&&let(Some(word),Some(doc))=(self.selection,self.session.document()){let job=lenz::selection::group_job(word,lines,doc.text_arc(side),doc.language(side));let(tx,rx)=std::sync::mpsc::channel();std::thread::spawn(move||{let _=tx.send(job());});self.grouping=Some((word,rx));}}}else{self.focus=side;if mouse.row>=self.diff_area.y+2{self.session.expand(side,mouse.row-self.diff_area.y-2);}}
                     }
                     MouseEventKind::Drag(MouseButton::Left)=>{let top=self.diff_area.y+2;let bottom=self.diff_area.bottom().saturating_sub(3+self.applied_panel_height());if mouse.row<top{self.session.scroll(-3.0,self.focus);}else if mouse.row>bottom{self.session.scroll(3.0,self.focus);}
         if let Some((side,pos,_))=self.mouse_position(mouse.column,mouse.row.clamp(top,bottom.max(top)))&&let Some(selection)=self.selection.as_mut().filter(|s|s.side==side){selection.head=pos;}},
@@ -1541,7 +1544,7 @@ mod tests {
         let source_y=app.diff_area.y+2;let click=|kind,row|Event::Mouse(crossterm::event::MouseEvent{kind,column:62,row,modifiers:KeyModifiers::NONE});
         app.handle(click(MouseEventKind::Down(MouseButton::Left),source_y));app.handle(click(MouseEventKind::Down(MouseButton::Left),source_y));
         assert_eq!(app.selection.unwrap().text(app.session.document().unwrap().lines_on(Side::Right)),"word");
-        app.handle(click(MouseEventKind::Down(MouseButton::Left),source_y));assert_eq!(app.selection.unwrap().text(app.session.document().unwrap().lines_on(Side::Right)),"new word\n");
+        app.handle(click(MouseEventKind::Down(MouseButton::Left),source_y));let deadline=std::time::Instant::now()+std::time::Duration::from_secs(10);while app.selection.unwrap().text(app.session.document().unwrap().lines_on(Side::Right))=="word"{assert!(std::time::Instant::now()<deadline);std::thread::sleep(std::time::Duration::from_millis(2));app.poll();}assert_eq!(app.selection.unwrap().text(app.session.document().unwrap().lines_on(Side::Right)),"new word\n","without a grammar the third click takes the line");
         let before=app.session.view().anchor_line_on(Side::Right);app.handle(click(MouseEventKind::Drag(MouseButton::Left),19));assert!(app.session.view().anchor_line_on(Side::Right)>before);assert!(!app.selection.unwrap().is_empty());
     }
     #[test]
