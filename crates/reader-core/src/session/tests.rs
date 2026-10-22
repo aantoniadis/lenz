@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Annotate with Git Blame", "Close Annotations", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -4825,4 +4825,169 @@ fn open_in_editor_goes_to_the_caret_and_compare_with_starts_lenz_diff_beside_it(
     }
     assert!(!menu.contains(&MenuEntry::Command(CommandId::Unsplit)));
     assert!(!s.toolbar().iter().any(|(id, _)| *id == CommandId::Open), "Open stays in the File menu, not the toolbar");
+}
+
+mod blame {
+    use super::*;
+    use crate::blame::ANNOTATION_COLS;
+    use lenz_content::git::testing::{commit_all, git, repo, write as put};
+
+    /// The active tab's annotation labels, line by line ("" for a line without one).
+    fn labels(s: &Session) -> Vec<String> {
+        let t = s.state().active().unwrap();
+        (0..t.document().unwrap().line_count()).map(|l| s.annotation(t.id(), l).map_or(String::new(), |a| a.label)).collect()
+    }
+    fn blamed(s: &Session) -> bool {
+        s.state().active().and_then(|t| t.blame.as_ref()).is_some_and(|b| b.done)
+    }
+    fn request(s: &Session) -> u64 {
+        s.state().active().unwrap().blame.as_ref().unwrap().request
+    }
+    fn annotate(s: &mut Session) {
+        s.dispatch(Command::SetAnnotate(true));
+        settle(s, blamed);
+    }
+    fn today() -> String {
+        lenz_content::blame::date(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64)
+    }
+
+    #[test]
+    fn annotations_stream_for_a_committed_file() {
+        let r = repo();
+        put(r.path(), "a.txt", "one\ntwo\n");
+        commit_all(r.path(), "first");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        assert_eq!(s.annotation_cols(s.state().active().unwrap().id()), 0, "off: no column");
+        assert_eq!(s.on(CommandId::AnnotateBlame), Some(false));
+        annotate(&mut s);
+        let label = format!("{} t", today());
+        assert_eq!(&labels(&s)[..2], [label.clone(), label]);
+        let t = s.state().active().unwrap().id();
+        assert_eq!(s.annotation_cols(t), ANNOTATION_COLS);
+        assert_eq!(s.annotation(t, 0).unwrap().shade, Some(1.0), "one commit: all newest");
+        assert_eq!(s.on(CommandId::AnnotateBlame), Some(true));
+        s.dispatch(Command::SetAnnotate(false));
+        assert_eq!((s.annotation_cols(t), s.annotation(t, 0).is_none()), (0, true));
+    }
+
+    #[test]
+    fn external_edit_reruns_and_marks_the_line_not_committed() {
+        let r = repo();
+        put(r.path(), "a.txt", "one\ntwo\n");
+        commit_all(r.path(), "first");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        std::fs::write(r.path().join("a.txt"), "one\nTWO\n").unwrap();
+        settle(&mut s, |s| blamed(s) && labels(s)[1] == "Not committed");
+        let t = s.state().active().unwrap().id();
+        assert_eq!(s.annotation(t, 1).unwrap().shade, None);
+        assert!(s.annotation(t, 0).unwrap().shade.is_some());
+    }
+
+    #[test]
+    fn switching_tabs_keeps_annotations_without_a_new_job() {
+        let r = repo();
+        put(r.path(), "a.txt", "a\n");
+        put(r.path(), "b.txt", "b\n");
+        commit_all(r.path(), "both");
+        let mut s = session(r.path());
+        s.dispatch(Command::OpenRetained(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        let before = request(&s);
+        s.dispatch(Command::OpenRetained(r.path().join("b.txt")));
+        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.source().ends_with("b.txt")));
+        assert_eq!(s.on(CommandId::AnnotateBlame), Some(false), "per tab");
+        let a = s.state().tabs().iter().find(|t| t.source().ends_with("a.txt")).unwrap().id();
+        s.dispatch(Command::ActivateTab(a));
+        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
+        assert_eq!((request(&s), blamed(&s)), (before, true), "kept, not blamed again");
+        assert!(labels(&s)[0].ends_with(" t"));
+    }
+
+    #[test]
+    fn a_stale_run_is_dropped_and_only_the_latest_applies() {
+        let r = repo();
+        put(r.path(), "a.txt", "a\nb\nc\n");
+        commit_all(r.path(), "first");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        s.dispatch(Command::SetAnnotate(true));
+        let first = request(&s);
+        s.dispatch(Command::SetAnnotate(false));
+        s.dispatch(Command::SetAnnotate(true));
+        s.dispatch(Command::Reload);
+        settle(&mut s, |s| opened(s) && blamed(s));
+        assert!(request(&s) > first);
+        assert!(labels(&s)[..3].iter().all(|l| l.ends_with(" t")), "{:?}", labels(&s));
+    }
+
+    #[test]
+    fn reload_reruns_after_a_commit_with_unchanged_bytes() {
+        let r = repo();
+        put(r.path(), "a.txt", "one\n");
+        commit_all(r.path(), "first");
+        put(r.path(), "a.txt", "one\ntwo\n");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        assert_eq!(labels(&s)[1], "Not committed");
+        git(r.path(), &["commit", "-qam", "second"]);
+        s.dispatch(Command::Reload);
+        settle(&mut s, |s| opened(s) && blamed(s) && labels(s)[1] != "Not committed");
+        let t = s.state().active().unwrap().id();
+        assert_eq!(s.annotation(t, 1).unwrap().commit.summary, "second");
+    }
+
+    #[test]
+    fn outside_git_turns_off_with_a_notice() {
+        let d = tempfile::tempdir().unwrap();
+        let path = write(d.path(), "a.txt", b"x\n");
+        let mut s = session(d.path());
+        s.dispatch(Command::Open(path));
+        settle(&mut s, opened);
+        s.dispatch(Command::SetAnnotate(true));
+        settle(&mut s, |s| s.state().active().is_some_and(|t| t.blame.is_none()));
+        assert_eq!(s.status_message(), "Annotate with Git Blame: Not in a Git repository");
+        assert_eq!(s.on(CommandId::AnnotateBlame), Some(false));
+    }
+
+    #[test]
+    fn disabled_reasons() {
+        let d = tempfile::tempdir().unwrap();
+        let mut s = session(d.path());
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("No file is open"));
+        assert_eq!(s.disabled(CommandId::CloseAnnotations), Some("No file is open"));
+        let png = d.path().join("i.png");
+        image::RgbaImage::new(2, 2).save(&png).unwrap();
+        s.dispatch(Command::Open(png));
+        settle(&mut s, opened);
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("Only text can be annotated"));
+        s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
+        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.image().is_none()));
+        assert_eq!(s.disabled(CommandId::AnnotateBlame), None);
+        assert_eq!(s.disabled(CommandId::CloseAnnotations), Some("Annotations are off"));
+    }
+
+    #[test]
+    fn split_copy_keeps_its_own_toggle() {
+        let r = repo();
+        put(r.path(), "a.txt", "a\n");
+        commit_all(r.path(), "first");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        s.dispatch(Command::Split(Split::Columns));
+        settle(&mut s, blamed);
+        assert!(labels(&s)[0].ends_with(" t"), "the copy is annotated too");
+        s.dispatch(Command::SetAnnotate(false));
+        assert!(s.state().shown(0).unwrap().blame.is_some(), "the other pane keeps its annotations");
+    }
 }

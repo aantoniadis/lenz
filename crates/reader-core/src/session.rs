@@ -182,6 +182,8 @@ pub enum Command {
     /// A click's selection at `at`: one click the caret, two the word, three the word's syntax group (Extend
     /// Selection's next step; the line without a grammar), which Extend Selection then goes on from.
     ClickSelect { at: usize, clicks: u8 },
+    /// Annotate the active tab with Git blame, or stop.
+    SetAnnotate(bool),
     SelectAll,
     Copy,
     /// Copy text the adapter selected (a Markdown preview's rendered text).
@@ -407,6 +409,8 @@ pub enum CommandId {
     /// The tree's order: each folder's folders before its files, or everything by name.
     FoldersFirst,
     AllByName,
+    AnnotateBlame,
+    CloseAnnotations,
     SplitRight,
     SplitDown,
     Unsplit,
@@ -438,7 +442,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 99] = [
+    pub const ALL: [CommandId; 101] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -529,6 +533,8 @@ impl CommandId {
         Self::LocateFile,
         Self::FoldersFirst,
         Self::AllByName,
+        Self::AnnotateBlame,
+        Self::CloseAnnotations,
         Self::SplitRight,
         Self::SplitDown,
         Self::Unsplit,
@@ -606,6 +612,8 @@ impl CommandId {
             Self::TypeHierarchySubtypes => "Type Hierarchy: Subtypes",
             Self::Documentation => "Quick Documentation",
             Self::DocumentationOnHover => "Documentation on Hover",
+            Self::AnnotateBlame => "Annotate with Git Blame",
+            Self::CloseAnnotations => "Close Annotations",
             Self::FileIcons => "File Icons",
             Self::InlayTypes => "Inlay Hints: Types",
             Self::InlayParameters => "Inlay Hints: Parameter Names",
@@ -768,6 +776,8 @@ pub enum Completion {
     HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
+    /// Blame of `tab`'s request `request`: runs of lines (the repository root with the first batch), then `done`.
+    Blamed { tab: TabId, request: u64, root: Option<PathBuf>, hunks: Vec<(std::ops::Range<usize>, Arc<lenz_content::blame::Commit>)>, done: Option<Result<(), String>> },
 }
 
 /// A loaded source: its stamp, the decoded snapshot and its resolved path.
@@ -834,6 +844,7 @@ impl Input {
                 Completion::Targets { .. } => "targets",
                 Completion::HierarchyLevel { .. } => "hierarchy level",
                 Completion::HierarchyRootKind { .. } => "hierarchy root kind",
+                Completion::Blamed { .. } => "blamed",
                 Completion::DocumentationReady { .. } => "documentation",
             },
         }
@@ -1249,6 +1260,7 @@ impl State {
             CommandId::Breadcrumbs => Some(self.settings.breadcrumbs),
             CommandId::DocumentationOnHover => Some(self.settings.documentation_on_hover),
             CommandId::FileIcons => Some(self.settings.file_icons),
+            CommandId::AnnotateBlame => Some(self.active().is_some_and(|t| t.blame.is_some())),
             _ => None,
         }
     }
@@ -1465,6 +1477,8 @@ pub struct Session {
     expanding: Option<(TabId, u64, Selection, u64, bool)>,
     /// The next Extend Selection comes from a triple click: it leaves the view where it was clicked.
     click_extend: bool,
+    /// The last blame request made (each tab keeps the one it wants).
+    blame_requests: u64,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -1580,6 +1594,7 @@ impl Session {
             expand_latest: Arc::new(AtomicU64::new(0)),
             expanding: None,
             click_extend: false,
+            blame_requests: 0,
             tx,
             rx,
         }
@@ -1761,6 +1776,14 @@ impl Session {
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
+            CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
+                None => Some("No file is open"),
+                Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
+                Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
+                Some(t) if t.doc.as_ref().is_none_or(|d| d.image().is_some()) => Some("Only text can be annotated"),
+                Some(t) if id == CommandId::CloseAnnotations && t.blame.is_none() => Some("Annotations are off"),
+                Some(_) => None,
+            },
             // The explorer's selection, which only the adapter knows, is checked when it asks.
             CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
             CommandId::CopyPathLine => match self.state.active() {
@@ -1970,6 +1993,19 @@ impl Session {
             entries.push(C(CommandId::Unsplit));
         }
         entries
+    }
+
+    /// Line `line`'s annotation in tab `tab`, while its annotations are on and git has reached it.
+    pub fn annotation(&self, tab: TabId, line: usize) -> Option<crate::blame::Annotation<'_>> {
+        crate::blame::annotation(self.state.tabs.iter().find(|t| t.id == tab)?.blame.as_ref()?, line)
+    }
+
+    /// The annotation column's width in cells for tab `tab` (0 while its annotations are off).
+    pub fn annotation_cols(&self, tab: TabId) -> usize {
+        match self.state.tabs.iter().find(|t| t.id == tab).is_some_and(|t| t.blame.is_some()) {
+            true => crate::blame::ANNOTATION_COLS,
+            false => 0,
+        }
     }
 
     /// The active tab, when its file is on disk for another app to open.
@@ -2433,8 +2469,10 @@ impl Session {
                     let copy = t.duplicate(TabId(self.next_tab), pane);
                     self.state.other = Some(copy.id);
                     self.other_current.store(copy.version(), Ordering::Relaxed);
+                    let id = copy.id;
                     self.state.tabs.push(copy);
                     self.focus_pane(pane);
+                    self.annotate(id);
                 }
                 repaint
             }
@@ -2493,6 +2531,10 @@ impl Session {
             Command::Reload if self.disabled(CommandId::Reload).is_some() => Effect::default(),
             Command::Reload => match (self.state.active, self.state.document().is_some()) {
                 (Some(id), true) => {
+                    // Blamed again even when the bytes are the same: commits may have changed.
+                    if let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) {
+                        b.stamp = None;
+                    }
                     self.load(id, true);
                     repaint
                 }
@@ -2507,6 +2549,19 @@ impl Session {
                 t.selection = Some(s);
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
+            }
+            Command::SetAnnotate(on) => {
+                if on && self.disabled(CommandId::AnnotateBlame).is_some() {
+                    return Effect::default();
+                }
+                let Some(t) = self.active_mut() else { return Effect::default() };
+                if on == t.blame.is_some() {
+                    return Effect::default();
+                }
+                t.blame = on.then(crate::blame::Blame::new);
+                let id = t.id;
+                self.annotate(id);
+                repaint
             }
             Command::ClickSelect { at, clicks } => {
                 let Some(doc) = self.state.document() else { return Effect::default() };
@@ -3429,6 +3484,21 @@ impl Session {
                 Effect { repaint: true, copy: None }
             }
             // For each shown tab of that version (both panes may show one snapshot).
+            Completion::Blamed { tab, request, root, hunks, done } => {
+                let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request) else { return Effect::default() };
+                b.apply(root, hunks);
+                match done {
+                    Some(Ok(())) => b.done = true,
+                    Some(Err(e)) => {
+                        if let Some(t) = self.tab_mut(tab) {
+                            t.blame = None;
+                        }
+                        self.state.messages.push(format!("Annotate with Git Blame: {e}"));
+                    }
+                    None => {}
+                }
+                Effect { repaint: true, copy: None }
+            }
             Completion::SelectionSteps { request, steps } => {
                 let Some((id, version, from, _, reveal)) = self.expanding.take_if(|e| e.3 == request) else { return Effect::default() };
                 // Still that tab, version and selection; else the answer is stale.
@@ -4709,6 +4779,7 @@ impl Session {
                 if let Some(text) = self.tab_mut(id).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) {
                     self.find_in(id, text, false);
                 }
+                self.annotate(id);
                 Effect { repaint: true, copy: None }
             }
             Refresh::Gone(e) => {
@@ -5822,6 +5893,20 @@ impl Session {
         if let Some(text) = self.tab_mut(id).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) {
             self.find_in(id, text, true);
         }
+        self.annotate(id);
+    }
+
+    /// Blames tab `id` when its annotations are on and are not of its content as it is (new, changed or reloaded).
+    fn annotate(&mut self, id: TabId) {
+        self.blame_requests += 1;
+        let (request, tx) = (self.blame_requests, self.tx.clone());
+        let Some(t) = self.tab_mut(id) else { return };
+        let (Some(doc), Some(b)) = (t.doc.as_ref(), t.blame.as_mut()) else { return };
+        if b.of(t.stamp) || t.retrieved.is_some() {
+            return;
+        }
+        let file = t.canonical.clone().unwrap_or_else(|| t.source.clone());
+        b.start(id, file, t.stamp, doc.line_count(), request, tx);
     }
 
     /// Work derived from the active document: syntax spans, and a Markdown file's preview.

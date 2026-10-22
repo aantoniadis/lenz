@@ -110,6 +110,8 @@ pub struct Tab {
     pub(crate) markdown_source: bool,
     /// The shown version's Markdown preview, or why it cannot be shown (`None`: not made yet).
     pub(crate) preview: Option<Result<Arc<crate::markdown::Preview>, String>>,
+    /// Annotate with Git Blame, while on: kept across releases, made again for new content.
+    pub(crate) blame: Option<crate::blame::Blame>,
 }
 
 impl Tab {
@@ -152,6 +154,7 @@ impl Tab {
             before_root: false,
             markdown_source: true,
             preview: None,
+            blame: None,
         }
     }
 
@@ -358,6 +361,8 @@ impl Tab {
             before_root: false,
             markdown_source: self.markdown_source,
             preview: self.preview.clone(),
+            // Its own annotations, blamed for itself once shown.
+            blame: self.blame.as_ref().map(|_| crate::blame::Blame::new()),
         }
     }
     /// The source's identity: absolute and normalized.

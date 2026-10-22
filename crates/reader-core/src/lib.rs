@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 pub mod actions;
+pub mod blame;
 pub mod cache;
 pub mod chrome;
 pub mod decor;
