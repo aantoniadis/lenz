@@ -5131,7 +5131,7 @@ mod blame {
             let done = started.elapsed();
             let t = s.state().active().unwrap();
             let b = t.blame.as_ref().unwrap();
-            let commits: std::collections::HashSet<_> = b.lines.iter().flatten().map(|c| Arc::as_ptr(c)).collect();
+            let commits: std::collections::HashSet<_> = b.lines.iter().flatten().map(Arc::as_ptr).collect();
             let bytes = b.lines.capacity() * std::mem::size_of::<Option<Arc<lenz_content::blame::Commit>>>();
             // A frame's worth of labels (60 rows), as the adapters ask for them.
             let frame = std::time::Instant::now();

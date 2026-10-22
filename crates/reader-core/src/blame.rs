@@ -129,11 +129,13 @@ fn run(tab: TabId, file: &std::path::Path, request: u64, latest: &AtomicU64, tx:
     }
 }
 
+type Job = Box<dyn FnOnce() + Send>;
+
 /// The blame worker: one thread, started on first use, running jobs in order.
-fn submit(job: Box<dyn FnOnce() + Send>) {
-    static WORKER: OnceLock<Option<mpsc::Sender<Box<dyn FnOnce() + Send>>>> = OnceLock::new();
+fn submit(job: Job) {
+    static WORKER: OnceLock<Option<mpsc::Sender<Job>>> = OnceLock::new();
     let worker = WORKER.get_or_init(|| {
-        let (tx, rx) = mpsc::channel::<Box<dyn FnOnce() + Send>>();
+        let (tx, rx) = mpsc::channel::<Job>();
         std::thread::Builder::new()
             .name("lenz-reader-blame".into())
             .spawn(move || {
