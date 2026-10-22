@@ -2658,7 +2658,7 @@ impl Session {
             Command::CloseCommit => Effect { repaint: self.state.commit.take().is_some(), copy: None },
             Command::CopyRevision => match self.commit_target() {
                 Ok((sha, _)) => {
-                    self.state.messages.push(format!("Copied {}", &sha[..sha.len().min(7)]));
+                    self.state.messages.push(format!("Copied {}", sha.get(..7).unwrap_or(&sha)));
                     Effect { repaint: true, copy: Some(sha) }
                 }
                 Err(_) => Effect::default(),

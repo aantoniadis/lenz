@@ -3912,7 +3912,7 @@ impl Render for ReaderView {
         let ann_tip = self.ann_hover.and_then(|(t, line, at)| {
             let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
             let c = a.commit;
-            let lines = [format!("{} · {} · {}", &c.sha[..c.sha.len().min(7)], c.author, lenz_content::blame::date(c.author_time)), c.summary.clone()];
+            let lines = [format!("{} · {} · {}", c.sha.get(..7).unwrap_or(&c.sha), c.author, lenz_content::blame::date(c.author_time)), c.summary.clone()];
             let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * self.char_w + 16.0;
             let x = (f32::from(at.x) + 12.0).min(self.width - w - 4.0).max(0.0);
             Some((x, f32::from(at.y) + 16.0, w, lines))

@@ -172,7 +172,7 @@ impl CommitPopup {
     /// The popup's text, as Lenz Diff's commit popup shows it.
     pub fn text(&self) -> String {
         let d = match &self.details {
-            None => return format!("Loading commit {}…", &self.sha[..self.sha.len().min(7)]),
+            None => return format!("Loading commit {}…", self.sha.get(..7).unwrap_or(&self.sha)),
             Some(Err(e)) => return format!("commit {}\n\n{e}", self.sha),
             Some(Ok(d)) => d,
         };

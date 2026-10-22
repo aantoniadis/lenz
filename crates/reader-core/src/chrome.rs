@@ -116,7 +116,7 @@ impl Session {
                 None => a.label,
                 Some(_) => {
                     let c = a.commit;
-                    format!("{} · {} · {} · {}", &c.sha[..c.sha.len().min(7)], c.author, lenz_content::blame::date(c.author_time), c.summary)
+                    format!("{} · {} · {} · {}", c.sha.get(..7).unwrap_or(&c.sha), c.author, lenz_content::blame::date(c.author_time), c.summary)
                 }
             };
         }
