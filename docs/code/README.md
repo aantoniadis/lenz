@@ -168,6 +168,15 @@ highlighted file or folder when the explorer has focus, with a file or folder yo
 a typed path in the terminal), in Lenz Diff: its window from the GUI; from the terminal, Lenz Diff's terminal app
 takes over the terminal until you quit it. Lenz Diff must sit beside Lenz Code, as release packages install it.
 
+**Annotate with Git Blame** (View menu, right-click, Alt+B) shows, left of the line numbers, the date and author of
+the commit that last changed each line, tinted by age (newest strongest); lines not committed yet say so. It is per
+tab, streams in as git reports it, and runs again when the file changes on disk; after a commit, amend or checkout
+that leaves the file's bytes as they are, press F5. Hovering over an annotation (GUI) shows its commit and highlights
+that commit's other lines; in the terminal the status line shows the caret line's commit. A click on an annotation, or
+**Show Commit…**, opens the commit (message, author, date, changed files) with **Show Diff**, which opens the whole
+commit in Lenz Diff against its first parent, and **Copy Revision**; both are also in the right-click menu. Annotating
+an earlier revision, choosing what the column shows and a commit log are not available.
+
 Find (Ctrl+F) opens a box over the pane's text: matches are tinted as you type and the counter says which one is
 selected (at most 10,000 are listed); Enter / Shift+Enter or F3 / Shift+F3 step, Alt+Enter lists every match in the
 results panel, Escape closes. Alt+C, Alt+W and Alt+R (or the box's Aa, W and .* toggles) match case, whole words or a

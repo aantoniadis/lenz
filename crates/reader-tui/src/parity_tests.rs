@@ -1244,3 +1244,78 @@ fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: 
     }
     assert_eq!(std::fs::read_to_string(&path).unwrap(), src);
 }
+
+#[gpui::test]
+fn gui_and_terminal_blame_through_their_menus_show_the_same_commit(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    let r = repo();
+    write(r.path(), "a.txt", "one\ntwo\n");
+    commit_all(r.path(), "First line\n\nThe body.");
+    let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+    let path = r.path().join("a.txt");
+    let state = tempfile::tempdir().unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&state.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&state.path().join("tui")), Some(path.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&Session) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session())) && done(&tui.session) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle: gui {} / tui {}", gui.read_with(visual, |v, _| { let s = v.session(); format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), t.document().map(|d| d.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) }), { let s = &tui.session; format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), t.document().map(|d| d.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) });
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.state().document().is_some());
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    // The same command from each adapter's application menu: its group, then its row.
+    let menu = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>, id: CommandId| {
+        visual.simulate_click(gpui::point(gpui::px(12.0), gpui::px(10.0)), gpui::Modifiers::default());
+        terminal.draw(|f| tui.draw(f)).unwrap();
+        let button = tui.layout.app_menu;
+        tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: button.x + 1, row: button.y, modifiers: KeyModifiers::NONE }));
+        let group = reader_core::actions::CommandGroup::ALL.iter().position(|g| *g == id.group()).unwrap();
+        let row = CommandId::ALL.iter().filter(|c| c.group() == id.group()).position(|c| *c == id).unwrap();
+        visual.simulate_keystrokes(&format!("{}enter {}enter", "down ".repeat(group), "down ".repeat(row)));
+        for n in [group, row] {
+            for _ in 0..n { key(tui, KeyCode::Down, KeyModifiers::NONE); }
+            key(tui, KeyCode::Enter, KeyModifiers::NONE);
+        }
+    };
+    menu(&mut visual, &mut tui, &mut terminal, CommandId::AnnotateBlame);
+    settle(&mut visual, &mut tui, &|s| s.state().active().is_some_and(|t| t.annotation(1).is_some()));
+    let labels = |s: &Session| (0..2).map(|l| s.annotation(s.state().active().unwrap().id(), l).unwrap().label).collect::<Vec<_>>();
+    assert_eq!(gui.read_with(&visual, |v, _| labels(v.session())), labels(&tui.session));
+    // Show Commit… on the caret's line (the first): the same popup text, and Copy Revision copies the same id.
+    visual.simulate_keystrokes("down up");
+    for code in [KeyCode::Down, KeyCode::Up] { key(&mut tui, code, KeyModifiers::NONE); }
+    assert_eq!(gui.read_with(&visual, |v, _| v.session().state().selection()), tui.session.state().selection());
+    assert_eq!(tui.session.state().selection().map(|s| s.head), Some(0));
+    menu(&mut visual, &mut tui, &mut terminal, CommandId::ShowCommit);
+    settle(&mut visual, &mut tui, &|s| s.state().commit_popup().is_some_and(|c| c.details.is_some()));
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    let text = tui.session.commit_text().unwrap();
+    assert!(text.starts_with(&format!("commit {sha}")), "{text}");
+    assert_eq!(gui.read_with(&visual, |v, _| v.session().commit_text()), Some(text));
+    visual.simulate_keystrokes("ctrl-c");
+    key(&mut tui, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(visual.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())), Some(sha.clone()));
+    assert_eq!(tui.copy.take(), Some(sha.clone()));
+    visual.simulate_keystrokes("escape");
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    settle(&mut visual, &mut tui, &|s| s.state().commit_popup().is_none());
+    // Show Diff: neither finds Lenz Diff beside the test binary, and both say so the same way.
+    menu(&mut visual, &mut tui, &mut terminal, CommandId::ShowCommitDiff);
+    let said = tui.session.status_message();
+    assert!(said.starts_with("Show Diff: Lenz Diff is not beside Lenz Code"), "{said}");
+    assert_eq!(gui.read_with(&visual, |v, _| v.session().status_message()), said.replace("lenz-diff-tui", "lenz-diff"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
+}

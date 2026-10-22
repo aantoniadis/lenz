@@ -5100,4 +5100,49 @@ mod blame {
         s.dispatch(Command::CloseTab(t));
         assert!(s.state().commit_popup().is_none());
     }
+
+    #[test]
+    #[ignore = "timing: cargo test -p reader-core --release --lib blame_timing -- --ignored --nocapture"]
+    fn blame_timing_on_a_large_file_with_a_long_history() {
+        let r = repo();
+        let mut lines: Vec<String> = (0..50_000).map(|i| format!("    let value_{i} = compute({i});")).collect();
+        let mut seed = 7u64;
+        let built = std::time::Instant::now();
+        for n in 0..200 {
+            for _ in 0..50 {
+                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let i = (seed >> 33) as usize % lines.len();
+                lines[i] = format!("    let value_{i} = edited({n});");
+            }
+            put(r.path(), "big.rs", lines.join("\n") + "\n");
+            commit_all(r.path(), &format!("commit {n}"));
+        }
+        eprintln!("built 200 commits of 50,000 lines in {:?}", built.elapsed());
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("big.rs")));
+        settle(&mut s, opened);
+        for round in 0..3 {
+            s.dispatch(Command::SetAnnotate(false));
+            let started = std::time::Instant::now();
+            s.dispatch(Command::SetAnnotate(true));
+            settle(&mut s, |s| { let t = s.state().active().unwrap(); (0..50_000).step_by(997).any(|l| t.annotation(l).is_some()) });
+            let first = started.elapsed();
+            settle(&mut s, blamed);
+            let done = started.elapsed();
+            let t = s.state().active().unwrap();
+            let b = t.blame.as_ref().unwrap();
+            let commits: std::collections::HashSet<_> = b.lines.iter().flatten().map(|c| Arc::as_ptr(c)).collect();
+            let bytes = b.lines.capacity() * std::mem::size_of::<Option<Arc<lenz_content::blame::Commit>>>();
+            // A frame's worth of labels (60 rows), as the adapters ask for them.
+            let frame = std::time::Instant::now();
+            for _ in 0..100 {
+                for l in 25_000..25_060 {
+                    std::hint::black_box(s.annotation(t.id(), l).map(|a| a.label));
+                }
+            }
+            let per_frame = frame.elapsed() / 100;
+            eprintln!("round {round}: first annotation {first:?}, done {done:?}, line table {} KiB, {} commits, 60 labels {per_frame:?}", bytes / 1024, commits.len());
+        }
+    }
 }
+
