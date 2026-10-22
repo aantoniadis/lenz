@@ -188,7 +188,8 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
         }
         if std::mem::take(&mut views[active].new_view) {
             views[active].handle(Event::FocusLost);
-            views.push(App::new(Config::from_env(true), None));
+            let root = views[active].new_view_root.take();
+            views.push(App::new(Config::from_env(true), root));
             active = views.len() - 1;
             dirty = true;
             continue;

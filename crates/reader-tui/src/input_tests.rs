@@ -1659,7 +1659,7 @@ fn help_and_wrapped_details_wheel_scroll_without_selection_and_clamp_on_resize()
     let mut a = app(dir.path());
     for prompt in [
         Prompt::Help,
-        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200), logo: false, commit: false },
+        Prompt::Details { title: "Details", body: "long wrapped detail ".repeat(200), logo: false, kind: Details::Text },
     ] {
         a.prompt(prompt);
         draw(&mut a, 24, 10);
@@ -1931,7 +1931,8 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
     click(&mut a, rows.x + 1, rows.y + row as u16);
     assert!(a.modal.is_none() && a.session.state().soft_wrap());
     click(&mut a, 2, 0);
-    for _ in 0..5 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    let servers = CommandGroup::ALL.iter().position(|g| *g == CommandGroup::LanguageServers).unwrap();
+    for _ in 0..servers { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(kind(&a), Some(Prompt::Menu(Some(CommandGroup::LanguageServers))));
     draw(&mut a, 100, 26);
@@ -2118,7 +2119,7 @@ fn mouse(a: &mut App, button: MouseButton, x: u16, y: u16) {
 }
 fn commit_body(a: &App) -> Option<String> {
     match &a.modal.as_ref()?.kind {
-        Prompt::Details { commit: true, body, .. } => Some(body.clone()),
+        Prompt::Details { kind: Details::Commit, body, .. } => Some(body.clone()),
         _ => None,
     }
 }
@@ -2197,4 +2198,154 @@ fn right_click_on_the_gutter_inside_a_selection_still_moves_the_caret() {
     a.dispatch(Command::Select(Selection { anchor: 0, head: 8 }));
     mouse(&mut a, MouseButton::Right, p.0 + 2, p.1 + 1);
     assert_eq!(a.session.state().selection().unwrap().range(), 4..4, "the clicked line, not the selection's head");
+}
+
+/// An app on a git repository: `main` with `a.txt`, branch `other` changing it, tag `v1`, worktree `second` on `side`.
+fn branches_app() -> (tempfile::TempDir, tempfile::TempDir, App) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    let r = repo();
+    git(r.path(), &["config", "user.name", "t"]);
+    git(r.path(), &["config", "user.email", "t@t"]);
+    write(r.path(), "a.txt", "main\n");
+    commit_all(r.path(), "main");
+    git(r.path(), &["tag", "v1"]);
+    git(r.path(), &["switch", "-q", "-c", "other"]);
+    write(r.path(), "a.txt", "other\n");
+    commit_all(r.path(), "other");
+    git(r.path(), &["switch", "-q", "main"]);
+    let wt = tempfile::tempdir().unwrap();
+    git(r.path(), &["worktree", "add", "-q", "-b", "side", &wt.path().join("second").to_string_lossy()]);
+    let state = tempfile::tempdir().unwrap();
+    let mut a = App::new(config(state.path()), Some(r.path().to_path_buf()));
+    std::mem::forget(state);
+    settle(&mut a, |a| a.session.branch_label().is_some());
+    draw(&mut a, 100, 20);
+    (r, wt, a)
+}
+fn typed(a: &mut App, text: &str) {
+    for c in text.chars() {
+        key(a, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+}
+fn prompt_kind(a: &App) -> Option<Prompt> {
+    a.modal.as_ref().map(|m| m.kind.clone())
+}
+fn open_popup(a: &mut App) {
+    a.run(CommandId::GitBranches);
+    settle(a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(a, 100, 20);
+}
+
+#[test]
+fn the_status_branch_opens_the_popup_and_enter_checks_out() {
+    let (r, _wt, mut a) = branches_app();
+    let (_, rect) = *a.layout.controls.iter().find(|(id, _)| *id == CommandId::GitBranches).expect("a branch cell");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let text: String = (rect.x..rect.right()).map(|x| terminal.backend().buffer()[(x, rect.y)].symbol().to_string()).collect();
+    assert_eq!(text.trim(), "⎇ main");
+    click(&mut a, rect.x + 1, rect.y);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(&mut a, 100, 20);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Branches));
+    assert!(a.choices().iter().any(|c| c.label.contains("● main")));
+    typed(&mut a, "oth");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| !a.session.state().checking_out());
+    draw(&mut a, 100, 20);
+    assert_eq!(a.session.branch_label().as_deref(), Some("⎇ other"));
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "other\n");
+}
+
+#[test]
+fn a_rows_menu_makes_a_branch_and_the_revision_prompt_checks_out() {
+    let (r, _wt, mut a) = branches_app();
+    open_popup(&mut a);
+    typed(&mut a, "v1");
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert!(matches!(prompt_kind(&a), Some(Prompt::BranchMenu { .. })));
+    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…"]);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!((prompt_kind(&a), a.modal.as_ref().unwrap().input.as_str()), (Some(Prompt::Branches), "v1"), "back to the list");
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("v1".into()), checkout: true }));
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("v1".into()), checkout: false }));
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    typed(&mut a, "other");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("A branch named \"other\" already exists"));
+    for _ in 0..5 { key(&mut a, KeyCode::Backspace, KeyModifiers::NONE); }
+    typed(&mut a, "from-v1");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| !a.session.state().checking_out());
+    assert_eq!(a.session.branch_label().as_deref(), Some("⎇ from-v1"));
+    a.run(CommandId::CheckoutRevision);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Revision));
+    typed(&mut a, "nope");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("No commit named \"nope\""));
+    for _ in 0..4 { key(&mut a, KeyCode::Backspace, KeyModifiers::NONE); }
+    typed(&mut a, "v1");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| !a.session.state().checking_out());
+    let sha = lenz_content::git::testing::git(r.path(), &["rev-parse", "v1"]).trim().to_string();
+    assert_eq!(a.session.branch_label(), Some(format!("⎇ {}", &sha[..7])));
+}
+
+#[test]
+fn checkout_problems_offer_smart_and_a_confirmed_force_by_key_and_click() {
+    let (r, _wt, mut a) = branches_app();
+    std::fs::write(r.path().join("a.txt"), "mine\n").unwrap();
+    a.dispatch(Command::Checkout(lenz_content::branches::Target::Branch("other".into())));
+    settle(&mut a, |a| a.session.state().checkout_problem().is_some());
+    draw(&mut a, 100, 20);
+    assert!(matches!(prompt_kind(&a), Some(Prompt::Details { kind: Details::Checkout, .. })));
+    assert_eq!(a.layout.details_choices.len(), 3);
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    assert_eq!(a.layout.details_choices.len(), 2, "the confirmation step");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "mine\n", "Enter never discards");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    assert!(a.modal.is_none() && a.session.state().checkout_problem().is_none());
+    a.dispatch(Command::Checkout(lenz_content::branches::Target::Branch("other".into())));
+    settle(&mut a, |a| a.session.state().checkout_problem().is_some());
+    draw(&mut a, 100, 20);
+    let force = a.layout.details_choices[1];
+    click(&mut a, force.x + 1, force.y);
+    draw(&mut a, 100, 20);
+    let confirm = a.layout.details_choices[0];
+    click(&mut a, confirm.x + 1, confirm.y);
+    settle(&mut a, |a| !a.session.state().checking_out());
+    assert_eq!(a.session.branch_label().as_deref(), Some("⎇ other"));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "other\n");
+}
+
+#[test]
+fn a_worktree_opens_here_or_in_a_new_view_and_a_tiny_terminal_copes() {
+    let (_r, wt, mut a) = branches_app();
+    open_popup(&mut a);
+    for (w, h) in [(20, 6), (12, 3)] {
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        draw(&mut a, w, h);
+    }
+    draw(&mut a, 100, 20);
+    a.modal.as_mut().unwrap().input = "second".into();
+    a.modal.as_mut().unwrap().at = 0;
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(a.new_view);
+    assert_eq!(a.new_view_root.as_deref().map(|p| std::fs::canonicalize(p).unwrap()), Some(std::fs::canonicalize(wt.path().join("second")).unwrap()));
+    open_popup(&mut a);
+    typed(&mut a, "second");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.branch_label().as_deref() == Some("⎇ side"));
 }
