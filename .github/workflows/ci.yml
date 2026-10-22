@@ -1,7 +1,7 @@
 name: CI
 
-# Not run on push: the account has no Actions minutes. Run `scripts/ci-local.sh` (the pre-push hook does).
-# Kept for a manual run from the Actions tab if minutes become available.
+# Not run on push: `scripts/ci-local.sh` is the gate (the pre-push hook runs it). Kept for a manual run from the
+# Actions tab.
 on:
   workflow_dispatch:
 
