@@ -20,13 +20,13 @@ pub fn word_at(line: &str, col: usize) -> Range<usize> {
         }
     };
     // the character under the caret, or the one before it at the end of the line
-    let Some((at, c)) = line[col..].chars().next().map(|c| (col, c)).or_else(|| line[..col].char_indices().next_back())
-    else {
+    let (before, after) = (line.get(..col).unwrap_or_default(), line.get(col..).unwrap_or_default());
+    let Some((at, c)) = after.chars().next().map(|c| (col, c)).or_else(|| before.char_indices().next_back()) else {
         return col..col;
     };
     let k = class(c);
-    let start = line[..at].char_indices().rev().take_while(|&(_, c)| class(c) == k).last().map_or(at, |(i, _)| i);
-    let end = line[at..].char_indices().find(|&(_, c)| class(c) != k).map_or(line.len(), |(i, _)| at + i);
+    let start = line.get(..at).unwrap_or_default().char_indices().rev().take_while(|&(_, c)| class(c) == k).last().map_or(at, |(i, _)| i);
+    let end = line.get(at..).unwrap_or_default().char_indices().find(|&(_, c)| class(c) != k).map_or(line.len(), |(i, _)| at + i);
     start..end
 }
 

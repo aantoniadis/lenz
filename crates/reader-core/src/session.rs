@@ -2509,7 +2509,7 @@ impl Session {
                 let s = match clicks {
                     0 | 1 => Selection { anchor: at, head: at },
                     _ => {
-                        let word = lenz_content::select::word_at(&doc.text()[line.clone()], at.clamp(line.start, line.end) - line.start);
+                        let word = lenz_content::select::word_at(doc.text().get(line.clone()).unwrap_or_default(), at.clamp(line.start, line.end) - line.start);
                         Selection { anchor: line.start + word.start, head: line.start + word.end }
                     }
                 };
