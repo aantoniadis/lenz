@@ -1,6 +1,6 @@
 # Lenz Reader (working name)
 
-A fast, read-only code reader that shares decoding, syntax highlighting, themes and single-pane text
+A fast code reader (it never edits files; only the Git checkouts and branches you choose change your repository) that shares decoding, syntax highlighting, themes and single-pane text
 presentation with Lenz through local workspace crates `lenz-content` and `lenz-gpui`.
 
 This is the imported Reader documentation. The proposed product name is **Lenz Code**;
@@ -136,7 +136,7 @@ Choose **Change theme** directly from the ☰ app menu (or Find Action). The cho
 
 **File Icons** in the View menu shows or hides file-type icons beside file names in the explorer, tabs and results; the choice is remembered and shared with the terminal reader, where the icons are Nerd Font glyphs.
 
-The reader never writes the files it shows. It shares Diff's theme choice in
+The reader never writes the files it shows (a Git checkout you choose changes them as `git switch` would). It shares Diff's theme choice in
 `$XDG_CONFIG_HOME/lenz/appearance.json`, user themes in `lenz/themes`, and font preferences
 (`[gui] font_family`, `font_size`, `reading_font`) in `lenz/settings.toml`.
 `LENZ_THEME` overrides `LENZ_APPEARANCE`, followed by the compatibility variables
@@ -167,6 +167,19 @@ message; **Open with Default App** always does. **Compare With…** compares the
 highlighted file or folder when the explorer has focus, with a file or folder you pick (the system dialog in the GUI,
 a typed path in the terminal), in Lenz Diff: its window from the GUI; from the terminal, Lenz Diff's terminal app
 takes over the terminal until you quit it. Lenz Diff must sit beside Lenz Code, as release packages install it.
+
+**Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the status bar) lists **New Branch…**,
+**Checkout Tag or Revision…**, then the **Recent**, **Local**, **Remote** and **Tags** branches and, with more than one,
+the **Worktrees**; typing filters. Enter checks out the highlighted branch (a remote one as a local branch tracking it,
+a tag or revision on a detached HEAD) or opens the highlighted worktree as the folder; → or a right-click lists a row's
+other actions (New Branch from Here…, Open in New Window). Your uncommitted changes go along when git allows. When they
+would be overwritten, a dialog lists the files: **Smart Checkout** stashes them, checks out and puts them back (a
+conflict keeps the stash, and **Resolve Conflicts in Lenz Diff** opens Lenz Diff on it); **Force Checkout** first lists
+every uncommitted change it discards, then discards them on a second confirmation; untracked files in the way must be
+moved or deleted first. After a checkout the open files reload (removed ones show as unavailable), the explorer and
+index refresh and annotations blame again. The status bar shows the branch (or the detached commit) and follows a
+switch made elsewhere within a few seconds. Checkouts run git as your terminal would, with the repository's hooks and
+filters; everything else Lenz Code asks git keeps them off.
 
 **Annotate with Git Blame** (View menu, right-click, Alt+B) shows, left of the line numbers, the date and author of
 the commit that last changed each line, tinted by age (newest strongest); lines not committed yet say so. It is per

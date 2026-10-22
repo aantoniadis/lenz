@@ -5506,5 +5506,26 @@ mod git_branches {
         let launch = s.merge_launch(&bin.path().join("lenz-code"), false).unwrap();
         assert_eq!((launch.args, launch.cwd), (vec!["merge".to_string()], Some(std::fs::canonicalize(r.path()).unwrap())));
     }
+
+    #[test]
+    #[ignore = "timing: cargo test -p reader-core --release --lib branches_timing -- --ignored --nocapture"]
+    fn branches_timing_with_a_thousand_refs() {
+        let (r, _wt, mut s) = repo_session();
+        let head = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        let refs: String = (0..1000).map(|i| match i % 2 { 0 => format!("create refs/heads/feature/b{i} {head}\n"), _ => format!("create refs/tags/t{i} {head}\n") }).collect();
+        lenz_content::git::run_with_input(r.path(), &["update-ref", "--stdin"], refs.into_bytes()).unwrap();
+        for round in 0..5 {
+            s.dispatch(Command::CloseBranches);
+            let started = std::time::Instant::now();
+            open_branches(&mut s);
+            let loaded = started.elapsed();
+            let filter = std::time::Instant::now();
+            let n = s.state().branch_rows("b99").len();
+            eprintln!("round {round}: popup rows {} loaded in {loaded:?}; filter 'b99' {n} rows in {:?}", s.state().branch_rows("").len(), filter.elapsed());
+        }
+        let label = std::time::Instant::now();
+        for _ in 0..1000 { std::hint::black_box(s.branch_label()); }
+        eprintln!("branch label: {:?} per call", label.elapsed() / 1000);
+    }
 }
 

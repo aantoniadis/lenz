@@ -1319,3 +1319,70 @@ fn gui_and_terminal_blame_through_their_menus_show_the_same_commit(cx: &mut Test
     assert_eq!(gui.read_with(&visual, |v, _| v.session().status_message()), said.replace("lenz-diff-tui", "lenz-diff"));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "one\ntwo\n");
 }
+
+#[gpui::test]
+fn gui_and_terminal_git_branches_list_the_same_rows_and_check_out_the_same_way(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    // Two identical repositories: one per adapter (a checkout in one must not change the other's).
+    let make = || {
+        let r = repo();
+        git(r.path(), &["config", "user.name", "t"]);
+        git(r.path(), &["config", "user.email", "t@t"]);
+        write(r.path(), "a.txt", "main\n");
+        commit_all(r.path(), "main");
+        git(r.path(), &["tag", "v1"]);
+        git(r.path(), &["switch", "-q", "-c", "other"]);
+        write(r.path(), "a.txt", "other\n");
+        commit_all(r.path(), "other");
+        git(r.path(), &["switch", "-q", "main"]);
+        r
+    };
+    let (gr, tr) = (make(), make());
+    let state = tempfile::tempdir().unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&state.path().join("gui"))), Some(gr.path().to_path_buf()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&state.path().join("tui")), Some(tr.path().to_path_buf()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&Session) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session())) && done(&tui.session) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.branch_label().is_some());
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    // Git Branches… from each application menu.
+    visual.simulate_click(gpui::point(gpui::px(12.0), gpui::px(10.0)), gpui::Modifiers::default());
+    let button = tui.layout.app_menu;
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: button.x + 1, row: button.y, modifiers: KeyModifiers::NONE }));
+    let group = reader_core::actions::CommandGroup::ALL.iter().position(|g| *g == reader_core::actions::CommandGroup::Git).unwrap();
+    let row = CommandId::ALL.iter().filter(|c| c.group() == reader_core::actions::CommandGroup::Git).position(|c| *c == CommandId::GitBranches).unwrap();
+    visual.simulate_keystrokes(&format!("{}enter {}enter", "down ".repeat(group), "down ".repeat(row)));
+    for n in [group, row] {
+        for _ in 0..n { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
+        key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    }
+    settle(&mut visual, &mut tui, &|s| s.state().branches().is_some_and(|b| !b.loading));
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    let gui_rows: Vec<String> = gui.read_with(&visual, |v, _| v.modal_rows().into_iter().skip(2).map(|r| r.0).collect());
+    let tui_rows: Vec<String> = tui.choices().into_iter().map(|c| c.label).collect();
+    assert_eq!(gui_rows, tui_rows);
+    assert!(tui_rows.iter().any(|r| r.contains("● main")) && tui_rows.iter().any(|r| r.ends_with("v1")));
+    // The same keys check out `other` in both.
+    visual.simulate_keystrokes("o t h e r enter");
+    for c in "other".chars() { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut visual, &mut tui, &|s| !s.state().checking_out() && s.branch_label().as_deref() == Some("⎇ other"));
+    assert_eq!(std::fs::read(gr.path().join("a.txt")).unwrap(), std::fs::read(tr.path().join("a.txt")).unwrap());
+    assert_eq!(std::fs::read_to_string(tr.path().join("a.txt")).unwrap(), "other\n");
+}
