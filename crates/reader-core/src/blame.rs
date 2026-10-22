@@ -12,7 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use lenz_content::blame::{self as git_blame, Commit};
+use lenz_content::blame::{self as git_blame, Commit, CommitDetails};
 
 use crate::{cache::Stamp, session::Completion, tabs::TabId};
 
@@ -150,5 +150,41 @@ fn submit(job: Box<dyn FnOnce() + Send>) {
             let _ = tx.send(job);
         }
         None => job(), // no thread could start: work inline rather than never
+    }
+}
+
+/// The commit an annotation opened, and its details once loaded.
+pub struct CommitPopup {
+    pub tab: TabId,
+    pub sha: String,
+    pub(crate) root: PathBuf,
+    pub details: Option<Result<CommitDetails, String>>,
+    pub(crate) request: u64,
+}
+
+/// At most this many message lines and changed files are listed.
+const MESSAGE_LINES: usize = 8;
+const FILES: usize = 10;
+
+impl CommitPopup {
+    /// The popup's text, as Lenz Diff's commit popup shows it.
+    pub fn text(&self) -> String {
+        let d = match &self.details {
+            None => return format!("Loading commit {}…", &self.sha[..self.sha.len().min(7)]),
+            Some(Err(e)) => return format!("commit {}\n\n{e}", self.sha),
+            Some(Ok(d)) => d,
+        };
+        let mut rows = vec![format!("commit {}", d.sha), format!("Author: {} <{}>", d.author, d.email), format!("Date:   {}", git_blame::date(d.author_time)), String::new()];
+        let message: Vec<&str> = d.message.lines().collect();
+        rows.extend(message.iter().take(MESSAGE_LINES).map(|l| format!("    {l}").trim_end().to_string()));
+        if message.len() > MESSAGE_LINES {
+            rows.push("    …".into());
+        }
+        rows.push(String::new());
+        rows.extend(d.files.iter().take(FILES).map(|(status, path)| format!("{status} {path}")));
+        if d.files.len() > FILES {
+            rows.push(format!("… {} more files", d.files.len() - FILES));
+        }
+        rows.join("\n")
     }
 }

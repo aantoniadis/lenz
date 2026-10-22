@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Annotate with Git Blame", "Close Annotations", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -4989,5 +4989,115 @@ mod blame {
         assert!(labels(&s)[0].ends_with(" t"), "the copy is annotated too");
         s.dispatch(Command::SetAnnotate(false));
         assert!(s.state().shown(0).unwrap().blame.is_some(), "the other pane keeps its annotations");
+    }
+
+    fn annotated_repo() -> (tempfile::TempDir, Session, String) {
+        let r = repo();
+        put(r.path(), "a.txt", "one\ntwo\n");
+        commit_all(r.path(), "First line\n\nThe body.");
+        put(r.path(), "a.txt", "one\nTWO\n");
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        (r, s, sha)
+    }
+
+    #[test]
+    fn show_commit_loads_details_and_the_popup_text() {
+        let (_r, mut s, sha) = annotated_repo();
+        let t = s.state().active().unwrap().id();
+        s.dispatch(Command::Select(Selection { anchor: 6, head: 6 }));
+        s.dispatch(Command::ShowCommitAt { tab: t, line: 0 });
+        assert_eq!(s.state().selection().unwrap().range(), 0..0, "the caret goes to the clicked line");
+        assert!(s.commit_text().unwrap().starts_with(&format!("Loading commit {}…", &sha[..7])));
+        settle(&mut s, |s| s.state().commit_popup().is_some_and(|p| p.details.is_some()));
+        let text = s.commit_text().unwrap();
+        assert!(text.starts_with(&format!("commit {sha}\nAuthor: t <t@t>\nDate:   ")), "{text}");
+        assert!(text.contains("\n    First line\n\n    The body.\n"), "{text}");
+        assert!(text.ends_with("\nA a.txt"), "{text}");
+        s.dispatch(Command::CloseCommit);
+        assert!(s.state().commit_popup().is_none());
+    }
+
+    #[test]
+    fn copy_revision_copies_the_full_sha() {
+        let (_r, mut s, sha) = annotated_repo();
+        s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+        assert_eq!(s.disabled(CommandId::CopyRevision), None);
+        let effect = s.dispatch(Command::CopyRevision);
+        assert_eq!(effect.copy.as_deref(), Some(sha.as_str()));
+        assert_eq!(s.status_message(), format!("Copied {}", &sha[..7]));
+    }
+
+    #[test]
+    fn show_diff_launches_lenz_diff_on_the_commit() {
+        let (r, mut s, sha) = annotated_repo();
+        s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+        let bin = tempfile::tempdir().unwrap();
+        let exe = bin.path().join("lenz-code");
+        let missing = s.commit_diff_launch(&exe, false).unwrap_err();
+        assert!(missing.starts_with("Show Diff: Lenz Diff is not beside Lenz Code ("), "{missing}");
+        assert!(missing.ends_with("); reinstall Lenz"), "{missing}");
+        std::fs::write(bin.path().join("lenz-diff"), "").unwrap();
+        std::fs::write(bin.path().join("lenz-diff-tui"), "").unwrap();
+        let launch = s.commit_diff_launch(&exe, false).unwrap();
+        assert_eq!(launch.program, bin.path().join("lenz-diff").to_string_lossy());
+        // The root commit is compared with the empty tree.
+        let empty = git(r.path(), &["hash-object", "-t", "tree", "/dev/null"]).trim().to_string();
+        assert_eq!(launch.args, [empty, sha.clone()]);
+        assert_eq!(launch.cwd.as_deref(), Some(std::fs::canonicalize(r.path()).unwrap().as_path()));
+        assert!(s.commit_diff_launch(&exe, true).unwrap().program.ends_with("lenz-diff-tui"));
+        // A later commit is compared with its first parent.
+        commit_all(r.path(), "second");
+        s.dispatch(Command::Reload);
+        settle(&mut s, |s| opened(s) && blamed(s) && labels(s)[1] != "Not committed");
+        s.dispatch(Command::Select(Selection { anchor: 4, head: 4 }));
+        let second = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        assert_eq!(s.commit_diff_launch(&exe, false).unwrap().args, [format!("{second}^1"), second]);
+    }
+
+    #[test]
+    fn uncommitted_and_unblamed_lines_disable_the_commit_commands() {
+        let (_r, mut s, _) = annotated_repo();
+        s.dispatch(Command::Select(Selection { anchor: 4, head: 4 }));
+        for id in [CommandId::ShowCommit, CommandId::ShowCommitDiff, CommandId::CopyRevision] {
+            assert_eq!(s.disabled(id), Some("This line is not committed"));
+        }
+        s.dispatch(Command::SetAnnotate(false));
+        assert_eq!(s.disabled(CommandId::ShowCommit), Some("Annotations are off"));
+    }
+
+    #[test]
+    fn status_line_shows_the_caret_commit() {
+        let (_r, mut s, sha) = annotated_repo();
+        s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+        assert_eq!(s.status_message(), format!("{} · t · {} · First line", &sha[..7], today()));
+        s.dispatch(Command::Select(Selection { anchor: 4, head: 4 }));
+        assert_eq!(s.status_message(), "Not committed");
+        s.dispatch(Command::Notice("Something happened".into()));
+        assert_eq!(s.status_message(), "Something happened", "notices come first");
+    }
+
+    #[test]
+    fn context_menu_offers_the_blame_entries() {
+        let (_r, mut s, _) = annotated_repo();
+        let has = |s: &Session, id| s.context_menu().contains(&MenuEntry::Command(id));
+        assert!([CommandId::ShowCommit, CommandId::ShowCommitDiff, CommandId::CopyRevision, CommandId::CloseAnnotations].iter().all(|&id| has(&s, id)));
+        assert!(!has(&s, CommandId::AnnotateBlame));
+        s.dispatch(Command::SetAnnotate(false));
+        assert!(has(&s, CommandId::AnnotateBlame));
+        assert!(!has(&s, CommandId::ShowCommit));
+    }
+
+    #[test]
+    fn closing_the_tab_closes_the_popup() {
+        let (_r, mut s, _) = annotated_repo();
+        let t = s.state().active().unwrap().id();
+        s.dispatch(Command::ShowCommitAt { tab: t, line: 0 });
+        assert!(s.state().commit_popup().is_some());
+        s.dispatch(Command::CloseTab(t));
+        assert!(s.state().commit_popup().is_none());
     }
 }

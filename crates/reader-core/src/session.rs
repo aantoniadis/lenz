@@ -184,6 +184,11 @@ pub enum Command {
     ClickSelect { at: usize, clicks: u8 },
     /// Annotate the active tab with Git blame, or stop.
     SetAnnotate(bool),
+    /// The commit that last changed line `line` of `tab`: the caret goes to the line and its details open.
+    ShowCommitAt { tab: TabId, line: usize },
+    CloseCommit,
+    /// Copy the shown or the caret line's commit id.
+    CopyRevision,
     SelectAll,
     Copy,
     /// Copy text the adapter selected (a Markdown preview's rendered text).
@@ -411,6 +416,9 @@ pub enum CommandId {
     AllByName,
     AnnotateBlame,
     CloseAnnotations,
+    ShowCommit,
+    ShowCommitDiff,
+    CopyRevision,
     SplitRight,
     SplitDown,
     Unsplit,
@@ -442,7 +450,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 101] = [
+    pub const ALL: [CommandId; 104] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -535,6 +543,9 @@ impl CommandId {
         Self::AllByName,
         Self::AnnotateBlame,
         Self::CloseAnnotations,
+        Self::ShowCommit,
+        Self::ShowCommitDiff,
+        Self::CopyRevision,
         Self::SplitRight,
         Self::SplitDown,
         Self::Unsplit,
@@ -614,6 +625,9 @@ impl CommandId {
             Self::DocumentationOnHover => "Documentation on Hover",
             Self::AnnotateBlame => "Annotate with Git Blame",
             Self::CloseAnnotations => "Close Annotations",
+            Self::ShowCommit => "Show Commit…",
+            Self::ShowCommitDiff => "Show Diff",
+            Self::CopyRevision => "Copy Revision",
             Self::FileIcons => "File Icons",
             Self::InlayTypes => "Inlay Hints: Types",
             Self::InlayParameters => "Inlay Hints: Parameter Names",
@@ -777,6 +791,8 @@ pub enum Completion {
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
     /// Blame of `tab`'s request `request`: runs of lines (the repository root with the first batch), then `done`.
+    /// The details of the commit popup's commit, for request `request`.
+    CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
     Blamed { tab: TabId, request: u64, root: Option<PathBuf>, hunks: Vec<(std::ops::Range<usize>, Arc<lenz_content::blame::Commit>)>, done: Option<Result<(), String>> },
 }
 
@@ -845,6 +861,7 @@ impl Input {
                 Completion::HierarchyLevel { .. } => "hierarchy level",
                 Completion::HierarchyRootKind { .. } => "hierarchy root kind",
                 Completion::Blamed { .. } => "blamed",
+                Completion::CommitLoaded { .. } => "commit loaded",
                 Completion::DocumentationReady { .. } => "documentation",
             },
         }
@@ -911,6 +928,8 @@ pub struct State {
     occurrences: Option<Occurrences>,
     /// The documentation shown in a popup.
     documentation: Option<Documentation>,
+    /// The commit an annotation opened, while shown.
+    commit: Option<crate::blame::CommitPopup>,
 }
 
 /// What asked for documentation: a key or menu (about the caret), or the pointer resting on a name.
@@ -1226,6 +1245,11 @@ impl State {
         (current && o.ranges.iter().any(|(r, _)| r.start <= caret && caret <= r.end)).then_some(o)
     }
 
+    /// The commit an annotation opened, while its tab is open.
+    pub fn commit_popup(&self) -> Option<&crate::blame::CommitPopup> {
+        self.commit.as_ref().filter(|c| self.tabs.iter().any(|t| t.id == c.tab))
+    }
+
     /// The documentation to show, while it is about the active tab's document as it is.
     pub fn documentation(&self) -> Option<&Documentation> {
         let d = self.documentation.as_ref()?;
@@ -1479,6 +1503,7 @@ pub struct Session {
     click_extend: bool,
     /// The last blame request made (each tab keeps the one it wants).
     blame_requests: u64,
+    commit_requests: u64,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -1531,6 +1556,7 @@ impl Session {
                 asking: None,
                 occurrences: None,
                 documentation: None,
+                commit: None,
             },
             cache: InactiveCache::new(INACTIVE_BYTES),
             index_cache_dir: config.cache,
@@ -1595,6 +1621,7 @@ impl Session {
             expanding: None,
             click_extend: false,
             blame_requests: 0,
+            commit_requests: 0,
             tx,
             rx,
         }
@@ -1776,6 +1803,7 @@ impl Session {
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
+            CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
@@ -1987,6 +2015,12 @@ impl Session {
             }
         }
         entries.push(C(CommandId::LocateFile));
+        if text {
+            match tab.is_some_and(|t| t.blame.is_some()) {
+                true => entries.extend([Separator, C(CommandId::ShowCommit), C(CommandId::ShowCommitDiff), C(CommandId::CopyRevision), C(CommandId::CloseAnnotations)]),
+                false => entries.extend([Separator, C(CommandId::AnnotateBlame)]),
+            }
+        }
         entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith)]);
         entries.extend([Separator, C(CommandId::SplitRight), C(CommandId::SplitDown)]);
         if self.state.settings.split.is_some() {
@@ -1998,6 +2032,46 @@ impl Session {
     /// Line `line`'s annotation in tab `tab`, while its annotations are on and git has reached it.
     pub fn annotation(&self, tab: TabId, line: usize) -> Option<crate::blame::Annotation<'_>> {
         crate::blame::annotation(self.state.tabs.iter().find(|t| t.id == tab)?.blame.as_ref()?, line)
+    }
+
+    /// The commit the commit commands act on: the popup's, else the caret line's. (Its id and repository root.)
+    fn commit_target(&self) -> Result<(String, PathBuf), &'static str> {
+        if let Some(c) = self.state.commit_popup() {
+            return Ok((c.sha.clone(), c.root.clone()));
+        }
+        let t = self.state.active().ok_or("No file is open")?;
+        let b = t.blame.as_ref().ok_or("Annotations are off")?;
+        let line = t.doc.as_ref().zip(t.selection).map(|(d, s)| d.line_of(s.head)).ok_or("No line is selected")?;
+        match (b.lines.get(line), &b.root) {
+            (Some(Some(c)), _) if !c.is_committed() => Err("This line is not committed"),
+            (Some(Some(c)), Some(root)) => Ok((c.sha.clone(), root.clone())),
+            _ => Err("This line is not annotated yet"),
+        }
+    }
+
+    /// The caret line's annotation in the active tab (the status line's commit).
+    pub fn caret_annotation(&self) -> Option<crate::blame::Annotation<'_>> {
+        let t = self.state.active()?;
+        let line = t.doc.as_ref().zip(t.selection).map(|(d, s)| d.line_of(s.head))?;
+        crate::blame::annotation(t.blame.as_ref()?, line)
+    }
+
+    /// The commit popup's text, the same in both frontends.
+    pub fn commit_text(&self) -> Option<String> {
+        self.state.commit_popup().map(crate::blame::CommitPopup::text)
+    }
+
+    /// Lenz Diff on the commit the commit commands act on, against its first parent (or the empty tree for a root
+    /// commit), started from `exe`'s folder: the window app, or the terminal app when `terminal`.
+    pub fn commit_diff_launch(&self, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
+        let (sha, root) = self.commit_target().map_err(|e| format!("Show Diff: {e}"))?;
+        let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
+        if !program.is_file() {
+            return Err(format!("Show Diff: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
+        }
+        // ponytail: one quick `git rev-parse` on the UI thread
+        let base = lenz_content::blame::parent_or_empty_tree(&root, &sha).map_err(|e| format!("Show Diff: {e}"))?;
+        Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: vec![base, sha], cwd: Some(root) })
     }
 
     /// The annotation column's width in cells for tab `tab` (0 while its annotations are off).
@@ -2563,6 +2637,32 @@ impl Session {
                 self.annotate(id);
                 repaint
             }
+            Command::ShowCommitAt { tab, line } => {
+                let Some(t) = self.tab_mut(tab) else { return Effect::default() };
+                let (Some(doc), Some(b)) = (t.doc.clone(), t.blame.as_ref()) else { return Effect::default() };
+                let (Some(Some(commit)), Some(root)) = (b.lines.get(line), b.root.clone()) else { return Effect::default() };
+                if !commit.is_committed() {
+                    return Effect::default();
+                }
+                let sha = commit.sha.clone();
+                let start = doc.line_range(line.min(doc.line_count() - 1)).start;
+                t.selection = Some(Selection { anchor: start, head: start });
+                self.commit_requests += 1;
+                let (request, tx) = (self.commit_requests, self.tx.clone());
+                self.state.commit = Some(crate::blame::CommitPopup { tab, sha: sha.clone(), root: root.clone(), details: None, request });
+                self.jobs.submit(Priority::Visible, move || {
+                    let _ = tx.send_blocking(Completion::CommitLoaded { request, result: lenz_content::blame::commit_details(&root, &sha) });
+                });
+                repaint
+            }
+            Command::CloseCommit => Effect { repaint: self.state.commit.take().is_some(), copy: None },
+            Command::CopyRevision => match self.commit_target() {
+                Ok((sha, _)) => {
+                    self.state.messages.push(format!("Copied {}", &sha[..sha.len().min(7)]));
+                    Effect { repaint: true, copy: Some(sha) }
+                }
+                Err(_) => Effect::default(),
+            },
             Command::ClickSelect { at, clicks } => {
                 let Some(doc) = self.state.document() else { return Effect::default() };
                 let at = floor_char_boundary(doc.text(), at.min(doc.text().len()));
@@ -3484,6 +3584,13 @@ impl Session {
                 Effect { repaint: true, copy: None }
             }
             // For each shown tab of that version (both panes may show one snapshot).
+            Completion::CommitLoaded { request, result } => match self.state.commit.as_mut().filter(|c| c.request == request) {
+                Some(c) => {
+                    c.details = Some(result);
+                    Effect { repaint: true, copy: None }
+                }
+                None => Effect::default(),
+            },
             Completion::Blamed { tab, request, root, hunks, done } => {
                 let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request) else { return Effect::default() };
                 b.apply(root, hunks);

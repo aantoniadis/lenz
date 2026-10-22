@@ -566,6 +566,16 @@ impl App {
                 }
                 return;
             }
+            InterfaceAction::ShowCommitDiff => {
+                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                let launch = self.session.commit_diff_launch(&exe, true);
+                self.dispatch(Command::CloseCommit);
+                match launch {
+                    Ok(launch) => self.foreground = Some(launch),
+                    Err(e) => return self.dispatch(Command::Notice(e)),
+                }
+                return;
+            }
             InterfaceAction::CompareWith => {
                 let row = (self.focus == Focus::Tree).then(|| self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone())).flatten();
                 match self.session.compare_source(row.as_deref()) {

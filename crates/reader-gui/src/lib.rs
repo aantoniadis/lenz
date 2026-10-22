@@ -845,6 +845,12 @@ impl ReaderView {
                 }
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
+                InterfaceAction::ShowCommitDiff => {
+                    let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                    let launch = self.session.commit_diff_launch(&exe, false);
+                    self.dispatch(Command::CloseCommit, cx);
+                    self.start(launch, None, cx);
+                }
                 InterfaceAction::CompareWith => {
                     let row = self.tree_focus.then(|| self.tree_sel.clone()).flatten();
                     match self.session.compare_source(row.as_deref()) {
