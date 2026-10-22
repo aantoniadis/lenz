@@ -139,3 +139,84 @@ impl crate::session::Session {
         }
     }
 }
+
+/// What the checkout-problem dialog offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutChoice {
+    Smart,
+    /// The first step of Force Checkout: list everything it would discard.
+    Force,
+    /// The second step: discard it and check out.
+    ConfirmForce,
+    Cancel,
+}
+
+/// A checkout git refused over files in the way, while the dialog is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutProblem {
+    pub target: git_branches::Target,
+    pub tracked: Vec<String>,
+    pub untracked: Vec<String>,
+    /// Once Force Checkout is chosen: every uncommitted change it would discard (the confirmation step).
+    pub discards: Option<Vec<String>>,
+}
+
+/// How a checkout target is named in messages: the branch it ends on, or the revision.
+pub fn target_label(t: &git_branches::Target) -> &str {
+    match t {
+        git_branches::Target::Branch(b) | git_branches::Target::Detached(b) => b,
+        git_branches::Target::Remote(r) => git_branches::local_name(r),
+    }
+}
+
+impl State {
+    pub fn checkout_problem(&self) -> Option<&CheckoutProblem> {
+        self.checkout_problem.as_ref()
+    }
+    /// A checkout or new branch is running.
+    pub fn checking_out(&self) -> bool {
+        self.checkout_running.is_some()
+    }
+}
+
+impl crate::session::Session {
+    /// The checkout-problem dialog's buttons, in order.
+    pub fn checkout_choices(&self) -> Vec<(&'static str, CheckoutChoice)> {
+        match self.state().checkout_problem() {
+            None => Vec::new(),
+            Some(p) if !p.untracked.is_empty() => vec![("Cancel", CheckoutChoice::Cancel)],
+            Some(p) if p.discards.is_some() => vec![("Force Checkout", CheckoutChoice::ConfirmForce), ("Cancel", CheckoutChoice::Cancel)],
+            Some(_) => vec![("Smart Checkout", CheckoutChoice::Smart), ("Force Checkout", CheckoutChoice::Force), ("Cancel", CheckoutChoice::Cancel)],
+        }
+    }
+    /// The checkout-problem dialog's text, the same in both frontends.
+    pub fn checkout_text(&self) -> Option<String> {
+        let p = self.state().checkout_problem()?;
+        let name = target_label(&p.target);
+        let list = |files: &[String]| files.iter().map(|f| format!("  {f}")).collect::<Vec<_>>().join("\n");
+        Some(match (&p.discards, p.untracked.is_empty()) {
+            (_, false) => format!("Checking out {name} would overwrite these untracked files:\n\n{}\n\nMove or delete them first, then check out again.", list(&p.untracked)),
+            (Some(d), true) => format!("Force Checkout discards your uncommitted changes to these files:\n\n{}\n\nThey cannot be recovered.", list(d)),
+            (None, true) => format!("Checking out {name} would overwrite your local changes to:\n\n{}\n\nSmart Checkout stashes your changes, checks out {name} and puts them back. Force Checkout discards them.", list(&p.tracked)),
+        })
+    }
+    /// Whether `name` can be a new branch here.
+    pub fn validate_branch_name(&self, name: &str) -> Result<(), String> {
+        let root = self.state().repo().ok_or("Not in a Git repository")?.root.clone();
+        git_branches::check_branch_name(&root, name.trim())
+    }
+    /// `rev` as a commit id, or why not.
+    pub fn validate_revision(&self, rev: &str) -> Result<String, String> {
+        let root = self.state().repo().ok_or("Not in a Git repository")?.root.clone();
+        git_branches::verify_commit(&root, rev)
+    }
+    /// Lenz Diff on the repository's conflicts (after a Smart Checkout kept its stash), from `exe`'s folder.
+    pub fn merge_launch(&self, exe: &std::path::Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
+        let root = self.state().repo().ok_or("Not in a Git repository")?.root.clone();
+        let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
+        if !program.is_file() {
+            return Err(format!("Resolve Conflicts: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
+        }
+        Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: vec!["merge".into()], cwd: Some(root) })
+    }
+}

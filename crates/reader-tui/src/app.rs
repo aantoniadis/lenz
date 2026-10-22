@@ -575,7 +575,7 @@ impl App {
                 return;
             }
             // Placeholder until the Git prompts land (this branch's Task 5).
-            InterfaceAction::NewBranch | InterfaceAction::CheckoutRevision => return,
+            InterfaceAction::NewBranch | InterfaceAction::CheckoutRevision | InterfaceAction::ResolveConflicts => return,
             InterfaceAction::ShowCommitDiff => {
                 let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
                 let launch = self.session.commit_diff_launch(&exe, true);

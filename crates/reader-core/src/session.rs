@@ -187,6 +187,14 @@ pub enum Command {
     /// Open the Git Branches popup (its lists load in the background), or close it.
     OpenBranches,
     CloseBranches,
+    /// Check out a branch, remote branch, tag or revision (local changes go along when git allows).
+    Checkout(lenz_content::branches::Target),
+    /// The checkout-problem dialog's answer.
+    CheckoutChoice(crate::branches::CheckoutChoice),
+    /// Make branch `name` at `from` (HEAD when `None`), and check it out when `checkout`.
+    NewBranch { name: String, from: Option<String>, checkout: bool },
+    /// Open another worktree of the repository as the folder.
+    OpenWorktree(PathBuf),
     /// The commit that last changed line `line` of `tab`: the caret goes to the line and its details open.
     ShowCommitAt { tab: TabId, line: usize },
     CloseCommit,
@@ -420,6 +428,7 @@ pub enum CommandId {
     GitBranches,
     NewBranch,
     CheckoutRevision,
+    ResolveConflicts,
     AnnotateBlame,
     CloseAnnotations,
     ShowCommit,
@@ -456,7 +465,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 107] = [
+    pub const ALL: [CommandId; 108] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -550,6 +559,7 @@ impl CommandId {
         Self::GitBranches,
         Self::NewBranch,
         Self::CheckoutRevision,
+        Self::ResolveConflicts,
         Self::AnnotateBlame,
         Self::CloseAnnotations,
         Self::ShowCommit,
@@ -635,6 +645,7 @@ impl CommandId {
             Self::GitBranches => "Git Branches…",
             Self::NewBranch => "New Branch…",
             Self::CheckoutRevision => "Checkout Tag or Revision…",
+            Self::ResolveConflicts => "Resolve Conflicts in Lenz Diff",
             Self::AnnotateBlame => "Annotate with Git Blame",
             Self::CloseAnnotations => "Close Annotations",
             Self::ShowCommit => "Show Commit…",
@@ -802,6 +813,8 @@ pub enum Completion {
     HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
+    /// A checkout (or new branch, named `label`; `made` when it was only created) in the repository at `root` ended.
+    CheckedOut { request: u64, root: PathBuf, label: String, made: bool, result: Result<lenz_content::branches::Outcome, lenz_content::branches::CheckoutError> },
     /// The repository holding `anchor` (or why there is none).
     Repo { anchor: PathBuf, result: Result<crate::branches::Repo, String> },
     /// The Git Branches popup's lists for the repository at `root`.
@@ -879,6 +892,7 @@ impl Input {
                 Completion::Blamed { .. } => "blamed",
                 Completion::CommitLoaded { .. } => "commit loaded",
                 Completion::Repo { .. } => "repository",
+                Completion::CheckedOut { .. } => "checked out",
                 Completion::Branches { .. } => "branches",
                 Completion::DocumentationReady { .. } => "documentation",
             },
@@ -954,6 +968,10 @@ pub struct State {
     pub(crate) repo_answered: Option<PathBuf>,
     /// The Git Branches popup's lists, while it is open.
     pub(crate) branches: Option<crate::branches::BranchesView>,
+    /// The running checkout's request, the refused one's dialog, and the files a Smart Checkout left in conflict.
+    pub(crate) checkout_running: Option<u64>,
+    pub(crate) checkout_problem: Option<crate::branches::CheckoutProblem>,
+    pub(crate) stash_conflicts: Option<Vec<String>>,
 }
 
 /// What asked for documentation: a key or menu (about the caret), or the pointer resting on a name.
@@ -1528,6 +1546,9 @@ pub struct Session {
     /// The last blame request made (each tab keeps the one it wants).
     blame_requests: u64,
     commit_requests: u64,
+    checkout_requests: u64,
+    /// The running checkout's target, for its dialog when git refuses.
+    pending_target: Option<lenz_content::branches::Target>,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -1585,6 +1606,9 @@ impl Session {
                 repo_anchor: None,
                 repo_answered: None,
                 branches: None,
+                checkout_running: None,
+                checkout_problem: None,
+                stash_conflicts: None,
             },
             cache: InactiveCache::new(INACTIVE_BYTES),
             index_cache_dir: config.cache,
@@ -1650,6 +1674,8 @@ impl Session {
             click_extend: false,
             blame_requests: 0,
             commit_requests: 0,
+            checkout_requests: 0,
+            pending_target: None,
             tx,
             rx,
         }
@@ -1833,6 +1859,7 @@ impl Session {
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
             CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
             CommandId::GitBranches | CommandId::NewBranch | CommandId::CheckoutRevision => self.state.repo.is_none().then_some("Not in a Git repository"),
+            CommandId::ResolveConflicts => self.state.stash_conflicts.is_none().then_some("Smart Checkout left no conflicts"),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
                 // Turning annotations off always works, also once the file has gone.
@@ -2067,6 +2094,42 @@ impl Session {
         crate::blame::annotation(self.state.tabs.iter().find(|t| t.id == tab)?.blame.as_ref()?, line)
     }
 
+    /// A new request for the checkout about to run (an older one's answer is then dropped).
+    fn begin_checkout(&mut self) -> u64 {
+        self.checkout_requests += 1;
+        self.state.checkout_running = Some(self.checkout_requests);
+        self.state.checkout_problem = None;
+        self.checkout_requests
+    }
+
+    fn start_checkout(&mut self, target: lenz_content::branches::Target, mode: lenz_content::branches::Mode) -> Effect {
+        let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+        let request = self.begin_checkout();
+        let label = crate::branches::target_label(&target).to_string();
+        self.state.messages.push(format!("Checking out {label}…"));
+        self.pending_target = Some(target.clone());
+        let tx = self.tx.clone();
+        self.jobs.submit(Priority::Visible, move || {
+            let result = lenz_content::branches::checkout(&root, &target, mode);
+            let _ = tx.send_blocking(Completion::CheckedOut { request, root, label, made: false, result });
+        });
+        Effect { repaint: true, copy: None }
+    }
+
+    /// After a checkout: every tab checked against the disk, the folder rescanned, annotations blamed again (the
+    /// history moved even where the bytes did not).
+    fn checked_out(&mut self) {
+        for t in &mut self.state.tabs {
+            if let Some(b) = t.blame.as_mut() {
+                b.stamp = None;
+            }
+        }
+        self.changed(crate::watch::Change { overflow: true, ..Default::default() });
+        for id in [self.state.active, self.state.other].into_iter().flatten() {
+            self.annotate(id);
+        }
+    }
+
     /// Looks up the repository when what it is looked up for changed: the folder, else the active file's folder.
     fn sync_repo(&mut self) {
         let anchor = self.state.project.as_ref().map(|p| p.root().to_path_buf())
@@ -2077,6 +2140,8 @@ impl Session {
         self.state.repo_anchor = anchor.clone();
         self.state.repo = None;
         self.state.branches = None;
+        self.state.checkout_problem = None;
+        self.state.stash_conflicts = None;
         let Some(anchor) = anchor else { return };
         let tx = self.tx.clone();
         self.jobs.submit(Priority::Background, move || {
@@ -2684,6 +2749,48 @@ impl Session {
                 repaint
             }
             Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
+            Command::Checkout(target) => self.start_checkout(target, lenz_content::branches::Mode::Normal),
+            Command::CheckoutChoice(choice) => {
+                use crate::branches::CheckoutChoice as C;
+                let Some(p) = self.state.checkout_problem.clone() else { return Effect::default() };
+                if !self.checkout_choices().iter().any(|c| c.1 == choice) {
+                    return Effect::default();
+                }
+                match choice {
+                    C::Cancel => self.state.checkout_problem = None,
+                    C::Smart => {
+                        self.state.checkout_problem = None;
+                        return self.start_checkout(p.target, lenz_content::branches::Mode::Smart);
+                    }
+                    C::Force => {
+                        let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+                        match lenz_content::branches::discarded_by_force(&root) {
+                            Ok(files) => self.state.checkout_problem = Some(crate::branches::CheckoutProblem { discards: Some(files), ..p }),
+                            Err(e) => {
+                                self.state.checkout_problem = None;
+                                self.state.messages.push(e);
+                            }
+                        }
+                    }
+                    C::ConfirmForce => {
+                        self.state.checkout_problem = None;
+                        return self.start_checkout(p.target, lenz_content::branches::Mode::Force);
+                    }
+                }
+                repaint
+            }
+            Command::NewBranch { name, from, checkout } => {
+                let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+                let request = self.begin_checkout();
+                let tx = self.tx.clone();
+                self.jobs.submit(Priority::Visible, move || {
+                    let name = name.trim().to_string();
+                    let result = lenz_content::branches::create_branch(&root, &name, from.as_deref().unwrap_or("HEAD"), checkout);
+                    let _ = tx.send_blocking(Completion::CheckedOut { request, root, label: name, made: !checkout, result });
+                });
+                repaint
+            }
+            Command::OpenWorktree(path) => self.command(Command::OpenRoot(path)),
             Command::SetAnnotate(on) => {
                 if on && self.disabled(CommandId::AnnotateBlame).is_some() {
                     return Effect::default();
@@ -3651,6 +3758,45 @@ impl Session {
                 Effect { repaint: true, copy: None }
             }
             // For each shown tab of that version (both panes may show one snapshot).
+            Completion::CheckedOut { request, root, label, made, result } => {
+                if self.state.checkout_running != Some(request) {
+                    return Effect::default();
+                }
+                self.state.checkout_running = None;
+                // The folder changed meanwhile: its repository is another one; nothing here to reload.
+                if self.state.repo.as_ref().is_none_or(|r| r.root != root) {
+                    return Effect::default();
+                }
+                self.state.branches = None;
+                match result {
+                    Ok(outcome) if made => {
+                        let _ = outcome;
+                        self.state.messages.push(format!("Created branch {label}"));
+                    }
+                    Ok(outcome) => {
+                        self.state.messages.push(format!("Checked out {label}"));
+                        if let Some(w) = outcome.warning {
+                            self.state.messages.push(format!("Checkout: {w}"));
+                        }
+                        self.state.stash_conflicts = outcome.stash_kept.clone();
+                        if let Some(files) = outcome.stash_kept {
+                            self.state.messages.push(format!("Smart Checkout: your changes conflict with {label} in {}; they are kept in the stash \"Lenz Smart Checkout\" (Git → Resolve Conflicts in Lenz Diff)", files.join(", ")));
+                        }
+                        self.checked_out();
+                    }
+                    Err(lenz_content::branches::CheckoutError::Blocked { tracked, untracked }) => {
+                        let target = self.pending_target.take().unwrap_or(lenz_content::branches::Target::Branch(label));
+                        self.state.checkout_problem = Some(crate::branches::CheckoutProblem { target, tracked, untracked, discards: None });
+                    }
+                    Err(lenz_content::branches::CheckoutError::Git(e)) => self.state.messages.push(e),
+                }
+                if let Some(r) = self.state.repo.as_mut()
+                    && let Some(head) = lenz_content::branches::head_of(&r.git_dir)
+                {
+                    r.head = head;
+                }
+                Effect { repaint: true, copy: None }
+            }
             Completion::Repo { anchor, result } => {
                 if self.state.repo_anchor.as_ref() != Some(&anchor) {
                     return Effect::default();

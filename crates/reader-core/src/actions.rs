@@ -42,6 +42,8 @@ pub enum InterfaceAction {
     NewBranch,
     /// Ask for a tag or revision to check out.
     CheckoutRevision,
+    /// Start Lenz Diff on the conflicts a Smart Checkout left.
+    ResolveConflicts,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -109,6 +111,7 @@ impl Session {
             CommandId::ShowCommitDiff => return CatalogAction::Interface(InterfaceAction::ShowCommitDiff),
             CommandId::NewBranch => return CatalogAction::Interface(InterfaceAction::NewBranch),
             CommandId::CheckoutRevision => return CatalogAction::Interface(InterfaceAction::CheckoutRevision),
+            CommandId::ResolveConflicts => return CatalogAction::Interface(InterfaceAction::ResolveConflicts),
             CommandId::GitBranches => Command::OpenBranches,
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
@@ -273,7 +276,7 @@ impl CommandId {
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
-            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision => G::Git,
+            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ResolveConflicts => G::Git,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
             | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
             | Self::RecentFiles | Self::RecentLocations | Self::NextTab | Self::PreviousTab
