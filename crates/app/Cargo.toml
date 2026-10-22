@@ -54,7 +54,7 @@ async-channel = "2.5.0"
 
 [dev-dependencies]
 # The in-process memory probe for this crate's tests.
-lenz-content = { path = "../content", features = ["perf-probe"] }
+lenz-content = { path = "../content", features = ["perf-probe", "git-testing"] }
 # XZ archive fixture generation.
 lzma-rust2 = { version = "0.23", default-features = false, features = ["encoder"] }
 

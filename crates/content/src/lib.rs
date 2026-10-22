@@ -14,6 +14,7 @@ pub mod encoding;
 pub mod find;
 pub mod file_icons;
 pub mod fuzzy;
+pub mod git;
 pub mod goto;
 pub mod highlight;
 pub mod image;
