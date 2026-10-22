@@ -116,7 +116,6 @@ fn usable() -> &'static Result<(u32, u32), String> {
     USABLE.get_or_init(check)
 }
 
-/// Runs git in `cwd` and returns its stdout; a non-zero exit becomes git's stderr.
 /// A `git` command in `cwd` as the user's own terminal would run it: the repository's hooks, filters and config all
 /// apply. Only for changes the user asked for (a checkout, a new branch); everything else uses [`command`], which keeps
 /// a repository's programs from running when it is merely read. Messages in the C locale (callers read git's
@@ -137,6 +136,7 @@ pub fn run_as_user(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     finish(command_as_user(cwd)?.args(args))
 }
 
+/// Runs git in `cwd` and returns its stdout; a non-zero exit becomes git's stderr.
 pub fn run(cwd: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     finish(command(cwd)?.args(args))
 }

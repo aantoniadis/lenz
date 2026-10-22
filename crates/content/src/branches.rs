@@ -52,6 +52,25 @@ fn not_git(e: String) -> String {
     if git::version().is_some() { "Not in a Git repository".into() } else { e }
 }
 
+/// `HEAD` of the repository at `root`: from its file, or through git for a reftable repository (whose `HEAD` file
+/// is a placeholder).
+pub fn head(root: &Path, git_dir: &Path) -> Option<Head> {
+    if !git_dir.join("reftable").is_dir() {
+        return head_of(git_dir);
+    }
+    let text = |out: Vec<u8>| String::from_utf8_lossy(&out).trim().to_string();
+    match git::run(root, &["symbolic-ref", "-q", "HEAD"]).map(text) {
+        Ok(r) => Some(Head { branch: Some(r.strip_prefix("refs/heads/").unwrap_or(&r).to_string()), sha: None }),
+        Err(_) => git::run(root, &["rev-parse", "HEAD"]).ok().map(text).map(|sha| Head { branch: None, sha: Some(sha) }),
+    }
+}
+
+/// What changes when HEAD may have: the `HEAD` file's time, or a reftable repository's table list's.
+pub fn head_signal(git_dir: &Path) -> Option<std::time::SystemTime> {
+    let file = if git_dir.join("reftable").is_dir() { git_dir.join("reftable/tables.list") } else { git_dir.join("HEAD") };
+    std::fs::metadata(file).and_then(|m| m.modified()).ok()
+}
+
 /// `HEAD` of the git directory `git_dir`, from its file.
 pub fn head_of(git_dir: &Path) -> Option<Head> {
     let text = std::fs::read_to_string(git_dir.join("HEAD")).ok()?;
@@ -82,6 +101,9 @@ pub fn refs(root: &Path) -> Result<Refs, String> {
     let mut refs = Refs::default();
     for line in String::from_utf8_lossy(&out).lines() {
         let (name, head) = line.split_once('\0').unwrap_or((line, ""));
+        if name.rsplit('/').next().is_some_and(|n| n.starts_with('-')) || name.contains("/-") {
+            continue; // named like an option: only `update-ref` makes those, and git is never handed them
+        }
         if let Some(b) = name.strip_prefix("refs/heads/") {
             if head == "*" {
                 refs.current = Some(b.to_string());
@@ -117,31 +139,45 @@ pub struct Worktree {
     pub dirty: Option<usize>,
 }
 
+/// The repository's worktrees, main first, each with its count of changed paths.
 pub fn worktrees(cwd: &Path) -> Result<Vec<Worktree>, String> {
+    let mut list = worktree_list(cwd)?;
+    count_changes(&mut list);
+    Ok(list)
+}
+
+/// [`worktrees`] without the changed-path counts (`dirty` is `None`): no `git status` run.
+pub fn worktree_list(cwd: &Path) -> Result<Vec<Worktree>, String> {
     let out = git::run(cwd, &["worktree", "list", "--porcelain"])?;
     let here = toplevel(cwd).ok().and_then(|p| p.canonicalize().ok());
     let mut list = Vec::new();
     // ponytail: `-z` needs git 2.36; a path with a newline would be C-quoted here.
     for block in String::from_utf8_lossy(&out).split("\n\n").filter(|b| !b.trim().is_empty()) {
         let mut w = Worktree { path: PathBuf::new(), head: None, branch: None, current: false, dirty: None };
-        let mut readable = true;
         for line in block.lines() {
             let (key, value) = line.split_once(' ').unwrap_or((line, ""));
             match key {
                 "worktree" => w.path = PathBuf::from(value),
                 "HEAD" => w.head = Some(value.to_string()),
                 "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
-                "bare" | "prunable" => readable = false,
                 _ => {}
             }
         }
         w.current = here.is_some() && w.path.canonicalize().ok() == here;
-        w.dirty = if readable { dirty(&w.path).ok() } else { None };
         list.push(w);
     }
     Ok(list)
 }
 
+/// Counts each worktree's changed paths (one `git status` each); `None` where they can't be read (bare, or its
+/// folder is gone).
+pub fn count_changes(list: &mut [Worktree]) {
+    for w in list.iter_mut() {
+        w.dirty = w.path.is_dir().then(|| dirty(&w.path).ok()).flatten();
+    }
+}
+
+/// How many paths `git status` lists in `dir`, untracked files included.
 fn dirty(dir: &Path) -> Result<usize, String> {
     let args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"];
     let out = git::run(dir, &args)?;
@@ -192,45 +228,69 @@ pub struct Outcome {
     pub warning: Option<String>,
 }
 
-/// The local branch a remote-tracking branch checks out as (`origin/feature/x` → `feature/x`).
-pub fn local_name(remote: &str) -> &str {
-    remote.split_once('/').map_or(remote, |(_, b)| b)
+/// The local branch remote-tracking branch `remote` (`origin/feature/x`) checks out as (`feature/x`), by the
+/// repository's remotes, so a remote named `team/fork` splits right.
+pub fn local_branch(root: &Path, remote: &str) -> String {
+    let remotes = git::run(root, &["remote"]).unwrap_or_default();
+    String::from_utf8_lossy(&remotes)
+        .lines()
+        .filter_map(|r| remote.strip_prefix(r).and_then(|b| b.strip_prefix('/')))
+        .min_by_key(|b| b.len())
+        .unwrap_or_else(|| remote.split_once('/').map_or(remote, |(_, b)| b))
+        .to_string()
 }
 
 /// Checks `target` out as the user would in a terminal (hooks and filters run). A refusal over local changes comes
 /// back as [`CheckoutError::Blocked`]; Smart Checkout of untracked files is refused the same way, untouched.
 pub fn checkout(root: &Path, target: &Target, mode: Mode) -> Result<Outcome, CheckoutError> {
-    let args = switch_args(root, target)?;
+    run_switch(root, switch_args(root, target)?, mode)
+}
+
+/// Creates branch `name` at `from` (HEAD when `None`), and checks it out when `checkout`, carrying local changes as
+/// [`checkout`] does in `mode`. On an unborn branch (no commits yet) checking out names the branch to be.
+pub fn create_branch(root: &Path, name: &str, from: Option<&str>, checkout: bool, mode: Mode) -> Result<Outcome, CheckoutError> {
+    check_branch_name(root, name).map_err(CheckoutError::Git)?;
+    let start = match from {
+        Some(f) => Some(verify_commit(root, f).map_err(CheckoutError::Git)?),
+        None => verify_commit(root, "HEAD").ok(),
+    };
+    let own = |s: &str| s.to_string();
+    match (checkout, start) {
+        (true, Some(start)) => run_switch(root, vec![own("switch"), own("-c"), own(name), start], mode),
+        (true, None) => run_switch(root, vec![own("switch"), own("-c"), own(name)], mode),
+        (false, Some(start)) => git::run_as_user(root, &["branch", name, &start]).map(|_| Outcome::default()).map_err(CheckoutError::Git),
+        (false, None) => Err(CheckoutError::Git("There are no commits yet: a branch needs one to start at".into())),
+    }
+}
+
+fn run_switch(root: &Path, mut args: Vec<String>, mode: Mode) -> Result<Outcome, CheckoutError> {
+    if mode == Mode::Force {
+        args.insert(1, "--discard-changes".into());
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
     if mode == Mode::Smart {
         return smart(root, &args);
-    }
-    let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
-    if mode == Mode::Force {
-        args.insert(1, "--discard-changes");
     }
     switch(root, &args).map(|warning| Outcome { warning, ..Outcome::default() })
 }
 
-/// Creates branch `name` at `from`, and checks it out when `checkout` (local changes go along when git allows).
-pub fn create_branch(root: &Path, name: &str, from: &str, checkout: bool) -> Result<Outcome, CheckoutError> {
-    check_branch_name(root, name).map_err(CheckoutError::Git)?;
-    let from = verify_commit(root, from).map_err(CheckoutError::Git)?;
-    if checkout {
-        switch(root, &["switch", "-c", name, &from]).map(|warning| Outcome { warning, ..Outcome::default() })
-    } else {
-        git::run_as_user(root, &["branch", name, &from]).map(|_| Outcome::default()).map_err(CheckoutError::Git)
-    }
-}
-
 fn switch_args(root: &Path, target: &Target) -> Result<Vec<String>, CheckoutError> {
     let own = |s: &str| s.to_string();
+    let name = match target {
+        Target::Branch(b) | Target::Remote(b) | Target::Detached(b) => b,
+    };
+    // A ref named like an option (only `update-ref` can make one) is never handed to git.
+    if name.starts_with('-') {
+        return Err(CheckoutError::Git(format!("\"{name}\" cannot be checked out")));
+    }
     Ok(match target {
         Target::Branch(b) => vec![own("switch"), own(b)],
         Target::Remote(r) => {
-            let local = local_name(r);
-            match refs(root).map_err(CheckoutError::Git)?.local.iter().any(|b| b == local) {
-                true => vec![own("switch"), own(local)],
-                false => vec![own("switch"), own("-c"), own(local), own("--track"), own(r)],
+            let local = local_branch(root, r);
+            match refs(root).map_err(CheckoutError::Git)?.local.contains(&local) {
+                true => vec![own("switch"), local],
+                // git names the local branch from the remote's refspec.
+                false => vec![own("switch"), own("--track"), own(r)],
             }
         }
         Target::Detached(rev) => vec![own("switch"), own("--detach"), verify_commit(root, rev).map_err(CheckoutError::Git)?],
@@ -265,33 +325,62 @@ fn moved(root: &Path, args: &[&str], before: Option<(String, String)>) -> bool {
     let Some((name, sha)) = here(root).filter(|now| Some(now) != before.as_ref()) else { return false };
     match args {
         [.., "--detach", rev] => name == "HEAD" && sha == *rev,
+        [.., "--track", _] => name.starts_with("refs/heads/"),
         [_, "-c", b, ..] | [_, "--discard-changes", "-c", b, ..] | [_, "--discard-changes", b] | [_, b] => name == format!("refs/heads/{b}"),
         _ => false,
     }
 }
 
-fn smart(root: &Path, args: &[String]) -> Result<Outcome, CheckoutError> {
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+/// The name the stash of a Smart Checkout has (`git stash list` shows it).
+pub const SMART_STASH: &str = "Lenz Smart Checkout";
+
+fn smart(root: &Path, args: &[&str]) -> Result<Outcome, CheckoutError> {
     // A dry try: carried changes need no stash, and untracked files in the way stay a refusal.
-    match switch(root, &args) {
+    match switch(root, args) {
         Err(CheckoutError::Blocked { untracked, .. }) if untracked.is_empty() => {}
         other => return other.map(|warning| Outcome { warning, ..Outcome::default() }),
     }
-    git::run_as_user(root, &["stash", "push", "-m", "Lenz Smart Checkout"]).map_err(CheckoutError::Git)?;
-    let warning = match switch(root, &args) {
+    git::run_as_user(root, &["stash", "push", "-m", SMART_STASH]).map_err(CheckoutError::Git)?;
+    let warning = match switch(root, args) {
         Ok(warning) => warning,
+        // Back as it was before the stash, or said where the changes are.
         Err(e) => {
-            // Back as it was before the stash.
-            let _ = git::run_as_user(root, &["stash", "pop"]);
-            return Err(e);
+            return Err(match restore(root) {
+                Ok(()) => e,
+                Err(_) => CheckoutError::Git(format!("The checkout failed and your changes could not be put back: they are kept in the stash \"{SMART_STASH}\" ({})", describe(&e))),
+            });
         }
     };
-    if git::run_as_user(root, &["stash", "pop"]).is_ok() {
-        return Ok(Outcome { warning, ..Outcome::default() });
+    match restore(root) {
+        Ok(()) => Ok(Outcome { warning, ..Outcome::default() }),
+        Err(conflicted) => Ok(Outcome { stash_kept: Some(conflicted), warning }),
     }
-    let out = git::run(root, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default();
-    let files = out.split(|&b| b == 0).filter(|f| !f.is_empty()).map(|f| String::from_utf8_lossy(f).into_owned()).collect();
-    Ok(Outcome { stash_kept: Some(files), warning })
+}
+
+/// Puts the Smart Checkout stash back, staged changes staged again when they still can be. On failure the stash
+/// stays and the conflicted files (possibly none) are returned.
+fn restore(root: &Path) -> Result<(), Vec<String>> {
+    let conflicted = || {
+        let out = git::run(root, &["diff", "--name-only", "--diff-filter=U", "-z"]).unwrap_or_default();
+        out.split(|&b| b == 0).filter(|f| !f.is_empty()).map(|f| String::from_utf8_lossy(f).into_owned()).collect::<Vec<_>>()
+    };
+    if git::run_as_user(root, &["stash", "pop", "--index"]).is_ok() {
+        return Ok(());
+    }
+    // `--index` refuses without touching anything when the staged part cannot be restored: try without it, unless
+    // the attempt already left conflicts.
+    let left = conflicted();
+    if left.is_empty() && git::run_as_user(root, &["stash", "pop"]).is_ok() {
+        return Ok(());
+    }
+    Err(if left.is_empty() { conflicted() } else { left })
+}
+
+fn describe(e: &CheckoutError) -> String {
+    match e {
+        CheckoutError::Blocked { .. } => "local changes would be overwritten".into(),
+        CheckoutError::Git(e) => e.clone(),
+    }
 }
 
 /// Git's refusal over files in the way (its messages are read in the C locale: see [`git::command_as_user`]).
@@ -301,7 +390,7 @@ fn blocked(stderr: &str) -> Option<CheckoutError> {
     for line in stderr.lines() {
         if line.contains("local changes to the following files would be overwritten") {
             list = Some(&mut tracked);
-        } else if line.contains("untracked working tree files would be overwritten") {
+        } else if line.contains("untracked working tree files would be overwritten") || line.contains("would lose untracked files in them") {
             list = Some(&mut untracked);
         } else if let (Some(l), Some(path)) = (list.as_mut(), line.strip_prefix('\t')) {
             l.push(path.to_string());
@@ -407,7 +496,13 @@ mod tests {
         assert_eq!(refs.tags, ["v1"]);
         assert_eq!(refs.current.as_deref(), Some("main"));
         assert_eq!(refs.recent, ["feature/x", "other"], "newest first, not the current one");
-        assert_eq!(local_name("upstream/feature/x"), "feature/x");
+        assert_eq!(local_branch(r.path(), "upstream/feature/x"), "feature/x");
+        git(r.path(), &["remote", "add", "team/fork", &up.path().to_string_lossy()]);
+        assert_eq!(local_branch(r.path(), "team/fork/topic"), "topic", "a remote with a slash in its name");
+        // A ref named like an option is not listed.
+        git(r.path(), &["update-ref", "refs/heads/-x", "HEAD"]);
+        assert!(!super::refs(r.path()).unwrap().local.iter().any(|b| b.starts_with('-')));
+        assert_eq!(checkout(r.path(), &Target::Branch("-x".into()), Mode::Normal), Err(CheckoutError::Git("\"-x\" cannot be checked out".into())));
     }
 
     #[test]
@@ -492,9 +587,9 @@ mod tests {
         assert_eq!(check_branch_name(r.path(), "-x"), Err("\"-x\" is not a valid branch name".into()));
         assert_eq!(check_branch_name(r.path(), "other"), Err("A branch named \"other\" already exists".into()));
         assert_eq!(check_branch_name(r.path(), "feature/new"), Ok(()));
-        create_branch(r.path(), "kept", "other", false).unwrap();
+        create_branch(r.path(), "kept", Some("other"), false, Mode::Normal).unwrap();
         assert_eq!(branch(r.path()).as_deref(), Some("main"));
-        create_branch(r.path(), "feature/new", "other", true).unwrap();
+        create_branch(r.path(), "feature/new", Some("other"), true, Mode::Normal).unwrap();
         assert_eq!(branch(r.path()).as_deref(), Some("feature/new"));
         assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "other\n");
     }
@@ -515,8 +610,75 @@ mod tests {
         let out = checkout(r.path(), &Target::Branch("main".into()), Mode::Normal).unwrap();
         assert_eq!(branch(r.path()).as_deref(), Some("main"));
         assert!(out.warning.is_some_and(|w| w.contains("hook says no")));
-        let out = create_branch(r.path(), "made", "other", true).unwrap();
+        let out = create_branch(r.path(), "made", Some("other"), true, Mode::Normal).unwrap();
         assert_eq!(branch(r.path()).as_deref(), Some("made"));
         assert!(out.warning.is_some());
     }
+
+    #[test]
+    fn a_new_branch_over_blocking_changes_has_smart_and_force_too() {
+        let r = two_branches();
+        write(r.path(), "a.txt", "edited\n");
+        assert!(matches!(create_branch(r.path(), "fresh", Some("other"), true, Mode::Normal), Err(CheckoutError::Blocked { .. })));
+        assert!(refs(r.path()).unwrap().local.iter().all(|b| b != "fresh"), "not made either");
+        let out = create_branch(r.path(), "fresh", Some("other"), true, Mode::Smart).unwrap();
+        assert_eq!(branch(r.path()).as_deref(), Some("fresh"));
+        assert_eq!(out.stash_kept, Some(vec!["a.txt".to_string()]), "edited vs other's whole line: kept");
+        git(r.path(), &["reset", "-q", "--hard"]);
+        write(r.path(), "a.txt", "edited again\n");
+        create_branch(r.path(), "forced", Some("main"), true, Mode::Force).unwrap();
+        assert_eq!((branch(r.path()).as_deref(), std::fs::read_to_string(r.path().join("a.txt")).unwrap().as_str()), (Some("forced"), "main\n"));
+    }
+
+    #[test]
+    fn an_unborn_branch_takes_a_new_name_but_cannot_be_a_start() {
+        let r = repo();
+        create_branch(r.path(), "first", None, true, Mode::Normal).unwrap();
+        assert_eq!(head_of(&git_dir(r.path()).unwrap()).unwrap().label(), "first");
+        assert_eq!(create_branch(r.path(), "second", None, false, Mode::Normal), Err(CheckoutError::Git("There are no commits yet: a branch needs one to start at".into())));
+    }
+
+    #[test]
+    fn staged_changes_stay_staged_through_smart_checkout() {
+        let r = two_branches();
+        write(r.path(), "c.txt", "1\n2\n3\n");
+        commit_all(r.path(), "c on main");
+        git(r.path(), &["switch", "-q", "other"]);
+        git(r.path(), &["merge", "-q", "main", "-m", "m"]);
+        write(r.path(), "c.txt", "X\n2\n3\n");
+        commit_all(r.path(), "c on other");
+        git(r.path(), &["switch", "-q", "main"]);
+        write(r.path(), "c.txt", "1\n2\nZ\n");
+        write(r.path(), "s.txt", "staged\n");
+        git(r.path(), &["add", "s.txt"]);
+        checkout(r.path(), &Target::Branch("other".into()), Mode::Smart).unwrap();
+        assert_eq!(git(r.path(), &["diff", "--cached", "--name-only"]).trim(), "s.txt", "still staged");
+    }
+
+    #[test]
+    fn refusals_over_untracked_folders_are_recognised() {
+        let e = "error: Updating the following directories would lose untracked files in them:\n\tdir\n\nAborting\n";
+        assert_eq!(blocked(e), Some(CheckoutError::Blocked { tracked: vec![], untracked: vec!["dir".into()] }));
+    }
+
+    #[test]
+    fn a_reftable_repository_reads_head_through_git() {
+        let r = tempfile::tempdir().unwrap();
+        if !crate::git::testing::try_git(r.path(), &["init", "-q", "-b", "main", "--ref-format=reftable"]) {
+            eprintln!("skipped: this git has no reftable");
+            return;
+        }
+        git(r.path(), &["config", "user.name", "t"]);
+        git(r.path(), &["config", "user.email", "t@t"]);
+        write(r.path(), "a.txt", "a\n");
+        commit_all(r.path(), "a");
+        let dir = git_dir(r.path()).unwrap();
+        assert_eq!(head(r.path(), &dir).unwrap().label(), "main");
+        let before = head_signal(&dir);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        git(r.path(), &["switch", "-q", "-c", "next"]);
+        assert_ne!(head_signal(&dir), before);
+        assert_eq!(head(r.path(), &dir).unwrap().label(), "next");
+    }
 }
+

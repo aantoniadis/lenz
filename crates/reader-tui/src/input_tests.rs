@@ -2271,9 +2271,10 @@ fn a_rows_menu_makes_a_branch_and_the_revision_prompt_checks_out() {
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("v1".into()), checkout: true }));
+    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("refs/tags/v1".into()), checkout: true }));
+    assert!(a.modal_title().starts_with("New branch from v1 "), "{}", a.modal_title());
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
-    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("v1".into()), checkout: false }));
+    assert_eq!(prompt_kind(&a), Some(Prompt::NewBranch { from: Some("refs/tags/v1".into()), checkout: false }));
     key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
     typed(&mut a, "other");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -2309,7 +2310,10 @@ fn checkout_problems_offer_smart_and_a_confirmed_force_by_key_and_click() {
     draw(&mut a, 100, 20);
     assert_eq!(a.layout.details_choices.len(), 2, "the confirmation step");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "mine\n", "Enter never discards");
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "mine\n", "neither Enter nor a second f discards");
+    assert_eq!(a.layout.details_choices.len(), 2);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     draw(&mut a, 100, 20);
     assert!(a.modal.is_none() && a.session.state().checkout_problem().is_none());
@@ -2324,6 +2328,16 @@ fn checkout_problems_offer_smart_and_a_confirmed_force_by_key_and_click() {
     settle(&mut a, |a| !a.session.state().checking_out());
     assert_eq!(a.session.branch_label().as_deref(), Some("⎇ other"));
     assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "other\n");
+    // By keys: f lists, y confirms.
+    std::fs::write(r.path().join("a.txt"), "mine again\n").unwrap();
+    a.dispatch(Command::Checkout(lenz_content::branches::Target::Branch("main".into())));
+    settle(&mut a, |a| a.session.state().checkout_problem().is_some());
+    draw(&mut a, 100, 20);
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('y'), KeyModifiers::NONE);
+    settle(&mut a, |a| !a.session.state().checking_out());
+    assert_eq!(a.session.branch_label().as_deref(), Some("⎇ main"));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n");
 }
 
 #[test]
@@ -2348,4 +2362,18 @@ fn a_worktree_opens_here_or_in_a_new_view_and_a_tiny_terminal_copes() {
     typed(&mut a, "second");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     settle(&mut a, |a| a.session.branch_label().as_deref() == Some("⎇ side"));
+}
+
+#[test]
+fn enter_on_the_current_branch_or_worktree_does_nothing_and_keeps_the_popup() {
+    let (_r, _wt, mut a) = branches_app();
+    open_popup(&mut a);
+    for current in ["● main", "Worktrees"] {
+        let at = a.choices().iter().position(|c| c.label.contains(current) && c.label.contains("●")).unwrap();
+        a.modal.as_mut().unwrap().at = at;
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!a.session.state().checking_out(), "{current}: no checkout");
+        assert_eq!(prompt_kind(&a), Some(Prompt::Branches), "{current}: the popup stays");
+    }
+    assert!(!a.session.status_details().contains("Checking out"));
 }

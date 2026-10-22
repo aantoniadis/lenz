@@ -138,7 +138,6 @@ pub fn tags(cwd: &Path) -> Result<Vec<Tag>, String> {
         .collect())
 }
 
-/// The repository's worktrees, main first, each with its count of changed paths.
 /// Stashes, newest first. Listed only: never applied or dropped.
 pub fn stashes(cwd: &Path) -> Result<Vec<Stash>, String> {
     let out = git::run(cwd, &["stash", "list", "--format=%H%x00%ct%x00%gs"])?;
@@ -172,7 +171,6 @@ fn refs_limited<const N:usize>(cwd:&Path,pattern:&str,sort:&str,fields:[&str;N],
         .collect()
 }
 
-/// How many paths `git status` lists in `dir`, untracked files included.
 #[cfg(test)]
 mod tests {
     use super::*;

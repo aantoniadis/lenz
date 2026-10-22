@@ -815,10 +815,12 @@ pub enum Completion {
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
     /// A checkout (or new branch, named `label`; `made` when it was only created) in the repository at `root` ended.
     CheckedOut { request: u64, root: PathBuf, label: String, made: bool, result: Result<lenz_content::branches::Outcome, lenz_content::branches::CheckoutError> },
+    /// HEAD of the repository at `root`, read again because its signal changed.
+    Head { root: PathBuf, head: Option<lenz_content::branches::Head> },
     /// The repository holding `anchor` (or why there is none).
     Repo { anchor: PathBuf, result: Result<crate::branches::Repo, String> },
     /// The Git Branches popup's lists for the repository at `root`.
-    Branches { root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
+    Branches { request: u64, root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
     /// The details of the commit popup's commit, for request `request`.
     CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
     /// Blame of `tab`'s request `request`: the repository root first, then runs of lines, then `done`.
@@ -893,6 +895,7 @@ impl Input {
                 Completion::CommitLoaded { .. } => "commit loaded",
                 Completion::Repo { .. } => "repository",
                 Completion::CheckedOut { .. } => "checked out",
+                Completion::Head { .. } => "head",
                 Completion::Branches { .. } => "branches",
                 Completion::DocumentationReady { .. } => "documentation",
             },
@@ -1549,8 +1552,9 @@ pub struct Session {
     checkout_requests: u64,
     /// The last lookup found no repository though a `.git` was there: the tick does not ask again.
     repo_git_seen: bool,
-    /// The running checkout's target, for its dialog when git refuses.
-    pending_target: Option<lenz_content::branches::Target>,
+    /// What the running checkout does, to run again from its dialog when git refuses.
+    pending_checkout: Option<crate::branches::Retry>,
+    branches_requests: u64,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -1678,7 +1682,8 @@ impl Session {
             commit_requests: 0,
             checkout_requests: 0,
             repo_git_seen: false,
-            pending_target: None,
+            pending_checkout: None,
+            branches_requests: 0,
             tx,
             rx,
         }
@@ -1861,7 +1866,11 @@ impl Session {
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
             CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
-            CommandId::GitBranches | CommandId::NewBranch | CommandId::CheckoutRevision => self.state.repo.is_none().then_some("Not in a Git repository"),
+            CommandId::GitBranches | CommandId::NewBranch | CommandId::CheckoutRevision => match &self.state.repo {
+                None => Some("Not in a Git repository"),
+                Some(_) if self.state.checkout_running.is_some() => Some("A checkout is running"),
+                Some(_) => None,
+            },
             CommandId::ResolveConflicts => self.state.stash_conflicts.is_none().then_some("Smart Checkout left no conflicts"),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
@@ -2105,15 +2114,32 @@ impl Session {
         self.checkout_requests
     }
 
-    fn start_checkout(&mut self, target: lenz_content::branches::Target, mode: lenz_content::branches::Mode) -> Effect {
-        let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+    /// The repository a checkout may write in: none outside git, and none while another checkout runs (said so).
+    fn writable_repo(&mut self) -> Option<PathBuf> {
+        let root = self.state.repo.as_ref()?.root.clone();
+        if self.state.checkout_running.is_some() {
+            self.state.messages.push("A checkout is running; wait for it to finish".into());
+            return None;
+        }
+        Some(root)
+    }
+
+    /// Runs a checkout or a new branch (checked out) in `mode`; a refusal opens the dialog to run it again.
+    fn retry(&mut self, retry: crate::branches::Retry, mode: lenz_content::branches::Mode) -> Effect {
+        let Some(root) = self.writable_repo() else { return Effect { repaint: true, copy: None } };
         let request = self.begin_checkout();
-        let label = crate::branches::target_label(&target).to_string();
-        self.state.messages.push(format!("Checking out {label}…"));
-        self.pending_target = Some(target.clone());
+        let label = retry.label().to_string();
+        self.state.messages.push(match &retry {
+            crate::branches::Retry::Checkout(_) => format!("Checking out {label}…"),
+            crate::branches::Retry::NewBranch { .. } => format!("Creating branch {label}…"),
+        });
+        self.pending_checkout = Some(retry.clone());
         let tx = self.tx.clone();
         self.jobs.submit(Priority::Visible, move || {
-            let result = lenz_content::branches::checkout(&root, &target, mode);
+            let result = match &retry {
+                crate::branches::Retry::Checkout(target) => lenz_content::branches::checkout(&root, target, mode),
+                crate::branches::Retry::NewBranch { name, from } => lenz_content::branches::create_branch(&root, name, from.as_deref(), true, mode),
+            };
             let _ = tx.send_blocking(Completion::CheckedOut { request, root, label, made: false, result });
         });
         Effect { repaint: true, copy: None }
@@ -2149,8 +2175,9 @@ impl Session {
         let tx = self.tx.clone();
         self.jobs.submit(Priority::Background, move || {
             let result = lenz_content::branches::locate(&anchor).and_then(|(root, git_dir)| {
-                let head = lenz_content::branches::head_of(&git_dir).ok_or("HEAD is unreadable")?;
-                Ok(crate::branches::Repo { root, git_dir, head })
+                let head = lenz_content::branches::head(&root, &git_dir).ok_or("HEAD is unreadable")?;
+                let signal = lenz_content::branches::head_signal(&git_dir);
+                Ok(crate::branches::Repo { root, git_dir, head, signal })
             });
             let _ = tx.send_blocking(Completion::Repo { anchor, result });
         });
@@ -2742,17 +2769,29 @@ impl Session {
                 Effect { repaint: changed, copy: None }
             }
             Command::OpenBranches => {
+                if self.disabled(CommandId::GitBranches).is_some() {
+                    return Effect::default();
+                }
                 let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
                 self.state.branches = Some(crate::branches::BranchesView { loading: true, ..Default::default() });
-                let tx = self.tx.clone();
+                self.branches_requests += 1;
+                let (request, tx) = (self.branches_requests, self.tx.clone());
                 self.jobs.submit(Priority::Visible, move || {
-                    let result = lenz_content::branches::refs(&root).and_then(|r| Ok((r, lenz_content::branches::worktrees(&root)?)));
-                    let _ = tx.send_blocking(Completion::Branches { root, result });
+                    // Changed paths are counted only when the Worktrees section shows (more than one).
+                    let result = lenz_content::branches::refs(&root).and_then(|r| {
+                        let mut worktrees = lenz_content::branches::worktree_list(&root)?;
+                        match worktrees.len() > 1 {
+                            true => lenz_content::branches::count_changes(&mut worktrees),
+                            false => worktrees.iter_mut().for_each(|w| w.dirty = None),
+                        }
+                        Ok((r, worktrees))
+                    });
+                    let _ = tx.send_blocking(Completion::Branches { request, root, result });
                 });
                 repaint
             }
             Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
-            Command::Checkout(target) => self.start_checkout(target, lenz_content::branches::Mode::Normal),
+            Command::Checkout(target) => self.retry(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal),
             Command::CheckoutChoice(choice) => {
                 use crate::branches::CheckoutChoice as C;
                 let Some(p) = self.state.checkout_problem.clone() else { return Effect::default() };
@@ -2763,7 +2802,7 @@ impl Session {
                     C::Cancel => self.state.checkout_problem = None,
                     C::Smart => {
                         self.state.checkout_problem = None;
-                        return self.start_checkout(p.target, lenz_content::branches::Mode::Smart);
+                        return self.retry(p.retry, lenz_content::branches::Mode::Smart);
                     }
                     C::Force => {
                         let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
@@ -2777,19 +2816,20 @@ impl Session {
                     }
                     C::ConfirmForce => {
                         self.state.checkout_problem = None;
-                        return self.start_checkout(p.target, lenz_content::branches::Mode::Force);
+                        return self.retry(p.retry, lenz_content::branches::Mode::Force);
                     }
                 }
                 repaint
             }
-            Command::NewBranch { name, from, checkout } => {
-                let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
+            Command::NewBranch { name, from, checkout: true } => self.retry(crate::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal),
+            Command::NewBranch { name, from, checkout: false } => {
+                let Some(root) = self.writable_repo() else { return repaint };
                 let request = self.begin_checkout();
                 let tx = self.tx.clone();
                 self.jobs.submit(Priority::Visible, move || {
                     let name = name.trim().to_string();
-                    let result = lenz_content::branches::create_branch(&root, &name, from.as_deref().unwrap_or("HEAD"), checkout);
-                    let _ = tx.send_blocking(Completion::CheckedOut { request, root, label: name, made: !checkout, result });
+                    let result = lenz_content::branches::create_branch(&root, &name, from.as_deref(), false, lenz_content::branches::Mode::Normal);
+                    let _ = tx.send_blocking(Completion::CheckedOut { request, root, label: name, made: true, result });
                 });
                 repaint
             }
@@ -3224,12 +3264,18 @@ impl Session {
             self.state.repo_anchor = None;
             self.sync_repo();
         }
-        // A branch switched elsewhere (a terminal, another app): HEAD's file says so; no git process.
+        // A branch switched elsewhere (a terminal, another app): HEAD's file (or a reftable's table list) changed; it
+        // is read again off the UI thread. Only a file's time is checked here.
         if let Some(r) = self.state.repo.as_mut()
-            && let Some(head) = lenz_content::branches::head_of(&r.git_dir).filter(|h| *h != r.head)
+            && let signal = lenz_content::branches::head_signal(&r.git_dir)
+            && signal != r.signal
         {
-            r.head = head;
-            repaint = true;
+            r.signal = signal;
+            let (root, git_dir, tx) = (r.root.clone(), r.git_dir.clone(), self.tx.clone());
+            self.jobs.submit(Priority::Background, move || {
+                let head = lenz_content::branches::head(&root, &git_dir);
+                let _ = tx.send_blocking(Completion::Head { root, head });
+            });
         }
         // Symbols wait for every server asked, but not for one that never answers.
         let now = self.state.semantics.now();
@@ -3775,39 +3821,61 @@ impl Session {
                     return Effect::default();
                 }
                 self.state.checkout_running = None;
-                // The folder changed meanwhile: its repository is another one; nothing here to reload.
-                if self.state.repo.as_ref().is_none_or(|r| r.root != root) {
-                    return Effect::default();
+                let retry = self.pending_checkout.take();
+                // The folder changed meanwhile: what happened there is still said, naming it; nothing here reloads.
+                let here = self.state.repo.as_ref().is_some_and(|r| r.root == root);
+                let place = if here { String::new() } else { format!(" in {}", root.display()) };
+                if here {
+                    self.state.branches = None;
+                    if let Some(r) = self.state.repo.as_mut()
+                        && let Some(head) = lenz_content::branches::head(&r.root, &r.git_dir)
+                    {
+                        r.head = head;
+                        r.signal = lenz_content::branches::head_signal(&r.git_dir);
+                    }
                 }
-                self.state.branches = None;
+                let now = self.state.repo.as_ref().filter(|_| here).map_or(label.clone(), |r| r.head.label());
                 match result {
-                    Ok(outcome) if made => {
-                        let _ = outcome;
-                        self.state.messages.push(format!("Created branch {label}"));
-                    }
+                    Ok(_) if made => self.state.messages.push(format!("Created branch {label}{place}")),
                     Ok(outcome) => {
-                        self.state.messages.push(format!("Checked out {label}"));
+                        self.state.messages.push(format!("Checked out {now}{place}"));
                         if let Some(w) = outcome.warning {
-                            self.state.messages.push(format!("Checkout: {w}"));
+                            self.state.messages.push(format!("Checkout{place}: {w}"));
                         }
-                        self.state.stash_conflicts = outcome.stash_kept.clone();
-                        if let Some(files) = outcome.stash_kept {
-                            self.state.messages.push(format!("Smart Checkout: your changes conflict with {label} in {}; they are kept in the stash \"Lenz Smart Checkout\" (Git → Resolve Conflicts in Lenz Diff)", files.join(", ")));
+                        let stash = lenz_content::branches::SMART_STASH;
+                        match outcome.stash_kept {
+                            Some(files) if !files.is_empty() => {
+                                self.state.messages.push(format!("Smart Checkout{place}: your changes conflict with {now} in {}; they are kept in the stash \"{stash}\" (Git → Resolve Conflicts in Lenz Diff)", files.join(", ")));
+                                if here {
+                                    self.state.stash_conflicts = Some(files);
+                                }
+                            }
+                            Some(_) => self.state.messages.push(format!("Smart Checkout{place}: your changes could not be put back; they are kept in the stash \"{stash}\"")),
+                            None => {}
                         }
-                        self.checked_out();
+                        if here {
+                            self.checked_out();
+                        }
                     }
-                    Err(lenz_content::branches::CheckoutError::Blocked { tracked, untracked }) => {
-                        let target = self.pending_target.take().unwrap_or(lenz_content::branches::Target::Branch(label));
-                        self.state.checkout_problem = Some(crate::branches::CheckoutProblem { target, tracked, untracked, discards: None });
+                    Err(lenz_content::branches::CheckoutError::Blocked { tracked, untracked }) if here => {
+                        let retry = retry.unwrap_or(crate::branches::Retry::Checkout(lenz_content::branches::Target::Branch(label)));
+                        self.state.checkout_problem = Some(crate::branches::CheckoutProblem { retry, tracked, untracked, discards: None });
                     }
-                    Err(lenz_content::branches::CheckoutError::Git(e)) => self.state.messages.push(e),
-                }
-                if let Some(r) = self.state.repo.as_mut()
-                    && let Some(head) = lenz_content::branches::head_of(&r.git_dir)
-                {
-                    r.head = head;
+                    Err(lenz_content::branches::CheckoutError::Blocked { .. }) => self.state.messages.push(format!("Checking out {label}{place} was refused: local changes would be overwritten")),
+                    Err(lenz_content::branches::CheckoutError::Git(e)) => self.state.messages.push(format!("{e}{}", if here { String::new() } else { format!(" ({})", root.display()) })),
                 }
                 Effect { repaint: true, copy: None }
+            }
+            Completion::Head { root, head } => {
+                match self.state.repo.as_mut().filter(|r| r.root == root && Some(&r.head) != head.as_ref()) {
+                    Some(r) => {
+                        if let Some(head) = head {
+                            r.head = head;
+                        }
+                        Effect { repaint: true, copy: None }
+                    }
+                    None => Effect::default(),
+                }
             }
             Completion::Repo { anchor, result } => {
                 if self.state.repo_anchor.as_ref() != Some(&anchor) {
@@ -3819,7 +3887,7 @@ impl Session {
                 self.state.repo = result.ok();
                 Effect { repaint: true, copy: None }
             }
-            Completion::Branches { root, result } => match self.state.branches.as_mut().filter(|_| self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
+            Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
                 Some(v) => {
                     v.loading = false;
                     match result {

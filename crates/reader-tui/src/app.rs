@@ -604,7 +604,6 @@ impl App {
                 }
                 return;
             }
-            // Placeholder until the Git prompts land (this branch's Task 5).
             InterfaceAction::NewBranch => Prompt::NewBranch { from: None, checkout: true },
             InterfaceAction::CheckoutRevision => Prompt::Revision,
             InterfaceAction::ResolveConflicts => {
@@ -1044,8 +1043,8 @@ impl App {
                     _ => "Git Branches · type to filter · Enter checks out · → more",
                 },
                 Prompt::BranchMenu { .. } => "Actions · ← back",
-                Prompt::NewBranch { checkout: true, .. } => "New branch · [x] check out (Tab) · Enter",
-                Prompt::NewBranch { checkout: false, .. } => "New branch · [ ] check out (Tab) · Enter",
+                Prompt::NewBranch { checkout: true, from } => return format!("New branch from {} · [x] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
+                Prompt::NewBranch { checkout: false, from } => return format!("New branch from {} · [ ] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
                 Prompt::Revision => "Checkout tag or revision · Enter",
             }
             .to_owned()
@@ -1184,14 +1183,15 @@ impl App {
             return;
         }
         if let Prompt::Details { kind: Details::Checkout, .. } = &kind {
-            // s Smart Checkout, f Force (then f again to confirm), Esc cancels; Enter takes the first safe choice.
+            // s Smart Checkout, f Force, y confirms the discard (another key than f, so a held f never does); Esc
+            // cancels; Enter takes the first safe choice.
             use reader_core::branches::CheckoutChoice as C;
             let choices: Vec<C> = self.session.checkout_choices().into_iter().map(|c| c.1).collect();
             let pick = match key.code {
                 KeyCode::Esc => Some(C::Cancel),
-                KeyCode::Char('s' | 'S') => Some(C::Smart),
-                KeyCode::Char('f' | 'F') if choices.contains(&C::ConfirmForce) => Some(C::ConfirmForce),
-                KeyCode::Char('f' | 'F') => Some(C::Force),
+                KeyCode::Char('s' | 'S') if !control && !alt => Some(C::Smart),
+                KeyCode::Char('f' | 'F') if !control && !alt => Some(C::Force),
+                KeyCode::Char('y' | 'Y') if !control && !alt => Some(C::ConfirmForce),
                 KeyCode::Enter => choices.first().copied().filter(|c| *c != C::ConfirmForce),
                 _ => None,
             };
@@ -1203,6 +1203,9 @@ impl App {
         // The Git Branches popup: Right opens the highlighted row's actions; in them Left or Esc goes back.
         if kind == Prompt::Branches && key.code == KeyCode::Right {
             return self.open_branch_menu(self.modal.as_ref().map_or(0, |m| m.at));
+        }
+        if matches!(kind, Prompt::BranchMenu { .. }) && key.code == KeyCode::Right {
+            return self.accept();
         }
         if let Prompt::BranchMenu { query, row, .. } = &kind
             && matches!(key.code, KeyCode::Left | KeyCode::Esc)
@@ -1420,7 +1423,7 @@ impl App {
                     self.dispatch(Command::Checkout(target));
                 }
             }
-            (BranchAction::NewBranchFrom, t) => self.prompt(Prompt::NewBranch { from: t.rev().map(str::to_string), checkout: true }),
+            (BranchAction::NewBranchFrom, t) => self.prompt(Prompt::NewBranch { from: t.rev(), checkout: true }),
             (BranchAction::Open, BranchTarget::Worktree(path)) => self.dispatch(Command::OpenWorktree(path)),
             (BranchAction::OpenInNewWindow, BranchTarget::Worktree(path)) => {
                 self.new_view = true;
@@ -1571,6 +1574,8 @@ impl App {
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
             Prompt::Mnemonic => {}
+            // Enter on the current branch or worktree does nothing (its other actions are in its menu), as in the GUI.
+            Prompt::Branches if self.choices().get(at).is_some_and(|c| matches!(&c.target, ChoiceTarget::Branch(t) if !matches!(t, reader_core::branches::BranchTarget::Action(_)) && self.session.branch_enter(t).is_none())) => {}
             _ => {
                 let Some(choice) = self.choices().get(at).cloned() else {
                     return;

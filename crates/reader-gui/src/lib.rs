@@ -895,7 +895,6 @@ impl ReaderView {
                 }
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
-                // Placeholder until the Git prompts land (this branch's Task 4).
                 InterfaceAction::NewBranch => self.modal = Some(Modal::NewBranch { from: None, name: String::new(), checkout: true, error: None }),
                 InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None }),
                 InterfaceAction::ResolveConflicts => {
@@ -1368,14 +1367,17 @@ impl ReaderView {
         }
         let key = ev.keystroke.key.as_str();
         if let Some(Modal::StatusDetails { kind: Details::Checkout, .. }) = &self.modal {
-            // s Smart Checkout, f Force (then f again to confirm), Escape cancels; Enter takes the first safe choice.
+            // s Smart Checkout, f Force, y confirms the discard (another key than f, and never a held one); Escape
+            // cancels; Enter takes the first safe choice.
             use reader_core::branches::CheckoutChoice as C;
             let choices: Vec<C> = self.session.checkout_choices().into_iter().map(|c| c.1).collect();
+            let m = &ev.keystroke.modifiers;
+            let plain = !(m.control || m.platform || m.alt) && !ev.is_held;
             let pick = match key {
                 "escape" => Some(C::Cancel),
-                "s" => Some(C::Smart),
-                "f" if choices.contains(&C::ConfirmForce) => Some(C::ConfirmForce),
-                "f" => Some(C::Force),
+                "s" if plain => Some(C::Smart),
+                "f" if plain => Some(C::Force),
+                "y" if plain => Some(C::ConfirmForce),
                 "enter" => choices.first().copied().filter(|c| *c != C::ConfirmForce),
                 _ => None,
             };
@@ -1504,6 +1506,14 @@ impl ReaderView {
                 "enter" | "right" => self.modal_accept(window, cx),
                 _ => {}
             }
+            return cx.notify();
+        }
+        // The Git prompts take a paste (a commit id, a branch name): its first line.
+        let paste = (key == "v" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform)).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten()
+            .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
+        if let (Some(text), Some(Modal::NewBranch { name: input, error, .. } | Modal::Revision { input, error })) = (&paste, &mut self.modal) {
+            input.push_str(text);
+            *error = None;
             return cx.notify();
         }
         // A new branch's name: typing edits it, Tab turns Check out on or off, Enter makes it, Escape cancels.
@@ -2302,7 +2312,7 @@ impl ReaderView {
                     self.dispatch(Command::Checkout(target), cx);
                 }
             }
-            (BranchAction::NewBranchFrom, t) => self.modal = Some(Modal::NewBranch { from: t.rev().map(str::to_string), name: String::new(), checkout: true, error: None }),
+            (BranchAction::NewBranchFrom, t) => self.modal = Some(Modal::NewBranch { from: t.rev(), name: String::new(), checkout: true, error: None }),
             (BranchAction::Open, BranchTarget::Worktree(path)) => self.dispatch(Command::OpenWorktree(path.clone()), cx),
             (BranchAction::OpenInNewWindow, BranchTarget::Worktree(path)) => {
                 let (make_config, path) = (self.make_config.clone(), path.clone());
@@ -3765,7 +3775,7 @@ impl ReaderView {
                 rows
             }
             Some(Modal::NewBranch { from, name, checkout, error }) => {
-                let start = from.as_deref().unwrap_or("HEAD");
+                let start = from.as_deref().map_or("HEAD", reader_core::branches::short_ref);
                 let hint = error.clone().unwrap_or_else(|| format!("New branch from {start} — Enter; Tab: check it out or not"));
                 vec![(format!("› {name}"), None), (format!("[{}] Check out the new branch", if *checkout { "x" } else { " " }), None), (hint, None)]
             }

@@ -5232,7 +5232,7 @@ fn gui_a_rows_menu_makes_a_branch_from_it_and_the_revision_prompt_checks_out(cx:
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "v1")), "back to the list");
     v.simulate_keystrokes("right down enter");
-    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewBranch { from: Some(f), .. }) if f == "v1")));
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewBranch { from: Some(f), .. }) if f == "refs/tags/v1")));
     type_text(&mut v, "other");
     v.simulate_keystrokes("enter");
     let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
@@ -5244,6 +5244,11 @@ fn gui_a_rows_menu_makes_a_branch_from_it_and_the_revision_prompt_checks_out(cx:
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ from-v1"));
     // Checkout Tag or Revision…: a bad name is refused in the prompt, a good one checks out detached.
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CheckoutRevision, w, cx));
+    // A paste goes in (its first line).
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted\nsecond line".into()));
+    v.simulate_keystrokes("ctrl-v");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Revision { input, .. }) if input == "pasted")));
+    for _ in 0..6 { v.simulate_keystrokes("backspace"); }
     type_text(&mut v, "nope");
     v.simulate_keystrokes("enter");
     let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
@@ -5274,7 +5279,9 @@ fn gui_checkout_problems_offer_smart_and_a_confirmed_force(cx: &mut TestAppConte
     v.simulate_keystrokes("f");
     assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Checkout)), ["Force Checkout", "Cancel"]);
     v.simulate_keystrokes("enter");
-    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "mine\n", "Enter never discards");
+    v.simulate_keystrokes("f");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "mine\n", "neither Enter nor a second f discards");
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Checkout)), ["Force Checkout", "Cancel"]);
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().checkout_problem().is_none()));
     // Again, then the Force button and its confirmation button.

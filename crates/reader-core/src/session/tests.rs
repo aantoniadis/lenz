@@ -5233,11 +5233,11 @@ mod git_branches {
         assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
         git(r.path(), &["switch", "-q", "feature/x"]);
         tick(&mut s);
-        assert_eq!(s.branch_label().as_deref(), Some("⎇ feature/x"));
+        settle(&mut s, |s| s.branch_label().as_deref() == Some("⎇ feature/x"));
         let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
         git(r.path(), &["switch", "-q", "--detach", "HEAD"]);
         tick(&mut s);
-        assert_eq!(s.branch_label(), Some(format!("⎇ {}", &sha[..7])));
+        settle(&mut s, |s| s.branch_label() == Some(format!("⎇ {}", &sha[..7])));
     }
 
     #[test]
@@ -5467,13 +5467,68 @@ mod git_branches {
     }
 
     #[test]
-    fn a_checkout_answered_after_the_folder_changed_is_dropped() {
+    fn a_checkout_answered_after_the_folder_changed_is_still_reported_there() {
         let (r, wt, mut s) = repo_session();
         s.dispatch(Command::Checkout(Target::Branch("feature/x".into())));
         s.dispatch(Command::OpenRoot(wt.path().join("second")));
         settle(&mut s, |s| !s.state().checking_out() && s.branch_label().as_deref() == Some("⎇ other"));
-        assert!(!s.status_details().contains("Checked out feature/x"), "nothing said about another folder's checkout");
-        let _ = r;
+        let said = format!("Checked out feature/x in {}", std::fs::canonicalize(r.path()).unwrap().display());
+        assert!(s.status_details().contains(&said), "{}", s.status_details());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ other"), "this folder's branch is untouched");
+    }
+
+    #[test]
+    fn a_new_branch_over_blocking_changes_retries_itself_from_the_dialog() {
+        let (r, _wt, mut s) = repo_session();
+        git(r.path(), &["switch", "-q", "feature/x"]);
+        put(r.path(), "a.txt", "x\n");
+        commit_all(r.path(), "x");
+        git(r.path(), &["switch", "-q", "main"]);
+        // An earlier checkout, so a stale target would show.
+        checkout(&mut s, Target::Branch("other".into()));
+        checkout(&mut s, Target::Branch("main".into()));
+        put(r.path(), "a.txt", "mine\n");
+        s.dispatch(Command::NewBranch { name: "fresh".into(), from: Some("refs/heads/feature/x".into()), checkout: true });
+        settle(&mut s, |s| !s.state().checking_out());
+        assert!(s.checkout_text().unwrap().starts_with("Checking out fresh would overwrite"), "{:?}", s.checkout_text());
+        choose(&mut s, CheckoutChoice::Smart);
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ fresh"));
+        assert!(s.status_message().contains("kept in the stash"), "{}", s.status_message());
+    }
+
+    #[test]
+    fn a_second_checkout_waits_for_the_first() {
+        let (r, _wt, mut s) = repo_session();
+        // A post-checkout hook that takes a while keeps the first checkout running.
+        let hook = r.path().join(".git/hooks/post-checkout");
+        std::fs::write(&hook, "#!/bin/sh\nsleep 1\n").unwrap();
+        std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        s.dispatch(Command::Checkout(Target::Branch("feature/x".into())));
+        assert_eq!(s.disabled(CommandId::GitBranches), Some("A checkout is running"));
+        assert_eq!(s.disabled(CommandId::NewBranch), Some("A checkout is running"));
+        s.dispatch(Command::Checkout(Target::Detached("v1".into())));
+        assert!(s.status_message().contains("A checkout is running"), "{}", s.status_message());
+        settle(&mut s, |s| !s.state().checking_out());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ feature/x"), "the first one finished; the second never ran");
+        assert_eq!(s.disabled(CommandId::GitBranches), None);
+    }
+
+    #[test]
+    fn a_reftable_repository_shows_and_follows_its_branch() {
+        let r = tempfile::tempdir().unwrap();
+        if !lenz_content::git::testing::try_git(r.path(), &["init", "-q", "-b", "main", "--ref-format=reftable"]) {
+            return;
+        }
+        put(r.path(), "a.txt", "a\n");
+        commit_all(r.path(), "a");
+        let mut s = session(&r.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+        settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(s.branch_label().as_deref(), Some("⎇ main"));
+        std::thread::sleep(Duration::from_millis(20));
+        git(r.path(), &["switch", "-q", "-c", "next"]);
+        tick(&mut s);
+        settle(&mut s, |s| s.branch_label().as_deref() == Some("⎇ next"));
     }
 
     #[test]

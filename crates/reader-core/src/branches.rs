@@ -13,6 +13,8 @@ pub struct Repo {
     pub root: PathBuf,
     pub git_dir: PathBuf,
     pub head: Head,
+    /// What changes when HEAD may have (see `lenz_content::branches::head_signal`).
+    pub signal: Option<std::time::SystemTime>,
 }
 
 /// The Git Branches popup's lists, while it is open.
@@ -45,10 +47,12 @@ impl BranchTarget {
             Self::Action(_) | Self::Worktree(_) => None,
         }
     }
-    /// The revision a new branch from here starts at.
-    pub fn rev(&self) -> Option<&str> {
+    /// The revision a new branch from here starts at, fully named (a tag and a branch may share a name).
+    pub fn rev(&self) -> Option<String> {
         match self {
-            Self::Branch(r) | Self::Remote(r) | Self::Tag(r) => Some(r),
+            Self::Branch(b) => Some(format!("refs/heads/{b}")),
+            Self::Remote(r) => Some(format!("refs/remotes/{r}")),
+            Self::Tag(t) => Some(format!("refs/tags/{t}")),
             Self::Action(_) | Self::Worktree(_) => None,
         }
     }
@@ -129,7 +133,9 @@ impl crate::session::Session {
     }
     /// The actions a row's submenu offers (none for the popup's own commands, which run on Enter).
     pub fn branch_actions(&self, target: &BranchTarget) -> Vec<(&'static str, BranchAction)> {
-        let current = self.state().branches().and_then(|v| v.refs.current.as_deref());
+        // What is current comes from the repository itself, not the popup's lists (which close before an action runs).
+        let repo = self.state().repo();
+        let current = repo.and_then(|r| r.head.branch.as_deref());
         match target {
             BranchTarget::Action(_) => Vec::new(),
             BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom)],
@@ -137,7 +143,8 @@ impl crate::session::Session {
             // A worktree whose folder is gone (`git worktree prune` tidies it): nothing to open.
             BranchTarget::Worktree(p) if !p.is_dir() => Vec::new(),
             BranchTarget::Worktree(p) => {
-                let here = self.state().branches().is_some_and(|v| v.worktrees.iter().any(|w| w.current && &w.path == p));
+                let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
+                let here = repo.is_some_and(|r| canonical(p).is_some() && canonical(p) == canonical(&r.root));
                 let mut actions = vec![("Open in New Window", BranchAction::OpenInNewWindow)];
                 if !here {
                     actions.insert(0, ("Open", BranchAction::Open));
@@ -159,10 +166,28 @@ pub enum CheckoutChoice {
     Cancel,
 }
 
+/// What a refused checkout runs again once the dialog is answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retry {
+    Checkout(git_branches::Target),
+    /// A new branch `name` at `from` (HEAD when `None`), checked out.
+    NewBranch { name: String, from: Option<String> },
+}
+
+impl Retry {
+    /// How it is named in messages.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Checkout(t) => target_label(t),
+            Self::NewBranch { name, .. } => name,
+        }
+    }
+}
+
 /// A checkout git refused over files in the way, while the dialog is open.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckoutProblem {
-    pub target: git_branches::Target,
+    pub retry: Retry,
     pub tracked: Vec<String>,
     pub untracked: Vec<String>,
     /// Once Force Checkout is chosen: every uncommitted change it would discard (the confirmation step).
@@ -172,8 +197,7 @@ pub struct CheckoutProblem {
 /// How a checkout target is named in messages: the branch it ends on, or the revision.
 pub fn target_label(t: &git_branches::Target) -> &str {
     match t {
-        git_branches::Target::Branch(b) | git_branches::Target::Detached(b) => b,
-        git_branches::Target::Remote(r) => git_branches::local_name(r),
+        git_branches::Target::Branch(b) | git_branches::Target::Detached(b) | git_branches::Target::Remote(b) => b,
     }
 }
 
@@ -200,7 +224,7 @@ impl crate::session::Session {
     /// The checkout-problem dialog's text, the same in both frontends.
     pub fn checkout_text(&self) -> Option<String> {
         let p = self.state().checkout_problem()?;
-        let name = target_label(&p.target);
+        let name = p.retry.label();
         let list = |files: &[String]| files.iter().map(|f| format!("  {f}")).collect::<Vec<_>>().join("\n");
         Some(match (&p.discards, p.untracked.is_empty()) {
             (_, false) => format!("Checking out {name} would overwrite these untracked files:\n\n{}\n\nMove or delete them first, then check out again.", list(&p.untracked)),
@@ -232,4 +256,9 @@ impl crate::session::Session {
 /// How both frontends show a popup row: its section, the current marker, its text.
 pub fn row_text(r: &BranchRow) -> String {
     format!("{:<10}{}{}", r.section, if r.current { "● " } else { "  " }, r.label)
+}
+
+/// A fully named ref as people say it (`refs/heads/main` → `main`, `refs/tags/v1` → `v1`).
+pub fn short_ref(r: &str) -> &str {
+    ["refs/heads/", "refs/remotes/", "refs/tags/"].iter().find_map(|p| r.strip_prefix(p)).unwrap_or(r)
 }

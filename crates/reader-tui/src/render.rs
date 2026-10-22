@@ -1142,7 +1142,8 @@ impl App {
                     for (label, choice) in self.session.checkout_choices() {
                         let key = match choice {
                             reader_core::branches::CheckoutChoice::Smart => "s",
-                            reader_core::branches::CheckoutChoice::Force | reader_core::branches::CheckoutChoice::ConfirmForce => "f",
+                            reader_core::branches::CheckoutChoice::Force => "f",
+                            reader_core::branches::CheckoutChoice::ConfirmForce => "y",
                             reader_core::branches::CheckoutChoice::Cancel => "Esc",
                         };
                         let text = format!("[{label} {key}]");
