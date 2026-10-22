@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -236,6 +236,8 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::Close), Some("No tab is open"));
     assert_eq!(disabled(CommandId::NextTab), Some("Only one tab is open"));
     assert_eq!(disabled(CommandId::OpenRecent), Some("No recent folders"));
+    assert_eq!(disabled(CommandId::OpenInEditor), Some("No file is open"));
+    assert_eq!(disabled(CommandId::CompareWith), Some("No file or folder is open"));
     assert!(s.state().document().is_none() && s.state().loading().is_none());
 }
 
@@ -4665,4 +4667,60 @@ fn about_is_in_the_application_menu_and_names_the_version() {
     assert!(matches!(s.action(CommandId::About), crate::actions::CatalogAction::Interface(crate::actions::InterfaceAction::About)));
     let text = crate::chrome::about();
     assert!(text.starts_with("Code reader") && text.contains(&format!("Version: {}", env!("CARGO_PKG_VERSION"))) && text.contains("Project: https://github.com/aantoniadis/lenz"), "{text}");
+}
+
+fn open_host(vars: &[(&str, &str)]) -> lenz_content::open::Host {
+    let vars: std::collections::HashMap<String, String> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+    lenz_content::open::Host { var: Box::new(move |k| vars.get(k).cloned()), on_path: Box::new(|_| false), macos: false }
+}
+
+#[test]
+fn open_in_editor_goes_to_the_caret_and_compare_with_starts_lenz_diff_beside_it() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::create_dir_all(root.join("other")).unwrap();
+    let a = write(&root, "a.rs", "fn a() {}\nlet é = 1;\n".as_bytes());
+    let b = write(&root, "b.rs", b"fn b() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root.clone()));
+    open(&mut s, Command::Open(a.clone()), "a.rs");
+    s.dispatch(Command::Select(Selection { anchor: 16, head: 16 }));
+    let plan = s.editor_plan(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
+    let file = a.to_string_lossy().into_owned();
+    assert_eq!((plan.launch.program.as_str(), plan.launch.args.clone()), ("code", vec!["--goto".to_string(), format!("{file}:2:6")]), "line 2, after `let é`");
+    assert_eq!(plan.launch.cwd.as_deref(), Some(root.as_path()));
+    let system = s.editor_plan(&open_host(&[("VISUAL", "code")]), None, true).unwrap();
+    assert_eq!((system.launch.program.as_str(), system.launch.args.clone()), ("xdg-open", vec![file.clone()]));
+    let fallback = s.editor_plan(&open_host(&[]), None, false).unwrap();
+    assert_eq!(s.editor_plan(&open_host(&[]), Some("zed"), false).unwrap().launch.args, [format!("{file}:2:6")], "the settings file's editor");
+    assert_eq!((fallback.launch.program.as_str(), fallback.toast.as_deref()), ("xdg-open", Some(lenz_content::open::NO_EDITOR_TOAST)));
+
+    assert_eq!(s.compare_source(None).unwrap(), a);
+    assert_eq!(s.compare_source(Some("sub")).unwrap(), root.join("sub"));
+    assert!(s.compare_source(Some("jdt://contents/x")).is_err());
+    let bin = d.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let exe = bin.join("lenz-code");
+    let missing = s.compare_launch(&a, &b, &exe, false).unwrap_err();
+    assert!(missing.contains("Lenz Diff is not beside Lenz Code"), "{missing}");
+    for name in ["lenz-diff", "lenz-diff-tui"] {
+        std::fs::write(bin.join(name), b"").unwrap();
+    }
+    let launch = s.compare_launch(&a, &b, &exe, false).unwrap();
+    assert_eq!(launch.program, bin.join("lenz-diff").to_string_lossy());
+    assert_eq!(launch.args, ["--no-index".to_string(), file.clone(), b.to_string_lossy().into_owned()]);
+    assert_eq!(s.compare_launch(&root.join("sub"), &root.join("other"), &exe, true).unwrap().program, bin.join("lenz-diff-tui").to_string_lossy());
+    assert!(s.compare_launch(&a, &root.join("sub"), &exe, false).unwrap_err().contains("a folder with a folder"));
+    assert!(s.compare_launch(&a, &a, &exe, false).unwrap_err().contains("different"));
+    assert!(s.compare_launch(&a, &root.join("gone.rs"), &exe, false).unwrap_err().contains("no such file"));
+
+    s.dispatch(Command::Notice("Cannot start code: gone".into()));
+    assert_eq!(s.status_message(), "Cannot start code: gone", "both status bars show it");
+    let menu = s.context_menu();
+    for id in [CommandId::OpenInEditor, CommandId::OpenWithDefaultApp, CommandId::CompareWith, CommandId::SplitRight, CommandId::SplitDown] {
+        assert!(menu.contains(&MenuEntry::Command(id)), "{id:?}");
+    }
+    assert!(!menu.contains(&MenuEntry::Command(CommandId::Unsplit)));
+    assert!(!s.toolbar().iter().any(|(id, _)| *id == CommandId::Open), "Open stays in the File menu, not the toolbar");
 }

@@ -195,6 +195,8 @@ pub struct ReaderView {
     tree_reveal: bool,
     pub tree_focus: bool,
     tree_shown: bool,
+    /// What Open in Editor and Compare With started; tests record here instead of starting anything.
+    pub launched: Vec<lenz_content::open::Launch>,
     pending_explorer: Option<reader_core::workspace::Explorer>,
     /// The sidebar's width from the last paint (0 when hidden).
     sidebar_w: f32,
@@ -459,7 +461,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -518,6 +520,41 @@ impl ReaderView {
 
     fn open(&mut self, path: PathBuf, cx: &mut Context<Self>) {
         self.dispatch(Command::Open(path), cx);
+    }
+
+    /// Open in Editor, or with the system's default app.
+    fn open_externally(&mut self, default_app: bool, cx: &mut Context<Self>) {
+        match self.session.editor_plan(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
+            Ok(plan) => self.start(Ok(plan.launch), plan.toast, cx),
+            Err(why) => self.dispatch(Command::Notice(why.into()), cx),
+        }
+    }
+
+    /// Lenz Diff's window comparing `left` with `right`.
+    pub fn compare(&mut self, left: &std::path::Path, right: &std::path::Path, cx: &mut Context<Self>) {
+        let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+        let launch = self.session.compare_launch(left, right, &exe, false);
+        self.start(launch, None, cx);
+    }
+
+    /// Starts `launch` detached; a failure, or else `toast`, shows with the core's messages.
+    fn start(&mut self, launch: Result<lenz_content::open::Launch, String>, toast: Option<String>, cx: &mut Context<Self>) {
+        let message = match launch {
+            Err(e) => Some(e),
+            Ok(launch) => {
+                #[cfg(feature = "test-support")]
+                let started = { self.launched.push(launch.clone()); Ok::<(), std::io::Error>(()) };
+                #[cfg(not(feature = "test-support"))]
+                let started = lenz_content::open::spawn(&launch);
+                match started {
+                    Err(e) => Some(format!("Cannot start {}: {e}", launch.program)),
+                    Ok(()) => toast,
+                }
+            }
+        };
+        if let Some(message) = message {
+            self.dispatch(Command::Notice(message), cx);
+        }
     }
 
     /// The active tab's horizontal scroll in pixels.
@@ -805,6 +842,27 @@ impl ReaderView {
                         .map(|d| AboutLogo(lenz_gpui::image::texture(d.pixels)));
                     self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo });
                     cx.notify();
+                }
+                InterfaceAction::OpenInEditor => self.open_externally(false, cx),
+                InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
+                InterfaceAction::CompareWith => {
+                    let row = self.tree_focus.then(|| self.tree_sel.clone()).flatten();
+                    match self.session.compare_source(row.as_deref()) {
+                        Err(why) => self.dispatch(Command::Notice(why.into()), cx),
+                        Ok(left) => {
+                            // A folder compares with a folder, a file with a file.
+                            let dir = left.is_dir();
+                            let answer = cx.prompt_for_paths(gpui::PathPromptOptions { files: !dir, directories: dir, multiple: false, prompt: Some("Compare".into()) });
+                            cx.spawn_in(window, async move |this, cx| {
+                                if let Ok(Ok(Some(paths))) = answer.await
+                                    && let Some(right) = paths.into_iter().next()
+                                {
+                                    let _ = this.update(cx, |v, cx| v.compare(&left, &right, cx));
+                                }
+                            })
+                            .detach();
+                        }
+                    }
                 }
                 InterfaceAction::OpenRecent => {
                     self.modal = Some(Modal::Recent { at: 0 });

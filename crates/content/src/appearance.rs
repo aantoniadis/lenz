@@ -53,6 +53,18 @@ pub fn load_at(path: &Path) -> (FontPreferences, Vec<String>) {
     }
 }
 
+/// The settings file's `[tools] editor`, for Open in Editor when the environment names none (an app started from
+/// the Dock or a desktop menu rarely has `$VISUAL`). Read when asked; any problem is no editor.
+pub fn editor() -> Option<String> {
+    editor_in(std::str::from_utf8(&crate::theme::read_bounded(&path()?).ok()?).ok()?)
+}
+
+pub fn editor_in(text: &str) -> Option<String> {
+    let table = text.parse::<toml::Table>().ok()?;
+    let editor = table.get("tools")?.get("editor")?.as_str()?.trim();
+    (!editor.is_empty()).then(|| editor.to_string())
+}
+
 pub fn parse(text: &str) -> (FontPreferences, Vec<String>) {
     let mut fonts = FontPreferences::default();
     let table = match text.parse::<toml::Table>() {
@@ -95,6 +107,14 @@ mod tests {
         }
         assert_eq!(parse("").0, FontPreferences::default());
         assert_eq!(parse("[gui").1.len(), 1);
+    }
+
+    #[test]
+    fn the_editor_comes_from_tools_and_ignores_blanks_and_bad_files() {
+        assert_eq!(editor_in("[tools]\neditor = \" code --wait \"\n"), Some("code --wait".into()));
+        assert_eq!(editor_in("[tools]\neditor = \"  \"\n"), None);
+        assert_eq!(editor_in("[gui]\nfont_size = 14\n"), None);
+        assert_eq!(editor_in("[tools\n"), None);
     }
 
     #[test]

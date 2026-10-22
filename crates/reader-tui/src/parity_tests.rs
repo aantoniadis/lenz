@@ -533,6 +533,8 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
         CommandId::Unsplit,
         CommandId::SoftWrap,
         CommandId::Reload,
+        CommandId::OpenInEditor,
+        CommandId::OpenWithDefaultApp,
     ] {
         // Reach the same action with the same keys through both adapters' application menus.
         visual.simulate_click(
@@ -571,6 +573,9 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
         key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
         settle(&mut visual, &mut tui);
     }
+    // Both handed the same editor and default-app launches over (recorded, not started).
+    assert_eq!(tui.launched.len(), 2);
+    assert_eq!(gui.read_with(&visual, |v, _| v.launched.clone()), tui.launched);
     // A pending navigation can be cancelled in either adapter without changing the read-only document.
     tui.dispatch(Command::CancelSemantic);
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());

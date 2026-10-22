@@ -34,6 +34,9 @@ pub enum InterfaceAction {
     RecentLocations,
     ChooseTheme,
     About,
+    OpenInEditor,
+    OpenWithDefaultApp,
+    CompareWith,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -95,6 +98,9 @@ impl Session {
             CommandId::ServerDetails => return CatalogAction::Interface(InterfaceAction::ServerDetails),
             CommandId::LanguageServer => return CatalogAction::Interface(InterfaceAction::LanguageServer),
             CommandId::Open => return CatalogAction::Interface(InterfaceAction::Open),
+            CommandId::OpenInEditor => return CatalogAction::Interface(InterfaceAction::OpenInEditor),
+            CommandId::OpenWithDefaultApp => return CatalogAction::Interface(InterfaceAction::OpenWithDefaultApp),
+            CommandId::CompareWith => return CatalogAction::Interface(InterfaceAction::CompareWith),
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
             CommandId::FindFile => return CatalogAction::Interface(InterfaceAction::FindFile),
@@ -241,7 +247,8 @@ impl CommandId {
         use CommandGroup as G;
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload
-            | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine => G::File,
+            | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
+            | Self::CompareWith => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
@@ -278,6 +285,8 @@ impl CommandId {
             Self::FindSymbol => Some("Ctrl+Alt+Shift+N"),
             Self::FindAction => Some("Ctrl+Shift+A"),
             Self::Open => Some("Ctrl+O"),
+            Self::SplitRight => Some("Ctrl+\\"),
+            Self::SplitDown => Some("Ctrl+Shift+\\"),
             Self::Outline => Some("Ctrl+Shift+O"),
             Self::FindInFile => Some("Ctrl+F"),
             Self::SearchProject => Some("Ctrl+Shift+F"),

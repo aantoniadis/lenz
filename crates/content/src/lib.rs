@@ -20,6 +20,7 @@ pub mod image;
 pub mod icons;
 pub mod lines;
 pub mod markdown;
+pub mod open;
 mod syntax_arena;
 pub mod theme;
 pub mod wrap;

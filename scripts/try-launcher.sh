@@ -32,7 +32,9 @@ for name, binary in names.items():
     if name == 'lenz':
         shutil.copy2(binaries[binary], target)
     else:
-        target.symlink_to(os.path.relpath(binaries[binary], out))
+        # A hard link, not a symlink: Linux reports a symlink's target as the executable, and Lenz Code finds
+        # Lenz Diff (Compare With) beside its own executable.
+        os.link(binaries[binary], target)
 print(f'\nTrial ready: {out}')
 print(f'  {out}/lenz path/to/source.rs')
 print(f'  {out}/lenz --tui path/to/source.rs')

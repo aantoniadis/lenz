@@ -41,15 +41,53 @@ View > File Icons turns them off, and LENZ_ICONS=plain|nerd overrides it for one
 struct Restore;
 impl Drop for Restore {
     fn drop(&mut self) {
-        let _ = execute!(
-            io::stdout(),
-            PopKeyboardEnhancementFlags,
-            DisableMouseCapture,
-            DisableBracketedPaste,
-            DisableFocusChange
-        );
-        ratatui::restore();
+        leave();
     }
+}
+
+/// The alternate screen in raw mode, with mouse, paste, focus and full key reporting.
+fn enter() -> io::Result<ratatui::DefaultTerminal> {
+    let terminal = ratatui::try_init()?;
+    execute!(
+        io::stdout(),
+        EnableMouseCapture,
+        EnableBracketedPaste,
+        EnableFocusChange,
+        PushKeyboardEnhancementFlags(
+            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
+                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
+        )
+    )?;
+    Ok(terminal)
+}
+
+fn leave() {
+    let _ = execute!(
+        io::stdout(),
+        PopKeyboardEnhancementFlags,
+        DisableMouseCapture,
+        DisableBracketedPaste,
+        DisableFocusChange
+    );
+    ratatui::restore();
+}
+
+/// Runs `launch` in this terminal until it exits, then takes the terminal back. Input reading must have stopped.
+fn run_in_terminal(terminal: &mut ratatui::DefaultTerminal, launch: &lenz_content::open::Launch) -> io::Result<Option<String>> {
+    leave();
+    let mut command = std::process::Command::new(&launch.program);
+    command.args(&launch.args);
+    if let Some(dir) = &launch.cwd {
+        command.current_dir(dir);
+    }
+    let status = command.status();
+    *terminal = enter()?;
+    Ok(match status {
+        Ok(s) if s.success() => None,
+        Ok(s) => Some(format!("Lenz Diff ended: {s}")),
+        Err(e) => Some(format!("Cannot start {}: {e}", launch.program)),
+    })
 }
 
 fn clipboard(out: &mut impl Write, text: &str) -> io::Result<()> {
@@ -112,18 +150,7 @@ async fn wait(input: &mut EventStream, views: &[App]) -> Wake {
 
 fn run(path: Option<PathBuf>) -> io::Result<()> {
     let _restore = Restore;
-    let mut terminal = ratatui::try_init()?;
-    execute!(
-        io::stdout(),
-        EnableMouseCapture,
-        EnableBracketedPaste,
-        EnableFocusChange,
-        PushKeyboardEnhancementFlags(
-            KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
-                | KeyboardEnhancementFlags::REPORT_EVENT_TYPES
-                | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES,
-        )
-    )?;
+    let mut terminal = enter()?;
     let mut views = vec![App::new(Config::from_env(true), path)];
     let mut active = 0usize;
     let mut input = None;
@@ -146,6 +173,15 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             terminal.draw(|frame| views[active].draw(frame))?;
             views[active].session.start_themes();
             dirty = false;
+        }
+        if let Some(launch) = views[active].foreground.take() {
+            // Lenz Diff reads the keys until it quits.
+            input = None;
+            if let Some(message) = run_in_terminal(&mut terminal, &launch)? {
+                views[active].dispatch(reader_core::session::Command::Notice(message));
+            }
+            dirty = true;
+            continue;
         }
         if let Some(text) = views[active].copy.take() {
             clipboard(&mut io::stdout().lock(), &text)?;
