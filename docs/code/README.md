@@ -154,8 +154,8 @@ capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`.
 
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
-Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Closing a pane's last tab closes
-the split. Tabs drag within a bar to reorder or
+Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Closing a pane's last tab, or dragging
+it into the other pane, closes the split. Tabs drag within a bar to reorder or
 into the other pane. The explorer's edge, the results panel's top and the split's divider drag; the sizes and the
 split are remembered in `settings.json` (a remembered split starts with an empty second pane).
 

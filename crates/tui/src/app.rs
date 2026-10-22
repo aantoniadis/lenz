@@ -195,7 +195,7 @@ impl App {
             }
         }
         if !self.session.loading() && let Some(hit)=self.pending_hit.take()&&hit.index==self.session.current() && self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.selection=Some(lenz::selection::Selection{side:hit.side,anchor:lenz::selection::Pos::new(hit.line,hit.range.start),head:lenz::selection::Pos::new(hit.line,hit.range.end)});}
-        if let Some((word,rx))=&self.grouping && let Ok(group)=rx.try_recv(){if self.selection==Some(*word){self.selection=Some(group);changed=true;}self.grouping=None;}
+        if let Some((word,rx))=&self.grouping{match rx.try_recv(){Ok(group)=>{if self.selection==Some(*word){self.selection=Some(group);changed=true;}self.grouping=None;},Err(std::sync::mpsc::TryRecvError::Disconnected)=>self.grouping=None,Err(std::sync::mpsc::TryRecvError::Empty)=>{}}}
         if let Some(job)=&self.opening_editor && let Ok(result)=job.try_recv(){self.opening_editor=None;changed=true;match result{Some(Ok(plan))=>{if let Err(e)=lenz::open::spawn(&plan.launch){self.session.set_notice(format!("Cannot start editor: {e}"));}else if let Some(note)=plan.toast{self.session.set_notice(note);}},Some(Err(e))=>self.session.set_notice(e),None=>{}}}
         if self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.markdown.clear();}
         changed|=self.restore_and_record_place();
@@ -204,7 +204,7 @@ impl App {
         changed|=self.navigator.poll_search();changed|=self.markdown.poll();changed|=self.visual.poll();changed
     }
     pub fn failed(&self)->bool{self.session.failed()||self.repository.as_ref().is_some_and(|r|r.core.failed)}
-    pub fn busy(&self)->bool {self.navigator.busy()||self.report_request.busy()||self.session.busy()||self.markdown.busy()||self.visual.busy()||self.opening_editor.is_some()||self.repository.as_ref().is_some_and(|r|r.busy())||self.set_search.as_ref().is_some_and(|s|s.busy())}
+    pub fn busy(&self)->bool {self.navigator.busy()||self.report_request.busy()||self.session.busy()||self.markdown.busy()||self.visual.busy()||self.opening_editor.is_some()||self.grouping.is_some()||self.repository.as_ref().is_some_and(|r|r.busy())||self.set_search.as_ref().is_some_and(|s|s.busy())}
     pub(crate) fn repository_effect(&mut self,effect:lenz::repository_session::RepositoryEffect){
         use lenz::repository_session::RepositoryEffect::*;
         match effect {

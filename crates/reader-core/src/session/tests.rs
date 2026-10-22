@@ -2481,6 +2481,24 @@ fn closing_a_split_panes_last_tab_closes_the_pane() {
     s.dispatch(Command::CloseTab(left));
     assert_eq!(s.state().split(), None);
     assert_eq!((pane_names(&s, 0), shown_name(&s, 0).as_deref()), (vec!["a.rs".to_string(), "b.rs".to_string()], Some("b.rs")));
+    // Dragging a pane's last tab into the other pane closes the split too, with or without a twin there.
+    for twin in [false, true] {
+        s.dispatch(Command::Split(Split::Columns));
+        if !twin {
+            s.dispatch(Command::Open(a.clone()));
+            settle(&mut s, opened);
+            let dup = s.state().pane_tabs(1).find(|t| t.title() == "b.rs").map(|t| t.id());
+            if let Some(dup) = dup { s.dispatch(Command::CloseTab(dup)); }
+            let a0 = s.state().pane_tabs(0).find(|t| t.title() == "a.rs").unwrap().id();
+            s.dispatch(Command::CloseTab(a0));
+        }
+        assert_eq!(s.state().split(), Some(Split::Columns), "precondition, twin {twin}");
+        let only: Vec<_> = s.state().pane_tabs(1).map(|t| t.id()).collect();
+        assert_eq!(only.len(), 1, "twin {twin}: {:?}", pane_names(&s, 1));
+        s.dispatch(Command::MoveTab { tab: only[0], pane: 0, index: 0 });
+        assert_eq!(s.state().split(), None, "twin {twin}");
+        assert!(s.state().active().is_some(), "twin {twin}");
+    }
     // Unsplit, the last tab closes and leaves an empty window.
     s.dispatch(Command::Close);
     s.dispatch(Command::Close);
@@ -2708,6 +2726,25 @@ fn click_select_word_then_group_then_ctrl_w_continues() {
     let comma = src.find(", 1").unwrap();
     s.dispatch(Command::ClickSelect { at: comma, clicks: 2 });
     assert_eq!(sel(&s), "\",", "a punctuation run is a word");
+}
+
+#[test]
+fn a_triple_click_keeps_the_view_where_it_was_clicked() {
+    let d = tempfile::tempdir().unwrap();
+    let body: String = (0..100).map(|i| format!("    let v{i} = {i};\n")).collect();
+    let src = format!("fn f() {{\n{body}}}\n");
+    let mut s = folded(d.path(), &src);
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 80, rows: 10 });
+    s.dispatch(Command::ClickSelect { at: 1, clicks: 3 });
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| x.range().len() > 2));
+    assert_eq!(&src[s.state().selection().unwrap().range()], src.trim_end(), "the whole function");
+    assert_eq!(s.state().top_line(), 0, "the clicked line stays in view");
+    // Ctrl+W still brings the selection's end into view.
+    s.dispatch(Command::Select(Selection { anchor: 1, head: 1 }));
+    s.dispatch(Command::ExtendSelection);
+    settle(&mut s, |s| s.state().selection().is_some_and(|x| !x.range().is_empty()));
+    s.dispatch(Command::ExtendSelection);
+    assert!(s.state().top_line() > 0, "Ctrl+W reveals the end");
 }
 
 #[test]

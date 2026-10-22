@@ -1445,7 +1445,10 @@ fn double_and_triple_click_select_the_word_and_its_syntax_group() {
     left_click(&mut app, at);
     left_click(&mut app, at);
     assert_eq!(selected(&app), "world");
-    left_click(&mut app, at);
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: at.0, row: at.1, modifiers: KeyModifiers::NONE }));
+    // The main loop sleeps until input unless busy: the pending group keeps it polling.
+    assert!(app.busy() || selected(&app) != "world", "the group is awaited");
     let deadline = Instant::now() + Duration::from_secs(10);
     while selected(&app) == "world" {
         assert!(Instant::now() < deadline, "the group did not arrive");

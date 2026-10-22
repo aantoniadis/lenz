@@ -1460,7 +1460,11 @@ pub struct Session {
     /// The latest selection-steps request; a parse stops once another replaces it.
     expand_latest: Arc<AtomicU64>,
     /// Steps being parsed for a tab's selection: the tab, its version, the selection and the request.
-    expanding: Option<(TabId, u64, Selection, u64)>,
+    /// Extend Selection waiting for its steps: tab, version, selection, request, and whether it scrolls to the result
+    /// (not for a triple click).
+    expanding: Option<(TabId, u64, Selection, u64, bool)>,
+    /// The next Extend Selection comes from a triple click: it leaves the view where it was clicked.
+    click_extend: bool,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -1575,6 +1579,7 @@ impl Session {
             preview_parsing: None,
             expand_latest: Arc::new(AtomicU64::new(0)),
             expanding: None,
+            click_extend: false,
             tx,
             rx,
         }
@@ -2039,7 +2044,8 @@ impl Session {
         if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let reveal_selection = matches!(&input,
             Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)
-            | Input::Completion(Completion::SelectionSteps { .. }));
+            | Input::Completion(Completion::SelectionSteps { .. }))
+            && !matches!(&input, Input::Completion(Completion::SelectionSteps { request, .. }) if self.expanding.is_some_and(|e| e.3 == *request && !e.4));
         let mut effect = match input {
             Input::Command(c) => self.command(c),
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
@@ -2516,7 +2522,10 @@ impl Session {
                 let effect = self.command(Command::Select(s));
                 match clicks {
                     0..=2 => effect,
-                    _ => Effect { repaint: effect.repaint | self.command(Command::ExtendSelection).repaint, copy: None },
+                    _ => {
+                        self.click_extend = true;
+                        Effect { repaint: effect.repaint | self.command(Command::ExtendSelection).repaint, copy: None }
+                    }
                 }
             }
             Command::MoveCaret(motion) => {
@@ -2575,6 +2584,7 @@ impl Session {
                 }
             }
             Command::ExtendSelection => {
+                let reveal = !std::mem::take(&mut self.click_extend);
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 let Some(doc) = t.doc.clone() else { return Effect::default() };
                 let from = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
@@ -2583,7 +2593,9 @@ impl Session {
                     return match e.extend() {
                         Some(next) => {
                             t.selection = Some(next);
-                            t.show_head();
+                            if reveal {
+                                t.show_head();
+                            }
                             repaint
                         }
                         None => Effect::default(),
@@ -2591,12 +2603,12 @@ impl Session {
                 }
                 let id = t.id;
                 match doc.language().filter(|_| !doc.is_large()) {
-                    None => self.start_expansion(id, doc.version(), from, crate::expand::fallback_steps(&doc, from.range())),
+                    None => self.start_expansion(id, doc.version(), from, crate::expand::fallback_steps(&doc, from.range()), reveal),
                     // Already parsing for this selection: applied once when the steps arrive.
-                    Some(_) if self.expanding.is_some_and(|(tab, v, s, _)| tab == id && v == doc.version() && s == from) => Effect::default(),
+                    Some(_) if self.expanding.is_some_and(|(tab, v, s, ..)| tab == id && v == doc.version() && s == from) => Effect::default(),
                     Some(lang) => {
                         let request = self.expand_latest.fetch_add(1, Ordering::Relaxed) + 1;
-                        self.expanding = Some((id, doc.version(), from, request));
+                        self.expanding = Some((id, doc.version(), from, request, reveal));
                         let (latest, tx, text, range) = (self.expand_latest.clone(), self.tx.clone(), doc.text().clone(), from.range());
                         self.jobs.submit(Priority::Visible, move || {
                             let current = latest.clone();
@@ -3418,13 +3430,13 @@ impl Session {
             }
             // For each shown tab of that version (both panes may show one snapshot).
             Completion::SelectionSteps { request, steps } => {
-                let Some((id, version, from, _)) = self.expanding.take_if(|e| e.3 == request) else { return Effect::default() };
+                let Some((id, version, from, _, reveal)) = self.expanding.take_if(|e| e.3 == request) else { return Effect::default() };
                 // Still that tab, version and selection; else the answer is stale.
                 let Some(doc) = self.state.active().filter(|t| t.id == id && t.selection.unwrap_or(Selection { anchor: 0, head: 0 }) == from).and_then(|t| t.doc.clone()).filter(|d| d.version() == version) else {
                     return Effect::default();
                 };
                 let steps = steps.unwrap_or_else(|| crate::expand::fallback_steps(&doc, from.range()));
-                self.start_expansion(id, version, from, steps)
+                self.start_expansion(id, version, from, steps, reveal)
             }
             Completion::Matched { tab, request, version, result } => {
                 let Some(t) = self.tab_mut(tab) else { return Effect::default() };
@@ -5543,9 +5555,12 @@ impl Session {
         };
         self.release(id);
         self.remove_tab(id, false);
-        // A split pane's last tab takes the pane with it.
+        self.left_pane(pane)
+    }
+
+    /// After the user closed or moved a tab out of `pane`: a split pane left without tabs closes the split.
+    fn left_pane(&mut self, pane: u8) -> Effect {
         if self.state.settings.split.is_some() && !self.state.tabs.iter().any(|t| t.pane == pane) {
-            self.focus_pane(pane);
             return self.command(Command::Unsplit);
         }
         self.rewatch();
@@ -5682,10 +5697,11 @@ impl Session {
             let source = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone());
             if let Some(twin) = self.state.tabs.iter().find(|t| t.pane == pane && Some(&t.source) == source.as_ref()).map(|t| t.id) {
                 // That pane has this source already: its tab is shown there instead.
-                self.close_tab(id);
+                self.release(id);
+                self.remove_tab(id, false);
                 self.focus_pane(pane);
                 self.activate(twin);
-                return Effect { repaint: true, copy: None };
+                return self.left_pane(from);
             }
         }
         let Some(i) = self.state.tabs.iter().position(|t| t.id == id) else { return Effect::default() };
@@ -5709,7 +5725,7 @@ impl Session {
             self.current.store(version, Ordering::Relaxed);
             self.activate(id);
             self.show_other();
-            self.rewatch();
+            return self.left_pane(from);
         }
         Effect { repaint: true, copy: None }
     }
@@ -5874,7 +5890,7 @@ impl Session {
     }
 
     /// Begin an expansion of tab `id`'s selection `from` through `steps`, taking the first.
-    fn start_expansion(&mut self, id: TabId, version: u64, from: Selection, steps: Vec<std::ops::Range<usize>>) -> Effect {
+    fn start_expansion(&mut self, id: TabId, version: u64, from: Selection, steps: Vec<std::ops::Range<usize>>, reveal: bool) -> Effect {
         let Some(t) = self.tab_mut(id) else { return Effect::default() };
         let mut e = crate::expand::Expansion { version, origin: from, steps, at: 0 };
         let next = e.extend();
@@ -5882,7 +5898,9 @@ impl Session {
         match next {
             Some(s) => {
                 t.selection = Some(s);
-                t.show_head();
+                if reveal {
+                    t.show_head();
+                }
                 Effect { repaint: true, copy: None }
             }
             None => Effect::default(),
