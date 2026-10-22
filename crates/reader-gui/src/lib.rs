@@ -79,7 +79,8 @@ pub enum Modal {
     /// Shared server management actions, with diagnostics in Server Details.
     LanguageServer { at: usize },
     /// A frozen, read-only diagnostic snapshot (or About, with its logo); Copy preserves the complete text.
-    StatusDetails { title: &'static str, text: String, logo: Option<AboutLogo> },
+    /// `commit`: the core's commit popup (its text follows the core; Show Diff / Copy Revision / Close buttons).
+    StatusDetails { title: &'static str, text: String, logo: Option<AboutLogo>, commit: bool },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
@@ -108,6 +109,11 @@ pub enum Modal {
     Mnemonic,
 }
 
+/// The details dialog's buttons: the commit popup's actions, else Copy and Close.
+fn details_labels(commit: bool) -> &'static [&'static str] {
+    if commit { &["Show Diff", "Copy Revision", "Close"] } else { &["Copy", "Close"] }
+}
+
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
 /// text.
 #[derive(Clone, Debug)]
@@ -133,14 +139,17 @@ struct ModalLayout {
 }
 
 impl ModalLayout {
-    fn details_buttons(&self, char_w: f32) -> [Bounds<Pixels>; 2] {
-        let width = ((f32::from(self.bounds.size.width) - 24.0).max(0.0) / 2.0).min(7.0 * char_w + 16.0);
+    /// The details dialog's buttons for `labels`, right-aligned along its bottom, each as wide as the longest label.
+    fn details_buttons(&self, char_w: f32, labels: &[&str]) -> Vec<Bounds<Pixels>> {
+        let n = labels.len() as f32;
+        let longest = labels.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32;
+        let width = ((f32::from(self.bounds.size.width) - 8.0 - 8.0 * n).max(0.0) / n).min(longest * char_w + 16.0);
         let height = line_h().min((f32::from(self.bounds.size.height) - 8.0).max(0.0));
         let right = f32::from(self.bounds.right()) - 8.0;
-        [2.0, 1.0].map(|i| Bounds {
+        (1..=labels.len()).rev().map(|i| i as f32).map(|i| Bounds {
             origin: gpui::point(px(right - i * width - (i - 1.0) * 8.0), px(f32::from(self.bounds.bottom()) - 4.0 - height)),
             size: gpui::size(px(width), px(height)),
-        })
+        }).collect()
     }
 }
 
@@ -164,6 +173,8 @@ pub struct ReaderView {
     pub(crate) crumb_hits: Vec<CrumbHit>,
     /// The breadcrumb bar has the keys: its pane and highlighted crumb.
     pub(crate) crumb_focus: Option<(u8, usize)>,
+    /// The annotation under the pointer: its tab, line and the pointer (for the tooltip and the commit's rows).
+    ann_hover: Option<(TabId, usize, gpui::Point<Pixels>)>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -438,8 +449,11 @@ pub use lenz_gpui::find::FindBox;
 pub struct PaneGeom {
     pub pane: u8,
     pub bar: (f32, f32, f32),
+    /// The pane's text and its gutter (right of the annotation column).
     pub text: Bounds<Pixels>,
     pub rows: usize,
+    /// The blame annotation column's width, left of `text` (0: none).
+    pub ann: f32,
 }
 
 /// What the pointer is dragging: a divider, or a tab (from where it was pressed; `moved` once it travelled).
@@ -461,7 +475,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -621,6 +635,7 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
+            Some(Modal::StatusDetails { commit: true, .. }) => self.dispatch(Command::CloseCommit, cx),
             _ => {}
         }
         cx.notify();
@@ -732,6 +747,16 @@ impl ReaderView {
         {
             cx.write_to_primary(ClipboardItem::new_string(text.to_owned()));
         }
+        // The core's commit popup opens, follows and closes its dialog.
+        match (self.session.commit_text(), &mut self.modal) {
+            (Some(t), Some(Modal::StatusDetails { commit: true, text, .. })) => *text = t,
+            (None, Some(Modal::StatusDetails { commit: true, .. })) => self.modal = None,
+            (Some(text), None) => {
+                self.modal_scroll.set(0);
+                self.modal = Some(Modal::StatusDetails { title: "Commit", text, logo: None, commit: true });
+            }
+            _ => {}
+        }
         if effect.repaint {
             cx.notify();
         }
@@ -830,7 +855,7 @@ impl ReaderView {
                     } else {
                         ("Status details", self.session.status_details())
                     };
-                    self.modal = Some(Modal::StatusDetails { title, text, logo: None });
+                    self.modal = Some(Modal::StatusDetails { title, text, logo: None, commit: false });
                     cx.notify();
                 }
                 InterfaceAction::About => {
@@ -840,7 +865,7 @@ impl ReaderView {
                     let logo = lenz_content::image::decode(lenz_content::about::LOGO_PNG, lenz_content::image::Format::Png)
                         .ok()
                         .map(|d| AboutLogo(lenz_gpui::image::texture(d.pixels)));
-                    self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo });
+                    self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo, commit: false });
                     cx.notify();
                 }
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
@@ -1142,6 +1167,7 @@ impl ReaderView {
             }
             // Ctrl+Alt+B implementations, Ctrl+Shift+B the type's definition; Ctrl+B alone shows or hides the explorer.
             ("b", true, false) if k.modifiers.alt => self.run(CommandId::Implementation, window, cx),
+            ("b", false, false) if k.modifiers.alt => self.run(CommandId::AnnotateBlame, window, cx),
             ("b", true, true) => self.run(CommandId::TypeDefinition, window, cx),
             ("h", true, false) if k.modifiers.alt => self.run(CommandId::CallHierarchy, window, cx),
             ("h", true, false) => self.run(CommandId::TypeHierarchy, window, cx),
@@ -1284,8 +1310,11 @@ impl ReaderView {
             return self.navigation_key(ev, window, cx);
         }
         let key = ev.keystroke.key.as_str();
-        if let Some(Modal::StatusDetails { text, .. }) = &self.modal {
-            if key == "c" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform) {
+        if let Some(Modal::StatusDetails { text, commit, .. }) = &self.modal {
+            let copy = key == "c" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform);
+            if copy && *commit {
+                self.run(CommandId::CopyRevision, window, cx);
+            } else if copy {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
             } else if matches!(key, "escape" | "enter" | "f2") {
                 self.close_modal(cx);
@@ -2096,6 +2125,20 @@ impl ReaderView {
     }
 
     /// The source byte under a window point in the text area, if a document is shown.
+    /// The blame column under a window point: the pane, its tab and the line whose first row is there.
+    fn annotation_at(&self, at: gpui::Point<Pixels>) -> Option<(u8, TabId, usize)> {
+        let g = self.panes.iter().find(|g| {
+            let (x, left) = (f32::from(at.x), f32::from(g.text.origin.x));
+            g.ann > 0.0 && (left - g.ann..left).contains(&x) && at.y >= g.text.origin.y && at.y < g.text.origin.y + g.text.size.height
+        })?;
+        let state = self.session.state();
+        let tab = state.shown(g.pane)?;
+        let row = ((f32::from(at.y) - f32::from(g.text.origin.y)) / line_h()).floor() as usize;
+        let rows = tab.rows(row + 1, state.wrap_cols(tab));
+        let r = rows.get(row).filter(|r| r.index == 0)?;
+        Some((g.pane, tab.id(), r.line))
+    }
+
     fn byte_at(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
         self.byte_in(window, self.session.state().active()?, self.text_bounds?, x, y).map(|(line, col)| self.session.state().document().map_or(0, |d| d.line_range(line).start) + col)
     }
@@ -2332,10 +2375,16 @@ impl ReaderView {
             let inside = self.modal_layout().filter(|l| l.bounds.contains(&ev.position) && !matches!(self.modal, Some(Modal::GoTo { .. })));
             match inside {
                 Some(l) => {
-                    if let Some(Modal::StatusDetails { text, .. }) = &self.modal {
-                        let [copy, close] = l.details_buttons(self.char_w);
-                        if copy.contains(&ev.position) { cx.write_to_clipboard(ClipboardItem::new_string(text.clone())); }
-                        else if close.contains(&ev.position) { self.close_modal(cx); }
+                    if let Some(Modal::StatusDetails { text, commit, .. }) = &self.modal {
+                        let (text, commit) = (text.clone(), *commit);
+                        let hit = l.details_buttons(self.char_w, details_labels(commit)).iter().position(|b| b.contains(&ev.position));
+                        match (commit, hit) {
+                            (true, Some(0)) => self.run(CommandId::ShowCommitDiff, window, cx),
+                            (true, Some(1)) => self.run(CommandId::CopyRevision, window, cx),
+                            (false, Some(0)) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                            (_, Some(_)) => self.close_modal(cx),
+                            (_, None) => {}
+                        }
                         return cx.notify();
                     }
                     let n = ((f32::from(ev.position.y) - f32::from(l.bounds.origin.y) - 4.0) / line_h()).floor();
@@ -2468,6 +2517,13 @@ impl ReaderView {
             return;
         }
         self.tree_focus = false;
+        // A click on an annotation opens its commit.
+        if let Some((pane, tab, line)) = self.annotation_at(ev.position) {
+            if pane != self.session.state().focused_pane() {
+                self.dispatch(Command::FocusPane(pane), cx);
+            }
+            return self.dispatch(Command::ShowCommitAt { tab, line }, cx);
+        }
         // The pane under the pointer takes focus first.
         if let Some(g) = self.panes.iter().find(|g| g.text.contains(&ev.position)).copied()
             && g.pane != self.session.state().focused_pane()
@@ -2528,13 +2584,27 @@ impl ReaderView {
         if self.session.state().documentation().is_some() {
             self.dispatch(Command::CloseDocumentation, cx);
         }
+        let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        // On the blame column: the caret goes to that line, so the commit commands act on it.
+        if let Some((pane, tab, line)) = self.annotation_at(ev.position) {
+            if pane != self.session.state().focused_pane() {
+                self.dispatch(Command::FocusPane(pane), cx);
+            }
+            let start = self.session.state().tabs().iter().find(|t| t.id() == tab).and_then(|t| t.document()).map(|d| d.line_range(line).start);
+            if let Some(start) = start {
+                self.dispatch(Command::Select(Selection { anchor: start, head: start }), cx);
+            }
+            let entries = self.session.context_menu();
+            let at = entries.iter().position(|e| matches!(e, MenuEntry::Command(_))).unwrap_or(0);
+            self.modal = Some(Modal::Context { entries, at, x, y, scroll: 0.0 });
+            return cx.notify();
+        }
         let Some(g) = self.panes.iter().find(|g| g.text.contains(&ev.position)).copied() else { return };
         if g.pane != self.session.state().focused_pane() {
             self.dispatch(Command::FocusPane(g.pane), cx);
             self.rows = g.rows;
             self.text_bounds = Some(g.text);
         }
-        let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         if self.focused_markdown().is_none()
             && let Some(at) = self.byte_at(window, x, y)
             && !self.session.state().selection().is_some_and(|s| s.range().contains(&at))
@@ -2608,6 +2678,11 @@ impl ReaderView {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        let ann_hover = self.modal.is_none().then(|| self.annotation_at(ev.position)).flatten().map(|(_, t, line)| (t, line, ev.position));
+        if ann_hover.map(|h| (h.0, h.1)) != self.ann_hover.map(|h| (h.0, h.1)) {
+            cx.notify();
+        }
+        self.ann_hover = ann_hover;
         let app_menu_hover = self.app_menu_button().contains(&ev.position);
         let commands_hover = self.modal.is_none() && self.commands_button().is_some_and(|(b, _)| b.contains(&ev.position));
         if (app_menu_hover, commands_hover) != (self.app_menu_hover, self.commands_hover) {
@@ -3529,21 +3604,21 @@ impl Render for ReaderView {
         let area = |x: f32, y: f32, w: f32, rows: usize| Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px(w.max(0.0)), px(rows as f32 * line_h())) };
         let mut panes = Vec::new();
         match split {
-            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, text_rows), rows: text_rows }),
+            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, text_rows), rows: text_rows, ann: 0.0 }),
             Some(Split::Columns) => {
                 let x = if fw >= 120.0 { (fx + (fw * share).round()).clamp(fx + 60.0, self.width - 60.0) } else { fx + (fw / 2.0).floor() };
                 self.split_at = x;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, toolbar_h()), text: area(fx, body_top, x - fx, text_rows), rows: text_rows });
-                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, toolbar_h()), text: area(x + 1.0, body_top, self.width - x - 1.0, text_rows), rows: text_rows });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, toolbar_h()), text: area(fx, body_top, x - fx, text_rows), rows: text_rows, ann: 0.0 });
+                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, toolbar_h()), text: area(x + 1.0, body_top, self.width - x - 1.0, text_rows), rows: text_rows, ann: 0.0 });
             }
             Some(Split::Rows) => {
                 // Too short for two panes and a bar: the first pane alone, until there is room.
                 let top = if text_rows >= 3 { ((((text_rows - 1) as f32) * share).round() as usize).clamp(1, text_rows - 2) } else { text_rows };
                 let y = body_top + top as f32 * line_h();
                 self.split_at = y;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, top), rows: top });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, top), rows: top, ann: 0.0 });
                 if text_rows >= 3 {
-                    panes.push(PaneGeom { pane: 1, bar: (fx, self.width, y), text: area(fx, y + line_h(), fw, text_rows - 1 - top), rows: text_rows - 1 - top });
+                    panes.push(PaneGeom { pane: 1, bar: (fx, self.width, y), text: area(fx, y + line_h(), fw, text_rows - 1 - top), rows: text_rows - 1 - top, ann: 0.0 });
                 }
             }
         }
@@ -3557,6 +3632,19 @@ impl Render for ReaderView {
                     g.text.size.height -= px(line_h());
                     g.rows -= 1;
                 }
+            }
+        }
+        // The blame column, left of the line numbers, while the pane's tab is annotated and shows its text; none when
+        // it would leave the text less than 40 px.
+        for g in &mut panes {
+            let state = self.session.state();
+            let Some(t) = state.shown(g.pane) else { continue };
+            let text = t.document().is_some_and(|d| d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+            let w = self.session.annotation_cols(t.id()) as f32 * self.char_w + 12.0;
+            if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
+                g.ann = w;
+                g.text.origin.x += px(w);
+                g.text.size.width -= px(w);
             }
         }
         let (crumb_hits, crumb_cells) = self.layout_crumbs(&crumb_rows);
@@ -3724,6 +3812,16 @@ impl Render for ReaderView {
             }
             // Rows under the sticky band are hidden by it; its own marks are painted over it.
             let band = sticky.iter().map(|(_, r)| r.y + 1.0).reduce(f32::max).unwrap_or(0.0);
+            // Annotations of the rows below the band (a line's first row): row, label, age shade, of the hovered commit.
+            let hovered = self.ann_hover.and_then(|(t, line, _)| Some(self.session.annotation(t, line)?.commit.sha.clone()));
+            let ann: Vec<(f32, String, Option<f32>, bool)> = match tab {
+                Some(t) if g.ann > 0.0 => rows.iter().filter(|r| r.number > 0 && r.y >= band).filter_map(|r| {
+                    let a = self.session.annotation(t.id(), r.number as usize - 1)?;
+                    let hot = a.shade.is_some() && hovered.as_deref() == Some(a.commit.sha.as_str());
+                    Some((r.y, a.label, a.shade, hot))
+                }).collect(),
+                _ => Vec::new(),
+            };
             bookmarks.retain(|(y, _)| *y >= band);
             marks.retain(|&(i, ..)| i as f32 >= band);
             let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| t.fold_at(line)).map(|(_, c)| c))).collect();
@@ -3731,7 +3829,7 @@ impl Render for ReaderView {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            frames.push(PaneFrame { preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor });
+            frames.push(PaneFrame { preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
@@ -3809,6 +3907,16 @@ impl Render for ReaderView {
             eprintln!("lenz-reader: slow render {:.1} ms", render_started.elapsed().as_secs_f64() * 1000.0);
         }
         let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
+        let modal_commit = matches!(self.modal, Some(Modal::StatusDetails { commit: true, .. }));
+        // The hovered annotation's commit, beside the pointer.
+        let ann_tip = self.ann_hover.and_then(|(t, line, at)| {
+            let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
+            let c = a.commit;
+            let lines = [format!("{} · {} · {}", &c.sha[..c.sha.len().min(7)], c.author, lenz_content::blame::date(c.author_time)), c.summary.clone()];
+            let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(0) as f32 * self.char_w + 16.0;
+            let x = (f32::from(at.x) + 12.0).min(self.width - w - 4.0).max(0.0);
+            Some((x, f32::from(at.y) + 16.0, w, lines))
+        });
         let about_logo = match &self.modal {
             Some(Modal::StatusDetails { logo: Some(logo), .. }) => Some(logo.0.clone()),
             _ => None,
@@ -3973,6 +4081,23 @@ impl Render for ReaderView {
                             let g = &f.geom;
                             let text = Bounds { origin: gpui::point(px(x0) + g.text.origin.x, px(y0) + g.text.origin.y), size: g.text.size };
                             let (tx, ty, tw) = (f32::from(text.origin.x), f32::from(text.origin.y), f32::from(text.size.width));
+                            if g.ann > 0.0 {
+                                // The blame column: each line's date and author on its commit's age shade.
+                                let (ax, aw) = (tx - g.ann, g.ann - 2.0);
+                                lenz_gpui::fill(window, ax, ty, g.ann, f32::from(text.size.height), palette.gutter_bg);
+                                let column = Bounds { origin: gpui::point(px(ax), px(ty)), size: gpui::size(px(aw), text.size.height) };
+                                window.with_content_mask(Some(gpui::ContentMask { bounds: column }), |window| {
+                                    for (y, label, shade, hot) in &f.ann {
+                                        let bg = match (shade, hot) {
+                                            (_, true) => palette.blame_new,
+                                            (Some(s), false) => lenz_content::theme::mix(palette.gutter_bg, palette.blame_new, *s * 0.6),
+                                            (None, false) => palette.gutter_bg,
+                                        };
+                                        lenz_gpui::fill(window, ax, ty + y * m.line_h, aw, m.line_h, bg);
+                                        lenz_gpui::text(window, cx, m, ax + 6.0, ty + y * m.line_h, label, if *hot || shade.is_some() { palette.fg } else { palette.dim });
+                                    }
+                                });
+                            }
                             window.with_content_mask(Some(gpui::ContentMask { bounds: text }), |window| {
                                 if let Some(hint) = f.hint {
                                     lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0, hint, palette.dim);
@@ -4043,6 +4168,15 @@ impl Render for ReaderView {
                                 }
                             });
                         }
+                        if let Some((tx, ty, tw, lines)) = &ann_tip {
+                            let (bg, border) = palette.raised();
+                            let th = lines.len() as f32 * line_h() + 8.0;
+                            lenz_gpui::fill(window, x0 + tx - 1.0, y0 + ty - 1.0, tw + 2.0, th + 2.0, border);
+                            lenz_gpui::fill(window, x0 + tx, y0 + ty, *tw, th, bg);
+                            for (i, l) in lines.iter().enumerate() {
+                                lenz_gpui::text(window, cx, m, x0 + tx + 8.0, y0 + ty + 4.0 + i as f32 * line_h(), l, if i == 0 { palette.accent } else { palette.fg });
+                            }
+                        }
                         // The split's divider.
                         match split {
                             Some(Split::Columns) => lenz_gpui::fill(window, x0 + split_at, y0, 1.0, panel_top - tabs_h + tabs_h, palette.border),
@@ -4099,7 +4233,8 @@ impl Render for ReaderView {
                             let menu = Bounds { origin: gpui::point(px(mx), px(my)), size: l.bounds.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
                                 if details_modal {
-                                    for (b, label) in l.details_buttons(char_w).into_iter().zip(["Copy", "Close"]) {
+                                    let labels = details_labels(modal_commit);
+                                    for (b, &label) in l.details_buttons(char_w, labels).iter().zip(labels) {
                                         let (x, y) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y));
                                         let clip = Bounds { origin: gpui::point(px(x), px(y)), size: b.size };
                                         window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
@@ -4268,6 +4403,8 @@ struct PaneFrame {
     pending: bool,
     unshowable: Option<String>,
     hint: Option<&'static str>,
+    /// Blame annotations: row, label, age shade (`None`: not committed), of the hovered commit.
+    ann: Vec<(f32, String, Option<f32>, bool)>,
 }
 
 /// Bookmark marks at the gutter's left edge (line numbers are right-aligned): the key, or a dot when it has none.

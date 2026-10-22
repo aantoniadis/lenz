@@ -308,6 +308,7 @@ impl CommandId {
             Self::PeekDefinition => Some("Alt+F12"),
             Self::TypeDefinition => Some("Ctrl+Shift+B"),
             Self::Implementation => Some("Ctrl+Alt+B"),
+            Self::AnnotateBlame | Self::CloseAnnotations => Some("Alt+B"),
             Self::Usages => Some("Shift+F12"),
             Self::CallHierarchy => Some("Ctrl+Alt+H"),
             Self::TypeHierarchy => Some("Ctrl+H"),

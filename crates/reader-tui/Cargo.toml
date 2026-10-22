@@ -29,6 +29,8 @@ gpui = { workspace = true, optional = true, features = ["test-support"] }
 
 [dev-dependencies]
 tempfile = "3"
+# Throwaway git repositories for the blame tests.
+lenz-content = { workspace = true, features = ["git-testing"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 

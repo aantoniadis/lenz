@@ -30,6 +30,8 @@ gpui_platform = { workspace = true, features = ["font-kit"] }
 gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
+# Throwaway git repositories for the blame tests.
+lenz-content = { workspace = true, features = ["git-testing"] }
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 serde_json = "1"
