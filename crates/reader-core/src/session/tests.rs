@@ -1669,7 +1669,9 @@ fn declaration_search_covers_the_project_and_follows_changes() {
     std::fs::write(root.join("app.py"), "class GadgetFactory:\n    pass\n").unwrap();
     settle(&mut s, |s| { let c = s.state().index_coverage(); c.pending == 0 && c.indexed == 4 } );
     let mut found = Vec::new();
-    for _ in 0..100 {
+    // The watcher reports a busy folder a second into a burst; a full parallel test run takes up to about two.
+    let until = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < until {
         s.dispatch(Command::FindDeclarations("factory".into()));
         settle(&mut s, searched);
         found = s.state().results().unwrap().hits().iter().map(|h| h.text.to_string()).collect();
