@@ -2321,15 +2321,29 @@ impl Viewer {
             Some(Content::Line(line)) => {
                 let pos = self.pos_at(window, side, line, tx);
                 let lines = self.raw(side);
-                self.sel = Some(match (self.sel, ev.click_count) {
+                // Caret, word, group, then again.
+                let clicks = (ev.click_count.max(1) - 1) % 3 + 1;
+                self.sel = Some(match (self.sel, clicks) {
                     (Some(mut sel), _) if ev.modifiers.shift && sel.side == side => {
                         sel.head = pos;
                         sel
                     }
-                    (_, 2) => Selection::word(side, lines, pos),
-                    (_, n) if n >= 3 => Selection::line(side, lines, line),
+                    (_, 2 | 3) => Selection::word(side, lines, pos),
                     _ => Selection::caret(side, pos),
                 });
+                // A third click: the word's syntax group, found off the UI thread; kept only while the word is.
+                if clicks == 3 && let (Some(word), Some(doc)) = (self.sel, self.doc()) {
+                    let job = crate::selection::group_job(word, self.raw(side), doc.text_arc(side), doc.language(side));
+                    cx.spawn(async move |this, cx| {
+                        let group = cx.background_executor().spawn(async move { job() }).await;
+                        this.update(cx, |v: &mut Viewer, cx| {
+                            if v.sel == Some(word) {
+                                v.sel = Some(group);
+                                cx.notify();
+                            }
+                        }).ok();
+                    }).detach();
+                }
                 self.dragging = true;
             }
             _ => {}
