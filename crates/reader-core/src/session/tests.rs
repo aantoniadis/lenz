@@ -28,7 +28,8 @@ fn analysis_document(s: &mut Session) -> Arc<Document> {
 }
 
 
-fn session(dir: &Path) -> Session {
+fn session(dir: &Path) -> Session { session_clock(dir, Arc::new(std::time::Instant::now)) }
+fn session_clock(dir: &Path, clock: semantics::Clock) -> Session {
     // Never a real language server: the settings name one that does not exist.
     let providers = dir.join("config/lenz-reader/providers.json");
     std::fs::create_dir_all(providers.parent().unwrap()).unwrap();
@@ -42,7 +43,7 @@ fn session(dir: &Path) -> Session {
 
         cache: dir.join("cache"),
         idle: crate::semantics::IDLE,
-        clock: std::sync::Arc::new(std::time::Instant::now),
+        clock,
         overrides: ThemeOverrides::default(),
         dark: true,
     })
@@ -83,6 +84,229 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 }
 
 #[test]
+fn draft_history_retains_changes_without_pinning_every_intermediate_snapshot() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let original = "a".repeat(256 * 1024);
+    let path = write(d.path(), "large-draft.txt", original.as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path.clone()), "large-draft.txt");
+    let tab = s.state().active().unwrap().id();
+    let baseline = Arc::downgrade(s.state().current_source().unwrap());
+    let edit = |s: &mut Session, range, text: &str| {
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind: EditKind::Replace });
+    };
+    edit(&mut s, 0..original.len() - 16384, "");
+    let partial = Arc::downgrade(s.state().current_source().unwrap());
+    assert_eq!(s.state().current_source().unwrap().len_bytes(), 16384);
+    assert!(s.state().current_source().unwrap().storage_bytes() >= original.len(), "a surviving original chunk accounts its whole backing");
+    edit(&mut s, 0..16384, "tiny");
+    assert!(partial.upgrade().is_none(), "history stores changes, not each intermediate snapshot");
+    assert!(baseline.upgrade().is_some(), "the confirmed baseline is a real retained owner");
+    assert!(s.state().current_source().unwrap().storage_bytes() < 64 * 1024);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "a".repeat(16384));
+    let undone = Arc::downgrade(s.state().current_source().unwrap());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), original);
+    assert!(!active_view(&s).dirty());
+    assert!(undone.upgrade().is_none());
+    edit(&mut s, 0..original.len(), "new branch");
+    assert!(!active_view(&s).can_redo());
+    assert_eq!(source_text(s.state().current_source().unwrap()), "new branch");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}
+
+#[test]
+fn draft_commands_preserve_image_read_only_admission_and_shared_availability() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "readonly.svg", br#"<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>"#);
+    let mut s = session(d.path());
+    assert_eq!(s.disabled(CommandId::Undo), Some("No file is open"));
+    open(&mut s, Command::Open(path.clone()), "readonly.svg");
+    let before = s.state().current_source().unwrap().clone();
+    let tab = s.state().active().unwrap().id();
+    assert_eq!(active_view(&s).edit_disabled(), Some("Images are read-only"));
+    s.dispatch(Command::Edit { tab, expected: before.key(), edits: vec![TextEdit { range: 0..0, text: "changed".into() }], kind: EditKind::Typing });
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &before));
+    assert!(!active_view(&s).can_undo());
+    assert!(!active_view(&s).dirty());
+    assert_eq!(s.disabled(CommandId::Undo), Some("Images are read-only"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source_text(&before));
+}
+
+#[cfg(unix)]
+#[test]
+fn draft_semantic_readiness_survives_unloading_its_last_view() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"unloaded_draft\"\n");
+    let a = write(d.path(), "draft.rs", b"fn saved() {}\n");
+    let b = write(d.path(), "other.txt", b"other stays current\n");
+    let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::OpenRetained(a.clone()), "draft.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|p| p.status == semantics::Status::Ready));
+    let tab = s.state().active().unwrap().id();
+    let (started, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    let source = s.state().current_source().unwrap();
+    let (expected, len) = (source.key(), source.len_bytes());
+    let text = "fn unsaved_unicode_é() {}\n";
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: text.into() }], kind: EditKind::Replace });
+    let key = s.state().current_source().unwrap().key();
+    s.dispatch(Command::OpenRetained(b.clone()));
+    let b_tab = s.state().active().unwrap().id();
+    let Ok((stamp, bytes)) = read(&b) else { panic!("stable disposable B") };
+    let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+    s.dispatch(Completion::Loaded { request: s.request, tab: b_tab, path: b.clone(), result: Ok((Some(stamp),
+        Arc::new(Document::decode(b.clone(), version, &bytes)), std::fs::canonicalize(&b).ok())) });
+    assert!(s.state().view(tab).is_none());
+    assert!(s.state().tab_dirty(tab));
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state.semantics.desired().get(&a).is_some_and(|doc| doc.version() == key.version && doc.text().as_ref() == text));
+    assert_eq!(s.state().current_source().unwrap().source(), b.as_path());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn saved() {}\n");
+}
+
+#[test]
+fn dirty_and_clean_history_survive_real_cache_eviction_and_a_split_closing() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "history.txt", b"original\r\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path.clone()), "history.txt");
+    let tab = s.state().active().unwrap().id();
+    s.cache = InactiveCache::new(0);
+    let edit = |s: &mut Session, text: &str| {
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..8, text: text.into() }], kind: EditKind::Replace });
+    };
+    edit(&mut s, "modified");
+    let draft = Arc::downgrade(s.state().current_source().unwrap());
+    let other = write(d.path(), "other.txt", b"reloadable");
+    open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+    let clean = Arc::downgrade(s.state().current_source().unwrap());
+    assert!(s.state().view(tab).is_none(), "inactive view is released, draft is buffer-owned");
+    assert!(draft.upgrade().is_some());
+    assert!(s.cache.is_empty(), "dirty buffers never consume reloadable cache budget");
+    open(&mut s, Command::OpenRetained(path.clone()), "history.txt");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "modified\r\n");
+    assert!(active_view(&s).dirty());
+    assert!(clean.upgrade().is_none(), "actual unrelated clean source was evicted");
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "original\r\n");
+    assert!(!active_view(&s).dirty());
+    let with_history = Arc::downgrade(s.state().current_source().unwrap());
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    assert!(with_history.upgrade().is_some(), "clean text with redo history is independently pinned");
+    open(&mut s, Command::OpenRetained(path.clone()), "history.txt");
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "modified\r\n");
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Unsplit);
+    let survivor = s.state().active().unwrap().id();
+    s.dispatch(Command::Undo { tab: survivor });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "original\r\n");
+    assert!(!active_view(&s).dirty());
+    assert_eq!(std::fs::read(path).unwrap(), b"original\r\n");
+}
+
+#[test]
+fn draft_history_groups_adjacent_same_view_edits_for_500ms_and_breaks_on_actions() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "groups.txt", b"A\n");
+    let clock = Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+    let observed = clock.clone();
+    let mut s = session_clock(d.path(), Arc::new(move || *observed.lock().unwrap()));
+    open(&mut s, Command::Open(path.clone()), "groups.txt");
+    let tab = s.state().active().unwrap().id();
+    let edit = |s: &mut Session, range, text: &str, kind| {
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind });
+    };
+    edit(&mut s, 0..0, "α", EditKind::Typing);
+    *clock.lock().unwrap() += Duration::from_millis(500);
+    edit(&mut s, 2..2, "😀", EditKind::Typing);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "A\n", "one meaningful typing group");
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀A\n");
+    edit(&mut s, 6..6, "x", EditKind::Typing);
+    *clock.lock().unwrap() += Duration::from_millis(501);
+    edit(&mut s, 7..7, "y", EditKind::Typing);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀xA\n");
+    s.dispatch(Command::Select(Selection { anchor: 7, head: 7 }));
+    edit(&mut s, 7..7, "z", EditKind::Typing);
+    s.dispatch(Command::Select(Selection { anchor: 8, head: 8 }));
+    edit(&mut s, 8..8, "w", EditKind::Typing);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀xzA\n");
+    edit(&mut s, 8..8, "PASTE", EditKind::Paste);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀xzA\n");
+    edit(&mut s, 6..8, "", EditKind::Delete);
+    edit(&mut s, 2..6, "", EditKind::Delete);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀xzA\n", "adjacent backspaces group without losing Unicode");
+    edit(&mut s, 2..6, "", EditKind::Delete);
+    edit(&mut s, 2..3, "", EditKind::Delete);
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀xzA\n", "forward deletes form their own group");
+    assert_eq!(std::fs::read(path).unwrap(), b"A\n");
+}
+
+#[test]
+fn draft_transactions_reject_stale_invalid_and_overlapping_ranges_atomically() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "atomic.txt", "α😀\r\nbeta\n".as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path.clone()), "atomic.txt");
+    let tab = s.state().active().unwrap().id();
+    let baseline = s.state().current_source().unwrap().clone();
+    let edit = |range, text: &str| TextEdit { range, text: text.into() };
+    for edits in [vec![edit(1..2, "x")], vec![edit(0..2, "x"), edit(1..6, "y")], vec![edit(0..0, "x"), edit(0..0, "y")], vec![edit(0..100, "x")]] {
+        s.dispatch(Command::Edit { tab, expected: baseline.key(), edits, kind: EditKind::Replace });
+        assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &baseline));
+        assert!(!active_view(&s).can_undo());
+        assert!(!active_view(&s).dirty());
+        assert!(!s.state().active().unwrap().retained());
+    }
+    s.dispatch(Command::Edit { tab, expected: baseline.key(), edits: vec![edit(0..2, "x")], kind: EditKind::Replace });
+    let current = s.state().current_source().unwrap().clone();
+    s.dispatch(Command::Edit { tab, expected: baseline.key(), edits: vec![edit(0..1, "z")], kind: EditKind::Replace });
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &current));
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀\r\nbeta\n");
+    assert!(!active_view(&s).can_undo());
+    assert!(active_view(&s).can_redo());
+    assert!(!active_view(&s).dirty());
+    assert_eq!(s.disabled(CommandId::Undo), Some("Nothing to undo"));
+    assert_eq!(s.disabled(CommandId::Redo), None);
+    let fresh = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected: fresh, edits: vec![edit(0..2, ""), edit(2..6, "")], kind: EditKind::Replace });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "\r\nbeta\n");
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀\r\nbeta\n");
+    let fresh = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected: fresh, edits: vec![edit(0..2, "x")], kind: EditKind::Replace });
+    let fresh = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected: fresh, edits: vec![edit(0..1, "α")], kind: EditKind::Replace });
+    assert!(!active_view(&s).dirty(), "content equality, even with new undo entries, defines clean");
+    assert!(active_view(&s).can_undo());
+    assert_eq!(s.disabled(CommandId::Undo), None);
+    assert_eq!(std::fs::read(&path).unwrap(), "α😀\r\nbeta\n".as_bytes());
+}
+
+#[test]
 fn shared_draft_commands_replace_unicode_and_undo_without_writing_disk() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap();
@@ -101,9 +325,14 @@ fn shared_draft_commands_replace_unicode_and_undo_without_writing_disk() {
     let second = s.state().active().unwrap().id();
     assert_ne!(first, second);
     s.dispatch(Command::Select(Selection { anchor: 8, head: 8 }));
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab: second, expected, edits: vec![TextEdit { range: 8..12, text: "BETA".into() }], kind: EditKind::Replace });
     let second_position = s.state().active().unwrap().selection();
     s.dispatch(Command::FocusPane(0));
     s.dispatch(Command::Select(Selection { anchor: 2, head: 2 }));
+    s.dispatch(Command::Undo { tab: first });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "é😀\r\nbeta\n");
+    assert!(active_view(&s).dirty());
     s.dispatch(Command::Undo { tab: first });
     assert_eq!(source_text(s.state().current_source().unwrap()), "α😀\r\nbeta\n");
     assert!(!active_view(&s).dirty());
@@ -111,9 +340,11 @@ fn shared_draft_commands_replace_unicode_and_undo_without_writing_disk() {
     let undone = s.state().current_source().unwrap().key();
     s.dispatch(Command::Redo { tab: second });
     assert_eq!(source_text(s.state().current_source().unwrap()), "é😀\r\nbeta\n");
+    s.dispatch(Command::Redo { tab: second });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "é😀\r\nBETA\n");
     assert!(s.state().current_source().unwrap().key().version > undone.version);
     assert_eq!(s.state().shown(0).unwrap().selection(), Some(Selection { anchor: 2, head: 2 }));
-    assert_eq!(source_text(pane_view(&s, 1).snapshot()), "é😀\r\nbeta\n");
+    assert_eq!(source_text(pane_view(&s, 1).snapshot()), "é😀\r\nBETA\n");
     let mut independent = session(&d.path().join("other-session"));
     open(&mut independent, Command::Open(path.clone()), "draft.txt");
     assert_eq!(source_text(independent.state().current_source().unwrap()), "α😀\r\nbeta\n");

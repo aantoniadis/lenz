@@ -378,6 +378,8 @@ pub enum CommandId {
     Close,
     SelectAll,
     Copy,
+    Undo,
+    Redo,
     /// Fold regions: the innermost at the caret, the one on the caret's line, all of them, comments and imports.
     Collapse,
     Expand,
@@ -496,7 +498,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 114] = [
+    pub const ALL: [CommandId; 116] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -535,6 +537,8 @@ impl CommandId {
         Self::Close,
         Self::SelectAll,
         Self::Copy,
+        Self::Undo,
+        Self::Redo,
         Self::CopyPath,
         Self::CopyPathLine,
         Self::OpenInEditor,
@@ -657,6 +661,8 @@ impl CommandId {
             Self::Close => "Close Tab",
             Self::SelectAll => "Select All",
             Self::Copy => "Copy",
+            Self::Undo => "Undo",
+            Self::Redo => "Redo",
             Self::Collapse => "Collapse",
             Self::Expand => "Expand",
             Self::CollapseAll => "Collapse All",
@@ -1177,6 +1183,9 @@ struct CurrentSource {
     saved: Option<SemanticSource>,
     draft: Option<crate::draft::Draft>,
 }
+impl CurrentSource {
+    fn pinned(&self) -> bool { self.draft.as_ref().is_some_and(|draft| draft.dirty() || draft.can_undo() || draft.can_redo()) }
+}
 impl Sources {
     fn admit(&mut self, source: &Path, previous: Option<crate::text::BufferId>, doc: &Arc<Document>, stamp: Option<Stamp>) -> crate::text::BufferId {
         let id = *self.aliases.entry(source.to_path_buf()).or_insert_with(|| previous.unwrap_or_else(|| {
@@ -1184,7 +1193,7 @@ impl Sources {
             crate::text::BufferId(self.next)
         }));
         let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None });
-        if entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
+        if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
         entry.snapshot = Some(Arc::new(crate::text::TextSnapshot::from_document(id, doc)));
@@ -1207,7 +1216,7 @@ impl<'a> View<'a> {
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_redo) }
-    pub fn edit_disabled(&self) -> Option<&str> {
+    pub fn edit_disabled(&self) -> Option<&'static str> {
         if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
         else { None }
@@ -1402,6 +1411,11 @@ impl<'a> View<'a> {
 }
 
 impl State {
+    /// Unsaved content is independent of repository status and remains visible for inactive tabs.
+    pub fn tab_dirty(&self, id: TabId) -> bool {
+        self.tabs.iter().find(|tab| tab.id == id).and_then(|tab| self.sources.buffers.get(&tab.buffer?))
+            .and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty)
+    }
     pub fn view(&self, id: TabId) -> Option<View<'_>> {
         let tab = self.tabs.iter().find(|tab| tab.id == id)?;
         let buffer = tab.buffer?;
@@ -2312,6 +2326,13 @@ impl Session {
                 Some(t) if !t.loaded => Some("No text to point at"),
                 Some(_) => None,
             },
+            CommandId::Undo | CommandId::Redo => match self.state.active().and_then(|tab| self.state.view(tab.id)) {
+                None => Some("No file is open"),
+                Some(view) if view.edit_disabled().is_some() => view.edit_disabled(),
+                Some(view) if id == CommandId::Undo && !view.can_undo() => Some("Nothing to undo"),
+                Some(view) if id == CommandId::Redo && !view.can_redo() => Some("Nothing to redo"),
+                Some(_) => None,
+            },
             CommandId::Copy => match self.state.selection() {
                 _ if !open => Some("No file is open"),
                 // The adapter holds a preview's selection.
@@ -2723,6 +2744,13 @@ impl Session {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. }
+            | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
+            | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+            for entry in self.state.sources.buffers.values_mut() {
+                if let Some(draft) = &mut entry.draft { draft.end_group(); }
+            }
+        }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
         if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
@@ -2786,14 +2814,14 @@ impl Session {
         effect
     }
 
-    fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>) -> Effect {
+    fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.snapshot().key() != expected || view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
         let draft = entry.draft.get_or_insert_with(|| crate::draft::Draft::new(current.clone()));
-        match draft.edit(&current, version, edits.clone()) {
+        match draft.edit(&current, version, edits.clone(), tab, kind, self.state.semantics.now()) {
             Ok(Some(next)) => self.publish_edit(tab, current, Arc::new(next), &edits),
             Ok(None) | Err(_) => Effect::default(),
         }
@@ -2828,8 +2856,10 @@ impl Session {
         for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
             let top = previous.reader_line_range(tab.top_line.min(previous.line_count() - 1)).start;
             tab.new_content();
-            tab.selection = tab.selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
-            tab.set_top(next.line_of(transform(top)), 0);
+            let selection = tab.selection.or_else(|| (tab.id == edited).then_some(Selection { anchor: top, head: top }));
+            tab.selection = selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
+            tab.set_top(next.line_of(transform(top)), tab.top_row());
+            if tab.restore.is_some() { tab.restore = Some(tab.location(Some(&next))); }
             if tab.id == edited { tab.retained = true; }
             changed.push(tab.id);
         }
@@ -2861,8 +2891,9 @@ impl Session {
         self.state.sources.buffers.retain(|id, entry| {
             let loaded = self.state.tabs.iter().any(|tab| tab.buffer == Some(*id) && tab.loaded);
             let cached = entry.snapshot.as_ref().is_some_and(|snapshot| self.cache.contains(snapshot.source()));
-            if !loaded && !cached { entry.snapshot = None; }
-            loaded || cached || self.state.tabs.iter().any(|tab| tab.buffer == Some(*id))
+            let pinned = entry.pinned();
+            if !loaded && !cached && !pinned { entry.snapshot = None; }
+            loaded || cached || pinned || self.state.tabs.iter().any(|tab| tab.buffer == Some(*id))
         });
         self.state.sources.aliases.retain(|_, id| self.state.sources.buffers.contains_key(id));
         self.analysis.retain_sources(|id| self.state.sources.buffers.get(&id).is_some_and(|e| e.snapshot.is_some()));
@@ -2871,10 +2902,13 @@ impl Session {
     fn cache_document(&mut self, stamp: Stamp, doc: Arc<Document>) {
         // A search/semantic preview is an immutable result. It may populate reloadable inactive
         // storage, but it cannot replace the source of an already loaded view.
+        if self.state.sources.buffers.values().any(|entry| entry.pinned()
+            && entry.snapshot.as_ref().is_some_and(|source| source.source() == doc.source())) { return; }
         if self.state.tabs.iter().any(|tab| tab.loaded && (tab.source == doc.source()
             || tab.canonical.as_deref() == Some(doc.source())
             || self.state.source(tab.id).is_some_and(|source| source.source() == doc.source()))) { return; }
         let id = self.state.sources.admit(doc.source(), None, &doc, Some(stamp));
+        if self.state.sources.buffers[&id].pinned() { return; }
         if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone() { self.cache.put(stamp, snapshot); }
         self.release_current();
     }
@@ -2898,7 +2932,7 @@ impl Session {
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
-            Command::Edit { tab, expected, edits, kind: _ } => self.edit(tab, expected, edits),
+            Command::Edit { tab, expected, edits, kind } => self.edit(tab, expected, edits, kind),
             Command::Undo { tab } => self.undo(tab, false),
             Command::Redo { tab } => self.undo(tab, true),
             Command::PrepareLayout { pane, tab, work } => {
@@ -4342,8 +4376,9 @@ impl Session {
         if fingerprint == self.synced { return; }
         self.synced = fingerprint;
         let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| t.retrieved.is_none()).filter_map(|t| {
-            let view = self.state.view(t.id)?;
-            let snapshot = view.snapshot();
+            let entry = self.state.sources.buffers.get(&t.buffer?)?;
+            if !t.loaded && !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return None; }
+            let snapshot = entry.snapshot.as_ref()?;
             let large = snapshot.is_large();
             self.state.semantics.wants_text(snapshot.language(), large, self.state.project.as_ref().map(|p| p.root())).then_some(t.id)
         }).collect();
@@ -6993,6 +7028,11 @@ impl Session {
             self.state.active = Some(id);
             self.state.messages.clear();
         }
+        if let Some((snapshot, stamp)) = self.state.tabs.iter().find(|t| t.id == id && !t.loaded)
+            .and_then(|tab| self.state.sources.buffers.get(&tab.buffer?))
+            .filter(|entry| entry.pinned()).and_then(|entry| Some((entry.snapshot.clone()?, entry.stamp))) {
+            self.show_snapshot(id, snapshot, stamp, false);
+        }
         let Some(t) = self.state.tabs.iter().find(|t| t.id == id) else { return };
         match self.state.source(id) {
             Some(snapshot) => {
@@ -7102,7 +7142,8 @@ impl Session {
     fn release(&mut self, id: TabId) {
         if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer) {
             let last = !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id));
-            self.analysis.release_view(buffer, id, last);
+            let dirty = self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty);
+            self.analysis.release_view(buffer, id, last && !dirty);
         }
         if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.retrieved.is_none() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(&self.state, t).then(|| self.state.location(t)));
@@ -7122,6 +7163,7 @@ impl Session {
             self.current.store(0, Ordering::Relaxed);
         }
         let snapshot = self.state.source(id).cloned();
+        let pinned = snapshot.as_ref().and_then(|snapshot| self.state.sources.buffers.get(&snapshot.key().buffer)).is_some_and(CurrentSource::pinned);
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token; // a check started while it was shown must not put content back
@@ -7133,7 +7175,7 @@ impl Session {
         t.new_content();
         t.restore = Some(at);
         t.loaded = false;
-        if let (Some(snapshot), Some(stamp)) = (snapshot, t.stamp.take()) { self.cache.put_current(stamp, snapshot); }
+        if !pinned && let (Some(snapshot), Some(stamp)) = (snapshot, t.stamp.take()) { self.cache.put_current(stamp, snapshot); }
         self.release_current();
     }
 

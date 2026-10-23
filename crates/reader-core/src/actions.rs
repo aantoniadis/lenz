@@ -179,6 +179,11 @@ impl Session {
             CommandId::Close => Command::Close,
             CommandId::SelectAll => Command::SelectAll,
             CommandId::Copy => Command::Copy,
+            CommandId::Undo | CommandId::Redo => match state.active() {
+                Some(tab) if id == CommandId::Undo => Command::Undo { tab: tab.id() },
+                Some(tab) => Command::Redo { tab: tab.id() },
+                None => return CatalogAction::Disabled("No tab is open"),
+            },
             CommandId::Collapse => Command::Collapse,
             CommandId::Expand => Command::Expand,
             CommandId::CollapseAll => Command::CollapseAll,
@@ -307,7 +312,7 @@ impl CommandId {
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
-            Self::SelectAll | Self::Copy | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
+            Self::SelectAll | Self::Copy | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
@@ -347,6 +352,8 @@ impl CommandId {
             Self::TypeHierarchy => Some("Ctrl+H"),
             Self::Documentation => Some("Ctrl+Q"),
             Self::Copy => Some("Ctrl+C"),
+            Self::Undo => Some("Ctrl+Z"),
+            Self::Redo => Some("Ctrl+Shift+Z"),
             Self::Close => Some("Ctrl+F4"),
             Self::ExtendSelection => Some("Ctrl+W"),
             Self::ShrinkSelection => Some("Ctrl+Shift+W"),
