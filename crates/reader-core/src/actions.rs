@@ -44,6 +44,12 @@ pub enum InterfaceAction {
     CheckoutRevision,
     /// Start Lenz Diff on the conflicts a Smart Checkout left.
     ResolveConflicts,
+    /// Start Lenz Diff on the working tree against HEAD (`Session::git_diff_launch`).
+    ShowLocalChanges,
+    /// Ask for a branch, tag or revision to compare the working tree with.
+    CompareWithRevision,
+    /// Start Lenz Diff on the current branch's changes since its base.
+    ShowBranchChanges,
     NewWindow,
     FocusBreadcrumbs,
     ToggleExplorer,
@@ -112,6 +118,10 @@ impl Session {
             CommandId::NewBranch => return CatalogAction::Interface(InterfaceAction::NewBranch),
             CommandId::CheckoutRevision => return CatalogAction::Interface(InterfaceAction::CheckoutRevision),
             CommandId::ResolveConflicts => return CatalogAction::Interface(InterfaceAction::ResolveConflicts),
+            CommandId::ShowLocalChanges => return CatalogAction::Interface(InterfaceAction::ShowLocalChanges),
+            CommandId::CompareWithRevision => return CatalogAction::Interface(InterfaceAction::CompareWithRevision),
+            CommandId::ShowBranchChanges => return CatalogAction::Interface(InterfaceAction::ShowBranchChanges),
+            CommandId::CompareWithWorktree => Command::OpenWorktrees,
             CommandId::GitBranches => Command::OpenBranches,
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
@@ -276,7 +286,8 @@ impl CommandId {
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
-            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ResolveConflicts => G::Git,
+            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision
+            | Self::ShowBranchChanges | Self::CompareWithWorktree | Self::ResolveConflicts => G::Git,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
             | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
             | Self::RecentFiles | Self::RecentLocations | Self::NextTab | Self::PreviousTab

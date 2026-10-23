@@ -114,7 +114,8 @@ pub enum Modal {
     /// A new branch: where it starts (`None`: HEAD), its name so far, whether to check it out, and why it was refused.
     NewBranch { from: Option<String>, name: String, checkout: bool, error: Option<String> },
     /// Checkout Tag or Revision: what is typed so far, and why it was refused.
-    Revision { input: String, error: Option<String> },
+    /// Checkout Tag or Revision…, or Compare with Branch, Tag or Revision… when `compare`.
+    Revision { input: String, error: Option<String>, compare: bool },
 }
 
 /// What a details dialog is: plain text, the core's commit popup, or its checkout-problem dialog.
@@ -189,6 +190,9 @@ pub struct ReaderView {
     /// For tests: worktrees Open in New Window was asked for (a real window is not opened).
     #[cfg(feature = "test-support")]
     pub opened_windows: Vec<PathBuf>,
+    /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
+    #[cfg(feature = "test-support")]
+    pub exe: Option<PathBuf>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -489,7 +493,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -558,9 +562,18 @@ impl ReaderView {
         }
     }
 
+    /// This program, for the apps installed beside it.
+    fn exe(&self) -> PathBuf {
+        #[cfg(feature = "test-support")]
+        if let Some(exe) = &self.exe {
+            return exe.clone();
+        }
+        std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default()
+    }
+
     /// Lenz Diff's window comparing `left` with `right`.
     pub fn compare(&mut self, left: &std::path::Path, right: &std::path::Path, cx: &mut Context<Self>) {
-        let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+        let exe = self.exe();
         let launch = self.session.compare_launch(left, right, &exe, false);
         self.start(launch, None, cx);
     }
@@ -896,14 +909,17 @@ impl ReaderView {
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
                 InterfaceAction::NewBranch => self.modal = Some(Modal::NewBranch { from: None, name: String::new(), checkout: true, error: None }),
-                InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None }),
+                InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None, compare: false }),
+                InterfaceAction::CompareWithRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None, compare: true }),
+                InterfaceAction::ShowLocalChanges => self.git_diff(&reader_core::branches::GitDiff::LocalChanges, cx),
+                InterfaceAction::ShowBranchChanges => self.git_diff(&reader_core::branches::GitDiff::BranchChanges(None), cx),
                 InterfaceAction::ResolveConflicts => {
-                    let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                    let exe = self.exe();
                     let launch = self.session.merge_launch(&exe, false);
                     self.start(launch, None, cx);
                 }
                 InterfaceAction::ShowCommitDiff => {
-                    let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                    let exe = self.exe();
                     let launch = self.session.commit_diff_launch(&exe, false);
                     self.dispatch(Command::CloseCommit, cx);
                     self.start(launch, None, cx);
@@ -1511,7 +1527,7 @@ impl ReaderView {
         // The Git prompts take a paste (a commit id, a branch name): its first line.
         let paste = (key == "v" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform)).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten()
             .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
-        if let (Some(text), Some(Modal::NewBranch { name: input, error, .. } | Modal::Revision { input, error })) = (&paste, &mut self.modal) {
+        if let (Some(text), Some(Modal::NewBranch { name: input, error, .. } | Modal::Revision { input, error, .. })) = (&paste, &mut self.modal) {
             input.push_str(text);
             *error = None;
             return cx.notify();
@@ -1542,7 +1558,7 @@ impl ReaderView {
             }
             return cx.notify();
         }
-        if let Some(Modal::Revision { input, error }) = &mut self.modal {
+        if let Some(Modal::Revision { input, error, compare }) = &mut self.modal {
             match key {
                 "escape" => self.modal = None,
                 "backspace" => {
@@ -1551,9 +1567,12 @@ impl ReaderView {
                 }
                 "enter" => match self.session.validate_revision(input) {
                     Ok(_) => {
-                        let rev = input.trim().to_string();
+                        let (rev, compare) = (input.trim().to_string(), *compare);
                         self.modal = None;
-                        self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(rev)), cx);
+                        match compare {
+                            true => self.git_diff(&reader_core::branches::GitDiff::Revision(rev), cx),
+                            false => self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(rev)), cx),
+                        }
                     }
                     Err(e) => *error = Some(e),
                 },
@@ -2327,9 +2346,21 @@ impl ReaderView {
                 #[cfg(feature = "test-support")]
                 let _ = make_config;
             }
+            (BranchAction::CompareWithWorkingTree | BranchAction::ChangesSinceBranching, t) => {
+                if let Some(diff) = reader_core::branches::GitDiff::of(t, action) {
+                    self.git_diff(&diff, cx);
+                }
+            }
             (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
         }
         cx.notify();
+    }
+
+    /// Starts Lenz Diff on a Git comparison, or shows why not.
+    fn git_diff(&mut self, diff: &reader_core::branches::GitDiff, cx: &mut Context<Self>) {
+        let exe = self.exe();
+        let launch = self.session.git_diff_launch(diff, &exe, false);
+        self.start(launch, None, cx);
     }
 
     /// A details dialog's buttons: the core's checkout choices, the commit popup's actions, else Copy and Close.
@@ -3761,9 +3792,12 @@ impl ReaderView {
             }
             Some(Modal::Branches { query, .. }) => {
                 let hint = match self.session.state().branches() {
-                    Some(b) if b.loading => "Git Branches — loading…".to_string(),
-                    Some(b) if b.error.is_some() => format!("Git Branches — {}", b.error.as_deref().unwrap_or_default()),
-                    _ => "Git Branches — type to filter; Enter checks out (or opens a worktree), Right more, Escape closes".to_string(),
+                    None => String::new(),
+                    Some(b) => match b.state_text() {
+                        Some(state) => format!("{} — {state}", b.heading()),
+                        None if b.worktrees_only => format!("{} — type to filter; Enter compares with the working tree, Right more, Escape closes", b.heading()),
+                        None => format!("{} — type to filter; Enter checks out (or opens a worktree), Right more, Escape closes", b.heading()),
+                    },
                 };
                 let mut rows = vec![(format!("› {query}"), None), (hint, None)];
                 rows.extend(self.session.state().branch_rows(query).into_iter().map(|r| (reader_core::branches::row_text(&r), None)));
@@ -3779,8 +3813,9 @@ impl ReaderView {
                 let hint = error.clone().unwrap_or_else(|| format!("New branch from {start} — Enter; Tab: check it out or not"));
                 vec![(format!("› {name}"), None), (format!("[{}] Check out the new branch", if *checkout { "x" } else { " " }), None), (hint, None)]
             }
-            Some(Modal::Revision { input, error }) => {
-                let hint = error.clone().unwrap_or_else(|| "Checkout tag or revision (a tag, branch, commit id or HEAD~2) — Enter".to_string());
+            Some(Modal::Revision { input, error, compare }) => {
+                let what = if *compare { "Compare the working tree with a branch, tag or revision" } else { "Checkout tag or revision" };
+                let hint = error.clone().unwrap_or_else(|| format!("{what} (a tag, branch, commit id or HEAD~2) — Enter"));
                 vec![(format!("› {input}"), None), (hint, None)]
             }
             Some(Modal::Places { list, query, .. }) => {

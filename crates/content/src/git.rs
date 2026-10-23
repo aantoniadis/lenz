@@ -210,7 +210,7 @@ pub fn any_commit(cwd: &Path, revs: &[&str]) -> bool {
 }
 
 /// False only when no directory from `cwd` up holds a `.git` or is itself a bare repository.
-fn may_be_in_repository(cwd: &Path) -> bool {
+pub fn may_be_in_repository(cwd: &Path) -> bool {
     cwd.ancestors().any(|dir| dir.join(".git").exists() || (dir.join("HEAD").is_file() && dir.join("objects").is_dir()))
 }
 

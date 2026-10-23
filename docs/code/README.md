@@ -181,6 +181,15 @@ index refresh and annotations blame again. The status bar shows the branch (or t
 switch made elsewhere within a few seconds. Checkouts run git as your terminal would, with the repository's hooks and
 filters; everything else Lenz Code asks git keeps them off.
 
+The Git menu also compares the working tree as it is (uncommitted and untracked files included) in Lenz Diff:
+**Show Local Changes** against the last commit (what the next commit would hold); **Compare with Branch, Tag or
+Revision…** against any of them, typed; **Show Branch Changes** against the point the current branch split from its
+base (the remote's default branch, else `main`, `master`, `origin/main` or `origin/master`), so everything the branch
+changes; **Compare with Worktree…** lists the other worktrees and compares the two folders. A row's actions in Git
+Branches… add **Compare with Working Tree** (branches, tags and worktrees) and **Show Changes Since Branching from
+Here** (other branches). Folder comparisons inside a repository skip what git ignores (`target/`, `node_modules/`); submodules and nested
+repositories are compared by their own ignore rules.
+
 **Annotate with Git Blame** (View menu, right-click, Alt+B) shows, left of the line numbers, the date and author of
 the commit that last changed each line, tinted by age (newest strongest); lines not committed yet say so. It is per
 tab, streams in as git reports it, and runs again when the file changes on disk; after a commit, amend or checkout

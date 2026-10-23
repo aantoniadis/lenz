@@ -438,6 +438,44 @@ pub fn check_branch_name(root: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The branch a branch's changes are counted from (Show Branch Changes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Base {
+    /// Fully named: `refs/remotes/origin/main`.
+    pub name: String,
+    /// As people say it: `origin/main`.
+    pub short: String,
+}
+
+const BASES: [&str; 4] = ["refs/heads/main", "refs/heads/master", "refs/remotes/origin/main", "refs/remotes/origin/master"];
+
+/// The remote's default branch (`origin/HEAD`), else the first of `main`, `master`, `origin/main`, `origin/master`.
+pub fn default_base(root: &Path) -> Option<Base> {
+    let mut args = vec!["for-each-ref", "--format=%(refname)%00%(symref)", "refs/remotes/origin/HEAD"];
+    args.extend(BASES);
+    let out = git::run(root, &args).ok()?;
+    let found: Vec<(&[u8], &[u8])> = out.split(|&b| b == b'\n').filter_map(|l| {
+        let at = l.iter().position(|&b| b == 0)?;
+        Some((&l[..at], &l[at + 1..]))
+    }).collect();
+    // A broken origin/HEAD (its branch deleted) is not listed.
+    let name = found.iter().find(|(r, s)| *r == b"refs/remotes/origin/HEAD" && !s.is_empty()).map(|(_, s)| *s)
+        .or_else(|| BASES.iter().map(|b| b.as_bytes()).find(|b| found.iter().any(|(r, _)| r == b)))?;
+    let name = String::from_utf8_lossy(name).into_owned();
+    let short = ["refs/heads/", "refs/remotes/"].iter().find_map(|p| name.strip_prefix(p)).unwrap_or(&name).to_string();
+    Some(Base { name, short })
+}
+
+/// The commit `a` and `b` last shared.
+pub fn merge_base(root: &Path, a: &str, b: &str) -> Result<String, String> {
+    let none = || format!("No common ancestor of {a} and {b}");
+    if a.starts_with('-') || b.starts_with('-') {
+        return Err(none());
+    }
+    let out = git::run(root, &["merge-base", a, b]).map_err(|_| none())?;
+    Ok(String::from_utf8_lossy(&out).trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -461,6 +499,39 @@ mod tests {
     }
     fn branch(r: &Path) -> Option<String> {
         head_of(&git_dir(r).unwrap()).unwrap().branch
+    }
+
+    #[test]
+    fn the_base_is_origin_head_else_main_master_origin_main_origin_master() {
+        let r = two_branches();
+        let base = |r: &Path| default_base(r).map(|b| (b.name, b.short));
+        let pair = |n: &str, s: &str| Some((n.to_string(), s.to_string()));
+        assert_eq!(base(r.path()), pair("refs/heads/main", "main"));
+        git(r.path(), &["update-ref", "refs/remotes/origin/trunk", "other"]);
+        git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
+        assert_eq!(base(r.path()), pair("refs/remotes/origin/trunk", "origin/trunk"));
+        git(r.path(), &["update-ref", "-d", "refs/remotes/origin/trunk"]);
+        assert_eq!(base(r.path()), pair("refs/heads/main", "main"), "origin/HEAD pointing nowhere");
+        git(r.path(), &["branch", "-q", "-m", "main", "master"]);
+        assert_eq!(base(r.path()), pair("refs/heads/master", "master"));
+        git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        assert_eq!(base(r.path()), pair("refs/heads/master", "master"), "local master before origin/main");
+        git(r.path(), &["branch", "-q", "-m", "master", "dev"]);
+        assert_eq!(base(r.path()), pair("refs/remotes/origin/main", "origin/main"));
+        git(r.path(), &["update-ref", "-d", "refs/remotes/origin/main"]);
+        assert_eq!(base(r.path()), None);
+    }
+
+    #[test]
+    fn merge_base_is_where_a_branch_split() {
+        let r = two_branches();
+        let main = git(r.path(), &["rev-parse", "main"]).trim().to_string();
+        assert_eq!(merge_base(r.path(), "refs/heads/main", "refs/heads/other"), Ok(main.clone()));
+        git(r.path(), &["switch", "-q", "--orphan", "alone"]);
+        write(r.path(), "z.txt", "z\n");
+        commit_all(r.path(), "alone");
+        assert_eq!(merge_base(r.path(), "refs/heads/main", "HEAD"), Err("No common ancestor of refs/heads/main and HEAD".into()));
+        assert!(merge_base(r.path(), "--all", "HEAD").is_err());
     }
 
     #[test]

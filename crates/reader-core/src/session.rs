@@ -186,6 +186,8 @@ pub enum Command {
     SetAnnotate(bool),
     /// Open the Git Branches popup (its lists load in the background), or close it.
     OpenBranches,
+    /// The popup with only the other worktrees, for Compare with Worktree….
+    OpenWorktrees,
     CloseBranches,
     /// Check out a branch, remote branch, tag or revision (local changes go along when git allows).
     Checkout(lenz_content::branches::Target),
@@ -428,6 +430,12 @@ pub enum CommandId {
     GitBranches,
     NewBranch,
     CheckoutRevision,
+    /// Lenz Diff on the working tree as it is against HEAD.
+    ShowLocalChanges,
+    CompareWithRevision,
+    /// Lenz Diff on everything since the current branch split from its base.
+    ShowBranchChanges,
+    CompareWithWorktree,
     ResolveConflicts,
     AnnotateBlame,
     CloseAnnotations,
@@ -465,7 +473,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 108] = [
+    pub const ALL: [CommandId; 112] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -559,6 +567,10 @@ impl CommandId {
         Self::GitBranches,
         Self::NewBranch,
         Self::CheckoutRevision,
+        Self::ShowLocalChanges,
+        Self::CompareWithRevision,
+        Self::ShowBranchChanges,
+        Self::CompareWithWorktree,
         Self::ResolveConflicts,
         Self::AnnotateBlame,
         Self::CloseAnnotations,
@@ -645,6 +657,10 @@ impl CommandId {
             Self::GitBranches => "Git Branches…",
             Self::NewBranch => "New Branch…",
             Self::CheckoutRevision => "Checkout Tag or Revision…",
+            Self::ShowLocalChanges => "Show Local Changes",
+            Self::CompareWithRevision => "Compare with Branch, Tag or Revision…",
+            Self::ShowBranchChanges => "Show Branch Changes",
+            Self::CompareWithWorktree => "Compare with Worktree…",
             Self::ResolveConflicts => "Resolve Conflicts in Lenz Diff",
             Self::AnnotateBlame => "Annotate with Git Blame",
             Self::CloseAnnotations => "Close Annotations",
@@ -1559,6 +1575,15 @@ pub struct Session {
     rx: async_channel::Receiver<Completion>,
 }
 
+/// Lenz Diff beside `exe` (the terminal app when `terminal`), or why not, for the command `what`.
+pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String, String> {
+    let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
+    if !program.is_file() {
+        return Err(format!("{what}: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
+    }
+    Ok(program.to_string_lossy().into_owned())
+}
+
 impl Session {
     pub fn new(config: Config) -> Self {
         let recent = read_recent(&config.recent);
@@ -1871,6 +1896,10 @@ impl Session {
                 Some(_) if self.state.checkout_running.is_some() => Some("A checkout is running"),
                 Some(_) => None,
             },
+            // Whether there is a base, a commit or another worktree is said when one runs (no git here).
+            CommandId::ShowLocalChanges | CommandId::CompareWithRevision | CommandId::ShowBranchChanges | CommandId::CompareWithWorktree => {
+                self.state.repo.is_none().then_some("Not in a Git repository")
+            }
             CommandId::ResolveConflicts => self.state.stash_conflicts.is_none().then_some("Smart Checkout left no conflicts"),
             CommandId::AnnotateBlame | CommandId::CloseAnnotations => match self.state.active() {
                 None => Some("No file is open"),
@@ -2215,13 +2244,10 @@ impl Session {
     /// commit), started from `exe`'s folder: the window app, or the terminal app when `terminal`.
     pub fn commit_diff_launch(&self, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
         let (sha, root) = self.commit_target().map_err(|e| format!("Show Diff: {e}"))?;
-        let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
-        if !program.is_file() {
-            return Err(format!("Show Diff: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
-        }
+        let program = lenz_diff(exe, terminal, "Show Diff")?;
         // ponytail: one quick `git rev-parse` on the UI thread
         let base = lenz_content::blame::parent_or_empty_tree(&root, &sha).map_err(|e| format!("Show Diff: {e}"))?;
-        Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: vec![base, sha], cwd: Some(root) })
+        Ok(lenz_content::open::Launch { program, args: vec![base, sha], cwd: Some(root) })
     }
 
 
@@ -2282,14 +2308,11 @@ impl Session {
         if std::fs::canonicalize(left).ok() == std::fs::canonicalize(&right).ok() {
             return Err("Compare With: pick a different file or folder".into());
         }
-        let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
-        if !program.is_file() {
-            return Err(format!("Compare With: Lenz Diff is not beside Lenz Code ({}); reinstall Lenz", program.display()));
-        }
+        let program = lenz_diff(exe, terminal, "Compare With")?;
         // ponytail: non-UTF-8 paths go lossy, as in lenz_content::open
         let args = ["--no-index".into(), left.to_string_lossy().into_owned(), right.to_string_lossy().into_owned()];
         let cwd = self.state.project.as_ref().map(|p| p.root().to_path_buf());
-        Ok(lenz_content::open::Launch { program: program.to_string_lossy().into_owned(), args: args.to_vec(), cwd })
+        Ok(lenz_content::open::Launch { program, args: args.to_vec(), cwd })
     }
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
@@ -2768,20 +2791,23 @@ impl Session {
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
             }
-            Command::OpenBranches => {
-                if self.disabled(CommandId::GitBranches).is_some() {
+            c @ (Command::OpenBranches | Command::OpenWorktrees) => {
+                let worktrees_only = matches!(c, Command::OpenWorktrees);
+                if self.disabled(if worktrees_only { CommandId::CompareWithWorktree } else { CommandId::GitBranches }).is_some() {
                     return Effect::default();
                 }
                 let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
-                self.state.branches = Some(crate::branches::BranchesView { loading: true, ..Default::default() });
+                self.state.branches = Some(crate::branches::BranchesView { loading: true, worktrees_only, ..Default::default() });
                 self.branches_requests += 1;
                 let (request, tx) = (self.branches_requests, self.tx.clone());
                 self.jobs.submit(Priority::Visible, move || {
                     // Changed paths are counted only when the Worktrees section shows (more than one).
-                    let result = lenz_content::branches::refs(&root).and_then(|r| {
+                    // Compare with Worktree… shows neither the refs nor the current worktree.
+                    let refs = if worktrees_only { Ok(Default::default()) } else { lenz_content::branches::refs(&root) };
+                    let result = refs.and_then(|r| {
                         let mut worktrees = lenz_content::branches::worktree_list(&root)?;
                         match worktrees.len() > 1 {
-                            true => lenz_content::branches::count_changes(&mut worktrees),
+                            true => worktrees.iter_mut().filter(|w| !(worktrees_only && w.current)).for_each(|w| lenz_content::branches::count_changes(std::slice::from_mut(w))),
                             false => worktrees.iter_mut().for_each(|w| w.dirty = None),
                         }
                         Ok((r, worktrees))
@@ -3893,6 +3919,10 @@ impl Session {
                     match result {
                         Ok((refs, worktrees)) => (v.refs, v.worktrees) = (refs, worktrees),
                         Err(e) => v.error = Some(e),
+                    }
+                    let none = v.worktrees_only && v.error.is_none() && self.state.branch_rows("").is_empty();
+                    if let Some(v) = self.state.branches.as_mut().filter(|_| none) {
+                        v.error = Some("No other worktree".into());
                     }
                     Effect { repaint: true, copy: None }
                 }

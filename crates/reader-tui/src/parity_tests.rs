@@ -1386,3 +1386,70 @@ fn gui_and_terminal_git_branches_list_the_same_rows_and_check_out_the_same_way(c
     assert_eq!(std::fs::read(gr.path().join("a.txt")).unwrap(), std::fs::read(tr.path().join("a.txt")).unwrap());
     assert_eq!(std::fs::read_to_string(tr.path().join("a.txt")).unwrap(), "other\n");
 }
+
+#[gpui::test]
+fn gui_and_terminal_git_comparisons_start_the_same_lenz_diff(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    let r = repo();
+    write(r.path(), "a.txt", "main\n");
+    commit_all(r.path(), "main");
+    git(r.path(), &["tag", "v1"]);
+    write(r.path(), "a.txt", "edited\n");
+    let bin = tempfile::tempdir().unwrap();
+    for name in ["lenz-diff", "lenz-diff-tui"] {
+        std::fs::write(bin.path().join(name), "").unwrap();
+    }
+    let state = tempfile::tempdir().unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&state.path().join("gui"))), Some(r.path().to_path_buf()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    gui.update(&mut visual, |v, _| v.exe = Some(bin.path().join("lenz-code")));
+    let mut tui = App::new(config(&state.path().join("tui")), Some(r.path().to_path_buf()));
+    tui.exe = Some(bin.path().join("lenz-code"));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&Session) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session())) && done(&tui.session) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.branch_label().is_some());
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    // Show Local Changes from each application menu.
+    visual.simulate_click(gpui::point(gpui::px(12.0), gpui::px(10.0)), gpui::Modifiers::default());
+    let button = tui.layout.app_menu;
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: button.x + 1, row: button.y, modifiers: KeyModifiers::NONE }));
+    let group = reader_core::actions::CommandGroup::ALL.iter().position(|g| *g == reader_core::actions::CommandGroup::Git).unwrap();
+    let row = CommandId::ALL.iter().filter(|c| c.group() == reader_core::actions::CommandGroup::Git).position(|c| *c == CommandId::ShowLocalChanges).unwrap();
+    visual.simulate_keystrokes(&format!("{}enter {}enter", "down ".repeat(group), "down ".repeat(row)));
+    for n in [group, row] {
+        for _ in 0..n { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
+        key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    }
+    let gui_args = |visual: &mut VisualTestContext| gui.read_with(visual, |v, _| v.launched.last().map(|l| (l.args.clone(), l.cwd.clone())));
+    let tui_args = |tui: &mut App| tui.foreground.take().map(|l| (l.args, l.cwd));
+    let local = tui_args(&mut tui);
+    assert_eq!(gui_args(&mut visual), local);
+    assert_eq!(local.map(|l| l.0), Some(vec!["HEAD".to_string()]));
+    // Compare with Working Tree from tag v1's row menu.
+    visual.simulate_keystrokes("ctrl-shift-`");
+    tui.run(CommandId::GitBranches);
+    settle(&mut visual, &mut tui, &|s| s.state().branches().is_some_and(|b| !b.loading));
+    visual.simulate_keystrokes("v 1 right down down enter");
+    for c in "v1".chars() { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    key(&mut tui, KeyCode::Right, KeyModifiers::NONE);
+    for _ in 0..2 { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let tag = tui_args(&mut tui);
+    assert_eq!(gui_args(&mut visual), tag);
+    assert_eq!(tag.map(|l| l.0), Some(vec!["refs/tags/v1".to_string()]));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "edited\n");
+}

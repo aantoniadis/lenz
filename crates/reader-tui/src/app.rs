@@ -74,8 +74,8 @@ pub(crate) enum Prompt {
     BranchMenu { target: reader_core::branches::BranchTarget, label: String, query: String, row: usize },
     /// A new branch's name (`input`), where it starts (`None`: HEAD) and whether to check it out (Tab).
     NewBranch { from: Option<String>, checkout: bool },
-    /// Checkout Tag or Revision (`input`).
-    Revision,
+    /// Checkout Tag or Revision (`input`), or Compare with Branch, Tag or Revision when `compare`.
+    Revision { compare: bool },
 }
 /// What a details prompt is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -150,6 +150,9 @@ pub(crate) struct App {
     /// What Open in Editor started; tests record here instead of starting anything.
     #[cfg(test)]
     pub launched: Vec<lenz_content::open::Launch>,
+    /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
+    #[cfg(test)]
+    pub exe: Option<PathBuf>,
     pub layout: crate::render::Geometry,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
@@ -183,6 +186,8 @@ impl App {
             foreground: None,
             #[cfg(test)]
             launched: Vec::new(),
+            #[cfg(test)]
+            exe: None,
             layout: Default::default(),
             crumb_at: 0,
             drag: None,
@@ -605,9 +610,12 @@ impl App {
                 return;
             }
             InterfaceAction::NewBranch => Prompt::NewBranch { from: None, checkout: true },
-            InterfaceAction::CheckoutRevision => Prompt::Revision,
+            InterfaceAction::CheckoutRevision => Prompt::Revision { compare: false },
+            InterfaceAction::CompareWithRevision => Prompt::Revision { compare: true },
+            InterfaceAction::ShowLocalChanges => return self.git_diff(&reader_core::branches::GitDiff::LocalChanges),
+            InterfaceAction::ShowBranchChanges => return self.git_diff(&reader_core::branches::GitDiff::BranchChanges(None)),
             InterfaceAction::ResolveConflicts => {
-                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                let exe = self.exe();
                 match self.session.merge_launch(&exe, true) {
                     Ok(launch) => self.foreground = Some(launch),
                     Err(e) => return self.dispatch(Command::Notice(e)),
@@ -615,7 +623,7 @@ impl App {
                 return;
             }
             InterfaceAction::ShowCommitDiff => {
-                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                let exe = self.exe();
                 let launch = self.session.commit_diff_launch(&exe, true);
                 self.dispatch(Command::CloseCommit);
                 match launch {
@@ -1038,14 +1046,19 @@ impl App {
                 Prompt::Siblings { .. } => "Breadcrumb entries",
                 Prompt::Help => "Reader help",
                 Prompt::Details { title, .. } => title,
-                Prompt::Branches => match self.session.state().branches() {
-                    Some(b) if b.loading => "Git Branches · loading…",
-                    _ => "Git Branches · type to filter · Enter checks out · → more",
-                },
+                Prompt::Branches => {
+                    let Some(b) = self.session.state().branches() else { return String::new() };
+                    return match b.state_text() {
+                        Some(state) => format!("{} · {state}", b.heading()),
+                        None if b.worktrees_only => format!("{} · type to filter · Enter compares · → more", b.heading()),
+                        None => format!("{} · type to filter · Enter checks out · → more", b.heading()),
+                    };
+                }
                 Prompt::BranchMenu { .. } => "Actions · ← back",
                 Prompt::NewBranch { checkout: true, from } => return format!("New branch from {} · [x] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
                 Prompt::NewBranch { checkout: false, from } => return format!("New branch from {} · [ ] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
-                Prompt::Revision => "Checkout tag or revision · Enter",
+                Prompt::Revision { compare: false } => "Checkout tag or revision · Enter",
+                Prompt::Revision { compare: true } => "Compare the working tree with a branch, tag or revision · Enter",
             }
             .to_owned()
         })
@@ -1429,8 +1442,29 @@ impl App {
                 self.new_view = true;
                 self.new_view_root = Some(path);
             }
+            (BranchAction::CompareWithWorkingTree | BranchAction::ChangesSinceBranching, t) => {
+                if let Some(diff) = reader_core::branches::GitDiff::of(&t, action) {
+                    self.git_diff(&diff);
+                }
+            }
             (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
         }
+    }
+    /// Runs Lenz Diff on a Git comparison in this terminal, or shows why not.
+    fn git_diff(&mut self, diff: &reader_core::branches::GitDiff) {
+        let exe = self.exe();
+        match self.session.git_diff_launch(diff, &exe, true) {
+            Ok(launch) => self.foreground = Some(launch),
+            Err(e) => self.dispatch(Command::Notice(e)),
+        }
+    }
+    /// This program, for the apps installed beside it.
+    fn exe(&self) -> PathBuf {
+        #[cfg(test)]
+        if let Some(exe) = &self.exe {
+            return exe.clone();
+        }
+        std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default()
     }
     fn accept(&mut self) {
         let Some(m) = self.modal.as_ref() else { return };
@@ -1477,7 +1511,7 @@ impl App {
                 }
             },
             Prompt::Compare(left) => {
-                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                let exe = self.exe();
                 let launch = match input.trim().is_empty() {
                     true => Err("Enter a file or folder path".to_string()),
                     false => self.session.compare_launch(&left, &self.resolve_path(&input), &exe, true),
@@ -1566,10 +1600,14 @@ impl App {
                 }
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
-            Prompt::Revision => match self.session.validate_revision(&input) {
+            Prompt::Revision { compare } => match self.session.validate_revision(&input) {
                 Ok(_) => {
                     self.close_modal();
-                    self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(input.trim().to_string())));
+                    let rev = input.trim().to_string();
+                    match compare {
+                        true => self.git_diff(&reader_core::branches::GitDiff::Revision(rev)),
+                        false => self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(rev))),
+                    }
                 }
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
@@ -1587,6 +1625,11 @@ impl App {
                     self.modal.as_mut().unwrap().error = Some(why.into());
                     return;
                 }
+                // Asked while the popup is open: what Enter does depends on it (Compare with Worktree compares).
+                let enter = match &choice.target {
+                    ChoiceTarget::Branch(t) => self.session.branch_enter(t),
+                    _ => None,
+                };
                 self.close_modal();
                 match choice.target {
                     ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) => {}
@@ -1602,7 +1645,7 @@ impl App {
                     ChoiceTarget::Branch(target) => match target {
                         reader_core::branches::BranchTarget::Action(id) => self.run(id),
                         t => {
-                            if let Some(action) = self.session.branch_enter(&t) {
+                            if let Some(action) = enter {
                                 self.branch_action(t, action);
                             }
                         }
