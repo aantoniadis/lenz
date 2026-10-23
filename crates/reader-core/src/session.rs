@@ -1190,6 +1190,20 @@ impl<'a> View<'a> {
 }
 
 impl View<'_> {
+    /// Syntax and semantic style at a line-relative source byte; no full-line span list is built.
+    pub fn style_at(&self, line: usize, byte: usize) -> (Option<lenz_content::highlight::Capture>, u8) {
+        if self.snapshot.line_range(line).is_none_or(|range| byte >= range.len()) { return (None, 0); }
+        let syntax = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version)
+            .and_then(|parsed| parsed.capture_at(line, byte));
+        let tokens = self.tab.tokens.as_ref().filter(|(version, _)| *version == self.snapshot.key().version)
+            .map_or(&[][..], |(_, tokens)| tokens.line(line));
+        let token = tokens.get(tokens.partition_point(|token| token.end as usize <= byte))
+            .filter(|token| token.start as usize <= byte);
+        token.map_or((syntax, 0), |token| (token.capture.or(syntax), token.mods))
+    }
+}
+
+impl View<'_> {
     /// A line-relative hover identifier; names clipped by the 4 KiB inspection window are omitted.
     pub fn linkable(&self, line: usize, byte: usize) -> Option<std::ops::Range<usize>> {
         let source = self.snapshot.line_range(line)?;
@@ -1202,9 +1216,8 @@ impl View<'_> {
         if (word.start == 0 && from > source.start) || (word.end == text.len() && end < source.end) { return None; }
         let word = from + word.start - source.start..from + word.end - source.start;
         use lenz_content::highlight::Capture as C;
-        let spans = self.tab.highlights().map(|p| p.spans(line..line + 1)).unwrap_or_default();
-        let quiet = spans.first().is_some_and(|s| s.iter().any(|(r, c)| r.contains(&word.start)
-            && matches!(c, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin)));
+        let quiet = self.tab.highlights().and_then(|parsed| parsed.capture_at(line, word.start))
+            .is_some_and(|capture| matches!(capture, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin));
         (!quiet).then_some(word)
     }
 }
