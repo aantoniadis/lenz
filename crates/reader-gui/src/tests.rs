@@ -372,6 +372,86 @@ fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mu
     assert_eq!(std::fs::read(f.dir.path().join("family.txt")).unwrap(),source.as_bytes());
 }
 
+fn native_literal_point(f: &Fixture, v: &mut VisualTestContext, literal: &str) -> Option<(gpui::Point<Pixels>, f32)> {
+    v.update(|window, cx| {
+        let reader = f.view.read(cx);
+        let state = reader.session.state();
+        let tab = state.active()?;
+        if !reader.current_source_geometry(tab) { return None; }
+        let bounds = reader.text_bounds?;
+        let view = state.view(tab.id())?;
+        let logical = view.layout_rows(reader.rows, state.wrap_cols(tab)).rows;
+        let width = f32::from(bounds.size.width) - num_w() - 16.0;
+        for row in reader.visible_rows() {
+            let Some(at) = row.text.find(literal) else { continue };
+            let parts = reader.source_parts(tab, logical.get(row.y as usize)?, &row, window);
+            let left = native_x(window, reader.metrics(), &row, &parts, at) - reader.hscroll();
+            let right = native_x(window, reader.metrics(), &row, &parts, at + literal.len()) - reader.hscroll();
+            if left >= 0.0 && right <= width {
+                return Some((point(bounds.origin.x + px(num_w() + 8.0 + left), bounds.origin.y + px((row.y + 0.5) * line_h())), reader.char_w));
+            }
+        }
+        None
+    })
+}
+
+fn settle_native_literal(cx: &mut TestAppContext, f: &Fixture, v: &mut VisualTestContext, literal: &str) -> (gpui::Point<Pixels>, f32) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(v, |reader, cx| reader.poll(cx));
+        draw(v);
+        if let Some(point) = native_literal_point(f, v, literal) { return point; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("native literal {literal:?} remains outside the painted viewport: {}", f.view.read_with(v, |r, _| r.status()));
+}
+
+#[gpui::test]
+fn source_windows_native_go_to_and_find_reveal_the_source_before_trailing_spaces(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END" + &" ".repeat(100) + "\n";
+    let f = fixture(cx, Some(("go-to.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(500.0), px(240.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-g 1 : 1 4 0 0 2 enter");
+    let (position, char_w) = settle_native_literal(cx, &f, &mut v, "END");
+    let target = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), target);
+    v.simulate_click(position + point(px(char_w * 0.1), px(0.0)), Modifiers::default());
+    v.simulate_click(position + point(px(char_w * 3.1), px(0.0)), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), target..target + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    v.simulate_keystrokes("home ctrl-f E N D");
+    settle_native_literal(cx, &f, &mut v, "END");
+    assert_eq!(std::fs::read(f.dir.path().join("go-to.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_native_wrapped_reveal_pans_wide_rows_and_unwinds_for_short_rows(cx: &mut TestAppContext) {
+    let source = "    ".to_owned() + &"1️⃣".repeat(80) + " END tail\nshort\n";
+    let f = fixture(cx, Some(("wrapped-pan.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(260.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z ctrl-g 1 : 6 5 enter");
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().column() > 0 && r.current_source_geometry(r.session.state().active().unwrap())) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), 4 + 20 * "1️⃣".len());
+    assert!(f.view.read_with(&v, |r, _| r.session.state().column() > 0), "a native-overwide wrapped row must expose its caret");
+    v.simulate_keystrokes("ctrl-g 2 : 1 enter");
+    settle_native_literal(cx, &f, &mut v, "short");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().column()), 0, "a short wrapped target unwinds the temporary pan");
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped-pan.txt")).unwrap(), source.as_bytes());
+}
+
 #[gpui::test]
 fn source_windows_compact_suppressed_source_and_retain_caret_mapping(cx: &mut TestAppContext) {
     let source = "a".to_owned() + &"\u{200b}".repeat(50_000) + "END\n";
