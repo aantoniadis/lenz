@@ -82,16 +82,18 @@ impl TextSnapshot {
 
     fn indexed(key: SnapshotKey, source: Arc<SourceMeta>, chunks: Vec<Arc<Chunk>>) -> Self {
         let (mut bytes, mut newlines, mut utf16) = (0, 0, 0);
-        let chunks = chunks.into_iter().filter(|c| !c.text().is_empty()).map(|chunk| {
+        let mut owned_bytes = size_of::<Self>();
+        let chunks = chunks.into_iter().map(|chunk| {
             let entry = Entry { chunk, byte: bytes, newline: newlines, utf16 };
             bytes += entry.chunk.text().len();
             newlines += entry.chunk.newlines.len();
             utf16 += entry.chunk.utf16;
+            owned_bytes += size_of::<Entry>() + size_of::<Chunk>()
+                + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() }
+                + entry.chunk.newlines.len() * size_of::<usize>();
             entry
         }).collect();
         let chunks: Arc<[Entry]> = chunks;
-        let owned_bytes = size_of::<Self>() + chunks.len() * size_of::<Entry>()
-            + chunks.iter().map(|entry| size_of::<Chunk>() + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() } + entry.chunk.newlines.len() * size_of::<usize>()).sum::<usize>();
         Self { key, source, chunks, bytes, newlines, utf16, owned_bytes }
     }
 
