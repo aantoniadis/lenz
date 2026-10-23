@@ -902,7 +902,10 @@ fn visible_find_promotes_its_queued_background_materialization() {
 }
 
 #[cfg(unix)]
-fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
+fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) { fake_semantic_session_with_env(dir, &[]) }
+
+#[cfg(unix)]
+fn fake_semantic_session_with_env(dir: &Path, env: &[(&str, &str)]) -> (Session, PathBuf) {
     let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
     let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]);
@@ -910,7 +913,10 @@ fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
     assert!(build.status().unwrap().success());
     let log = dir.join("fake.log");
     let script = dir.join("fake-server");
-    std::fs::write(&script, format!("#!/bin/sh\nexport FAKE_LSP_LOG='{}'\nexec '{}' \"$@\"\n", log.display(), profile.join("examples/fake_lsp").display())).unwrap();
+    let mut sh = format!("#!/bin/sh\nexport FAKE_LSP_LOG='{}'\n", log.display());
+    for (key, value) in env { sh.push_str(&format!("export {key}='{}'\n", value.replace('\'', "'\\''"))); }
+    sh.push_str(&format!("exec '{}' \"$@\"\n", profile.join("examples/fake_lsp").display()));
+    std::fs::write(&script, sh).unwrap();
     std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut s = session(dir);
     let providers = dir.join("config/lenz-reader/providers.json");
@@ -919,6 +925,133 @@ fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
     std::fs::write(providers, settings.to_string()).unwrap();
     s.state.semantics.reload_runtime("rust-analyzer");
     (s, log)
+}
+
+
+#[cfg(unix)]
+fn desired_matches_current(s: &Session, path: &Path) -> bool {
+    s.state().current_source().is_some_and(|source| source.source() == path
+        && s.state.semantics.desired().get(path).is_some_and(|doc| doc.version() == source.key().version))
+}
+
+#[cfg(unix)]
+fn desired_text_probe(s: &Session, path: &Path) -> (std::sync::Weak<str>, usize) {
+    let desired = s.state.semantics.desired();
+    let doc = desired.get(path).unwrap();
+    assert_eq!(doc.version(), s.state().current_source().unwrap().key().version);
+    // Outgoing::Text and TextFlight retain this same Arc; drop the cloned map on return.
+    (Arc::downgrade(doc.text()), doc.text().len())
+}
+
+#[cfg(unix)]
+fn release_historical_protocol_reader_owners(s: &mut Session) {
+    // Current text stays usable; historical source/cache/analysis owners must be gone.
+    s.cache = InactiveCache::new(0);
+    s.release_current();
+    s.analysis.close();
+    s.analysis.retain_sources(|_| false);
+    // Occupying all existing workers behind earlier work is a drain barrier, not another pool.
+    let (entered, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let entered = entered.clone();
+        s.jobs.submit(Priority::Background, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).expect("old CPU work drained"); }
+    for release in releases { release.send(()).unwrap(); }
+    while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+    s.dispatch(Completion::AnalysisWake);
+    assert!(s.cache.is_empty());
+    assert!(s.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref()).all(|source| {
+        s.state().current_source().is_some_and(|current| source.key() == current.key())
+    }), "historical frontend source owners were released");
+}
+
+#[cfg(unix)]
+fn protocol_messages(log: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log).unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_blocked_writer_keeps_only_bounded_text_versions_and_sends_current_text_before_asking() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"writer\"\n");
+    let release = d.path().join("release"); let release_text = release.to_string_lossy();
+    let source = |version| format!("fn keep() {{}}\n/*version-{version:02} {}*/\n", "x".repeat(256 * 1024));
+    let path = write(&root, "src/main.rs", source(0).as_bytes());
+    let (mut s, log) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")]);
+    s.dispatch(Command::Open(path.clone()));
+    settle(&mut s, |s| desired_matches_current(s, &path) && s.state().provider().is_some_and(|v| matches!(v.status, semantics::Status::Ready | semantics::Status::Indexing(_))));
+    settle(&mut s, |_| release.with_extension("paused").exists());
+    let mut texts = Vec::new();
+    for version in 1..=32 {
+        settle(&mut s, |s| desired_matches_current(s, &path));
+        texts.push(desired_text_probe(&s, &path).0);
+        std::fs::write(&path, source(version)).unwrap(); s.dispatch(Command::Reload);
+        let expected = format!("version-{version:02}");
+        settle(&mut s, |s| s.state().loading().is_none() && s.state().current_source().is_some_and(|current| source_text(current).contains(&expected)));
+    }
+    settle(&mut s, |s| desired_matches_current(s, &path) && s.state().highlights().is_some());
+    release_historical_protocol_reader_owners(&mut s);
+    assert!(texts[0].upgrade().is_some(), "positive control: first blocked historical payload survives reader-owner release");
+    let retained = texts.iter().filter(|text| text.upgrade().is_some()).count();
+    assert!(retained <= 3, "the blocked protocol writer retained {retained} superseded text versions");
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Definition { peek: false });
+    assert!(s.state().asking().is_some());
+    std::fs::write(&release, b"").unwrap(); settle(&mut s, |s| s.state().asking().is_none());
+    settle(&mut s, |_| texts.iter().all(|text| text.upgrade().is_none()));
+    let messages = protocol_messages(&log);
+    let asked = messages.iter().position(|m| m["method"] == "textDocument/definition").unwrap();
+    let current_text = source(32);
+    let changed = messages.iter().position(|m| m["method"] == "textDocument/didChange" && m["params"]["contentChanges"][0]["text"].as_str() == Some(&current_text)).unwrap();
+    assert!(changed < asked, "a request cannot overtake its exact current text");
+}
+
+#[cfg(unix)]
+#[test]
+fn decoded_expansion_and_closed_uri_churn_obey_the_global_writer_byte_budget() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"writer\"\n");
+    let start = write(&root, "src/start.rs", b"fn start() {}\n");
+    let release = d.path().join("release"); let release_text = release.to_string_lossy();
+    let (mut s, log) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")]);
+    s.dispatch(Command::Open(start.clone())); settle(&mut s, |s| desired_matches_current(s, &start));
+    settle(&mut s, |_| release.with_extension("paused").exists()); s.dispatch(Command::Close);
+    // Raw UTF16 bytes remain eligible while CJK expands to three UTF8 bytes per character.
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend("/*".encode_utf16().chain(std::iter::repeat_n(0x4e00, 2_500_000)).chain("*/\n".encode_utf16()).flat_map(u16::to_le_bytes));
+    let mut old = Vec::new();
+    for i in 0..4 {
+        let path = write(&root, &format!("src/expanded-{i}.rs"), &bytes);
+        s.dispatch(Command::Open(path.clone())); settle(&mut s, |s| desired_matches_current(s, &path));
+        let current = s.state().current_source().unwrap();
+        assert!(!current.is_large(), "existing raw-byte eligibility must be preserved");
+        assert!(current.len_bytes() > 7 << 20, "fixture must demonstrate legacy decoding expansion: {}", current.encoding());
+        old.push(desired_text_probe(&s, &path)); s.dispatch(Command::Close);
+    }
+    // Replace each cached source before measuring the transport's historical ownership.
+    for i in 0..4 {
+        let path = write(&root, &format!("src/expanded-{i}.rs"), b"fn replacement() {}\n");
+        s.dispatch(Command::Open(path.clone()));
+        settle(&mut s, |s| desired_matches_current(s, &path) && s.state().current_source().is_some_and(|source| source_text(source).starts_with("fn replacement")));
+        s.dispatch(Command::Close);
+    }
+    s.dispatch(Command::Open(start.clone()));
+    settle(&mut s, |s| desired_matches_current(s, &start) && s.state().highlights().is_some());
+    release_historical_protocol_reader_owners(&mut s);
+    assert!(old[0].0.upgrade().is_some(), "positive control: first expanded blocked payload survives reader-owner release");
+    let retained: usize = old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum();
+    assert!(retained <= 15 << 20, "closed historical UTF8 payload retained {retained} bytes");
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Definition { peek: false });
+    assert!(s.state().asking().is_some()); std::fs::write(&release, b"").unwrap();
+    settle(&mut s, |s| s.state().asking().is_none());
+    settle(&mut s, |_| old.iter().all(|(text, _)| text.upgrade().is_none()));
+    let messages = protocol_messages(&log);
+    assert!(messages.iter().filter(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|uri| uri.ends_with("start.rs"))).count() >= 2);
+    assert!(s.state().provider().is_some_and(|v| matches!(v.status, semantics::Status::Ready | semantics::Status::Indexing(_))), "backpressure defers without failing the provider");
 }
 
 #[test]
@@ -6727,10 +6860,11 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     let c = write(d.path(), "c.txt", &[b'c'; 128]);
     let fourth = write(d.path(), "d.txt", &[b'd'; 128]);
     let mut s = session(d.path());
-    s.cache = InactiveCache::new(900);
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     let tab = s.state().active().unwrap().id();
     let admitted = s.state().view(tab).unwrap().snapshot().clone();
+    let budget = admitted.storage_bytes() * 2;
+    s.cache = InactiveCache::new(budget);
     let worker_document = analysis_document(&mut s);
     let loaded = Arc::downgrade(&worker_document);
     assert!(s.analysis.ensure(crate::analysis::Input::new(admitted.clone(), loaded.clone(), 0, true), Priority::Background));
@@ -6743,6 +6877,7 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     open(&mut s, Command::OpenRetained(b.clone()), "b.txt");
     assert!(s.state().view(tab).is_none());
     assert!(weak.upgrade().is_some(), "the inactive cache retains reusable text");
+    assert!(s.cache.peek(&a).is_some_and(|cached| std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(&cached))), "reuse comes from the actual inactive cache");
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     assert!(Arc::ptr_eq(&weak.upgrade().unwrap(), s.state().view(tab).unwrap().snapshot()));
     open(&mut s, Command::OpenRetained(b), "b.txt");
@@ -6750,7 +6885,7 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     open(&mut s, Command::OpenRetained(fourth), "d.txt");
     assert!(weak.upgrade().is_none(), "eviction frees the actual indexed text");
     assert!(loaded.upgrade().is_none(), "admission must not turn evicted frontend data into a strong cache");
-    assert!(s.inactive_bytes() <= 900, "both representations share the budget");
+    assert!(s.inactive_bytes() <= budget, "retained source storage stays within the fixture budget");
     s.dispatch(Command::ActivateTab(tab));
     settle(&mut s, |s| s.state().view(tab).is_some());
     let current = s.state().view(tab).unwrap();
