@@ -139,20 +139,14 @@ impl State {
     pub fn branch_rows(&self, query: &str) -> Vec<BranchRow> {
         let Some(v) = &self.branches else { return Vec::new() };
         let row = |section, label: &str, current, target| BranchRow { section, label: label.to_string(), current, target };
-        let mut rows = vec![
-            row("", CommandId::NewBranch.label(), false, BranchTarget::Action(CommandId::NewBranch)),
-            row("", CommandId::CheckoutRevision.label(), false, BranchTarget::Action(CommandId::CheckoutRevision)),
-        ];
-        let current = v.refs.current.as_deref();
-        rows.extend(v.refs.recent.iter().map(|b| row("Recent", b, false, BranchTarget::Branch(b.clone()))));
-        rows.extend(v.refs.local.iter().map(|b| row("Local", b, Some(b.as_str()) == current, BranchTarget::Branch(b.clone()))));
-        rows.extend(v.refs.remote.iter().map(|b| row("Remote", b, false, BranchTarget::Remote(b.clone()))));
-        rows.extend(v.refs.tags.iter().map(|t| row("Tags", t, false, BranchTarget::Tag(t.clone()))));
-        if v.worktrees_only {
-            rows.clear();
+        let mut rows = Vec::new();
+        if !v.worktrees_only {
+            rows.extend(self.ref_rows(v));
         }
         if v.worktrees.len() > 1 {
-            rows.extend(v.worktrees.iter().filter(|w| !v.worktrees_only || !w.current && w.path.is_dir()).map(|w| {
+            // Compare with Worktree… lists the others that have a folder of files (a bare repository has none).
+            let comparable = |w: &Worktree| !w.current && w.head.is_some() && w.path.is_dir();
+            rows.extend(v.worktrees.iter().filter(|w| !v.worktrees_only || comparable(w)).map(|w| {
                 let name = w.branch.clone().or_else(|| w.head.as_ref().map(|h| h.get(..7).unwrap_or(h).to_string())).unwrap_or_else(|| "(bare)".into());
                 let changed = w.dirty.filter(|&n| n > 0).map_or(String::new(), |n| format!(" · {n} changed"));
                 let missing = if w.path.is_dir() { "" } else { " · missing" };
@@ -162,6 +156,20 @@ impl State {
         }
         let query = query.to_lowercase();
         rows.retain(|r| r.label.to_lowercase().contains(&query));
+        rows
+    }
+    /// The popup's own commands, then Recent, Local, Remote and Tags.
+    fn ref_rows(&self, v: &BranchesView) -> Vec<BranchRow> {
+        let row = |section, label: &str, current, target| BranchRow { section, label: label.to_string(), current, target };
+        let mut rows = vec![
+            row("", CommandId::NewBranch.label(), false, BranchTarget::Action(CommandId::NewBranch)),
+            row("", CommandId::CheckoutRevision.label(), false, BranchTarget::Action(CommandId::CheckoutRevision)),
+        ];
+        let current = v.refs.current.as_deref();
+        rows.extend(v.refs.recent.iter().map(|b| row("Recent", b, false, BranchTarget::Branch(b.clone()))));
+        rows.extend(v.refs.local.iter().map(|b| row("Local", b, Some(b.as_str()) == current, BranchTarget::Branch(b.clone()))));
+        rows.extend(v.refs.remote.iter().map(|b| row("Remote", b, false, BranchTarget::Remote(b.clone()))));
+        rows.extend(v.refs.tags.iter().map(|t| row("Tags", t, false, BranchTarget::Tag(t.clone()))));
         rows
     }
 }
@@ -190,8 +198,9 @@ impl crate::session::Session {
             BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
             BranchTarget::Branch(_) | BranchTarget::Remote(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE, ("Show Changes Since Branching from Here", BranchAction::ChangesSinceBranching)],
             BranchTarget::Tag(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
-            // A worktree whose folder is gone (`git worktree prune` tidies it): nothing to open.
-            BranchTarget::Worktree(p) if !p.is_dir() => Vec::new(),
+            // A worktree whose folder is gone (`git worktree prune` tidies it), or a bare repository (no `.git` in
+            // it, no files): nothing to open or compare.
+            BranchTarget::Worktree(p) if !p.join(".git").exists() => Vec::new(),
             BranchTarget::Worktree(p) => {
                 let canonical = |p: &std::path::Path| std::fs::canonicalize(p).ok();
                 let here = repo.is_some_and(|r| canonical(p).is_some() && canonical(p) == canonical(&r.root));
@@ -202,6 +211,16 @@ impl crate::session::Session {
             }
         }
     }
+}
+
+/// git's tree with nothing in it.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// `rev` as Lenz Diff gets it: its name, or its commit `sha` when Lenz Diff would take the name for a subcommand or
+/// git for a file in `root` ("both revision and filename").
+fn by_name(root: &std::path::Path, rev: &str, sha: String) -> String {
+    let file = root.join(rev).symlink_metadata().is_ok();
+    if file || matches!(rev, "log" | "pr" | "merge" | "report") { sha } else { rev.to_string() }
 }
 
 const COMPARE: (&str, BranchAction) = ("Compare with Working Tree", BranchAction::CompareWithWorkingTree);
@@ -313,20 +332,21 @@ impl crate::session::Session {
         // ponytail: a git call or two on the UI thread, as Show Diff does
         let fail = |e: String| format!("{what}: {e}");
         let rev = match diff {
-            GitDiff::Worktree(other) => return self.compare_launch(root, other, exe, terminal),
-            GitDiff::LocalChanges => {
-                git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
-                "HEAD".to_string()
+            GitDiff::Worktree(other) => {
+                let launch = self.compare_launch(root, other, exe, terminal).map_err(|e| e.replacen("Compare With:", "Compare with Worktree:", 1))?;
+                return Ok(lenz_content::open::Launch { cwd: Some(root.clone()), ..launch });
             }
+            // No commit yet: every file is new.
+            GitDiff::LocalChanges => match git_branches::verify_commit(root, "HEAD") {
+                Ok(sha) => by_name(root, "HEAD", sha),
+                Err(_) => EMPTY_TREE.to_string(),
+            },
             GitDiff::Revision(rev) => {
                 let sha = git_branches::verify_commit(root, rev).map_err(fail)?;
-                // A name Lenz Diff takes as a subcommand goes by its commit.
-                match rev.trim() {
-                    "log" | "pr" | "merge" | "report" => sha,
-                    rev => rev.to_string(),
-                }
+                by_name(root, rev.trim(), sha)
             }
             GitDiff::BranchChanges(from) => {
+                git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
                 let base = match from {
                     Some(from) => from.clone(),
                     None => {

@@ -1420,6 +1420,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unborn_repository_against_the_empty_tree_shows_every_file_as_new() {
+        let r = repo();
+        write(r.path(), "a.txt", "a\n");
+        let set = ChangeSet::load(&git_spec(false, &[crate::selection_title::EMPTY_TREE], &[], true), r.path()).unwrap();
+        assert_eq!(listing(&set), [("a.txt", Status::Untracked)]);
+    }
+
+    #[test]
     fn folder_compare_lists_git_files_inside_a_work_tree() {
         let r = repo();
         write(r.path(), ".gitignore", "target/\n*.log\n");

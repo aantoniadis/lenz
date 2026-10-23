@@ -5356,6 +5356,13 @@ fn gui_the_git_menu_compares_the_working_tree(cx: &mut TestAppContext) {
     draw(&mut v);
     let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
     assert!(rows[1].starts_with("Compare the working tree with a branch, tag or revision"), "{rows:?}");
+    // Narrow: the prompt stays inside the window, its hint wrapped.
+    v.simulate_resize(size(px(260.0), px(200.0)));
+    draw(&mut v);
+    let (bounds, lines) = f.view.read_with(&v, |r, _| r.modal_layout().map(|l| (l.bounds, l.lines.len())).unwrap());
+    assert!(bounds.right() <= px(260.0) && lines > 2, "{bounds:?} {lines}");
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
     type_text(&mut v, "nope");
     v.simulate_keystrokes("enter");
     let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
@@ -5410,6 +5417,8 @@ fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppCo
     draw(&mut v);
     let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
     assert_eq!(rows[1], "Compare with Worktree — No other worktree");
+    let bounds = f.view.read_with(&v, |r, _| r.modal_layout().map(|l| l.bounds).unwrap());
+    assert!(bounds.right() <= px(300.0), "{bounds:?}");
     v.simulate_keystrokes("enter escape");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().branches().is_none()));
     assert_eq!(launched_args(&mut v, &f).len(), 3);

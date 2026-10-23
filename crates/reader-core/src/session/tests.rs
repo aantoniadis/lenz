@@ -5379,7 +5379,9 @@ mod git_branches {
         let mut s = session(&fresh.path().join(".lenz-test"));
         s.dispatch(Command::OpenRoot(fresh.path().to_path_buf()));
         settle(&mut s, |s| s.branch_label().is_some());
-        assert_eq!(args(&s, &GitDiff::LocalChanges, &exe), Err("Show Local Changes: there is no commit yet".into()));
+        // No commit yet: every file is new.
+        assert_eq!(args(&s, &GitDiff::LocalChanges, &exe), Ok(vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()]));
+        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Branch Changes: there is no commit yet".into()));
     }
 
     #[test]
@@ -5434,6 +5436,56 @@ mod git_branches {
         assert_eq!(launch.args, ["--no-index".to_string(), root.to_string_lossy().into_owned(), second.to_string_lossy().into_owned()]);
         assert_eq!(launch.cwd, Some(root));
         assert!(s.git_diff_launch(&GitDiff::Worktree(wt.path().join("gone")), &exe, false).is_err());
+    }
+
+    #[test]
+    fn a_bare_repository_is_never_a_worktree_to_compare_with() {
+        // The `repo.git` beside its worktrees layout.
+        let d = tempfile::tempdir().unwrap();
+        let seed = repo();
+        put(seed.path(), "a.txt", "a\n");
+        commit_all(seed.path(), "1");
+        git(d.path(), &["clone", "-q", "--bare", &seed.path().to_string_lossy(), "b.git"]);
+        let bare = d.path().join("b.git");
+        for (name, branch) in [("one", "x"), ("two", "y")] {
+            git(&bare, &["worktree", "add", "-q", "-b", branch, &d.path().join(name).to_string_lossy()]);
+        }
+        let mut s = session(&d.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(d.path().join("one")));
+        settle(&mut s, |s| s.branch_label().is_some());
+        s.dispatch(Command::OpenWorktrees);
+        settle(&mut s, |s| s.state().branches().is_some_and(|b| !b.loading));
+        let rows: Vec<_> = s.state().branch_rows("").into_iter().map(|r| r.target).collect();
+        assert_eq!(rows, [BranchTarget::Worktree(d.path().join("two"))]);
+        s.dispatch(Command::CloseBranches);
+        open_branches(&mut s);
+        let bare_row = s.state().branch_rows("(bare)").into_iter().next().expect("listed in the full popup");
+        assert!(s.branch_actions(&bare_row.target).is_empty());
+    }
+
+    #[test]
+    fn a_name_that_is_also_a_file_goes_to_lenz_diff_as_its_commit() {
+        let (r, _wt, s) = repo_session();
+        let (_bin, exe) = exe();
+        let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        git(r.path(), &["branch", "docs"]);
+        put(r.path(), "docs/x.md", "x\n");
+        assert_eq!(args(&s, &GitDiff::Revision("docs".into()), &exe), Ok(vec![sha.clone()]));
+        put(r.path(), "HEAD", "a file named HEAD\n");
+        assert_eq!(args(&s, &GitDiff::LocalChanges, &exe), Ok(vec![sha]));
+    }
+
+    #[test]
+    fn compare_with_worktree_runs_in_the_repository_and_says_its_name() {
+        let (r, wt, mut s) = repo_session();
+        let (_bin, exe) = exe();
+        // A file open from the repository, no folder: the launch still runs in the repository.
+        s.dispatch(Command::OpenWorktree(wt.path().join("second")));
+        settle(&mut s, |s| s.branch_label().as_deref() == Some("⎇ other"));
+        let launch = s.git_diff_launch(&GitDiff::Worktree(r.path().to_path_buf()), &exe, false).unwrap();
+        assert_eq!(launch.cwd, Some(std::fs::canonicalize(wt.path().join("second")).unwrap()));
+        let gone = s.git_diff_launch(&GitDiff::Worktree(wt.path().join("gone")), &exe, false).unwrap_err();
+        assert!(gone.starts_with("Compare with Worktree: "), "{gone}");
     }
 
     #[test]

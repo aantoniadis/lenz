@@ -2802,10 +2802,12 @@ impl Session {
                 let (request, tx) = (self.branches_requests, self.tx.clone());
                 self.jobs.submit(Priority::Visible, move || {
                     // Changed paths are counted only when the Worktrees section shows (more than one).
-                    let result = lenz_content::branches::refs(&root).and_then(|r| {
+                    // Compare with Worktree… shows neither the refs nor the current worktree.
+                    let refs = if worktrees_only { Ok(Default::default()) } else { lenz_content::branches::refs(&root) };
+                    let result = refs.and_then(|r| {
                         let mut worktrees = lenz_content::branches::worktree_list(&root)?;
                         match worktrees.len() > 1 {
-                            true => lenz_content::branches::count_changes(&mut worktrees),
+                            true => worktrees.iter_mut().filter(|w| !(worktrees_only && w.current)).for_each(|w| lenz_content::branches::count_changes(std::slice::from_mut(w))),
                             false => worktrees.iter_mut().for_each(|w| w.dirty = None),
                         }
                         Ok((r, worktrees))
