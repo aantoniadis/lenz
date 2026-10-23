@@ -510,7 +510,7 @@ fn raster_image_and_markdown_preview_use_shared_decoded_content() {
     let tab = app.session.state().active().unwrap();
     app.preview_selection = Some((
         tab.id(),
-        app.session.state().view(tab.id()).unwrap().snapshot().key().version,
+        crate::app::PreviewSource::new(&app.session.state().view(tab.id()).unwrap()),
         reader_core::session::Selection { anchor: 0, head: 7 },
     ));
     let selected = draw(&mut app, 50, 15);
