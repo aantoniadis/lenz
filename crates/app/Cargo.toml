@@ -30,8 +30,6 @@ gpui = { workspace = true, optional = true }
 lenz-gpui = { path = "../gpui", optional = true }
 # Zero-width detection for the combining-mark cap (src/document.rs); the TUI already builds it.
 unicode-width = "0.2"
-# Encoding names for writing files back (src/write.rs); decoding is in lenz-content.
-encoding_rs = "0.8.42"
 # Image decoding (src/images.rs). Same version and a subset of the features gpui already enables, so it unifies: nothing new to compile.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # SVG rasterising (src/images.rs); embedded raster data is enabled for GUI builds.
@@ -54,7 +52,7 @@ async-channel = "2.5.0"
 
 [dev-dependencies]
 # The in-process memory probe for this crate's tests.
-lenz-content = { path = "../content", features = ["perf-probe", "git-testing"] }
+lenz-content = { path = "../content", features = ["perf-probe", "git-testing", "write-testing"] }
 # XZ archive fixture generation.
 lzma-rust2 = { version = "0.23", default-features = false, features = ["encoder"] }
 

@@ -32,3 +32,5 @@ pub mod watch;
 pub mod workspace;
 
 pub mod navigation;
+
+pub mod text;

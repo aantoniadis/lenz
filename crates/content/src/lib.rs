@@ -28,3 +28,4 @@ pub mod select;
 mod syntax_arena;
 pub mod theme;
 pub mod wrap;
+pub mod write;
