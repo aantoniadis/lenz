@@ -357,13 +357,15 @@ fn leaving_a_file_keeps_it_inactive_and_returning_reuses_it() {
     s.dispatch(Command::Open(a.clone()));
     settle(&mut s, opened);
     let first = s.state().document().unwrap().clone();
+    let current = s.state().current().unwrap();
     s.dispatch(Command::Open(b));
     settle(&mut s, |s| s.state().document().is_some());
-    assert_eq!(s.inactive_bytes(), first.bytes());
+    assert_eq!(s.inactive_bytes(), first.bytes() + current.storage_bytes());
     s.dispatch(Command::Open(a.clone()));
     settle(&mut s, |s| s.state().document().is_some());
     assert!(Arc::ptr_eq(s.state().document().unwrap(), &first), "served from the cache, not read again");
-    assert_eq!(s.inactive_bytes(), s.state().document().map_or(0, |_| doc_bytes(&s, "b.txt")));
+    assert!(Arc::ptr_eq(&s.state().current().unwrap(), &current), "indexed text is reused with the compatibility document");
+    assert!(s.inactive_bytes() > doc_bytes(&s, "b.txt"));
     // A file changed since it was left is read again.
     s.dispatch(Command::Open(d.path().join("b.txt")));
     settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.txt")));
@@ -4115,14 +4117,19 @@ fn the_old_path_of_a_followed_rename_opens_the_file_now_there() {
     let a = write(d.path(), "a.txt", b"content\n");
     let mut s = session(d.path());
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let original = s.state().view(tab).unwrap().snapshot().key().buffer;
     let moved = d.path().join("moved.txt");
     std::fs::rename(&a, &moved).unwrap();
     settle(&mut s, |s| s.state().active().unwrap().source() == moved);
+    assert_eq!(s.state().view(tab).unwrap().snapshot().source(), moved);
+    assert_eq!(s.state().view(tab).unwrap().snapshot().key().buffer, original);
     std::fs::write(&a, b"new\n").unwrap();
     s.dispatch(Command::Open(a.clone()));
     settle(&mut s, opened);
     assert_eq!(s.state().active().unwrap().source(), a, "a tab for a.txt");
     assert_eq!(s.state().document().unwrap().line(0), "new");
+    assert_ne!(s.state().current().unwrap().key().buffer, original);
 }
 
 #[test]
@@ -5893,4 +5900,157 @@ fn two_explorer_entries_compare_with_ctrl_d() {
     assert!(s.state().tree_marks().is_empty());
     assert_eq!(CommandId::CompareSelected.shortcut(), Some("Ctrl+D"));
     assert_eq!(CommandId::CompareSelected.label(), "Compare Selected");
+}
+
+#[test]
+fn current_views_share_source_identity_and_preserve_source_coordinates() {
+    let d = tempfile::tempdir().unwrap();
+    let bytes: Vec<u8> = [0xff, 0xfe].into_iter().chain("α\r\n😀z\n".encode_utf16().flat_map(u16::to_le_bytes)).collect();
+    let path = write(d.path(), "current.txt", &bytes);
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "current.txt");
+    let first = s.state().active().unwrap().id();
+    let snapshot = s.state().view(first).unwrap().snapshot().clone();
+    assert_eq!(snapshot.source_meta().original_encoding(), "UTF-16LE");
+    assert!(snapshot.source_meta().had_bom());
+    s.dispatch(Command::Split(Split::Columns));
+    let second = s.state().active().unwrap().id();
+    assert_ne!(first, second);
+    assert!(Arc::ptr_eq(&snapshot, s.state().view(second).unwrap().snapshot()));
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(2) }));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 8, head: 8 }));
+    assert_ne!(s.state().view(first).unwrap().tab().selection(), s.state().selection());
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("α\r\n😀z\n"));
+    let mut other = session(&d.path().join("independent"));
+    open(&mut other, Command::Open(path), "current.txt");
+    assert!(!Arc::ptr_eq(&snapshot, other.state().view(other.state().active().unwrap().id()).unwrap().snapshot()));
+    s.dispatch(Command::GoToLine(LineColumn { line: 99, column: None }));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 10, head: 10 }), "Reader retains the final empty source line");
+}
+
+#[test]
+fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "a.txt", &[b'a'; 128]);
+    let b = write(d.path(), "b.txt", &[b'b'; 128]);
+    let c = write(d.path(), "c.txt", &[b'c'; 128]);
+    let fourth = write(d.path(), "d.txt", &[b'd'; 128]);
+    let mut s = session(d.path());
+    s.cache = InactiveCache::new(900);
+    open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let snapshot = s.state().view(tab).unwrap().snapshot();
+    let key = snapshot.key();
+    let weak = Arc::downgrade(snapshot);
+    open(&mut s, Command::OpenRetained(b.clone()), "b.txt");
+    assert!(s.state().view(tab).is_none());
+    assert!(weak.upgrade().is_some(), "the inactive cache retains reusable text");
+    open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+    assert!(Arc::ptr_eq(&weak.upgrade().unwrap(), s.state().view(tab).unwrap().snapshot()));
+    open(&mut s, Command::OpenRetained(b), "b.txt");
+    open(&mut s, Command::OpenRetained(c), "c.txt");
+    open(&mut s, Command::OpenRetained(fourth), "d.txt");
+    assert!(weak.upgrade().is_none(), "eviction frees the actual indexed text");
+    assert!(s.inactive_bytes() <= 900, "both representations share the budget");
+    s.dispatch(Command::ActivateTab(tab));
+    settle(&mut s, |s| s.state().view(tab).is_some());
+    let current = s.state().view(tab).unwrap();
+    assert_eq!(current.snapshot().key().buffer, key.buffer);
+    assert_eq!(current.snapshot().copy_range(0..128).as_deref(), Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"));
+}
+
+#[test]
+fn current_view_loading_empty_and_image_sources_keep_reader_behavior() {
+    let d = tempfile::tempdir().unwrap();
+    let empty = write(d.path(), "empty.txt", b"");
+    let image = write(d.path(), "image.png", &png(1, 1, [255, 0, 0, 255]));
+    let mut s = session(d.path());
+    assert!(s.state().view(TabId(0)).is_none());
+    s.dispatch(Command::SelectAll);
+    s.dispatch(Command::Copy);
+    s.dispatch(Command::Reload);
+    s.dispatch(Command::OpenRetained(empty));
+    let tab = s.state().active().unwrap().id();
+    assert!(s.state().view(tab).is_none(), "a load is admitted only on completion");
+    settle(&mut s, |s| s.state().view(tab).is_some());
+    s.dispatch(Command::GoToLine(LineColumn { line: 9, column: Some(9) }));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 0, head: 0 }));
+    assert_eq!(s.dispatch(Command::Copy).copy, None);
+    open(&mut s, Command::OpenRetained(image), "image.png");
+    let view = s.state().view(s.state().active().unwrap().id()).unwrap();
+    assert!(view.snapshot().image().is_some());
+    assert_eq!(s.disabled(CommandId::GoToLine), Some("An image has no lines"));
+}
+
+#[cfg(unix)]
+#[test]
+fn canonical_source_aliases_keep_one_current_identity() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "source.txt", b"original\n");
+    let alias = d.path().join("alias.txt");
+    std::os::unix::fs::symlink(&path, &alias).unwrap();
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(alias), "alias.txt");
+    let first = s.state().active().unwrap().id();
+    let current = s.state().view(first).unwrap().snapshot().clone();
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::OpenRetained(path));
+    settle(&mut s, opened);
+    assert!(Arc::ptr_eq(&current, s.state().view(s.state().active().unwrap().id()).unwrap().snapshot()));
+}
+
+#[test]
+fn current_caret_and_word_selection_keep_unicode_coordinates_on_a_long_line() {
+    let d = tempfile::tempdir().unwrap();
+    let text = format!("{}😀z", "a ".repeat(450_000));
+    let path = write(d.path(), "long.txt", text.as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path), "long.txt");
+    s.dispatch(Command::GoToLine(LineColumn { line: 1, column: Some(900_002) }));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 900_004, head: 900_004 }));
+    s.dispatch(Command::MoveCaret(Motion::Left));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 900_000, head: 900_000 }));
+    s.dispatch(Command::ClickSelect { at: 900_002, clicks: 2 });
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("😀"));
+    let view = s.state().view(s.state().active().unwrap().id()).unwrap();
+    let window = view.line_window(0, 900_000, 4).unwrap();
+    assert_eq!(window.text, "😀");
+    assert_eq!(window.bytes, 900_000..900_004);
+    assert_eq!(window.utf16, 900_000..900_002);
+}
+
+#[test]
+fn current_refresh_updates_split_compatibility_without_merging_view_positions_or_sessions() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "refresh.rs", b"fn alpha() {}\nfn beta() {}\n");
+    let mut s = session(d.path());
+    let mut other = session(&d.path().join("other"));
+    open(&mut s, Command::OpenRetained(path.clone()), "refresh.rs");
+    open(&mut other, Command::OpenRetained(path.clone()), "refresh.rs");
+    s.watcher = Watcher::new(|_| true);
+    other.watcher = Watcher::new(|_| true);
+    let first = s.state().active().unwrap().id();
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 8 }));
+    s.dispatch(Command::Split(Split::Columns));
+    let second = s.state().active().unwrap().id();
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(4) }));
+    let second_position = s.state().selection();
+    settle(&mut s, |s| s.state().tabs().iter().all(|tab| tab.highlights().is_some()));
+    let previous = s.state().view(first).unwrap().snapshot().key();
+    std::fs::write(&path, b"fn alpha() {}\nfn zeta() {}\n").unwrap();
+    s.dispatch(Command::Reload);
+    settle(&mut s, |s| s.state().view(second).unwrap().snapshot().key() != previous);
+    let left = s.state().view(first).unwrap();
+    let right = s.state().view(second).unwrap();
+    assert!(Arc::ptr_eq(left.snapshot(), right.snapshot()));
+    assert!(Arc::ptr_eq(left.tab().document().unwrap(), right.tab().document().unwrap()));
+    assert_eq!(left.copy_selection().as_deref(), Some("alpha"));
+    assert_eq!(right.tab().selection(), second_position);
+    assert_eq!(right.snapshot().copy_range(17..21).as_deref(), Some("zeta"));
+    assert_eq!(left.tab().document().unwrap().line(1), "fn zeta() {}");
+    assert!(left.tab().highlights().is_none() && right.tab().highlights().is_none(), "derived products from the previous version are not presented");
+    let other = other.state().view(other.state().active().unwrap().id()).unwrap();
+    assert_eq!(other.snapshot().copy_range(17..21).as_deref(), Some("beta"));
+    assert_eq!(other.tab().document().unwrap().line(0), "fn alpha() {}");
 }

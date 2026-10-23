@@ -49,7 +49,10 @@ pub struct Tab {
     pub(crate) canonical: Option<PathBuf>,
     /// Pinned or double-clicked: not replaced by the next preview.
     pub(crate) retained: bool,
+    /// Compatibility worker/layout input; current source reads resolve through State::view.
     pub(crate) doc: Option<Arc<Document>>,
+    /// Session-owned source identity, retained when reloadable content is released.
+    pub(crate) buffer: Option<crate::text::BufferId>,
     /// Its language as last loaded, kept while its content is released (`None`: never loaded).
     pub(crate) language: Option<Option<lenz_content::highlight::Language>>,
     pub(crate) stamp: Option<Stamp>,
@@ -124,6 +127,7 @@ impl Tab {
             source,
             retained,
             doc: None,
+            buffer: None,
             language: None,
             stamp: None,
             highlights: None,
@@ -239,7 +243,10 @@ impl Tab {
     /// The lines it shows: all but those inside its collapsed regions. Made again only when the folds, the collapsed
     /// regions or the line count change (rows, clicks and the pointer ask often).
     pub fn visible(&self) -> Arc<crate::folds::Visible> {
-        let (generation, lines) = (self.collapsed.generation(), self.doc.as_ref().map_or(0, |d| d.line_count()));
+        self.visible_for(self.doc.as_ref().map_or(0, |d| d.line_count()))
+    }
+    pub(crate) fn visible_for(&self, lines: usize) -> Arc<crate::folds::Visible> {
+        let generation = self.collapsed.generation();
         let mut cache = self.visible.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let same = |f: &Option<Arc<lenz_content::highlight::Folds>>| match (f, &self.folds) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -331,6 +338,7 @@ impl Tab {
             canonical: self.canonical.clone(),
             retained: true,
             doc: self.doc.clone(),
+            buffer: self.buffer,
             language: self.language,
             stamp: self.stamp,
             highlights: self.highlights.clone(),

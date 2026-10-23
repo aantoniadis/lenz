@@ -955,6 +955,7 @@ pub struct Effect {
 
 /// The state adapters present.
 pub struct State {
+    sources: Sources,
     tabs: Vec<Tab>,
     /// The focused pane's shown tab; commands act on it.
     active: Option<TabId>,
@@ -1116,7 +1117,104 @@ impl Ask {
     }
 }
 
+/// Session-owned identities outlive release of reloadable content. Only the registry owns current
+/// text; tabs retain identity and reading positions, and the bounded cache keeps clean text reusable.
+#[derive(Default)]
+struct Sources {
+    next: u64,
+    aliases: std::collections::HashMap<PathBuf, crate::text::BufferId>,
+    buffers: std::collections::HashMap<crate::text::BufferId, CurrentSource>,
+}
+struct CurrentSource {
+    document: std::sync::Weak<Document>,
+    snapshot: Option<Arc<crate::text::TextSnapshot>>,
+    stamp: Option<Stamp>,
+}
+impl Sources {
+    fn admit(&mut self, source: &Path, previous: Option<crate::text::BufferId>, doc: &Arc<Document>, stamp: Option<Stamp>) -> crate::text::BufferId {
+        let id = *self.aliases.entry(source.to_path_buf()).or_insert_with(|| previous.unwrap_or_else(|| {
+            self.next += 1;
+            crate::text::BufferId(self.next)
+        }));
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp });
+        if entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
+            return id;
+        }
+        entry.snapshot = Some(Arc::new(crate::text::TextSnapshot::from_document(id, doc)));
+        entry.document = Arc::downgrade(doc);
+        entry.stamp = stamp;
+        id
+    }
+}
+
+/// Current source text paired with one tab's independent reading state.
+pub struct View<'a> {
+    tab: &'a Tab,
+    snapshot: &'a Arc<crate::text::TextSnapshot>,
+}
+impl<'a> View<'a> {
+    pub fn tab(&self) -> &'a Tab { self.tab }
+    pub fn snapshot(&self) -> &'a Arc<crate::text::TextSnapshot> { self.snapshot }
+    pub fn dirty(&self) -> bool { false }
+    pub fn edit_disabled(&self) -> Option<&str> { Some("Editing is not available yet") }
+    /// Reader source rows include the logical final empty line.
+    pub fn line_count(&self) -> usize { self.snapshot.line_count() }
+    pub fn visible(&self) -> Arc<crate::folds::Visible> { self.tab.visible_for(self.snapshot.line_count()) }
+    /// Compatibility layout over the retained immutable Document; use line_window for bounded reads.
+    pub fn shown_line(&self, line: usize) -> crate::shown::Shown { self.tab.shown_line(line) }
+    /// Compatibility layout until both adapters consume bounded snapshot windows.
+    pub fn line_rows(&self, line: usize, cols: Option<usize>) -> Arc<[crate::wrap::Row]> { self.tab.line_rows(line, cols) }
+    /// Compatibility hit testing for the existing whole-line display map.
+    pub fn caret_row(&self, line: usize, byte: usize, cols: Option<usize>) -> usize { self.tab.caret_row(line, byte, cols) }
+    /// Selection coordinates can be queried without allocating its text.
+    pub fn selected_range(&self) -> Option<std::ops::Range<usize>> {
+        let range = self.tab.selection()?.range();
+        (!range.is_empty() && range.end <= self.snapshot.len_bytes()
+            && self.snapshot.floor_char_boundary(range.start) == range.start
+            && self.snapshot.floor_char_boundary(range.end) == range.end).then_some(range)
+    }
+    pub fn line_window(&self, line: usize, from: usize, max_bytes: usize) -> Option<crate::text::TextWindow<'_>> {
+        self.snapshot.line_window(line, from, max_bytes)
+    }
+    pub fn copy_selection(&self) -> Option<String> { self.snapshot.copy_range(self.selected_range()?) }
+
+}
+
 impl State {
+    pub fn view(&self, id: TabId) -> Option<View<'_>> {
+        let tab = self.tabs.iter().find(|tab| tab.id == id)?;
+        let buffer = tab.buffer?;
+        let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
+        tab.doc.as_ref()?;
+        Some(View { snapshot, tab })
+    }
+
+    fn admit_current(&mut self, id: TabId) -> Vec<TabId> {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else { return Vec::new() };
+        let Some(doc) = &tab.doc else { return Vec::new() };
+        let buffer = self.sources.admit(tab.canonical.as_deref().unwrap_or(&tab.source), tab.buffer, doc, tab.stamp);
+        tab.buffer = Some(buffer);
+        let Some(entry) = self.sources.buffers.get(&buffer) else { return Vec::new() };
+        let Some(current) = entry.document.upgrade() else { return Vec::new() };
+        let mut changed = Vec::new();
+        for tab in &mut self.tabs {
+            if tab.buffer != Some(buffer) { continue; }
+            let Some(previous) = &tab.doc else { continue };
+            if Arc::ptr_eq(previous, &current) { continue; }
+            let at = tab.location();
+            tab.doc = Some(current.clone());
+            tab.stamp = entry.stamp;
+            tab.new_content();
+            tab.restore_to(&at);
+            changed.push(tab.id);
+        }
+        changed
+    }
+
+    fn current(&self) -> Option<Arc<crate::text::TextSnapshot>> {
+        Some(self.view(self.active?)?.snapshot().clone())
+    }
+
     pub fn navigation(&self) -> Option<&crate::navigation::Search> { self.navigation.as_ref() }
     /// How much of the project the declaration index covers.
     pub fn index_coverage(&self) -> index::Coverage {
@@ -1265,7 +1363,7 @@ impl State {
     /// messages.
     pub fn notices(&self) -> Vec<String> {
         let tab = self.active();
-        let doc = tab.and_then(|t| t.doc.as_ref()).map(|d| d.notices()).unwrap_or_default();
+        let doc = self.current().map(|snapshot| snapshot.notices()).unwrap_or_default();
         let gone = tab.and_then(|t| Some((t.unavailable.as_ref()?, t.doc.is_some()))).map(|(e, shown)| match shown {
             true => format!("Unavailable: {e}; showing the last loaded content"),
             false => format!("Unavailable: {e}"),
@@ -1626,6 +1724,7 @@ impl Session {
         let merged = tx.clone();
         Self {
             state: State {
+                sources: Sources::default(),
                 tabs: Vec::new(),
                 active: None,
                 other: None,
@@ -1819,7 +1918,8 @@ impl Session {
             return Some("Waiting for language server settings to finish saving");
         }
 
-        let open = self.state.document().is_some();
+        let current = self.state.current();
+        let open = current.is_some();
         let tabs = self.state.pane_tabs(self.state.focused).count();
         match id {
             CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow => None,
@@ -1841,8 +1941,8 @@ impl Session {
             CommandId::Back => (!self.state.can_back()).then_some("Nothing to go back to"),
             CommandId::Forward => (!self.state.can_forward()).then_some("Nothing to go forward to"),
             CommandId::ToggleBookmark | CommandId::SetBookmarkMnemonic => match self.state.active() {
-                Some(t) if t.doc.is_some() && !shows_text(t) => Some("Bookmarks need a text view"),
-                Some(t) if t.doc.is_some() => None,
+                Some(t) if self.state.view(t.id).is_some() && !shows_text(t) => Some("Bookmarks need a text view"),
+                Some(t) if self.state.view(t.id).is_some() => None,
                 _ => Some("No file is open"),
             },
             CommandId::ShowBookmarks | CommandId::NextBookmark | CommandId::PreviousBookmark => self.state.places.bookmarks().is_empty().then_some("No bookmarks"),
@@ -1860,12 +1960,12 @@ impl Session {
             CommandId::FindInFile => match self.state.active() {
                 _ if !open => Some("No file is open"),
                 Some(t) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("Find works on the source; Ctrl+Shift+V shows it"),
-                Some(t) if t.doc.as_ref().is_some_and(|d| d.image().is_some()) && !t.image_source => Some("An image has no text to find"),
+                Some(t) if self.state.view(t.id).map(|view| view.snapshot()).is_some_and(|d| d.image().is_some()) && !t.image_source => Some("An image has no text to find"),
                 _ => None,
             },
             CommandId::NextMatch | CommandId::PreviousMatch | CommandId::CloseFind | CommandId::ListMatches => self.state.active().and_then(|t| t.find.as_ref()).is_none().then_some("No find is open"),
             CommandId::MatchCase | CommandId::WholeWord | CommandId::RegularExpression => None,
-            CommandId::SoftWrap => match self.state.active().and_then(|t| Some((t, t.doc.as_ref()?))) {
+            CommandId::SoftWrap => match self.state.active().and_then(|t| Some((t, self.state.view(t.id).map(|view| view.snapshot())?))) {
                 Some((_, d)) if d.is_large() => Some("Too large to wrap"),
                 Some((t, d)) if d.image().is_some() && !t.image_source => Some("An image has no lines"),
                 Some((t, _)) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("The preview wraps already; Ctrl+Shift+V shows the source"),
@@ -1878,10 +1978,10 @@ impl Session {
             CommandId::GoToLine => match self.state.active() {
                 _ if !open => Some("No file is open"),
                 Some(t) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("Lines are in the source; Ctrl+Shift+V shows it"),
-                Some(t) if t.doc.as_ref().is_some_and(|d| d.image().is_some()) && !t.image_source => Some("An image has no lines"),
+                Some(t) if self.state.view(t.id).map(|view| view.snapshot()).is_some_and(|d| d.image().is_some()) && !t.image_source => Some("An image has no lines"),
                 _ => None,
             },
-            CommandId::Outline => match self.state.document() {
+            CommandId::Outline => match current.as_ref() {
                 None => Some("No file is open"),
                 Some(d) if d.is_large() => Some("Large file: no outline"),
                 Some(d) if !d.language().is_some_and(lenz_content::highlight::has_declarations) => Some("No outline for this language"),
@@ -1893,9 +1993,9 @@ impl Session {
             CommandId::Reload | CommandId::SelectAll => (!open).then_some("No file is open"),
             CommandId::Collapse | CommandId::Expand | CommandId::CollapseAll | CommandId::ExpandAll | CommandId::CollapseCommentsImports => self.fold_unavailable(),
             CommandId::ExtendSelection => match self.state.active() {
-                Some(t) if t.doc.as_ref().is_some_and(|d| d.image().is_some()) && !t.image_source => Some("Only text has a selection to extend"),
+                Some(t) if self.state.view(t.id).map(|view| view.snapshot()).is_some_and(|d| d.image().is_some()) && !t.image_source => Some("Only text has a selection to extend"),
                 Some(t) if matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) => Some("Only text has a selection to extend"),
-                Some(t) if t.doc.is_some() => None,
+                Some(t) if self.state.view(t.id).is_some() => None,
                 _ => Some("No file is open"),
             },
             CommandId::ShrinkSelection => match self.state.active() {
@@ -1929,7 +2029,7 @@ impl Session {
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
                 Some(t) if t.doc.is_none() && self.state.loading().is_some() => Some("The file is still loading"),
                 // An SVG shown as its source is text.
-                Some(t) if t.doc.as_ref().is_none_or(|d| d.image().is_some() && !t.image_source) => Some("Only text can be annotated"),
+                Some(t) if self.state.view(t.id).map(|view| view.snapshot()).is_none_or(|d| d.image().is_some() && !t.image_source) => Some("Only text can be annotated"),
                 Some(t) if id == CommandId::CloseAnnotations && t.blame.is_none() => Some("Annotations are off"),
                 Some(_) => None,
             },
@@ -1951,7 +2051,7 @@ impl Session {
             },
             CommandId::MarkdownSource => self.preview_control(self.state.focused_pane())
                 .map_or(Some("Not a Markdown file"), |control| control.disabled),
-            CommandId::ImageSource => match self.state.document().and_then(|d| d.image()) {
+            CommandId::ImageSource => match current.as_ref().and_then(|d| d.image()) {
                 Some(i) if i.format == lenz_content::image::Format::Svg && i.pixels.is_ok() => None,
                 Some(i) if i.format == lenz_content::image::Format::Svg => Some("This SVG cannot be rendered"),
                 Some(_) => Some("A raster image has no source text"),
@@ -1985,7 +2085,7 @@ impl Session {
                 }
                 _ => None,
             },
-            CommandId::Definition | CommandId::PeekDefinition | CommandId::TypeDefinition | CommandId::Implementation | CommandId::Documentation | CommandId::CallHierarchy | CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees | CommandId::TypeHierarchy | CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes | CommandId::Usages | CommandId::FileSymbols => match (self.state.document(), self.state.provider()) {
+            CommandId::Definition | CommandId::PeekDefinition | CommandId::TypeDefinition | CommandId::Implementation | CommandId::Documentation | CommandId::CallHierarchy | CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees | CommandId::TypeHierarchy | CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes | CommandId::Usages | CommandId::FileSymbols => match (current.as_ref(), self.state.provider()) {
                 (None, _) => Some("No file is open"),
                 _ if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Not available in source a language server returned"),
                 (Some(d), _) if d.is_large() => Some("Large file: no language server"),
@@ -2004,7 +2104,7 @@ impl Session {
                     _ => None,
                 },
             },
-            CommandId::WorkspaceRoot => match (self.state.document(), self.state.project.is_some()) {
+            CommandId::WorkspaceRoot => match (current.as_ref(), self.state.project.is_some()) {
                 (None, _) => Some("No file is open"),
                 (_, false) => Some("No folder is open"),
                 (Some(d), _) if d.language().and_then(semantics::provider::for_language).is_none() => Some("No language server for this language"),
@@ -2014,7 +2114,7 @@ impl Session {
     }
 
     fn runtime_kind(&self) -> Option<semantics::runtime::Kind> {
-        match self.state.document()?.language()? {
+        match self.state.current()?.language()? {
             highlight::Language::Java => Some(semantics::runtime::Kind::Java),
             highlight::Language::Python => Some(semantics::runtime::Kind::PyrightNode),
             _ => None,
@@ -2384,6 +2484,33 @@ impl Session {
             self.state.documentation = None;
         }
         effect
+    }
+
+    fn admit_current(&mut self, id: TabId) {
+        let changed = self.state.admit_current(id);
+        for id in changed {
+            if let Some(doc) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.doc.clone()) {
+                if self.is_shown(id) {
+                    self.mark_shown(id, doc.version());
+                    self.decorate(&doc);
+                }
+                if let Some(query) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.find.as_ref()).map(|find| find.query.clone()) {
+                    self.find_in(id, query, false);
+                }
+                self.annotate(id);
+            }
+        }
+        self.release_current();
+    }
+
+    fn release_current(&mut self) {
+        self.state.sources.buffers.retain(|id, entry| {
+            let loaded = self.state.tabs.iter().any(|tab| tab.buffer == Some(*id) && tab.doc.is_some());
+            let cached = entry.document.upgrade().is_some_and(|doc| self.cache.contains(doc.source()));
+            if !loaded && !cached { entry.snapshot = None; }
+            loaded || cached || self.state.tabs.iter().any(|tab| tab.buffer == Some(*id))
+        });
+        self.state.sources.aliases.retain(|_, id| self.state.sources.buffers.contains_key(id));
     }
 
     fn command(&mut self, command: Command) -> Effect {
@@ -2813,9 +2940,9 @@ impl Session {
                 _ => Effect::default(),
             },
             Command::Select(s) => {
+                let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let Some(doc) = &t.doc else { return Effect::default() };
-                let clamp = |b: usize| floor_char_boundary(doc.text(), b);
+                let clamp = |b: usize| doc.floor_char_boundary(b);
                 let s = Selection { anchor: clamp(s.anchor), head: clamp(s.head) };
                 let changed = t.selection != Some(s);
                 t.selection = Some(s);
@@ -2955,14 +3082,13 @@ impl Session {
                 Err(_) => Effect::default(),
             },
             Command::ClickSelect { at, clicks } => {
-                let Some(doc) = self.state.document() else { return Effect::default() };
-                let at = floor_char_boundary(doc.text(), at.min(doc.text().len()));
-                let line = doc.line_range(doc.line_of(at));
+                let Some(doc) = self.state.current() else { return Effect::default() };
+                let at = doc.floor_char_boundary(at);
                 let s = match clicks {
                     0 | 1 => Selection { anchor: at, head: at },
                     _ => {
-                        let word = lenz_content::select::word_at(doc.text().get(line.clone()).unwrap_or_default(), at.clamp(line.start, line.end) - line.start);
-                        Selection { anchor: line.start + word.start, head: line.start + word.end }
+                        let word = doc.word_at(at);
+                        Selection { anchor: word.start, head: word.end }
                     }
                 };
                 let effect = self.command(Command::Select(s));
@@ -2977,21 +3103,22 @@ impl Session {
             Command::MoveCaret(motion) => {
                 if matches!(self.state.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Effect::default(); }
                 let cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
+                let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let Some(doc) = t.doc.clone().filter(|d| d.image().is_none() || t.image_source) else { return Effect::default() };
+                if doc.source_meta().image().is_some() && !t.image_source { return Effect::default(); }
                 let s = t.selection.unwrap_or(Selection {anchor:0,head:0});
                 let visible = t.visible();
                 let line = doc.line_of(s.head);
-                let range = doc.line_range(line);
+                let range = doc.reader_line_range(line);
                 let head = match motion {
                     Motion::Left if s.anchor != s.head => s.anchor.min(s.head),
                     Motion::Right if s.anchor != s.head => s.anchor.max(s.head),
-                    Motion::Left if s.head <= range.start && line > 0 => doc.line_range(visible.step(line,-1)).end,
-                    Motion::Right if s.head >= range.end && visible.step(line,1) > line => doc.line_range(visible.step(line,1)).start,
+                    Motion::Left if s.head <= range.start && line > 0 => doc.reader_line_range(visible.step(line,-1)).end,
+                    Motion::Right if s.head >= range.end && visible.step(line,1) > line => doc.reader_line_range(visible.step(line,1)).start,
                     Motion::Up | Motion::Down => moved_row(t, &doc, s.head, motion == Motion::Down, cols),
                     _ => moved(&doc, &visible, s.head, motion),
                 };
-                let head = if visible.hidden(doc.line_of(head)) { doc.line_range(visible.shown(doc.line_of(head))).end } else { head };
+                let head = if visible.hidden(doc.line_of(head)) { doc.reader_line_range(visible.shown(doc.line_of(head))).end } else { head };
                 t.selection = Some(Selection {anchor:head,head});
                 t.approximate = false;
                 t.show_head();
@@ -2999,8 +3126,9 @@ impl Session {
             }
             Command::Extend(motion) => {
                 let cols = self.state.active().and_then(|t| self.state.wrap_cols(t)).filter(|_| matches!(motion, Motion::Up | Motion::Down));
+                let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let Some(doc) = t.doc.clone() else { return Effect::default() };
+
                 let s = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
                 let head = match cols {
                     Some(cols) => moved_row(t, &doc, s.head, motion == Motion::Down, Some(cols)),
@@ -3011,7 +3139,7 @@ impl Session {
                 // sticky lines.
                 t.top_line = t.top_line.min(line);
                 t.selection = Some(Selection { head, ..s });
-                let (id, row) = (t.id, cols.map_or(0, |c| t.caret_row(line, head - doc.line_range(line).start, Some(c))));
+                let (id, row) = (t.id, cols.map_or(0, |c| t.caret_row(line, head - doc.reader_line_range(line).start, Some(c))));
                 self.clear_of_band(id, line, row);
                 repaint
             }
@@ -3066,9 +3194,9 @@ impl Session {
                 }
             }
             Command::SelectAll => {
+                let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let Some(len) = t.doc.as_ref().map(|d| d.text().len()) else { return Effect::default() };
-                t.selection = Some(Selection { anchor: 0, head: len });
+                t.selection = Some(Selection { anchor: 0, head: doc.len_bytes() });
                 repaint
             }
             Command::CopyPath { line } => {
@@ -3077,7 +3205,7 @@ impl Session {
                     Some(relative) => relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
                     None => t.source.to_string_lossy().into_owned(),
                 };
-                let at = t.doc.as_ref().map_or(0, |d| t.selection.map_or(0, |s| d.line_of(s.head)) + 1);
+                let at = self.state.view(t.id).map_or(0, |view| t.selection.map_or(0, |s| view.snapshot().line_of(s.head)) + 1);
                 Effect { repaint: false, copy: Some(if line { format!("{path}:{at}") } else { path }) }
             }
             Command::CopyText(text) => Effect { repaint: false, copy: (!text.is_empty()).then_some(text) },
@@ -3086,10 +3214,12 @@ impl Session {
                 Effect { repaint: true, copy: None }
             }
             Command::Copy => {
-                let (Some(doc), Some(s)) = (self.state.document(), self.state.selection()) else { return Effect::default() };
-                // No selection: the caret's line with its line ending.
-                let range = if s.range().is_empty() { doc.line_with_ending(doc.line_of(s.head)) } else { s.range() };
-                Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.text()[range].to_owned()) }
+                let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Effect::default() };
+                let Some(s) = view.tab().selection() else { return Effect::default() };
+                let doc = view.snapshot();
+                // No selection: the caret's visible line with its original ending.
+                let range = if s.range().is_empty() { doc.line_with_ending(doc.line_of(s.head)).unwrap_or(0..0) } else { s.range() };
+                Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten() }
             }
             Command::Scroll(top) => {
                 let Some(t) = self.active_mut() else { return Effect::default() };
@@ -4581,8 +4711,23 @@ impl Session {
                     t.stamp = stamp;
                 }
                 t.unavailable = None;
+                let current = t.doc.clone();
+                let buffer = t.buffer;
+                let identity = t.canonical.clone().unwrap_or_else(|| t.source.clone());
+                if let Some(id) = buffer {
+                    self.state.sources.aliases.retain(|source, buffer| *buffer != id || *source == identity);
+                }
+                if let Some(doc) = &current {
+                    if let Some(entry) = buffer.and_then(|id| self.state.sources.buffers.get_mut(&id)) {
+                        entry.snapshot = entry.snapshot.as_ref().map(|snapshot| Arc::new(snapshot.with_source_meta(doc.source_meta().clone())));
+                        entry.document = Arc::downgrade(doc);
+                        entry.stamp = stamp;
+                    }
+                    self.state.sources.admit(&identity, buffer, doc, stamp);
+                    self.admit_current(tab);
+                }
                 // A released tab's snapshot follows it, keeping its identity for the next rename.
-                if t.doc.is_none() {
+                if current.is_none() {
                     self.cache.rename(&from, &to);
                 }
                 // Its bookmarks and recent places follow it.
@@ -5274,6 +5419,7 @@ impl Session {
                 t.new_content();
                 t.restore_to(&here);
                 let source = t.source.clone();
+                self.admit_current(id);
                 if shown {
                     self.mark_shown(id, doc.version());
                     self.decorate(&doc);
@@ -5302,6 +5448,7 @@ impl Session {
                         t.restore_to(&at);
                     }
                 }
+                self.admit_current(id);
                 let Some(t) = self.tab_mut(id) else { return Effect::default() };
                 t.stamp = None;
                 t.unavailable = Some(e);
@@ -5629,12 +5776,12 @@ impl Session {
     /// a step in history.
     fn go_to_line(&mut self, at: lenz_content::goto::LineColumn) -> Effect {
         let from = self.here();
+        let Some(doc) = self.state.current() else { return Effect::default() };
         let Some(t) = self.active_mut() else { return Effect::default() };
-        let Some(doc) = t.doc.clone() else { return Effect::default() };
         let line = (at.line as usize).saturating_sub(1).min(doc.line_count().saturating_sub(1));
-        let text = doc.line(line);
-        let byte = text.char_indices().nth(at.column.unwrap_or(1).saturating_sub(1) as usize).map_or(text.len(), |(i, _)| i);
-        let offset = doc.line_range(line).start + byte;
+        let range = doc.reader_line_range(line);
+        let offset = doc.byte_at_column(line, at.column.unwrap_or(1).saturating_sub(1) as usize);
+        let byte = offset - range.start;
         t.selection = Some(Selection { anchor: offset, head: offset });
         t.expansion = None;
         t.reveal(line);
@@ -5711,12 +5858,14 @@ impl Session {
     /// Selection grows one row at a time; scroll only enough to keep its head inside the reported viewport.
     fn keep_selection_visible(&mut self) {
         let Some(t) = self.state.active() else { return };
-        let (Some(doc), Some(selection)) = (t.document(), t.selection()) else { return };
+        let (Some(view), Some(selection)) = (self.state.view(t.id), t.selection()) else { return };
+        let doc = view.snapshot();
         let rows = self.state.text_size[t.pane() as usize].1;
         if rows == 0 { return; }
         let source_line = doc.line_of(selection.head);
         let line = t.visible().shown(source_line);
-        let byte = if line == source_line { selection.head - doc.line_range(line).start } else { doc.line(line).len() };
+        let range = doc.reader_line_range(line);
+        let byte = if line == source_line { selection.head - range.start } else { range.len() };
         let cols = self.state.wrap_cols(t);
         let row = t.caret_row(line, byte, cols);
         let id = t.id();
@@ -5866,6 +6015,7 @@ impl Session {
         if retain && let Some(t) = self.tab_mut(id) {
             t.retained = true;
         }
+        if self.state.tabs.iter().any(|tab| tab.id == id && tab.retrieved.is_some()) { self.admit_current(id); }
         let same = self.state.active == Some(id);
         self.activate(id);
         self.index_visible(id);
@@ -6113,6 +6263,7 @@ impl Session {
             self.pending = None;
             self.current.store(0, Ordering::Relaxed);
         }
+        let indexed_bytes = self.state.view(id).map_or(0, |view| view.snapshot().storage_bytes());
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token; // a check started while it was shown must not put content back
@@ -6124,8 +6275,9 @@ impl Session {
         t.new_content();
         t.restore = Some(at);
         if let (Some(doc), Some(stamp)) = (t.doc.take(), t.stamp.take()) {
-            self.cache.put(stamp, doc);
+            self.cache.put_current(stamp, doc, indexed_bytes);
         }
+        self.release_current();
     }
 
     fn close_tab(&mut self, id: TabId) -> Effect {
@@ -6165,6 +6317,7 @@ impl Session {
             self.state.other = self.nearest(pane, i);
             self.show_other();
         }
+        self.release_current();
     }
 
     /// The tab of pane `pane` nearest position `i` of the tab list: the first at or after it, else the last before.
@@ -6389,6 +6542,7 @@ impl Session {
             t.restore_to(&at);
         }
         let source = t.source.clone();
+        self.admit_current(id);
         if self.is_shown(id) {
             self.mark_shown(id, doc.version());
             self.decorate(&doc);
@@ -6734,17 +6888,16 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 /// Where `head` goes by `motion` in `doc`.
-fn moved(doc: &Document, v: &crate::folds::Visible, head: usize, motion: Motion) -> usize {
-    let text = doc.text();
+fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize, motion: Motion) -> usize {
     let line = doc.line_of(head);
-    let range = doc.line_range(line);
+    let range = doc.reader_line_range(line);
     let column = |l: usize| {
-        let r = doc.line_range(l);
-        floor_char_boundary(text, (r.start + (head - range.start)).min(r.end))
+        let r = doc.reader_line_range(l);
+        doc.floor_char_boundary((r.start + (head - range.start)).min(r.end))
     };
     match motion {
-        Motion::Left => text[..head].char_indices().next_back().map_or(0, |(i, _)| i),
-        Motion::Right => text[head..].chars().next().map_or(head, |c| head + c.len_utf8()),
+        Motion::Left => doc.previous_char_boundary(head),
+        Motion::Right => doc.next_char_boundary(head),
         // Up and Down skip collapsed lines.
         Motion::Up if line > 0 => column(v.step(line, -1)),
         Motion::Up => range.start,
@@ -6756,9 +6909,9 @@ fn moved(doc: &Document, v: &crate::folds::Visible, head: usize, motion: Motion)
 }
 
 /// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).
-fn moved_row(t: &Tab, doc: &Document, head: usize, down: bool, cols: Option<usize>) -> usize {
+fn moved_row(t: &Tab, doc: &crate::text::TextSnapshot, head: usize, down: bool, cols: Option<usize>) -> usize {
     let line = doc.line_of(head);
-    let byte = head - doc.line_range(line).start;
+    let byte = head - doc.reader_line_range(line).start;
     let rows = t.line_rows(line, cols);
     if rows.is_empty() {
         return head;
@@ -6769,7 +6922,7 @@ fn moved_row(t: &Tab, doc: &Document, head: usize, down: bool, cols: Option<usiz
     let column = rows[row].indent + shown.text.get(rows[row].display.start..at).map_or(0, lenz_content::wrap::width);
     let (to_line, to_row) = match cols { Some(cols) => t.step_rows((line, row), if down {1} else {-1}, cols), None => (t.visible().step(line, if down {1} else {-1}), 0) };
     if (to_line, to_row) == (line, row) {
-        return if down { doc.line_range(line).end } else { doc.line_range(line).start };
+        return if down { doc.reader_line_range(line).end } else { doc.reader_line_range(line).start };
     }
     let to_rows = t.line_rows(to_line, cols);
     let target = &to_rows[to_row];
@@ -6793,9 +6946,9 @@ fn moved_row(t: &Tab, doc: &Document, head: usize, down: bool, cols: Option<usiz
         }
         width += w;
     }
-    let mut head = doc.line_range(to_line).start + crate::wrap::source_of(&to_map, d);
+    let mut head = doc.reader_line_range(to_line).start + crate::wrap::source_of(&to_map, d);
     // Display maps repeat a character's end offset for its continuation bytes.
-    while !doc.text().is_char_boundary(head) { head += 1; }
+    if doc.floor_char_boundary(head) != head { head = doc.next_char_boundary(head); }
     head
 }
 

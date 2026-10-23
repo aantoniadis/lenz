@@ -241,7 +241,11 @@ impl Session {
     /// Seed find from a single selected line, then the focused tab's previous query.
     pub fn find_seed(&self) -> String {
         let state = self.state();
-        state.selected_text().filter(|s| !s.contains('\n')).map(str::to_owned)
+        state.active().and_then(|tab| state.view(tab.id())).and_then(|view| {
+            let range = view.selected_range()?;
+            // Check line identity before copying: a multiline selection must not be assembled for Find.
+            (view.snapshot().line_of(range.start) == view.snapshot().line_of(range.end)).then(|| view.copy_selection()).flatten()
+        })
             .or_else(|| state.active().and_then(|t| t.find()).map(|f| f.query().to_owned()))
             .unwrap_or_default()
     }
