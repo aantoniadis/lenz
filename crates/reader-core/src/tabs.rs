@@ -57,6 +57,7 @@ pub struct Tab {
     pub(crate) language: Option<Option<lenz_content::highlight::Language>>,
     pub(crate) stamp: Option<Stamp>,
     pub(crate) highlights: Option<Arc<Parsed>>,
+    pub(crate) parsed_source: Option<crate::session::SemanticSource>,
     /// Fold regions of its document's version (they arrive with the highlights).
     pub(crate) folds: Option<Arc<lenz_content::highlight::Folds>>,
     /// Declarations of its document's version, from the same parse, while sticky scroll or breadcrumbs is on.
@@ -132,6 +133,7 @@ impl Tab {
             language: None,
             stamp: None,
             highlights: None,
+            parsed_source: None,
             folds: None,
             declarations: None,
             hints: None,
@@ -348,6 +350,7 @@ impl Tab {
             language: self.language,
             stamp: self.stamp,
             highlights: self.highlights.clone(),
+            parsed_source: self.parsed_source.clone(),
             folds: self.folds.clone(),
             declarations: self.declarations.clone(),
             hints: self.hints.clone(),
@@ -404,6 +407,7 @@ impl Tab {
     pub(crate) fn new_content(&mut self) {
         self.layout.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         self.highlights = None;
+        self.parsed_source = None;
         self.folds = None;
         self.declarations = None;
         self.hints = None;

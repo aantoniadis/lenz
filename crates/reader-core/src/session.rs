@@ -1218,9 +1218,34 @@ impl<'a> View<'a> {
 }
 
 impl View<'_> {
+    pub fn highlights(&self) -> Option<&Parsed> {
+        self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
+        self.tab.highlights.as_deref()
+    }
+    pub fn declarations(&self) -> Option<&lenz_content::highlight::Declarations> {
+        self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
+        self.tab.declarations.as_deref()
+    }
+    pub fn declarations_handle(&self) -> Option<&Arc<lenz_content::highlight::Declarations>> {
+        self.declarations()?;
+        self.tab.declarations.as_ref()
+    }
+    pub fn tokens(&self) -> Option<&Arc<crate::decor::Tokens>> {
+        let (version, tokens) = self.tab.tokens.as_ref()?;
+        (*version == self.snapshot.key().version).then_some(tokens)
+    }
+    pub fn rendering(&self) -> Option<Rendering<'_>> {
+        (self.snapshot.language() == Some(Language::Markdown)).then_some(())?;
+        Some(match &self.tab.preview {
+            _ if self.tab.markdown_source => Rendering::Source,
+            None => Rendering::Pending,
+            Some(Ok(preview)) => Rendering::Preview(preview),
+            Some(Err(_)) => Rendering::Source,
+        })
+    }
     /// Syntax and semantic style at a line-relative source byte; no full-line span list is built.
     pub fn style_at(&self, line: usize, byte: usize) -> (Option<lenz_content::highlight::Capture>, u8) {
-        let parsed = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version);
+        let parsed = self.highlights();
         let tokens = self.tab.tokens.as_ref().filter(|(version, _)| *version == self.snapshot.key().version)
             .map_or(&[][..], |(_, tokens)| tokens.line(line));
         if parsed.is_none() && tokens.is_empty() { return (None, 0); }
@@ -1245,7 +1270,7 @@ impl View<'_> {
         if (word.start == 0 && from > source.start) || (word.end == text.len() && end < source.end) { return None; }
         let word = from + word.start - source.start..from + word.end - source.start;
         use lenz_content::highlight::Capture as C;
-        let quiet = self.tab.highlights().and_then(|parsed| parsed.capture_at(line, word.start))
+        let quiet = self.highlights().and_then(|parsed| parsed.capture_at(line, word.start))
             .is_some_and(|capture| matches!(capture, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin));
         (!quiet).then_some(word)
     }
@@ -1501,12 +1526,16 @@ impl State {
     }
     /// Syntax spans for the active document's version, when ready.
     pub fn highlights(&self) -> Option<&Parsed> {
-        self.active()?.highlights()
+        self.view(self.active?)?.highlights()
     }
     /// How the active Markdown file is shown (`None`: not Markdown). A preview that cannot be made shows the
     /// source, and a notice says why.
     pub fn rendering(&self) -> Option<Rendering<'_>> {
-        self.active()?.rendering()
+        self.view(self.active?)?.rendering()
+    }
+    /// The active view's authoritative source, without requesting analysis.
+    pub fn current_source(&self) -> Option<&Arc<crate::text::TextSnapshot>> {
+        Some(self.view(self.active?)?.snapshot)
     }
     pub fn loading(&self) -> Option<&Path> {
         self.loading.as_deref()
@@ -4761,9 +4790,12 @@ impl Session {
             }
             Completion::Highlighted { version, parsed, folds, declarations } => {
                 let (parsed, folds, declarations) = (parsed.map(Arc::new), folds.map(Arc::new), declarations.map(Arc::new));
+                let source = self.state.tabs.iter().filter_map(|t| self.state.view(t.id)).find(|v| v.snapshot().key().version == version
+                    && buffer.is_none_or(|buffer| v.snapshot().key().buffer == buffer)).map(|v| SemanticSource::new(v.snapshot()));
                 let mut repaint = false;
                 for t in self.shown_mut(version, buffer).filter(|t| t.highlights.is_none()) {
                     t.highlights = parsed.clone();
+                    t.parsed_source = source.clone();
                     t.folds = folds.clone();
                     t.declarations = declarations.clone();
                     // Kept where a region of the same kind still starts on that line; the caret and top line stay shown.

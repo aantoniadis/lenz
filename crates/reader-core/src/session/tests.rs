@@ -1285,6 +1285,25 @@ fn syntax_and_find_share_one_current_materialization_across_split_views() {
 }
 
 #[test]
+fn current_reader_status_uses_snapshot_coordinates_before_worker_admission() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "current-status.txt", b"saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "current-status.txt");
+    let tab = s.state().active().unwrap().id();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("one\ntwo\n😀end\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.dispatch(Command::GoToLine(LineColumn { line: 3, column: Some(2) }));
+    assert_eq!(s.status_position(), "3:5", "status must use the current source, before a worker needs contiguous text");
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("one\ntwo\n😀end\n"));
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"saved\n");
+}
+
+#[test]
 fn find_materializes_the_current_snapshot_without_replacing_it() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "draft.txt", b"saved\n");

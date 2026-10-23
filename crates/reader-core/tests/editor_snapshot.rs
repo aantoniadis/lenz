@@ -2,6 +2,32 @@ use std::sync::Arc;
 use reader_core::{document::Document, text::{BufferId, TextEdit, TextSnapshot}};
 
 #[test]
+fn retained_snapshot_storage_counts_shared_backing_once_after_a_large_deletion() {
+    let text = "x\n".repeat(100_000);
+    let snapshot = TextSnapshot::from_document(BufferId(81), &Document::decode("backing.txt".into(), 1, text.as_bytes()));
+    let backing = text.len() + 100_001 * size_of::<usize>();
+    assert!(snapshot.storage_bytes() >= backing, "current text owns its original text and newline allocations");
+    assert!(snapshot.storage_bytes() < backing + 100_000, "shared backing is charged once rather than per chunk");
+    let tail = snapshot.apply_edits(2, &[TextEdit { range: 8192..text.len(), text: Arc::from("") }]).unwrap();
+    assert_eq!(tail.len_bytes(), 8192);
+    assert!(tail.storage_bytes() >= backing, "surviving original chunks retain the complete backing allocations");
+    let empty = TextSnapshot::from_document(BufferId(82), &Document::decode("empty.txt".into(), 1, b""));
+    assert!(empty.storage_bytes() >= size_of::<TextSnapshot>() + "empty.txt".len());
+}
+
+#[test]
+fn encoded_large_policy_survives_snapshot_and_worker_conversion() {
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend("a".repeat(3 << 20).encode_utf16().flat_map(u16::to_le_bytes));
+    let document = Document::decode("large.rs".into(), 1, &bytes);
+    assert!(document.is_large());
+    let snapshot = TextSnapshot::from_document(BufferId(83), &document);
+    assert!(snapshot.is_large(), "decoded UTF8 size must not silently enable restricted reader features");
+    assert!(snapshot.materialize_while(|| true).unwrap().is_large());
+    assert_eq!(snapshot.notices(), document.notices());
+}
+
+#[test]
 fn editor_text_unicode_transactions_preserve_held_snapshots() {
     let document = Document::decode("unicode.txt".into(), 1, "a😀\r\ne\u{301}\n".as_bytes());
     let original = TextSnapshot::from_document(BufferId(7), &document);
