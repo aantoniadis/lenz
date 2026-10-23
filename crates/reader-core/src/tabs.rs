@@ -180,6 +180,10 @@ impl Tab {
     pub fn declarations(&self) -> Option<&lenz_content::highlight::Declarations> {
         self.declarations.as_deref()
     }
+    /// Retained identity for adapter geometry; checking it does not compute sticky layout.
+    pub fn declarations_handle(&self) -> Option<&Arc<lenz_content::highlight::Declarations>> {
+        self.declarations.as_ref()
+    }
     /// Inlay hints for its document's version, when ready.
     pub fn hints(&self) -> Option<&Arc<crate::decor::Hints>> {
         let (version, hints) = self.hints.as_ref()?;
