@@ -309,14 +309,11 @@ impl crate::session::Session {
             GitDiff::Worktree(_) => "Compare with Worktree",
         };
         let repo = self.state().repo().ok_or(format!("{what}: Not in a Git repository"))?;
-        if let GitDiff::Worktree(other) = diff {
-            return self.compare_launch(&repo.root, other, exe, terminal);
-        }
-        let program = crate::session::lenz_diff(exe, terminal, what)?;
         let root = &repo.root;
         // ponytail: a git call or two on the UI thread, as Show Diff does
         let fail = |e: String| format!("{what}: {e}");
         let rev = match diff {
+            GitDiff::Worktree(other) => return self.compare_launch(root, other, exe, terminal),
             GitDiff::LocalChanges => {
                 git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
                 "HEAD".to_string()
@@ -344,8 +341,8 @@ impl crate::session::Session {
                 };
                 git_branches::merge_base(root, &base, "HEAD").map_err(fail)?
             }
-            GitDiff::Worktree(_) => unreachable!("compared above"),
         };
+        let program = crate::session::lenz_diff(exe, terminal, what)?;
         Ok(lenz_content::open::Launch { program, args: vec![rev], cwd: Some(root.clone()) })
     }
 }

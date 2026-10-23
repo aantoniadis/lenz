@@ -3918,8 +3918,9 @@ impl Session {
                         Ok((refs, worktrees)) => (v.refs, v.worktrees) = (refs, worktrees),
                         Err(e) => v.error = Some(e),
                     }
-                    if v.worktrees_only && v.error.is_none() && self.state.branch_rows("").is_empty() {
-                        self.state.branches.as_mut().expect("open").error = Some("No other worktree".into());
+                    let none = v.worktrees_only && v.error.is_none() && self.state.branch_rows("").is_empty();
+                    if let Some(v) = self.state.branches.as_mut().filter(|_| none) {
+                        v.error = Some("No other worktree".into());
                     }
                     Effect { repaint: true, copy: None }
                 }
