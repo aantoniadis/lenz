@@ -3,18 +3,31 @@ use std::{collections::{HashMap, VecDeque}, sync::{Arc, OnceLock, Weak, atomic::
 use crate::{document::{Document, SourceMeta}, jobs::{Jobs, Priority, MAX_JOBS}, session::Completion, tabs::TabId, text::{BufferId, SnapshotKey, TextSnapshot}};
 
 const BUFFERS: usize = 64;
+#[path = "analysis_result.rs"]
+mod result;
+pub(crate) use result::{ResultFence, ResultSlot, ResultStage};
+use result::{ResultEntry, ResultTicket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
+enum Owner { Buffer(BufferId), Result(ResultSlot) }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Consumer { Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
 
 #[derive(Clone, Debug)]
-pub struct Ticket { scope: Scope, consumer: Consumer, request: u64, run: u64, metadata: Weak<SourceMeta> }
+pub enum Ticket { Source(SourceTicket), Result(ResultTicket) }
+#[derive(Clone, Debug)]
+pub struct SourceTicket { scope: Scope, consumer: Consumer, request: u64, run: u64, metadata: Weak<SourceMeta> }
 impl Ticket {
-    pub(crate) fn matches(&self, snapshot: &TextSnapshot, project: u64) -> bool { self.scope == scope(snapshot, project) && self.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta())) }
-    pub(crate) fn buffer(&self) -> BufferId { self.scope.key.buffer }
+    pub(crate) fn matches(&self, snapshot: &TextSnapshot, project: u64) -> bool {
+        match self { Self::Source(t) => t.scope == scope(snapshot, project) && t.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta())), Self::Result(_) => false }
+    }
+    pub(crate) fn buffer(&self) -> Option<BufferId> { match self { Self::Source(t) => Some(t.scope.key.buffer), Self::Result(_) => None } }
+    pub(crate) fn result(&self) -> Option<&ResultTicket> { match self { Self::Result(t) => Some(t), Self::Source(_) => None } }
+    fn project(&self) -> u64 { match self { Self::Source(t) => t.scope.project, Self::Result(t) => t.fence.project } }
 }
 fn scope(snapshot: &TextSnapshot, project: u64) -> Scope {
     Scope { key: snapshot.key(), source: Arc::as_ptr(snapshot.source_meta()) as usize, project }
@@ -69,16 +82,21 @@ pub(crate) struct Lease {
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
     project: Arc<AtomicU64>,
+    published: Option<Arc<AtomicBool>>,
     tx: async_channel::Sender<Completion>,
 }
 impl Lease {
-    pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) && self.project.load(Ordering::Acquire) == self.ticket.scope.project }
+    pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) && self.project.load(Ordering::Acquire) == self.ticket.project() }
     pub(crate) fn ticket(&self) -> Ticket { self.ticket.clone() }
     pub(crate) fn send(&self, result: Completion) -> bool {
-        self.wanted() && self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket.clone(), result: Box::new(result) }).is_ok()
+        if !self.wanted() { return false; }
+        if self.published.as_ref().is_some_and(|sent| sent.swap(true, Ordering::AcqRel)) { return false; }
+        let sent = self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket.clone(), result: Box::new(result) }).is_ok();
+        if !sent && let Some(published) = &self.published { published.store(false, Ordering::Release); }
+        sent
     }
     pub(crate) fn cancellation(&self) -> impl Fn() -> bool + Send + Clone + 'static {
-        let (group, cancel, project, expected) = (self.group.clone(), self.cancel.clone(), self.project.clone(), self.ticket.scope.project);
+        let (group, cancel, project, expected) = (self.group.clone(), self.cancel.clone(), self.project.clone(), self.ticket.project());
         move || group.load(Ordering::Acquire) && cancel.load(Ordering::Acquire) && project.load(Ordering::Acquire) == expected
     }
 }
@@ -92,7 +110,7 @@ impl Drop for Lease {
 
 #[derive(Default)]
 pub(crate) struct Analysis {
-    entries: HashMap<BufferId, Entry>, queue: VecDeque<BufferId>, running: usize, next: u64,
+    entries: HashMap<BufferId, Entry>, results: HashMap<ResultSlot, ResultEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
     pub(crate) revision: u64,
     dirty: bool, project: u64,
     #[cfg(test)]
@@ -103,11 +121,11 @@ impl Analysis {
         let id = input.scope.key.buffer;
         self.dirty = true;
         let live = input.live;
-        if !self.entries.contains_key(&id) && self.entries.len() == BUFFERS {
+        if !self.entries.contains_key(&id) && self.entries.len() + self.results.len() == BUFFERS {
             let discard = self.entries.iter().find(|(_, entry)| !entry.live && !entry.group.running()).map(|(id, _)| *id);
             let Some(discard) = discard else { return false };
             self.entries.remove(&discard);
-            self.queue.retain(|id| *id != discard);
+            self.queue.retain(|id| *id != Owner::Buffer(discard));
         }
         let intent = Intent { request, priority, work: Box::new(work) };
         if let Some(entry) = self.entries.get_mut(&id) {
@@ -153,17 +171,20 @@ impl Analysis {
     fn enqueue(&mut self, id: BufferId) {
         if let Some(entry) = self.entries.get_mut(&id) && !entry.queued {
             entry.queued = true;
-            self.queue.push_back(id);
+            self.queue.push_back(Owner::Buffer(id));
         }
         if self.entries.get(&id).is_some_and(|entry| entry.group.waiting.values().any(|intent| intent.priority == Priority::Visible)
             || entry.pending.as_ref().is_some_and(|pending| pending.intents.values().any(|intent| intent.priority == Priority::Visible)))
-            && let Some(at) = self.queue.iter().position(|queued| *queued == id)
-        { self.queue.remove(at); self.queue.push_front(id); }
+            && let Some(at) = self.queue.iter().position(|queued| *queued == Owner::Buffer(id))
+        { self.queue.remove(at); self.queue.push_front(Owner::Buffer(id)); }
     }
 
     pub(crate) fn accepts(&self, ticket: &Ticket) -> bool {
-        self.entries.get(&ticket.scope.key.buffer).is_some_and(|entry| entry.pending.is_none() && entry.group.scope == ticket.scope
-            && entry.group.run == ticket.run && entry.group.cancel.load(Ordering::Acquire) && entry.group.latest.get(&ticket.consumer) == Some(&ticket.request))
+        match ticket {
+            Ticket::Source(t) => self.entries.get(&t.scope.key.buffer).is_some_and(|entry| entry.pending.is_none() && entry.group.scope == t.scope
+                && entry.group.run == t.run && entry.group.cancel.load(Ordering::Acquire) && entry.group.latest.get(&t.consumer) == Some(&t.request)),
+            Ticket::Result(t) => self.results.get(&t.slot).is_some_and(|entry| entry.latest.serial == t.serial && entry.ack != t.serial),
+        }
     }
 
     pub(crate) fn cancel_consumer(&mut self, id: BufferId, consumer: Consumer) {
@@ -178,8 +199,9 @@ impl Analysis {
 
     pub(crate) fn release_view(&mut self, id: BufferId, tab: TabId, last: bool) {
         self.cancel_consumer(id, Consumer::Find(tab));
+        self.cancel_consumer(id, Consumer::Selection(tab));
         if !last { return; }
-        for consumer in [Consumer::Syntax, Consumer::Markdown, Consumer::Ready, Consumer::Documentation, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
+        for consumer in [Consumer::Syntax, Consumer::RootKind, Consumer::Markdown, Consumer::Ready, Consumer::Documentation, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
         if let Some(entry) = self.entries.get_mut(&id) {
             entry.live = false;
             if let Some(pending) = &mut entry.pending { pending.input.live = false; }
@@ -191,7 +213,7 @@ impl Analysis {
     pub(crate) fn forget(&mut self, id: BufferId) {
         self.dirty = true;
         if let Some(entry) = self.entries.get_mut(&id) { entry.live = false; entry.pending = None; entry.queued = false; entry.group.cancel(); }
-        self.queue.retain(|queued| *queued != id);
+        self.queue.retain(|queued| *queued != Owner::Buffer(id));
         if self.entries.get(&id).is_some_and(|entry| !entry.group.running()) { self.entries.remove(&id); }
     }
 
@@ -205,7 +227,7 @@ impl Analysis {
             entry.group.cancel();
             entry.pending = None;
             entry.queued = false;
-            self.queue.retain(|queued| *queued != id);
+            self.queue.retain(|queued| *queued != Owner::Buffer(id));
         }
     }
 
@@ -216,6 +238,7 @@ impl Analysis {
 
     pub(crate) fn close(&mut self) {
         for entry in self.entries.values_mut() { entry.group.cancel(); entry.pending = None; }
+        self.close_results();
         self.queue.clear();
     }
 
@@ -258,16 +281,22 @@ impl Analysis {
             if !entry.group.waiting.is_empty() { retry.push(*id); }
             (entry.group.cancel.load(Ordering::Acquire) && (entry.live || !entry.group.waiting.is_empty())) || entry.group.running()
         });
-        self.queue.retain(|id| self.entries.contains_key(id));
+        self.reap_results();
+        self.queue.retain(|id| match id { Owner::Buffer(id) => self.entries.contains_key(id), Owner::Result(slot) => self.results.contains_key(slot) });
         for id in retry { self.enqueue(id); }
         // Background work cannot occupy the visible queue's entire admission allowance. The same
         // three workers execute both classes; at most six task closures can be submitted here.
         let mut background: usize = self.entries.values().map(|e| usize::from(e.group.materializing.as_ref().is_some_and(|t| t.priority == Priority::Background))
             + e.group.inflight.values().filter(|t| t.priority == Priority::Background).count()).sum();
+        background += self.result_background();
         let mut turns = self.queue.len().saturating_add(2 * MAX_JOBS);
         while self.running < 2 * MAX_JOBS && turns > 0 {
             turns -= 1;
-            let Some(id) = self.queue.pop_front() else { break };
+            let Some(owner) = self.queue.pop_front() else { break };
+            let id = match owner {
+                Owner::Buffer(id) => id,
+                Owner::Result(slot) => { self.submit_result(slot, jobs, tx, project, &mut background); continue; }
+            };
             let Some(entry) = self.entries.get_mut(&id) else { continue };
             entry.queued = false;
             let group = &mut entry.group;
@@ -278,11 +307,11 @@ impl Analysis {
             let Some(consumer) = intent else { continue };
             let Some(intent) = group.waiting.remove(&consumer) else { continue };
             if intent.priority == Priority::Background && background == MAX_JOBS {
-                group.waiting.insert(consumer, intent); entry.queued = true; self.queue.push_back(id); continue;
+                group.waiting.insert(consumer, intent); entry.queued = true; self.queue.push_back(Owner::Buffer(id)); continue;
             }
             let priority = intent.priority;
             let (done, cancel) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
-            let lease = Lease { ticket: Ticket { scope: group.scope, consumer, request: intent.request, run: group.run, metadata: group.metadata.clone() }, group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), project: project.clone(), tx: tx.clone() };
+            let lease = Lease { ticket: Ticket::Source(SourceTicket { scope: group.scope, consumer, request: intent.request, run: group.run, metadata: group.metadata.clone() }), group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), project: project.clone(), published: None, tx: tx.clone() };
             if let Some(doc) = group.document.get().cloned() {
                 group.inflight.insert(consumer, Task { done, cancel, job: None, priority });
                 self.running += 1;
@@ -314,7 +343,7 @@ impl Analysis {
                 });
                 if let Some(task) = &mut group.materializing { task.job = job; }
             }
-            if !group.waiting.is_empty() { entry.queued = true; self.queue.push_back(id); }
+            if !group.waiting.is_empty() { entry.queued = true; self.queue.push_back(Owner::Buffer(id)); }
         }
     }
 }

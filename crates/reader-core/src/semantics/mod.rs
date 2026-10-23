@@ -1855,25 +1855,9 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
                 send(Event::StartTimeout { session });
             });
         }
-        if let Some(mut stdin) = stdin {
-            let send = send.clone();
-            let _ = std::thread::Builder::new().name(format!("reader-{}-in", provider.id)).spawn(move || {
-                while let Ok(m) = inbox.recv_blocking() {
-                    let token = match &m { Outgoing::Text { token, .. } => Some(*token), Outgoing::Message(_) => None };
-                    if let Err(error) = m.write(&mut stdin) {
-                        inbox.close();
-                        while inbox.try_recv().is_ok() {}
-                        send(Event::Exited { session, reason: format!("could not write to server: {error}") });
-                        return;
-                    }
-                    // Publish before advancing: any reply to the following request is enqueued after
-                    // this acknowledgement and therefore sees the exact last-written snapshot.
-                    if let Some(token) = token && !send(Event::Written { session, token }) { return; }
-                }
-            });
-        }
         let stderr_log: Arc<Mutex<Stderr>> = Arc::default();
         let (stderr_done, stderr_eof) = std::sync::mpsc::sync_channel(1);
+        let stderr_eof = Arc::new(Mutex::new(stderr_eof));
         if let Some(stderr) = stderr {
             let stderr_log = stderr_log.clone();
             let _ = std::thread::Builder::new().name(format!("reader-{}-err", provider.id)).spawn(move || {
@@ -1887,6 +1871,30 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
                     }
                 }
                 let _ = stderr_done.send(());
+            });
+        }
+        if let Some(mut stdin) = stdin {
+            let send = send.clone();
+            let (process, key, exe, stderr_log, stderr_eof) = (process.clone(), key.clone(), exe.clone(), stderr_log.clone(), stderr_eof.clone());
+            let _ = std::thread::Builder::new().name(format!("reader-{}-in", provider.id)).spawn(move || {
+                while let Ok(m) = inbox.recv_blocking() {
+                    let token = match &m { Outgoing::Text { token, .. } => Some(*token), Outgoing::Message(_) => None };
+                    if let Err(error) = m.write(&mut stdin) {
+                        inbox.close();
+                        while inbox.try_recv().is_ok() {}
+                        // Whichever I/O thread takes the child owns shutdown and its final details.
+                        // This also terminates a helper holding stdout open after stdin fails.
+                        let child = process.lock().ok().and_then(|mut p| { p.closed = true; if p.stopped { None } else { p.child.take() } });
+                        if let Some(child) = child {
+                            let details = finish_server(child, &key, provider, &exe, &stderr_log, &stderr_eof);
+                            send(Event::Exited { session, reason: format!("could not write to server: {error}; {details}") });
+                        }
+                        return;
+                    }
+                    // Publish before advancing: any reply to the following request is enqueued after
+                    // this acknowledgement and therefore sees the exact last-written snapshot.
+                    if let Some(token) = token && !send(Event::Written { session, token }) { return; }
+                }
             });
         }
         let Some(stdout) = stdout else { return };
@@ -1910,16 +1918,22 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
             p.closed = true;
             if p.stopped { None } else { p.child.take() }
         });
-        let Some(mut child) = child else { return };
-        kill_group(&mut child);
-        let status = child.wait().map_or_else(|e| e.to_string(), |s| s.to_string());
-        // A descendant can inherit stderr: never join its reader or wait indefinitely for EOF.
-        let _ = stderr_eof.recv_timeout(std::time::Duration::from_millis(100));
-        let stderr = stderr_log.lock().map(|log| log.summary()).unwrap_or_default();
-        let reason = format!("`{}` exited ({status}){}{}", exe.display(), if stderr.is_empty() { String::new() } else { format!(": {stderr}") }, runtime_failure(&key, provider, &exe));
-        let reason = lenz_content::display::expand_tabs(&reason).0;
+        let Some(child) = child else { return };
+        let reason = finish_server(child, &key, provider, &exe, &stderr_log, &stderr_eof);
         send(Event::Exited { session, reason });
     });
+}
+
+
+/// The I/O thread that owns the child preserves exit status and bounded stderr evidence while reaping it.
+fn finish_server(mut child: Child, key: &Key, provider: &Provider, exe: &Path, stderr_log: &Mutex<Stderr>, stderr_eof: &Mutex<std::sync::mpsc::Receiver<()>>) -> String {
+    kill_group(&mut child);
+    let status = child.wait().map_or_else(|e| e.to_string(), |s| s.to_string());
+    // A descendant can inherit stderr: never wait indefinitely for its EOF.
+    if let Ok(eof) = stderr_eof.lock() { let _ = eof.recv_timeout(std::time::Duration::from_millis(100)); }
+    let stderr = stderr_log.lock().map(|log| log.summary()).unwrap_or_default();
+    let reason = format!("`{}` exited ({status}){}{}", exe.display(), if stderr.is_empty() { String::new() } else { format!(": {stderr}") }, runtime_failure(key, provider, exe));
+    lenz_content::display::expand_tabs(&reason).0
 }
 
 
@@ -1956,16 +1970,22 @@ pub type ReadFile<'a> = &'a dyn Fn(&Path) -> Result<(crate::cache::Stamp, Arc<Do
 /// file's start), at most `limit`. Files are taken from `open` (the snapshots the server was sent) or read once
 /// each by `read`; positions convert in `encoding`.
 pub fn targets(reply: &Value, limit: usize, encoding: Encoding, provider: &'static str, session: u64, open: &HashMap<PathBuf, Arc<Document>>, read: ReadFile) -> Targets {
+    targets_while(reply, limit, encoding, provider, session, open, read, &|| true)
+}
+
+#[expect(clippy::too_many_arguments, reason = "the existing target resolver plus its admission cancellation predicate")]
+pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, provider: &'static str, session: u64, open: &HashMap<PathBuf, Arc<Document>>, read: ReadFile, current: &dyn Fn() -> bool) -> Targets {
     let start = json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } });
     let mut files: HashMap<PathBuf, Result<Snapshot, String>> = HashMap::new();
     let items = match reply {
-        Value::Array(items) => items.iter().collect(),
-        Value::Object(_) => vec![reply],
-        _ => Vec::new(),
+        Value::Array(items) => items.as_slice(),
+        Value::Object(_) => std::slice::from_ref(reply),
+        _ => &[],
     };
     let mut out = Targets::default();
     let mut seen = std::collections::HashSet::new();
     for item in items {
+        if !current() { break; }
         // A link's selection range is the name; its full range is the whole declaration. A symbol has a location.
         let (uri, range) = match (item.get("targetUri"), item.get("location")) {
             (Some(uri), _) => (uri, item.get("targetSelectionRange").or(item.get("targetRange"))),
@@ -2041,8 +2061,13 @@ pub fn memory_notice(bytes: u64) -> Option<String> {
 /// `DocumentSymbol`s or flat `SymbolInformation`s. Each row shows the source text at the symbol's name (so it
 /// is validated like a declaration); at most `limit`.
 pub fn file_symbols(reply: &Value, doc: &Arc<Document>, encoding: Encoding, limit: usize) -> Targets {
-    fn walk(items: &[Value], depth: u16, doc: &Arc<Document>, encoding: Encoding, limit: usize, out: &mut Targets) {
+    file_symbols_while(reply, doc, encoding, limit, &|| true)
+}
+
+pub(crate) fn file_symbols_while(reply: &Value, doc: &Arc<Document>, encoding: Encoding, limit: usize, current: &dyn Fn() -> bool) -> Targets {
+    fn walk(items: &[Value], depth: u16, doc: &Arc<Document>, encoding: Encoding, limit: usize, out: &mut Targets, current: &dyn Fn() -> bool) {
         for item in items {
+            if !current() { return; }
             if out.found.len() == limit {
                 out.limited = true;
                 return;
@@ -2062,12 +2087,12 @@ pub fn file_symbols(reply: &Value, doc: &Arc<Document>, encoding: Encoding, limi
                 None => out.failed.push(format!("{}: a symbol outside the file as sent", item["name"].as_str().unwrap_or("?"))),
             }
             if let Some(children) = item["children"].as_array() {
-                walk(children, depth + 1, doc, encoding, limit, out);
+                walk(children, depth + 1, doc, encoding, limit, out, current);
             }
         }
     }
     let mut out = Targets::default();
-    walk(reply.as_array().map_or(&[][..], Vec::as_slice), 0, doc, encoding, limit, &mut out);
+    walk(reply.as_array().map_or(&[][..], Vec::as_slice), 0, doc, encoding, limit, &mut out, current);
     out.found.sort_by_key(|t| (t.hit.line, t.hit.range.start));
     out
 }
@@ -2155,4 +2180,19 @@ mod tests {
         assert_eq!(rows, [(0, "class Ä:", 0), (1, "def f(self):", 0)], "source order, the first line of each range");
         assert!(file_symbols(&json!([{ "name": "x", "location": { "range": { "start": { "line": 9, "character": 0 }, "end": { "line": 9, "character": 1 } } } }]), &doc, Encoding::Utf16, 10).failed.len() == 1);
     }
+
+    #[test]
+    fn target_and_symbol_resolution_stop_after_cancellation_even_for_open_documents() {
+        let doc = Arc::new(Document::decode(PathBuf::from("/cancel.rs"), 1, b"abcdef\n"));
+        let open = HashMap::from([(doc.source().to_owned(), doc.clone())]);
+        let values = Value::Array((0..6).map(|column| json!({ "uri": "file:///cancel.rs", "range": { "start": {"line":0,"character":column}, "end": {"line":0,"character":column+1} } })).collect());
+        let steps = std::cell::Cell::new(0);
+        let current = || { let step = steps.get() + 1; steps.set(step); step <= 2 };
+        let targets = targets_while(&values, 20, Encoding::Utf16, "test", 1, &open, &|_| panic!("already open"), &current);
+        assert_eq!(targets.found.len(), 2);
+        steps.set(0);
+        let symbols = file_symbols_while(&values, &doc, Encoding::Utf16, 20, &current);
+        assert_eq!(symbols.found.len(), 2);
+    }
+
 }

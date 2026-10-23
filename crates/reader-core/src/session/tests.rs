@@ -697,6 +697,23 @@ fn finder_perf() {
 }
 
 #[test]
+fn replacing_selection_expansion_bounds_queued_source_owners() {
+    let d = tempfile::tempdir().unwrap(); let file = write(d.path(), "expand.rs", b"fn main() { let value = 1; value; }\n"); let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "expand.rs"); settle(&mut s, |s| s.state().highlights().is_some());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for index in 0..129 {
+        let at = index % 10 + 3; s.dispatch(Command::Select(Selection { anchor: at, head: at })); s.dispatch(Command::ExtendSelection);
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.expanding.is_none());
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded syntax selection requests retained {queued} source closures");
+}
+
+#[test]
 fn split_find_consumers_keep_independent_latest_queries_for_one_snapshot() {
     let d = tempfile::tempdir().unwrap(); let file = write(d.path(), "split.txt", b"alpha beta beta gamma gamma gamma\n");
     let mut s = session(d.path()); open(&mut s, Command::Open(file), "split.txt");
@@ -927,6 +944,80 @@ fn background_semantic_readiness_starts_in_the_dispatch_that_registers_it() {
     }
     assert!(s.state.semantics.desired().get(&file).is_some_and(|d| d.version() == current.key().version), "new footer demand must not depend on an unrelated input or the five-second tick");
     assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn already_resolved_semantic_targets_do_not_navigate_after_the_origin_changes() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n"); write(d.path(), "lib.rs", b"pub fn target() {}\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    let rx = s.completions();
+    let old = loop { let c = rx.recv_blocking_timeout().unwrap();
+        if matches!(&c, Completion::Targets { .. }) || matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Targets { .. })) { break c; }
+        s.dispatch(c);
+    };
+    std::fs::write(&file, b"fn main() { changed(); }\n").unwrap(); s.dispatch(Command::Reload);
+    settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.text().contains("changed")));
+    let current = s.state().view(s.state.active.unwrap()).unwrap().snapshot().clone();
+    s.dispatch(old);
+    assert_eq!(s.state().active().unwrap().source(), file.as_path(), "the request's origin must be revalidated after target resolution");
+    assert!(Arc::ptr_eq(s.state().view(s.state.active.unwrap()).unwrap().snapshot(), &current));
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_semantic_target_replies_bounds_actual_document_retaining_jobs() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n"); let target = write(d.path(), "lib.rs", b"pub fn target() {}\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some());
+    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for _ in 0..129 {
+        s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+        let request = s.state.asking.as_ref().unwrap().request;
+        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false,
+            result: Ok(serde_json::json!([{ "uri": semantics::lsp::file_uri(&target), "range": { "start": {"line": 0,"character": 7}, "end": {"line":0,"character":13} } }])) });
+        s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source() == target));
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded semantic target replies retained {queued} document-map closures");
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
+    use crate::analysis::{ResultFence, ResultSlot, ResultStage};
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    let asking = s.state.asking.as_ref().unwrap();
+    let fence = ResultFence { slot: ResultSlot { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
+    s.analysis.request_result(fence, Priority::Visible, || |_| panic!("semantic resolver failed")).unwrap();
+    s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
+    settle(&mut s, |s| s.state.asking.is_none());
+    assert!(s.state.messages.iter().any(|m| m.contains("cancelled or could not complete")));
+    s.dispatch(Command::Definition { peek: false });
+    let request = s.state.asking.as_ref().unwrap().request;
+    let project = s.project_generation.load(Ordering::Acquire);
+    for n in 1000..1065 {
+        let fence = ResultFence { slot: ResultSlot { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
+        if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
+    }
+    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });
+    assert!(effect.repaint); assert!(s.state.asking.is_none(), "capacity pressure must end this server's answer visibly");
+    assert!(s.state.messages.iter().any(|m| m.contains("capacity is full")));
 }
 
 #[cfg(unix)]
@@ -6569,6 +6660,11 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     s.cache = InactiveCache::new(900);
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     let tab = s.state().active().unwrap().id();
+    let admitted = s.state().view(tab).unwrap().snapshot().clone();
+    let loaded = Arc::downgrade(s.state().document().unwrap());
+    assert!(s.analysis.ensure(crate::analysis::Input::new(admitted.clone(), loaded.clone(), 0, true), Priority::Background));
+    assert!(s.analysis.ready(&admitted, 0).is_some(), "matching saved text registers synchronously");
+    drop(admitted);
     let snapshot = s.state().view(tab).unwrap().snapshot();
     let key = snapshot.key();
     let weak = Arc::downgrade(snapshot);
@@ -6581,6 +6677,7 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     open(&mut s, Command::OpenRetained(c), "c.txt");
     open(&mut s, Command::OpenRetained(fourth), "d.txt");
     assert!(weak.upgrade().is_none(), "eviction frees the actual indexed text");
+    assert!(loaded.upgrade().is_none(), "admission must not turn evicted frontend data into a strong cache");
     assert!(s.inactive_bytes() <= 900, "both representations share the budget");
     s.dispatch(Command::ActivateTab(tab));
     settle(&mut s, |s| s.state().view(tab).is_some());
