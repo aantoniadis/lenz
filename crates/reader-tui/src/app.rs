@@ -155,6 +155,7 @@ pub(crate) struct App {
     pub exe: Option<PathBuf>,
     pub layout: crate::render::Geometry,
     pub source_cache: std::cell::RefCell<crate::source::Cache>,
+    pub(crate) source_redraw: bool,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
     /// The last text click (when, where) and how many came in a row there: two take the word, three its group.
@@ -191,6 +192,7 @@ impl App {
             exe: None,
             layout: Default::default(),
             source_cache: Default::default(),
+            source_redraw: false,
             crumb_at: 0,
             drag: None,
             clicks: None,
@@ -358,7 +360,7 @@ impl App {
         self.clamp();
     }
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.hover.map(|h| h.due)
+        if self.source_redraw { Some(Instant::now()) } else { self.hover.map(|h| h.due) }
     }
     fn hover_current(&self, hover: Hover) -> bool {
         self.modal.is_none()
@@ -372,15 +374,16 @@ impl App {
                 })
     }
     pub fn tick(&mut self, now: Instant) -> bool {
+        let repaint = std::mem::take(&mut self.source_redraw);
         let Some(hover) = self.hover else {
-            return false;
+            return repaint;
         };
         if !self.hover_current(hover) {
             self.hover = None;
-            return false;
+            return repaint;
         }
         if now < hover.due {
-            return false;
+            return repaint;
         }
         self.hover = None;
         self.dispatch(Command::DocumentationAt {

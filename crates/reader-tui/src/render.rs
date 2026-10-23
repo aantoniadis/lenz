@@ -248,7 +248,7 @@ impl App {
         fill(frame.buffer_mut(), area, style(p.fg, p.bg));
         if area.is_empty() {
             self.layout = geometry;
-            for command in self.source_cache.borrow_mut().finish() { self.session.dispatch(command); }
+            for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }
             return;
         }
         self.draw_toolbar(frame, &mut geometry, p);
@@ -416,7 +416,7 @@ impl App {
             );
         }
         self.layout = geometry;
-        for command in self.source_cache.borrow_mut().finish() { self.session.dispatch(command); }
+        for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }
     }
 
     fn draw_toolbar(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {

@@ -680,10 +680,14 @@ fn horizontal_scroll_is_clamped_to_current_terminal_extents_after_input_and_resi
     draw(&mut a, 40, 10);
     let width = a.layout.panes[0].text.width as usize;
     assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert!(a.next_deadline().is_some(), "a render-time clamp must schedule a fresh frame");
+    assert!(a.tick(Instant::now()));
     draw(&mut a, 80, 10);
     let width = a.layout.panes[0].text.width as usize;
     assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert!(a.tick(Instant::now()));
     draw(&mut a, 80, 10);
+    assert!(a.next_deadline().is_none(), "settled source geometry must not schedule idle redraws");
     key(&mut a, KeyCode::End, KeyModifiers::NONE);
     key(&mut a, KeyCode::Up, KeyModifiers::NONE);
     draw(&mut a, 1, 1);
