@@ -221,7 +221,7 @@ impl Document {
         &self.text
     }
 
-    pub(crate) fn line_starts(&self) -> &[usize] { &self.line_starts }
+    pub(crate) fn line_starts(&self) -> &Arc<[usize]> { &self.line_starts }
 
     pub fn line_count(&self) -> usize {
         self.line_starts.len()

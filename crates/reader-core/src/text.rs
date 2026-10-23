@@ -24,25 +24,29 @@ pub struct TextWindow<'a> {
 }
 
 #[derive(Debug)]
-struct Chunk { text: Arc<str>, range: Range<usize>, shared_source: bool, newlines: Box<[usize]>, utf16: usize }
+struct Chunk { text: Arc<str>, range: Range<usize>, shared_source: bool, newlines: Arc<[usize]>, newline_range: Range<usize>, newline_base: usize, utf16: usize }
 impl Chunk {
     fn text(&self) -> &str { self.text.get(self.range.clone()).unwrap_or_default() }
+    fn newline(&self, index: usize) -> Option<usize> {
+        self.newlines.get(self.newline_range.clone())?.get(index)?.checked_sub(self.newline_base)
+    }
     fn indexed(text: Arc<str>, range: Range<usize>, shared_source: bool) -> Arc<Self> {
         let part = text.get(range.clone()).unwrap_or_default();
-        let newlines = part.match_indices('\n').map(|(i, _)| i).collect();
+        let newlines: Arc<[usize]> = part.match_indices('\n').map(|(i, _)| i).collect();
         let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
-        Arc::new(Self { text, range, shared_source, newlines, utf16 })
+        let newline_range = 0..newlines.len();
+        Arc::new(Self { text, range, shared_source, newlines, newline_range, newline_base: 0, utf16 })
     }
-    fn shared(text: Arc<str>, lines: &[usize]) -> Vec<Arc<Self>> {
+    fn shared(text: Arc<str>, lines: Arc<[usize]>) -> Vec<Arc<Self>> {
         let mut chunks = Vec::with_capacity(text.len().div_ceil(CHUNK_BYTES));
         let (mut from, mut first_line) = (0, 1);
         while from < text.len() {
             let end = text.floor_char_boundary(from.saturating_add(CHUNK_BYTES).min(text.len()));
             let after = lines.partition_point(|&offset| offset <= end);
-            let newlines = lines.get(first_line..after).unwrap_or_default().iter().map(|&offset| offset - 1 - from).collect();
             let part = text.get(from..end).unwrap_or_default();
             let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
-            chunks.push(Arc::new(Self { text: text.clone(), range: from..end, shared_source: true, newlines, utf16 }));
+            chunks.push(Arc::new(Self { text: text.clone(), range: from..end, shared_source: true,
+                newlines: lines.clone(), newline_range: first_line..after, newline_base: from + 1, utf16 }));
             from = end;
             first_line = after;
         }
@@ -77,7 +81,7 @@ pub struct TextSnapshot {
 
 impl TextSnapshot {
     pub fn from_document(buffer: BufferId, document: &Document) -> Self {
-        Self::indexed(SnapshotKey { buffer, version: document.version() }, document.source_meta().clone(), Chunk::shared(document.text().clone(), document.line_starts()))
+        Self::indexed(SnapshotKey { buffer, version: document.version() }, document.source_meta().clone(), Chunk::shared(document.text().clone(), document.line_starts().clone()))
     }
 
     fn indexed(key: SnapshotKey, source: Arc<SourceMeta>, chunks: Vec<Arc<Chunk>>) -> Self {
@@ -86,11 +90,10 @@ impl TextSnapshot {
         let chunks = chunks.into_iter().map(|chunk| {
             let entry = Entry { chunk, byte: bytes, newline: newlines, utf16 };
             bytes += entry.chunk.text().len();
-            newlines += entry.chunk.newlines.len();
+            newlines += entry.chunk.newline_range.len();
             utf16 += entry.chunk.utf16;
             owned_bytes += size_of::<Entry>() + size_of::<Chunk>()
-                + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() }
-                + entry.chunk.newlines.len() * size_of::<usize>();
+                + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() + entry.chunk.newline_range.len() * size_of::<usize>() };
             entry
         }).collect();
         let chunks: Arc<[Entry]> = chunks;
@@ -109,7 +112,7 @@ impl TextSnapshot {
     pub fn len_utf16(&self) -> usize { self.utf16 }
     pub fn line_count(&self) -> usize { self.newlines + 1 }
 
-    /// Additional indexed storage beside the compatibility Document, excluding shared source text/metadata.
+    /// Additional indexed storage beside the compatibility Document; shared text, line offsets and metadata excluded.
     pub fn storage_bytes(&self) -> usize { self.owned_bytes }
 
     pub(crate) fn reader_line_range(&self, line: usize) -> Range<usize> {
@@ -185,7 +188,7 @@ impl TextSnapshot {
         if line > self.newlines { return None; }
         let i = self.chunks.partition_point(|e| e.newline < line) - 1;
         let e = &self.chunks[i];
-        Some(e.byte + e.chunk.newlines[line - e.newline - 1] + 1)
+        Some(e.byte + e.chunk.newline(line - e.newline - 1)? + 1)
     }
     pub fn line_with_ending(&self, line: usize) -> Option<Range<usize>> {
         Some(self.line_start(line)?..self.line_start(line + 1).unwrap_or(self.bytes))
@@ -200,7 +203,8 @@ impl TextSnapshot {
     }
     pub fn line_of(&self, byte: usize) -> usize {
         let byte = byte.min(self.bytes);
-        self.entry(byte).map_or(0, |e| e.newline + e.chunk.newlines.partition_point(|&n| n < byte - e.byte))
+        self.entry(byte).map_or(0, |e| e.newline + e.chunk.newlines.get(e.chunk.newline_range.clone())
+            .map_or(0, |lines| lines.partition_point(|&n| n < byte - e.byte + e.chunk.newline_base)))
     }
     pub fn floor_char_boundary(&self, byte: usize) -> usize {
         let mut byte = byte.min(self.bytes);
