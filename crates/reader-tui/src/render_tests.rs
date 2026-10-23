@@ -607,8 +607,9 @@ fn tall_local_markdown_images_keep_layout_metadata_bounded_on_resize() {
     });
     let source_doc =
         reader_core::document::Document::decode("tall.md".into(), 1, source.as_bytes());
+    let source_snapshot = reader_core::text::TextSnapshot::from_document(reader_core::text::BufferId(1), &source_doc);
     for width in [160, 18, 1000, 1, 160] {
-        let layout = MarkdownLayout::new(preview.clone(), width, &source_doc);
+        let layout = MarkdownLayout::new(preview.clone(), width, &source_snapshot);
         assert!(
             layout.rows.len() <= 21,
             "image layout rows: {}",

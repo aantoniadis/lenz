@@ -11,10 +11,11 @@ use ratatui::{
 };
 use reader_core::{
     navigation::{Kind, Scope},
-    session::{Command, CommandId, MenuEntry, Rendering, Split, State},
+    session::{Command, CommandId, MenuEntry, Rendering, Split, State, View},
     tabs::{Tab, TabId},
+    text::SnapshotKey,
 };
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -44,6 +45,14 @@ pub(crate) struct Geometry {
     pub search_toggles: Vec<(CommandId, Rect)>,
 }
 
+impl Geometry {
+    pub(crate) fn invalidate_source(&mut self) {
+        for pane in &mut self.panes {
+            pane.source = None;
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct PaneGeometry {
     pub controls: Vec<(CommandId, Rect)>,
@@ -61,6 +70,104 @@ pub(crate) struct PaneGeometry {
     pub ann: u16,
     pub rows: Vec<(u16, usize, usize)>,
     pub hits: Vec<TextHit>,
+    source: Option<SourceIdentity>,
+}
+
+impl PaneGeometry {
+    pub(crate) fn source_view<'a>(&self, app: &'a App) -> Option<View<'a>> {
+        let state = app.session.state();
+        let tab = state.shown(self.pane)?;
+        let view = state.view(tab.id())?;
+        self.source.as_ref().filter(|held| held.matches(&view, app))?;
+        Some(view)
+    }
+}
+
+struct SourceIdentity {
+    tab: TabId,
+    snapshot: SnapshotKey,
+    metadata: Arc<reader_core::document::SourceMeta>,
+    top: (usize, usize),
+    column: usize,
+    cols: Option<usize>,
+    size: Option<(usize, usize)>,
+    visible: Arc<reader_core::folds::Visible>,
+    breadcrumbs: bool,
+    split: Option<Split>,
+    explorer: bool,
+    results: bool,
+    rendering: SourceRendering,
+    image_source: bool,
+    hints: Option<Arc<reader_core::decor::Hints>>,
+    declarations: Option<Arc<lenz_content::highlight::Declarations>>,
+    sticky: bool,
+    annotation_cols: usize,
+}
+
+fn same_arc<T>(held: Option<&Arc<T>>, current: Option<&Arc<T>>) -> bool {
+    match (held, current) {
+        (None, None) => true,
+        (Some(held), Some(current)) => Arc::ptr_eq(held, current),
+        _ => false,
+    }
+}
+
+enum SourceRendering {
+    Text,
+    Pending,
+    Preview(Arc<reader_core::markdown::Preview>),
+}
+
+impl SourceRendering {
+    fn new(tab: &Tab) -> Self {
+        match tab.rendering() {
+            Some(Rendering::Preview(preview)) => Self::Preview(preview.clone()),
+            Some(Rendering::Pending) => Self::Pending,
+            _ => Self::Text,
+        }
+    }
+    fn matches(&self, tab: &Tab) -> bool {
+        match (self, tab.rendering()) {
+            (Self::Text, None | Some(Rendering::Source)) | (Self::Pending, Some(Rendering::Pending)) => true,
+            (Self::Preview(held), Some(Rendering::Preview(current))) => Arc::ptr_eq(held, current),
+            _ => false,
+        }
+    }
+}
+
+impl SourceIdentity {
+    fn new(view: &View<'_>, app: &App) -> Self {
+        let state = app.session.state();
+        let tab = view.tab();
+        Self {
+            tab: tab.id(), snapshot: view.snapshot().key(),
+            metadata: view.snapshot().source_meta().clone(),
+            top: (tab.top_line(), tab.top_row()), column: tab.column(), cols: state.wrap_cols(tab),
+            size: state.text_size(tab.pane()), visible: view.visible(),
+            breadcrumbs: state.breadcrumbs(), split: state.split(),
+            explorer: app.tree_shown && state.has_tree(), results: state.results().is_some(),
+            rendering: SourceRendering::new(tab), image_source: tab.image_source(),
+            hints: tab.hints().cloned(), declarations: tab.declarations_handle().cloned(),
+            sticky: state.sticky_scroll(), annotation_cols: tab.annotation_cols(),
+        }
+    }
+    fn matches(&self, view: &View<'_>, app: &App) -> bool {
+        let state = app.session.state();
+        let tab = view.tab();
+        app.session.native_reveal(tab.pane()).is_none()
+            && self.tab == tab.id() && self.snapshot == view.snapshot().key()
+            && Arc::ptr_eq(&self.metadata, view.snapshot().source_meta())
+            && self.top == (tab.top_line(), tab.top_row()) && self.column == tab.column()
+            && self.cols == state.wrap_cols(tab) && self.size == state.text_size(tab.pane())
+            && Arc::ptr_eq(&self.visible, &view.visible())
+            && self.breadcrumbs == state.breadcrumbs() && self.split == state.split()
+            && self.explorer == (app.tree_shown && state.has_tree())
+            && self.results == state.results().is_some()
+            && self.rendering.matches(tab) && self.image_source == tab.image_source()
+            && same_arc(self.hints.as_ref(), tab.hints())
+            && same_arc(self.declarations.as_ref(), tab.declarations_handle())
+            && self.sticky == state.sticky_scroll() && self.annotation_cols == tab.annotation_cols()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -135,6 +242,8 @@ fn clamp(at: &mut usize, top: &mut usize, len: usize, height: usize) {
 impl App {
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.show_documentation();
+        for pane in 0..2 { self.session.dispatch(Command::SetNativeContext { pane, context: 1 }); }
+        self.source_cache.borrow_mut().begin(self.session.state());
         let area = frame.area();
         let palette = **self.session.state().palette();
         let p = &palette;
@@ -142,6 +251,7 @@ impl App {
         fill(frame.buffer_mut(), area, style(p.fg, p.bg));
         if area.is_empty() {
             self.layout = geometry;
+            for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }
             return;
         }
         self.draw_toolbar(frame, &mut geometry, p);
@@ -309,6 +419,7 @@ impl App {
             );
         }
         self.layout = geometry;
+        for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }
     }
 
     fn draw_toolbar(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
@@ -1409,10 +1520,10 @@ fn number_cells(lines: usize) -> u16 {
 /// leave the text fewer than 8 columns).
 fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
     let Some(t) = state.shown(pane) else { return 0 };
-    let Some(d) = t.document() else { return 0 };
-    let text = (d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+    let Some(view) = state.view(t.id()) else { return 0 };
+    let text = (view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
     let cells = t.annotation_cols() as u16 + 1;
-    let digits = number_cells(d.line_count()) + 3;
+    let digits = number_cells(view.line_count()) + 3;
     if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
 }
 
@@ -1420,8 +1531,8 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let bars = 1 + u16::from(state.breadcrumbs());
     let gutter = state
         .shown(pane)
-        .and_then(|t| t.document())
-        .map_or(3, |d| number_cells(d.line_count()) + 3)
+        .and_then(|t| state.view(t.id()))
+        .map_or(3, |view| number_cells(view.line_count()) + 3)
         .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
     Rect::new(
@@ -1661,7 +1772,7 @@ fn draw_pane(
         );
         return geometry;
     };
-    let Some(doc) = tab.document() else {
+    let Some(view) = state.view(tab.id()) else {
         line(
             frame.buffer_mut(),
             geometry.text,
@@ -1670,7 +1781,8 @@ fn draw_pane(
         );
         return geometry;
     };
-    if let Some(image) = doc.image().filter(|_| !tab.image_source()) {
+    geometry.source = Some(SourceIdentity::new(&view, app));
+    if let Some(image) = view.snapshot().image().filter(|_| !tab.image_source()) {
         match &image.pixels {
             Ok(pixels) => draw_image(frame.buffer_mut(), geometry.text, pixels, p),
             Err(why) => line(
@@ -1708,7 +1820,7 @@ fn draw_pane(
                         std::sync::Arc::new(MarkdownLayout::new(
                             preview.clone(),
                             geometry.text.width,
-                            doc,
+                            view.snapshot(),
                         ))
                     });
                 geometry.preview_total = layout.rows.len();
@@ -1765,22 +1877,30 @@ fn draw_pane(
         }
     }
     let cols = state.wrap_cols(tab);
-    let sticky = if state.sticky_scroll() {
-        tab.sticky(
-            reader_core::tabs::sticky_cap(geometry.text.height as usize),
-            cols,
-        )
-    } else {
-        std::sync::Arc::from([])
-    };
-    let rows = tab.rows(geometry.text.height as usize, cols);
+    use reader_core::layout::Query;
+    let (sticky, sticky_pending) = if state.sticky_scroll() {
+        match view.layout_sticky(reader_core::tabs::sticky_cap(geometry.text.height as usize), cols) {
+            Query::Ready(lines) => (lines, None),
+            Query::Pending(work) => (Arc::from([]), Some(work)),
+        }
+    } else { (Arc::from([]), None) };
+    let layout = view.layout_rows(geometry.text.height as usize, cols);
+    let layout_complete = layout.pending.is_none() && sticky_pending.is_none();
+    let rows = layout.rows;
+    if rows.is_empty() && layout.pending.is_some() {
+        line(frame.buffer_mut(), geometry.text, "Preparing text…", style(p.dim, p.bg));
+    }
+    let mut extent = Some(0usize);
     for (n, r) in rows.iter().enumerate() {
         let y = geometry.text.y + n as u16;
+        let native = native_source_row(app, pane, &view, r, cols, geometry.text.width);
+        extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         draw_source_row(
             frame.buffer_mut(),
             state,
-            tab,
+            &view,
             r,
+            native,
             geometry.text,
             y,
             area.x,
@@ -1791,17 +1911,22 @@ fn draw_pane(
         geometry.rows.push((y, r.line, r.index));
     }
     for pinned in sticky.iter() {
-        let Some(r) = tab.line_rows(pinned.line, cols).first().cloned() else {
-            continue;
+        let r = match view.layout_row(pinned.line, 0, cols) {
+            Query::Ready(Some(row)) => row,
+            Query::Ready(None) => continue,
+            Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, tab.id(), work); continue; }
         };
         let y = geometry.text.y + pinned.row as u16;
+        let native = native_source_row(app, pane, &view, &r, cols, geometry.text.width);
+        extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         geometry.hits.retain(|h| h.y != y);
         geometry.rows.retain(|(cy, ..)| *cy != y);
         draw_source_row(
             frame.buffer_mut(),
             state,
-            tab,
+            &view,
             &r,
+            native,
             geometry.text,
             y,
             area.x,
@@ -1811,14 +1936,39 @@ fn draw_pane(
         );
         geometry.rows.push((y, r.line, r.index));
     }
+    if let Some(work) = layout.pending.or(sticky_pending) {
+        app.source_cache.borrow_mut().layout(pane, tab.id(), work);
+    }
+    if layout_complete && let Some(extent) = extent {
+        app.source_cache.borrow_mut().clamp(app.session.native_viewport(pane), &view, geometry.text.width as usize, extent);
+    }
     geometry
+}
+
+fn native_source_row(app: &App, pane: u8, view: &View<'_>, row: &reader_core::layout::Row, cols: Option<usize>, width: u16) -> Option<crate::source::Row> {
+    if cols.is_none() {
+        return Some(app.source_cache.borrow_mut().row(pane, view, row.line, view.tab().column(), width as usize, app.session.projection(pane).map(AsRef::as_ref), app.session.native_reveal(pane).filter(|goal| goal.identity.line() == row.line)));
+    }
+    let held = app.source_cache.borrow().cursor(pane, view, row.line, row.display.start);
+    let cursor = if let Some(cursor) = held { cursor } else {
+        match view.layout_cursor(row.line, row.display.start, cols) {
+            reader_core::layout::Query::Ready(cursor) => cursor?,
+            reader_core::layout::Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, view.tab().id(), work); return None; }
+        }
+    };
+    let goal = app.session.native_reveal(pane).filter(|goal| goal.identity.line() == row.line).filter(|goal| {
+        match view.layout_position(goal.source, cols) {
+            reader_core::layout::Query::Ready(position) => position.is_some_and(|position| position.row == row.index),
+            reader_core::layout::Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, view.tab().id(), work); false }
+        }
+    });
+    Some(app.source_cache.borrow_mut().wrapped(pane, view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), view.tab().column(), row.indent, width as usize, app.session.projection(pane).map(AsRef::as_ref), goal))
 }
 
 struct SourceCell<'a> {
     x: u16,
     width: u16,
     byte: usize,
-    display: usize,
     text: &'a str,
 }
 fn source_cells(
@@ -1853,7 +2003,6 @@ fn source_cells(
                 x: (col - skip) as u16,
                 width: w as u16,
                 byte: source,
-                display,
                 text: grapheme,
             });
         }
@@ -1869,8 +2018,9 @@ fn source_cells(
 fn draw_source_row(
     buf: &mut Buffer,
     state: &State,
-    tab: &Tab,
-    r: &reader_core::wrap::Row,
+    view: &View<'_>,
+    r: &reader_core::layout::Row,
+    native: Option<crate::source::Row>,
     area: Rect,
     y: u16,
     gutter_x: u16,
@@ -1881,10 +2031,8 @@ fn draw_source_row(
     if area.width == 0 || y >= area.bottom() {
         return;
     }
-    let Some(doc) = tab.document() else {
-        return;
-    };
-    let shown = tab.shown_line(r.line);
+    let tab = view.tab();
+    let Some(source_line) = view.snapshot().line_range(r.line) else { return };
     let base = if sticky { p.header_bg } else { p.bg };
     fill(
         buf,
@@ -1900,7 +2048,7 @@ fn draw_source_row(
     let mark = if bookmark.is_some() { "●" } else { " " };
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
     // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
-    let digits = number_cells(doc.line_count()) as usize + 3;
+    let digits = number_cells(view.line_count()) as usize + 3;
     let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
     if ann > 0 {
         let a = tab.annotation(r.line).filter(|_| r.index == 0 && !sticky);
@@ -1940,46 +2088,33 @@ fn draw_source_row(
             p.gutter_bg,
         ),
     );
-    let start = doc.line_range(r.line).start;
+    let Some(native) = native.as_ref() else {
+        line(buf, Rect::new(area.x, y, area.width, 1), "Preparing text…", style(p.dim, base));
+        return;
+    };
+    if native.failed || (native.pending && native.cells.is_empty()) {
+        line(buf, Rect::new(area.x, y, area.width, 1), if native.failed { "Text layout failed" } else { "Preparing text…" }, style(p.dim, base));
+        return;
+    }
+    let start = source_line.start;
     let selection = tab.selection();
-    let spans = tab.spans(r.line);
     let find = tab.find();
     let occurrences = (state.active().is_some_and(|a| a.id() == tab.id()))
         .then(|| state.occurrences())
         .flatten();
-    let skip = if state.wrap_cols(tab).is_some() {
-        0
-    } else {
-        tab.column()
-    };
-    let indent = r.indent.min(area.width as usize);
-    let cells = source_cells(
-        &shown,
-        r.display.clone(),
-        skip,
-        (area.width as usize).saturating_sub(indent),
-    );
+    let skip = tab.column().saturating_sub(r.indent);
+    let indent = r.indent.saturating_sub(tab.column()).min(area.width as usize);
     let mut end_x = area.x + indent as u16;
-    for cell in cells {
-        let source = start + cell.byte;
+    for cell in native.cells.iter() {
+        let source = cell.byte;
+        let byte = source.saturating_sub(start);
+        let width = cell.width.min(area.width as usize) as u16;
         let mut st = style(p.fg, base);
-        if let Some((_, capture, mods)) =
-            spans.iter().find(|(range, ..)| range.contains(&cell.byte))
-        {
-            if let Some(capture) = capture {
-                st = st.fg(color(p.syntax_color(*capture)));
-            }
-            if mods & reader_core::decor::MUTABLE != 0 {
-                st = st.add_modifier(Modifier::UNDERLINED);
-            }
-            if mods & reader_core::decor::DEPRECATED != 0 {
-                st = st.add_modifier(Modifier::CROSSED_OUT);
-            }
-        }
-        let hint = shown
-            .hints
-            .iter()
-            .any(|(_, range, _)| range.contains(&cell.display));
+        let (capture, mods) = view.style_at(r.line, byte);
+        if let Some(capture) = capture { st = st.fg(color(p.syntax_color(capture))); }
+        if mods & reader_core::decor::MUTABLE != 0 { st = st.add_modifier(Modifier::UNDERLINED); }
+        if mods & reader_core::decor::DEPRECATED != 0 { st = st.add_modifier(Modifier::CROSSED_OUT); }
+        let hint = cell.hint;
         if hint {
             st = style(p.dim, base).add_modifier(Modifier::ITALIC);
         }
@@ -1990,7 +2125,7 @@ fn draw_source_row(
             && find.is_some_and(|f| {
                 f.in_line(r.line)
                     .iter()
-                    .any(|(_, range)| range.contains(&cell.byte))
+                    .any(|(_, range)| range.contains(&byte))
             })
         {
             st = st.bg(color(p.found_bg));
@@ -1999,30 +2134,30 @@ fn draw_source_row(
             st = st.bg(color(p.sel_bg));
         }
         if selection.is_some_and(|s| s.anchor == s.head && s.head == source)
-            && shown.caret(cell.byte) == cell.display
+            && cell.caret
         {
             st = st.add_modifier(Modifier::REVERSED);
         }
-        let x = area.x + indent as u16 + cell.x;
-        buf.set_stringn(x, y, cell.text, cell.width as usize, st);
+        let x = area.x + indent as u16 + cell.column.saturating_sub(skip) as u16;
+        buf.set_stringn(x, y, if cell.width > area.width as usize { "▏" } else { cell.text() }, width as usize, st);
         hits.push(TextHit {
             x,
             y,
-            width: cell.width.max(1),
+            width: width.max(1),
             line: r.line,
-            byte: cell.byte,
+            byte,
         });
-        end_x = x + cell.width;
+        end_x = x + width;
     }
-    if end_x < area.right() {
+    if end_x < area.right() && let Some(end) = native.end.map(|end| end.saturating_sub(start)) {
         hits.push(TextHit {
             x: end_x,
             y,
             width: area.right() - end_x,
             line: r.line,
-            byte: r.source.end.min(doc.line(r.line).len()),
+            byte: end,
         });
-        if selection.is_some_and(|s| s.anchor == s.head && s.head == start + r.source.end) {
+        if selection.is_some_and(|s| s.anchor == s.head && s.head == start + end) {
             buf.set_stringn(
                 end_x,
                 y,
@@ -2100,7 +2235,7 @@ impl MarkdownLayout {
     fn new(
         preview: std::sync::Arc<reader_core::markdown::Preview>,
         width: u16,
-        source: &reader_core::document::Document,
+        source: &reader_core::text::TextSnapshot,
     ) -> Self {
         let mut rows = Vec::new();
         let mut lines = Vec::new();
@@ -2108,7 +2243,7 @@ impl MarkdownLayout {
             let mut push = |range: Range<usize>, kind| {
                 let offset =
                     preview_source(&preview.doc, range.start).unwrap_or(block.source.start);
-                let line = source.line_of(offset.min(source.text().len()));
+                let line = source.line_of(offset.min(source.len_bytes()));
                 lines.push(line.max(lines.last().copied().unwrap_or(0)));
                 rows.push(MarkdownRow {
                     block: index,

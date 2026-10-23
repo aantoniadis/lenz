@@ -5090,6 +5090,7 @@ dependencies = [
  "sqlparser",
  "tempfile",
  "toml 1.1.8+spec-1.1.0",
+ "unicode-segmentation",
 ]
 
 [[package]]
@@ -5105,6 +5106,7 @@ dependencies = [
  "resvg 0.48.1",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -237,7 +237,7 @@ impl TextSnapshot {
         None
     }
 
-    fn range(&self, bytes: Range<usize>) -> Option<Cow<'_, str>> {
+    pub(crate) fn range(&self, bytes: Range<usize>) -> Option<Cow<'_, str>> {
         if bytes.start > bytes.end || !self.boundary(bytes.start) || !self.boundary(bytes.end) { return None; }
         if bytes.is_empty() { return Some(Cow::Borrowed("")); }
         let e = self.entry(bytes.start)?;

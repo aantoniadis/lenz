@@ -33,6 +33,8 @@ sqlparser = { version = "0.63", features = ["visitor"] }
 sqlformat = "0.5"
 # Native PostgreSQL 18 grammar with structured Unicode cursor positions.
 pg_parse = "0.15"
+# Shared bounded display projection; the terminal already uses this locked version.
+unicode-segmentation = "1.13.3"
 
 [build-dependencies]
 sha2 = "0.10.9"
