@@ -334,33 +334,38 @@ fn duckdb_sql_assistance() {
     println!("DuckDB: {} fixture outcomes; query-local results are in summary.json",outcomes.len());
 }
 
-struct Pg { name: String, dir: PathBuf }
+struct Pg { id: String, docker: PathBuf, dir: PathBuf }
 impl Pg {
+    fn start(docker: &Path, dir: &Path, name: &str) -> Result<Self, String> {
+        let out=Command::new(docker).args(["run","--detach","--pull=never","--network","none","--name",name,"--tmpfs","/var/lib/postgresql:rw,size=512m","-e","POSTGRES_HOST_AUTH_METHOD=trust","postgres:18-alpine","-c","log_statement=all"]).output().map_err(|e|e.to_string())?;
+        if !out.status.success() {return Err(String::from_utf8_lossy(&out.stderr).into_owned());}
+        let id=String::from_utf8(out.stdout).map_err(|e|e.to_string())?.trim().to_owned();
+        if id.len()!=64 || !id.bytes().all(|b|b.is_ascii_hexdigit()) {return Err("docker run did not return a container ID; cleanup is unarmed".into());}
+        Ok(Self {id,docker:docker.into(),dir:dir.into()})
+    }
     fn sql(&self, dir: &Path, phase: &str, sql: &str, readonly: bool) -> String {
-        let mut c=Command::new("docker"); c.args(["exec","-i"]);
+        let mut c=Command::new(&self.docker); c.args(["exec","-i"]);
         if readonly {c.args(["-e","PGOPTIONS=-c default_transaction_read_only=on"]);}
-        let t=Instant::now(); let out=c.args([&self.name,"psql","-X","-U","postgres","-v","ON_ERROR_STOP=1","-At","-c",sql]).output().unwrap();
+        let t=Instant::now(); let out=c.args([&self.id,"psql","-X","-U","postgres","-v","ON_ERROR_STOP=1","-At","-c",sql]).output().unwrap();
         let text=String::from_utf8(out.stdout).unwrap();save(dir,&format!("{phase}-boundary.json"),&json!({"statement":sql,"readonly":readonly,"stdout":text,"stderr":String::from_utf8_lossy(&out.stderr),"success":out.status.success(),"elapsed_ms":t.elapsed().as_secs_f64()*1000.0}));assert!(out.status.success());text
     }
 }
 impl Drop for Pg {fn drop(&mut self){
-    if let Ok(out)=Command::new("docker").args(["logs",&self.name]).output(){let _=fs::write(self.dir.join("container-final.log"),[out.stdout,out.stderr].concat());}
-    let _=Command::new("docker").args(["rm","-f",&self.name]).output();
+    if let Ok(out)=Command::new(&self.docker).args(["logs",&self.id]).output(){let _=fs::write(self.dir.join("container-final.log"),[out.stdout,out.stderr].concat());}
+    let _=Command::new(&self.docker).args(["rm","-f",&self.id]).output();
 }}
 #[test] #[ignore = "cached PostgreSQL container for metadata only; no PostgreSQL language provider installed"]
 fn postgres_sql_assistance() {
     let dir=evidence("postgres");let sentinel=dir.join("must-not-exist.csv");assert!(!sentinel.exists());let fixtures=sql_fixtures(&sentinel);save(&dir,"fixtures.json",&json!(fixtures));
     let connections=0;assert_eq!(connections,0); // Offline provider absent: no language capabilities claimed.
-    let pg=Pg{name:format!("lenz-readiness-{}",std::process::id()),dir:dir.clone()};
     let image=Command::new("docker").args(["image","inspect","postgres:18-alpine","--format","{{.Id}}"]).output().unwrap();
     assert!(image.status.success(),"unverified: no cached image");
-    let out=Command::new("docker").args(["run","--detach","--pull=never","--network","none","--name",&pg.name,"--tmpfs","/var/lib/postgresql:rw,size=512m","-e","POSTGRES_HOST_AUTH_METHOD=trust","postgres:18-alpine","-c","log_statement=all"]).output().unwrap();
-    assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let pg=Pg::start(&executable("docker"),&dir,&format!("lenz-readiness-{}",std::process::id())).unwrap();
     let deadline=Instant::now()+Duration::from_secs(30);
     loop {
-        let init=Command::new("docker").args(["exec",&pg.name,"cat","/proc/1/comm"]).output().unwrap();
+        let init=Command::new("docker").args(["exec",&pg.id,"cat","/proc/1/comm"]).output().unwrap();
         if init.stdout==b"postgres\n" {
-            let ready=Command::new("docker").args(["exec",&pg.name,"pg_isready","-U","postgres"]).output().unwrap();
+            let ready=Command::new("docker").args(["exec",&pg.id,"pg_isready","-U","postgres"]).output().unwrap();
             if ready.status.success(){break;}
         }
         assert!(Instant::now()<deadline,"PostgreSQL readiness timeout");std::thread::sleep(Duration::from_millis(100));
@@ -376,11 +381,40 @@ fn postgres_sql_assistance() {
     for (name,_,_) in &fixtures {assert_eq!(pg.sql(&dir,&format!("fixture-{name}"),metadata,true),columns);}
     let after=pg.sql(&dir,"verify-after","SELECT * FROM ready.fixture;",true);assert_eq!(before,after);assert!(!sentinel.exists());
     pg.sql(&dir,"refresh-setup","ALTER TABLE ready.fixture ADD COLUMN fresh_col integer;",false);assert!(pg.sql(&dir,"refresh",metadata,true).contains("fresh_col|integer"));
-    let stats=Command::new("docker").args(["stats","--no-stream","--format","{{json .}}",&pg.name]).output().unwrap();fs::write(dir.join("container-memory.json"),stats.stdout).unwrap();
-    let failed=Command::new("docker").args(["exec","-e","PGOPTIONS=-c default_transaction_read_only=on",&pg.name,"psql","-X","-U","postgres","-d","missing_readiness_database","-At","-c",metadata]).output().unwrap();assert!(!failed.status.success());fs::write(dir.join("connection-failure.log"),failed.stderr).unwrap();
-    let logs=Command::new("docker").args(["logs",&pg.name]).output().unwrap();let log=String::from_utf8([logs.stdout,logs.stderr].concat()).unwrap();fs::write(dir.join("server-statements.log"),&log).unwrap();
+    let stats=Command::new("docker").args(["stats","--no-stream","--format","{{json .}}",&pg.id]).output().unwrap();fs::write(dir.join("container-memory.json"),stats.stdout).unwrap();
+    let failed=Command::new("docker").args(["exec","-e","PGOPTIONS=-c default_transaction_read_only=on",&pg.id,"psql","-X","-U","postgres","-d","missing_readiness_database","-At","-c",metadata]).output().unwrap();assert!(!failed.status.success());fs::write(dir.join("connection-failure.log"),failed.stderr).unwrap();
+    let logs=Command::new("docker").args(["logs",&pg.id]).output().unwrap();let log=String::from_utf8([logs.stdout,logs.stderr].concat()).unwrap();fs::write(dir.join("server-statements.log"),&log).unwrap();
     let user_statements_submitted=fixtures.iter().filter(|(_,sql,_)|log.lines().any(|l|l.split_once("statement: ").is_some_and(|(_,actual)|actual.trim_end_matches(';')==sql))).count();
     let explain_statements_submitted=log.lines().filter(|l|l.contains("statement: EXPLAIN")).count();assert_eq!(user_statements_submitted,0);assert_eq!(explain_statements_submitted,0);
     save(&dir,"summary.json",&json!({"version":version.trim(),"image":String::from_utf8_lossy(&image.stdout).trim(),"offline_connections":connections,"language_provider":"unverified: none installed; all offline language requirements remain blocked","metadata":"columns/types and function signatures demonstrated","user_statements_submitted":user_statements_submitted,"explain_statements_submitted":explain_statements_submitted,"data_unchanged":before==after,"sentinel_absent":!sentinel.exists(),"refresh":"explicit query sees schema change","connection_failure":"missing database refused","memory":"one container cgroup sample in container-memory.json, not process RSS","dialect_switch_cancellation":"unverified"}));
     println!("PostgreSQL {version}: metadata boundary checked; language provider absent");
+}
+
+#[test]
+fn postgres_cleanup_requires_successful_acquisition() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp=tempfile::tempdir().unwrap();
+    let docker=temp.path().join("docker");
+    fs::write(&docker,r#"#!/bin/sh
+printf '%s\n' "$*" >> "$0.calls"
+if [ "$1" = run ]; then exit 1; fi
+"#).unwrap();
+    fs::set_permissions(&docker,fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(Pg::start(&docker,temp.path(),"existing-container").is_err());
+    let calls=fs::read_to_string(temp.path().join("docker.calls")).unwrap();
+    assert_eq!(calls.lines().count(),1,"failed creation must not inspect or remove an unowned container: {calls}");
+}
+
+#[test]
+fn postgres_cleanup_uses_the_acquired_id() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp=tempfile::tempdir().unwrap();let docker=temp.path().join("docker");let id="a".repeat(64);
+    fs::write(&docker,format!(r#"#!/bin/sh
+printf '%s\n' "$*" >> "$0.calls"
+if [ "$1" = run ]; then printf '%s\n' '{id}'; fi
+"#)).unwrap();
+    fs::set_permissions(&docker,fs::Permissions::from_mode(0o755)).unwrap();
+    let pg=Pg::start(&docker,temp.path(),"reusable-name").unwrap();assert_eq!(pg.id,id);drop(pg);
+    let calls=fs::read_to_string(temp.path().join("docker.calls")).unwrap();
+    assert_eq!(calls.lines().skip(1).collect::<Vec<_>>(),vec![format!("logs {id}"),format!("rm -f {id}")]);
 }
