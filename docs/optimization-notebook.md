@@ -1707,3 +1707,15 @@ source-band crop and was checked against both positive and negative screenshots.
 Raw evidence is under `08/native-goto-oracle-v4/` and `08/native-goto-old-oracle-v4/`.
 The final focused GUI batch passes 44 tests, and strict GUI Clippy passes. The complete
 08–10 gate remains pending.
+
+## Snapshot rendering/analysis integration — 2026-10-24
+
+Tickets08–10 completed a phased local gate with focused repairs for Unicode/tab/hint
+vertical movement and adapter fixtures. The unconstrained linker run was cancelled
+before tests began because of I/O pressure; four-job resumption retained compiled
+caches. No new stress or optimization loop followed. The user accepted the recorded
+syntax-readiness, stress-memory and TUI startup/GoTo costs. Successful, unsuccessful
+and inconclusive experiments, exact sources and raw evidence are linked from the
+[batch report](research/reader-snapshot-batch-08-10.md). Measurements precede the final
+narrow caret repair. Native macOS and physical-display/GPU claims remain unverified.
+Full validation and stress will run once after each batch of several tickets.

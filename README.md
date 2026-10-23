@@ -73,6 +73,12 @@ for the 945,000-byte fixture; the measured performance exception was accepted. T
 excludes frontend painting and does not enable editing. See the [snapshot measurements](docs/research/reader-snapshot-migration-performance.md)
 for repeated timing, sustained memory, unsuccessful experiments and remaining limits.
 
+The combined rendering/analysis migration added **0.72 ms / 9.87 ms** to syntax
+readiness for 56 KB / roughly 1 MiB fixtures and **1.79 MiB** settled stress RSS;
+these documented costs were accepted. Cached navigation improved. See the
+[completed snapshot batch](docs/research/reader-snapshot-batch-08-10.md) for the
+phased validation, measurements and remaining limits.
+
 ### Diff and merge
 
 - **Compare** files, directories, revisions, the index or the working tree, with word/character/line highlighting, whitespace and case modes, three scroll modes, syntax highlighting, sticky scroll (the enclosing declarations stay pinned at the top of each pane) and blame annotations.
@@ -355,7 +361,7 @@ The bounded-source GUI migration measured **142.45→142.39 ms** startup in eigh
 alternating release pairs, **172.50→172.03 MiB** settled RSS for ten kept tabs, and
 matching 15-second wrapped/unwrapped scroll intervals. These use a separate generated
 fixture and owned software display; see the [migration measurements](docs/research/reader-snapshot-gui.md)
-for endpoints, limits and the pending integrated gate.
+for endpoints and limits, and the [completed batch checks](docs/research/reader-snapshot-batch-08-10.md).
 
 The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
 (seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a
