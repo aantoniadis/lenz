@@ -29,7 +29,7 @@ One `lenz` command opens both, each a separate executable:
 (or `lenz-diff-tui`), and git difftool and mergetool configurations change as shown in
 [git difftool](#git-difftool) and [git mergetool](#git-mergetool).
 
-**Status:** beta (0.0.4). Diff is tested on Linux and macOS (Apple Silicon), with automated
+**Status:** beta (0.0.5). Diff is tested on Linux and macOS (Apple Silicon), with automated
 GUI interaction coverage on Linux. The Code Reader and the launcher are verified on Linux;
 native macOS validation is pending. The Reader never edits files (Git checkouts you choose aside), with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
@@ -131,14 +131,14 @@ On Linux, gpui needs: `libxkbcommon-x11-dev libwayland-dev libfontconfig-dev lib
 `cargo build` makes bare executables. They work, but the Dock shows a generic icon while they start and quit, and the Lenz logo only once the window is up. For the logo throughout, build the release package, which puts all five executables in `Lenz.app`:
 
 ```sh
-packaging/package.sh 0.0.4
+packaging/package.sh 0.0.5
 ```
 
-The bundle is at `target/package/lenz-0.0.4-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.4-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version.
+The bundle is at `target/package/lenz-0.0.5-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.5-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version.
 
 ```sh
-open target/package/lenz-0.0.4-aarch64-apple-darwin/Lenz.app                          # the Reader, as from Finder
-target/package/lenz-0.0.4-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
+open target/package/lenz-0.0.5-aarch64-apple-darwin/Lenz.app                          # the Reader, as from Finder
+target/package/lenz-0.0.5-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
 ```
 
 To install it, copy `Lenz.app` to `/Applications` and put symlinks to the five executables in `/Applications/Lenz.app/Contents/MacOS/` on your `PATH` (as the Homebrew formula does); launched through them, from a terminal or as a git difftool, it still shows the logo.
