@@ -3197,7 +3197,6 @@ dependencies = [
  "async-channel",
  "bzip2",
  "crc32fast",
- "encoding_rs",
  "flate2",
  "gpui",
  "gpui_platform",
