@@ -24,8 +24,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-22.04 gives the glibc 2.35 floor that packaging/build-linux.sh gets from its container.
-        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15]
+        # ubuntu-22.04 gives the glibc 2.35 floor that packaging/build-linux.sh gets from its container; macos-26
+        # builds with Xcode 26 and the macOS 26 SDK (the binaries still run on macOS 11 and later). Pinned, not
+        # -latest, so a label change never alters a release build unannounced.
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

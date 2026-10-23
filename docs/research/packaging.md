@@ -50,7 +50,7 @@ Terms (Comparison, Side, Change Set) are defined in `CONTEXT.md`. `gdv` is the p
 
 ### macOS build and `.app`
 
-- **Build:** keep gpui's default build-time Metal shaders. In CI, run on `macos-15` (default Xcode 16.4) and add an explicit `xcodebuild -downloadComponent MetalToolchain` step. Xcode 26 runner images intermittently lack the Metal toolchain ([runner-images#13014](https://github.com/actions/runner-images/issues/13014), [#14013](https://github.com/actions/runner-images/issues/14013)).
+- **Build:** keep gpui's default build-time Metal shaders. In CI, run on `macos-15` (default Xcode 16.4) and add an explicit `xcodebuild -downloadComponent MetalToolchain` step. *Update 2026-10-23: the release builds on `macos-26` (Xcode 26, macOS 26 SDK) at the user's request; the step now runs `metal --version` and downloads the toolchain only when that fails (Xcode 16 has no `-downloadComponent`, which failed the first v0.0.5 run).* Xcode 26 runner images intermittently lack the Metal toolchain ([runner-images#13014](https://github.com/actions/runner-images/issues/13014), [#14013](https://github.com/actions/runner-images/issues/14013)).
 - **Fallback:** the `gpui_platform/runtime_shaders` feature, which needs no Xcode but compiles shaders at every app start; its startup cost is unmeasured.
 - **No `.app` for the MVP.** gpui sets the activation policy and the menu bar in code ([platform.rs L1320, L1084](https://github.com/zed-industries/zed/blob/v1.22.0/crates/gpui_macos/src/platform.rs#L1320)). Verify on a Mac (ticket 09) before relying on it.
 
