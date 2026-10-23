@@ -4,7 +4,7 @@ Date: 2026-10-23. Execution of the [reviewed readiness plan](../superpowers/plan
 
 ## Status
 
-Baseline and buffer/save experiments completed. Template and SQL investigations are pending. No production editor behavior has been implemented or validated.
+Baseline and buffer/save experiments completed. Template probes completed with release blockers; SQL investigation is pending. No production editor behavior has been implemented or validated.
 
 ## Baseline
 
@@ -70,3 +70,25 @@ These tests establish the controlled failure boundaries, not recovery from every
 ## Verification limits
 
 Native macOS, hardware rendering, physical display/input latency, cold OS caches and the full Diff performance matrix were not exercised. No source or collector behavior changed for this baseline.
+
+## ERB and Haml
+
+Ran the real installed Ruby LSP 0.26.11 and VS Code HTML extension 10.0.0 server, using Ruby 3.4.10 and Node 26.10.0. Each case owns its project, HOME, XDG and Bundler state. `bundle lock --local` uses installed gems only; explicit BUNDLE_GEMFILE prevents Ruby LSP's automatic bundle setup. Rails, ruby-lsp-rails and a Haml grammar/provider are absent. No production provider was changed.
+
+Three ordinary tests verify fixture-region mappings across ERB/Haml markup, indentation, interpolation, multiline Ruby, CRLF and non-BMP text; exact completion ranges and surrounding bytes; rejection of scaffolding, malformed positions, foreign files, overlapping edits and stale versions; and whole-transaction refusal. These regions are supplied explicitly. They are not an ERB/Haml parser and do not establish automatic language-region recognition.
+
+| Capability | ERB | Haml |
+| --- | --- | --- |
+| Project helper member completion | Native Ruby LSP returns `greet`, but its replacement range is wrong after host-language emoji; unsafe | Explicit Ruby projection returns `greet` with the exact original range |
+| Mapped Ruby syntax diagnostics | Native diagnostics return null; explicit projection locates the original `]` byte | Explicit projection locates the original `]` byte |
+| Signature help | One signature with UTF-16, empty with UTF-8 in the exercised changed draft; unresolved | Same encoding-dependent result; unresolved |
+| HTML tags/attributes | HTML server returns the expected `div` and `class`; native ERB requests host delegation | Same HTML candidates available, but HTML edit/snippet syntax is not Haml syntax; conversion unproven |
+| Rails helpers, automatic region parsing, full template formatting | Unverified; required before full release | Unverified; required before full release |
+
+The range defect is concrete: native ERB's final UTF-8 run proposes bytes 39..42 while `gre` occupies 42..45. UTF-16 yielded a wrong ERB range and an unmappable Haml Ruby range. Do not apply these native results as if they were correct source edits. An explicit Ruby projection with UTF-8 negotiation passes exact `gre` replacement and maps syntax diagnostics to bytes 48..49 (ERB) and 51..52 (Haml). Generated scaffolding and foreign-file edits must reject the whole edit transaction. This is a viable mapping primitive, not a validated complete template implementation. Signature help and real grammar/context recognition still block the template slice and full release.
+
+Changed drafts were sent via negotiated incremental updates and source files remained unchanged. The initial run incorrectly sent full-text changes to this incremental-only implementation; that run is retained but superseded. UTF-16, UTF-8 and strengthened failing range checks are retained separately. Stale-range rejection uses the deterministic mapping contract, including a real completion payload; it is not proof of a production asynchronous lifecycle. Markup candidates were exercised in standalone HTML projections, not a complete template host adapter.
+
+In the final two single runs, the exercised requests plus HTML startup took about 0.59 seconds after Ruby initialization; end-of-run RSS was 77.7–78.1 MiB for Ruby and 121.6–131.0 MiB for HTML. These are point samples, not peak/settled distributions or a product performance comparison. Initialize timing and all requests/replies are timestamped in the transcripts. Generated local files are inventoried; no OS-level network/filesystem audit was performed, so isolation claims refer to the configured launch and observed artifacts.
+
+Evidence: [pinned source/tool identities](../../target/perf/editor-readiness/templates-final/identity.json), [ERB summary](../../target/perf/editor-readiness/templates-final/erb/summary.json), [ERB range check](../../target/perf/editor-readiness/templates-final/erb/native-range-check.json), [ERB mapped diagnostics](../../target/perf/editor-readiness/templates-final/erb/mapped-diagnostics.json), [Haml summary](../../target/perf/editor-readiness/templates-final/haml/summary.json), [Haml mapped diagnostics](../../target/perf/editor-readiness/templates-final/haml/mapped-diagnostics.json), and [run log](../../target/perf/editor-readiness/templates-final-run.log). Each provider directory includes initialize capabilities, stderr, raw framed-message transcripts, completion/signature/diagnostic payloads and fixture sources. Passing the probe means the stated experiments completed; it does not mean template acceptance passed.
