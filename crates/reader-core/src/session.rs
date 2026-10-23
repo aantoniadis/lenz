@@ -4711,9 +4711,13 @@ impl Session {
                     t.stamp = stamp;
                 }
                 t.unavailable = None;
-                let current = t.doc.clone();
+                let mut current = t.doc.clone();
                 let buffer = t.buffer;
                 let identity = t.canonical.clone().unwrap_or_else(|| t.source.clone());
+                if current.is_none() {
+                    self.cache.rename(&from, &to);
+                    current = self.cache.peek(&to);
+                }
                 if let Some(id) = buffer {
                     self.state.sources.aliases.retain(|source, buffer| *buffer != id || *source == identity);
                 }
@@ -4725,10 +4729,6 @@ impl Session {
                     }
                     self.state.sources.admit(&identity, buffer, doc, stamp);
                     self.admit_current(tab);
-                }
-                // A released tab's snapshot follows it, keeping its identity for the next rename.
-                if current.is_none() {
-                    self.cache.rename(&from, &to);
                 }
                 // Its bookmarks and recent places follow it.
                 if Arc::make_mut(&mut self.state.places).rename(&from, &to) {
