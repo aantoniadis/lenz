@@ -1,7 +1,7 @@
 //! Bounded terminal measurement over shared resumable projections.
 use reader_core::{
     projection::{Batch, Cursor, Request, WINDOW_WORK, Window},
-    session::{Command, State, View},
+    session::{Command, NativeReveal, NativeViewport, State, View},
     tabs::TabId,
 };
 use std::{collections::VecDeque, ops::Range, sync::Arc};
@@ -44,6 +44,9 @@ struct Target {
     width: usize,
     display: Option<Range<usize>>,
     source_end: Option<usize>,
+    goal: Option<NativeReveal>,
+    cols: usize,
+    indent: usize,
 }
 
 struct Line {
@@ -60,6 +63,8 @@ struct Line {
     ready: bool,
     failed: bool,
     touched: bool,
+    goal_display: Option<usize>,
+    bounds: Option<Range<usize>>,
 }
 
 impl Line {
@@ -83,6 +88,8 @@ impl Line {
             ready: false,
             failed: false,
             touched: true,
+            goal_display: None,
+            bounds: None,
         })
     }
 
@@ -90,7 +97,7 @@ impl Line {
         if self.target == target {
             return;
         }
-        if self.target.display == target.display
+        if self.target.goal == target.goal && self.target.display == target.display
             && self.target.skip == target.skip
             && self.target.width == target.width
         {
@@ -127,11 +134,17 @@ impl Line {
                 return;
             }
         }
+        let preserve = self.ready && self.target.display == target.display
+            && self.target.skip == target.skip && self.target.width == target.width;
+        let new_goal = self.target.goal != target.goal;
+        if new_goal { self.goal_display = None; self.bounds = None; }
         self.position = self
             .checkpoints
             .iter()
             .chain(std::iter::once(&self.position))
-            .filter(|p| target.skip > 0 && p.column <= target.skip)
+            .filter(|p| if let Some(goal) = &target.goal {
+                p.cursor.source_byte() < goal.source
+            } else { target.skip > 0 && p.column <= target.skip })
             .max_by_key(|p| p.column)
             .cloned()
             .unwrap_or_else(|| Position {
@@ -140,7 +153,7 @@ impl Line {
                 carry: None,
             });
         self.target = target;
-        self.cells = Arc::default();
+        if !preserve { self.cells = Arc::default(); }
         self.complete =
             self.end.as_ref() == Some(&self.position.cursor) && self.position.carry.is_none();
         self.ready = self.complete;
@@ -160,9 +173,13 @@ impl Line {
         );
         cell.column = self.position.column;
         cell.width = UnicodeWidthStr::width(cell.text());
+        if self.bounds.is_none() && self.goal_display.is_some_and(|display| (cell.display..cell.display + cell.text().len()).contains(&display)) {
+            self.bounds = Some(cell.column..cell.column.saturating_add(cell.width.max(1)));
+        }
         if cell.column >= self.target.skip
-            && cell.column.saturating_add(cell.width)
-                <= self.target.skip.saturating_add(self.target.width)
+            && (cell.column.saturating_add(cell.width) <= self.target.skip.saturating_add(self.target.width)
+                || (cell.column == self.target.skip && cell.width > self.target.width && self.target.width > 0))
+            && !self.cells.iter().any(|old| old.display == cell.display)
         {
             Arc::make_mut(&mut self.cells).push(cell.clone());
         }
@@ -171,6 +188,9 @@ impl Line {
 
     fn consume(&mut self, window: &Window) {
         self.started = true;
+        if self.goal_display.is_none() {
+            self.goal_display = self.target.goal.as_ref().and_then(|goal| window.caret_display(goal.source));
+        }
         self.checkpoints.push_back(self.position.clone());
         if self.checkpoints.len() > CHECKPOINTS {
             self.checkpoints.pop_front();
@@ -246,9 +266,12 @@ impl Line {
         if self.complete {
             self.extent = Some(self.position.column);
             self.end = Some(self.position.cursor.clone());
+            if self.bounds.is_none() && self.goal_display == Some(self.target.display.as_ref().map_or(window.display.end, |r| r.end)) {
+                self.bounds = Some(self.position.column..self.position.column.saturating_add(1));
+            }
         }
-        self.ready = self.complete
-            || self.position.column >= self.target.skip.saturating_add(self.target.width);
+        self.ready = self.complete || (self.position.column >= self.target.skip.saturating_add(self.target.width)
+            && (self.target.goal.is_none() || self.bounds.is_some()));
     }
 }
 
@@ -296,6 +319,7 @@ impl Cache {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn row(
         &mut self,
         pane: u8,
@@ -304,6 +328,7 @@ impl Cache {
         skip: usize,
         width: usize,
         batch: Option<&Batch>,
+        goal: Option<&NativeReveal>,
     ) -> Row {
         self.project(
             pane,
@@ -314,6 +339,9 @@ impl Cache {
                 width,
                 display: None,
                 source_end: None,
+                goal: goal.cloned(),
+                cols: width,
+                indent: 0,
             },
             None,
             batch,
@@ -328,18 +356,24 @@ impl Cache {
         cursor: Cursor,
         display: Range<usize>,
         source_end: Option<usize>,
+        skip: usize,
+        indent: usize,
         width: usize,
         batch: Option<&Batch>,
+        goal: Option<&NativeReveal>,
     ) -> Row {
         self.project(
             pane,
             view,
             cursor.line(),
             Target {
-                skip: 0,
-                width,
+                skip: skip.saturating_sub(indent),
+                width: width.saturating_sub(indent.saturating_sub(skip)),
                 display: Some(display),
                 source_end,
+                goal: goal.cloned(),
+                cols: width,
+                indent,
             },
             Some(cursor),
             batch,
@@ -449,6 +483,9 @@ impl Cache {
                 slot.seen = true;
             }
         }
+        if let Some((goal, bounds)) = entry.target.goal.as_ref().zip(entry.bounds.clone()) {
+            self.commands.push(Command::MeasuredReveal { goal: goal.clone(), cols: entry.target.cols, bounds: bounds.start.saturating_add(entry.target.indent)..bounds.end.saturating_add(entry.target.indent) });
+        }
         let row = Row {
             cells: entry.cells.clone(),
             end: (entry.complete && entry.position.column <= skip.saturating_add(width))
@@ -460,7 +497,7 @@ impl Cache {
                     }
                 })
                 .flatten(),
-            extent: entry.extent.filter(|_| entry.target.display.is_none()),
+            extent: entry.extent.map(|extent| extent.saturating_add(entry.target.indent).saturating_add(1)),
             failed: entry.failed,
             pending: !entry.ready && !entry.failed,
         };
@@ -497,17 +534,11 @@ impl Cache {
             .map(|entry| entry.start.clone())
     }
 
-    pub fn clamp(&mut self, pane: u8, view: &View<'_>, cols: usize, extent: usize) {
-        if let Some(identity) = view.display_start(view.tab().top_line()) {
+    pub fn clamp(&mut self, viewport: Option<NativeViewport>, view: &View<'_>, cols: usize, extent: usize) {
+        if let Some(viewport) = viewport {
             let max = extent.saturating_sub(cols);
             if view.tab().column() > max {
-                self.commands.push(Command::ClampColumn {
-                    pane,
-                    tab: view.tab().id(),
-                    identity,
-                    cols,
-                    max,
-                });
+                self.commands.push(Command::ClampColumn { viewport, max });
             }
         }
     }
