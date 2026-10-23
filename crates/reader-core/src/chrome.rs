@@ -178,7 +178,7 @@ impl Session {
         let image = state
             .active()
             .filter(|t| !t.image_source())
-            .and_then(|t| t.document()?.image())
+            .and_then(|t| state.view(t.id())?.snapshot().image())
             .map(|image| {
                 format!(
                     "{}×{} · {:?} · {} bytes{}",

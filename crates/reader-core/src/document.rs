@@ -43,6 +43,7 @@ pub struct SourceMeta {
 }
 
 impl SourceMeta {
+    pub(crate) fn fingerprint(&self) -> u64 { self.fingerprint }
     pub(crate) fn is_large(&self) -> bool { self.large }
     pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, ..self.clone() } }
     pub(crate) fn bytes(&self) -> usize {

@@ -4,7 +4,7 @@
 
 use std::{path::Path, sync::Arc, time::SystemTime};
 
-use crate::document::Document;
+use crate::text::TextSnapshot;
 
 /// The starting budget for inactive reloadable content.
 pub const INACTIVE_BYTES: usize = 32 << 20;
@@ -41,7 +41,7 @@ pub struct InactiveCache {
     limit: usize,
     used: usize,
     /// Least recently left first.
-    entries: Vec<(Stamp, Arc<Document>, usize)>,
+    entries: Vec<(Stamp, Arc<TextSnapshot>, usize)>,
 }
 
 impl InactiveCache {
@@ -49,7 +49,7 @@ impl InactiveCache {
         Self { limit, used: 0, entries: Vec::new() }
     }
 
-    /// Bytes held, by [`Document::bytes`].
+    /// Bytes held, by [`TextSnapshot::bytes`].
     pub fn used(&self) -> usize {
         self.used
     }
@@ -64,14 +64,14 @@ impl InactiveCache {
 
     /// Keep `doc`, read as `stamp`, as the most recently left; evicts the least recently left until within
     /// the budget. A document larger than the whole budget is not kept.
-    pub fn put(&mut self, stamp: Stamp, doc: Arc<Document>) {
-        self.put_current(stamp, doc, 0);
+    pub fn put(&mut self, stamp: Stamp, doc: Arc<TextSnapshot>) {
+        self.put_current(stamp, doc);
     }
 
     /// Keep compatibility text and its additional indexed storage in the same budget.
-    pub(crate) fn put_current(&mut self, stamp: Stamp, doc: Arc<Document>, indexed_bytes: usize) {
+    pub(crate) fn put_current(&mut self, stamp: Stamp, doc: Arc<TextSnapshot>) {
         self.remove(doc.source());
-        let bytes = doc.bytes().saturating_add(indexed_bytes);
+        let bytes = doc.storage_bytes();
         if bytes > self.limit {
             return;
         }
@@ -84,18 +84,18 @@ impl InactiveCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn documents(&self) -> Vec<Arc<Document>> {
+    pub(crate) fn documents(&self) -> Vec<Arc<TextSnapshot>> {
         self.entries.iter().map(|(_, d, _)| d.clone()).collect()
     }
 
     /// The kept snapshot of `path` whatever its stamp: the last content of a file that has since disappeared,
     /// taken back by its tab before it can be evicted.
-    pub fn take_any(&mut self, path: &Path) -> Option<Arc<Document>> {
+    pub fn take_any(&mut self, path: &Path) -> Option<Arc<TextSnapshot>> {
         self.remove(path).map(|(_, doc)| doc)
     }
 
     /// The kept snapshot of `path`, left in place, whatever its stamp (a preview shares it; opening checks the file).
-    pub fn peek(&self, path: &Path) -> Option<Arc<Document>> {
+    pub fn peek(&self, path: &Path) -> Option<Arc<TextSnapshot>> {
         self.entries.iter().find(|(_, d, _)| d.source() == path).map(|(_, d, _)| d.clone())
     }
 
@@ -107,7 +107,7 @@ impl InactiveCache {
     /// `from`'s kept snapshot is the same file's under `to` now (a followed rename).
     pub fn rename(&mut self, from: &Path, to: &Path) {
         if let Some(e) = self.entries.iter_mut().find(|(_, d, _)| d.source() == from) {
-            e.1 = Arc::new(e.1.renamed(to.to_path_buf()));
+            e.1 = Arc::new(e.1.with_source_meta(Arc::new(e.1.source_meta().renamed(to.to_path_buf()))));
         }
     }
 
@@ -116,12 +116,12 @@ impl InactiveCache {
     }
 
     /// The kept snapshot of `path` if it was read as `stamp`, removed from the cache; a stale one is dropped.
-    pub fn take(&mut self, path: &Path, stamp: Option<Stamp>) -> Option<Arc<Document>> {
+    pub fn take(&mut self, path: &Path, stamp: Option<Stamp>) -> Option<Arc<TextSnapshot>> {
         let (kept, doc) = self.remove(path)?;
         (Some(kept) == stamp).then_some(doc)
     }
 
-    fn remove(&mut self, path: &Path) -> Option<(Stamp, Arc<Document>)> {
+    fn remove(&mut self, path: &Path) -> Option<(Stamp, Arc<TextSnapshot>)> {
         let i = self.entries.iter().position(|(_, d, _)| d.source() == path)?;
         let (stamp, doc, bytes) = self.entries.remove(i);
         self.used -= bytes;
@@ -134,8 +134,8 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    fn doc(name: &str, len: usize) -> Arc<Document> {
-        Arc::new(Document::decode(PathBuf::from(name), 1, "a".repeat(len).as_bytes()))
+    fn doc(name: &str, len: usize) -> Arc<TextSnapshot> {
+        Arc::new(TextSnapshot::decode(PathBuf::from(name), 1, "a".repeat(len).as_bytes()))
     }
     const STAMP: Stamp = Stamp { len: 1, modified: None, file: None };
 

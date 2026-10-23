@@ -564,8 +564,11 @@ impl Semantics {
 
     /// The provider for `doc`'s language and, once resolved, its workspace root and the provider serving it.
     pub(crate) fn resolved(&self, doc: &Document) -> Option<(usize, Option<Option<PathBuf>>)> {
-        let (p, _) = provider::for_language(doc.language()?)?;
-        let dir = doc.source().parent()?.to_owned();
+        self.resolved_source(doc.source_meta())
+    }
+    pub(crate) fn resolved_source(&self, source: &crate::document::SourceMeta) -> Option<(usize, Option<Option<PathBuf>>)> {
+        let (p, _) = provider::for_language(source.language()?)?;
+        let dir = source.source().parent()?.to_owned();
         Some(match self.roots.get(&(p, dir)) {
             Some(Some(Some((q, root)))) => (*q, Some(Some(root.clone()))),
             Some(Some(None)) => (p, Some(None)),
@@ -579,13 +582,16 @@ impl Semantics {
 
     /// The provider state for `doc`, for presentation; `None` when no provider serves its language.
     pub fn view(&self, doc: &Document) -> Option<ProviderView> {
-        let (p, root) = self.resolved(doc)?;
+        self.view_source(doc.source_meta(), doc.is_large())
+    }
+    pub(crate) fn view_source(&self, source: &crate::document::SourceMeta, large: bool) -> Option<ProviderView> {
+        let (p, root) = self.resolved_source(source)?;
         let provider = &PROVIDERS[p];
         let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None };
-        if doc.is_large() {
+        if large {
             return Some(view(None, Status::Missing("not used for large files".into())));
         }
-        if self.disabled_for(p, doc.source()) {
+        if self.disabled_for(p, source.source()) {
             return Some(view(None, Status::Disabled));
         }
         Some(match root {
@@ -964,8 +970,11 @@ impl Semantics {
     /// Restart the server for `doc`'s workspace (also one that failed or was not found): the old session's
     /// requests and virtual sources become obsolete; documents reopen in the new one.
     pub fn restart(&mut self, doc: &Document) -> bool {
+        self.restart_source(doc.source_meta())
+    }
+    pub(crate) fn restart_source(&mut self, source: &crate::document::SourceMeta) -> bool {
         self.reload();
-        let Some((p, Some(Some(root)))) = self.resolved(doc) else { return false };
+        let Some((p, Some(Some(root)))) = self.resolved_source(source) else { return false };
         let Some(i) = self.servers.iter().position(|s| s.key.provider == p && s.key.root == root) else { return false };
         let s = self.servers.remove(i);
         self.queued.retain(|q| *q != s.session);
@@ -1275,7 +1284,10 @@ impl Semantics {
 
     /// The name of `doc`'s running server when it does not offer `kind` (`None`: it does, or none runs for it).
     pub fn lacks(&self, doc: &Document, kind: Decor) -> Option<&'static str> {
-        let s = self.servers.iter().find(|s| s.initialized() && s.open.contains_key(doc.source()))?;
+        self.lacks_source(doc.source(), kind)
+    }
+    pub(crate) fn lacks_source(&self, source: &Path, kind: Decor) -> Option<&'static str> {
+        let s = self.servers.iter().find(|s| s.initialized() && s.open.contains_key(source))?;
         (!s.offers(kind)).then_some(PROVIDERS[s.key.provider].name)
     }
 

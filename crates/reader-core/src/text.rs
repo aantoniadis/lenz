@@ -260,6 +260,17 @@ impl TextSnapshot {
         }
         Some(Cow::Owned(text))
     }
+    pub(crate) fn matches_document(&self, doc: &Document) -> bool {
+        self.bytes == doc.text().len() && self.source.fingerprint() == doc.content_fingerprint()
+            && self.chunks.iter().all(|e| doc.text().get(e.byte..e.byte + e.chunk.text().len()) == Some(e.chunk.text()))
+    }
+    pub(crate) fn column_of(&self, byte: usize) -> usize {
+        let byte = self.floor_char_boundary(byte);
+        let start = self.reader_line_range(self.line_of(byte)).start;
+        self.chunks.iter().filter(|e| e.byte < byte && e.byte + e.chunk.text().len() > start).map(|e| {
+            e.chunk.text().get(start.saturating_sub(e.byte)..(byte - e.byte).min(e.chunk.text().len())).unwrap_or_default().chars().count()
+        }).sum()
+    }
     pub fn copy_range(&self, bytes: Range<usize>) -> Option<String> { self.range(bytes).map(Cow::into_owned) }
 
     /// `from` is an absolute byte offset, clamped to this line and rounded down to a character boundary.
