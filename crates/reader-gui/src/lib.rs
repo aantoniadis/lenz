@@ -2510,9 +2510,9 @@ impl ReaderView {
         if row.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) { return Some(row.line); }
         let projected = self.source_row(tab, row)?;
         if !row.last || !projected.complete() || !collapsed { return None; }
-        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + row.indent as f32 * self.char_w + projected.origin;
-        let full = format!("{}{PLACEHOLDER}", projected.text);
-        (lenz_gpui::column_at(window, self.metrics(), &full, x - tx) > projected.text.len()).then_some(row.line)
+        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + row.indent as f32 * self.char_w;
+        let end = projected.x_for(window, self.metrics(), projected.text.len())?;
+        (lenz_gpui::column_at(window, self.metrics(), PLACEHOLDER, x - tx - end) > 0).then_some(row.line)
     }
 
     pub fn fold_marks(&self) -> Vec<(usize, bool)> {
@@ -3608,7 +3608,7 @@ impl ReaderView {
             let Some(tab) = state.shown(g.pane) else { continue };
             if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
             let Some(view) = state.view(tab.id()) else { continue };
-            if view.snapshot().image().is_some() && !tab.image_source() { continue; }
+            if wanted_image(&view).is_some() || unshowable_image(&view).is_some() { continue; }
             let cols = state.wrap_cols(tab);
             let layout = view.layout_rows(g.rows, cols);
             let mut pending = layout.pending;
