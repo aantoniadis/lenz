@@ -5550,7 +5550,7 @@ mod git_branches {
         // The full popup is unchanged next time.
         s.dispatch(Command::CloseBranches);
         open_branches(&mut s);
-        assert!(s.state().branch_rows("").iter().any(|r| r.section == "Recent" || r.section == "") && s.state().branch_rows("HEAD~1").iter().all(|r| !matches!(r.target, BranchTarget::Revision(_))));
+        assert!(s.state().branch_rows("").iter().any(|r| r.section == "Recent" || r.section.is_empty()) && s.state().branch_rows("HEAD~1").iter().all(|r| !matches!(r.target, BranchTarget::Revision(_))));
     }
 
     #[test]
