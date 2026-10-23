@@ -247,7 +247,8 @@ fn saved_history_survives_cache_pressure() {
         assert_eq!(owner.saved, "changed\n");
         let stamp = Stamp { len: 4096, modified: None, file: None };
         for n in 0..20 {
-            owner.cache.put(stamp, Arc::new(Document::decode(format!("other-{n}").into(), n, &vec![b'x';4096])));
+            owner.cache.put(stamp, Arc::new(reader_core::text::TextSnapshot::from_document(reader_core::text::BufferId(n),
+                &Document::decode(format!("other-{n}").into(), n, &vec![b'x';4096]))));
             if n == 0 { assert!(owner.cache.peek(std::path::Path::new("other-0")).is_some(), "pressure fixture must actually enter the cache"); }
         }
         assert!(owner.cache.peek(std::path::Path::new("other-0")).is_none());

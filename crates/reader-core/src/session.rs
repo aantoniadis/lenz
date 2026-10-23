@@ -1155,6 +1155,9 @@ impl Ask {
     }
 }
 
+/// Retrieved text enters through its loader once; another pane references the existing buffer.
+enum RetrievedContent { Loaded(Arc<Document>), Buffer(crate::text::BufferId) }
+
 /// Session-owned identities outlive release of reloadable content. Only the registry owns current
 /// text; tabs retain identity and reading positions, and the bounded cache keeps clean text reusable.
 #[derive(Default)]
@@ -5342,7 +5345,7 @@ impl Session {
                 self.state.libraries.add_virtual(target.source.clone(), self.state.settings.folders_first);
                 self.state.tree_revision += 1;
                 // A kept tab: its content cannot be read again once replaced.
-                let effect = self.navigate_to(PathBuf::from(&*target.source.uri), true, Some(at), true, Some((doc, target.source)));
+                let effect = self.navigate_to(PathBuf::from(&*target.source.uri), true, Some(at), true, Some((RetrievedContent::Loaded(doc), target.source)));
                 Effect { repaint: true, ..effect }
             }
             Completion::Moved { tab, token, to, stamp, canonical } => {
@@ -5697,8 +5700,9 @@ impl Session {
             return if retain { Effect::default() } else { self.command(Command::ToggleDir(path.to_string())) };
         }
         if let Some(source) = self.state.libraries.virtual_source(&path).cloned() {
-            if self.state.tabs.iter().any(|t| t.source == Path::new(path.as_ref()) && t.loaded && t.retrieved.is_some()) {
-                return self.navigate_to(PathBuf::from(path.as_ref()), true, None, true, None);
+            if let Some((buffer, source)) = self.state.tabs.iter().find(|t| t.source == Path::new(path.as_ref()) && t.loaded)
+                .and_then(|t| Some((t.buffer?, t.retrieved.clone()?))) {
+                return self.navigate_to(PathBuf::from(path.as_ref()), true, None, true, Some((RetrievedContent::Buffer(buffer), source)));
             }
             self.state.semantics.cancel();
             self.semantic_seq += 1;
@@ -6632,7 +6636,7 @@ impl Session {
 
     /// [`Session::navigate`], optionally to source a language server returned (`retrieved`): its tab holds that
     /// snapshot and never reads the disk.
-    fn navigate_to(&mut self, requested: PathBuf, retain: bool, restore: Option<Location>, record: bool, retrieved: Option<(Arc<Document>, semantics::VirtualSource)>) -> Effect {
+    fn navigate_to(&mut self, requested: PathBuf, retain: bool, restore: Option<Location>, record: bool, retrieved: Option<(RetrievedContent, semantics::VirtualSource)>) -> Effect {
         self.open_seq += 1; // a result still being checked must not move the view after this
         // A jump to another file that has not landed is given up: it must not fire on that file's next open.
         if self.pending_goto.as_ref().is_some_and(|(p, _)| *p != normalized(&requested)) {
@@ -6683,18 +6687,23 @@ impl Session {
                 }
             }
         };
-        if let Some((doc, source)) = retrieved
-            && let Some(t) = self.tab_mut(id)
-        {
-            t.display = PathBuf::from(format!("{} ({})", source.name(), source.provider));
-            t.language = Some(doc.language());
-            t.loaded = true;
-            let retrieved_doc = doc.clone();
-            t.new_content(); // what was derived from earlier text does not fit this one
-            t.retrieved = Some(source);
-            t.stamp = None;
-            t.unavailable = None;
-            self.admit_current(id, &retrieved_doc, None);
+        if let Some((content, source)) = retrieved {
+            let snapshot = match &content {
+                RetrievedContent::Buffer(buffer) => self.state.sources.buffers.get(buffer).and_then(|e| e.snapshot.clone()),
+                RetrievedContent::Loaded(_) => None,
+            };
+            let language = match &content { RetrievedContent::Loaded(doc) => doc.language(), RetrievedContent::Buffer(_) => snapshot.as_ref().and_then(|s| s.language()) };
+            if let Some(t) = self.tab_mut(id) {
+                t.display = PathBuf::from(format!("{} ({})", source.name(), source.provider));
+                t.language = Some(language);
+                t.loaded = true;
+                t.new_content();
+                t.retrieved = Some(source);
+                t.stamp = None;
+                t.unavailable = None;
+                if let Some(snapshot) = &snapshot { t.buffer = Some(snapshot.key().buffer); }
+            }
+            if let RetrievedContent::Loaded(doc) = content { self.admit_current(id, &doc, None); }
         }
         if retain && let Some(t) = self.tab_mut(id) {
             t.retained = true;
