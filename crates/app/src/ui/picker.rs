@@ -302,7 +302,10 @@ impl Viewer {
             let rows = p.sources.rows(&self.palette, &p.branches);
             // the core lists each row's entries (branches, tags, worktrees, the open PR)
             if row >= 0.0 && (row as usize) < rows.len() && let Some(r) = self.repo.as_ref() {
-                items.extend(r.source_menu(row as usize).into_iter().map(|(label, entry)| (label.to_string(), MenuAction::Source(entry))));
+                items.extend(r.source_menu(row as usize).into_iter().map(|(label, entry)| {
+                    let why = match &entry { crate::repository_session::SourceEntry::Command(c) => r.disabled(c), _ => None };
+                    (why.map_or_else(|| label.to_string(), |why| format!("{label} ({why})")), MenuAction::Source(entry))
+                }));
             }
         } else if y >= toolbar_h() + line_h() && y < toolbar_h() + lh {
             let row = ((y - toolbar_h()) / line_h() - 1.0 + p.scroll).floor();

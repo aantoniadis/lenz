@@ -1519,14 +1519,33 @@ fn the_checkout_dialog_offers_smart_and_a_confirmed_force_in_the_terminal() {
     use crossterm::event::KeyEventKind;
     let (dir, mut app) = checkout_repository();
     std::fs::write(dir.path().join("a.txt"), "mine\n").unwrap();
+    let (ox, oy) = find(&draw(&mut app, 120, 30), "⎇ other");
     app.git_command(lenz::repository_session::RepositoryCommand::Checkout(lenz::branches::Target::Branch("other".into())));
     ready(&mut app);
     let shown = screen(&draw(&mut app, 120, 30));
     assert!(shown.contains("s Smart Checkout") && shown.contains("would overwrite your local changes"), "{shown}");
+    // Keys typed as it pops up, Ctrl+S, and clicks and the wheel on the panes beneath change nothing.
+    key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+    std::thread::sleep(lenz::repository_session::DIALOG_GRACE);
+    key(&mut app, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        let selected = app.repository.as_ref().unwrap().core.picker.sources.selected;
+        for kind in [MouseEventKind::Down(MouseButton::Left), MouseEventKind::ScrollDown] {
+            for (column, row) in [(ox + 2, oy), (100, 25)] {
+                assert!(app.handle(Event::Mouse(MouseEvent { kind, column, row, modifiers: KeyModifiers::NONE })));
+            }
+        }
+        ready(&mut app);
+        assert_eq!(app.repository.as_ref().unwrap().core.picker.sources.selected, selected);
+    }
+    assert!(app.repository.as_ref().unwrap().core.checkout_problem().is_some_and(|p| p.discards.is_none()));
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "mine\n");
     key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
     ready(&mut app);
     assert!(screen(&draw(&mut app, 120, 30)).contains("y Force Checkout"));
     // Enter, a held y and s do nothing at the confirmation.
+    std::thread::sleep(lenz::repository_session::DIALOG_GRACE);
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     let mut held = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
     held.kind = KeyEventKind::Repeat;
@@ -1534,8 +1553,9 @@ fn the_checkout_dialog_offers_smart_and_a_confirmed_force_in_the_terminal() {
     key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
     ready(&mut app);
     assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "mine\n");
-    // Tiny terminals draw it; then y confirms.
-    draw(&mut app, 20, 6);
+    // Tiny terminals draw it, the keys line still shown; then y confirms.
+    let tiny = screen(&draw(&mut app, 20, 6));
+    assert!(tiny.contains("y Force"), "{tiny}");
     key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
     ready(&mut app);
     assert_eq!(current_branch(dir.path()), "other");
@@ -1585,4 +1605,21 @@ fn an_unsaved_draft_blocks_a_checkout_in_the_terminal() {
     assert_eq!(current_branch(dir.path()), "main");
     assert_eq!(std::fs::read_to_string(dir.path().join("m.txt")).unwrap(), "changed\n");
     assert!(app.session.has_dirty() && app.session.notice().is_some_and(|n| n.starts_with("Unsaved changes")));
+}
+
+#[test]
+fn shift_f10_on_the_sidebar_lists_the_selected_rows_actions() {
+    let (dir, mut app) = checkout_repository();
+    draw(&mut app, 160, 40);
+    let core = &mut app.repository.as_mut().unwrap().core;
+    let rows = core.picker.sources.rows_with_palette(&core.picker.branches, Default::default());
+    let other = rows.iter().position(|r| matches!(&r.action, Some(lenz::repository_session::SourceAction::Branch(n, _)) if n == "refs/heads/other")).unwrap();
+    core.picker.sources.selected = other;
+    core.execute(lenz::repository_session::RepositoryCommand::Focus(lenz::repository_session::Pane::Sidebar));
+    key(&mut app, KeyCode::F(10), KeyModifiers::SHIFT);
+    let menu = screen(&draw(&mut app, 160, 40));
+    assert!(menu.contains("Checkout") && menu.contains("New Branch from Here…"), "{menu}");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "other");
 }

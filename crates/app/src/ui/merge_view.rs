@@ -380,7 +380,7 @@ impl Viewer {
 
     pub(super) fn merge_act(&mut self, act: Act, cx: &mut Context<Self>) {
         if self.about.is_some()||self.theme_chooser.is_some()||self.discard_modal()
-            ||self.help||self.popup.is_some()||self.goto.is_some()||self.switcher.is_some()||self.menu.is_some()
+            ||self.help||self.popup.is_some()||self.goto.is_some()||self.git_prompt.is_some()||self.checkout_modal()||self.switcher.is_some()||self.menu.is_some()
             ||self.search.as_ref().is_some_and(|s|s.editing)||self.conflicts.as_ref().is_some_and(|s|s.confirming()) {return;}
         if self.merge.as_ref().is_some_and(|s|s.ask.is_some()) && !matches!(act,Act::Save|Act::Done|Act::Cancel|Act::Reload){return;}
         let Some(s) = self.merge.as_mut() else { return };

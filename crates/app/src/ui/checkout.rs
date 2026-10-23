@@ -117,8 +117,12 @@ impl Viewer {
     pub(super) fn checkout_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let Some(choices) = self.repo.as_ref().and_then(|r| r.checkout_problem()).map(|p| p.choices()) else { return false };
         let has = |c| choices.iter().any(|(_, x)| *x == c);
+        // Letters only bare, and not just as the dialog pops up (keys typed for something else).
+        let m = &ev.keystroke.modifiers;
+        let bare = !(m.control || m.alt || m.platform) && self.repo.as_ref().is_some_and(|r| r.checkout_keys_ready());
         let choice = match ev.keystroke.key.as_str() {
             "escape" => Some(CheckoutChoice::Cancel),
+            _ if !bare => None,
             "s" if has(CheckoutChoice::Smart) => Some(CheckoutChoice::Smart),
             // Held keys and repeats never reach the confirmation.
             "f" if has(CheckoutChoice::Force) && !ev.is_held => Some(CheckoutChoice::Force),
@@ -283,9 +287,16 @@ mod gui_tests {
         std::fs::write(dir.path().join("a.txt"), "mine\n").unwrap();
         viewer.update(&mut cx, |v, cx| v.git_command(RepositoryCommand::Checkout(lenz_content::branches::Target::Branch("other".into())), cx));
         pump(&mut cx, &viewer, |v| v.modal() == Some(Modal::Checkout));
+        // Keys typed as it pops up, and Ctrl+S, choose nothing.
+        keys(&mut cx, &window, &["s"]);
+        std::thread::sleep(crate::repository_session::DIALOG_GRACE);
+        window.update(&mut cx, |v, w, cx| v.on_key(&event("s", true, false, false), w, cx)).unwrap();
+        assert!(viewer.read_with(&cx, |v, _| v.repo.as_ref().unwrap().checkout_problem().is_some_and(|p| p.discards.is_none())));
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "mine\n");
         // Force: a second step lists what is discarded; Enter and a held f do nothing there; y confirms.
         keys(&mut cx, &window, &["f"]);
         pump(&mut cx, &viewer, |v| v.repo.as_ref().and_then(|r| r.checkout_problem()).is_some_and(|p| p.discards.is_some()));
+        std::thread::sleep(crate::repository_session::DIALOG_GRACE);
         keys(&mut cx, &window, &["enter", "f", "s"]);
         assert_eq!(viewer.read_with(&cx, |v, _| v.repo.as_ref().unwrap().checkout_problem().unwrap().choices().len()), 2);
         assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "mine\n");
@@ -294,7 +305,9 @@ mod gui_tests {
         // Again, then y.
         viewer.update(&mut cx, |v, cx| v.git_command(RepositoryCommand::Checkout(lenz_content::branches::Target::Branch("other".into())), cx));
         pump(&mut cx, &viewer, |v| v.modal() == Some(Modal::Checkout));
+        std::thread::sleep(crate::repository_session::DIALOG_GRACE);
         keys(&mut cx, &window, &["f"]);
+        std::thread::sleep(crate::repository_session::DIALOG_GRACE);
         keys(&mut cx, &window, &["y"]);
         pump(&mut cx, &viewer, done);
         assert_eq!(branch(dir.path()), "other");

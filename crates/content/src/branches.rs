@@ -287,6 +287,9 @@ fn switch_args(root: &Path, target: &Target) -> Result<Vec<String>, CheckoutErro
         Target::Branch(b) => vec![own("switch"), own(b)],
         Target::Remote(r) => {
             let local = local_branch(root, r);
+            if local.starts_with('-') {
+                return Err(CheckoutError::Git(format!("\"{r}\" cannot be checked out")));
+            }
             match refs(root).map_err(CheckoutError::Git)?.local.contains(&local) {
                 true => vec![own("switch"), local],
                 // git names the local branch from the remote's refspec.
@@ -614,6 +617,15 @@ mod tests {
         assert_eq!(base(r.path()), pair("refs/remotes/origin/main", "origin/main"));
         git(r.path(), &["update-ref", "-d", "refs/remotes/origin/main"]);
         assert_eq!(base(r.path()), None);
+    }
+
+    #[test]
+    fn a_remote_branch_whose_local_name_looks_like_an_option_is_refused() {
+        let r = two_branches();
+        git(r.path(), &["remote", "add", "origin", &r.path().to_string_lossy()]);
+        git(r.path(), &["update-ref", "refs/remotes/origin/-x", "HEAD"]);
+        assert!(matches!(checkout(r.path(), &Target::Remote("origin/-x".into()), Mode::Normal), Err(CheckoutError::Git(e)) if e.contains("cannot be checked out")));
+        assert_eq!(branch(r.path()).as_deref(), Some("main"));
     }
 
     #[test]

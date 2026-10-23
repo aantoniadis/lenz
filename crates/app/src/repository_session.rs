@@ -1209,6 +1209,9 @@ pub(crate) fn submit<T: Send + 'static>(
     static WORKER:Worker=Worker::new();
     submit_on(&WORKER,"lenz-repository",token,job)
 }
+/// How long the checkout dialog ignores its letter keys after it appears or changes step.
+pub const DIALOG_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
 /// Checkouts run on a thread of their own, never queued behind a comparison.
 fn submit_checkout<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
     static WORKER:Worker=Worker::new();
@@ -1400,11 +1403,11 @@ pub struct RepositorySession {
     message_collapsed: bool,
     /// The range commit the keyboard is on.
     message_cursor: usize,
-    /// The repository the window opened on: checkouts write here (the shown worktree may be another).
-    repository: PathBuf,
     /// The checkout running (what it retries if refused) and its answer.
     checkout: Option<(lenz_content::branches::Retry, Inbox<Result<lenz_content::branches::Outcome, lenz_content::branches::CheckoutError>>)>,
     checkout_problem: Option<lenz_content::branches::CheckoutProblem>,
+    /// When the dialog last appeared or changed step (keys wait [`DIALOG_GRACE`]).
+    problem_at: Option<std::time::Instant>,
     /// What the refresh after a checkout says instead of "Repository refreshed".
     checkout_notice: Option<String>,
 }
@@ -1648,7 +1651,11 @@ impl RepositorySession {
                     false => vec![command(C::Checkout(target)), new_branch(&refname), compare],
                 }
             }
-            Some(SourceAction::Tag(commit)) => vec![command(C::Checkout(Target::Detached(commit.clone()))), new_branch(&commit)],
+            Some(SourceAction::Tag(commit)) => {
+                // ponytail: tags on one commit share a row action, so the first one's name is used
+                let tag = self.picker.sources.tags.iter().find(|t| t.commit == commit).map_or(commit.clone(), |t| t.name.clone());
+                vec![command(C::Checkout(Target::Detached(tag.clone()))), new_branch(&format!("refs/tags/{tag}"))]
+            }
             Some(SourceAction::Worktree(path)) => match self.picker.sources.worktrees.iter().find(|w| w.path == path) {
                 // A bare repository has no files, and a removed folder nothing to show.
                 Some(w) if w.head.is_none() || !path.is_dir() => Vec::new(),
@@ -1662,22 +1669,27 @@ impl RepositorySession {
     pub fn checkout_problem(&self) -> Option<&lenz_content::branches::CheckoutProblem> {
         self.checkout_problem.as_ref()
     }
+    /// Whether the dialog takes its letter keys yet: not until [`DIALOG_GRACE`] after it appeared or changed step,
+    /// so keys typed for something else when it pops up never choose Smart or Force.
+    pub fn checkout_keys_ready(&self) -> bool {
+        self.problem_at.is_none_or(|at| at.elapsed() >= DIALOG_GRACE)
+    }
     /// A checkout or new branch is running.
     pub fn checking_out(&self) -> bool {
         self.checkout.is_some()
     }
     /// Whether `name` can be a new branch here.
     pub fn validate_branch_name(&self, name: &str) -> Result<(), String> {
-        lenz_content::branches::check_branch_name(&self.repository, name.trim())
+        lenz_content::branches::check_branch_name(&self.picker.root, name.trim())
     }
     /// `rev` as a commit id, or why not.
     pub fn validate_revision(&self, rev: &str) -> Result<String, String> {
-        lenz_content::branches::verify_commit(&self.repository, rev)
+        lenz_content::branches::verify_commit(&self.picker.root, rev)
     }
     /// Runs `retry` in `mode` on the checkout worker; a refusal opens the dialog to run it again.
     fn start_checkout(&mut self, retry: lenz_content::branches::Retry, mode: lenz_content::branches::Mode) {
         self.checkout_problem = None;
-        let root = self.repository.clone();
+        let root = self.picker.root.clone();
         self.notice = Some(match &retry {
             lenz_content::branches::Retry::Checkout(_) => format!("Checking out {}…", retry.label()),
             lenz_content::branches::Retry::NewBranch { name, .. } => format!("Creating branch {name}…"),
@@ -1688,10 +1700,11 @@ impl RepositorySession {
     /// A checkout's answer: the window reloads and says what happened, or the dialog opens.
     fn poll_checkout(&mut self) -> bool {
         use lenz_content::branches::{CheckoutError, CheckoutProblem};
-        let Some((retry, inbox)) = self.checkout.as_mut() else { return false };
-        let Ok(result) = inbox.try_recv() else {
-            if matches!(inbox.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) { self.checkout = None; }
-            return false;
+        let Some((retry, inbox)) = self.checkout.as_ref() else { return false };
+        let result = match inbox.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => None,
         };
         let retry = retry.clone();
         self.checkout = None;
@@ -1699,23 +1712,27 @@ impl RepositorySession {
         match result {
             None => {}
             Some(Ok(outcome)) => {
-                let mut said = vec![format!("Checked out {label}")];
-                said.extend(outcome.warning.map(|w| format!("Checkout: {w}")));
+                // One line, warnings first: a toast and a status line show one line.
                 let stash = lenz_content::branches::SMART_STASH;
-                match outcome.stash_kept {
-                    Some(files) if !files.is_empty() => said.push(format!("Smart Checkout: your changes conflict with {label} in {}; they are kept in the stash \"{stash}\"", files.join(", "))),
-                    Some(_) => said.push(format!("Smart Checkout: your changes could not be put back; they are kept in the stash \"{stash}\"")),
-                    None => {}
-                }
-                self.notice = Some(said.join("\n"));
+                let mut warnings: Vec<String> = match outcome.stash_kept {
+                    Some(files) if !files.is_empty() => vec![format!("Smart Checkout: your changes conflict with {label} in {} and are kept in the stash \"{stash}\"", files.join(", "))],
+                    Some(_) => vec![format!("Smart Checkout: your changes could not be put back and are kept in the stash \"{stash}\"")],
+                    None => Vec::new(),
+                };
+                warnings.extend(outcome.warning.map(|w| format!("Checkout: {}", w.replace('\n', " "))));
+                self.notice = Some(match warnings.is_empty() {
+                    true => format!("Checked out {label}"),
+                    false => format!("{}; checked out {label}", warnings.join("; ")),
+                });
                 self.checkout_notice = self.notice.clone();
                 self.run(RepositoryCommand::RefreshRepository);
             }
             Some(Err(CheckoutError::Blocked { tracked, untracked })) => {
                 self.notice = None;
                 self.checkout_problem = Some(CheckoutProblem { retry, tracked, untracked, discards: None });
+                self.problem_at = Some(std::time::Instant::now());
             }
-            Some(Err(CheckoutError::Git(e))) => self.notice = Some(e),
+            Some(Err(CheckoutError::Git(e))) => self.notice = Some(e.replace('\n', " ")),
         }
         true
     }
@@ -1769,7 +1786,6 @@ impl RepositorySession {
 
     /// A session over `picker` with no background work started.
     pub fn with_picker(picker: Picker) -> Self {
-        let repository = picker.root.clone();
         Self {
             picker,
             pr: None,
@@ -1819,9 +1835,9 @@ impl RepositorySession {
             message_token: std::sync::Arc::new(()),
             message_collapsed: false,
             message_cursor: 0,
-            repository,
             checkout: None,
             checkout_problem: None,
+            problem_at: None,
             checkout_notice: None,
         }
     }
@@ -1872,6 +1888,9 @@ impl RepositorySession {
             | RepositoryCommand::CheckoutChoice(lenz_content::branches::CheckoutChoice::Smart | lenz_content::branches::CheckoutChoice::ConfirmForce)
                 if self.checkout.is_some() => Some("A checkout is running; wait for it to finish"),
             RepositoryCommand::CompareWorktree(path) | RepositoryCommand::OpenWindow(path) if !path.is_dir() => Some("The worktree's folder is gone"),
+            RepositoryCommand::Checkout(lenz_content::branches::Target::Branch(b))
+                if self.picker.sources.worktrees.iter().any(|w| !w.current && w.branch.as_deref() == Some(b.as_str())) =>
+                Some("Checked out in another worktree"),
             RepositoryCommand::CopyHash
             | RepositoryCommand::CopySubject
             | RepositoryCommand::CopyDetails
@@ -2019,13 +2038,20 @@ impl RepositorySession {
     pub fn poll_rows(&mut self, log_rows: f32) -> bool {
         let mut changed = false;
         changed |= self.poll_checkout();
-        if let Some((plan,inventory,filters))=receive(&mut self.refreshing)
-            && self.picker.refresh_is_current(&plan){
-            self.source_details=None;
-            self.head=self.picker.apply_repository_inventory(inventory);
-            let errors=self.picker.apply_refresh_filters(&plan,filters);
-            let done=self.checkout_notice.take().unwrap_or_else(||"Repository refreshed".into());
-            self.notice=Some(if errors.is_empty(){done}else{errors.join("\n")});changed=true;
+        if let Some((plan,inventory,filters))=receive(&mut self.refreshing){
+            if self.picker.refresh_is_current(&plan){
+                self.source_details=None;
+                self.head=self.picker.apply_repository_inventory(inventory);
+                let errors=self.picker.apply_refresh_filters(&plan,filters);
+                let done=self.checkout_notice.take().unwrap_or_else(||"Repository refreshed".into());
+                self.notice=Some(if errors.is_empty(){done}else{format!("{done}; {}",errors.join("; "))});changed=true;
+            }else if let Some(done)=self.checkout_notice.take(){
+                // A click during the refresh after a checkout keeps its own history, but the sidebar and title
+                // still follow the new HEAD.
+                self.source_details=None;
+                self.head=self.picker.apply_repository_inventory(inventory);
+                self.notice=Some(done);changed=true;
+            }
         }
         if let Some(inventory) = receive(&mut self.sources) {
             changed = true;
@@ -2531,7 +2557,7 @@ impl RepositorySession {
             }
             C::NewBranch { name, from, checkout: false } => {
                 let name = name.trim().to_string();
-                match lenz_content::branches::create_branch(&self.repository, &name, from.as_deref(), false, lenz_content::branches::Mode::Normal) {
+                match lenz_content::branches::create_branch(&self.picker.root, &name, from.as_deref(), false, lenz_content::branches::Mode::Normal) {
                     Ok(_) => {
                         self.checkout_notice = Some(format!("Created branch {name}"));
                         self.run(C::RefreshRepository);
@@ -2551,8 +2577,11 @@ impl RepositorySession {
                     K::Cancel => {}
                     K::Smart => self.start_checkout(problem.retry, Mode::Smart),
                     K::ConfirmForce => self.start_checkout(problem.retry, Mode::Force),
-                    K::Force => match lenz_content::branches::discarded_by_force(&self.repository) {
-                        Ok(discards) => self.checkout_problem = Some(lenz_content::branches::CheckoutProblem { discards: Some(discards), ..problem }),
+                    K::Force => match lenz_content::branches::discarded_by_force(&self.picker.root) {
+                        Ok(discards) => {
+                            self.checkout_problem = Some(lenz_content::branches::CheckoutProblem { discards: Some(discards), ..problem });
+                            self.problem_at = Some(std::time::Instant::now());
+                        }
                         Err(e) => self.notice = Some(e),
                     },
                 }
@@ -3623,13 +3652,64 @@ mod checkout_tests {
     }
 
     #[test]
-    fn a_checkout_writes_in_the_windows_repository_after_a_worktree_row_was_shown() {
+    fn a_checkout_acts_on_the_worktree_shown() {
         let (r, wt, mut state) = fixture();
         let second = wt.path().join("second");
         state.execute(RepositoryCommand::Source(SourceAction::Worktree(second.clone())));
         settle(&mut state);
         checkout(&mut state, Target::Branch("other".into()));
-        assert_eq!((branch(r.path()), branch(&second)), ("other".to_string(), "side".to_string()));
+        assert_eq!((branch(r.path()), branch(&second)), ("main".to_string(), "other".to_string()));
+        assert_eq!(state.picker.title_branch, "other", "the title describes the worktree checked out");
+        assert_eq!(state.notice.as_deref(), Some("Checked out other"));
+    }
+
+    #[test]
+    fn a_smart_conflict_is_said_first_on_one_line() {
+        let (r, _wt, mut state) = fixture();
+        write(r.path(), "a.txt", "1\n2\nmine\n");
+        checkout(&mut state, Target::Branch("other".into()));
+        assert!(!state.checkout_keys_ready(), "the dialog waits before taking letters");
+        std::thread::sleep(DIALOG_GRACE);
+        assert!(state.checkout_keys_ready());
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Force));
+        assert!(!state.checkout_keys_ready(), "and again at Force's confirmation");
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Cancel));
+        checkout(&mut state, Target::Branch("other".into()));
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Smart));
+        settle(&mut state);
+        let notice = state.notice.clone().unwrap();
+        assert!(notice.starts_with("Smart Checkout: your changes conflict with other in a.txt and are kept in the stash"), "{notice}");
+        assert!(notice.ends_with("; checked out other") && !notice.contains('\n'), "{notice}");
+    }
+
+    #[test]
+    fn a_click_during_the_refresh_after_a_checkout_keeps_the_sidebar_right() {
+        let (r, _wt, mut state) = fixture();
+        state.execute(RepositoryCommand::Checkout(Target::Branch("other".into())));
+        let started = std::time::Instant::now();
+        while state.checking_out() {
+            state.poll();
+            assert!(started.elapsed().as_secs() < 10);
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        // The refresh is on its way; a log move overtakes it.
+        state.execute(RepositoryCommand::Move { delta: 1, extend: false, two: false });
+        settle(&mut state);
+        assert_eq!(branch(r.path()), "other");
+        assert_eq!(state.picker.title_branch, "other");
+        assert!(state.picker.sources.branches.iter().any(|b| b.current && b.name == "other"));
+        assert_eq!(state.notice.as_deref(), Some("Checked out other"));
+    }
+
+    #[test]
+    fn tags_check_out_by_name_and_a_branch_of_another_worktree_says_why_not() {
+        let (_r, _wt, mut state) = fixture();
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags")));
+        let tag = row(&state, |a| matches!(a, SourceAction::Tag(_)));
+        assert!(matches!(&state.source_menu(tag)[0].1, SourceEntry::Command(RepositoryCommand::Checkout(Target::Detached(t))) if t == "v1"));
+        assert!(matches!(&state.source_menu(tag)[1].1, SourceEntry::NewBranchFrom(t) if t == "refs/tags/v1"));
+        assert_eq!(state.disabled(&RepositoryCommand::Checkout(Target::Branch("side".into()))), Some("Checked out in another worktree"));
+        assert_eq!(state.disabled(&RepositoryCommand::Checkout(Target::Branch("other".into()))), None);
     }
 
     #[test]

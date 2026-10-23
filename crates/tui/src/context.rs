@@ -318,7 +318,7 @@ impl App {
             let Some(card) = card else { return true };
             self.context.items = vec![Item { label: "Copy comment".into(), reason: None, action: Action::Copy(card.body) }];
             if !card.url.is_empty() { self.context.items.push(Item { label: "Copy link to comment".into(), reason: None, action: Action::Copy(card.url) }); }
-        } else if let Some(entries) = point.and_then(|p| self.repository.as_ref().and_then(|r| r.source_menu(p))) {
+        } else if let Some(entries) = self.repository.as_ref().and_then(|r| r.source_menu(point)) {
             // a sidebar row: only its own entries, and no menu without any
             if entries.is_empty() { return true; }
             use lenz::repository_session::SourceEntry;

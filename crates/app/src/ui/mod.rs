@@ -1146,7 +1146,7 @@ impl Viewer {
     fn tool(&mut self, tool: Tool, x: f32, window: &mut Window, cx: &mut Context<Self>) {
         if let Tool::Merge(act)=tool {self.merge_act(act,cx);return;}
         if self.modal().is_some_and(|m|matches!(m,Modal::Discard|Modal::Checkout|Modal::About|Modal::Theme)){return;}
-        if self.help||self.popup.is_some()||self.goto.is_some()||self.switcher.is_some(){return;}
+        if self.help||self.popup.is_some()||self.goto.is_some()||self.git_prompt.is_some()||self.checkout_modal()||self.switcher.is_some(){return;}
         if (self.merge.as_ref().is_some_and(|s|s.ask.is_some())||self.picker_v.as_ref().is_some_and(|s|s.ask.is_some())) && !matches!(tool,Tool::Pick(version_picker::PickAct::Save|version_picker::PickAct::Done|version_picker::PickAct::Cancel)){return;}
         if self.conflicts.as_ref().is_some_and(|s|s.confirming()){return;}
         match tool {
@@ -1728,12 +1728,14 @@ impl Viewer {
 
     /// Paint a brief message now and repaint when it expires.
     fn toast(&mut self, message: String, cx: &mut Context<Self>) {
+        // A long message (a checkout's warning) stays long enough to read.
+        let shown_for = TOAST_FOR.max(std::time::Duration::from_millis(50) * message.chars().count() as u32).min(std::time::Duration::from_secs(10));
         self.toast = Some((message, Instant::now()));
         cx.notify();
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(TOAST_FOR).await;
+            cx.background_executor().timer(shown_for).await;
             this.update(cx, |viewer: &mut Viewer, cx| {
-                if viewer.toast.as_ref().is_some_and(|(_, at)| at.elapsed() >= TOAST_FOR) {
+                if viewer.toast.as_ref().is_some_and(|(_, at)| at.elapsed() >= shown_for) {
                     viewer.toast = None;
                     cx.notify();
                 }
@@ -2190,9 +2192,9 @@ impl Viewer {
             return;
         }
         // Go to file / line, Find in Change Set while typed: a click outside the box closes it
-        if self.switcher.is_some() || self.goto.is_some() || self.search.as_ref().is_some_and(|s| s.editing) {
+        if self.switcher.is_some() || self.goto.is_some() || self.git_prompt.is_some() || self.search.as_ref().is_some_and(|s| s.editing) {
             if !self.prompt_box_contains(x, y) {
-                self.switcher = None;self.goto = None;
+                self.switcher = None;self.goto = None;self.git_prompt = None;
                 if self.search.as_ref().is_some_and(|s| s.editing) && let Some(s) = self.search.take() {s.cancel.store(true, std::sync::atomic::Ordering::Relaxed);}
                 cx.notify();
             }
@@ -2543,7 +2545,7 @@ impl Viewer {
             }
             return;
         }
-        if self.markdown_active()&&(self.help||self.goto.is_some()||self.switcher.is_some()||self.popup.is_some()){return;}
+        if self.markdown_active()&&(self.help||self.goto.is_some()||self.git_prompt.is_some()||self.switcher.is_some()||self.popup.is_some()){return;}
         if self.resize_move(x,y,ev.pressed_button==Some(MouseButton::Left),cx){return;}
         if ev.pressed_button==Some(MouseButton::Left) && (self.message_drag(x,y,cx) || self.pr_dialog_drag(x,y,cx)) {return;}
         if self.markdown_drag(ev,window,cx){return;}
@@ -3091,7 +3093,7 @@ impl Viewer {
     }
 
     fn on_wheel(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.discard_modal() || self.merge.as_ref().is_some_and(|s|s.ask.is_some()) || self.picker_v.as_ref().is_some_and(|s|s.ask.is_some()){return;}
+        if self.discard_modal() || self.checkout_modal() || self.merge.as_ref().is_some_and(|s|s.ask.is_some()) || self.picker_v.as_ref().is_some_and(|s|s.ask.is_some()){return;}
         if self.theme_chooser.is_some()||self.diff_options.is_some(){return;}
         // the palette takes the wheel as row moves; nothing underneath scrolls
         if let Some(p)=self.command_palette.as_mut(){
@@ -3116,7 +3118,7 @@ impl Viewer {
             if let Some(p)=&mut self.popup {p.scroll=if f32::from(delta.y)>0. {p.scroll.saturating_sub(3)}else{(p.scroll+3).min(max)};}
             cx.notify();return;
         }
-        if self.switcher.is_some() || self.goto.is_some() || self.help
+        if self.switcher.is_some() || self.goto.is_some() || self.git_prompt.is_some() || self.help
             || self.search.as_ref().is_some_and(|s| s.editing)
             || self.repo.as_ref().map(|r| &r.picker).is_some_and(|p| p.filter_editing) { return; }
         let delta = lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w);
