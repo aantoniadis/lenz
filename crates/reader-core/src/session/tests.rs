@@ -84,6 +84,32 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 }
 
 #[test]
+fn project_text_search_overlays_current_drafts_and_leaves_unopened_files_on_disk() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let a = write(&root, "open.rs", b"fn removed_saved() {}\n");
+    let b = write(&root, "unopened.rs", b"fn unopened_draft_only() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(a.clone()), "open.rs");
+    let source = s.state().current_source().unwrap();
+    let (expected, len) = (source.key(), source.len_bytes());
+    let tab = s.state().active().unwrap().id();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: "\n\nfn draft_only() {}\n".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Search { query: "draft_only".into(), scope: SearchIn::Project });
+    settle(&mut s, searched);
+    let mut hits: Vec<_> = s.state().results().unwrap().hits().iter().map(|hit| (hit.path.to_string(), hit.line)).collect(); hits.sort();
+    assert_eq!(hits, [("open.rs".into(), 2), ("unopened.rs".into(), 0)]);
+    s.dispatch(Command::Search { query: "removed_saved".into(), scope: SearchIn::Project });
+    settle(&mut s, searched);
+    assert!(s.state().results().unwrap().hits().is_empty(), "saved matches removed from an open draft must disappear");
+    assert_eq!(std::fs::read(a).unwrap(), b"fn removed_saved() {}\n");
+    assert_eq!(std::fs::read(b).unwrap(), b"fn unopened_draft_only() {}\n");
+}
+
+#[test]
 fn rejected_and_noop_edits_do_not_pin_reloadable_sources() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap();
