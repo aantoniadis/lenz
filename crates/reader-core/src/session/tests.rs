@@ -6054,3 +6054,28 @@ fn current_refresh_updates_split_compatibility_without_merging_view_positions_or
     assert_eq!(other.snapshot().copy_range(17..21).as_deref(), Some("beta"));
     assert_eq!(other.tab().document().unwrap().line(0), "fn alpha() {}");
 }
+
+#[test]
+fn current_cached_rename_reactivation_updates_path_and_preserves_held_snapshot() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "before.txt", b"original\r\n");
+    let moved = d.path().join("after.txt");
+    let other = write(d.path(), "other.txt", b"other\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "before.txt");
+    let tab = s.state().active().unwrap().id();
+    let held = s.state().view(tab).unwrap().snapshot().clone();
+    open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+    std::fs::remove_file(other).unwrap();
+    settle(&mut s, |s| s.state().active().is_some_and(|tab| tab.unavailable().is_some()));
+    std::fs::rename(&path, &moved).unwrap();
+    settle(&mut s, |s| s.state().tabs().iter().any(|t| t.id() == tab && t.source() == moved));
+    s.dispatch(Command::ActivateTab(tab));
+    settle(&mut s, |s| s.state().view(tab).is_some());
+    let current = s.state().view(tab).unwrap().snapshot();
+    assert_eq!(current.source(), moved);
+    assert_eq!(current.key().buffer, held.key().buffer);
+    assert_eq!(held.source(), path, "a retained snapshot keeps its original metadata");
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("original\r\n"));
+}
