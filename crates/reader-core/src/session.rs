@@ -1396,11 +1396,16 @@ impl State {
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
-        let positions: Vec<_> = self.tabs.iter().filter(|t| t.loaded).map(|t| (t.id, self.location(t))).collect();
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else { return Vec::new() };
+        let previous_buffer = self.sources.aliases.get(tab.canonical.as_deref().unwrap_or(&tab.source)).copied().or(tab.buffer);
+        let previous = previous_buffer.and_then(|id| self.sources.buffers.get(&id)?.snapshot.clone());
+        let positions: Vec<_> = self.tabs.iter().filter(|t| t.loaded && t.id != id && t.buffer.is_some() && t.buffer == previous_buffer)
+            .map(|t| (t.id, self.location(t))).collect();
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else { return Vec::new() };
         let buffer = self.sources.admit(tab.canonical.as_deref().unwrap_or(&tab.source), tab.buffer, doc, stamp);
         tab.buffer = Some(buffer);
         let snapshot = self.sources.buffers[&buffer].snapshot.as_ref().expect("admitted source").clone();
+        if previous.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &snapshot)) { return Vec::new(); }
         let mut changed = Vec::new();
         for tab in &mut self.tabs {
             if tab.buffer != Some(buffer) || !tab.loaded || tab.id == id { continue; }
@@ -2768,10 +2773,11 @@ impl Session {
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) {
         let changed = self.state.admit_current(id, doc, stamp);
+        let version = self.state.source(id).map_or(0, |snapshot| snapshot.key().version);
         if let Some(view) = self.state.view(id) { self.analysis.invalidate(view.snapshot(), self.project_generation.load(Ordering::Relaxed)); }
         for id in changed {
             if self.is_shown(id) {
-                self.mark_shown(id, doc.version());
+                self.mark_shown(id, version);
                 self.decorate(id);
             }
             if let Some(query) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.find.as_ref()).map(|find| find.query.clone()) { self.find_in(id, query, false); }
@@ -2792,6 +2798,11 @@ impl Session {
     }
 
     fn cache_document(&mut self, stamp: Stamp, doc: Arc<Document>) {
+        // A search/semantic preview is an immutable result. It may populate reloadable inactive
+        // storage, but it cannot replace the source of an already loaded view.
+        if self.state.tabs.iter().any(|tab| tab.loaded && (tab.source == doc.source()
+            || tab.canonical.as_deref() == Some(doc.source())
+            || self.state.source(tab.id).is_some_and(|source| source.source() == doc.source()))) { return; }
         let id = self.state.sources.admit(doc.source(), None, &doc, Some(stamp));
         if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone() { self.cache.put(stamp, snapshot); }
         self.release_current();
