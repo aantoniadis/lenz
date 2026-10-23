@@ -460,6 +460,15 @@ impl Parsed {
         self.offsets.capacity() * size_of::<usize>() + self.spans.capacity() * size_of::<Span>()
     }
 
+    /// A capture at one line-relative byte, without cloning the line's span list.
+    pub fn capture_at(&self, line: usize, byte: usize) -> Option<Capture> {
+        let from = *self.offsets.get(line)?;
+        let to = *self.offsets.get(line.checked_add(1)?)?;
+        let spans = self.spans.get(from..to)?;
+        let at = spans.partition_point(|span| span.end as usize <= byte);
+        spans.get(at).filter(|span| span.start as usize <= byte).map(|span| span.capture)
+    }
+
     pub fn spans(&self, lines: Range<usize>) -> Vec<Vec<(Range<usize>, Capture)>> {
         let n = self.offsets.len() - 1;
         (lines.start.min(n)..lines.end.min(n)).map(|l| {

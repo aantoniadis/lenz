@@ -479,37 +479,6 @@ impl Tab {
         }
     }
 
-    /// `(line, row)` moved by `delta` rows (wrapped rows count; collapsed lines are skipped), within the document.
-    pub(crate) fn step_rows(&self, (mut line, mut row): (usize, usize), delta: isize, cols: usize) -> (usize, usize) {
-        let v = self.visible();
-        let mut left = delta;
-        while left > 0 {
-            if row + 1 < self.line_rows(line, Some(cols)).len() {
-                row += 1;
-            } else {
-                let next = v.step(line, 1);
-                if next == line {
-                    break;
-                }
-                (line, row) = (next, 0);
-            }
-            left -= 1;
-        }
-        while left < 0 {
-            if row > 0 {
-                row -= 1;
-            } else {
-                let prev = v.step(line, -1);
-                if prev == line {
-                    break;
-                }
-                (line, row) = (prev, self.line_rows(prev, Some(cols)).len().saturating_sub(1));
-            }
-            left += 1;
-        }
-        (line, row)
-    }
-
     pub fn find(&self) -> Option<&crate::find::FindState> {
         self.find.as_ref()
     }

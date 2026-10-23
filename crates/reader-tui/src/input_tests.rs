@@ -665,6 +665,142 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "α界 z\nsecond\n");
 }
 #[test]
+fn horizontal_scroll_is_clamped_to_current_terminal_extents_after_input_and_resize() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.txt");
+    let source = "α界 ".repeat(100) + "end\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 40, 10);
+    a.dispatch(Command::ScrollColumn(usize::MAX));
+    draw(&mut a, 40, 10);
+    let width = a.layout.panes[0].text.width as usize;
+    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert!(a.next_deadline().is_some(), "a render-time clamp must schedule a fresh frame");
+    assert!(a.tick(Instant::now()));
+    draw(&mut a, 80, 10);
+    let width = a.layout.panes[0].text.width as usize;
+    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert!(a.tick(Instant::now()));
+    draw(&mut a, 80, 10);
+    assert!(a.next_deadline().is_none(), "settled source geometry must not schedule idle redraws");
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 1, 1);
+    draw(&mut a, 80, 10);
+    key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 1, 1);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("families.txt");
+    let family = "👨‍👩‍👧‍👦";
+    let source = family.repeat(2_000) + " END" + &" ".repeat(100) + "\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let view = a.session.state().view(a.session.state().active().unwrap().id()).unwrap();
+    let mut cursor = view.display_start(0).unwrap();
+    let window = view.display_window(&mut cursor, reader_core::projection::WINDOW_WORK).unwrap();
+    assert_ne!(window.source.end % 25, 0, "fixture must split a family grapheme across chunks");
+    draw(&mut a, 80, 20);
+    a.dispatch(Command::ScrollColumn(3_998));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        terminal.draw(|f| a.draw(f)).unwrap();
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 50_001) { break; }
+        assert!(Instant::now() < deadline, "the tail of the line never became usable");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    let pane = &a.layout.panes[0];
+    let (x, y) = (pane.text.x, pane.text.y);
+    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), family);
+    assert_eq!(pane.hits.iter().find(|hit| hit.x == x).map(|hit| (hit.width, hit.byte)), Some((2, 49_975)));
+    assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "E");
+    click(&mut a, x + 3, y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: x + 6, row: y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(a.session.state().selected_text(), Some("END"));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("END"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn cold_horizontal_seek_completes_every_visible_long_line_without_starving_later_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many-long-lines.txt");
+    let source: String = (0..40).map(|line| format!("{}TAIL_{line:02}{}\n", "x".repeat(12_000), " ".repeat(100))).collect();
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 100, 50);
+    a.dispatch(Command::ScrollColumn(12_000));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(&mut a, 100, 50);
+        let pane = &a.layout.panes[0];
+        if (0..40).all(|line| pane.hits.iter().any(|hit| hit.line == line && hit.byte == 12_000)) { break; }
+        assert!(Instant::now() < deadline, "visible cold lines did not finish");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    assert!(a.session.projection(0).is_none(), "finished viewports must release the raw batch");
+    key(&mut a, KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        draw(&mut a, 100, 50);
+        if a.layout.panes[0].hits.iter().any(|hit| hit.line == 0 && hit.byte == 11_996) { break; }
+        assert!(Instant::now() < deadline);
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+    }
+    assert_eq!(a.session.state().column(), 11_996);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("joined.txt");
+    let source = "👩\u{200D}".repeat(1_000) + "💻 END\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let pane = &a.layout.panes[0];
+    let escaped = pane.hits.iter().find(|hit| hit.byte == 256).unwrap();
+    let next = pane.hits.iter().find(|hit| hit.byte == 259).unwrap();
+    let (x, y, end) = (escaped.x, escaped.y, next.x);
+    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), "[");
+    let escape: String = (x..x + 8).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect();
+    assert_eq!(escape, "[U+200D]");
+    click(&mut a, x, y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: end, row: y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(a.session.state().selected_text(), Some("\u{200D}"));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("\u{200D}"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn double_and_triple_click_select_word_and_group() {
     let dir = tempfile::tempdir().unwrap();
     let src = "fn f() { g(\"hello world\", 1); }\n";
@@ -1104,6 +1240,199 @@ fn shifted_selection_head_stays_in_real_terminal_viewport() {
     assert_eq!(line, 30);
     assert!(a.layout.panes[0].rows.iter().any(|(_, l, _)| *l == line));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn followed_rename_invalidates_source_context_hits_without_changing_text_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("before.txt");
+    let moved = dir.path().join("after.txt");
+    std::fs::write(&path, "relative-link target\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
+    let tab = a.session.state().active().unwrap().id();
+    let key = a.session.state().view(tab).unwrap().snapshot().key();
+    std::fs::rename(&path, &moved).unwrap();
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.source() == moved));
+    assert_eq!(a.session.state().view(tab).unwrap().snapshot().key(), key);
+    a.handle(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE,
+    }));
+    assert!(a.modal.is_none(), "old source context must wait for a new frame");
+    assert_eq!(a.session.state().selection(), None);
+    assert_eq!(std::fs::read_to_string(moved).unwrap(), "relative-link target\n");
+}
+
+#[test]
+fn hover_identifier_lookup_uses_bounded_current_snapshot_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.rs");
+    let source = format!("{}\n{}target(); // hidden\n{}", "header".repeat(1000), " ".repeat(12_000), "a".repeat(10_000));
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+    let state = a.session.state();
+    let view = state.view(state.active().unwrap().id()).unwrap();
+    assert_eq!(view.linkable(1, 12_002), Some(12_000..12_006));
+    assert_eq!(view.linkable(1, 12_015), None, "comments are not hover targets");
+    assert_eq!(view.linkable(2, 5_000), None, "do not fabricate a truncated long identifier");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"hint-geometry\"\nversion = \"0.1.0\"\n").unwrap();
+    let path = root.join("main.rs");
+    let source = "fn main() { let value = helper(); }\nfn helper() {}\n";
+    std::fs::write(&path, source).unwrap();
+    let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
+    let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"])
+        .current_dir(env!("CARGO_MANIFEST_DIR"));
+    if profile.ends_with("release") { build.arg("--release"); }
+    assert!(build.status().unwrap().success());
+    let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
+    let cfg = config(dir.path());
+    std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake,"env":{"FAKE_LSP_SLOW_DECOR":"1"}}}}).to_string()).unwrap();
+    let mut a = App::new(cfg, Some(root));
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+        && a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 25, a.layout.panes[0].text.y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }));
+    assert!(a.next_deadline().is_some());
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.hints().is_some()));
+    assert!(a.next_deadline().is_none(), "late hint layout invalidates the pending hover target");
+    draw(&mut a, 80, 20);
+    let old_hints = Arc::downgrade(a.session.state().active().unwrap().hints().unwrap());
+    let (x, y) = (a.layout.panes[0].text.x + 24, a.layout.panes[0].text.y);
+    a.dispatch(Command::SetInlayTypes(false));
+    let before = a.session.state().selection();
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection(), before);
+    draw(&mut a, 80, 20);
+    assert!(old_hints.upgrade().is_none(), "obsolete native layout must release replaced hint labels");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn source_hits_do_not_select_source_after_switching_to_markdown_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note.md");
+    std::fs::write(&path, "# Header\n\nBody\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 2, a.layout.panes[0].text.y);
+    a.run(CommandId::MarkdownSource);
+    let before = a.session.state().selection();
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection(), before);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "# Header\n\nBody\n");
+}
+
+#[test]
+fn source_hits_are_invalidated_by_header_split_and_explorer_layout_changes() {
+    for change in 0..3 {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.txt");
+        std::fs::write(&path, "alpha\nbeta\ngamma\n").unwrap();
+        let mut a = app(dir.path());
+        a.dispatch(Command::OpenRoot(dir.path().to_path_buf()));
+        a.dispatch(Command::Open(path.clone()));
+        settle(&mut a, |a| a.session.state().document().is_some());
+        draw(&mut a, 100, 24);
+        let (x, y) = (a.layout.panes[0].text.x + 2, a.layout.panes[0].text.y);
+        match change {
+            0 => a.dispatch(Command::SetBreadcrumbs(false)),
+            1 => a.run(CommandId::SplitRight),
+            _ => a.run(CommandId::ToggleExplorer),
+        }
+        let before = a.session.state().selection();
+        click(&mut a, x, y);
+        assert_eq!(a.session.state().selection(), before, "layout change={change}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "alpha\nbeta\ngamma\n");
+    }
+}
+
+#[test]
+fn folded_source_does_not_accept_hits_from_the_old_projection() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fold.rs");
+    let source = "fn main() {\n  let first = 1;\n  let second = 2;\n}\ntail\n";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.folds().is_some()));
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y + 1);
+    a.dispatch(Command::ToggleFold(0));
+    let before = a.session.state().selection();
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection(), before);
+    assert!(a.session.state().active().unwrap().visible().hidden(1));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn source_hits_wait_for_render_after_scrolling_or_resizing() {
+    for resize in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lines.txt");
+        let source = (0..100).map(|i| format!("line{i:03}\n")).collect::<String>();
+        std::fs::write(&path, &source).unwrap();
+        let mut a = app(dir.path());
+        a.dispatch(Command::Open(path.clone()));
+        settle(&mut a, |a| a.session.state().document().is_some());
+        draw(&mut a, 80, 20);
+        let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
+        if resize {
+            a.handle(Event::Resize(40, 10));
+        } else {
+            a.dispatch(Command::ScrollRows(3));
+        }
+        click(&mut a, x, y);
+        assert_eq!(a.session.state().selection(), None, "resize={resize}");
+        draw(&mut a, if resize { 40 } else { 80 }, if resize { 10 } else { 20 });
+        let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
+        click(&mut a, x, y);
+        let expected = if resize { 4 } else { 28 };
+        assert_eq!(a.session.state().selection(), Some(Selection { anchor: expected, head: expected }));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+}
+
+#[test]
+fn stale_source_geometry_cannot_target_reloaded_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("changing.txt");
+    std::fs::write(&path, "original content\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    draw(&mut a, 80, 20);
+    let (x, y) = {
+        let pane = &a.layout.panes[0];
+        (pane.text.x + 4, pane.text.y)
+    };
+    let version = a.session.state().document().unwrap().version();
+    std::fs::write(&path, "replacement text\n").unwrap();
+    a.run(CommandId::Reload);
+    settle(&mut a, |a| a.session.state().document().is_some_and(|d| d.version() != version));
+    let before = a.session.state().selection();
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection(), before);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "replacement text\n");
 }
 
 #[test]

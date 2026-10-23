@@ -41,13 +41,13 @@ impl Scheduler {
             });
         }
     }
-    pub(crate) fn finish(&mut self, done: Finished, current: impl Fn(&Request) -> bool) -> Option<(Request, Delta)> {
+    pub(crate) fn finish(&mut self, done: Finished, current: impl Fn(&Request) -> bool) -> Option<(Request, Option<Delta>)> {
         let slot = self.slots.get_mut(done.pane as usize)?;
         if slot.running != Some(done.ticket) { return None; }
         slot.running = None;
         if slot.latest.load(Ordering::Relaxed) != done.ticket || !current(&done.request) { return None; }
         slot.wanted = None;
-        done.delta.map(|delta| (done.request, delta))
+        Some((done.request, done.delta))
     }
 }
 
