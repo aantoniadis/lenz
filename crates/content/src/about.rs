@@ -7,6 +7,22 @@ pub const ROWS: &[(&str, &str)] = &[
     ("Project", "https://github.com/aantoniadis/lenz"),
 ];
 
+/// This build: the release's build ID when packaged (`0.0.6 (abc1234)`), else the workspace version.
+pub const BUILD: &str = match option_env!("LENZ_BUILD_ID") {
+    Some(id) => id,
+    None => env!("CARGO_PKG_VERSION"),
+};
+
+/// What `--version` prints for the executable installed as `name`.
+pub fn version_line(name: &str) -> String {
+    format!("{name} {BUILD}")
+}
+
+/// Whether `args` ask for the version alone (`--version` or `-V`).
+pub fn wants_version<S: AsRef<std::ffi::OsStr>>(args: &[S]) -> bool {
+    matches!(args, [a] if a.as_ref() == "--version" || a.as_ref() == "-V")
+}
+
 /// The About logo for the GUIs: a 96×96 PNG, decoded only while About is open.
 pub const LOGO_PNG: &[u8] = include_bytes!("../../../assets/lenz-about.png");
 /// The About logo for terminals: 24×24 RGBA pixels, drawn as half-block cells.

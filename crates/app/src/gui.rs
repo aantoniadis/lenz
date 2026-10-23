@@ -14,6 +14,7 @@ pub fn run() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let Some(code) = crate::diagnostics::report_cli(&args) { return code; }
     if cli::wants_help(&args) { println!("{}", cli::USAGE); return ExitCode::SUCCESS; }
+    if lenz_content::about::wants_version(&args) { println!("{}", lenz_content::about::version_line("lenz-diff")); return ExitCode::SUCCESS; }
     if let Some(code) = choose_repository(&args) { return code; }
     let (mut request, mut set, launch) = match load(&args) {
         Ok(loaded) => loaded,

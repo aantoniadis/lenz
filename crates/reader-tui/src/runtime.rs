@@ -262,8 +262,8 @@ pub fn main() -> ExitCode {
         println!("{HELP}");
         return ExitCode::SUCCESS;
     }
-    if args.len() == 1 && args[0] == "--version" {
-        println!("lenz-reader-tui {}", env!("CARGO_PKG_VERSION"));
+    if lenz_content::about::wants_version(&args) {
+        println!("{}", lenz_content::about::version_line("lenz-code-tui"));
         return ExitCode::SUCCESS;
     }
     let literal = args.first().is_some_and(|a| a == "--");

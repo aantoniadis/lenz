@@ -5,6 +5,7 @@ const HELP: &str = "Lenz — code and comparisons
 
 Usage: lenz [file-or-folder]
        lenz --tui [file-or-folder]
+       lenz --version
        lenz diff [comparison arguments]
        lenz diff --tui [comparison arguments]
 
@@ -19,6 +20,11 @@ fn main() -> ExitCode {
     let mut args: Vec<OsString> = env::args_os().skip(1).collect();
     if args.first().is_some_and(|s| s == "--help" || s == "-h") {
         println!("{HELP}");
+        return ExitCode::SUCCESS;
+    }
+    // The launcher's own: no app starts. (No dependencies here, so the build ID is read as the apps read it.)
+    if matches!(args.as_slice(), [a] if a == "--version" || a == "-V") {
+        println!("lenz {}", option_env!("LENZ_BUILD_ID").unwrap_or(env!("CARGO_PKG_VERSION")));
         return ExitCode::SUCCESS;
     }
     let binary = match args.first().and_then(|s| s.to_str()) {

@@ -102,3 +102,13 @@ fn a_symlinked_launcher_runs_the_apps_beside_its_real_file() {
         assert_eq!(OsString::from_vec(first.to_vec()), dir.path().join(binary));
     }
 }
+
+#[test]
+fn version_is_the_launchers_own_and_starts_no_app() {
+    let dir = fixture();
+    for flag in ["--version", "-V"] {
+        let out = Command::new(dir.path().join("lenz")).arg(flag).stdin(Stdio::null()).output().unwrap();
+        assert!(out.status.success(), "{flag}: {out:?}");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("lenz {}\n", env!("CARGO_PKG_VERSION")), "{flag}: no app ran");
+    }
+}

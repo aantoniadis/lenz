@@ -245,6 +245,7 @@ fn main() -> ExitCode {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if let Some(code) = lenz::diagnostics::report_cli(&args) { return code; }
     if args.as_slice() == ["--help"] || args.as_slice() == ["-h"] { println!("{HELP}"); return ExitCode::SUCCESS; }
+    if lenz::about::wants_version(&args) { println!("{}", lenz::about::version_line("lenz-diff-tui")); return ExitCode::SUCCESS; }
     let result = (|| {
         let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
         let request = request(&args, &cwd)?;
