@@ -28,7 +28,7 @@ fn snapshot_style_queries_keep_syntax_semantic_precedence_and_modifier_flags() {
     s.dispatch(Command::Open(path.clone()));
     s.dispatch(Command::SetSemanticHighlighting(true));
     let until = Instant::now() + Duration::from_secs(10);
-    while !s.state().active().is_some_and(|tab| tab.highlights().is_some() && tab.tokens().is_some()) {
+    while !s.state().active().and_then(|tab| s.state().view(tab.id())).is_some_and(|view| view.highlights().is_some() && view.tokens().is_some()) {
         assert!(Instant::now() < until, "syntax or semantic tokens timed out");
         while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
         std::thread::yield_now();

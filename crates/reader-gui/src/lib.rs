@@ -4426,7 +4426,7 @@ impl Render for ReaderView {
         #[cfg(feature = "perf-probe")]
         if let Some(seconds) = probe::scroll_seconds()
             && frames.iter().any(|f| !f.rows.is_empty())
-            && (!probe::decor() || self.session.state().active().is_some_and(|t| t.hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some_and(|k| !k.is_empty())))
+            && (!probe::decor() || self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.inlay_hints().is_some_and(|h| !h.is_empty()) && v.tokens().is_some_and(|k| !k.is_empty())))
         {
             if probe::decor() && !probe::DECORATED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!("lenz-reader: decorated {:.1} ms", probe::START.get().map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0));
@@ -4434,11 +4434,11 @@ impl Render for ReaderView {
             if probe::frame(seconds) {
                 cx.quit();
             } else {
-                if probe::fold() && self.session.state().active().is_some_and(|t| t.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if probe::fold() && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     self.session.dispatch(Command::CollapseAll);
                 }
                 // One row further each frame (over collapsed regions), wrapping at the end.
-                let at_end = self.session.state().active().is_none_or(|t| { let v = t.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
+                let at_end = self.session.state().active().is_none_or(|t| { let Some(view) = self.session.state().view(t.id()) else { return true }; let v = view.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
                 self.session.dispatch(if at_end { Command::Scroll(0) } else { Command::ScrollRows(1) });
                 window.request_animation_frame();
             }
