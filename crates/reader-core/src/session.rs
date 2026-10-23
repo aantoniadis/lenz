@@ -1192,11 +1192,12 @@ impl<'a> View<'a> {
 impl View<'_> {
     /// Syntax and semantic style at a line-relative source byte; no full-line span list is built.
     pub fn style_at(&self, line: usize, byte: usize) -> (Option<lenz_content::highlight::Capture>, u8) {
-        if self.snapshot.line_range(line).is_none_or(|range| byte >= range.len()) { return (None, 0); }
-        let syntax = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version)
-            .and_then(|parsed| parsed.capture_at(line, byte));
+        let parsed = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version);
         let tokens = self.tab.tokens.as_ref().filter(|(version, _)| *version == self.snapshot.key().version)
             .map_or(&[][..], |(_, tokens)| tokens.line(line));
+        if parsed.is_none() && tokens.is_empty() { return (None, 0); }
+        if self.snapshot.line_range(line).is_none_or(|range| byte >= range.len()) { return (None, 0); }
+        let syntax = parsed.and_then(|parsed| parsed.capture_at(line, byte));
         let token = tokens.get(tokens.partition_point(|token| token.end as usize <= byte))
             .filter(|token| token.start as usize <= byte);
         token.map_or((syntax, 0), |token| (token.capture.or(syntax), token.mods))
