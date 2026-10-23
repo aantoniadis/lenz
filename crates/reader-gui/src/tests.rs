@@ -11,6 +11,10 @@ struct Fixture {
     window: WindowHandle<ReaderView>,
 }
 
+fn copied_selection(state: &reader_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
+}
+
 fn fixture(cx: &mut TestAppContext, file: Option<(&str, &[u8])>) -> Fixture {
     fixture_with(cx, file, Path::new("/nonexistent/rust-analyzer"))
 }
@@ -1476,7 +1480,7 @@ fn declaration_search_follows_a_coarse_checkout_through_keys(cx: &mut TestAppCon
     assert!(!rows.iter().any(|r| r.label.contains("WatchAlpha")));
     window.simulate_keystrokes("enter enter");
     drop(window);
-    settle(cx, &f, |v| v.session().state().selected_text().as_deref() == Some("WatchOmega"));
+    settle(cx, &f, |v| copied_selection(v.session().state()).as_deref() == Some("WatchOmega"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
 }
 
