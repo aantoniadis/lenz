@@ -23,5 +23,6 @@ Screenshots: [image probe](images-in-gpui-probe.png) and
 
 ## Later research
 
+- [Native macOS termination prerequisite](native-macos-termination.md) (2026-10-23): pinned GPUI shutdown boundary, candidate consent integration and required native acceptance; implementation remains unresolved.
 - [Large-workspace LSP practices](large-workspace-lsp.md) (2026-10-21): VS Code, Zed, Neovim and Helix practices, Ruby LSP indexing boundaries, project scope, reuse and server-specific caches.
 - [Rust security and performance practices](rust-security-performance-practices.md) (2026-10-08): primary-source practices for a Rust viewer of untrusted repositories: terminal injection and Unicode, git/gh hardening and repo-local config execution, atomic writes, decoder limits, crash-freedom lints, supply chain, performance and ratatui/crossterm.
