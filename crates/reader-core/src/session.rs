@@ -6713,6 +6713,9 @@ impl Drop for Session {
         }
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
+        self.current.store(0, Ordering::Relaxed);
+        self.other_current.store(0, Ordering::Relaxed);
+        self.renders.fetch_add(1, Ordering::Relaxed);
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);

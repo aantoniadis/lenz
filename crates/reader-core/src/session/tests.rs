@@ -697,6 +697,46 @@ fn finder_perf() {
 }
 
 #[test]
+fn dropping_a_split_session_cancels_its_other_panes_running_parser() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = session(d.path());
+    let a = write(d.path(), "a.txt", b"first\n");
+    let b = write(d.path(), "b.txt", b"second\n");
+    open(&mut s, Command::Open(a), "a.txt");
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::Open(b), "b.txt");
+    let version = s.state().shown(0).unwrap().document().unwrap().version();
+    let wanted = s.wanted(version);
+    let receiver = s.completions();
+    let (started, entered) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (finished, result) = std::sync::mpsc::channel();
+    s.jobs.submit(Priority::Background, move || {
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let wait = std::sync::Mutex::new(wait);
+        let parsed = highlight::parse_with(Language::Rust, "fn cancelled() { let value = 1; }\n".repeat(2_000).into(),
+            highlight::Want { folds: true, declarations: true }, move || {
+                if first.swap(false, Ordering::Relaxed) {
+                    started.send(()).unwrap();
+                    if wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).is_err() { return false; }
+                }
+                wanted()
+            });
+        finished.send(parsed.is_none()).unwrap();
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let dropping = std::thread::spawn(move || drop(s));
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !receiver.is_closed() && std::time::Instant::now() < until { std::thread::yield_now(); }
+    let closed = receiver.is_closed();
+    release.send(()).unwrap();
+    let cancelled = result.recv_timeout(Duration::from_secs(5)).unwrap();
+    dropping.join().unwrap();
+    assert!(closed, "session teardown reached worker cancellation");
+    assert!(cancelled, "the real parser must observe cancellation after its session closes");
+}
+
+#[test]
 fn dropping_a_session_with_a_full_channel_does_not_hang() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("many");
