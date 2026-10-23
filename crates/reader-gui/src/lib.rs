@@ -317,7 +317,7 @@ struct SourceGeometry {
 impl SourceGeometry {
     fn new(view: &reader_core::session::View<'_>, reader: &ReaderView) -> Option<Self> {
         if matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
-            || wanted_image(view.tab()).is_some() { return None; }
+            || wanted_image(view).is_some() { return None; }
         let state = reader.session.state();
         Some(Self {
             cursor: view.display_start(0)?, tab: view.tab().id(), visible: view.visible(),
@@ -347,7 +347,7 @@ impl SourceGeometry {
             && self.sticky == state.sticky_scroll() && self.annotation_cols == view.tab().annotation_cols()
             && self.layout == reader.layout && self.viewport == (reader.width.to_bits(), reader.height.to_bits(), reader.char_w.to_bits())
             && !matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
-            && wanted_image(view.tab()).is_none()
+            && wanted_image(view).is_none()
     }
 }
 
@@ -403,6 +403,16 @@ mod probe {
         }
         if tabs_ready && !TABS.swap(true, Ordering::Relaxed) {
             eprintln!("lenz-reader: tabs ready {:.1} ms", ms());
+        }
+    }
+    /// Optional bounded native-font diagnostic; TestPlatform does not reproduce native advances.
+    pub fn native_widths(window: &gpui::Window, metrics: lenz_gpui::Metrics<'_>) {
+        static CHECKED: AtomicBool = AtomicBool::new(false);
+        if CHECKED.swap(true, Ordering::Relaxed) || std::env::var_os("READER_PROBE_NATIVE").is_none() { return; }
+        for (name, text) in [("hangul-cho-filler", "\u{115f}\u{200b}"), ("hangul-filler", "\u{3164}\u{200b}"), ("halfwidth-filler", "\u{ffa0}\u{200b}"), ("soft-hyphen", "\u{ad}\u{200b}"), ("family", "👨‍👩‍👧‍👦"), ("marks", "a\u{301}\u{301}")] {
+            let run = gpui::TextRun { len: text.len(), font: metrics.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            let pixels = f32::from(window.text_system().shape_line(text.into(), gpui::px(metrics.font_size), &[run], None).width);
+            eprintln!("READER_NATIVE_WIDTH_V1 {name} columns={} pixels={pixels}", lenz_content::wrap::width(text));
         }
     }
     pub fn files() -> Vec<std::path::PathBuf> {
@@ -735,12 +745,7 @@ impl ReaderView {
         let (completions, themes) = (self.session.completions(), self.session.theme_updates());
         loop {
             if let Ok(c) = completions.try_recv() {
-                // Extend Selection's first step arrives here: keep its head on screen as a key would.
-                let steps = matches!(c, Completion::SelectionSteps { .. });
                 self.dispatch(c, cx);
-                if steps {
-                    self.keep_head_shown(cx);
-                }
             } else if let Ok(u) = themes.try_recv() {
                 self.dispatch(Completion::Theme(Box::new(u)), cx);
             } else {
@@ -791,11 +796,9 @@ impl ReaderView {
         let before = self.session.state().results().map(|r| r.id());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected = (self.session.state().active().map(|t| t.id()), self.session.state().selection());
-        #[cfg(feature = "perf-probe")]
-        let (input, started): (reader_core::session::Input, _) = (input.into(), std::time::Instant::now());
-        #[cfg(feature = "perf-probe")]
-        let kind = input.kind();
         let input: reader_core::session::Input = input.into();
+        #[cfg(feature = "perf-probe")]
+        let (started, kind) = (std::time::Instant::now(), input.kind());
         let theme_update = matches!(&input, reader_core::session::Input::Command(Command::Theme(_)) | reader_core::session::Input::Completion(Completion::Theme(_)));
         if matches!(&input, reader_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
         let workspace = self.session.state().workspace_revision();
@@ -913,7 +916,6 @@ impl ReaderView {
                         self.results_focus = false;
                         cx.notify();
                     }
-                    CommandId::ExtendSelection | CommandId::ShrinkSelection => self.keep_head_shown(cx),
                     _ => {},
                 }
             }
@@ -2275,19 +2277,6 @@ impl ReaderView {
     /// Extend the selection by `motion` and scroll so its head stays visible.
     fn extend(&mut self, motion: Motion, cx: &mut Context<Self>) {
         self.dispatch(Command::Extend(motion), cx);
-        self.keep_head_shown(cx);
-    }
-
-    /// Scroll so the selection's head is above the view's bottom (the core keeps it below the top).
-    fn keep_head_shown(&mut self, cx: &mut Context<Self>) {
-        let state = self.session.state();
-        if let (Some(t), Some(doc), Some(s)) = (state.active(), state.document(), state.selection()) {
-            let below = t.visible().rows_between(state.top_line(), doc.line_of(s.head));
-            let rows = self.rows.max(1);
-            if below >= rows {
-                self.dispatch(Command::ScrollRows((below + 1 - rows) as isize), cx);
-            }
-        }
     }
 
     fn on_wheel(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2496,7 +2485,7 @@ impl ReaderView {
     }
 
     fn byte_in(&self, window: &Window, tab: &Tab, bounds: Bounds<Pixels>, x: f32, y: f32) -> Option<(usize, usize)> {
-        if !self.current_source_geometry(tab) || y < f32::from(bounds.origin.y) { return None; }
+        if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
         let state = self.session.state();
         let view = state.view(tab.id())?;
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
@@ -2511,7 +2500,7 @@ impl ReaderView {
 
     fn fold_click(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
         let (tab, bounds) = (self.session.state().active()?, self.text_bounds?);
-        if !self.current_source_geometry(tab) || y < f32::from(bounds.origin.y) { return None; }
+        if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
         let state = self.session.state();
         let view = state.view(tab.id())?;
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
@@ -2520,7 +2509,7 @@ impl ReaderView {
         let (_, collapsed) = tab.fold_at(row.line)?;
         if row.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) { return Some(row.line); }
         let projected = self.source_row(tab, row)?;
-        if !row.last || projected.extent.is_none() || !collapsed { return None; }
+        if !row.last || !projected.complete() || !collapsed { return None; }
         let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + row.indent as f32 * self.char_w + projected.origin;
         let full = format!("{}{PLACEHOLDER}", projected.text);
         (lenz_gpui::column_at(window, self.metrics(), &full, x - tx) > projected.text.len()).then_some(row.line)
@@ -2555,7 +2544,7 @@ impl ReaderView {
         if g.pane == state.focused_pane() && self.session.disabled(CommandId::Definition).is_some() {
             return None;
         }
-        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) || wanted_image(tab).is_some() || unshowable_image(tab).is_some() {
+        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) || state.view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
             return None; // no text drawn
         }
         // The character under the pointer: the boundary nearest half a cell to its left starts it.
@@ -2633,9 +2622,8 @@ impl ReaderView {
         let (row, anchor_x) = view.layout_rows(g.rows, state.wrap_cols(t)).rows.iter().enumerate().find_map(|(i, r)| {
             let native = self.source_row(t, r)?;
             let local = native.caret(at)?;
-            let run = gpui::TextRun { len: native.text.len(), font: self.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
-            let x = f32::from(window.text_system().shape_line(native.text.clone().into(), px(font_size()), &[run], None).x_for_index(local));
-            Some((i as f32, native.origin + r.indent as f32 * self.char_w + x))
+            let x = native.x_for(window, self.metrics(), local)?;
+            Some((i as f32, r.indent as f32 * self.char_w + x))
         }).unwrap_or((0.0, 0.0));
         let column = t.column();
         let w = (f32::from(g.text.size.width) - 32.0).clamp(120.0, 640.0);
@@ -3595,6 +3583,20 @@ impl ReaderView {
         }
     }
 
+    fn source_parts(&self, tab: &Tab, logical: &reader_core::layout::Row, row: &TextRow, window: &Window) -> Vec<(std::ops::Range<usize>, f32)> {
+        let Some(native) = self.source_row(tab, logical) else { return Vec::new() };
+        let indent = logical.indent;
+        let offset = indent as f32 * self.char_w;
+        let mut parts = Vec::new();
+        if indent > 0 { parts.push((0..indent, 0.0)); }
+        parts.extend(native.fragments.iter().map(|(r, x)| (r.start + indent..r.end + indent, x + offset)));
+        if row.text.len() > native.text.len() + indent {
+            parts.push((native.text.len() + indent..row.text.len(), native.x_for(window, self.metrics(), native.text.len()).unwrap_or(0.0) + offset));
+        }
+        if parts.is_empty() { parts.push((0..0, offset)); }
+        parts
+    }
+
     fn prepare_source(&mut self, panes: &[PaneGeom], window: &mut Window) {
         use reader_core::layout::Query;
         let font = self.font.clone();
@@ -3683,7 +3685,7 @@ impl ReaderView {
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
         let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
-        if let Some((fold, true)) = tab.fold_at(r.line) && r.last && projected.extent.is_some() {
+        if let Some((fold, true)) = tab.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
             row.text.push_str(PLACEHOLDER);
             row.bg.push((at + 1..at + PLACEHOLDER.len() - 1, lenz_content::theme::mix(palette.bg, palette.num_fg, 0.25)));
@@ -3747,7 +3749,7 @@ impl ReaderView {
     /// nothing is drawn.
     fn shown_image(&mut self, pane: u8, cx: &mut Context<Self>) -> Option<(Arc<gpui::RenderImage>, (u32, u32))> {
         let i = pane as usize;
-        let wanted = self.session.state().shown(pane).and_then(wanted_image);
+        let wanted = self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| wanted_image(&view));
         let Some(pixels) = wanted else {
             self.image[i] = None; // its texture's CPU pixels go too, not only its atlas entry
             return None;
@@ -3772,7 +3774,7 @@ impl ReaderView {
 
     /// Why the active raster image cannot be shown, when it cannot.
     pub fn unshowable_image(&self) -> Option<String> {
-        self.session.state().active().and_then(unshowable_image)
+        self.session.state().active().and_then(|tab| self.session.state().view(tab.id())).and_then(|view| unshowable_image(&view))
     }
 
     /// The focused pane's image drawn now: its size in pixels, for tests.
@@ -4038,6 +4040,8 @@ impl Render for ReaderView {
         let run = gpui::TextRun { len: 10, font: self.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
         let shaped = window.text_system().shape_line("0123456789".into(), px(font_size()), &[run], None);
         self.char_w = (f32::from(shaped.width) / 10.0).max(1.0);
+        #[cfg(feature = "perf-probe")]
+        probe::native_widths(window, self.metrics());
         self.width = f32::from(viewport.width);
         self.height = f32::from(viewport.height);
         // The explorer takes a share of the width (or what its divider was dragged to); below 320 px it shows only
@@ -4119,7 +4123,7 @@ impl Render for ReaderView {
         for g in &mut panes {
             let state = self.session.state();
             let Some(t) = state.shown(g.pane) else { continue };
-            let text = t.document().is_some_and(|d| d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+            let text = state.view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
             let w = t.annotation_cols() as f32 * self.char_w + 12.0;
             if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
                 g.ann = w;
@@ -4228,7 +4232,7 @@ impl Render for ReaderView {
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
         let max = self.max_column();
-        if self.session.state().document().is_some() && self.session.state().column() > max {
+        if self.session.state().active().is_some_and(|t| self.session.state().view(t.id()).is_some()) && self.session.state().column() > max {
             self.session.dispatch(Command::ScrollColumn(max));
         }
         self.prepare_source(&panes, window);
@@ -4245,7 +4249,7 @@ impl Render for ReaderView {
             let state = self.session.state();
             let tab = state.shown(g.pane);
             let pending = matches!(tab.and_then(Tab::rendering), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
-            let unshowable = tab.and_then(unshowable_image);
+            let unshowable = tab.and_then(|tab| state.view(tab.id())).and_then(|view| unshowable_image(&view));
             let (mut rows, decor) = match tab {
                 Some(t) if picture.is_none() && unshowable.is_none() => self.tab_rows(t, g.rows),
                 _ => Default::default(),
@@ -4265,7 +4269,7 @@ impl Render for ReaderView {
                 Some((row.y, shown))
             });
             let hint = match tab {
-                Some(t) if t.document().is_some() || state.loading().is_some() => None,
+                Some(t) if state.view(t.id()).is_some() || state.loading().is_some() => None,
                 None if split.is_some() => Some("Open a file here, or drag a tab to this pane"),
                 _ if state.project().is_some() => Some("Pick a file in the tree, or find one with Ctrl+P"),
                 _ => Some("Open a file to read it (Ctrl+O)"),
@@ -4309,16 +4313,22 @@ impl Render for ReaderView {
             };
             bookmarks.retain(|(y, _)| *y >= band);
             marks.retain(|&(i, ..)| i as f32 >= band);
+            let sticky_parts = tab.map_or_else(Vec::new, |tab| sticky.iter().map(|(line, row)| {
+                state.view(tab.id()).and_then(|view| match view.layout_row(*line, 0, state.wrap_cols(tab)) {
+                    reader_core::layout::Query::Ready(Some(logical)) => Some(self.source_parts(tab, &logical, row, window)),
+                    _ => None,
+                }).unwrap_or_default()
+            }).collect());
             let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| t.fold_at(line)).map(|(_, c)| c))).collect();
             if g.pane == state.focused_pane() {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            let row_origins = tab.and_then(|tab| state.view(tab.id()).map(|view| (tab, view))).map_or_else(Vec::new, |(tab, view)| {
+            let row_parts = tab.and_then(|tab| state.view(tab.id()).map(|view| (tab, view))).map_or_else(Vec::new, |(tab, view)| {
                 let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
-                rows.iter().map(|row| logical.get(row.y as usize).and_then(|r| self.source_row(tab, r)).map_or(0.0, |r| r.origin)).collect()
+                rows.iter().map(|row| logical.get(row.y as usize).map(|r| self.source_parts(tab, r, row, window)).unwrap_or_default()).collect()
             });
-            frames.push(PaneFrame { row_origins, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
         self.source_geometry = [0, 1].map(|pane| self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
@@ -4390,7 +4400,7 @@ impl Render for ReaderView {
         let probe = {
             let state = self.session.state();
             let wanted = probe::files();
-            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.document().is_some() && state.tabs().len() >= wanted.len())
+            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.active().is_some_and(|t| state.view(t.id()).is_some()) && state.tabs().len() >= wanted.len())
         };
         #[cfg(feature = "perf-probe")]
         if render_started.elapsed().as_millis() >= 30 {
@@ -4604,7 +4614,7 @@ impl Render for ReaderView {
                                     lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0, hint, palette.dim);
                                 }
                                 for (i, row) in f.rows.iter().enumerate() {
-                                    lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll - f.row_origins.get(i).copied().unwrap_or(0.0), row);
+                                    paint_source_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row, f.row_parts.get(i).map_or(&[], Vec::as_slice));
                                 }
                                 for &(row, collapsed, bright) in &f.marks {
                                     let color = if bright { palette.fg } else { palette.num_fg };
@@ -4614,16 +4624,15 @@ impl Render for ReaderView {
                                 if let Some((ry, shown)) = &f.link
                                     && let Some(row) = f.rows.iter().find(|r| r.y == *ry)
                                 {
-                                    let run = gpui::TextRun { len: row.text.len(), font: m.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
-                                    let line = window.text_system().shape_line(row.text.clone().into(), px(m.font_size), &[run], None);
-                                    let (a, b) = (f32::from(line.x_for_index(shown.start)), f32::from(line.x_for_index(shown.end)));
+                                    let parts = f.rows.iter().position(|row| row.y == *ry).and_then(|i| f.row_parts.get(i)).map_or(&[][..], Vec::as_slice);
+                                    let (a, b) = (native_x(window, m, row, parts, shown.start), native_x(window, m, row, parts, shown.end));
                                     let lx = lenz_gpui::text_x(m, tx, f.hscroll);
                                     window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
                                         lenz_gpui::fill(window, lx + a, ty + ry * m.line_h + m.line_h - 3.0, b - a, 1.0, palette.syntax.link);
                                     });
                                 }
                                 window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
-                                    paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, char_w, |y| f.rows.iter().find(|r| r.y == y), &f.decor);
+                                    paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, |y| f.rows.iter().enumerate().find(|(_, r)| r.y == y).map(|(i, row)| (row, f.row_parts.get(i).map_or(&[][..], Vec::as_slice))), &f.decor);
                                 });
                                 if let Some((texture, (iw, ih))) = &f.picture {
                                     // Fitted to the view, never enlarged, centred, over a checkerboard.
@@ -4649,11 +4658,11 @@ impl Render for ReaderView {
                                 }
                                 if let Some(n) = f.sticky.iter().map(|(r, _)| r.y + 1.0).reduce(f32::max) {
                                     lenz_gpui::fill(window, tx, ty, tw, n * m.line_h, palette.header_bg);
-                                    for (row, _) in &f.sticky {
-                                        lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row);
+                                    for (i, (row, _)) in f.sticky.iter().enumerate() {
+                                        paint_source_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row, f.sticky_parts.get(i).map_or(&[], Vec::as_slice));
                                     }
                                     window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
-                                        paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, char_w, |y| f.sticky.iter().map(|(r, _)| r).find(|r| r.y == y), &f.sticky_decor);
+                                        paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, |y| f.sticky.iter().enumerate().find(|(_, (r, _))| r.y == y).map(|(i, (row, _))| (row, f.sticky_parts.get(i).map_or(&[][..], Vec::as_slice))), &f.sticky_decor);
                                     });
                                     // Their own fold marks, over the marks of the rows the band hides (those are not drawn).
                                     for (row, fold) in &f.sticky {
@@ -4797,16 +4806,16 @@ impl Render for ReaderView {
     }
 }
 
-fn wanted_image(tab: &Tab) -> Option<Arc<lenz_content::image::Pixels>> {
-    let image = tab.document()?.image()?;
+fn wanted_image(view: &reader_core::session::View<'_>) -> Option<Arc<lenz_content::image::Pixels>> {
+    let image = view.snapshot().image()?;
     let pixels = image.pixels.as_ref().ok()?;
-    (image.format != lenz_content::image::Format::Svg || !tab.image_source()).then(|| pixels.clone())
+    (image.format != lenz_content::image::Format::Svg || !view.tab().image_source()).then(|| pixels.clone())
 }
 
 /// Why `tab`'s raster image cannot be shown, when it cannot (an SVG that cannot be rendered shows its source
 /// instead, with the reason in the status bar).
-fn unshowable_image(tab: &Tab) -> Option<String> {
-    let image = tab.document()?.image()?;
+fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
+    let image = view.snapshot().image()?;
     if image.format == lenz_content::image::Format::Svg {
         return None;
     }
@@ -4852,7 +4861,8 @@ struct PaneFrame {
     /// Underlines (mutable) and strikethroughs (deprecated): row, display range, colour, modifier bits.
     decor: Vec<(f32, std::ops::Range<usize>, u32, u8)>,
     hscroll: f32,
-    row_origins: Vec<f32>,
+    row_parts: Vec<Vec<(std::ops::Range<usize>, f32)>>,
+    sticky_parts: Vec<Vec<(std::ops::Range<usize>, f32)>>,
     picture: Option<(Arc<gpui::RenderImage>, (u32, u32))>,
     markdown: Option<PreviewFrame>,
     pending: bool,
@@ -4860,6 +4870,34 @@ struct PaneFrame {
     hint: Option<&'static str>,
     /// Blame annotations: row, label, age shade (`None`: not committed), of the hovered commit.
     ann: Vec<(f32, String, Option<f32>, bool)>,
+}
+
+fn native_x(window: &Window, metrics: Metrics<'_>, row: &TextRow, parts: &[(std::ops::Range<usize>, f32)], at: usize) -> f32 {
+    let Some((range, origin)) = parts.iter().rev().find(|(r, _)| r.start <= at && at <= r.end) else { return 0.0 };
+    let Some(text) = row.text.get(range.clone()) else { return *origin };
+    debug_assert!(text.len() <= 6144);
+    let run = gpui::TextRun { len: text.len(), font: metrics.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+    origin + f32::from(window.text_system().shape_line(text.to_owned().into(), px(metrics.font_size), &[run], None).x_for_index(at - range.start))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, palette: &lenz_content::theme::Palette, bounds: Bounds<Pixels>, x: f32, width: f32, scroll: f32, row: &TextRow, parts: &[(std::ops::Range<usize>, f32)]) {
+    for (i, (part, origin)) in parts.iter().enumerate() {
+        let cut = |range: &std::ops::Range<usize>| {
+            let (start, end) = (range.start.max(part.start), range.end.min(part.end));
+            (start < end).then(|| start - part.start..end - part.start)
+        };
+        let fragment = TextRow {
+            y: row.y, number: if i == 0 { row.number } else { 0 },
+            text: row.text.get(part.clone()).unwrap_or_default().to_owned(),
+            fg: row.fg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
+            bg: row.bg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
+            selected: row.selected.as_ref().and_then(cut),
+            caret: row.caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start),
+        };
+        debug_assert!(fragment.text.len() <= 6144);
+        lenz_gpui::paint_row(window, cx, metrics, palette, bounds, x, width, scroll - origin, &fragment);
+    }
 }
 
 /// Bookmark marks at the gutter's left edge (line numbers are right-aligned): the key, or a dot when it has none.
@@ -4872,10 +4910,10 @@ fn paint_bookmarks(window: &mut Window, cx: &mut App, m: Metrics, tx: f32, ty: f
 
 /// Underlines (mutable) and strikethroughs (deprecated) on the rows `row_at` finds by their y, drawn from `lx` (the
 /// text's left edge after scrolling) under the pane top `ty`: row, display range, colour and modifier bits each.
-fn paint_decor<'a>(window: &mut Window, m: Metrics, lx: f32, ty: f32, char_w: f32, row_at: impl Fn(f32) -> Option<&'a TextRow>, decor: &[(f32, std::ops::Range<usize>, u32, u8)]) {
+fn paint_decor<'a>(window: &mut Window, m: Metrics, lx: f32, ty: f32, row_at: impl Fn(f32) -> Option<(&'a TextRow, &'a [(std::ops::Range<usize>, f32)])>, decor: &[(f32, std::ops::Range<usize>, u32, u8)]) {
     for (ry, r, color, mods) in decor {
-        let Some(row) = row_at(*ry) else { continue };
-        let x = |b: usize| lenz_content::wrap::width(row.text.get(..b).unwrap_or_default()) as f32 * char_w;
+        let Some((row, parts)) = row_at(*ry) else { continue };
+        let x = |b: usize| native_x(window, m, row, parts, b);
         let (a, w, y) = (x(r.start), x(r.end) - x(r.start), ty + ry * m.line_h);
         if mods & reader_core::decor::MUTABLE != 0 {
             lenz_gpui::fill(window, lx + a, y + m.line_h - 2.0, w, 1.0, *color);
