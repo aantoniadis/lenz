@@ -66,7 +66,7 @@ impl Mark {
 /// all), and is `moved`; going there stops at the last line. Whether any mark changed.
 fn relocate(marks: &mut [Mark], source: &Path, doc: &TextSnapshot) -> bool {
     let last = doc.line_count() - 1;
-    let anchored = |l: usize, m: &Mark| crate::tabs::anchor(doc, l).as_ref() == m.anchor.as_ref();
+    let anchored = |l: usize, m: &Mark| crate::tabs::anchor_matches(doc, l, &m.anchor);
     // ponytail: one String per line, built only when some mark's line changed; an index per document if this shows up.
     let mut lines: Option<HashMap<String, Vec<usize>>> = None;
     let mut changed = false;

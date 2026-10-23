@@ -271,7 +271,8 @@ impl TextSnapshot {
     pub(crate) fn column_of(&self, byte: usize) -> usize {
         let byte = self.floor_char_boundary(byte);
         let start = self.reader_line_range(self.line_of(byte)).start;
-        self.chunks.iter().filter(|e| e.byte < byte && e.byte + e.chunk.text().len() > start).map(|e| {
+        let first = self.chunks.partition_point(|e| e.byte <= start).saturating_sub(1);
+        self.chunks[first..].iter().take_while(|e| e.byte < byte).map(|e| {
             e.chunk.text().get(start.saturating_sub(e.byte)..(byte - e.byte).min(e.chunk.text().len())).unwrap_or_default().chars().count()
         }).sum()
     }

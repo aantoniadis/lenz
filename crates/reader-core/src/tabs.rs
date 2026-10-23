@@ -403,7 +403,7 @@ impl Tab {
             return;
         }
         // The anchor is a whole line (or its first ANCHOR_CHARS characters): it must match exactly and only once.
-        let same = |l: usize| anchor(doc, l).as_ref() == at.anchor.as_ref();
+        let same = |l: usize| anchor_matches(doc, l, &at.anchor);
         let mut matches = (0..doc.line_count()).filter(|&l| same(l));
         let unique = match (at.anchor.is_empty(), matches.next(), matches.next()) {
             (false, Some(l), None) => Some(l),
@@ -451,6 +451,12 @@ pub(crate) fn anchor(doc: &TextSnapshot, line: usize) -> Box<str> {
     // At most four UTF8 bytes per context character; never assemble a long source line.
     let end = doc.floor_char_boundary(range.start.saturating_add(ANCHOR_CHARS * 4).min(range.end));
     doc.range(range.start..end).unwrap_or_default().chars().take(ANCHOR_CHARS).collect()
+}
+
+pub(crate) fn anchor_matches(doc: &TextSnapshot, line: usize, anchor: &str) -> bool {
+    let range = doc.reader_line_range(line);
+    let end = doc.floor_char_boundary(range.start.saturating_add(ANCHOR_CHARS * 4).min(range.end));
+    doc.range(range.start..end).unwrap_or_default().chars().take(ANCHOR_CHARS).eq(anchor.chars())
 }
 
 /// Reading history: committed navigations, Back and Forward.
