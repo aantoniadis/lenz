@@ -28,3 +28,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   completed layout separately for very long combining-mark runs. The retained
   window leak has a regression check; equivalent native startup measurements for
   that specific input remain a follow-up.
+- **Presentation work during native reveal:** review whether automatically issued
+  commands such as `ColourResults` should supersede a pending native reveal. The
+  cancellation classifier currently exempts a small set of adapter feedback
+  commands. Reproduce semantic-result navigation with fresh result coloring before
+  treating this as a defect; do not start a separate investigation now.
