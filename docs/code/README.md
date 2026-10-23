@@ -187,8 +187,8 @@ filters; everything else Lenz Code asks git keeps them off.
 The Git menu also compares the working tree as it is (uncommitted and untracked files included) in Lenz Diff:
 **Show Local Changes** against the last commit (what the next commit would hold); **Compare with Branch, Tag or
 Revision…** against one picked from a list of branches and tags, or any revision typed; **Compare with Base Branch**
-against the base branch as it is now (the remote's default branch, else `main`, `master`, `origin/main` or
-`origin/master`); **Show Changes Since Branch Start** against the point the current branch split from that base, so
+against the base branch as it is now (your local `main` or `master`, else the remote's default branch, else
+`origin/main` or `origin/master`; Lenz never fetches); **Show Changes Since Branch Start** against the point the current branch split from that base, so
 only what the branch changes, not the base's later updates; **Compare with Worktree…** lists the other worktrees and compares the two folders. A row's actions in Git
 Branches… add **Compare with Working Tree** (branches, tags and worktrees) and **Show Changes Since Branching from
 Here** (other branches). Folder comparisons inside a repository skip what git ignores (`target/`, `node_modules/`); submodules and nested

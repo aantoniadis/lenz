@@ -546,7 +546,8 @@ pub struct Base {
 
 const BASES: [&str; 4] = ["refs/heads/main", "refs/heads/master", "refs/remotes/origin/main", "refs/remotes/origin/master"];
 
-/// The remote's default branch (`origin/HEAD`), else the first of `main`, `master`, `origin/main`, `origin/master`.
+/// The local `main` or `master`, else the remote's default branch (`origin/HEAD`), else `origin/main` or
+/// `origin/master`: the local branch first, since Lenz never fetches and the user works against it.
 pub fn default_base(root: &Path) -> Option<Base> {
     let mut args = vec!["for-each-ref", "--format=%(refname)%00%(symref)", "refs/remotes/origin/HEAD"];
     args.extend(BASES);
@@ -555,9 +556,13 @@ pub fn default_base(root: &Path) -> Option<Base> {
         let at = l.iter().position(|&b| b == 0)?;
         Some((&l[..at], &l[at + 1..]))
     }).collect();
+    let listed = |name: &str| found.iter().any(|(r, _)| *r == name.as_bytes());
+    let (local, remote) = BASES.split_at(2);
     // A broken origin/HEAD (its branch deleted) is not listed.
-    let name = found.iter().find(|(r, s)| *r == b"refs/remotes/origin/HEAD" && !s.is_empty()).map(|(_, s)| *s)
-        .or_else(|| BASES.iter().map(|b| b.as_bytes()).find(|b| found.iter().any(|(r, _)| r == b)))?;
+    let origin_head = || found.iter().find(|(r, s)| *r == b"refs/remotes/origin/HEAD" && !s.is_empty()).map(|(_, s)| *s);
+    let name = local.iter().find(|b| listed(b)).map(|b| b.as_bytes())
+        .or_else(origin_head)
+        .or_else(|| remote.iter().find(|b| listed(b)).map(|b| b.as_bytes()))?;
     let name = String::from_utf8_lossy(name).into_owned();
     let short = ["refs/heads/", "refs/remotes/"].iter().find_map(|p| name.strip_prefix(p)).unwrap_or(&name).to_string();
     Some(Base { name, short })
@@ -599,23 +604,25 @@ mod tests {
     }
 
     #[test]
-    fn the_base_is_origin_head_else_main_master_origin_main_origin_master() {
+    fn the_base_is_local_main_or_master_else_the_remotes_default_else_origin_main_origin_master() {
         let r = two_branches();
         let base = |r: &Path| default_base(r).map(|b| (b.name, b.short));
         let pair = |n: &str, s: &str| Some((n.to_string(), s.to_string()));
         assert_eq!(base(r.path()), pair("refs/heads/main", "main"));
         git(r.path(), &["update-ref", "refs/remotes/origin/trunk", "other"]);
         git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk"]);
-        assert_eq!(base(r.path()), pair("refs/remotes/origin/trunk", "origin/trunk"));
-        git(r.path(), &["update-ref", "-d", "refs/remotes/origin/trunk"]);
-        assert_eq!(base(r.path()), pair("refs/heads/main", "main"), "origin/HEAD pointing nowhere");
+        assert_eq!(base(r.path()), pair("refs/heads/main", "main"), "the local main before the remote's default");
         git(r.path(), &["branch", "-q", "-m", "main", "master"]);
         assert_eq!(base(r.path()), pair("refs/heads/master", "master"));
-        git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
-        assert_eq!(base(r.path()), pair("refs/heads/master", "master"), "local master before origin/main");
         git(r.path(), &["branch", "-q", "-m", "master", "dev"]);
+        assert_eq!(base(r.path()), pair("refs/remotes/origin/trunk", "origin/trunk"), "no local main or master: the remote's default");
+        git(r.path(), &["update-ref", "-d", "refs/remotes/origin/trunk"]);
+        git(r.path(), &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+        assert_eq!(base(r.path()), pair("refs/remotes/origin/master", "origin/master"), "origin/HEAD pointing nowhere");
+        git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         assert_eq!(base(r.path()), pair("refs/remotes/origin/main", "origin/main"));
         git(r.path(), &["update-ref", "-d", "refs/remotes/origin/main"]);
+        git(r.path(), &["update-ref", "-d", "refs/remotes/origin/master"]);
         assert_eq!(base(r.path()), None);
     }
 

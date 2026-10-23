@@ -5518,7 +5518,10 @@ mod git_branches {
         assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/heads/main".to_string()]), "on main itself: its tip");
         git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
         git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
-        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/remotes/origin/main".to_string()]));
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/heads/main".to_string()]), "the local main first");
+        git(r.path(), &["switch", "-q", "feature/x"]);
+        git(r.path(), &["branch", "-q", "-D", "main"]);
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/remotes/origin/main".to_string()]), "else the remote's default");
         let lone = repo();
         put(lone.path(), "a.txt", "a\n");
         commit_all(lone.path(), "1");
