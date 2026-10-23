@@ -4258,7 +4258,7 @@ impl Session {
         let mut seen = std::collections::HashSet::new();
         let mut docs = Vec::new();
         for tab in tabs {
-            let path = self.state.tabs.iter().find(|t| t.id == tab).map(|t| t.source.clone()).unwrap();
+            let Some(path) = self.state.tabs.iter().find(|t| t.id == tab).map(|t| t.source.clone()) else { continue };
             if !seen.insert(path.clone()) { continue; }
             if let Some(doc) = self.admitted_document(tab, Priority::Background).or_else(|| previous.get(&path).cloned()) { docs.push(doc); }
         }
