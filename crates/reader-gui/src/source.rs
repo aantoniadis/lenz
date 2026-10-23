@@ -43,6 +43,8 @@ pub(crate) struct Row {
 }
 
 impl Row {
+    pub fn complete(&self) -> bool { self.end.is_some() }
+
     pub fn range(&self, source: Range<usize>) -> Range<usize> {
         let mut out: Option<Range<usize>> = None;
         for window in &self.windows {
