@@ -48,6 +48,12 @@ impl Jobs {
         self.submit_promotable(priority, job);
     }
 
+    #[cfg(test)]
+    pub(crate) fn queued(&self) -> usize {
+        let queue = self.shared.0.lock().unwrap_or_else(|e| e.into_inner());
+        queue.visible.len() + queue.background.len()
+    }
+
     pub(crate) fn has_workers(&self) -> bool { !self.workers.is_empty() }
 
     /// A narrow executor handle: policy and cancellation remain with the submitting owner.

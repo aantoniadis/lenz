@@ -5,7 +5,7 @@ use crate::{document::{Document, SourceMeta}, jobs::{Jobs, Priority, MAX_JOBS}, 
 const BUFFERS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Syntax, Markdown, Index, Ready, Decode(crate::decor::Decor) }
+pub(crate) enum Consumer { Find(TabId), Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -179,7 +179,7 @@ impl Analysis {
     pub(crate) fn release_view(&mut self, id: BufferId, tab: TabId, last: bool) {
         self.cancel_consumer(id, Consumer::Find(tab));
         if !last { return; }
-        for consumer in [Consumer::Syntax, Consumer::Markdown, Consumer::Ready, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
+        for consumer in [Consumer::Syntax, Consumer::Markdown, Consumer::Ready, Consumer::Documentation, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
         if let Some(entry) = self.entries.get_mut(&id) {
             entry.live = false;
             if let Some(pending) = &mut entry.pending { pending.input.live = false; }
@@ -217,6 +217,10 @@ impl Analysis {
     pub(crate) fn close(&mut self) {
         for entry in self.entries.values_mut() { entry.group.cancel(); entry.pending = None; }
         self.queue.clear();
+    }
+
+    pub(crate) fn pump_requested(&mut self, jobs: &Jobs, tx: &async_channel::Sender<Completion>, project: &Arc<AtomicU64>) {
+        if self.dirty { self.pump(jobs, tx, project); }
     }
 
     pub(crate) fn pump(&mut self, jobs: &Jobs, tx: &async_channel::Sender<Completion>, project: &Arc<AtomicU64>) {

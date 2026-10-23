@@ -188,3 +188,40 @@ fn editor_text_release_workload() {
     samples.sort_unstable();
     eprintln!("900001-byte Unicode line, 10000 insert/window/UTF16/delete cycles; p50={}ns p95={}ns p99={}ns", samples[5000], samples[9500], samples[9900]);
 }
+
+/// Primitive worker conversion, distinct from UI feedback or parser readiness. Run release and alone.
+#[test]
+#[ignore = "timing: snapshot conversion and cancellation; run in release, alone"]
+fn editor_text_materialization_release_workload() {
+    use std::{sync::atomic::{AtomicBool, Ordering}, time::Instant};
+    let unit = "/// Café 😀\r\npub fn item() { let name = \"é\"; }\r\n";
+    let text = unit.repeat(20_000);
+    let mut bytes = vec![0xff, 0xfe]; bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let original = Document::decode("materialize.rs".into(), 1, &bytes);
+    let snapshot = TextSnapshot::from_document(BufferId(73), &original).apply_edits(2, &[TextEdit { range: 0..0, text: Arc::from("// draft\n") }]).unwrap();
+    let live = AtomicBool::new(true);
+    let (mut old, mut admitted, mut cancelled) = (Vec::new(), Vec::new(), Vec::new());
+    for trial in 0..321 {
+        for mode in if trial % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let started = Instant::now();
+            let worker = if mode == 0 { snapshot.materialize() } else { snapshot.materialize_while(|| live.load(Ordering::Acquire)).unwrap() };
+            let elapsed = started.elapsed().as_secs_f64() * 1_000_000.0;
+            assert_eq!(worker.line_count(), 40_002);
+            assert_eq!(worker.line(0), "// draft");
+            assert_eq!(worker.line(20_000), "pub fn item() { let name = \"é\"; }");
+            assert_eq!(worker.line_range(20_000), snapshot.line_range(20_000).unwrap());
+            assert!(Arc::ptr_eq(worker.source_meta(), original.source_meta()));
+            if trial > 20 { if mode == 0 { old.push(elapsed); } else { admitted.push(elapsed); } }
+        }
+        let checks = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let result = snapshot.materialize_while(|| { let next = checks.get() + 1; checks.set(next); next <= 2 });
+        let elapsed = started.elapsed().as_secs_f64() * 1_000_000.0;
+        assert!(result.is_none()); assert_eq!(checks.get(), 3);
+        if trial > 20 { cancelled.push(elapsed); }
+    }
+    eprintln!("READER_CONFIG {}", serde_json::json!({"bytes":snapshot.len_bytes(),"lines":snapshot.line_count(),"original_encoding":original.encoding(),"samples":300,"unit":"us","note":"conversion only; one atomic cancellation predicate; interleaved old/new order"}));
+    for (name, samples) in [("reader/materialize-original-api", old), ("reader/materialize-cancellable-indexed", admitted), ("reader/materialize-cancel-after-first-chunk", cancelled)] {
+        eprintln!("READER_PERF {}", serde_json::json!({"name":name,"unit":"us","samples":samples}));
+    }
+}

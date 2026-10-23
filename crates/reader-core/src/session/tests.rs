@@ -875,6 +875,110 @@ fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
     (s, log)
 }
 
+#[test]
+fn semantic_sync_does_not_materialize_plain_drafts_without_a_provider() {
+    for (name, draft) in [("plain.txt", "plain draft".repeat(10_000)), ("large.rs", "x".repeat(crate::document::LARGE_BYTES + 1))] {
+    let d = tempfile::tempdir().unwrap(); let file = write(d.path(), name, b"saved\n"); let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), name);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(c) = s.completions().try_recv() { s.dispatch(c); }
+    let tab = s.state.active.unwrap(); let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from(draft) }]).unwrap());
+    s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current.clone()); s.tab_mut(tab).unwrap().new_content();
+    s.dispatch(Command::Scroll(0));
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < until {
+        if let Ok(c) = s.completions().try_recv() { s.dispatch(c); } else { std::thread::sleep(Duration::from_millis(1)); }
+    }
+    assert_eq!(s.analysis.materializations.load(Ordering::Acquire), 0, "LSP demand without a provider must not copy an otherwise idle plain draft");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"saved\n");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn background_semantic_readiness_starts_in_the_dispatch_that_registers_it() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"background\"\n");
+    let file = write(d.path(), "background.rs", b"fn saved() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "background.rs");
+    settle(&mut s, |s| s.state().active().unwrap().tokens.is_some() && s.state().active().unwrap().hints.is_some() && s.state().highlights().is_some());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(c) = s.completions().try_recv() { s.dispatch(c); }
+    let tab = s.state.active.unwrap(); let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("fn current_background() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current.clone()); s.tab_mut(tab).unwrap().new_content();
+    s.dispatch(Command::Scroll(0)); // only the footer requests semantic readiness
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while s.state.semantics.desired().get(&file).is_none_or(|d| d.version() != current.key().version) && std::time::Instant::now() < until {
+        if let Ok(c) = s.completions().try_recv() {
+            // Suppress unrelated provider/watch events: only the materializer's own finalization
+            // may drive readiness, so an incidental message cannot conceal a missing submission.
+            if matches!(c, Completion::AnalysisWake) { s.dispatch(c); }
+        } else { std::thread::sleep(Duration::from_millis(1)); }
+    }
+    assert!(s.state.semantics.desired().get(&file).is_some_and(|d| d.version() == current.key().version), "new footer demand must not depend on an unrelated input or the five-second tick");
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_hover_replies_keeps_provider_markup_out_of_unbounded_worker_queues() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"hover\"\n");
+    let file = write(d.path(), "hover.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file), "hover.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && s.state().active().unwrap().hints.is_some() && s.state().active().unwrap().tokens.is_some());
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    let rx = s.completions();
+    for _ in 0..129 {
+        s.dispatch(Command::Documentation);
+        loop {
+            let c = rx.recv_blocking_timeout().unwrap();
+            let replied = matches!(&c, Completion::Semantic(semantics::Event::Message { message, .. }) if message["result"]["contents"]["kind"] == "markdown");
+            s.dispatch(c); if replied { break; }
+        }
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().documentation().is_some());
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded hover markup retained {queued} worker closures");
+}
+
+#[cfg(unix)]
+#[test]
+fn documentation_from_before_a_version_preserving_rename_is_not_published() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"rename\"\n");
+    let file = write(d.path(), "old.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "old.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Documentation);
+    let rx = s.completions();
+    let old = loop { let c = rx.recv_blocking_timeout().unwrap(); if matches!(&c, Completion::DocumentationReady { .. }) || matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::DocumentationReady { .. })) { break c; } s.dispatch(c); };
+    let tab = s.state.active.unwrap(); let version = s.state().view(tab).unwrap().snapshot().key().version;
+    let token = s.state().active().unwrap().refresh; let renamed = d.path().join("renamed.rs");
+    std::fs::rename(&file, &renamed).unwrap();
+    s.dispatch(Completion::Moved { tab, token, to: renamed.clone(), stamp: Stamp::of(&renamed), canonical: std::fs::canonicalize(&renamed).ok() });
+    assert_eq!(s.state().view(tab).unwrap().snapshot().key().version, version);
+    s.dispatch(old);
+    assert!(s.state().documentation().is_none(), "source metadata must match after rendering, not only tab and version");
+    s.dispatch(Command::Documentation); settle(&mut s, |s| s.state().documentation().is_some());
+    let token = s.state().active().unwrap().refresh; let again = d.path().join("again.rs"); std::fs::rename(&renamed, &again).unwrap();
+    s.dispatch(Completion::Moved { tab, token, to: again.clone(), stamp: Stamp::of(&again), canonical: std::fs::canonicalize(&again).ok() });
+    assert!(s.state().documentation().is_none(), "already displayed documentation also belongs to its source metadata");
+}
+
 #[cfg(unix)]
 #[test]
 fn decoded_decorations_from_a_restarted_provider_cannot_complete_a_new_request() {

@@ -556,6 +556,12 @@ impl Semantics {
         &self.settings_file
     }
 
+    /// Eligibility can be checked before materializing a draft. Workspace resolution and executable
+    /// detection remain downstream, on their existing paths.
+    pub(crate) fn wants_text(&self, language: Option<lenz_content::highlight::Language>, large: bool, browse: Option<&Path>) -> bool {
+        !large && language.and_then(provider::for_language).is_some_and(|(p, _)| !self.settings.disabled(&PROVIDERS[provider::primary(p)], browse))
+    }
+
     /// The provider for `doc`'s language and, once resolved, its workspace root and the provider serving it.
     pub(crate) fn resolved(&self, doc: &Document) -> Option<(usize, Option<Option<PathBuf>>)> {
         let (p, _) = provider::for_language(doc.language()?)?;
