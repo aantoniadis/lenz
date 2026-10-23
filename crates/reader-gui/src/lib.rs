@@ -1171,12 +1171,12 @@ impl ReaderView {
     }
 
     #[cfg(feature = "test-support")]
-    fn draft_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+    fn draft_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let key = &ev.keystroke;
         let control = key.modifiers.control || key.modifiers.platform;
         if control && !key.modifiers.alt && key.key == "z" {
-            let Some((tab, _, _)) = self.draft_target() else { return false };
-            self.dispatch(if key.modifiers.shift { Command::Redo { tab } } else { Command::Undo { tab } }, cx);
+            if self.draft_target().is_none() { return false; }
+            self.run(if key.modifiers.shift { CommandId::Redo } else { CommandId::Undo }, window, cx);
             true
         } else if control && !key.modifiers.alt && !key.modifiers.shift && key.key == "v" {
             cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| self.replace_draft_input(&text, reader_core::text::EditKind::Paste, cx))
@@ -1250,7 +1250,7 @@ impl ReaderView {
             _ => {}
         }
         #[cfg(feature = "test-support")]
-        if self.draft_key(ev, cx) { return; }
+        if self.draft_key(ev, window, cx) { return; }
         // The preview scrolls in pixels; it has no caret to move.
         if !ctrl && self.focused_markdown().is_some_and(|m| m.layout.is_some()) {
             let view = self.rows as f32 * line_h();

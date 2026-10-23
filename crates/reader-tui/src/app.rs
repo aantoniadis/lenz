@@ -1744,8 +1744,8 @@ impl App {
         let other = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META);
         match key.code {
             KeyCode::Char('z') if control && !other => {
-                let Some((tab, _, _)) = self.draft_target() else { return false };
-                self.dispatch(if key.modifiers.contains(KeyModifiers::SHIFT) { Command::Redo { tab } } else { Command::Undo { tab } });
+                if self.draft_target().is_none() { return false; }
+                self.run(if key.modifiers.contains(KeyModifiers::SHIFT) { CommandId::Redo } else { CommandId::Undo });
                 true
             }
             KeyCode::Char(character) if !control && !other && !character.is_control() => self.replace_draft_input(&character.to_string(), EditKind::Typing),
