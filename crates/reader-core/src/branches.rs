@@ -26,12 +26,18 @@ pub struct BranchesView {
     pub error: Option<String>,
     /// Compare with Worktree…: only the other worktrees, and Enter compares.
     pub worktrees_only: bool,
+    /// Compare with Branch, Tag or Revision…: branches and tags (and what is typed), and Enter compares.
+    pub revisions_only: bool,
 }
 
 impl BranchesView {
     /// The popup's name.
     pub fn heading(&self) -> &'static str {
-        if self.worktrees_only { "Compare with Worktree" } else { "Git Branches" }
+        match () {
+            _ if self.worktrees_only => "Compare with Worktree",
+            _ if self.revisions_only => "Compare with Branch, Tag or Revision",
+            _ => "Git Branches",
+        }
     }
     /// Why it shows no rows yet: loading, or what went wrong.
     pub fn state_text(&self) -> Option<&str> {
@@ -48,6 +54,8 @@ pub enum BranchTarget {
     Remote(String),
     Tag(String),
     Worktree(PathBuf),
+    /// What was typed in the pick list: any revision, checked when used.
+    Revision(String),
 }
 
 impl BranchTarget {
@@ -56,7 +64,7 @@ impl BranchTarget {
         match self {
             Self::Branch(b) => Some(git_branches::Target::Branch(b.clone())),
             Self::Remote(r) => Some(git_branches::Target::Remote(r.clone())),
-            Self::Tag(t) => Some(git_branches::Target::Detached(t.clone())),
+            Self::Tag(t) | Self::Revision(t) => Some(git_branches::Target::Detached(t.clone())),
             Self::Action(_) | Self::Worktree(_) => None,
         }
     }
@@ -66,6 +74,7 @@ impl BranchTarget {
             Self::Branch(b) => Some(format!("refs/heads/{b}")),
             Self::Remote(r) => Some(format!("refs/remotes/{r}")),
             Self::Tag(t) => Some(format!("refs/tags/{t}")),
+            Self::Revision(r) => Some(r.clone()),
             Self::Action(_) | Self::Worktree(_) => None,
         }
     }
@@ -95,6 +104,8 @@ pub enum GitDiff {
     Revision(String),
     /// Against where HEAD split from this branch (the base branch when `None`).
     BranchChanges(Option<String>),
+    /// Against the base branch's tip.
+    BaseBranch,
     /// This worktree's folder against another's.
     Worktree(PathBuf),
 }
@@ -130,6 +141,10 @@ impl State {
     pub fn repo_checked(&self) -> bool {
         self.repo_anchor.as_ref().is_none_or(|a| self.repo_answered.as_ref() == Some(a))
     }
+    /// The explorer entries marked for Compare Selected, oldest first.
+    pub fn tree_marks(&self) -> &[std::sync::Arc<str>] {
+        &self.tree_marks
+    }
     /// The Git Branches popup's lists, while it is open.
     pub fn branches(&self) -> Option<&BranchesView> {
         self.branches.as_ref()
@@ -140,6 +155,15 @@ impl State {
         let Some(v) = &self.branches else { return Vec::new() };
         let row = |section, label: &str, current, target| BranchRow { section, label: label.to_string(), current, target };
         let mut rows = Vec::new();
+        if v.revisions_only {
+            let mut rows: Vec<_> = self.ref_rows(v).into_iter().filter(|r| matches!(r.section, "Local" | "Remote" | "Tags")).collect();
+            let typed = query.trim();
+            rows.retain(|r| r.label.to_lowercase().contains(&typed.to_lowercase()));
+            if !typed.is_empty() {
+                rows.insert(0, row("", &format!("Compare with “{typed}”"), false, BranchTarget::Revision(typed.to_string())));
+            }
+            return rows;
+        }
         if !v.worktrees_only {
             rows.extend(self.ref_rows(v));
         }
@@ -178,7 +202,7 @@ impl crate::session::Session {
     /// What Enter on a row does: check it out, or open the worktree (nothing for the current branch or worktree;
     /// the row's other actions are in its menu).
     pub fn branch_enter(&self, target: &BranchTarget) -> Option<BranchAction> {
-        let compare = self.state().branches().is_some_and(|v| v.worktrees_only);
+        let compare = self.state().branches().is_some_and(|v| v.worktrees_only || v.revisions_only);
         if compare {
             return self.branch_actions(target).into_iter().map(|(_, a)| a).find(|a| *a == BranchAction::CompareWithWorkingTree);
         }
@@ -198,6 +222,7 @@ impl crate::session::Session {
             BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
             BranchTarget::Branch(_) | BranchTarget::Remote(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE, ("Show Changes Since Branching from Here", BranchAction::ChangesSinceBranching)],
             BranchTarget::Tag(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
+            BranchTarget::Revision(_) => vec![COMPARE],
             // A worktree whose folder is gone (`git worktree prune` tidies it), or a bare repository (no `.git` in
             // it, no files): nothing to open or compare.
             BranchTarget::Worktree(p) if !p.join(".git").exists() => Vec::new(),
@@ -268,7 +293,8 @@ impl crate::session::Session {
         let what = match diff {
             GitDiff::LocalChanges => "Show Local Changes",
             GitDiff::Revision(_) => "Compare",
-            GitDiff::BranchChanges(_) => "Show Branch Changes",
+            GitDiff::BranchChanges(_) => "Show Changes Since Branch Start",
+            GitDiff::BaseBranch => "Compare with Base Branch",
             GitDiff::Worktree(_) => "Compare with Worktree",
         };
         let repo = self.state().repo().ok_or(format!("{what}: Not in a Git repository"))?;
@@ -290,6 +316,7 @@ impl crate::session::Session {
                 by_name(root, rev.trim(), sha)
             }
             GitDiff::BranchChanges(from) => git_branches::changes_since(root, &repo.git_dir, from.as_deref()).map_err(fail)?,
+            GitDiff::BaseBranch => git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?.name,
         };
         let program = crate::session::lenz_diff(exe, terminal, what)?;
         Ok(lenz_content::open::Launch { program, args: vec![rev], cwd: Some(root.clone()) })
