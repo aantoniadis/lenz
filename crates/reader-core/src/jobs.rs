@@ -22,7 +22,8 @@ type Job = Box<dyn FnOnce() + Send>;
 #[derive(Default)]
 struct Queue {
     visible: VecDeque<Job>,
-    background: VecDeque<Job>,
+    background: VecDeque<(u64, Job)>,
+    next: u64,
     stop: bool,
 }
 
@@ -44,17 +45,34 @@ impl Jobs {
     }
 
     pub fn submit(&self, priority: Priority, job: impl FnOnce() + Send + 'static) {
-        if self.workers.is_empty() {
-            return job(); // no thread could start: work inline rather than never
-        }
+        self.submit_promotable(priority, job);
+    }
+
+    pub(crate) fn has_workers(&self) -> bool { !self.workers.is_empty() }
+
+    /// A narrow executor handle: policy and cancellation remain with the submitting owner.
+    pub(crate) fn submit_promotable(&self, priority: Priority, job: impl FnOnce() + Send + 'static) -> Option<u64> {
+        if self.workers.is_empty() { job(); return None; }
         let (queue, wake) = &*self.shared;
         let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        q.next += 1;
+        let id = q.next;
         match priority {
             Priority::Visible => q.visible.push_back(Box::new(job)),
-            Priority::Background => q.background.push_back(Box::new(job)),
+            Priority::Background => q.background.push_back((id, Box::new(job))),
         }
         wake.notify_one();
+        Some(id)
     }
+
+    pub(crate) fn promote(&self, id: u64) {
+        let (queue, wake) = &*self.shared;
+        let mut q = queue.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(at) = q.background.iter().position(|(queued, _)| *queued == id)
+            && let Some((_, job)) = q.background.remove(at)
+        { q.visible.push_back(job); wake.notify_one(); }
+    }
+
 }
 
 impl Default for Jobs {
@@ -72,7 +90,7 @@ fn work(shared: &(Mutex<Queue>, Condvar)) {
                 if q.stop {
                     return;
                 }
-                if let Some(job) = q.visible.pop_front().or_else(|| q.background.pop_front()) {
+                if let Some(job) = q.visible.pop_front().or_else(|| q.background.pop_front().map(|(_, job)| job)) {
                     break job;
                 }
                 q = wake.wait(q).unwrap_or_else(|e| e.into_inner());

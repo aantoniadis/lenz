@@ -368,6 +368,7 @@ pub struct Outcome {
 
 /// A decoration reply for the session to decode, about the version it was asked about.
 pub struct Decoration {
+    pub session: u64,
     /// The request it answers: applied only while it is the latest asked about its document and kind.
     pub id: i64,
     pub path: PathBuf,
@@ -438,7 +439,7 @@ struct Server {
 }
 
 struct TextFlight { path: PathBuf, document: Arc<Document>, epoch: u64 }
-struct Deferred { question: Question, params: Value, request: u64, epoch: u64 }
+struct Deferred { method: &'static str, params: Value, request: u64, epoch: u64 }
 
 #[derive(Default)]
 struct Progress {
@@ -1207,11 +1208,8 @@ impl Semantics {
     pub fn retrieve(&mut self, source: &VirtualSource, request: u64) -> Result<(), String> {
         let s = self.servers.iter_mut().find(|s| s.session == source.session).ok_or_else(|| format!("the {} session that named it has ended; ask again", source.provider))?;
         let method = PROVIDERS[s.key.provider].virtual_contents.ok_or_else(|| source.unavailable())?;
-        s.next_id += 1;
-        let id = s.next_id;
-        s.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": { "uri": &*source.uri } }))?;
-        s.pending.insert(Lane::Foreground, (request, id));
-        Ok(())
+        if !s.initialized() { return Err(format!("{} is not ready", source.provider)); }
+        s.request_method(Lane::Foreground, method, json!({ "uri": &*source.uri }), request)
     }
 
     /// The encoding of server session `session` (how positions in its answers count).
@@ -1320,7 +1318,7 @@ impl Server {
             }
             return Outcome::default();
         }
-        Outcome { decorations: vec![Decoration { id, path, version, kind, encoding: self.encoding, legend: self.legend.clone(), body }], ..Outcome::default() }
+        Outcome { decorations: vec![Decoration { session: self.session, id, path, version, kind, encoding: self.encoding, legend: self.legend.clone(), body }], ..Outcome::default() }
     }
 
     /// Whether its capabilities include `kind`.
@@ -1355,17 +1353,21 @@ impl Server {
 
     /// Send `question`'s request for session request `request`.
     fn request(&mut self, question: Question, params: Value, request: u64) -> Result<(), String> {
+        self.request_method(question.lane(), question.method(), params, request)
+    }
+
+    fn request_method(&mut self, lane: Lane, method: &'static str, params: Value, request: u64) -> Result<(), String> {
         // Workspace and hierarchy questions also depend on preceding cross-file updates. Preserve the
         // old FIFO barrier while coalescing text, with one replaceable intent per existing lane.
         if self.text_pending() {
-            self.deferred.insert(question.lane(), Deferred { question, params, request, epoch: self.desired_epoch });
+            self.deferred.insert(lane, Deferred { method, params, request, epoch: self.desired_epoch });
             self.idle_since = None;
             return Ok(());
         }
         self.next_id += 1;
         let id = self.next_id;
-        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": question.method(), "params": params }))?;
-        self.pending.insert(question.lane(), (request, id));
+        self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
+        self.pending.insert(lane, (request, id));
         self.idle_since = None;
         Ok(())
     }
@@ -1466,7 +1468,7 @@ impl Server {
         if self.text_pending() { return; }
         for (lane, d) in std::mem::take(&mut self.deferred) {
             if d.epoch != self.desired_epoch { self.failed.insert(lane, self.failed_reply(lane, d.request, "the source changed before the request was sent")); }
-            else if let Err(why) = self.request(d.question, d.params, d.request) { self.failed.insert(lane, self.failed_reply(lane, d.request, &why)); }
+            else if let Err(why) = self.request_method(lane, d.method, d.params, d.request) { self.failed.insert(lane, self.failed_reply(lane, d.request, &why)); }
         }
         for path in std::mem::take(&mut self.refresh) { self.refresh_index(&path); }
     }

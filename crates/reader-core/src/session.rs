@@ -796,7 +796,7 @@ pub enum Completion {
     /// A version's syntax spans, fold regions and (while asked for) declarations, from one parse.
     Highlighted { version: u64, parsed: Option<Parsed>, folds: Option<Folds>, declarations: Option<highlight::Declarations> },
     /// A version's decoded inlay hints or semantic tokens, made under its kind's setting generation `generation`.
-    Decorated { version: u64, generation: u64, request: i64, data: crate::decor::Decorated },
+    Decorated { session: u64, version: u64, generation: u64, request: i64, data: crate::decor::Decorated },
     /// A tab's find matches for one request and document version (or why the query cannot be matched).
     Matched { tab: TabId, request: u64, version: u64, result: crate::find::Found },
     /// The syntax steps a selection grows through (`None`: no tree; words, lines and paragraphs instead).
@@ -839,7 +839,7 @@ pub enum Completion {
     /// The located targets of definition request `request`.
     Targets { request: u64, session: u64, provider: &'static str, origin: String, indexing: bool, targets: semantics::Targets },
     /// Documentation made into a preview (or why it could not be).
-    DocumentationReady { request: u64, preview: Result<crate::markdown::Preview, String> },
+    DocumentationReady { session: u64, request: u64, preview: Result<crate::markdown::Preview, String> },
     /// A call-hierarchy level, located: each function with its call site.
     /// `limited`: the usages it was read from stopped at the limit (a syntax-built level may miss children).
     /// `indexing`: the server was still loading or indexing when it answered.
@@ -1421,7 +1421,7 @@ impl State {
     /// is on one of them.
     pub fn occurrences(&self) -> Option<&Occurrences> {
         let (o, t, caret) = (self.occurrences.as_ref()?, self.active()?, self.selection()?.head);
-        let current = t.source == o.path && t.doc.as_ref().is_some_and(|d| d.version() == o.version);
+        let current = t.source == o.path && self.view(t.id).is_some_and(|v| v.snapshot().key().version == o.version);
         (current && o.ranges.iter().any(|(r, _)| r.start <= caret && caret <= r.end)).then_some(o)
     }
 
@@ -1435,7 +1435,7 @@ impl State {
         let d = self.documentation.as_ref()?;
         let shown = [self.active, self.other].contains(&Some(d.tab));
         let t = self.tabs.iter().find(|t| t.id == d.tab)?;
-        (shown && t.doc.as_ref().is_some_and(|doc| doc.version() == d.version)).then_some(d)
+        (shown && self.view(t.id).is_some_and(|v| v.snapshot().key().version == d.version)).then_some(d)
     }
 
     /// Whether resting the pointer on a name shows its documentation.
@@ -1583,6 +1583,17 @@ enum Goto {
     Mark(crate::places::Mark),
 }
 
+struct SemanticWait {
+    tab: TabId,
+    key: crate::text::SnapshotKey,
+    metadata: std::sync::Weak<crate::document::SourceMeta>,
+    project: u64,
+    request: u64,
+    offset: usize,
+    question: semantics::Question,
+    foreground: Option<Ask>,
+}
+
 pub struct Session {
     state: State,
     cache: InactiveCache,
@@ -1594,6 +1605,7 @@ pub struct Session {
     index_batch_seq: u64,
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
+    semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
     request: u64,
@@ -1777,6 +1789,7 @@ impl Session {
             index_batch_seq: 0,
             jobs: Jobs::new(),
             analysis: Default::default(),
+            semantic_wait: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -2469,33 +2482,16 @@ impl Session {
             Input::Completion(c) => self.complete(c),
         };
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
-        if let Some(batch) = self.index_batch.as_ref() && let Some(items) = batch.take() {
-            let (root, generation, revision) = (batch.root.clone(), batch.generation, batch.revision);
-            self.index_batch = None;
-            if self.index_revision.load(Ordering::Relaxed) == revision && self.project_generation.load(Ordering::Relaxed) == generation {
-                let mut files = Vec::new();
-                for item in items {
-                    let path = root.join(item.path.as_ref());
-                    let current = self.state.tabs.iter().find(|tab| tab.source == path || tab.canonical.as_ref() == Some(&path))
-                        .and_then(|tab| tab.buffer).and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref());
-                    let valid = match (item.ticket, current) {
-                        (Some(ticket), Some(snapshot)) => ticket.matches(snapshot, generation),
-                        (None, None) => true,
-                        _ => false,
-                    };
-                    match item.result.filter(|_| valid) {
-                        Some(result) => files.push((item.path, result)),
-                        None => self.state.index.invalidate(&item.path, true),
-                    }
-                }
-                effect.repaint |= self.complete(Completion::Indexed { generation, revision, files }).repaint;
-            }
-        }
+        if let Some(batch) = self.index_batch.as_ref() && batch.ready()
+            && self.tx.try_send(Completion::Indexed { generation: batch.generation, revision: batch.revision, files: Vec::new() }).is_ok()
+        { batch.queued.store(true, Ordering::Release); }
         if reveal_selection && effect.repaint {
             self.keep_selection_visible();
         }
         // Language servers follow the documents shown (cheap: a pass over the tabs).
         self.sync_semantics();
+        effect.repaint |= self.retry_semantic_analysis();
+        for reply in self.state.semantics.take_failures() { effect.repaint |= self.semantic_reply(reply).repaint; }
         self.sync_repo();
         // Search rows retain their identity while background server availability changes.
         if let Some(n) = &self.state.navigation {
@@ -2548,6 +2544,7 @@ impl Session {
             loaded || cached || self.state.tabs.iter().any(|tab| tab.buffer == Some(*id))
         });
         self.state.sources.aliases.retain(|_, id| self.state.sources.buffers.contains_key(id));
+        self.analysis.retain_sources(|id| self.state.sources.buffers.get(&id).is_some_and(|e| e.snapshot.is_some()));
     }
 
     fn command(&mut self, command: Command) -> Effect {
@@ -2743,6 +2740,9 @@ impl Session {
             },
             Command::FindStep { forward } => self.find_step(forward),
             Command::CloseFind => {
+                if let Some((tab, buffer)) = self.state.active().and_then(|t| Some((t.id, t.buffer?))) {
+                    self.analysis.cancel_consumer(buffer, crate::analysis::Consumer::Find(tab));
+                }
                 if let Some(t) = self.active_mut() {
                     t.find = None;
                 }
@@ -3343,22 +3343,13 @@ impl Session {
             Command::Implementation => self.ask(Ask::Implementation),
             Command::Documentation => {
                 let (Some(t), Some(at)) = (self.state.active(), self.state.selection()) else { return Effect::default() };
-                let (id, name) = (t.id, t.name_at(at.head));
-                match name {
-                    Some(name) => self.document(id, name, DocTrigger::Caret),
-                    None => {
-                        self.state.messages.push("Quick documentation: No documentation here".into());
-                        Effect { repaint: true, copy: None }
-                    }
-                }
+                let id = t.id;
+                let name = self.current_name_at(id, at.head, true).unwrap_or(at.head..at.head);
+                self.document(id, name, DocTrigger::Caret)
             }
             Command::DocumentationAt { tab, offset } => {
-                let Some(t) = self.state.tabs.iter().find(|t| t.id == tab) else { return Effect::default() };
-                let Some(doc) = t.doc.as_ref() else { return Effect::default() };
-                let line = doc.line_of(offset.min(doc.text().len()));
-                let start = doc.line_range(line).start;
-                match t.linkable(line, offset - start) {
-                    Some(r) => self.document(tab, start + r.start..start + r.end, DocTrigger::Pointer),
+                match self.current_name_at(tab, offset, false) {
+                    Some(name) => self.document(tab, name, DocTrigger::Pointer),
                     None => Effect::default(),
                 }
             }
@@ -3448,6 +3439,7 @@ impl Session {
             Command::RestartServer => {
                 if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
                 let Some(doc) = self.state.document().cloned() else { return Effect::default() };
+                self.cancel_semantic_analysis();
                 self.state.asking = None;
                 self.state.semantics.cancel();
                 if !self.state.semantics.restart(&doc) {
@@ -3461,6 +3453,7 @@ impl Session {
                 let (Some(doc), Some(browse)) = (self.state.document(), self.state.project.as_ref().map(|p| p.root().to_owned())) else { return Effect::default() };
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
+                self.cancel_semantic_analysis();
                 let settings = self.state.semantics.set_enabled(provider, browse, enabled);
                 self.save_provider_settings(settings);
                 self.synced = 0;
@@ -3477,6 +3470,7 @@ impl Session {
                 let Some((provider, _)) = doc.language().and_then(semantics::provider::for_language) else { return Effect::default() };
                 self.state.asking = None;
                 let root = root.map(|r| normalized(&r));
+                self.cancel_semantic_analysis();
                 let settings = self.state.semantics.set_root(provider, browse, root);
                 self.synced = 0;
                 self.save_provider_settings(settings);
@@ -3549,6 +3543,83 @@ impl Session {
         Effect { repaint, copy: None }
     }
 
+    fn current_name_at(&self, tab: TabId, offset: usize, trailing: bool) -> Option<std::ops::Range<usize>> {
+        let view = self.state.view(tab)?;
+        let source = view.snapshot();
+        if view.tab().doc.as_ref().is_some_and(|doc| doc.version() == source.key().version && Arc::ptr_eq(doc.source_meta(), source.source_meta())) {
+            return if trailing { view.tab().name_at(offset) } else {
+                let line = source.line_of(offset); let start = source.line_range(line)?.start;
+                view.tab().linkable(line, offset.checked_sub(start)?).map(|r| start + r.start..start + r.end)
+            };
+        }
+        // Drafts have no matching compatibility Document. Inspect only the name's local source window;
+        // an explicit documentation request can still use its exact caret when this label is clipped.
+        let at = source.floor_char_boundary(offset);
+        let line = source.line_of(at); let bounds = source.line_range(line)?;
+        let from = source.floor_char_boundary(at.saturating_sub(2048).max(bounds.start));
+        let window = source.line_window(line, from, 4096)?;
+        let local = at.checked_sub(window.bytes.start)?;
+        let name = crate::document::identifier(&window.text, local).or_else(|| trailing.then(|| local.checked_sub(1).filter(|c| window.text.is_char_boundary(*c)).and_then(|c| crate::document::identifier(&window.text, c))).flatten())?;
+        if name.start == 0 && window.bytes.start > bounds.start || name.end == window.text.len() && window.bytes.end < bounds.end { return None; }
+        Some(window.bytes.start + name.start..window.bytes.start + name.end)
+    }
+
+    fn admitted_document(&mut self, tab: TabId, priority: Priority) -> Option<Arc<Document>> {
+        let buffer = self.state.tabs.iter().find(|t| t.id == tab)?.buffer?;
+        let entry = self.state.sources.buffers.get(&buffer)?;
+        let snapshot = entry.snapshot.clone()?;
+        let project = self.project_generation.load(Ordering::Acquire);
+        if let Some(ready) = self.analysis.ready(&snapshot, project) { return Some(ready); }
+        let input = crate::analysis::Input::new(snapshot.clone(), entry.document.clone(), project, self.is_shown(tab));
+        if !self.analysis.ensure(input, priority) { return None; }
+        self.analysis.ready(&snapshot, project)
+    }
+
+    fn cancel_semantic_analysis(&mut self) {
+        self.semantic_wait.clear();
+        self.pending_doc = None;
+        self.pending_highlight = None;
+    }
+
+    fn defer_semantic(&mut self, tab: TabId, request: u64, offset: usize, question: semantics::Question, foreground: Option<Ask>) {
+        let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return };
+        self.state.semantics.cancel_lane(question.lane());
+        self.semantic_wait.insert(question.lane(), SemanticWait { tab, key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()),
+            project: self.project_generation.load(Ordering::Acquire), request, offset, question, foreground });
+    }
+
+    fn retry_semantic_analysis(&mut self) -> bool {
+        let mut repaint = false;
+        for lane in [semantics::Lane::Foreground, semantics::Lane::Hover, semantics::Lane::Highlight, semantics::Lane::Hierarchy] {
+            let Some(wait) = self.semantic_wait.remove(&lane) else { continue };
+            let current = self.state.view(wait.tab).is_some_and(|v| v.snapshot().key() == wait.key && wait.metadata.ptr_eq(&Arc::downgrade(v.snapshot().source_meta())))
+                && self.project_generation.load(Ordering::Acquire) == wait.project;
+            let requested = match lane {
+                semantics::Lane::Foreground => self.state.asking.as_ref().is_some_and(|a| a.request == wait.request),
+                semantics::Lane::Hover => self.pending_doc.as_ref().is_some_and(|p| p.0 == wait.request),
+                semantics::Lane::Highlight => self.pending_highlight.as_ref().is_some_and(|p| p.0 == wait.request),
+                semantics::Lane::Hierarchy => false,
+            };
+            if !current || !requested {
+                if requested { match lane { semantics::Lane::Foreground => { self.state.asking = None; repaint = true; }, semantics::Lane::Hover => self.pending_doc = None, semantics::Lane::Highlight => self.pending_highlight = None, semantics::Lane::Hierarchy => {} } }
+                continue;
+            }
+            let Some(doc) = self.admitted_document(wait.tab, Priority::Visible) else { self.semantic_wait.insert(lane, wait); continue };
+            // Readiness changes the fingerprint independently of the compatibility Tab.doc.
+            self.synced = 0;
+            self.sync_semantics();
+            if let Some(ask) = wait.foreground { repaint |= self.ask_ready(doc, wait.offset, ask, wait.request).repaint; }
+            else if let Err(why) = self.state.semantics.ask(&doc, wait.offset, wait.request, wait.question) {
+                match lane {
+                    semantics::Lane::Hover => { if self.pending_doc.as_ref().is_some_and(|p| p.4 == DocTrigger::Caret) { self.state.messages.push(format!("Quick documentation: {why}")); repaint = true; } self.pending_doc = None; }
+                    semantics::Lane::Highlight => self.pending_highlight = None,
+                    semantics::Lane::Foreground | semantics::Lane::Hierarchy => {}
+                }
+            }
+        }
+        repaint
+    }
+
     /// Ask the active document's language server `ask` about the caret.
     fn ask(&mut self, ask: Ask) -> Effect {
         let (Some(doc), Some(at)) = (self.state.document().cloned(), self.state.selection()) else { return Effect::default() };
@@ -3558,6 +3629,21 @@ impl Session {
 
     /// Ask about `offset` of `doc` (a snapshot a tab holds).
     fn ask_at(&mut self, doc: Arc<Document>, offset: usize, ask: Ask) -> Effect {
+        let Some(tab) = self.state.tabs.iter().find(|t| t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, &doc))).map(|t| t.id) else { return Effect::default() };
+        self.semantic_seq += 1;
+        let request = self.semantic_seq;
+        self.semantic_wait.remove(&semantics::Lane::Foreground);
+        if let Some(current) = self.admitted_document(tab, Priority::Visible) { return self.ask_ready(current, offset, ask, request); }
+        let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return Effect::default() };
+        self.forget_semantic_messages();
+        let project = self.state.project.as_ref().map_or(0, |p| p.generation());
+        self.state.asking = Some(Asking { request, ask, at: Some((snapshot.source().to_owned(), offset, snapshot.key().version)), project, remaining: 1,
+            since: self.state.semantics.now(), retrieving: None, root: None });
+        self.defer_semantic(tab, request, offset, ask.question(), Some(ask));
+        Effect { repaint: true, copy: None }
+    }
+
+    fn ask_ready(&mut self, doc: Arc<Document>, offset: usize, ask: Ask, request: u64) -> Effect {
         if let Ask::TypeHierarchy(direction) = ask
             && !self.state.semantics.view(&doc).is_some_and(|v| v.offers(semantics::Question::PrepareTypeHierarchy))
         {
@@ -3565,8 +3651,6 @@ impl Session {
         }
         self.synced = 0;
         self.sync_semantics(); // the server has this version before it is asked about it
-        self.semantic_seq += 1;
-        let request = self.semantic_seq;
         self.forget_semantic_messages();
         let project = self.state.project.as_ref().map_or(0, |p| p.generation());
         match self.state.semantics.ask(&doc, offset, request, ask.question()) {
@@ -3585,8 +3669,15 @@ impl Session {
         self.sync_semantics();
         self.forget_semantic_messages();
         let label = Ask::TypeHierarchy(direction).label();
-        let tab = self.state.tabs.iter().find(|t| t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, &doc)));
-        let (name, held) = (tab.and_then(|t| t.name_at(offset)), tab.and_then(|t| t.declarations.clone()));
+        let tab = self.state.tabs.iter().find(|t| t.source == doc.source());
+        let name = if let Some(tab) = tab.filter(|t| t.doc.as_ref().is_some_and(|loaded| loaded.version() == doc.version() && Arc::ptr_eq(loaded.source_meta(), doc.source_meta()))) {
+            tab.name_at(offset)
+        } else {
+            // This explicit fallback runs after readiness, so the exact current source is available.
+            let line = doc.line_of(offset); let start = doc.line_range(line).start; let col = offset.saturating_sub(start);
+            crate::document::identifier(doc.line(line), col).or_else(|| col.checked_sub(1).filter(|c| doc.line(line).is_char_boundary(*c)).and_then(|c| crate::document::identifier(doc.line(line), c))).map(|r| start + r.start..start + r.end)
+        };
+        let held = tab.and_then(|t| t.declarations.clone());
         let Some(name) = name else {
             self.state.messages.push(format!("{label}: Place the caret on a name first"));
             return Effect { repaint: true, copy: None };
@@ -3632,29 +3723,39 @@ impl Session {
     /// Ask for the occurrences of the name at the caret, in the background.
     fn occurrences(&mut self) -> Effect {
         let (Some(t), Some(at)) = (self.state.active(), self.state.selection()) else { return Effect::default() };
-        let (Some(doc), Some(name)) = (t.doc.clone(), t.name_at(at.head)) else { return Effect::default() };
+        let (Some(_), Some(name)) = (t.doc.as_ref(), self.current_name_at(t.id, at.head, true)) else { return Effect::default() };
+        let tab = t.id;
+        let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return Effect::default() };
         if self.state.occurrences().is_some_and(|o| o.ranges.iter().any(|(r, _)| *r == name)) {
             return Effect::default(); // already marked
         }
         self.sync_semantics();
         self.semantic_seq += 1;
         let request = self.semantic_seq;
-        self.pending_highlight = match self.state.semantics.ask(&doc, name.start, request, semantics::Question::Highlight) {
-            Ok(()) => Some((request, doc.source().to_owned(), doc.version(), at.head)),
-            Err(_) => None, // no server for it, or not ready: nothing is marked
-        };
+        self.semantic_wait.remove(&semantics::Lane::Highlight);
+        self.pending_highlight = Some((request, snapshot.source().to_owned(), snapshot.key().version, at.head));
+        match self.admitted_document(tab, Priority::Visible) {
+            Some(doc) => { if self.state.semantics.ask(&doc, name.start, request, semantics::Question::Highlight).is_err() { self.pending_highlight = None; } }
+            None => self.defer_semantic(tab, request, name.start, semantics::Question::Highlight, None),
+        }
         Effect::default()
     }
 
     /// Ask about the documentation of `name` in `tab`, replacing any request before.
     fn document(&mut self, tab: TabId, name: std::ops::Range<usize>, trigger: DocTrigger) -> Effect {
-        let Some(doc) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.doc.clone()) else { return Effect::default() };
+        let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return Effect::default() };
         if self.state.documentation().is_some_and(|d| d.tab == tab && d.at == name) {
             return Effect::default(); // shown already
         }
         self.sync_semantics();
         self.semantic_seq += 1;
         let request = self.semantic_seq;
+        self.semantic_wait.remove(&semantics::Lane::Hover);
+        let Some(doc) = self.admitted_document(tab, Priority::Visible) else {
+            self.pending_doc = Some((request, tab, snapshot.key().version, name.clone(), trigger));
+            self.defer_semantic(tab, request, name.start, semantics::Question::Hover, None);
+            return Effect::default();
+        };
         match self.state.semantics.ask(&doc, name.start, request, semantics::Question::Hover) {
             Ok(()) => self.pending_doc = Some((request, tab, doc.version(), name, trigger)),
             Err(why) => {
@@ -3672,7 +3773,7 @@ impl Session {
     /// tab's document as it is.
     fn documentation_reply(&mut self, reply: semantics::Reply) -> Effect {
         let Some((request, tab, version, _, trigger)) = self.pending_doc.clone().filter(|p| p.0 == reply.request) else { return Effect::default() };
-        let current = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.doc.as_ref()).is_some_and(|d| d.version() == version);
+        let current = self.state.view(tab).is_some_and(|v| v.snapshot().key().version == version);
         let text = reply.result.ok().filter(|_| current).and_then(|v| semantics::hover::markdown(&v));
         let Some(text) = text else {
             self.pending_doc = None;
@@ -3683,9 +3784,10 @@ impl Session {
             return Effect::default();
         };
         let tx = self.tx.clone();
+        let session = reply.session;
         self.jobs.submit(Priority::Visible, move || {
             let preview = crate::markdown::render(text.into(), || true);
-            let _ = tx.send_blocking(Completion::DocumentationReady { request, preview });
+            let _ = tx.send_blocking(Completion::DocumentationReady { session, request, preview });
         });
         Effect::default()
     }
@@ -3694,7 +3796,8 @@ impl Session {
     /// caret where it was.
     fn occurrences_reply(&mut self, reply: semantics::Reply) -> Effect {
         let Some((_, path, version, caret)) = self.pending_highlight.take_if(|p| p.0 == reply.request) else { return Effect::default() };
-        let (Some(doc), Some(at)) = (self.state.document().cloned(), self.state.selection()) else { return Effect::default() };
+        let (Some(tab), Some(at)) = (self.state.active, self.state.selection()) else { return Effect::default() };
+        let Some(doc) = self.admitted_document(tab, Priority::Visible) else { return Effect::default() };
         if doc.source() != path || doc.version() != version || at.head != caret {
             return Effect::default();
         }
@@ -3749,16 +3852,21 @@ impl Session {
     /// Decode a decoration reply off the UI thread, for the document version it was asked about (if a tab still
     /// holds it).
     fn decode(&mut self, d: semantics::Decoration) {
-        let Some(doc) = self.state.tabs.iter().filter_map(|t| t.doc.as_ref()).find(|doc| doc.version() == d.version && doc.source() == d.path).cloned() else { return };
+        if !self.state.semantics.has_session(d.session) || self.state.semantics.latest(&d.path, d.kind) != Some(d.id) { return; }
+        let Some(tab) = self.state.tabs.iter().find(|t| t.source == d.path).map(|t| t.id) else { return };
+        let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()).filter(|s| s.key().version == d.version) else { return };
+        let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
+        let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), self.is_shown(tab));
         let filter = crate::decor::HintFilter { types: self.state.settings.inlay_types, parameters: self.state.settings.inlay_parameters };
         let (generation, request) = (self.decor_generation[d.kind as usize], d.id);
-        let tx = self.tx.clone();
-        self.jobs.submit(Priority::Visible, move || {
+        self.semantic_seq += 1; // RPC numbers may be reused by a restarted provider.
+        self.analysis.request(input, crate::analysis::Consumer::Decode(d.kind), self.semantic_seq, Priority::Visible, move |doc, lease| {
+            if !lease.wanted() { return; }
             let data = match d.kind {
                 Decor::Hints => crate::decor::Decorated::Hints(Arc::new(crate::decor::decode_hints(&d.body, &doc, d.encoding, filter))),
                 Decor::Tokens => crate::decor::Decorated::Tokens(Arc::new(crate::decor::decode_tokens(&d.body, &doc, d.encoding, &d.legend))),
             };
-            let _ = tx.send_blocking(Completion::Decorated { version: doc.version(), generation, request, data });
+            lease.send(Completion::Decorated { session: d.session, version: doc.version(), generation, request, data });
         });
     }
 
@@ -3769,7 +3877,8 @@ impl Session {
         }
         let s = &self.state.settings;
         let wanted: Vec<Decor> = [(s.inlay_types || s.inlay_parameters, Decor::Hints), (s.semantic_highlighting, Decor::Tokens)].into_iter().filter_map(|(on, k)| on.then_some(k)).collect();
-        let docs: Vec<Arc<Document>> = [self.state.active, self.state.other].into_iter().flatten().filter_map(|id| self.state.tabs.iter().find(|t| t.id == id)).filter(|t| shows_text(t)).filter_map(|t| t.doc.clone()).collect();
+        let tabs: Vec<TabId> = [self.state.active, self.state.other].into_iter().flatten().filter(|id| self.state.tabs.iter().find(|t| t.id == *id).is_some_and(shows_text)).collect();
+        let docs: Vec<Arc<Document>> = tabs.into_iter().filter_map(|id| self.admitted_document(id, Priority::Background)).collect();
         if !docs.is_empty() {
             self.state.semantics.decorate(&docs, &wanted);
         }
@@ -3799,19 +3908,22 @@ impl Session {
     }
 
     fn sync_documents(&mut self) {
-        // Each snapshot's identity: a rename keeps the version but is a new snapshot (made while the old one lives,
-        // so at another address).
-        let fingerprint = self.state.tabs.iter().fold(1u64, |h, t| {
-            let (version, at) = t.doc.as_ref().map_or((0, 0), |d| (d.version(), Arc::as_ptr(d) as usize as u64));
-            h.wrapping_mul(1_000_003).wrapping_add(version).wrapping_mul(1_000_003).wrapping_add(at)
+        let fingerprint = self.state.tabs.iter().fold(self.analysis.revision.wrapping_add(1), |h, t| {
+            let loaded = t.doc.as_ref().map_or(0, |d| Arc::as_ptr(d) as usize as u64);
+            let current = t.buffer.and_then(|id| self.state.sources.buffers.get(&id)).and_then(|e| e.snapshot.as_ref()).map_or(0, |s| Arc::as_ptr(s) as usize as u64);
+            h.wrapping_mul(1_000_003).wrapping_add(loaded).wrapping_mul(1_000_003).wrapping_add(current)
         }) | 1;
-        if fingerprint == self.synced {
-            return;
-        }
+        if fingerprint == self.synced { return; }
         self.synced = fingerprint;
-        // A source open in both panes is one document to the servers.
+        let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| t.retrieved.is_none() && t.doc.is_some()).map(|t| t.id).collect();
+        let previous = self.state.semantics.desired();
         let mut seen = std::collections::HashSet::new();
-        let docs: Vec<Arc<Document>> = self.state.tabs.iter().filter(|t| t.retrieved.is_none() && seen.insert(&t.source)).filter_map(|t| t.doc.clone()).collect();
+        let mut docs = Vec::new();
+        for tab in tabs {
+            let path = self.state.tabs.iter().find(|t| t.id == tab).map(|t| t.source.clone()).unwrap();
+            if !seen.insert(path.clone()) { continue; }
+            if let Some(doc) = self.admitted_document(tab, Priority::Background).or_else(|| previous.get(&path).cloned()) { docs.push(doc); }
+        }
         let browse = self.state.project.as_ref().map(|p| p.root().to_owned());
         let (jobs, tx) = (&self.jobs, self.tx.clone());
         let mut resolve = |provider: usize, dir: PathBuf, file: PathBuf, over: Option<PathBuf>, settings: semantics::provider::Settings| {
@@ -3847,7 +3959,7 @@ impl Session {
             return Effect::default(); // another request, project or server session
         };
         let ask = asking.ask;
-        let current = asking.at.as_ref().is_none_or(|(path, _, version)| self.state.tabs.iter().find(|t| t.source == *path).and_then(|t| t.doc.as_ref()).is_some_and(|d| d.version() == *version));
+        let current = asking.at.as_ref().is_none_or(|(path, _, version)| self.state.tabs.iter().find(|t| t.source == *path).and_then(|t| self.state.view(t.id)).is_some_and(|v| v.snapshot().key().version == *version));
         if !current {
             self.state.asking = None;
             self.state.messages.push(format!("{}: the file changed while the language server answered; ask again", ask.label()));
@@ -3935,13 +4047,15 @@ impl Session {
         Effect { repaint: true, copy: None }
     }
 
-    fn complete(&mut self, completion: Completion) -> Effect {
+    fn complete(&mut self, completion: Completion) -> Effect { self.complete_source(completion, None) }
+
+    fn complete_source(&mut self, completion: Completion, buffer: Option<crate::text::BufferId>) -> Effect {
         match completion {
             Completion::AnalysisWake => Effect::default(),
             Completion::Analyzed { ticket, result } => {
                 let current = self.state.sources.buffers.get(&ticket.buffer()).and_then(|entry| entry.snapshot.as_ref())
                     .is_some_and(|snapshot| ticket.matches(snapshot, self.project_generation.load(Ordering::Relaxed)));
-                if current && self.analysis.accepts(&ticket) { self.complete(*result) } else { Effect::default() }
+                if current && self.analysis.accepts(&ticket) { self.complete_source(*result, Some(ticket.buffer())) } else { Effect::default() }
             }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
@@ -3962,6 +4076,7 @@ impl Session {
                             self.state.asking = None;
                             self.state.semantics.cancel();
                         }
+                        self.cancel_semantic_analysis();
                         self.state.semantics.reload_project(provider, &root);
                         self.synced = 0;
                         self.state.messages.push(format!("{} for {}. Its enabled language server will restart.", if reset { "Project language server settings reset to inherited defaults" } else if self.state.semantics.settings().ruby_tooling_excluded(&root) { "Ruby tooling gem exclusions enabled; navigation into those gems is unavailable" } else { "Ruby tooling gem exclusions disabled" }, root.display()));
@@ -3981,6 +4096,7 @@ impl Session {
                 let message = match result {
                     Ok(path) => {
                         if self.runtime_kind() == Some(kind) { self.state.asking = None; self.state.semantics.cancel(); }
+                        self.cancel_semantic_analysis();
                         self.state.semantics.reload_runtime(kind.provider());
                         self.synced = 0;
                         if let Some(model) = &mut self.state.server_runtime { model.configured = path; }
@@ -4216,7 +4332,7 @@ impl Session {
             Completion::Highlighted { version, parsed, folds, declarations } => {
                 let (parsed, folds, declarations) = (parsed.map(Arc::new), folds.map(Arc::new), declarations.map(Arc::new));
                 let mut repaint = false;
-                for t in self.shown_mut(version).filter(|t| t.highlights.is_none()) {
+                for t in self.shown_mut(version, buffer).filter(|t| t.highlights.is_none()) {
                     t.highlights = parsed.clone();
                     t.folds = folds.clone();
                     t.declarations = declarations.clone();
@@ -4229,16 +4345,20 @@ impl Session {
                 }
                 Effect { repaint, copy: None }
             }
-            Completion::Decorated { version, generation, request, data } => {
+            Completion::Decorated { session, version, generation, request, data } => {
+                if !self.state.semantics.has_session(session) { return Effect::default(); }
                 // Made under an older setting, or answering a request superseded since (a refresh, a server that
                 // finished loading): dropped; the current one is asked for.
                 let kind = data.kind();
-                let source = self.state.tabs.iter().filter_map(|t| t.doc.as_ref()).find(|d| d.version() == version).map(|d| d.source().to_owned());
+                let source = self.state.tabs.iter().filter(|t| buffer.is_none_or(|buffer| t.buffer == Some(buffer))).filter_map(|t| self.state.view(t.id))
+                    .find(|v| v.snapshot().key().version == version).map(|v| v.snapshot().source().to_owned());
                 if generation != self.decor_generation[kind as usize] || source.is_none_or(|p| self.state.semantics.latest(&p, kind) != Some(request)) {
                     return Effect::default();
                 }
                 let mut repaint = false;
-                for t in self.state.tabs.iter_mut().filter(|t| t.doc.as_ref().is_some_and(|d| d.version() == version)) {
+                let sources = &self.state.sources.buffers;
+                for t in self.state.tabs.iter_mut().filter(|t| buffer.is_none_or(|buffer| t.buffer == Some(buffer))
+                    && t.buffer.and_then(|id| sources.get(&id)).and_then(|e| e.snapshot.as_ref()).is_some_and(|s| s.key().version == version)) {
                     match &data {
                         crate::decor::Decorated::Hints(h) => {
                             t.hints = Some((version, h.clone()));
@@ -4254,7 +4374,7 @@ impl Session {
                 // Superseded: another version, tab or presentation.
                 let preview = Some(preview.map(Arc::new));
                 let mut repaint = false;
-                for t in self.shown_mut(version).filter(|t| t.preview.is_none() && !t.markdown_source) {
+                for t in self.shown_mut(version, buffer).filter(|t| t.preview.is_none() && !t.markdown_source) {
                     t.preview = preview.clone();
                     repaint = true;
                 }
@@ -4262,7 +4382,7 @@ impl Session {
             }
             Completion::PreviewImages { version, doc, images } => {
                 let mut repaint = false;
-                for t in self.shown_mut(version) {
+                for t in self.shown_mut(version, buffer) {
                     // Only for the preview they were decoded for, once.
                     let Some(Ok(p)) = t.preview.as_ref().filter(|p| p.as_ref().is_ok_and(|p| Arc::ptr_eq(&p.doc, &doc) && p.images.is_none())) else { continue };
                     let p = crate::markdown::Preview { doc: doc.clone(), syntax: p.syntax.clone(), images: Some(images.clone()) };
@@ -4483,6 +4603,26 @@ impl Session {
                 if self.index_revision.load(Ordering::Relaxed) != revision || self.state.project.as_ref().is_none_or(|p| p.generation() != generation) {
                     return Effect::default(); // a replaced root's index
                 }
+                let mut files = files;
+                if let Some(batch) = self.index_batch.take_if(|batch| batch.generation == generation && batch.revision == revision)
+                    && let Some(items) = batch.take()
+                {
+                    let root = batch.root.clone();
+                    for item in items {
+                        let path = root.join(item.path.as_ref());
+                        let current = self.state.tabs.iter().find(|tab| tab.source == path || tab.canonical.as_ref() == Some(&path))
+                            .and_then(|tab| tab.buffer).and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref());
+                        let valid = match (item.ticket, current) {
+                            (Some(ticket), Some(snapshot)) => ticket.matches(snapshot, generation),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        match item.result.filter(|_| valid) {
+                            Some(result) => files.push((item.path, result)),
+                            None => self.state.index.invalidate(&item.path, true),
+                        }
+                    }
+                }
                 let mut checked = Vec::new();
                 for (path, result) in files {
                     if self.overflow_fingerprints.contains_key(&path) { checked.push((path.clone(), true)); }
@@ -4636,7 +4776,7 @@ impl Session {
                     self.sync_semantics();
                     let waited = self.state.semantics.waiting().is_some();
                     let label = self.state.asking.as_ref().map_or("Definition", |a| a.ask.label());
-                    match self.state.document().cloned().and_then(|doc| Some((self.state.semantics.take_waiting(&doc)?, doc))) {
+                    match self.state.active.and_then(|tab| self.admitted_document(tab, Priority::Visible)).and_then(|doc| Some((self.state.semantics.take_waiting(&doc)?, doc))) {
                         Some(((request, offset, question), doc)) => {
                             if let Err(why) = self.state.semantics.ask(&doc, offset, request, question) {
                                 self.state.asking = None;
@@ -4671,7 +4811,8 @@ impl Session {
                 }
                 effect
             }
-            Completion::DocumentationReady { request, preview } => {
+            Completion::DocumentationReady { session, request, preview } => {
+                if !self.state.semantics.has_session(session) { return Effect::default(); }
                 let Some((_, tab, version, at, trigger)) = self.pending_doc.take_if(|p| p.0 == request) else { return Effect::default() };
                 match preview {
                     Ok(preview) => self.state.documentation = Some(Documentation { tab, version, at, trigger, preview: Arc::new(preview) }),
@@ -5622,6 +5763,7 @@ impl Session {
         }
         // Project closure stops its language servers now.
         self.state.asking = None;
+        self.cancel_semantic_analysis();
         self.state.semantics.stop_all();
         self.synced = 0;
         // The saver holds the old project's last save; a save for the new file writes it first.
@@ -6092,6 +6234,7 @@ impl Session {
     }
 
     fn cancel_for_index_rebuild(&mut self) {
+        self.cancel_semantic_analysis();
         self.state.asking = None;
         self.state.semantics.cancel();
         if let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Symbols) {
@@ -6167,7 +6310,8 @@ impl Session {
             if let Some(canonical) = &tab.canonical { opened.entry(canonical.as_path()).or_insert(tab); }
         }
         let shown = [self.state.active, self.state.other];
-        let mut groups: std::collections::HashMap<crate::text::BufferId, (crate::analysis::Input, Option<Stamp>, Vec<Arc<str>>)> = Default::default();
+        type OpenChunk = (crate::analysis::Input, Option<Stamp>, Vec<Arc<str>>);
+        let mut groups: std::collections::HashMap<crate::text::BufferId, OpenChunk> = Default::default();
         let mut disk = Vec::new();
         for rel in chunk {
             let path = root.join(rel.as_ref());
@@ -6334,9 +6478,10 @@ impl Session {
     }
 
     fn release(&mut self, id: TabId) {
-        if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer)
-            && !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id))
-        { self.analysis.forget(buffer); }
+        if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer) {
+            let last = !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id));
+            self.analysis.release_view(buffer, id, last);
+        }
         if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.retrieved.is_none() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(t).then(|| t.location()));
             Arc::make_mut(&mut self.state.places).left_file(&source);
@@ -6439,11 +6584,11 @@ impl Session {
     }
 
     /// The shown tabs whose document is `version`.
-    fn shown_mut(&mut self, version: u64) -> impl Iterator<Item = &mut Tab> {
+    fn shown_mut(&mut self, version: u64, buffer: Option<crate::text::BufferId>) -> impl Iterator<Item = &mut Tab> {
         let (active, other) = (self.state.active, self.state.other);
         let sources = &self.state.sources.buffers;
         self.state.tabs.iter_mut().filter(move |t| (Some(t.id) == active || Some(t.id) == other)
-            && t.buffer.and_then(|buffer| sources.get(&buffer)).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| snapshot.key().version == version))
+            && buffer.is_none_or(|buffer| t.buffer == Some(buffer)) && t.buffer.and_then(|buffer| sources.get(&buffer)).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| snapshot.key().version == version))
     }
 
     /// Record that shown tab `id` shows `version`, so work on it is wanted.
@@ -6457,6 +6602,7 @@ impl Session {
     }
 
     /// Work on `version` is wanted while either pane shows it.
+    #[cfg(test)]
     fn wanted(&self, version: u64) -> impl Fn() -> bool + Send + Clone + 'static {
         let (current, other) = (self.current.clone(), self.other_current.clone());
         move || current.load(Ordering::Relaxed) == version || other.load(Ordering::Relaxed) == version
@@ -6777,8 +6923,8 @@ impl Session {
         let Some(tab) = self.state.tabs.iter().find(|t| shown.contains(&Some(t.id)) && t.highlights.is_none() && t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, doc))).map(|t| t.id) else { return };
         let Some(view) = self.state.view(tab) else { return };
         let snapshot = view.snapshot().clone();
-        if doc.version() == snapshot.key().version && Arc::ptr_eq(doc.source_meta(), snapshot.source_meta()) && doc.is_large() { return; }
-        if let Some(lang) = snapshot.language().filter(|_| !snapshot.is_large()) {
+        let large = if doc.version() == snapshot.key().version && Arc::ptr_eq(doc.source_meta(), snapshot.source_meta()) { doc.is_large() } else { snapshot.is_large() };
+        if let Some(lang) = snapshot.language().filter(|_| !large) {
             let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed), true);
             let declarations = self.state.wants_declarations() && highlight::has_declarations(lang);
             self.analysis.request(input, crate::analysis::Consumer::Syntax, u64::from(declarations), Priority::Background, move |doc, lease| {
