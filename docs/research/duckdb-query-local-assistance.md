@@ -71,9 +71,12 @@ Evidence is retained under `target/perf/editor-implementation/06/`: red/green lo
 `measurements.json`, `native-resources.json`, `identity.json` and check logs.
 The earlier shared-target Rust API timing samples do not establish source/artifact
 provenance and are excluded from acceptance evidence. Private-target checks and
-explicitly debug-profile API samples are retained in the ticket worktree under
-`target/private-validation-06/`, using `target/private-06` for compilation with
-DEV/TEST debug symbols disabled and incremental compilation disabled. These short,
+explicitly debug-profile API samples are retained in the main checkout under
+`target/perf/editor-implementation/06/private-validation/`, including the exact
+private test executable. `retained-paths.json` maps its original build path to the
+retained copy; `identity.json` preserves original source/build identities. The
+private build used `target/private-06` in the ticket worktree with DEV/TEST debug
+symbols disabled and incremental compilation disabled. These short,
 contended-host prerequisite samples are not production frontend, persistent-worker,
 sustained-memory or display measurements. Separate direct native parser process
 samples remain in `native-resources.json` (Linux wait4 RSS, not Rust API timings).
