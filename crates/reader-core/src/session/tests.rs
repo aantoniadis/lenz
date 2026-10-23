@@ -1085,7 +1085,7 @@ fn background_semantic_readiness_starts_in_the_dispatch_that_registers_it() {
     let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"background\"\n");
     let file = write(d.path(), "background.rs", b"fn saved() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
     open(&mut s, Command::Open(file.clone()), "background.rs");
-    settle(&mut s, |s| active_view(&s).tokens().is_some() && active_view(&s).inlay_hints().is_some() && s.state().highlights().is_some());
+    settle(&mut s, |s| active_view(s).tokens().is_some() && active_view(s).inlay_hints().is_some() && s.state().highlights().is_some());
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
         s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
@@ -1190,7 +1190,7 @@ fn replacing_hover_replies_keeps_provider_markup_out_of_unbounded_worker_queues(
     let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"hover\"\n");
     let file = write(d.path(), "hover.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
     open(&mut s, Command::Open(file), "hover.rs");
-    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && active_view(&s).inlay_hints().is_some() && active_view(&s).tokens().is_some());
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && active_view(s).inlay_hints().is_some() && active_view(s).tokens().is_some());
     s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
@@ -1254,7 +1254,7 @@ fn decoded_decorations_from_a_restarted_provider_cannot_complete_a_new_request()
     settle(&mut s, |s| !s.state.semantics.has_session(old_session) && s.state.semantics.latest(&file, Decor::Tokens) == Some(old_request));
     s.dispatch(old);
     let stale_installed = active_view(&s).tokens().is_some();
-    settle(&mut s, |s| active_view(&s).tokens().is_some());
+    settle(&mut s, |s| active_view(s).tokens().is_some());
     assert!(!stale_installed, "a restarted provider can reuse its request numbers; the server session must also match");
     let other = write(d.path(), "other.rs", b"fn other() {}\n");
     s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::Open(other), "other.rs"); s.dispatch(Command::FocusPane(0));
@@ -1847,7 +1847,7 @@ fn an_external_replacement_advances_the_version_and_follows_the_context() {
     s.dispatch(Command::Select(Selection { anchor: 27, head: 33 }));
     let (version, history) = (active_view(&s).snapshot().key().version, s.state().can_back());
     replace(&a, b"// header\n// more\nfn one() {}\nfn two() {}\nfn target() {}\n");
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     let tab = s.state().active().unwrap();
     assert_eq!(source_line(s.state().current_source().unwrap(), 4), "fn target() {}");
     assert_eq!((tab.top_line(), tab.selection().map(|x| x.range())), (4, Some(45..51)), "the selection follows its line");
@@ -1871,7 +1871,7 @@ fn shortening_deleting_and_restoring_keep_the_reader_honest() {
     s.dispatch(Command::Scroll(40));
     let version = active_view(&s).snapshot().key().version;
     std::fs::write(&a, b"short\n").unwrap();
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     assert_eq!(s.state().top_line(), 1, "clamped to the new length");
     assert!(s.state().notices().iter().any(|n| n.starts_with("Approximate")));
     std::fs::remove_file(&a).unwrap();
@@ -2002,7 +2002,7 @@ fn refresh_perf() {
         let version = active_view(&s).snapshot().key().version;
         let started = std::time::Instant::now();
         replace(&a, format!("// change {i}\n{body}").as_bytes());
-        settle(&mut s, |s| active_view(&s).snapshot().key().version > version);
+        settle(&mut s, |s| active_view(s).snapshot().key().version > version);
         if i >= 10 {
             latency.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -2029,7 +2029,7 @@ fn refreshes_keep_encodings_line_endings_roles_and_bytes() {
     let version = active_view(&s).snapshot().key().version;
     let after = b"caf\xe9 au lait, cr\xe8me br\xfbl\xe9e\r\nchanged\r\n".to_vec();
     replace(&latin, &after);
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     let doc = s.state().current_source().unwrap();
     assert_eq!((source_line(doc, 1), doc.encoding()), ("changed".to_string(), "windows-1252"));
     assert_eq!(doc.copy_range(doc.line_range(0).unwrap().end..doc.line_range(1).unwrap().start).unwrap(), "\r\n", "line endings kept");
@@ -3391,7 +3391,7 @@ fn a_split_shows_the_source_twice_and_each_pane_keeps_its_tabs_and_place() {
     // Each pane scrolls on its own; both stay coloured.
     s.dispatch(Command::Scroll(120));
     assert_eq!((s.state().shown(0).unwrap().top_line(), s.state().top_line()), (50, 120));
-    settle(&mut s, |s| pane_view(&s, 0).highlights().is_some() && pane_view(&s, 1).highlights().is_some());
+    settle(&mut s, |s| pane_view(s, 0).highlights().is_some() && pane_view(s, 1).highlights().is_some());
     // Opening in the focused pane leaves the other showing its file, in memory.
     s.dispatch(Command::Open(b.clone()));
     settle(&mut s, opened);
@@ -4145,7 +4145,7 @@ fn matches_and_go_to_line_come_into_view_counting_wrapped_rows() {
     let mut s = txt(d.path(), &text);
     s.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 10 });
     s.dispatch(Command::SetSoftWrap(true));
-    let shown = |s: &Session| { let t = s.state().active().unwrap(); source_rows(active_view(&s), 10, s.state().wrap_cols(t)).iter().map(|r| r.line).collect::<Vec<_>>() };
+    let shown = |s: &Session| { let t = s.state().active().unwrap(); source_rows(active_view(s), 10, s.state().wrap_cols(t)).iter().map(|r| r.line).collect::<Vec<_>>() };
     find(&mut s, "cccc008");
     let head = s.state().selection().unwrap().head;
     let line = s.state().current_source().unwrap().line_of(head);
@@ -4184,7 +4184,7 @@ fn declared(d: &Path, src: &str) -> Session {
 }
 
 fn sticky_of(s: &Session) -> Vec<usize> {
-    let crate::layout::Query::Ready(sticky) = active_view(&s).layout_sticky(5, s.state().wrap_cols(s.state().active().unwrap())) else { panic!("fixture sticky layout pending") };
+    let crate::layout::Query::Ready(sticky) = active_view(s).layout_sticky(5, s.state().wrap_cols(s.state().active().unwrap())) else { panic!("fixture sticky layout pending") };
     sticky.iter().map(|k| k.line).collect()
 }
 
@@ -4367,7 +4367,7 @@ fn banded(d: &Path) -> Session {
 
 /// The row line `line` is shown on, from the top.
 fn row_of(s: &Session, line: usize) -> Option<usize> {
-    source_rows(active_view(&s), 20, None).iter().position(|r| r.line == line)
+    source_rows(active_view(s), 20, None).iter().position(|r| r.line == line)
 }
 
 #[test]
@@ -5067,7 +5067,7 @@ fn a_find_over_a_file_that_shrinks_on_disk_steps_safely() {
     find(&mut s, "foo");
     let version = active_view(&s).snapshot().key().version;
     replace(&a, b"x\n");
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     s.dispatch(Command::FindStep { forward: true }); // before the new matches arrive
     settle(&mut s, found);
     s.dispatch(Command::FindStep { forward: true });
@@ -5231,7 +5231,7 @@ fn next_bookmark_passes_a_bookmark_past_the_end_of_its_file() {
     s.dispatch(Command::ToggleBookmark);
     let v = active_view(&s).snapshot().key().version;
     replace(&a, b"x\n");
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > v);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > v);
     caret(&mut s, 0);
     s.dispatch(Command::StepBookmark { forward: true });
     settle(&mut s, opened);
@@ -5257,7 +5257,7 @@ fn a_change_on_disk_with_find_open_keeps_the_view() {
     let v = active_view(&s).snapshot().key().version;
     text.push_str("appended\n");
     replace(&a, text.as_bytes());
-    settle(&mut s, |s| active_view(&s).snapshot().key().version > v && found(s));
+    settle(&mut s, |s| active_view(s).snapshot().key().version > v && found(s));
     assert_eq!(s.state().top_line(), top, "an external append does not move the view");
 }
 
