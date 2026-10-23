@@ -1167,7 +1167,7 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
     let server = s.state.semantics.session_of(&source_document).unwrap();
     s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
     let asking = s.state.asking.as_ref().unwrap();
-    let fence = ResultFence { slot: ResultSlot { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
+    let fence = ResultFence { slot: ResultSlot::Semantic { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
     s.analysis.request_result(fence, Priority::Visible, || |_| panic!("semantic resolver failed")).unwrap();
     s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
     settle(&mut s, |s| s.state.asking.is_none());
@@ -1176,7 +1176,7 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
     let request = s.state.asking.as_ref().unwrap().request;
     let project = s.project_generation.load(Ordering::Acquire);
     for n in 1000..1065 {
-        let fence = ResultFence { slot: ResultSlot { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
+        let fence = ResultFence { slot: ResultSlot::Semantic { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
         if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
     }
     let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });

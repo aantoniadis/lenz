@@ -4311,40 +4311,74 @@ impl Session {
             && asking.at.as_ref().is_none_or(|(path, _, version)| self.state.tabs.iter().find(|t| t.source == *path).and_then(|t| self.state.view(t.id)).is_some_and(|v| v.snapshot().key().version == *version))
     }
 
-    fn result_current(state: &State, fence: &crate::analysis::ResultFence) -> bool {
-        if fence.project != state.project.as_ref().map_or(0, |p| p.generation()) || !state.semantics.can_ask(fence.slot.server) { return false; }
-        if fence.source.as_ref().is_some_and(|source| !state.sources.buffers.get(&source.key.buffer).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| source.matches(snapshot))) { return false; }
-        match fence.slot.lane {
-            semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
-            semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == fence.slot.server && h.loading(fence.request) == fence.node)),
-            semantics::Lane::Hover | semantics::Lane::Highlight => false,
+    fn result_current(state: &State, fence: &crate::analysis::ResultFence, project: u64, open: u64, preview: u64) -> bool {
+        use crate::analysis::{ResultSlot, ResultStage};
+        match fence.slot {
+            ResultSlot::Search => fence.project == project && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.id == fence.request
+                && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline))),
+            ResultSlot::Preview => fence.project == project && fence.request == preview && fence.stage == ResultStage::Preview
+                && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.selected == fence.node),
+            ResultSlot::Validate => fence.project == project && fence.request == open && fence.stage == ResultStage::Validate
+                && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && fence.node.is_some_and(|i| i < r.hits.len())),
+            ResultSlot::Semantic { server, lane } => {
+                if fence.project != state.project.as_ref().map_or(0, |p| p.generation()) || !state.semantics.can_ask(server) { return false; }
+                if fence.source.as_ref().is_some_and(|source| !state.sources.buffers.get(&source.key.buffer).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| source.matches(snapshot))) { return false; }
+                match lane {
+                    semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
+                    semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node)),
+                    semantics::Lane::Hover | semantics::Lane::Highlight => false,
+                }
+            }
         }
     }
 
     fn invalidate_result_analysis(&mut self) {
         let state = &self.state;
-        self.analysis.invalidate_results(|fence| Self::result_current(state, fence));
+        let (project, open, preview) = (self.project_generation.load(Ordering::Acquire), self.open_seq, self.preview_latest.load(Ordering::Acquire));
+        self.analysis.invalidate_results(|fence| Self::result_current(state, fence, project, open, preview));
     }
 
     fn result_failed(&mut self, fence: &crate::analysis::ResultFence, why: String) -> Effect {
-        match fence.slot.lane {
-            semantics::Lane::Foreground => {
-                if let Some(asking) = self.state.asking.as_ref().filter(|a| a.request == fence.request && a.project == fence.project) {
-                    let message = format!("{}: {why}; try again", asking.ask.label());
-                    self.state.messages.push(message.clone());
-                    if let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Symbols) { r.error = Some(message); }
-                    return self.answered(fence.request);
+        use crate::analysis::ResultSlot;
+        match fence.slot {
+            ResultSlot::Search => {
+                if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
+                    r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None };
                 }
             }
-            semantics::Lane::Hierarchy => {
-                if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set)
-                    && let Some(h) = r.hierarchy.as_mut().filter(|h| h.session == fence.slot.server)
-                    && let Some(node) = h.loading(fence.request).filter(|node| Some(*node) == fence.node)
-                { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None }; }
+            ResultSlot::Preview => {
+                if fence.request == self.preview_latest.load(Ordering::Acquire) && let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.selected == fence.node) {
+                    r.preview = None; self.state.messages.push(format!("Cannot preview: {why}")); return Effect { repaint: true, copy: None };
+                }
             }
-            semantics::Lane::Hover | semantics::Lane::Highlight => {}
+            ResultSlot::Validate => {
+                if fence.request == self.open_seq && let (Some(id), Some(index)) = (fence.result_set, fence.node) {
+                    return self.complete_source(Completion::Validated { id, open: fence.request, index, result: Err(why) }, None);
+                }
+            }
+            ResultSlot::Semantic { server, lane } => match lane {
+                semantics::Lane::Foreground => {
+                    if let Some(asking) = self.state.asking.as_ref().filter(|a| a.request == fence.request && a.project == fence.project) {
+                        let message = format!("{}: {why}; try again", asking.ask.label());
+                        self.state.messages.push(message.clone());
+                        if let Some(r) = self.state.results.as_mut().filter(|r| r.kind == ResultsKind::Symbols) { r.error = Some(message); }
+                        return self.answered(fence.request);
+                    }
+                }
+                semantics::Lane::Hierarchy => {
+                    if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set)
+                        && let Some(h) = r.hierarchy.as_mut().filter(|h| h.session == server)
+                        && let Some(node) = h.loading(fence.request).filter(|node| Some(*node) == fence.node)
+                    { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None }; }
+                }
+                semantics::Lane::Hover | semantics::Lane::Highlight => {}
+            },
         }
         Effect::default()
+    }
+
+    fn local_result_fence(&self, slot: crate::analysis::ResultSlot, stage: crate::analysis::ResultStage, request: u64, result_set: u64, index: Option<usize>, snapshot: Option<&crate::text::TextSnapshot>) -> crate::analysis::ResultFence {
+        crate::analysis::ResultFence { slot, project: self.project_generation.load(Ordering::Acquire), request, stage, result_set: Some(result_set), node: index, source: snapshot.map(SemanticSource::new) }
     }
 
     /// A reply: check it answers the current request about the snapshot asked, in this project and server
@@ -4397,7 +4431,7 @@ impl Session {
                 return Effect { repaint: true, copy: None };
             };
             let versions = self.versions.clone();
-            let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot { server: reply.session, lane: reply.lane }, project, request, stage: crate::analysis::ResultStage::Retrieved, result_set: None, node: None, source: asking.source.clone() };
+            let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot::Semantic { server: reply.session, lane: reply.lane }, project, request, stage: crate::analysis::ResultStage::Retrieved, result_set: None, node: None, source: asking.source.clone() };
             if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease| {
                 if !lease.wanted() { return; }
                 let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
@@ -4412,7 +4446,7 @@ impl Session {
         let origin = self.state.semantics.origin(session).unwrap_or_else(|| provider.to_string());
         let limit = if ask.question() == semantics::Question::Definition { semantics::TARGET_LIMIT } else { semantics::USAGE_LIMIT };
         let asked_path = asking.at.as_ref().filter(|_| ask == Ask::FileSymbols).map(|(path, _, _)| path.clone());
-        let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot { server: session, lane: reply.lane }, project, request, stage: crate::analysis::ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
+        let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot::Semantic { server: session, lane: reply.lane }, project, request, stage: crate::analysis::ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
             // Capture a sent-map generation only after a bounded owner slot has been reserved.
@@ -4480,9 +4514,10 @@ impl Session {
             Completion::Analyzed { ticket, result } => {
                 if let Some(tag) = ticket.result() {
                     if !self.analysis.accepts(&ticket) { return Effect::default(); }
-                    let current = Self::result_current(&self.state, &tag.fence);
+                    let current = Self::result_current(&self.state, &tag.fence, self.project_generation.load(Ordering::Acquire), self.open_seq, self.preview_latest.load(Ordering::Acquire));
+                    let target_buffer = (tag.fence.slot == crate::analysis::ResultSlot::Validate).then(|| tag.fence.source.as_ref().map(|source| source.key.buffer)).flatten();
                     if !self.analysis.acknowledge_result(tag) { return Effect::default(); }
-                    return if current { self.complete_source(*result, None) } else { self.result_failed(&tag.fence, "source or semantic request context changed".into()) };
+                    return if current { self.complete_source(*result, target_buffer) } else { self.result_failed(&tag.fence, "source or semantic request context changed".into()) };
                 }
                 let current = ticket.buffer().and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref())
                     .is_some_and(|snapshot| ticket.matches(snapshot, self.project_generation.load(Ordering::Relaxed)));
@@ -5050,6 +5085,14 @@ impl Session {
                 }
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id) else { return Effect::default() };
                 let (Some(hit), Some(path)) = (r.hits.get(index).cloned(), r.target(index)) else { return Effect::default() };
+                let result = result.and_then(|(stamp, doc)| {
+                    let changed = self.state.sources.buffers.iter().filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
+                        let captured = buffer == Some(id);
+                        let target = captured || source.source() == path || self.state.tabs.iter().any(|tab| tab.buffer == Some(id) && (tab.source == path || tab.canonical.as_ref() == Some(&path)));
+                        target && (!source.matches_document(&doc) || captured && source.source() != doc.source())
+                    });
+                    if changed { Err("the current source changed".into()) } else { Ok((stamp, doc)) }
+                });
                 match result {
                     // Opening is committed: the main area moved, the results stay for the next one.
                     Ok((stamp, doc)) => self.open_at(path, &hit, stamp, doc),
@@ -5605,8 +5648,8 @@ impl Session {
         let (syntax, direction) = (h.source == hierarchy::Source::Syntax, h.direction);
         let result_set = self.state.results.as_ref().map(|r| r.id);
         let source = self.hierarchy_source.as_ref().filter(|(id, _)| Some(*id) == result_set).map(|(_, source)| source.clone());
-        let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot { server: reply.session, lane: reply.lane }, project: self.project_generation.load(Ordering::Acquire), request: reply.request, stage: if syntax { crate::analysis::ResultStage::SyntaxHierarchy } else { crate::analysis::ResultStage::Hierarchy }, result_set, node: Some(node), source };
-        if !Self::result_current(&self.state, &fence) { return self.result_failed(&fence, "source or semantic request context changed".into()); }
+        let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot::Semantic { server: reply.session, lane: reply.lane }, project: self.project_generation.load(Ordering::Acquire), request: reply.request, stage: if syntax { crate::analysis::ResultStage::SyntaxHierarchy } else { crate::analysis::ResultStage::Hierarchy }, result_set, node: Some(node), source };
+        if !Self::result_current(&self.state, &fence, self.project_generation.load(Ordering::Acquire), self.open_seq, self.preview_latest.load(Ordering::Acquire)) { return self.result_failed(&fence, "source or semantic request context changed".into()); }
         let (versions, request, encoding, provider, session, indexing) = (self.versions.clone(), reply.request, reply.encoding, reply.provider, reply.session, reply.indexing);
         let latest = self.hierarchy_latest.clone();
         let semantics = &self.state.semantics;
@@ -5772,15 +5815,18 @@ impl Session {
                 let held = self.state.tabs.iter().find(|t| t.source == source).and_then(|t| self.state.source(t.id).cloned()).or_else(|| self.cache.peek(&source));
                 let path: Arc<str> = source.to_string_lossy().into();
                 self.state.results = Some(base(self, Scope::File(source.clone()), None, 1, false));
+                let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Search, id, id, None, held.as_deref());
                 if let Some(snapshot) = held {
                     let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
-                    let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), false);
-                    self.analysis.request(input, crate::analysis::Consumer::Search, id, Priority::Visible, move |doc, lease| {
-                        if latest.load(Ordering::Relaxed) == id { lease.send(Completion::Found { id, found: search::search_text(&query, &path, doc.text()) }); }
-                    });
+                    let project = fence.project;
+                    if self.analysis.request_result_document(fence.clone(), Priority::Visible, || {
+                        (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
+                            if latest.load(Ordering::Relaxed) == id { lease.send(Completion::Found { id, found: search::search_text(&query, &path, doc.text()) }); }
+                        })
+                    }).is_err() { return self.result_failed(&fence, "Search analysis capacity is full".into()); }
                     return Effect { repaint: true, copy: None };
                 }
-                self.jobs.submit(Priority::Visible, move || {
+                if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
                     if latest.load(Ordering::Relaxed) != id {
                         return;
                     }
@@ -5789,8 +5835,8 @@ impl Session {
                             Err(ReadError::Unstable) => search::Found { done: true, error: Some("the file is changing on disk".into()), ..Default::default() },
                             Err(ReadError::Failed(e)) => search::Found { done: true, error: Some(e), ..Default::default() },
                     };
-                    let _ = tx.send_blocking(Completion::Found { id, found });
-                });
+                    lease.send(Completion::Found { id, found });
+                }).is_err() { return self.result_failed(&fence, "Search analysis capacity is full".into()); }
             }
         }
         Effect { repaint: true, copy: None }
@@ -5809,8 +5855,9 @@ impl Session {
         self.state.results = Some(self.new_results(id, ResultsKind::Outline, String::new(), Scope::File(doc.source().to_owned()), None, 1, false));
         let latest = self.search_latest.clone();
         let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
-        let input = crate::analysis::Input::new(doc, loaded, self.project_generation.load(Ordering::Acquire), true);
-        self.analysis.request(input, crate::analysis::Consumer::Outline, id, Priority::Visible, move |doc, lease| {
+        let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Outline, id, id, None, Some(&doc));
+        let project = fence.project;
+        if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(doc, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
             let cancelled = latest.clone();
             let found = match lenz_content::highlight::declarations_while(lang, doc.text().clone(), move || cancelled.load(Ordering::Relaxed) == id) {
                 Some(found) => {
@@ -5829,7 +5876,7 @@ impl Session {
                 None => search::Found { done: true, error: Some("the outline could not be built".into()), ..Default::default() },
             };
             lease.send(Completion::Found { id, found });
-        });
+        })).is_err() { return self.result_failed(&fence, "Outline analysis capacity is full".into()); }
         Effect { repaint: true, copy: None }
     }
 
@@ -5924,17 +5971,18 @@ impl Session {
             None => {
                 r.preview = None;
                 self.highlight_preview();
+                let fence = self.local_result_fence(crate::analysis::ResultSlot::Preview, crate::analysis::ResultStage::Preview, preview, id, Some(i), held.as_deref());
                 if let Some(snapshot) = held {
                     let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
-                    let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), false);
+                    let project = fence.project;
                     let latest = self.preview_latest.clone();
-                    self.analysis.request(input, crate::analysis::Consumer::Preview, preview, Priority::Visible, move |doc, lease| {
+                    if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
                         if latest.load(Ordering::Relaxed) == preview { lease.send(Completion::CurrentPreview { id, index: i, doc }); }
-                    });
+                    })).is_err() { return self.result_failed(&fence, "Preview analysis capacity is full".into()); }
                     return Effect { repaint: true, copy: None };
                 }
-                let (versions, tx, latest) = (self.versions.clone(), self.tx.clone(), self.preview_latest.clone());
-                self.jobs.submit(Priority::Visible, move || {
+                let (versions, latest) = (self.versions.clone(), self.preview_latest.clone());
+                if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
                     if latest.load(Ordering::Relaxed) != preview {
                         return; // a later selection replaced this one before it started
                     }
@@ -5946,8 +5994,8 @@ impl Session {
                         Err(ReadError::Unstable) => Err("it is changing on disk".to_string()),
                         Err(ReadError::Failed(e)) => Err(e),
                     };
-                    let _ = tx.send_blocking(Completion::Previewed { id, index: i, doc });
-                });
+                    lease.send(Completion::Previewed { id, index: i, doc });
+                }).is_err() { return self.result_failed(&fence, "Preview analysis capacity is full".into()); }
             }
         }
         Effect { repaint: true, copy: None }
@@ -5963,17 +6011,18 @@ impl Session {
         // against the file as it is now.
         let held = file_scope.then(|| self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned())).flatten();
         self.open_seq += 1;
-        let (open, versions, tx) = (self.open_seq, self.versions.clone(), self.tx.clone());
+        let (open, versions) = (self.open_seq, self.versions.clone());
+        let fence = self.local_result_fence(crate::analysis::ResultSlot::Validate, crate::analysis::ResultStage::Validate, open, id, Some(i), held.as_deref());
         if let Some(snapshot) = held {
             let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
-            let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), false);
-            self.analysis.request(input, crate::analysis::Consumer::Validate, open, Priority::Visible, move |doc, lease| {
+            let project = fence.project;
+            if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
                 let result = if hit.line < doc.line_count() && search::still_matches(&hit, kind, &query, doc.line(hit.line)) { Ok((None, doc)) } else { Err("the file changed".into()) };
                 lease.send(Completion::Validated { id, open, index: i, result });
-            });
+            })).is_err() { return self.result_failed(&fence, "Result validation capacity is full".into()); }
             return Effect::default();
         }
-        self.jobs.submit(Priority::Visible, move || {
+        if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
             let checked = match read(&path) {
                     Ok((stamp, bytes)) => {
                         let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
@@ -5989,8 +6038,8 @@ impl Session {
                     _ => Err("the file changed".to_string()),
                 }
             });
-            let _ = tx.send_blocking(Completion::Validated { id, open, index: i, result });
-        });
+            lease.send(Completion::Validated { id, open, index: i, result });
+        }).is_err() { return self.result_failed(&fence, "Result validation capacity is full".into()); }
         Effect::default()
     }
 

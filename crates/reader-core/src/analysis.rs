@@ -12,7 +12,7 @@ use result::{ResultEntry, ResultTicket};
 enum Owner { Buffer(BufferId), Result(ResultSlot) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Search, Outline, Preview, Validate, Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
+pub(crate) enum Consumer { Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
