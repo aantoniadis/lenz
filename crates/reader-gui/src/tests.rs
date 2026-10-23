@@ -321,6 +321,58 @@ fn source_windows_scroll_and_select_past_the_old_long_line_prefix(cx: &mut TestA
 }
 
 #[gpui::test]
+fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mut TestAppContext) {
+    let prefix = "a".repeat(40) + &"👨‍👩‍👧‍👦".repeat(2_000);
+    let end = prefix.len();
+    let source = prefix.clone() + "END" + &" tail".repeat(500) + "\r\n";
+    let f = fixture(cx, Some(("family.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    let (font, char_w) = f.view.read_with(&v, |r, _| (r.font.clone(), r.char_w));
+    let native_end = v.update(|window, _| {
+        let measure = |text: &str| {
+            let run = gpui::TextRun { len: text.len(), font: font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_owned().into(), px(font_size()), &[run], None).width)
+        };
+        // A whole-prefix f32 layout accumulates rounding over thousands of glyphs.
+        measure(&"a".repeat(40)) as f64 + 2_000.0 * measure("👨‍👩‍👧‍👦") as f64
+    }) as f32;
+    let column = (native_end / char_w).floor() as usize - 20;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(column), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))));
+    let (bounds, column, shown, origin) = f.view.read_with(&v, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        let view = r.session.state().view(r.session.state().active().unwrap().id()).unwrap();
+        let width = (f32::from(bounds.size.width) - num_w() - 16.0).max(1.0);
+        let row = r.source.get(0, &view, 0, r.session.state().column() as f32 * r.char_w, width).unwrap();
+        (bounds, r.session.state().column(), row.text.clone(), row.origin)
+    });
+    let at = shown.find("END").unwrap();
+    let painted_end = v.update(|window, _| {
+        let run = gpui::TextRun { len: shown.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        origin + f32::from(window.text_system().shape_line(shown.into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    assert!((painted_end - native_end).abs() < 1.0, "bounded native advances must retain the family glyph's width");
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + painted_end - column as f32 * char_w;
+    let y = bounds.origin.y + px(line_h()/2.0);
+    v.simulate_click(point(px(x+char_w*0.1),y),Modifiers::default());
+    v.simulate_click(point(px(x+char_w*3.1),y),Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r,_| r.session().state().selection().unwrap().range()),end..end+3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item|item.text()).as_deref(),Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("family.txt")).unwrap(),source.as_bytes());
+}
+
+#[gpui::test]
 fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("closed.txt", b"owned source")));
     settle(cx, &f, |r| r.session().state().document().is_some());
