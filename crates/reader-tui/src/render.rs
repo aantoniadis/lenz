@@ -11,10 +11,11 @@ use ratatui::{
 };
 use reader_core::{
     navigation::{Kind, Scope},
-    session::{Command, CommandId, MenuEntry, Rendering, Split, State},
+    session::{Command, CommandId, MenuEntry, Rendering, Split, State, View},
     tabs::{Tab, TabId},
+    text::SnapshotKey,
 };
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -44,6 +45,14 @@ pub(crate) struct Geometry {
     pub search_toggles: Vec<(CommandId, Rect)>,
 }
 
+impl Geometry {
+    pub(crate) fn invalidate_source(&mut self) {
+        for pane in &mut self.panes {
+            pane.source = None;
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct PaneGeometry {
     pub controls: Vec<(CommandId, Rect)>,
@@ -61,6 +70,99 @@ pub(crate) struct PaneGeometry {
     pub ann: u16,
     pub rows: Vec<(u16, usize, usize)>,
     pub hits: Vec<TextHit>,
+    source: Option<SourceIdentity>,
+}
+
+impl PaneGeometry {
+    pub(crate) fn source_view<'a>(&self, app: &'a App) -> Option<View<'a>> {
+        let state = app.session.state();
+        let tab = state.shown(self.pane)?;
+        let view = state.view(tab.id())?;
+        self.source.as_ref().filter(|held| held.matches(&view, app))?;
+        Some(view)
+    }
+}
+
+struct SourceIdentity {
+    tab: TabId,
+    snapshot: SnapshotKey,
+    top: (usize, usize),
+    column: usize,
+    cols: Option<usize>,
+    visible: Arc<reader_core::folds::Visible>,
+    breadcrumbs: bool,
+    split: Option<Split>,
+    explorer: bool,
+    results: bool,
+    rendering: SourceRendering,
+    image_source: bool,
+    hints: Option<Arc<reader_core::decor::Hints>>,
+    declarations: Option<Arc<lenz_content::highlight::Declarations>>,
+    sticky: bool,
+    annotation_cols: usize,
+}
+
+fn same_arc<T>(held: Option<&Arc<T>>, current: Option<&Arc<T>>) -> bool {
+    match (held, current) {
+        (None, None) => true,
+        (Some(held), Some(current)) => Arc::ptr_eq(held, current),
+        _ => false,
+    }
+}
+
+enum SourceRendering {
+    Text,
+    Pending,
+    Preview(Arc<reader_core::markdown::Preview>),
+}
+
+impl SourceRendering {
+    fn new(tab: &Tab) -> Self {
+        match tab.rendering() {
+            Some(Rendering::Preview(preview)) => Self::Preview(preview.clone()),
+            Some(Rendering::Pending) => Self::Pending,
+            _ => Self::Text,
+        }
+    }
+    fn matches(&self, tab: &Tab) -> bool {
+        match (self, tab.rendering()) {
+            (Self::Text, None | Some(Rendering::Source)) | (Self::Pending, Some(Rendering::Pending)) => true,
+            (Self::Preview(held), Some(Rendering::Preview(current))) => Arc::ptr_eq(held, current),
+            _ => false,
+        }
+    }
+}
+
+impl SourceIdentity {
+    fn new(view: &View<'_>, app: &App) -> Self {
+        let state = app.session.state();
+        let tab = view.tab();
+        Self {
+            tab: tab.id(), snapshot: view.snapshot().key(),
+            top: (tab.top_line(), tab.top_row()), column: tab.column(), cols: state.wrap_cols(tab),
+            visible: view.visible(),
+            breadcrumbs: state.breadcrumbs(), split: state.split(),
+            explorer: app.tree_shown && state.has_tree(), results: state.results().is_some(),
+            rendering: SourceRendering::new(tab), image_source: tab.image_source(),
+            hints: tab.hints().cloned(), declarations: tab.declarations_handle().cloned(),
+            sticky: state.sticky_scroll(), annotation_cols: tab.annotation_cols(),
+        }
+    }
+    fn matches(&self, view: &View<'_>, app: &App) -> bool {
+        let state = app.session.state();
+        let tab = view.tab();
+        self.tab == tab.id() && self.snapshot == view.snapshot().key()
+            && self.top == (tab.top_line(), tab.top_row()) && self.column == tab.column()
+            && self.cols == state.wrap_cols(tab)
+            && Arc::ptr_eq(&self.visible, &view.visible())
+            && self.breadcrumbs == state.breadcrumbs() && self.split == state.split()
+            && self.explorer == (app.tree_shown && state.has_tree())
+            && self.results == state.results().is_some()
+            && self.rendering.matches(tab) && self.image_source == tab.image_source()
+            && same_arc(self.hints.as_ref(), tab.hints())
+            && same_arc(self.declarations.as_ref(), tab.declarations_handle())
+            && self.sticky == state.sticky_scroll() && self.annotation_cols == tab.annotation_cols()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1661,6 +1763,7 @@ fn draw_pane(
         );
         return geometry;
     };
+    geometry.source = state.view(tab.id()).map(|view| SourceIdentity::new(&view, app));
     let Some(doc) = tab.document() else {
         line(
             frame.buffer_mut(),

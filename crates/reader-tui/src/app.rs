@@ -1135,6 +1135,7 @@ impl App {
             Event::FocusGained => self.dispatch(Command::Recheck),
             Event::Resize(_, _) => {
                 self.hover = None;
+                self.layout.invalidate_source();
                 self.clamp();
             }
             Event::FocusLost => {
@@ -2064,15 +2065,16 @@ impl App {
                         .hits
                         .iter()
                         .find(|h| h.y == y && h.x <= x && x < h.x.saturating_add(h.width.max(1)))?;
-                    let tab = self.session.state().shown(pane.pane)?;
-                    let doc = tab.document()?;
-                    if hit.line >= doc.line_count() || tab.linkable(hit.line, hit.byte).is_none() {
+                    let view = pane.source_view(self)?;
+                    let tab = view.tab();
+                    let snapshot = view.snapshot();
+                    if hit.line >= snapshot.line_count() || tab.linkable(hit.line, hit.byte).is_none() {
                         return None;
                     }
                     Some((
                         tab.id(),
-                        doc.version(),
-                        doc.line_range(hit.line).start + hit.byte,
+                        snapshot.key().version,
+                        snapshot.line_range(hit.line)?.start + hit.byte,
                         tab.top_line(),
                     ))
                 })
@@ -2333,6 +2335,9 @@ impl App {
                     self.prompt(Prompt::Siblings { pane, crumb });
                     return;
                 }
+                if pane.source_view(self).is_none() {
+                    continue;
+                }
                 // A click on an annotation opens its commit.
                 if !drag
                     && (pane.gutter_x..pane.gutter_x + pane.ann).contains(&x)
@@ -2396,11 +2401,10 @@ impl App {
                         self.focus = Focus::Text;
                         return;
                     }
-                    let Some(tab) = self.session.state().shown(pane_id) else {
+                    let Some(view) = pane.source_view(self) else {
                         return;
                     };
-                    let Some(doc) = tab.document() else { return };
-                    let (id, version) = (tab.id(), doc.version());
+                    let (id, version) = (view.tab().id(), view.snapshot().key().version);
                     if drag
                         && self
                             .drag
@@ -2409,7 +2413,8 @@ impl App {
                         self.drag = None;
                         return;
                     }
-                    let offset = (doc.line_range(line).start + byte).min(doc.text().len());
+                    let Some(source_line) = view.snapshot().line_range(line) else { return };
+                    let offset = (source_line.start + byte).min(view.snapshot().len_bytes());
                     if !drag && !event.modifiers.contains(KeyModifiers::CONTROL) {
                         // Clicks on one cell within 400 ms count up: caret, word, group, then caret again.
                         let now = Instant::now();
@@ -2511,6 +2516,7 @@ impl App {
         };
         let pane_id = pane.pane;
         let preview = pane.preview;
+        let Some(view) = pane.source_view(self) else { return };
         let offset = (!preview)
             .then(|| {
                 let line = pane.rows.iter().find(|(row, _, _)| *row == y)?.1;
@@ -2521,8 +2527,7 @@ impl App {
                     .filter(|h| h.y == y && h.line == line && h.x <= x && x >= pane.text.x)
                     .max_by_key(|h| h.x)
                     .map_or(0, |h| h.byte);
-                let doc = self.session.state().shown(pane_id)?.document()?;
-                Some((doc.line_range(line).start + byte).min(doc.text().len()))
+                Some((view.snapshot().line_range(line)?.start + byte).min(view.snapshot().len_bytes()))
             })
             .flatten();
         if self.session.state().shown(pane_id).is_none() {
