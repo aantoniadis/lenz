@@ -19,7 +19,10 @@ pub struct NativeReveal {
 
 /// Opaque identity of the viewport whose complete native extents were measured.
 #[derive(Clone, Debug)]
-pub struct NativeViewport {
+pub struct NativeViewport(Arc<Viewport>);
+
+#[derive(Debug)]
+struct Viewport {
     pub(crate) pane: u8,
     pub(crate) tab: TabId,
     identity: Cursor,
@@ -31,7 +34,7 @@ pub struct NativeViewport {
     declarations: Option<Arc<lenz_content::highlight::Declarations>>,
     wrapped: bool,
 }
-impl PartialEq for NativeViewport {
+impl PartialEq for Viewport {
     fn eq(&self, other: &Self) -> bool {
         self.pane == other.pane && self.tab == other.tab && self.identity == other.identity
             && self.context == other.context && self.epoch == other.epoch && self.size == other.size && self.top == other.top
@@ -41,18 +44,21 @@ impl PartialEq for NativeViewport {
             }
     }
 }
+impl Eq for Viewport {}
+impl PartialEq for NativeViewport { fn eq(&self, other: &Self) -> bool { self.0 == other.0 } }
 impl Eq for NativeViewport {}
 impl NativeViewport {
+    pub(crate) fn tab(&self) -> TabId { self.0.tab }
     pub(crate) fn capture(state: &State, reveals: &Reveals, pane: u8) -> Option<Self> {
         let tab = state.shown(pane)?;
         let view = state.view(tab.id())?;
-        Some(Self { pane, tab: tab.id(), identity: view.display_start(tab.top_line())?,
+        Some(Self(Arc::new(Viewport { pane, tab: tab.id(), identity: view.display_start(tab.top_line())?,
             context: reveals.context(pane)?, epoch: reveals.serial, size: state.text_size(pane)?,
             top: (tab.top_line(), tab.top_row(), tab.column()), visible: view.visible(),
-            declarations: tab.declarations_handle().cloned(), wrapped: state.wrap_cols(tab).is_some() })
+            declarations: tab.declarations_handle().cloned(), wrapped: state.wrap_cols(tab).is_some() })))
     }
     pub(crate) fn current(&self, state: &State, reveals: &Reveals) -> bool {
-        let Some(now) = Self::capture(state, reveals, self.pane) else { return false };
+        let Some(now) = Self::capture(state, reveals, self.0.pane) else { return false };
         self == &now
     }
 }

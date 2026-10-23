@@ -3047,7 +3047,7 @@ impl Session {
             Command::OpenResult(i) => self.validate_result(i),
             Command::ClampColumn { viewport, max } => {
                 if !viewport.current(&self.state, &self.native) { return Effect::default(); }
-                let tab = viewport.tab;
+                let tab = viewport.tab();
                 match self.state.tabs.iter_mut().find(|t| t.id == tab) {
                     Some(t) if t.column > max => { t.column = max; repaint }
                     _ => Effect::default(),

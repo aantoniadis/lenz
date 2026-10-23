@@ -756,6 +756,104 @@ fn leading_zero_width_source_keeps_its_first_hit_after_resizing() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 #[test]
+fn unicode_go_to_caret_repaints_after_native_overscroll_clamping() {
+    for (source, column, expected, wrapped, width) in [
+        ("👨‍👩‍👧‍👦".repeat(2_000) + " END" + &" ".repeat(100) + "\n", 14_002, 50_001, false, 120),
+        ("x".repeat(20_000) + " END" + &" ".repeat(100) + "\n", 20_002, 20_001, false, 120),
+        ("1\u{FE0F}\u{20E3}".repeat(500) + " END" + &" ".repeat(100) + "\n", 1_502, 3_501, true, 80),
+        ("x".repeat(20_000), 20_001, 20_000, false, 80),
+    ] {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("go-to-families.txt");
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(wrapped));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, width, 36);
+    a.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(column) }));
+    draw(&mut a, width, 36);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut trace = Vec::new();
+    while !a.layout.panes[0].hits.iter().any(|hit| hit.byte == expected) {
+        assert!(Instant::now() < deadline, "no END after GoTo, state={trace:?}");
+        let mut dirty = false;
+        while let Ok(completion) = a.session.completions().try_recv() { dirty |= a.apply(completion); }
+        if a.next_deadline().is_some_and(|at| at <= Instant::now()) { dirty |= a.tick(Instant::now()); }
+        if dirty {
+            draw(&mut a, width, 36);
+            let pane = &a.layout.panes[0];
+            trace.push((a.session.state().column(), pane.hits.len(), pane.hits.first().map(|hit| hit.byte), pane.hits.last().map(|hit| hit.byte), a.next_deadline().is_some()));
+            if trace.len() > 12 { trace.remove(0); }
+        } else { std::thread::yield_now(); }
+    }
+    assert_eq!(a.session.state().selection().unwrap().head, expected);
+    assert!(a.session.native_reveal(0).is_none());
+    if expected + 3 <= source.len() && &source[expected..expected + 3] == "END" {
+        key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);
+        key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);
+        key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);
+        key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(a.copy.take().as_deref(), Some("END"));
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+}
+#[test]
+fn wrapped_keycap_in_one_text_cell_has_an_exact_source_indicator() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keycap.txt");
+    let source = "1\u{FE0F}\u{20E3}";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.loaded()));
+    a.dispatch(Command::SetSoftWrap(true));
+    a.dispatch(Command::SetStickyScroll(false));
+    let mut checked = false;
+    for width in 4..10 {
+        a.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(1) }));
+        let rendered = draw_screen(&mut a, width, 10);
+        let pane = &a.layout.panes[0];
+        if pane.text.width == 1 {
+            let hit = pane.hits.iter().find(|hit| hit.byte == 0).expect("overwide source remains reachable");
+            assert_eq!(hit.width, 1);
+            assert!(rendered.contains('▏'), "a one-cell indicator replaces the unfit glyph");
+            checked = true;
+        }
+    }
+    assert!(checked, "fixture must exercise one native text cell");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn find_reveals_a_match_after_the_long_unwrapped_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("find-tail.txt");
+    let source = "x".repeat(20_000) + " END" + &" ".repeat(100);
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.loaded()));
+    a.dispatch(Command::SetSoftWrap(false));
+    draw(&mut a, 80, 20);
+    a.run(CommandId::FindInFile);
+    a.handle(Event::Paste("END".into()));
+    settle(&mut a, |a| a.session.state().active().and_then(|tab| tab.find()).is_some_and(|find| find.matches().len() == 1));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        draw(&mut a, 80, 20);
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 20_001) { break; }
+        assert!(Instant::now() < deadline, "found match stays outside the viewport");
+        while let Ok(done) = a.session.completions().try_recv() { a.apply(done); }
+        std::thread::yield_now();
+    }
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("END"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn suppressed_zero_width_windows_keep_bounded_hits_and_exact_source_end() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("zero-width-tail.txt");
@@ -798,7 +896,7 @@ fn wrapped_continuation_whitespace_keeps_the_caret_on_its_clicked_row() {
     a.dispatch(Command::SetStickyScroll(false));
     draw(&mut a, 28, 10);
     let pane = &a.layout.panes[0];
-    let end = pane.hits.iter().filter(|hit| hit.y == pane.text.y).last().unwrap();
+    let end = pane.hits.iter().rfind(|hit| hit.y == pane.text.y).unwrap();
     assert!(end.width > 1, "fixture needs whitespace after the continued row");
     let (x, y) = (end.x + end.width - 1, end.y);
     click(&mut a, x, y);
