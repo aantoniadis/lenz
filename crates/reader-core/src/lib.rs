@@ -35,3 +35,6 @@ pub mod workspace;
 pub mod navigation;
 
 pub mod text;
+
+mod sql_assistance;
+pub mod duckdb_assistance;
