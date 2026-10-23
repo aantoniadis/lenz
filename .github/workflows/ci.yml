@@ -13,7 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15]
+        # macOS as the release builds it.
+        os: [ubuntu-24.04, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -27,7 +28,10 @@ jobs:
 
       - name: Metal toolchain (gpui compiles shaders at build time)
         if: runner.os == 'macOS'
-        run: xcodebuild -downloadComponent MetalToolchain
+        # Xcode 26 downloads it on demand; an Xcode that ships it has no -downloadComponent.
+        run: |
+          xcodebuild -version
+          xcrun metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun metal --version; }
 
       - uses: dtolnay/rust-toolchain@stable
         with:
