@@ -6777,6 +6777,7 @@ impl Session {
         let Some(tab) = self.state.tabs.iter().find(|t| shown.contains(&Some(t.id)) && t.highlights.is_none() && t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, doc))).map(|t| t.id) else { return };
         let Some(view) = self.state.view(tab) else { return };
         let snapshot = view.snapshot().clone();
+        if doc.version() == snapshot.key().version && Arc::ptr_eq(doc.source_meta(), snapshot.source_meta()) && doc.is_large() { return; }
         if let Some(lang) = snapshot.language().filter(|_| !snapshot.is_large()) {
             let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed), true);
             let declarations = self.state.wants_declarations() && highlight::has_declarations(lang);

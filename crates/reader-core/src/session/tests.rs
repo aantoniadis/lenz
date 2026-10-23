@@ -697,6 +697,30 @@ fn finder_perf() {
 }
 
 #[test]
+fn large_encoded_sources_keep_their_existing_syntax_reduction() {
+    let d = tempfile::tempdir().unwrap();
+    let text = format!("/*{}*/", "x".repeat(3 << 20));
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let file = write(d.path(), "encoded.rs", &bytes);
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "encoded.rs");
+    assert!(s.state().document().unwrap().is_large());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+    let parsed = s.state().highlights().is_some();
+    for release in releases { release.send(()).unwrap(); }
+    assert!(!parsed, "a read-path migration must not enable parsing previously reduced encoded files");
+}
+
+#[test]
 fn an_old_analysis_result_cannot_complete_a_reopened_view_request() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "again.rs", b"fn current() {}\n");
