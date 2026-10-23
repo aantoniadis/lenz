@@ -28,6 +28,17 @@ The provider has text/snapshot inputs and text/value outputs; no connection stri
 
 Raw local evidence is under `target/perf/editor-implementation/05/` in the main checkout's shared target directory. `identity.json` records compiler/platform, base revision, exact source hashes, executable SHA-256 and build command; `sources/` and `postgres-assistance-probe` preserve the measured implementation. `*-red.log` retain meaningful failing behavior during development. `boundary.strace`, `boundary-summary.json` and `boundary.log` preserve observed syscalls, destructive source payloads and real results. `measurements.json` retains 100 raw timings per operation, source/response examples, RSS samples and actual sustained duration; `stress.log` retains deterministic assertion results.
 
+The final post-merge release process completed **1,353,858 deterministic workload cycles in 60.000 seconds**. Across 100 measured requests per operation:
+
+| Operation | Median / p95 |
+| --- | ---: |
+| Query-local completion | 0.009684 / 0.015459 ms |
+| Native syntax error with original position | 0.000611 / 0.001142 ms |
+| Guarded formatting | 0.029451 / 0.046598 ms |
+| Nested signature help | 0.000822 / 0.001242 ms |
+
+Sampled stress RSS stayed between **8.41 and 8.52 MiB**; the final-quarter median was 8.51 MiB. The sampler retains one status record per second, so its allocations are included. A separately retained first run (`first/`) produced the same deterministic outcomes, zero network/provider-child syscalls, and a similarly bounded short-run RSS range. Large supplied catalogs and long-running product workloads were not measured.
+
 Build with `CARGO_BUILD_JOBS=4` and the same `CARGO_TARGET_DIR` as the main checkout:
 
 ```sh
