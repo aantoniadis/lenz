@@ -25,21 +25,39 @@ pub struct Image {
     pub pixels: Result<Arc<img::Pixels>, String>,
 }
 
+/// Immutable source/decode facts shared by draft snapshots and worker Documents.
+#[derive(Debug, Clone)]
+pub struct SourceMeta {
+    source: PathBuf,
+    encoding: String,
+    original_encoding: &'static str,
+    had_bom: bool,
+    shown_encoding: bool,
+    lossy: bool,
+    binary: bool,
+    language: Option<Language>,
+    image: Option<Arc<Image>>,
+    fingerprint: u64,
+}
+
+impl SourceMeta {
+    pub fn source(&self) -> &std::path::Path { &self.source }
+    pub fn encoding(&self) -> &str { &self.encoding }
+    pub fn original_encoding(&self) -> &'static str { self.original_encoding }
+    pub fn had_bom(&self) -> bool { self.had_bom }
+    pub fn is_lossy(&self) -> bool { self.lossy }
+    pub fn is_binary(&self) -> bool { self.binary }
+    pub fn language(&self) -> Option<Language> { self.language }
+    pub fn image(&self) -> Option<&Arc<Image>> { self.image.as_ref() }
+}
+
 #[derive(Debug)]
 pub struct Document {
-    source: PathBuf,
+    source: Arc<SourceMeta>,
     version: u64,
     text: Arc<str>,
     line_starts: Arc<[usize]>,
-    encoding: String,
-    shown_encoding: bool,
-    lossy: bool,
     large: bool,
-    language: Option<Language>,
-    /// An image file: raster (its text is empty) or SVG (its text is the source).
-    image: Option<Arc<Image>>,
-    /// FNV-1a of the bytes read, for images (whose pixels, not text, say whether the file changed).
-    fingerprint: u64,
     /// Where language servers' lines start, when they differ from the reader's: a CR not followed by LF ends a line
     /// for them, not for the reader. Found when a language server first needs it, not at every open.
     protocol_lines: std::sync::OnceLock<Option<Arc<[usize]>>>,
@@ -51,7 +69,8 @@ impl Document {
         // An image: decoded here (off the UI thread, like every load), bounded; a raster image has no text. A raster
         // format only for binary content (git's rule, as Lenz decides), so text that happens to start like an
         // image stays text; an SVG by its extension (Lenz's rule, shared).
-        let format = img::detect_file(&source.to_string_lossy(), bytes, encoding::looks_binary(bytes));
+        let binary = encoding::looks_binary(bytes);
+        let format = img::detect_file(&source.to_string_lossy(), bytes, binary);
         let image = format.map(|format| {
             let pixels = if bytes.len() > IMAGE_BYTES {
                 Err(format!("{} MiB is too large to show (the limit is {} MiB)", bytes.len() >> 20, IMAGE_BYTES >> 20))
@@ -74,20 +93,55 @@ impl Document {
         let first = &decoded.text[lines::line_range(&decoded.text, &line_starts, 0)];
         let language = highlight::detect(&source, first);
         Self {
-            encoding: decoded.label(),
-            shown_encoding: decoded.shown_in_header(),
-            lossy: decoded.lossy,
+            source: Arc::new(SourceMeta {
+                encoding: decoded.label(),
+                original_encoding: decoded.encoding,
+                had_bom: decoded.had_bom,
+                shown_encoding: decoded.shown_in_header(),
+                lossy: decoded.lossy,
+                binary,
+                language,
+                source,
+                image,
+                fingerprint,
+            }),
             text: decoded.text.into(),
             line_starts,
             large,
-            language,
-            source,
             version,
-            image,
-            fingerprint,
             protocol_lines: std::sync::OnceLock::new(),
         }
     }
+
+    /// Text decoded by the file loader with its declared encoding, without guessing again.
+    /// Image/binary sources must use `decode` so their original bytes remain available.
+    pub fn from_decoded(source: PathBuf, version: u64, decoded: encoding::Decoded) -> Self {
+        let metadata = SourceMeta {
+            encoding: decoded.label(),
+            original_encoding: decoded.encoding,
+            had_bom: decoded.had_bom,
+            shown_encoding: decoded.shown_in_header(),
+            lossy: decoded.lossy,
+            binary: false,
+            language: None,
+            source,
+            image: None,
+            fingerprint: 0,
+        };
+        let mut document = Self::from_snapshot_parts(Arc::new(metadata), version, decoded.text.into());
+        Arc::make_mut(&mut document.source).language = highlight::detect(document.source(), document.line(0));
+        document
+    }
+
+    /// Construct an explicitly materialized worker document without decoding draft UTF-8 again.
+    pub fn from_snapshot_parts(source: Arc<SourceMeta>, version: u64, text: Arc<str>) -> Self {
+        let line_starts: Arc<[usize]> = lines::line_starts(&text).into();
+        let lines = line_starts.len() - usize::from(text.ends_with('\n'));
+        let large = text.len() > LARGE_BYTES || lines > LARGE_LINES;
+        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new() }
+    }
+
+    pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
 
     /// FNV-1a of a file's bytes: whether an image file changed, without decoding it.
     pub fn fingerprint(bytes: &[u8]) -> u64 {
@@ -96,47 +150,43 @@ impl Document {
 
     /// The fingerprint of the bytes an image was decoded from (0 for text).
     pub fn content_fingerprint(&self) -> u64 {
-        self.fingerprint
+        self.source.fingerprint
     }
 
     /// The image this document shows, if it is an image file.
     pub fn image(&self) -> Option<&Arc<Image>> {
-        self.image.as_ref()
+        self.source.image.as_ref()
     }
 
     /// Whether it shows the same content as `other` (text, and for images the bytes they were decoded from).
     pub fn same_content(&self, other: &Document) -> bool {
-        self.text == other.text && self.fingerprint == other.fingerprint
+        self.text == other.text && self.source.fingerprint == other.source.fingerprint
     }
 
     /// Text a language server returned for virtual source `source` (an opaque URI): its language is detected from
     /// `name` (the URI's file name).
     pub fn retrieved(source: PathBuf, name: &std::path::Path, version: u64, text: &str) -> Self {
         let mut doc = Self::decode(source, version, text.as_bytes());
-        doc.language = highlight::detect(name, doc.line(0));
+        Arc::make_mut(&mut doc.source).language = highlight::detect(name, doc.line(0));
         doc
     }
 
     /// The same snapshot under a new path (a confirmed move): text and offsets are shared, not copied.
     pub fn renamed(&self, source: PathBuf) -> Self {
+        let mut metadata = (*self.source).clone();
+        metadata.source = source;
         Self {
-            source,
+            source: Arc::new(metadata),
             version: self.version,
             text: self.text.clone(),
             line_starts: self.line_starts.clone(),
-            encoding: self.encoding.clone(),
-            shown_encoding: self.shown_encoding,
-            lossy: self.lossy,
             large: self.large,
-            language: self.language,
-            image: self.image.clone(),
-            fingerprint: self.fingerprint,
             protocol_lines: self.protocol_lines.clone(),
         }
     }
 
     pub fn source(&self) -> &std::path::Path {
-        &self.source
+        &self.source.source
     }
 
     pub fn version(&self) -> u64 {
@@ -200,27 +250,27 @@ impl Document {
     }
 
     pub fn language(&self) -> Option<Language> {
-        self.language
+        self.source.language
     }
 
     /// The encoding as shown to the user, e.g. "UTF-8", "windows-1252", "UTF-16LE BOM".
     pub fn encoding(&self) -> &str {
-        &self.encoding
+        &self.source.encoding
     }
 
     /// What the reader should say about this snapshot: a notable encoding, lost bytes, large-file mode.
     pub fn notices(&self) -> Vec<String> {
         let mut notices = Vec::new();
-        if self.shown_encoding {
-            notices.push(format!("Encoding: {}", self.encoding));
+        if self.source.shown_encoding {
+            notices.push(format!("Encoding: {}", self.source.encoding));
         }
-        if self.lossy {
+        if self.source.lossy {
             notices.push(encoding::LOSSY_NOTICE.into());
         }
         if self.large {
             notices.push("Large file: syntax highlighting off".into());
         }
-        if let Some(i) = &self.image {
+        if let Some(i) = &self.source.image {
             notices.push(match &i.pixels {
                 Ok(_) => {
                     let scaled = if i.downscaled { format!(", shown downscaled to fit {} px", img::MAX_SIDE) } else { String::new() };
@@ -234,8 +284,8 @@ impl Document {
 
     /// Memory this snapshot holds, for cache accounting.
     pub fn bytes(&self) -> usize {
-        let pixels = self.image.as_ref().and_then(|i| i.pixels.as_ref().ok()).map_or(0, |p| p.as_raw().len());
-        self.text.len() + self.line_starts.len() * size_of::<usize>() + self.source.as_os_str().len() + pixels
+        let pixels = self.source.image.as_ref().and_then(|i| i.pixels.as_ref().ok()).map_or(0, |p| p.as_raw().len());
+        self.text.len() + self.line_starts.len() * size_of::<usize>() + self.source.source.as_os_str().len() + pixels
     }
 }
 
