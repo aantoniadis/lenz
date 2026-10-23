@@ -256,6 +256,7 @@ def signature_edges(directory):
         ('within-unicode-argument', 'ReadyWidget.greet("😀|", excited: true)', 'greet(name, excited: <default>)', 0),
         ('nested-comma-in-argument', 'ReadyWidget.greet(ReadyWidget.outer(1, 2), |', 'greet(name, excited: <default>)', 1),
         ('nested-outer-second', 'ReadyWidget.outer(ReadyWidget.greet("😀"), |', 'outer(first, second = <default>)', 1),
+        ('within-array-argument', 'ReadyWidget.greet([1, |2])', 'greet(name, excited: <default>)', 0),
         ('existing-closing', 'ReadyWidget.greet(|)', 'greet(name, excited: <default>)', 0),
         ('after-closed-space', 'ReadyWidget.greet("😀") |', None, None),
         ('closed', 'ReadyWidget.greet("😀")|', None, None),

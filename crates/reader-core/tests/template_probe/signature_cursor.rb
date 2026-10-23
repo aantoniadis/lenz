@@ -50,7 +50,7 @@ module TemplateSignatureRequest
     parameter = 0
     Prism.lex(prefix).value.each do |token, _|
       case token.type
-      when :PARENTHESIS_LEFT, :BRACKET_LEFT, :BRACE_LEFT, :LAMBDA_BEGIN, :EMBEXPR_BEGIN, :KEYWORD_DO
+      when :PARENTHESIS_LEFT, :BRACKET_LEFT, :BRACKET_LEFT_ARRAY, :BRACE_LEFT, :LAMBDA_BEGIN, :EMBEXPR_BEGIN, :KEYWORD_DO
         depth += 1
       when :PARENTHESIS_RIGHT, :BRACKET_RIGHT, :BRACE_RIGHT, :EMBEXPR_END, :KEYWORD_END
         depth -= 1
