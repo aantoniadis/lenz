@@ -233,3 +233,154 @@ fn projected_transaction_rejects_every_edit_if_one_is_unsafe() {
     }
     assert!(projected_edits(&p,&[valid],1).is_none());
 }
+
+fn sql_literal(text: &str) -> String { format!("'{}'",text.replace('\'',"''")) }
+#[test]
+fn edited_sql_is_one_literal_even_with_quotes_and_statements() {
+    assert_eq!(sql_literal("'); DROP TABLE fixture; --"),"'''); DROP TABLE fixture; --'");
+    assert_eq!(sql_literal("SELECT '😀'\r\n"),"'SELECT ''😀''\r\n'");
+}
+
+fn sql_fixtures(sentinel: &Path) -> Vec<(&'static str,String,Option<&'static str>)> {
+    vec![
+        ("alias","SELECT * FROM (SELECT 1 AS alias_col) a WHERE a.".into(),Some("alias_col")),
+        ("cte","WITH c AS (SELECT 1 AS cte_col) SELECT * FROM c WHERE c.".into(),Some("cte_col")),
+        ("nested","SELECT * FROM (SELECT * FROM (SELECT 1 AS nested_col) n) q WHERE q.".into(),Some("nested_col")),
+        ("quoted","SELECT * FROM (SELECT 1 AS \"Mixed Column\") q WHERE q.".into(),Some("Mixed Column")),
+        ("qualified","SELECT * FROM ready.".into(),Some("fixture")),
+        ("qualified_prefix","SELECT * FROM ready.f".into(),Some("fixture")),
+        ("function","SELECT ab".into(),Some("abs")),
+        ("incomplete","WITH x AS (SELECT".into(),None),
+        ("malformed","SELECT )".into(),None),
+        ("duckdb","SELECT * EXCLUDE (id) FROM ready.fixture GROUP BY ALL".into(),None),
+        ("postgres","SELECT DISTINCT ON (id) id::integer FROM ready.fixture ORDER BY id".into(),None),
+        ("drop","DROP TABLE ready.fixture".into(),None),
+        ("update","UPDATE ready.fixture SET label='changed'".into(),None),
+        ("export",format!("COPY ready.fixture TO {}",sql_literal(&sentinel.to_string_lossy())),None),
+        ("quote_escape","'); DROP TABLE ready.fixture; --".into(),None),
+    ]
+}
+const DUCK_SETTINGS: &str = "SET autoinstall_known_extensions=false; SET autoload_known_extensions=false; SET enable_external_access=false; ";
+fn duck(dir: &Path, database: &Path, readonly: bool, name: &str, statement: &str) -> (bool, Value) {
+    let sql=format!("{DUCK_SETTINGS}{statement}");
+    let mut command=Command::new(executable("python3"));
+    command.args(["-c","import subprocess,resource,json,sys,pathlib; r=subprocess.run(sys.argv[2:]); pathlib.Path(sys.argv[1]).write_text(json.dumps({'max_rss_kib':resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss})); sys.exit(r.returncode)"]).arg(dir.join(format!("{name}-resource.json"))).arg(executable("duckdb"));
+    command.args(["-no-agent","-init","/dev/null","-json","-echo","-bail"]).env("HOME",dir.join("home"));
+    if readonly {command.arg("-readonly");}
+    let started=Instant::now(); let result=command.arg(database).arg(&sql).output().unwrap();
+    let stdout=String::from_utf8(result.stdout).unwrap();
+    save(dir,&format!("{name}-boundary.json"),&json!({"database":database,"readonly":readonly,"statement":sql,"stdout":stdout,"stderr":String::from_utf8_lossy(&result.stderr),"success":result.status.success(),"elapsed_ms":started.elapsed().as_secs_f64()*1000.0}));
+    if result.status.success() && (statement.starts_with("SELECT * FROM sql_auto_complete(") || statement.starts_with("SELECT json_serialize_sql(")) {
+        let echoed=stdout.split_once("SET enable_external_access=false; \n").expect("actual CLI statement echo").1;
+        assert!(echoed.starts_with(&format!("{statement}\n")),"unexpected top-level statement boundary");
+    }
+    let rows=stdout.lines().position(|l|l.starts_with("[{"));
+    let parsed=rows.and_then(|start|serde_json::from_str(&stdout.lines().skip(start).collect::<Vec<_>>().join("\n")).ok()).unwrap_or_else(||json!([]));
+    (result.status.success(),parsed)
+}
+fn suggestions(rows: &Value, expected: &str) -> bool {
+    rows.as_array().is_some_and(|rows|rows.iter().any(|r|r["suggestion"].as_str().is_some_and(|s|s.trim().trim_matches('"')==expected)))
+}
+#[test] #[ignore = "installed DuckDB; disposable metadata file and retained SQL boundary logs"]
+fn duckdb_sql_assistance() {
+    let dir=evidence("duckdb"); fs::create_dir_all(dir.join("home")).unwrap();
+    let sentinel=dir.join("must-not-exist.csv"); assert!(!sentinel.exists());
+    let fixtures=sql_fixtures(&sentinel); save(&dir,"fixtures.json",&json!(fixtures));
+    let mut outcomes=Vec::new();
+    let mut external_connections=0;
+    let mut submitted=Vec::new();
+    for (name,query,expected) in &fixtures {
+        let statement=format!("SELECT * FROM sql_auto_complete({});",sql_literal(query)); submitted.push(statement.clone());
+        let (ok,rows)=duck(&dir,Path::new(":memory:"),false,&format!("offline-{name}"),&statement); assert!(ok);
+        outcomes.push(json!({"phase":"offline","fixture":name,"expected":expected,"expected_found":expected.map(|e|suggestions(&rows,e))}));
+        if *name=="function" {assert!(suggestions(&rows,"abs"));assert_eq!(rows[0]["suggestion_start"],7);}
+        let parse=format!("SELECT json_serialize_sql({}) AS parsed;",sql_literal(query)); submitted.push(parse.clone());
+        let (ok,rows)=duck(&dir,Path::new(":memory:"),false,&format!("parse-{name}"),&parse); assert!(ok);
+        if *name=="malformed" {assert_eq!(rows[0]["parsed"]["error"],true); assert_eq!(rows[0]["parsed"]["position"],"7");}
+        if *name=="duckdb" {assert_eq!(rows[0]["parsed"]["error"],false);}
+    }
+    assert_eq!(external_connections,0,"offline requests must not open a metadata source");
+    let database=dir.join("metadata.duckdb"); assert!(!database.exists(),"use a fresh evidence directory for each run");
+    let setup="CREATE SCHEMA ready; CREATE TABLE ready.fixture(id INTEGER, label VARCHAR); INSERT INTO ready.fixture VALUES (7,'original'); CREATE MACRO ready.double_it(x) AS x*2;";
+    fs::write(dir.join("setup.sql"),setup).unwrap(); assert!(duck(&dir,&database,false,"setup",setup).0);
+    let before=duck(&dir,&database,true,"verify-before","SELECT * FROM ready.fixture;").1;
+    let metadata="SELECT table_schema,table_name,column_name,data_type FROM information_schema.columns WHERE table_schema='ready' ORDER BY ordinal_position;";
+    external_connections+=1;
+    let (ok,columns)=duck(&dir,&database,true,"metadata",metadata); assert!(ok);assert_eq!(columns[0]["column_name"],"id");assert_eq!(columns[0]["data_type"],"INTEGER");
+    for (name,query,expected) in &fixtures {
+        external_connections+=1;
+        let statement=format!("SELECT * FROM sql_auto_complete({});",sql_literal(query));submitted.push(statement.clone());
+        let (ok,rows)=duck(&dir,&database,true,&format!("connected-{name}"),&statement);assert!(ok);
+        outcomes.push(json!({"phase":"connected","fixture":name,"expected":expected,"expected_found":expected.map(|e|suggestions(&rows,e))}));
+        if *name=="qualified_prefix" {assert!(suggestions(&rows,"fixture"));}
+    }
+    let functions=duck(&dir,&database,true,"functions","SELECT function_name,parameters,parameter_types,return_type,description FROM duckdb_functions() WHERE function_name IN ('abs','double_it');").1;
+    assert!(functions.as_array().unwrap().iter().any(|r|r["function_name"]=="abs" && !r["parameter_types"].as_array().unwrap().is_empty()));
+    let after=duck(&dir,&database,true,"verify-after","SELECT * FROM ready.fixture;").1; assert_eq!(before,after); assert!(!sentinel.exists());
+    assert!(duck(&dir,&database,false,"refresh-setup","ALTER TABLE ready.fixture ADD COLUMN fresh_col INTEGER;").0);
+    let refreshed=duck(&dir,&database,true,"refresh-metadata",metadata).1; assert!(refreshed.as_array().unwrap().iter().any(|r|r["column_name"]=="fresh_col"));
+    let failed=duck(&dir,&dir.join("missing.duckdb"),true,"connection-failure",metadata);assert!(!failed.0);assert!(!dir.join("missing.duckdb").exists());
+    let user_statements_submitted=submitted.iter().filter(|s|!(s.starts_with("SELECT * FROM sql_auto_complete('")||s.starts_with("SELECT json_serialize_sql('"))).count();
+    let explain_statements_submitted=submitted.iter().filter(|s|s.trim_start().to_uppercase().starts_with("EXPLAIN")).count();
+    assert_eq!(user_statements_submitted,0);assert_eq!(explain_statements_submitted,0);
+    let format_input="select * exclude (id) from ready.fixture group by all;";
+    let mut formatter=Command::new(executable("duckdb")).args(["-no-agent","-init","/dev/null","-format"]).env("HOME",dir.join("home")).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    formatter.stdin.take().unwrap().write_all(format_input.as_bytes()).unwrap();
+    let formatted=formatter.wait_with_output().unwrap();assert!(formatted.status.success());
+    let formatted=String::from_utf8(formatted.stdout).unwrap();assert_eq!(formatted,"SELECT * EXCLUDE (id)\nFROM ready.fixture\nGROUP BY ALL;\n");
+    save(&dir,"format.json",&json!({"input":format_input,"output":formatted,"database_open":false}));
+    let version=Command::new(executable("duckdb")).arg("--version").output().unwrap();
+    save(&dir,"summary.json",&json!({"version":String::from_utf8_lossy(&version.stdout),"outcomes":outcomes,"offline_external_connections":0,"connected_completion_and_catalog_opens":external_connections,"user_statements_submitted":user_statements_submitted,"explain_statements_submitted":explain_statements_submitted,"data_unchanged":before==after,"sentinel_absent":!sentinel.exists(),"formatting":"CLI -format produced expected DuckDB syntax; no edits applied","dialect_switch_cancellation":"unverified: no asynchronous SQL adapter","memory":"per-process maximum RSS in *-resource.json; no production worker measurements","refresh":"new readonly open sees explicit schema change"}));
+    println!("DuckDB: {} fixture outcomes; query-local results are in summary.json",outcomes.len());
+}
+
+struct Pg { name: String, dir: PathBuf }
+impl Pg {
+    fn sql(&self, dir: &Path, phase: &str, sql: &str, readonly: bool) -> String {
+        let mut c=Command::new("docker"); c.args(["exec","-i"]);
+        if readonly {c.args(["-e","PGOPTIONS=-c default_transaction_read_only=on"]);}
+        let t=Instant::now(); let out=c.args([&self.name,"psql","-X","-U","postgres","-v","ON_ERROR_STOP=1","-At","-c",sql]).output().unwrap();
+        let text=String::from_utf8(out.stdout).unwrap();save(dir,&format!("{phase}-boundary.json"),&json!({"statement":sql,"readonly":readonly,"stdout":text,"stderr":String::from_utf8_lossy(&out.stderr),"success":out.status.success(),"elapsed_ms":t.elapsed().as_secs_f64()*1000.0}));assert!(out.status.success());text
+    }
+}
+impl Drop for Pg {fn drop(&mut self){
+    if let Ok(out)=Command::new("docker").args(["logs",&self.name]).output(){let _=fs::write(self.dir.join("container-final.log"),[out.stdout,out.stderr].concat());}
+    let _=Command::new("docker").args(["rm","-f",&self.name]).output();
+}}
+#[test] #[ignore = "cached PostgreSQL container for metadata only; no PostgreSQL language provider installed"]
+fn postgres_sql_assistance() {
+    let dir=evidence("postgres");let sentinel=dir.join("must-not-exist.csv");assert!(!sentinel.exists());let fixtures=sql_fixtures(&sentinel);save(&dir,"fixtures.json",&json!(fixtures));
+    let connections=0;assert_eq!(connections,0); // Offline provider absent: no language capabilities claimed.
+    let pg=Pg{name:format!("lenz-readiness-{}",std::process::id()),dir:dir.clone()};
+    let image=Command::new("docker").args(["image","inspect","postgres:18-alpine","--format","{{.Id}}"]).output().unwrap();
+    assert!(image.status.success(),"unverified: no cached image");
+    let out=Command::new("docker").args(["run","--detach","--pull=never","--network","none","--name",&pg.name,"--tmpfs","/var/lib/postgresql:rw,size=512m","-e","POSTGRES_HOST_AUTH_METHOD=trust","postgres:18-alpine","-c","log_statement=all"]).output().unwrap();
+    assert!(out.status.success(),"{}",String::from_utf8_lossy(&out.stderr));
+    let deadline=Instant::now()+Duration::from_secs(30);
+    loop {
+        let init=Command::new("docker").args(["exec",&pg.name,"cat","/proc/1/comm"]).output().unwrap();
+        if init.stdout==b"postgres\n" {
+            let ready=Command::new("docker").args(["exec",&pg.name,"pg_isready","-U","postgres"]).output().unwrap();
+            if ready.status.success(){break;}
+        }
+        assert!(Instant::now()<deadline,"PostgreSQL readiness timeout");std::thread::sleep(Duration::from_millis(100));
+    }
+    let version=pg.sql(&dir,"version","SHOW server_version;",true);
+    let setup="CREATE SCHEMA ready; CREATE TABLE ready.fixture(id integer, label text); INSERT INTO ready.fixture VALUES (7,'original'); CREATE FUNCTION ready.double_it(x integer) RETURNS integer LANGUAGE SQL IMMUTABLE AS 'SELECT x*2';";
+    fs::write(dir.join("setup.sql"),setup).unwrap();pg.sql(&dir,"setup",setup,false);
+    let before=pg.sql(&dir,"verify-before","SELECT * FROM ready.fixture;",true);
+    let metadata="SELECT column_name,data_type FROM information_schema.columns WHERE table_schema='ready' ORDER BY ordinal_position;";
+    let columns=pg.sql(&dir,"metadata",metadata,true);assert_eq!(columns,"id|integer\nlabel|text\n");
+    let functions=pg.sql(&dir,"functions","SELECT proname,pg_get_function_identity_arguments(p.oid),pg_get_function_result(p.oid) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='ready';",true);assert!(functions.contains("double_it|x integer|integer"));
+    // Edited SQL is never passed to this catalog-only adapter; fixtures trigger the same fixed query.
+    for (name,_,_) in &fixtures {assert_eq!(pg.sql(&dir,&format!("fixture-{name}"),metadata,true),columns);}
+    let after=pg.sql(&dir,"verify-after","SELECT * FROM ready.fixture;",true);assert_eq!(before,after);assert!(!sentinel.exists());
+    pg.sql(&dir,"refresh-setup","ALTER TABLE ready.fixture ADD COLUMN fresh_col integer;",false);assert!(pg.sql(&dir,"refresh",metadata,true).contains("fresh_col|integer"));
+    let stats=Command::new("docker").args(["stats","--no-stream","--format","{{json .}}",&pg.name]).output().unwrap();fs::write(dir.join("container-memory.json"),stats.stdout).unwrap();
+    let failed=Command::new("docker").args(["exec","-e","PGOPTIONS=-c default_transaction_read_only=on",&pg.name,"psql","-X","-U","postgres","-d","missing_readiness_database","-At","-c",metadata]).output().unwrap();assert!(!failed.status.success());fs::write(dir.join("connection-failure.log"),failed.stderr).unwrap();
+    let logs=Command::new("docker").args(["logs",&pg.name]).output().unwrap();let log=String::from_utf8([logs.stdout,logs.stderr].concat()).unwrap();fs::write(dir.join("server-statements.log"),&log).unwrap();
+    let user_statements_submitted=fixtures.iter().filter(|(_,sql,_)|log.lines().any(|l|l.split_once("statement: ").is_some_and(|(_,actual)|actual.trim_end_matches(';')==sql))).count();
+    let explain_statements_submitted=log.lines().filter(|l|l.contains("statement: EXPLAIN")).count();assert_eq!(user_statements_submitted,0);assert_eq!(explain_statements_submitted,0);
+    save(&dir,"summary.json",&json!({"version":version.trim(),"image":String::from_utf8_lossy(&image.stdout).trim(),"offline_connections":connections,"language_provider":"unverified: none installed; all offline language requirements remain blocked","metadata":"columns/types and function signatures demonstrated","user_statements_submitted":user_statements_submitted,"explain_statements_submitted":explain_statements_submitted,"data_unchanged":before==after,"sentinel_absent":!sentinel.exists(),"refresh":"explicit query sees schema change","connection_failure":"missing database refused","memory":"one container cgroup sample in container-memory.json, not process RSS","dialect_switch_cancellation":"unverified"}));
+    println!("PostgreSQL {version}: metadata boundary checked; language provider absent");
+}
