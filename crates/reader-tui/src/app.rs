@@ -19,6 +19,8 @@ use reader_core::{
     },
     tabs::TabId,
 };
+#[cfg(test)]
+use reader_core::text::{EditKind, SnapshotKey, TextEdit};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -161,6 +163,9 @@ pub(crate) struct App {
     /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
     #[cfg(test)]
     pub exe: Option<PathBuf>,
+    /// Ticket12 input traces opt in; production source input remains read-only.
+    #[cfg(test)]
+    draft_input: bool,
     pub layout: crate::render::Geometry,
     pub source_cache: std::cell::RefCell<crate::source::Cache>,
     pub(crate) source_redraw: bool,
@@ -198,6 +203,8 @@ impl App {
             launched: Vec::new(),
             #[cfg(test)]
             exe: None,
+            #[cfg(test)]
+            draft_input: false,
             layout: Default::default(),
             source_cache: Default::default(),
             source_redraw: false,
@@ -1121,9 +1128,17 @@ impl App {
                     self.key(key);
                 }
             }
-            Event::Paste(text) if self.modal.is_some() => {
-                self.double_shift.interrupt();
-                self.edit_prompt(&text, false);
+            Event::Paste(text) => {
+                if self.modal.is_some() {
+                    self.double_shift.interrupt();
+                    self.edit_prompt(&text, false);
+                } else {
+                    #[cfg(test)]
+                    {
+                        self.double_shift.interrupt();
+                        self.replace_draft_input(&text, EditKind::Paste);
+                    }
+                }
             }
             Event::Mouse(mouse) if mouse.kind == MouseEventKind::Moved => {
                 self.double_shift.interrupt();
@@ -1146,7 +1161,6 @@ impl App {
                 self.hover = None;
                 self.drag = None;
             }
-            _ => {}
         }
         true
     }
@@ -1703,7 +1717,45 @@ impl App {
             path
         }
     }
+    #[cfg(test)]
+    pub(crate) fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+
+    #[cfg(test)]
+    fn draft_target(&self) -> Option<(TabId, SnapshotKey, std::ops::Range<usize>)> {
+        if !self.draft_input || self.modal.is_some() || self.focus != Focus::Text { return None; }
+        let state = self.session.state();
+        let view = state.view(state.active()?.id())?;
+        if view.edit_disabled().is_some() || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
+        let range = if let Some(selection) = view.tab().selection() { selection.range() }
+            else { let start = view.snapshot().line_range(view.tab().top_line())?.start; start..start };
+        Some((view.tab().id(), view.snapshot().key(), range))
+    }
+
+    #[cfg(test)]
+    fn replace_draft_input(&mut self, text: &str, kind: EditKind) -> bool {
+        let Some((tab, expected, range)) = self.draft_target() else { return false };
+        self.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind });
+        true
+    }
+
+    #[cfg(test)]
+    fn draft_key(&mut self, key: KeyEvent) -> bool {
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let other = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META);
+        match key.code {
+            KeyCode::Char('z') if control && !other => {
+                if self.draft_target().is_none() { return false; }
+                self.run(if key.modifiers.contains(KeyModifiers::SHIFT) { CommandId::Redo } else { CommandId::Undo });
+                true
+            }
+            KeyCode::Char(character) if !control && !other && !character.is_control() => self.replace_draft_input(&character.to_string(), EditKind::Typing),
+            _ => false,
+        }
+    }
+
     fn key(&mut self, key: KeyEvent) {
+        #[cfg(test)]
+        if self.draft_key(key) { return; }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);

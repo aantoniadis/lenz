@@ -9,7 +9,7 @@ const CHUNK_BYTES: usize = 4096;
 pub struct BufferId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SnapshotKey { pub buffer: BufferId, pub version: u64 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit { pub range: Range<usize>, pub text: Arc<str> }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind { Typing, Delete, Paste, Replace }
@@ -263,6 +263,21 @@ impl TextSnapshot {
             text.push_str(e.chunk.text().get(from..to)?);
         }
         Some(Cow::Owned(text))
+    }
+    pub(crate) fn content_eq(&self, other: &Self) -> bool {
+        if self.bytes != other.bytes { return false; }
+        let (mut a, mut b, mut from_a, mut from_b) = (0, 0, 0, 0);
+        while let (Some(left), Some(right)) = (self.chunks.get(a), other.chunks.get(b)) {
+            let left = &left.chunk.text().as_bytes()[from_a..];
+            let right = &right.chunk.text().as_bytes()[from_b..];
+            let count = left.len().min(right.len());
+            if left.as_ptr() != right.as_ptr() && left[..count] != right[..count] { return false; }
+            from_a += count;
+            from_b += count;
+            if count == left.len() { a += 1; from_a = 0; }
+            if count == right.len() { b += 1; from_b = 0; }
+        }
+        true
     }
     pub(crate) fn matches_document(&self, doc: &Document) -> bool {
         self.bytes == doc.text().len() && self.source.fingerprint() == doc.content_fingerprint()

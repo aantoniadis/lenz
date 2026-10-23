@@ -1591,6 +1591,7 @@ fn draw_pane(
         .map(|tab| {
             (UnicodeWidthStr::width(tab.title().as_str()) as u16
                 + 4
+                + if state.tab_dirty(tab.id()) { 2 } else { 0 }
                 + if app.nerd_icons() { 2 } else { 0 })
             .min(32)
             .min(tab_width)
@@ -1608,7 +1609,8 @@ fn draw_pane(
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
         let text = format!(
-            " {}{} ",
+            " {}{}{} ",
+            if state.tab_dirty(tab.id()) { "● " } else { "" },
             lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons(), &tab.title()),
             if tab.retained() { "" } else { " ◇" }
         );

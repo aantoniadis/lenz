@@ -194,6 +194,9 @@ pub struct ReaderView {
     /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
     #[cfg(feature = "test-support")]
     pub exe: Option<PathBuf>,
+    /// Ticket12 traces explicitly opt in; normal builds expose no writable input.
+    #[cfg(feature = "test-support")]
+    draft_input: bool,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -564,7 +567,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, #[cfg(feature = "test-support")] draft_input: false };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1146,6 +1149,43 @@ impl ReaderView {
         }.layout(g.text, line_h(), self.char_w))
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+
+    #[cfg(feature = "test-support")]
+    fn draft_target(&self) -> Option<(TabId, reader_core::text::SnapshotKey, std::ops::Range<usize>)> {
+        if !self.draft_input || self.modal.is_some() || self.tree_focus || self.results_focus || self.find_focus.is_some() || self.crumb_focus.is_some() { return None; }
+        let state = self.session.state();
+        let view = state.view(state.active()?.id())?;
+        if view.edit_disabled().is_some() || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
+        let range = if let Some(selection) = view.tab().selection() { selection.range() }
+            else { let start = view.snapshot().line_range(view.tab().top_line())?.start; start..start };
+        Some((view.tab().id(), view.snapshot().key(), range))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
+        let Some((tab, expected, range)) = self.draft_target() else { return false };
+        self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);
+        true
+    }
+
+    #[cfg(feature = "test-support")]
+    fn draft_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let key = &ev.keystroke;
+        let control = key.modifiers.control || key.modifiers.platform;
+        if control && !key.modifiers.alt && key.key == "z" {
+            if self.draft_target().is_none() { return false; }
+            self.run(if key.modifiers.shift { CommandId::Redo } else { CommandId::Undo }, window, cx);
+            true
+        } else if control && !key.modifiers.alt && !key.modifiers.shift && key.key == "v" {
+            cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| self.replace_draft_input(&text, reader_core::text::EditKind::Paste, cx))
+        } else if !control && !key.modifiers.alt {
+            key.key_char.as_deref().filter(|text| !text.chars().any(char::is_control))
+                .is_some_and(|text| self.replace_draft_input(text, reader_core::text::EditKind::Typing, cx))
+        } else { false }
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         if !matches!(k.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
@@ -1209,6 +1249,8 @@ impl ReaderView {
             ("right", true, _) | ("]", _, true) => return self.run(CommandId::Forward, window, cx),
             _ => {}
         }
+        #[cfg(feature = "test-support")]
+        if self.draft_key(ev, window, cx) { return; }
         // The preview scrolls in pixels; it has no caret to move.
         if !ctrl && self.focused_markdown().is_some_and(|m| m.layout.is_some()) {
             let view = self.rows as f32 * line_h();
@@ -4206,11 +4248,12 @@ impl Render for ReaderView {
             let state = self.session.state();
             let shown = state.shown(g.pane).map(|t| t.id());
             let mut x = g.bar.0;
-            let mut row: Vec<(String, bool, bool, f32, f32, TabId)> = state.pane_tabs(g.pane).map(|t| {
+            let mut row: Vec<(String, bool, bool, f32, f32, TabId, bool)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
-                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icon_w(state.file_icons());
+                let dirty = state.tab_dirty(t.id());
+                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
                 x += w;
-                (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id())
+                (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id(), dirty)
             }).collect();
             let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
             let shift = row.iter().find(|r| r.2).map_or(0.0, |r| (r.4 - right).min(r.3 - g.bar.0).max(0.0));
@@ -4219,7 +4262,7 @@ impl Render for ReaderView {
                 r.4 -= shift;
             }
             hits.extend(row.iter().map(|r| (r.3, r.4, r.5)));
-            bars.push(row.into_iter().map(|r| (r.0, r.1, r.2, r.3, r.4)).collect());
+            bars.push(row.into_iter().map(|r| (r.0, r.1, r.2, r.3, r.4, r.6)).collect());
         }
         self.tab_hits = hits;
         self.panes = panes.clone();
@@ -4538,7 +4581,7 @@ impl Render for ReaderView {
                             let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
-                                for (title, retained, shown, tx0, tx1) in &f.tabs {
+                                for (title, retained, shown, tx0, tx1, dirty) in &f.tabs {
                                     if *tx1 < bx0 {
                                         continue; // scrolled off the left
                                     }
@@ -4552,7 +4595,9 @@ impl Render for ReaderView {
                                     if file_icons {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
                                     }
-                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icon_w, y, title, color);
+                                    let title_x = x0 + tx0 + char_w + icon_w;
+                                    if *dirty { lenz_gpui::text(window, cx, m, title_x, y, "●", palette.accent); }
+                                    lenz_gpui::text(window, cx, m, title_x + if *dirty { 2.0 * char_w } else { 0.0 }, y, title, color);
                                     lenz_gpui::text(window, cx, m, x0 + tx1 - char_w * 2.0, y, "×", palette.dim);
                                     lenz_gpui::fill(window, x0 + tx1 - 1.0, y + 3.0, 1.0, tabs_h - 6.0, palette.border);
                                 }
@@ -4871,8 +4916,8 @@ fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
 
 /// A Markdown preview's layout, its scroll and its visible images' textures.
 type PreviewFrame = (Arc<preview::Layout>, f32, Vec<(usize, Arc<gpui::RenderImage>)>, Option<std::ops::Range<usize>>);
-/// A tab in its bar: title, kept, shown, x range.
-type TabCell = (String, bool, bool, f32, f32);
+/// A tab in its bar: title, kept, shown, x range, unsaved draft marker.
+type TabCell = (String, bool, bool, f32, f32, bool);
 
 /// One pane's frame to paint: where it is, its tabs (title, kept, shown, x range), and what it shows.
 /// A piece of a breadcrumb bar to paint.

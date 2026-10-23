@@ -49,3 +49,19 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   build before changing the gate; this is an operational observation, not a
   demonstrated product regression. Evidence: the batch gate log under
   `target/perf/editor-implementation/merge-08-10/`.
+- **Draft-aware blame presentation:** saved-file blame currently uses the reader's
+  current line index. Before production typing is enabled, cover inserting and
+  deleting lines in an annotated draft and undoing them; hide or map annotations
+  that no longer describe the current line. The ticket-12 input gate remains off
+  in production, and its focused traces do not claim draft-aware blame support.
+- **Typing-group allocation:** compact history currently joins inserted/deleted
+  group text when adjacent edits coalesce. This copies the group's changed text,
+  not the document. Use the scheduled batch measurements before deciding whether
+  mutable group-string capacity is worthwhile; no extra benchmark run is needed
+  per ticket.
+
+- **Many-tab dirty indicator cost:** `State::tab_dirty(TabId)` currently locates
+  the tab by scanning the tab collection. Header painting now queries dirty state
+  for each tab; include many-tab counts in the planned batch measurements before
+  deciding whether to expose a borrowed-tab or iterator form. The draft dirty
+  comparison itself is constant time; no text is copied by this lookup.

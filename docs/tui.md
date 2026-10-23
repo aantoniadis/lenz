@@ -2,6 +2,8 @@
 
 For the code reader, see the [terminal reader guide](code/tui.md).
 
+Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production reader typing and IME remain gated for editor tickets 21/22.
+
 ![The terminal Diff showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
 `lenz diff --tui` (installed as `lenz-diff-tui`) is the terminal adapter over the same shared core as the GUI (`lenz diff`): comparison, editing, merge, repository and pull request, image, annotation and search behavior all live in `crates/app`. This page lists the terminal's controls, where it differs from the GUI and its capability limits. Command-line usage, settings and the feature overview are in the [README](../README.md).
