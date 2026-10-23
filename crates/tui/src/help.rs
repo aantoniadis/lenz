@@ -20,7 +20,7 @@ pub const REPOSITORY:&[Row]=&[
     ("","Repository panes"),("F10 / F6","Command palette / cycle sources, commits, files, diff"),("Ctrl-R","Show / hide repository picker"),
     ("Ctrl-S / Ctrl-L","In Sources: toggle sources / toggle log"),("Tab / Shift-Tab","Move between picker panes and files"),
     ("","Sources"),("Arrows / Enter","Select and open source"),("/ / Esc","Filter sources / clear filter"),("c / C","Compare branch merge base / tips"),
-    ("o","Open selected worktree in new view"),("a / b","All / current branch history"),("s","Staged changes"),
+    ("o","Open selected worktree in new view"),("Right-click","Branch: Checkout / New Branch; worktree: Compare with Working Tree"),("a / b","All / current branch history"),("s","Staged changes"),
     ("","Commits/Files"),("Type / Ctrl-F","Find literal text; keep every row visible"),("Up/Down, F3/Shift-F3","Step matches without opening a comparison"),
     ("Enter / Esc","Open candidate / cancel and restore position"),("Ctrl-A / Ctrl-C","Clear query / copy candidate hash or path"),("PgUp/PgDn, Home/End","Scroll list without opening a comparison"),
     ("Shift-arrows / Ctrl-arrows","Range / second commit outside search"),("F10 / Shift-F10","Commands / candidate context actions"),("Alt-F10","Focus toolbar; arrows choose; Enter opens"),
