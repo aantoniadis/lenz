@@ -157,7 +157,7 @@ This is Diff's reference; Reader usage is in the [Reader guide](docs/code/README
 | `lenz diff A B`, `lenz diff A..B` | revision `A` vs revision `B` |
 | `lenz diff A...B` | merge base of `A` and `B` vs `B` |
 | `lenz diff ... -- <path>...` | only these paths (relative to the current directory) |
-| `lenz diff <left> <right>` | two files, or two directories paired by relative path (inside a repository, the files git lists: ignored ones, submodules and nested repositories left out; `.git` never compared) |
+| `lenz diff <left> <right>` | two files, or two directories paired by relative path (inside a repository, the files git lists, submodules and nested repositories included, ignored ones skipped; `.git` never compared) |
 | `lenz diff --no-index <left> <right>` | the same, even if an argument names a revision |
 
 Browsing the repository:

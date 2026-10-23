@@ -841,7 +841,8 @@ fn diff_dirs(l: &Path, r: &Path) -> Result<Vec<Comparison>, String> {
 }
 
 /// Every file of a compared folder by `/`-separated relative path: inside a git work tree (and not itself ignored)
-/// the files git lists, tracked and untracked but not ignored; else every file under it.
+/// the files git lists, tracked and untracked but not ignored, and those of its submodules and nested repositories;
+/// else every file under it.
 fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     // `git difftool -d` exports GIT_DIR and GIT_WORK_TREE, and git would then list that repository's files for
     // its temporary folders.
@@ -856,12 +857,15 @@ fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     };
     let mut files = BTreeMap::new();
     for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
-        let rel = git::path_text(entry)?.to_string();
+        let rel = git::path_text(entry)?.trim_end_matches('/').to_string();
         let path = root.join(&rel);
-        // Deleted tracked files, submodules and nested repositories (`x/`) are not files here.
         if path.is_file() {
             files.insert(rel, path);
+        } else if path.symlink_metadata().is_ok_and(|m| m.is_dir()) {
+            // A submodule or nested repository (`x/`): its own files, by its own rules.
+            files.extend(self::files(&path)?.into_iter().map(|(sub, p)| (format!("{rel}/{sub}"), p)));
         }
+        // Else a deleted tracked file, or a link to a folder.
     }
     Ok(files)
 }
@@ -1449,8 +1453,30 @@ mod tests {
         let set = plain(r.path(), ".", "wt").unwrap();
         assert_eq!(
             listing(&set),
-            [(".gitignore", Status::Modified), ("gone.txt", Status::Deleted), ("new.txt", Status::Added), ("src/a.rs", Status::Modified)]
+            [(".gitignore", Status::Modified), ("gone.txt", Status::Deleted), ("new.txt", Status::Added), ("nested/z.txt", Status::Added), ("src/a.rs", Status::Modified)]
         );
+    }
+
+    #[test]
+    fn folder_compare_goes_into_submodules_with_their_own_rules() {
+        // Two checkouts of a repository holding `sub`, a repository of its own (a gitlink, as a submodule is).
+        let make = |x: &str| {
+            let r = repo();
+            let sub = r.path().join("sub");
+            std::fs::create_dir(&sub).unwrap();
+            git(&sub, &["init", "-q", "-b", "main"]);
+            write(&sub, ".gitignore", "*.o\n");
+            write(&sub, "x.txt", "1\n");
+            commit_all(&sub, "inner");
+            write(r.path(), "a.txt", "a\n");
+            commit_all(r.path(), "outer");
+            write(&sub, "x.txt", x);
+            write(&sub, "built.o", x);
+            r
+        };
+        let (l, r) = (make("1\n"), make("2\n"));
+        let set = plain(l.path(), ".", &r.path().to_string_lossy()).unwrap();
+        assert_eq!(listing(&set), [("sub/x.txt", Status::Modified)]);
     }
 
     #[test]
