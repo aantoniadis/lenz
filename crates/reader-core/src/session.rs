@@ -1222,6 +1222,10 @@ impl<'a> View<'a> {
         self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         self.tab.highlights.as_deref()
     }
+    pub fn folds(&self) -> Option<&'a Arc<Folds>> {
+        self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
+        self.tab.folds.as_ref()
+    }
     pub fn declarations(&self) -> Option<&'a lenz_content::highlight::Declarations> {
         self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         self.tab.declarations.as_deref()
