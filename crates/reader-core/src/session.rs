@@ -60,8 +60,15 @@ impl Selection {
     }
 }
 
+pub use crate::native::{NativeReveal, NativeViewport};
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    PrepareProjection(crate::projection::Request),
+    SetNativeContext { pane: u8, context: u64 },
+    MeasuredReveal { goal: NativeReveal, cols: usize, bounds: std::ops::Range<usize> },
+    PrepareLayout { pane: u8, tab: TabId, work: crate::layout::Work },
+    CancelProjection { pane: u8, request: u64 },
     SearchEverywhere { scope: crate::navigation::Scope, query: String },
     CloseSearchEverywhere,
     /// Forget one recent-file result only if its displayed identity is still current.
@@ -93,6 +100,8 @@ pub enum Command {
     Forward,
     /// The active tab's horizontal position, in display columns.
     ScrollColumn(usize),
+    /// Clamp a pane using its adapter's measured extent, rejecting obsolete source or width identities.
+    ClampColumn { viewport: NativeViewport, max: usize },
     /// Check every open source against the disk (focus regained, or notifications unavailable).
     Recheck,
     /// Search the project or the active document for literal text, case-insensitively.
@@ -773,6 +782,8 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    Projected(crate::projection::Finished),
+    LaidOut(Box<crate::layout::Finished>),
     LibraryRead { generation: u64, read: crate::libraries::Read },
     Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
     ServerRuntimes { request: u64, paths: Vec<PathBuf> },
@@ -885,6 +896,8 @@ impl Input {
         match self {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
+                Completion::Projected(_) => "source projection",
+                Completion::LaidOut(_) => "source layout",
                 Completion::PlacesRead { .. } => "places read",
                 Completion::PlacesMerged { .. } => "places merged",
                 Completion::PlacesChecked { .. } => "places checked",
@@ -1178,6 +1191,142 @@ impl<'a> View<'a> {
     }
     pub fn copy_selection(&self) -> Option<String> { self.snapshot.copy_range(self.selected_range()?) }
 
+}
+
+impl View<'_> {
+    /// Syntax and semantic style at a line-relative source byte; no full-line span list is built.
+    pub fn style_at(&self, line: usize, byte: usize) -> (Option<lenz_content::highlight::Capture>, u8) {
+        let parsed = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version);
+        let tokens = self.tab.tokens.as_ref().filter(|(version, _)| *version == self.snapshot.key().version)
+            .map_or(&[][..], |(_, tokens)| tokens.line(line));
+        if parsed.is_none() && tokens.is_empty() { return (None, 0); }
+        if self.snapshot.line_range(line).is_none_or(|range| byte >= range.len()) { return (None, 0); }
+        let syntax = parsed.and_then(|parsed| parsed.capture_at(line, byte));
+        let token = tokens.get(tokens.partition_point(|token| token.end as usize <= byte))
+            .filter(|token| token.start as usize <= byte);
+        token.map_or((syntax, 0), |token| (token.capture.or(syntax), token.mods))
+    }
+}
+
+impl View<'_> {
+    /// A line-relative hover identifier; names clipped by the 4 KiB inspection window are omitted.
+    pub fn linkable(&self, line: usize, byte: usize) -> Option<std::ops::Range<usize>> {
+        let source = self.snapshot.line_range(line)?;
+        let at = source.start.checked_add(byte)?;
+        if at >= source.end || self.snapshot.floor_char_boundary(at) != at { return None; }
+        let from = self.snapshot.floor_char_boundary(at.saturating_sub(2048).max(source.start));
+        let end = self.snapshot.floor_char_boundary(from.saturating_add(4096).min(source.end));
+        let text = self.snapshot.copy_range(from..end)?;
+        let word = crate::document::identifier(&text, at - from)?;
+        if (word.start == 0 && from > source.start) || (word.end == text.len() && end < source.end) { return None; }
+        let word = from + word.start - source.start..from + word.end - source.start;
+        use lenz_content::highlight::Capture as C;
+        let quiet = self.tab.highlights().and_then(|parsed| parsed.capture_at(line, word.start))
+            .is_some_and(|capture| matches!(capture, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin));
+        (!quiet).then_some(word)
+    }
+}
+
+impl View<'_> {
+    fn layout_query<T>(&self, cols: Option<usize>, mut query: impl FnMut(&mut crate::layout::Cache) -> crate::layout::Query<T>) -> crate::layout::Query<T> {
+        use crate::layout::Query;
+        let mut cache = self.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.configure(self.snapshot, cols, self.inlay_hints());
+        let mut budget = crate::projection::WINDOW_WORK;
+        for _ in 0..64 {
+            match query(&mut cache) {
+                Query::Pending(work) => {
+                    if budget < crate::projection::MIN_WORK { return Query::Pending(work); }
+                    let Some(delta) = work.clone().run(self.snapshot, budget, || true) else { return Query::Pending(work) };
+                    budget = budget.saturating_sub(delta.work().max(crate::projection::MIN_WORK));
+                    cache.apply(delta);
+                }
+                ready => return ready,
+            }
+        }
+        query(&mut cache)
+    }
+
+    pub fn layout_row(&self, line: usize, index: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Row>> {
+        self.layout_query(cols, |cache| cache.row(self.snapshot, line, index, 32))
+    }
+
+    pub fn layout_last(&self, line: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Row>> {
+        self.layout_query(cols, |cache| cache.last(self.snapshot, line))
+    }
+
+    pub fn layout_position(&self, source: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Position>> {
+        self.layout_query(cols, |cache| cache.position(self.snapshot, self.snapshot.line_of(source), source))
+    }
+
+    /// A projection cursor at or before the global display byte, within one bounded raw window.
+    pub fn layout_cursor(&self, line: usize, display: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::projection::Cursor>> {
+        self.layout_query(cols, |cache| cache.cursor(self.snapshot, line, display))
+    }
+
+    pub fn layout_byte_at(&self, row: &crate::layout::Row, column: usize, cols: Option<usize>) -> crate::layout::Query<Option<usize>> {
+        self.layout_query(cols, |cache| cache.byte_at(self.snapshot, row, column))
+    }
+
+    pub fn layout_rows(&self, count: usize, cols: Option<usize>) -> crate::layout::Rows {
+        use crate::layout::{Query, Rows};
+        let visible = self.visible();
+        let count = count.min(4096);
+        let mut out = Vec::with_capacity(count);
+        let query = self.layout_query(cols, |cache| {
+            out.clear();
+            let (mut line, mut index) = (self.tab.top_line(), if cols.is_some() { self.tab.top_row() } else { 0 });
+            while out.len() < count {
+                match cache.row(self.snapshot, line, index, count - out.len()) {
+                    Query::Ready(Some(row)) => {
+                        let last = row.last;
+                        out.push(row);
+                        if !last { index += 1; continue; }
+                    }
+                    Query::Ready(None) => {}
+                    Query::Pending(work) => {
+                        if let Some(prefix) = cache.prefix(self.snapshot, line, index) { out.push(prefix); }
+                        return Query::Pending(work);
+                    }
+                }
+                let next = visible.step(line, 1);
+                if next == line { break; }
+                line = next; index = 0;
+            }
+            Query::Ready(())
+        });
+        Rows { rows: out, pending: match query { Query::Pending(work) => Some(work), Query::Ready(()) => None } }
+    }
+
+    pub fn layout_sticky(&self, max: usize, cols: Option<usize>) -> crate::layout::Query<Arc<[crate::tabs::StickyLine]>> {
+        use crate::layout::Query;
+        let Some(declarations) = self.tab.declarations.as_ref().filter(|_| max > 0) else { return Query::Ready(Arc::from([])) };
+        let shown = self.layout_rows(max.saturating_add(1), cols);
+        if let Some(work) = shown.pending { return Query::Pending(work); }
+        let row_of = |line: u32| shown.rows.iter().position(|row| row.line as u32 >= line).map_or(u32::MAX, |at| at as u32);
+        Query::Ready(declarations.sticky_rows(u32::try_from(self.tab.top_line()).unwrap_or(u32::MAX), self.tab.top_row() > 0, max, row_of)
+            .into_iter().map(|line| crate::tabs::StickyLine { line: line.line as usize, row: line.row as usize })
+            .filter(|line| line.line < self.line_count()).collect())
+    }
+
+    pub fn layout_step(&self, from: (usize, usize), delta: isize, cols: usize) -> crate::layout::Query<(usize, usize)> {
+        let visible = self.visible();
+        self.layout_query(Some(cols), |cache| cache.step(self.snapshot, &visible, from, delta))
+    }
+
+    pub fn inlay_hints(&self) -> Option<&Arc<crate::decor::Hints>> {
+        let (version, hints) = self.tab.hints.as_ref()?;
+        (*version == self.snapshot.key().version).then_some(hints)
+    }
+
+    pub fn display_start(&self, line: usize) -> Option<crate::projection::Cursor> {
+        crate::projection::Cursor::start(self.snapshot, line, self.inlay_hints().cloned())
+    }
+
+    pub fn display_window(&self, cursor: &mut crate::projection::Cursor, work_bytes: usize) -> Option<crate::projection::Window> {
+        if !cursor.matches(self.snapshot, self.inlay_hints()) { return None; }
+        cursor.window(self.snapshot, work_bytes)
+    }
 }
 
 impl State {
@@ -1490,6 +1639,9 @@ impl State {
         self.settings.sticky_scroll || self.settings.breadcrumbs
     }
 
+    /// The adapter's current text viewport, in its own columns and rows.
+    pub fn text_size(&self, pane: u8) -> Option<(usize, usize)> { self.text_size.get(pane as usize).copied() }
+
     /// The columns `tab`'s lines wrap at: `None` when wrap is off, the width is not known yet, or the tab shows a
     /// large file, an image or a Markdown preview.
     pub fn wrap_cols(&self, tab: &Tab) -> Option<usize> {
@@ -1578,6 +1730,13 @@ enum Goto {
     Mark(crate::places::Mark),
 }
 
+#[derive(Clone)]
+enum LayoutPurpose { Command(Command), Selection, Reveal { line: usize, byte: usize }, Band { line: usize, row: usize } }
+
+struct LayoutIntent {
+    request: crate::layout::Request, purpose: LayoutPurpose, selection: Option<Selection>, top: (usize, usize), visible: Arc<crate::folds::Visible>,
+}
+
 pub struct Session {
     state: State,
     cache: InactiveCache,
@@ -1585,6 +1744,10 @@ pub struct Session {
     index_cache: Option<Arc<std::sync::Mutex<crate::index_cache::Cache>>>,
     index_revision: Arc<AtomicU64>,
     index_rebuilding: bool,
+    projections: crate::projection_jobs::Scheduler,
+    layouts: crate::layout_jobs::Scheduler,
+    layout_intents: [Option<LayoutIntent>; 2],
+    native: crate::native::Reveals,
     jobs: Jobs,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -1702,6 +1865,13 @@ pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String
 }
 
 impl Session {
+    pub fn native_viewport(&self, pane: u8) -> Option<NativeViewport> { NativeViewport::capture(&self.state, &self.native, pane) }
+    pub fn native_context(&self, pane: u8) -> Option<u64> { self.native.context(pane) }
+    pub fn native_reveal(&self, pane: u8) -> Option<&NativeReveal> { self.native.goal(pane, &self.state) }
+
+    pub fn projection(&self, pane: u8) -> Option<&Arc<crate::projection::Batch>> {
+        self.projections.ready(pane).filter(|b| projection_current(&self.state, &b.request))
+    }
     pub fn new(config: Config) -> Self {
         let recent = read_recent(&config.recent);
         let settings = read_settings(&config.settings);
@@ -1766,6 +1936,9 @@ impl Session {
             index_revision: Arc::new(AtomicU64::new(0)),
             index_rebuilding: false,
             jobs: Jobs::new(),
+            projections: Default::default(),
+            layouts: Default::default(),
+            layout_intents: Default::default(), native: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -2447,6 +2620,13 @@ impl Session {
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
         let input = input.into();
+        // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
+        // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+            self.layout_intents = Default::default();
+            self.native.cancel();
+        }
+        let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
         if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let reveal_selection = matches!(&input,
             Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)
@@ -2483,6 +2663,15 @@ impl Session {
         if self.state.documentation.is_some() && self.state.documentation().is_none() {
             self.state.documentation = None;
         }
+        for intent in &mut self.layout_intents {
+            if intent.as_ref().is_some_and(|intent| !layout_intent_current(&self.state, intent)) { *intent = None; }
+        }
+        if laid_out { for pane in 0..2 { self.native.regenerate(&self.state, pane); } }
+        self.native.invalidate(&self.state);
+        self.layouts.invalidate(|r| layout_current(&self.state, r));
+        self.layouts.pump(&self.jobs, &self.tx);
+        self.projections.invalidate(|r| projection_current(&self.state, r));
+        self.projections.pump(&self.jobs, &self.tx);
         effect
     }
 
@@ -2513,9 +2702,52 @@ impl Session {
         self.state.sources.aliases.retain(|_, id| self.state.sources.buffers.contains_key(id));
     }
 
+    fn defer_layout(&mut self, tab: TabId, work: crate::layout::Work, purpose: LayoutPurpose) -> Effect {
+        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        let pane = view.tab().pane();
+        let request = crate::layout::Request { pane, tab, work };
+        self.layout_intents[pane as usize] = Some(LayoutIntent { request: request.clone(), purpose,
+            selection: view.tab().selection(), top: (view.tab().top_line(), view.tab().top_row()), visible: view.visible() });
+        self.prepare_layout(request);
+        Effect::default()
+    }
+
+    fn prepare_layout(&mut self, request: crate::layout::Request) {
+        if layout_current(&self.state, &request) && let Some(snapshot) = self.state.view(request.tab).map(|view| view.snapshot().clone()) {
+            self.layouts.prepare(request, snapshot);
+        }
+    }
+
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
+            Command::PrepareLayout { pane, tab, work } => {
+                if self.layout_intents.get(pane as usize).is_some_and(Option::is_some) { return Effect::default(); }
+                self.prepare_layout(crate::layout::Request { pane, tab, work });
+                Effect::default()
+            }
+            Command::SetNativeContext { pane, context } => {
+                Effect { repaint: self.native.set_context(&self.state, pane, context), copy: None }
+            }
+            Command::MeasuredReveal { goal, cols, bounds } => {
+                let Some(column) = self.native.measured(&self.state, &goal, cols, bounds) else { return Effect::default() };
+                match self.state.tabs.iter_mut().find(|tab| tab.id == goal.tab) {
+                    Some(tab) if tab.column != column => { tab.column = column; repaint }
+                    _ => Effect::default(),
+                }
+            }
+            Command::PrepareProjection(request) => {
+                if projection_current(&self.state, &request)
+                    && let Some(snapshot) = self.state.view(request.tab).map(|v| v.snapshot().clone())
+                {
+                    self.projections.prepare(request, snapshot);
+                }
+                Effect::default()
+            }
+            Command::CancelProjection { pane, request } => {
+                self.projections.cancel(pane, request);
+                Effect::default()
+            }
             Command::SearchEverywhere {scope, query} => {
                 if scope == crate::navigation::Scope::Recent && self.state.navigation.as_ref().is_none_or(|n| n.scope != scope) {
                     self.command(Command::CheckPlaces);
@@ -2765,14 +2997,33 @@ impl Session {
                 Effect { repaint: true, ..effect }
             }
             Command::SetTextSize { pane, cols, rows } => {
-                let Some(size) = self.state.text_size.get_mut(pane as usize) else { return Effect::default() };
-                let rewrap = size.0 != cols;
-                *size = (cols, rows);
+                let Some(old_size) = self.state.text_size(pane) else { return Effect::default() };
+                let changed = old_size != (cols, rows);
+                let rewrap = old_size.0 != cols;
+                let goal = self.native.goal(pane, &self.state).cloned();
+                let intent = changed.then(|| self.layout_intents[pane as usize].take()).flatten()
+                    .filter(|intent| layout_intent_current(&self.state, intent));
+                self.state.text_size[pane as usize] = (cols, rows);
                 if rewrap {
                     // Wrapped rows change with the width: the top line stays, from its first row.
                     self.state.tabs.iter_mut().filter(|t| t.pane == pane).for_each(|t| t.set_top(t.top_line, 0));
                 }
-                Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None }
+                let mut effect = Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None };
+                if changed {
+                    self.native.regenerate(&self.state, pane);
+                    if let Some(intent) = intent {
+                        let resumed = self.resume_layout(intent);
+                        effect.repaint |= resumed.repaint;
+                        effect.copy = resumed.copy;
+                    } else if let Some(goal) = goal {
+                        let target = self.state.view(goal.tab).map(|view| {
+                            let line = view.snapshot().line_of(goal.source);
+                            (line, goal.source.saturating_sub(view.snapshot().reader_line_range(line).start))
+                        });
+                        if let Some((line, byte)) = target { self.bring_into_view(goal.tab, line, byte); }
+                    }
+                }
+                effect
             }
             Command::RerunSearch => match self.state.results.as_ref().map(|r| (r.kind, r.query.clone(), r.scope.clone())) {
                 Some((ResultsKind::Text, query, scope)) => {
@@ -2811,7 +3062,14 @@ impl Session {
             Command::FindDeclarations(query) => self.find_declarations(query),
             Command::SelectResult(i) => self.select_result(i),
             Command::OpenResult(i) => self.validate_result(i),
-            Command::ScrollColumn(_) if self.state.active().is_some_and(|t| self.state.wrap_cols(t).is_some()) => Effect::default(),
+            Command::ClampColumn { viewport, max } => {
+                if !viewport.current(&self.state, &self.native) { return Effect::default(); }
+                let tab = viewport.tab();
+                match self.state.tabs.iter_mut().find(|t| t.id == tab) {
+                    Some(t) if t.column > max => { t.column = max; repaint }
+                    _ => Effect::default(),
+                }
+            }
             Command::ScrollColumn(column) => match self.active_mut() {
                 Some(t) if t.column != column => {
                     t.column = column;
@@ -3104,9 +3362,19 @@ impl Session {
                 if matches!(self.state.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Effect::default(); }
                 let cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
                 let Some(doc) = self.state.current() else { return Effect::default() };
+                let wrapped = if let Some(cols) = cols.filter(|_| matches!(motion, Motion::Up | Motion::Down)) {
+                    let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
+                    match layout_moved(&view, view.tab().selection().map(|selection| selection.head), motion == Motion::Down, cols) {
+                        crate::layout::Query::Ready(head) => Some(head),
+                        crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::MoveCaret(motion))),
+                    }
+                } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 if doc.source_meta().image().is_some() && !t.image_source { return Effect::default(); }
-                let s = t.selection.unwrap_or(Selection {anchor:0,head:0});
+                let s = t.selection.unwrap_or_else(|| {
+                    let origin = if cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
+                    Selection { anchor: origin, head: origin }
+                });
                 let visible = t.visible();
                 let line = doc.line_of(s.head);
                 let range = doc.reader_line_range(line);
@@ -3115,7 +3383,7 @@ impl Session {
                     Motion::Right if s.anchor != s.head => s.anchor.max(s.head),
                     Motion::Left if s.head <= range.start && line > 0 => doc.reader_line_range(visible.step(line,-1)).end,
                     Motion::Right if s.head >= range.end && visible.step(line,1) > line => doc.reader_line_range(visible.step(line,1)).start,
-                    Motion::Up | Motion::Down => moved_row(t, &doc, s.head, motion == Motion::Down, cols),
+                    Motion::Up | Motion::Down => wrapped.unwrap_or_else(|| moved(&doc, &visible, s.head, motion)),
                     _ => moved(&doc, &visible, s.head, motion),
                 };
                 let head = if visible.hidden(doc.line_of(head)) { doc.reader_line_range(visible.shown(doc.line_of(head))).end } else { head };
@@ -3125,22 +3393,27 @@ impl Session {
                 repaint
             }
             Command::Extend(motion) => {
-                let cols = self.state.active().and_then(|t| self.state.wrap_cols(t)).filter(|_| matches!(motion, Motion::Up | Motion::Down));
+                let wrap_cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
+                let cols = wrap_cols.filter(|_| matches!(motion, Motion::Up | Motion::Down));
                 let Some(doc) = self.state.current() else { return Effect::default() };
+                let wrapped = if let Some(cols) = cols {
+                    let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
+                    match layout_moved(&view, Some(view.tab().selection().map_or(0, |selection| selection.head)), motion == Motion::Down, cols) {
+                        crate::layout::Query::Ready(head) => Some(head),
+                        crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::Extend(motion))),
+                    }
+                } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-
-                let s = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
-                let head = match cols {
-                    Some(cols) => moved_row(t, &doc, s.head, motion == Motion::Down, Some(cols)),
-                    None => moved(&doc, &t.visible(), s.head, motion),
-                };
+                let s = t.selection.unwrap_or_else(|| {
+                    let origin = if wrap_cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
+                    Selection { anchor: origin, head: origin }
+                });
+                let head = wrapped.unwrap_or_else(|| moved(&doc, &t.visible(), s.head, motion));
                 let line = doc.line_of(head);
                 // Keep the head on screen as far as the core knows the view: at or below the top line, and below the
                 // sticky lines.
                 t.top_line = t.top_line.min(line);
                 t.selection = Some(Selection { head, ..s });
-                let (id, row) = (t.id, cols.map_or(0, |c| t.caret_row(line, head - doc.reader_line_range(line).start, Some(c))));
-                self.clear_of_band(id, line, row);
                 repaint
             }
             Command::ExtendSelection if self.disabled(CommandId::ExtendSelection).is_some() => Effect::default(),
@@ -3222,23 +3495,29 @@ impl Session {
                 Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten() }
             }
             Command::Scroll(top) => {
-                let Some(t) = self.active_mut() else { return Effect::default() };
-                let top = match &t.doc {
-                    Some(d) => t.visible().shown(top.min(d.line_count() - 1)),
-                    None => t.top_line,
-                };
-                let changed = t.top_line != top || t.top_row() != 0 || t.approximate;
-                t.set_top(top, 0);
-                t.approximate = false;
+                let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
+                let line = view.visible().shown(top.min(view.line_count().saturating_sub(1)));
+                let row = if top == usize::MAX && let Some(cols) = self.state.wrap_cols(view.tab()) {
+                    match view.layout_last(line, Some(cols)) {
+                        crate::layout::Query::Ready(last) => last.map_or(0, |row| row.index),
+                        crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::Scroll(top))),
+                    }
+                } else { 0 };
+                let Some(tab) = self.active_mut() else { return Effect::default() };
+                let changed = (tab.top_line(), tab.top_row()) != (line, row) || tab.approximate;
+                tab.set_top(line, row); tab.approximate = false;
                 Effect { repaint: changed, copy: None }
             }
             Command::ScrollRows(rows) => {
-                let cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
-                let Some(t) = self.active_mut().filter(|t| t.doc.is_some()) else { return Effect::default() };
-                let (top, row) = match cols {
-                    Some(cols) => t.step_rows((t.top_line, t.top_row()), rows, cols),
-                    None => (t.visible().step(t.top_line, rows), 0),
+                let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
+                let (top, row) = match self.state.wrap_cols(view.tab()) {
+                    Some(cols) => match view.layout_step((view.tab().top_line(), view.tab().top_row()), rows, cols) {
+                        crate::layout::Query::Ready(top) => top,
+                        crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::ScrollRows(rows))),
+                    },
+                    None => (view.visible().step(view.tab().top_line(), rows), 0),
                 };
+                let Some(t) = self.active_mut() else { return Effect::default() };
                 let changed = (t.top_line, t.top_row()) != (top, row) || t.approximate;
                 t.set_top(top, row);
                 t.approximate = false;
@@ -3898,8 +4177,43 @@ impl Session {
         Effect { repaint: true, copy: None }
     }
 
+    fn resume_layout(&mut self, intent: LayoutIntent) -> Effect {
+        match intent.purpose {
+            LayoutPurpose::Command(command) => {
+                let reveal = matches!(&command, Command::MoveCaret(_) | Command::Extend(_));
+                let effect = self.command(command);
+                if reveal && effect.repaint { self.keep_selection_visible(); }
+                effect
+            }
+            LayoutPurpose::Selection => { self.keep_selection_visible(); Effect::default() }
+            LayoutPurpose::Reveal { line, byte } => { self.bring_into_view(intent.request.tab, line, byte); Effect::default() }
+            LayoutPurpose::Band { line, row } => { self.clear_of_band(intent.request.tab, line, row); Effect::default() }
+        }
+    }
+
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
+            Completion::LaidOut(done) => {
+                let pane = done.pane as usize;
+                let result = self.layouts.finish(*done, |r| layout_current(&self.state, r));
+                let failed = result.as_ref().is_some_and(|(_, delta)| delta.is_none());
+                if failed {
+                    self.layout_intents[pane] = None;
+                    self.state.messages.push("Source layout failed; try the navigation again".into());
+                }
+                let applied = result.and_then(|(request, delta)| delta.map(|delta| (request, delta))).is_some_and(|(request, delta)| {
+                    self.state.tabs.iter().find(|tab| tab.id == request.tab).is_some_and(|tab| tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(delta))
+                });
+                let mut effect = Effect { repaint: applied || failed, copy: None };
+                if applied && let Some(intent) = self.layout_intents.get_mut(pane).and_then(Option::take).filter(|intent| layout_intent_current(&self.state, intent)) {
+                    let resumed = self.resume_layout(intent);
+                    effect.repaint |= resumed.repaint; effect.copy = resumed.copy;
+                }
+                effect
+            }
+            Completion::Projected(done) => {
+                Effect { repaint: self.projections.finish(done, |r| projection_current(&self.state, r)), copy: None }
+            }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
@@ -5857,74 +6171,95 @@ impl Session {
 
     /// Selection grows one row at a time; scroll only enough to keep its head inside the reported viewport.
     fn keep_selection_visible(&mut self) {
-        let Some(t) = self.state.active() else { return };
-        let (Some(view), Some(selection)) = (self.state.view(t.id), t.selection()) else { return };
-        let doc = view.snapshot();
-        let rows = self.state.text_size[t.pane() as usize].1;
+        use crate::layout::Query;
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return };
+        let Some(selection) = view.tab().selection() else { return };
+        let (id, pane) = (view.tab().id(), view.tab().pane() as usize);
+        let rows = self.state.text_size[pane].1.min(4096);
         if rows == 0 { return; }
-        let source_line = doc.line_of(selection.head);
-        let line = t.visible().shown(source_line);
-        let range = doc.reader_line_range(line);
-        let byte = if line == source_line { selection.head - range.start } else { range.len() };
-        let cols = self.state.wrap_cols(t);
-        let row = t.caret_row(line, byte, cols);
-        let id = t.id();
-        let width = self.state.text_size[t.pane() as usize].0;
-        let column = if cols.is_none() && width > 0 {
-            let shown = t.shown_line(line);
-            let caret = lenz_content::wrap::width(shown.text.get(..shown.caret(byte)).unwrap_or_default());
-            Some(if caret < t.column { caret } else { t.column.max(caret.saturating_add(1).saturating_sub(width)) })
-        } else { None };
-        if !t.rows(rows, cols).iter().any(|r| r.line == line && r.index == row) {
-            let back = rows.saturating_sub(1).min(isize::MAX as usize) as isize;
-            let (top, top_row) = match cols {
-                Some(cols) => t.step_rows((line, row), -back, cols),
-                None => (t.visible().step(line, -back), 0),
-            };
-            if let Some(t) = self.tab_mut(id) { t.set_top(top, top_row); }
-        }
-        if let (Some(column), Some(t)) = (column, self.tab_mut(id)) { t.column = column; }
-        self.clear_of_band(id, line, row);
-    }
-
-    /// Bring byte `byte` of `line` in `tab` into view: when its row is not among the pane's shown rows, the top moves
-    /// so that row sits three rows below it, as other navigation does (wrapped rows count).
-    fn bring_into_view(&mut self, tab: TabId, line: usize, byte: usize) {
-        let Some(t) = self.state.tabs.iter().find(|t| t.id == tab) else { return };
-        let rows = self.state.text_size.get(t.pane as usize).map_or(0, |s| s.1);
-        let cols = self.state.wrap_cols(t);
-        let Some(t) = self.tab_mut(tab) else { return };
-        let row = t.caret_row(line, byte, cols);
-        if rows > 0 && t.rows(rows, cols).iter().any(|r| r.line == line && r.index == row) {
-            return self.clear_of_band(tab, line, row); // shown, unless under the sticky lines
-        }
-        let (top, top_row) = match cols {
-            Some(cols) => t.step_rows((line, row), -3, cols),
-            None => (t.visible().step(line, -3), 0),
-        };
-        t.set_top(top, top_row);
-        self.clear_of_band(tab, line, row);
-    }
-
-    /// Scroll up until `(line, row)` of `tab` shows below its sticky lines (one row at a time: the band changes with
-    /// the top).
-    fn clear_of_band(&mut self, tab: TabId, line: usize, row: usize) {
-        let sticky = self.state.settings.sticky_scroll;
-        let Some(t) = self.state.tabs.iter().find(|t| t.id == tab).filter(|_| sticky) else { return };
-        let rows = self.state.text_size.get(t.pane as usize).map_or(0, |s| s.1);
-        let (cap, cols) = (crate::tabs::sticky_cap(rows), self.state.wrap_cols(t));
-        let Some(t) = self.tab_mut(tab) else { return };
-        for _ in 0..=cap {
-            let band = t.sticky(cap, cols).len();
-            let at = t.rows(cap + 1, cols).iter().position(|r| r.line == line && r.index == row);
-            if at.is_none_or(|i| i >= band) || (t.top_line == 0 && t.top_row() == 0) {
-                break;
+        let source_line = view.snapshot().line_of(selection.head);
+        let line = view.visible().shown(source_line);
+        let head = if line == source_line { selection.head } else { view.snapshot().reader_line_range(line).end };
+        let cols = self.state.wrap_cols(view.tab());
+        let position = if cols.is_none() { crate::layout::Position { line, row: 0, display: 0, column: 0 } } else {
+            match view.layout_position(head, cols) {
+                Query::Ready(Some(position)) => position, Query::Ready(None) => return,
+                Query::Pending(work) => { self.defer_layout(id, work, LayoutPurpose::Selection); return; }
             }
-            let (top, top_row) = match cols {
-                Some(cols) => t.step_rows((t.top_line, t.top_row()), -1, cols),
-                None => (t.visible().step(t.top_line, -1), 0),
+        };
+        let shown = view.layout_rows(rows, cols);
+        let top = if shown.rows.iter().any(|row| row.line == line && row.index == position.row) { None }
+        else {
+            if let Some(work) = shown.pending { self.defer_layout(id, work, LayoutPurpose::Selection); return; }
+            Some(match cols {
+                Some(cols) => match view.layout_step((line, position.row), -(rows.saturating_sub(1) as isize), cols) {
+                    Query::Ready(top) => top,
+                    Query::Pending(work) => { self.defer_layout(id, work, LayoutPurpose::Selection); return; }
+                },
+                None => (view.visible().step(line, -(rows.saturating_sub(1) as isize)), 0),
+            })
+        };
+        if let Some((line, row)) = top && let Some(tab) = self.tab_mut(id) { tab.set_top(line, row); }
+        self.clear_of_band(id, line, position.row);
+        self.native.issue(&self.state, id, head);
+    }
+
+    /// Bring a line-relative source byte into the reported viewport using exact shared rows.
+    fn bring_into_view(&mut self, tab: TabId, line: usize, byte: usize) {
+        use crate::layout::Query;
+        let Some(view) = self.state.view(tab) else { return };
+        let rows = self.state.text_size[view.tab().pane() as usize].1.min(4096);
+        let cols = self.state.wrap_cols(view.tab());
+        let range = view.snapshot().reader_line_range(line);
+        let source = view.snapshot().floor_char_boundary(range.start.saturating_add(byte).min(range.end));
+        let position = if cols.is_none() { crate::layout::Position { line, row: 0, display: 0, column: 0 } } else {
+            match view.layout_position(source, cols) {
+                Query::Ready(Some(position)) => position, Query::Ready(None) => return,
+                Query::Pending(work) => { self.defer_layout(tab, work, LayoutPurpose::Reveal { line, byte }); return; }
+            }
+        };
+        let shown = view.layout_rows(rows, cols);
+        let top = if rows > 0 && shown.rows.iter().any(|row| row.line == line && row.index == position.row) { None } else {
+            if let Some(work) = shown.pending { self.defer_layout(tab, work, LayoutPurpose::Reveal { line, byte }); return; }
+            Some(match cols {
+            Some(cols) => match view.layout_step((line, position.row), -3, cols) {
+                Query::Ready(top) => top,
+                Query::Pending(work) => { self.defer_layout(tab, work, LayoutPurpose::Reveal { line, byte }); return; }
+            },
+            None => (view.visible().step(line, -3), 0),
+            })
+        };
+        if let Some(top) = top && let Some(tab) = self.tab_mut(tab) { tab.set_top(top.0, top.1); }
+        self.clear_of_band(tab, line, position.row);
+        self.native.issue(&self.state, tab, source);
+    }
+
+    /// Keep a known exact row below the sticky band. Cold layout resumes through the same bounded lane.
+    fn clear_of_band(&mut self, tab: TabId, line: usize, row: usize) {
+        use crate::layout::Query;
+        if !self.state.settings.sticky_scroll { return; }
+        let Some(view) = self.state.view(tab) else { return };
+        let rows = self.state.text_size[view.tab().pane() as usize].1;
+        let cap = crate::tabs::sticky_cap(rows);
+        for _ in 0..=cap {
+            let Some(view) = self.state.view(tab) else { return };
+            let cols = self.state.wrap_cols(view.tab());
+            let band = match view.layout_sticky(cap, cols) {
+                Query::Ready(sticky) => sticky.len(),
+                Query::Pending(work) => { self.defer_layout(tab, work, LayoutPurpose::Band { line, row }); return; }
             };
-            t.set_top(top, top_row);
+            let shown = view.layout_rows(cap + 1, cols);
+            let at = shown.rows.iter().position(|shown| shown.line == line && shown.index == row);
+            if at.is_none() && let Some(work) = shown.pending { self.defer_layout(tab, work, LayoutPurpose::Band { line, row }); return; }
+            if at.is_none_or(|at| at >= band) || (view.tab().top_line() == 0 && view.tab().top_row() == 0) { return; }
+            let top = match cols {
+                Some(cols) => match view.layout_step((view.tab().top_line(), view.tab().top_row()), -1, cols) {
+                    Query::Ready(top) => top,
+                    Query::Pending(work) => { self.defer_layout(tab, work, LayoutPurpose::Band { line, row }); return; }
+                },
+                None => (view.visible().step(view.tab().top_line(), -1), 0),
+            };
+            if let Some(tab) = self.tab_mut(tab) { tab.set_top(top.0, top.1); }
         }
     }
 
@@ -6713,6 +7048,8 @@ impl Drop for Session {
         }
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
+        self.layouts.cancel_all();
+        self.projections.cancel_all();
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
@@ -6888,6 +7225,24 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 /// Where `head` goes by `motion` in `doc`.
+fn layout_intent_current(state: &State, intent: &LayoutIntent) -> bool {
+    layout_current(state, &intent.request) && state.view(intent.request.tab).is_some_and(|view| {
+        view.tab().selection() == intent.selection && (view.tab().top_line(), view.tab().top_row()) == intent.top
+            && Arc::ptr_eq(&view.visible(), &intent.visible)
+            && (!matches!(intent.purpose, LayoutPurpose::Command(_) | LayoutPurpose::Selection) || state.active().is_some_and(|tab| tab.id() == intent.request.tab))
+    })
+}
+
+fn layout_current(state: &State, request: &crate::layout::Request) -> bool {
+    state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
+        && state.view(request.tab).is_some_and(|view| request.work.matches(view.snapshot(), state.wrap_cols(view.tab()), view.inlay_hints()))
+}
+
+fn projection_current(state: &State, request: &crate::projection::Request) -> bool {
+    state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
+        && state.view(request.tab).is_some_and(|view| request.cursor.matches(view.snapshot(), view.inlay_hints()))
+}
+
 fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize, motion: Motion) -> usize {
     let line = doc.line_of(head);
     let range = doc.reader_line_range(line);
@@ -6909,47 +7264,29 @@ fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize
 }
 
 /// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).
-fn moved_row(t: &Tab, doc: &crate::text::TextSnapshot, head: usize, down: bool, cols: Option<usize>) -> usize {
-    let line = doc.line_of(head);
-    let byte = head - doc.reader_line_range(line).start;
-    let rows = t.line_rows(line, cols);
-    if rows.is_empty() {
-        return head;
-    }
-    let row = t.caret_row(line, byte, cols);
-    let shown = t.shown_line(line);
-    let at = shown.caret(byte);
-    let column = rows[row].indent + shown.text.get(rows[row].display.start..at).map_or(0, lenz_content::wrap::width);
-    let (to_line, to_row) = match cols { Some(cols) => t.step_rows((line, row), if down {1} else {-1}, cols), None => (t.visible().step(line, if down {1} else {-1}), 0) };
-    if (to_line, to_row) == (line, row) {
-        return if down { doc.reader_line_range(line).end } else { doc.reader_line_range(line).start };
-    }
-    let to_rows = t.line_rows(to_line, cols);
-    let target = &to_rows[to_row];
-    let crate::shown::Shown { text: to_shown, map: to_map, .. } = t.shown_line(to_line);
-    // Unwrapped row metadata uses source bytes; shown text includes expanded tabs and inlay hints.
-    let display = if cols.is_none() { 0..to_shown.len() } else { target.display.clone() };
-    // The display offset in the target row nearest the column. A shorter row ends there, except that a row
-    // continued by another ends before its last character (its end is the next row's start).
-    let last_row = to_row + 1 == to_rows.len();
-    let end = match last_row {
-        true => display.end,
-        false => to_shown.get(display.clone()).and_then(|r| r.char_indices().next_back()).map_or(display.start, |(i, _)| display.start + i),
-    };
-    let mut width = target.indent;
-    let mut d = end;
-    for (i, c) in to_shown.get(display.clone()).unwrap_or_default().char_indices() {
-        let w = lenz_content::wrap::width(c.encode_utf8(&mut [0; 4]));
-        if width + w > column {
-            d = display.start + i;
-            break;
+fn layout_moved(view: &View<'_>, head: Option<usize>, down: bool, cols: usize) -> crate::layout::Query<usize> {
+    use crate::layout::{Position, Query};
+    let position = if let Some(head) = head {
+        match view.layout_position(head, Some(cols)) {
+            Query::Ready(Some(position)) => position, Query::Ready(None) => return Query::Ready(head), Query::Pending(work) => return Query::Pending(work),
         }
-        width += w;
+    } else {
+        match view.layout_row(view.tab().top_line(), view.tab().top_row(), Some(cols)) {
+            Query::Ready(Some(row)) => Position { line: row.line, row: row.index, display: row.display.start, column: row.indent },
+            Query::Ready(None) => return Query::Ready(0), Query::Pending(work) => return Query::Pending(work),
+        }
+    };
+    let head = head.unwrap_or_else(|| view.snapshot().reader_line_range(position.line).start);
+    let (line, index) = match view.layout_step((position.line, position.row), if down { 1 } else { -1 }, cols) {
+        Query::Ready(target) => target, Query::Pending(work) => return Query::Pending(work),
+    };
+    let row = match view.layout_row(line, index, Some(cols)) {
+        Query::Ready(Some(row)) => row, Query::Ready(None) => return Query::Ready(head), Query::Pending(work) => return Query::Pending(work),
+    };
+    match view.layout_byte_at(&row, position.column, Some(cols)) {
+        Query::Ready(Some(at)) if at == head && (line, index) != (position.line, position.row) => Query::Ready(if down { view.snapshot().next_char_boundary(head) } else { view.snapshot().previous_char_boundary(head) }),
+        Query::Ready(at) => Query::Ready(at.unwrap_or(head)), Query::Pending(work) => Query::Pending(work),
     }
-    let mut head = doc.reader_line_range(to_line).start + crate::wrap::source_of(&to_map, d);
-    // Display maps repeat a character's end offset for its continuation bytes.
-    if doc.floor_char_boundary(head) != head { head = doc.next_char_boundary(head); }
-    head
 }
 
 /// A syntax-built level: each usage that is one side of a relation in its file gives the other side (subtypes: the

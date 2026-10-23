@@ -288,6 +288,316 @@ fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn source_windows_scroll_and_select_past_the_old_long_line_prefix(cx: &mut TestAppContext) {
+    let source = format!("{}END😀\t\x07{}\r\n", "a".repeat(12_000), "tail ".repeat(1_000));
+    let f = fixture(cx, Some(("long.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(12_000), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (bounds, column, char_w, shown) = f.view.read_with(&v, |r, _| {
+        (r.text_bounds.unwrap(), r.session().state().column(), r.char_w, r.visible_rows()[0].text.clone())
+    });
+    assert!(shown.contains("END"), "the viewport must reach the original tail: {shown:?}");
+    assert!(column > 10_000);
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + (12_000 - column) as f32 * char_w;
+    let y = bounds.origin.y + px(line_h() / 2.0);
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 12_000..12_003);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("long.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mut TestAppContext) {
+    let prefix = "a".repeat(40) + &"👨‍👩‍👧‍👦".repeat(2_000);
+    let end = prefix.len();
+    let source = prefix.clone() + "END" + &" tail".repeat(500) + "\r\n";
+    let f = fixture(cx, Some(("family.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    let (font, char_w) = f.view.read_with(&v, |r, _| (r.font.clone(), r.char_w));
+    let native_end = v.update(|window, _| {
+        let measure = |text: &str| {
+            let run = gpui::TextRun { len: text.len(), font: font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_owned().into(), px(font_size()), &[run], None).width)
+        };
+        // A whole-prefix f32 layout accumulates rounding over thousands of glyphs.
+        measure(&"a".repeat(40)) as f64 + 2_000.0 * measure("👨‍👩‍👧‍👦") as f64
+    }) as f32;
+    let column = (native_end / char_w).floor() as usize - 20;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(column), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))));
+    let (bounds, column, shown, origin) = f.view.read_with(&v, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        let view = r.session.state().view(r.session.state().active().unwrap().id()).unwrap();
+        let width = (f32::from(bounds.size.width) - num_w() - 16.0).max(1.0);
+        let row = r.source.get(0, &view, 0, r.session.state().column() as f32 * r.char_w, width).unwrap();
+        (bounds, r.session.state().column(), row.text.clone(), row.origin)
+    });
+    let at = shown.find("END").unwrap();
+    let painted_end = v.update(|window, _| {
+        let run = gpui::TextRun { len: shown.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        origin + f32::from(window.text_system().shape_line(shown.into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    assert!((painted_end - native_end).abs() < 1.0, "bounded native advances must retain the family glyph's width");
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + painted_end - column as f32 * char_w;
+    let y = bounds.origin.y + px(line_h()/2.0);
+    v.simulate_click(point(px(x+char_w*0.1),y),Modifiers::default());
+    v.simulate_click(point(px(x+char_w*3.1),y),Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r,_| r.session().state().selection().unwrap().range()),end..end+3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item|item.text()).as_deref(),Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("family.txt")).unwrap(),source.as_bytes());
+}
+
+fn native_literal_point(f: &Fixture, v: &mut VisualTestContext, literal: &str) -> Option<(gpui::Point<Pixels>, f32)> {
+    v.update(|window, cx| {
+        let reader = f.view.read(cx);
+        let state = reader.session.state();
+        let tab = state.active()?;
+        if !reader.current_source_geometry(tab) { return None; }
+        let bounds = reader.text_bounds?;
+        let view = state.view(tab.id())?;
+        let logical = view.layout_rows(reader.rows, state.wrap_cols(tab)).rows;
+        let width = f32::from(bounds.size.width) - num_w() - 16.0;
+        for row in reader.visible_rows() {
+            let Some(at) = row.text.find(literal) else { continue };
+            let logical_row = logical.get(row.y as usize)?;
+            reader.ready_source_row(tab, logical_row)?;
+            let parts = reader.source_parts(tab, logical_row, &row, window);
+            let left = native_x(window, reader.metrics(), &row, &parts, at) - reader.hscroll();
+            let right = native_x(window, reader.metrics(), &row, &parts, at + literal.len()) - reader.hscroll();
+            if left >= 0.0 && right <= width {
+                return Some((point(bounds.origin.x + px(num_w() + 8.0 + left), bounds.origin.y + px((row.y + 0.5) * line_h())), reader.char_w));
+            }
+        }
+        None
+    })
+}
+
+fn settle_native_literal(cx: &mut TestAppContext, f: &Fixture, v: &mut VisualTestContext, literal: &str) -> (gpui::Point<Pixels>, f32) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(v, |reader, cx| reader.poll(cx));
+        draw(v);
+        if let Some(point) = native_literal_point(f, v, literal) { return point; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("native literal {literal:?} remains outside the painted viewport: {:?}", f.view.read_with(v, |r, _| {
+        let state=r.session.state();let tab=state.active().unwrap();let view=state.view(tab.id()).unwrap();
+        let logical=view.layout_rows(r.rows,state.wrap_cols(tab)).rows;
+        (r.status(),state.column(),r.session.native_reveal(tab.pane()).map(|g|(g.request,g.source,g.context)),r.visible_rows().iter().map(|row|(row.y,row.text.find(literal),row.text.len())).collect::<Vec<_>>(),logical.iter().map(|row|r.source_row(tab,row).map(|native|(native.skip(),native.pending(),r.ready_source_row(tab,row).is_some()))).collect::<Vec<_>>())
+    }));
+}
+
+#[gpui::test]
+fn source_windows_native_go_to_and_find_reveal_the_source_before_trailing_spaces(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END" + &" ".repeat(100) + "\n";
+    let f = fixture(cx, Some(("go-to.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(500.0), px(240.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-g 1 : 1 4 0 0 2 enter");
+    let (position, char_w) = settle_native_literal(cx, &f, &mut v, "END");
+    let target = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), target);
+    v.simulate_click(position + point(px(char_w * 0.1), px(0.0)), Modifiers::default());
+    v.simulate_click(position + point(px(char_w * 3.1), px(0.0)), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), target..target + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    v.simulate_keystrokes("home ctrl-f");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query() == "END"));
+    settle(cx, &f, find_settled);
+    v.simulate_keystrokes("enter");
+    settle_native_literal(cx, &f, &mut v, "END");
+    assert_eq!(std::fs::read(f.dir.path().join("go-to.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_native_wrapped_reveal_pans_wide_rows_and_unwinds_for_short_rows(cx: &mut TestAppContext) {
+    let source = "    ".to_owned() + &"1️⃣".repeat(80) + " END tail\nshort\n";
+    let f = fixture(cx, Some(("wrapped-pan.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(260.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z ctrl-g 1 : 6 5 enter");
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().column() > 0 && r.current_source_geometry(r.session.state().active().unwrap())) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), 4 + 20 * "1️⃣".len());
+    assert!(f.view.read_with(&v, |r, _| r.session.state().column() > 0), "a native-overwide wrapped row must expose its caret");
+    v.simulate_keystrokes("ctrl-g 2 : 1 enter");
+    settle_native_literal(cx, &f, &mut v, "short");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().column()), 0, "a short wrapped target unwinds the temporary pan");
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped-pan.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_compact_suppressed_source_and_retain_caret_mapping(cx: &mut TestAppContext) {
+    let source = "a".to_owned() + &"\u{200b}".repeat(50_000) + "END\n";
+    let f = fixture(cx, Some(("invisible.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let view = r.session.state().view(tab.id()).unwrap();
+        let logical = view.layout_rows(r.rows, None).rows;
+        let row = r.source_row(tab, &logical[0]).unwrap();
+        assert!(row.text.contains("END"));
+        assert!(row.text.len() < 256);
+        assert!(r.source.retained_windows() <= 64, "suppressed source must not accumulate projected windows: {}", r.source.retained_windows());
+        let middle = 1 + 25_000 * "\u{200b}".len();
+        assert_eq!(row.caret(middle), row.caret(source.find("END").unwrap()), "hidden source retains the displayed boundary for its caret");
+    });
+    assert_eq!(std::fs::read(f.dir.path().join("invisible.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END tail\r\n";
+    let f = fixture(cx, Some(("wrapped.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(220.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z end up");
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End followed by Up must paint the original tail: {:?}", f.view.read_with(&v, |r, _| { let t=r.session.state().active().unwrap(); let layout=r.session.state().view(t.id()).unwrap().layout_rows(r.rows,r.session.state().wrap_cols(t)); ((t.top_line(),t.top_row()),format!("{:?}",layout.rows),r.visible_rows().iter().map(|r|r.text.clone()).collect::<Vec<_>>()) }));
+    v.simulate_keystrokes("up");
+    for _ in 0..100 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().active().unwrap().top_line() == 0) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (head, tail, first_byte) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let layout = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        (tab.top_row(), r.visible_rows().iter().any(|row| row.text.contains("END")), layout.rows[0].source.start)
+    });
+    assert!(first_byte > 40_000 && tail, "Up must move within the original source tail: row {head}, byte {first_byte}");
+    let (bounds, row, origin, font, char_w) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let logical = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        let row = r.visible_rows().into_iter().find(|r| r.text.contains("END")).unwrap();
+        let origin = r.source_row(tab, &logical.rows[row.y as usize]).unwrap().origin;
+        (r.text_bounds.unwrap(), row, origin, r.font.clone(), r.char_w)
+    });
+    let at = row.text.find("END").unwrap();
+    let x = v.update(|window, _| {
+        let run = gpui::TextRun { len: row.text.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        f32::from(bounds.origin.x) + num_w() + 8.0 + origin + f32::from(window.text_system().shape_line(row.text.clone().into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    let y = bounds.origin.y + px((row.y + 0.5) * line_h());
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    let end = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), end..end + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_scroll_geometry_until_repaint(cx: &mut TestAppContext) {
+    let source = "same long source row\n".repeat(50);
+    let f = fixture(cx, Some(("stale.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    // Both lines are cached: the old viewport must still be rejected after scrolling.
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.session.dispatch(Command::Scroll(1));
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 8.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must not reuse the previous painted viewport");
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0));
+    assert!(hit.is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("stale.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_font_geometry_until_repaint(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("font.txt", b"source coordinates\n")));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.font.weight = gpui::FontWeight::BOLD;
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 10.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must reject font changes before the native geometry is repainted");
+    draw(&mut v);
+    assert!(v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0)).is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("font.txt")).unwrap(), b"source coordinates\n");
+}
+
+#[gpui::test]
+fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("closed.txt", b"owned source")));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let metadata = f.view.read_with(&v, |r, _| {
+        let tab = r.session().state().active().unwrap();
+        Arc::downgrade(r.session().state().view(tab.id()).unwrap().snapshot().source_meta())
+    });
+    std::fs::write(f.dir.path().join("closed.txt"), b"replacement source").unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Reload, cx));
+    settle(cx, &f, |r| r.session().state().document().is_some_and(|doc| doc.text().as_ref() == "replacement source"));
+    draw(&mut v);
+    assert!(metadata.upgrade().is_none(), "a refreshed source view must release obsolete projection metadata");
+    assert_eq!(std::fs::read(f.dir.path().join("closed.txt")).unwrap(), b"replacement source");
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));

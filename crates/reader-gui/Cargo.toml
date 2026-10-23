@@ -20,6 +20,7 @@ reader-core = { path = "../reader-core" }
 lenz-content.workspace = true
 lenz-gpui.workspace = true
 gpui.workspace = true
+unicode-segmentation = "1.13.3"
 # SVG logos and embedded raster images in Reader content.
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
 

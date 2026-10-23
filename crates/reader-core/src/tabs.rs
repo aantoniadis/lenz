@@ -85,6 +85,7 @@ pub struct Tab {
     top_row: (usize, usize),
     /// Soft-wrapped rows made so far (for one document version and width).
     wrap: std::sync::Mutex<crate::wrap::WrapCache>,
+    pub(crate) layout: std::sync::Mutex<crate::layout::Cache>,
     /// Horizontal position, in display columns.
     pub(crate) column: usize,
     /// Where to put the view once the document is (re)loaded.
@@ -144,6 +145,7 @@ impl Tab {
             find_latest: Default::default(),
             top_row: (0, 0),
             wrap: Default::default(),
+            layout: Default::default(),
             top_line: 0,
             column: 0,
             restore: None,
@@ -179,6 +181,10 @@ impl Tab {
     /// Declarations for its document's version, when asked for and ready.
     pub fn declarations(&self) -> Option<&lenz_content::highlight::Declarations> {
         self.declarations.as_deref()
+    }
+    /// Retained identity for adapter geometry; checking it does not compute sticky layout.
+    pub fn declarations_handle(&self) -> Option<&Arc<lenz_content::highlight::Declarations>> {
+        self.declarations.as_ref()
     }
     /// Inlay hints for its document's version, when ready.
     pub fn hints(&self) -> Option<&Arc<crate::decor::Hints>> {
@@ -355,6 +361,7 @@ impl Tab {
             find_latest: Default::default(),
             top_row: (0, 0),
             wrap: Default::default(),
+            layout: Default::default(),
             top_line: self.top_line,
             column: self.column,
             restore: self.restore.clone(),
@@ -395,6 +402,7 @@ impl Tab {
     }
     /// Its shown content is replaced or released: what was derived from the old content goes.
     pub(crate) fn new_content(&mut self) {
+        self.layout.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         self.highlights = None;
         self.folds = None;
         self.declarations = None;
@@ -469,37 +477,6 @@ impl Tab {
             }
             line = next;
         }
-    }
-
-    /// `(line, row)` moved by `delta` rows (wrapped rows count; collapsed lines are skipped), within the document.
-    pub(crate) fn step_rows(&self, (mut line, mut row): (usize, usize), delta: isize, cols: usize) -> (usize, usize) {
-        let v = self.visible();
-        let mut left = delta;
-        while left > 0 {
-            if row + 1 < self.line_rows(line, Some(cols)).len() {
-                row += 1;
-            } else {
-                let next = v.step(line, 1);
-                if next == line {
-                    break;
-                }
-                (line, row) = (next, 0);
-            }
-            left -= 1;
-        }
-        while left < 0 {
-            if row > 0 {
-                row -= 1;
-            } else {
-                let prev = v.step(line, -1);
-                if prev == line {
-                    break;
-                }
-                (line, row) = (prev, self.line_rows(prev, Some(cols)).len().saturating_sub(1));
-            }
-            left += 1;
-        }
-        (line, row)
     }
 
     pub fn find(&self) -> Option<&crate::find::FindState> {
