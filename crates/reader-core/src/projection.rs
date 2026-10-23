@@ -136,6 +136,7 @@ impl Cursor {
     pub fn display_byte(&self) -> usize { self.display }
     pub fn logical_column(&self) -> usize { self.column }
     pub fn hints(&self) -> Option<&Arc<Hints>> { self.hints.as_ref() }
+    pub(crate) fn context_bytes(&self) -> usize { self.guard.tail.capacity() }
 
     pub fn matches(&self, snapshot: &TextSnapshot, hints: Option<&Arc<Hints>>) -> bool {
         self.key == snapshot.key() && Arc::ptr_eq(&self.metadata, snapshot.source_meta()) && match (&self.hints, hints) {
@@ -252,15 +253,18 @@ impl Window {
     }
 
     /// A caret is omitted when its exact position is outside the window or still inside a pending label set.
-    pub fn caret(&self, source: usize) -> Option<usize> {
+    pub fn caret_display(&self, source: usize) -> Option<usize> {
         if !self.source.contains(&source) && source != self.source.end { return None; }
         let inherited = (source == self.from.byte).then_some(self.from.type_caret).flatten()
             .or_else(|| (source == self.to.byte).then_some(self.to.type_caret).flatten());
-        if let Some(global) = inherited {
-            return (self.display.start..=self.display.end).contains(&global).then(|| self.local(global));
-        }
+        if let Some(global) = inherited { return Some(global); }
         if source == self.to.byte && !self.end_ready { return None; }
-        Some(self.shown.caret(source - self.source.start))
+        Some(self.display.start + self.shown.caret(source - self.source.start))
+    }
+
+    pub fn caret(&self, source: usize) -> Option<usize> {
+        let global = self.caret_display(source)?;
+        (self.display.start..=self.display.end).contains(&global).then(|| self.local(global))
     }
 
     /// Every visible hint/escape maps to original source boundaries, never editable projection bytes.

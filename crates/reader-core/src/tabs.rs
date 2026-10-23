@@ -85,6 +85,7 @@ pub struct Tab {
     top_row: (usize, usize),
     /// Soft-wrapped rows made so far (for one document version and width).
     wrap: std::sync::Mutex<crate::wrap::WrapCache>,
+    pub(crate) layout: std::sync::Mutex<crate::layout::Cache>,
     /// Horizontal position, in display columns.
     pub(crate) column: usize,
     /// Where to put the view once the document is (re)loaded.
@@ -144,6 +145,7 @@ impl Tab {
             find_latest: Default::default(),
             top_row: (0, 0),
             wrap: Default::default(),
+            layout: Default::default(),
             top_line: 0,
             column: 0,
             restore: None,
@@ -355,6 +357,7 @@ impl Tab {
             find_latest: Default::default(),
             top_row: (0, 0),
             wrap: Default::default(),
+            layout: Default::default(),
             top_line: self.top_line,
             column: self.column,
             restore: self.restore.clone(),
@@ -395,6 +398,7 @@ impl Tab {
     }
     /// Its shown content is replaced or released: what was derived from the old content goes.
     pub(crate) fn new_content(&mut self) {
+        self.layout.get_mut().unwrap_or_else(std::sync::PoisonError::into_inner).clear();
         self.highlights = None;
         self.folds = None;
         self.declarations = None;
