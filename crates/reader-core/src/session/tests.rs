@@ -3851,15 +3851,21 @@ fn shift_down_moves_one_visual_row_and_folds_still_skip() {
 }
 
 #[test]
-fn large_files_refuse_wrap_and_wrap_turns_off_horizontal_scroll() {
+fn large_files_refuse_wrap_and_wrapping_resets_then_clamps_native_pan() {
     let d = tempfile::tempdir().unwrap();
     let mut s = txt(d.path(), "abc\n");
     s.dispatch(Command::SetTextSize { pane: 0, cols: 20, rows: 10 });
     s.dispatch(Command::ScrollColumn(5));
     s.dispatch(Command::SetSoftWrap(true));
     assert_eq!(s.state().active().unwrap().column(), 0);
+    let old_viewport = s.native_viewport(0).unwrap();
     s.dispatch(Command::ScrollColumn(5));
-    assert_eq!(s.state().active().unwrap().column(), 0, "no sideways scroll while wrapped");
+    assert_eq!(s.state().active().unwrap().column(), 5, "native-overwide wrapped rows permit explicit pan");
+    s.dispatch(Command::ClampColumn { viewport: old_viewport, max: 0 });
+    assert_eq!(s.state().active().unwrap().column(), 5, "stale measured extents cannot undo a later pan");
+    let current_viewport = s.native_viewport(0).unwrap();
+    s.dispatch(Command::ClampColumn { viewport: current_viewport, max: 0 });
+    assert_eq!(s.state().active().unwrap().column(), 0, "current complete native extents clamp a fitting wrapped row");
     let big = write(d.path(), "big.txt", "x\n".repeat(crate::document::LARGE_BYTES / 2 + 1).as_bytes());
     s.dispatch(Command::Open(big));
     settle(&mut s, |s| s.state().document().is_some_and(|d| d.is_large()));
@@ -5382,7 +5388,10 @@ fn caret_arrows_move_without_selecting_and_reveal_unicode_columns_and_crlf() {
     assert_eq!(s.state().selection().unwrap().head, 6, "keep display column 1, not UTF-8 byte column 2");
     s.dispatch(Command::MoveCaret(Motion::Right));
     assert_eq!(s.state().selection(), Some(Selection { anchor: 7, head: 7 }));
-    assert!(s.state().column() > 0, "reveal the caret horizontally");
+    let goal = s.native_reveal(0).expect("navigation requests native horizontal measurement").clone();
+    assert_eq!(goal.source, 7);
+    s.dispatch(Command::MeasuredReveal { goal, cols: 2, bounds: 2..3 });
+    assert!(s.state().column() > 0, "reveal the caret horizontally after exact native feedback");
     s.dispatch(Command::Select(Selection {anchor:0,head:3}));
     s.dispatch(Command::MoveCaret(Motion::Left));
     assert_eq!(s.state().selection(), Some(Selection {anchor:0,head:0}), "Left collapses a range to its start");

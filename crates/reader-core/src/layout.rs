@@ -252,6 +252,9 @@ impl WorkState {
                 }
                 _ => {}
             }
+            if window.complete && delta.column.is_none() && let Target::Column(target) = self.target {
+                delta.column = Some((target, window.source.end));
+            }
             let rows = self.scan.consume(&window, self.key.cols.unwrap_or(usize::MAX).max(1));
             for row in rows {
                 let wanted = match self.target {
@@ -598,7 +601,7 @@ impl Cache {
 
     pub fn byte_at(&mut self, snapshot: &TextSnapshot, row: &Row, column: usize) -> Query<Option<usize>> {
         let wanted = column.saturating_sub(row.indent);
-        if wanted >= row.width { return Query::Ready(Some(if row.last { row.source.end } else { row.end_caret })); }
+        if self.key.as_ref().is_some_and(|key| key.cols.is_some()) && wanted >= row.width { return Query::Ready(Some(if row.last { row.source.end } else { row.end_caret })); }
         let target = row.column.saturating_add(wanted);
         let Some(held) = self.line(snapshot, row.line) else { return Query::Ready(None) };
         if let Some((_, byte)) = held.columns.iter().rev().find(|(c, _)| *c == target) { return Query::Ready(Some(*byte)); }

@@ -679,15 +679,16 @@ fn horizontal_scroll_is_clamped_to_current_terminal_extents_after_input_and_resi
     a.dispatch(Command::ScrollColumn(usize::MAX));
     draw(&mut a, 40, 10);
     let width = a.layout.panes[0].text.width as usize;
-    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert_eq!(a.session.state().column(), 404usize.saturating_sub(width));
     assert!(a.next_deadline().is_some(), "a render-time clamp must schedule a fresh frame");
     assert!(a.tick(Instant::now()));
     draw(&mut a, 80, 10);
     let width = a.layout.panes[0].text.width as usize;
-    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    assert_eq!(a.session.state().column(), 404usize.saturating_sub(width));
     assert!(a.tick(Instant::now()));
     draw(&mut a, 80, 10);
     assert!(a.next_deadline().is_none(), "settled source geometry must not schedule idle redraws");
+    assert!(a.layout.panes[0].hits.iter().any(|hit| hit.line == 0 && hit.byte == 603), "the clamped viewport includes the EOF caret cell");
     key(&mut a, KeyCode::End, KeyModifiers::NONE);
     key(&mut a, KeyCode::Up, KeyModifiers::NONE);
     draw(&mut a, 1, 1);
@@ -753,6 +754,33 @@ fn leading_zero_width_source_keeps_its_first_hit_after_resizing() {
         draw(&mut a, width, 20);
         assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
     }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn unwrapped_vertical_arrows_preserve_unicode_display_columns_and_reveal_the_caret() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vertical-unicode.txt");
+    let source = "éx\r\nabcdef\n終端\n";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.loaded()));
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 6, 10);
+    assert_eq!(a.layout.panes[0].text.width, 2);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    draw(&mut a, 6, 10);
+    assert_eq!(a.session.state().selection().unwrap().head, 2);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    draw(&mut a, 6, 10);
+    assert_eq!(a.session.state().selection().unwrap().head, 6);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    draw(&mut a, 6, 10);
+    draw(&mut a, 6, 10);
+    assert_eq!(a.session.state().selection().unwrap().head, 7);
+    assert!(a.session.state().column() > 0);
+    assert!(a.layout.panes[0].hits.iter().any(|hit| hit.line == 1 && hit.byte == 2));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 #[test]
@@ -2186,6 +2214,9 @@ fn plain_arrow_keys_move_utf8_caret_and_keep_both_axes_visible() {
     }
     draw(&mut a, 40, 12);
     assert!(a.session.state().column() > 0);
+    assert!(a.next_deadline().is_some(), "native reveal feedback schedules the translated viewport");
+    assert!(a.tick(Instant::now()));
+    draw(&mut a, 40, 12);
     let head = a.session.state().selection().unwrap().head;
     assert!(a.layout.panes[0].hits.iter().any(|h| h.byte == head));
     for _ in 0..30 {

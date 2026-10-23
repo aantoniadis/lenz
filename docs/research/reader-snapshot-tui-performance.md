@@ -121,3 +121,20 @@ PTY observations measure emitted bytes, not physical terminal display latency.
 RSS does not measure GPU memory or prove absence of leaks. Native macOS, physical
 display behavior, and the final combined 08–10 executable remain unverified here.
 Editing remains gated by the later editor-enablement tickets.
+
+## Integration gate repair
+
+The integrated gate exposed a real unwrapped vertical-navigation regression:
+ordinary Up/Down had fallen back to source-byte offsets instead of the baseline's
+display columns. The repair uses the same bounded shared layout position/column
+queries as wrapped navigation. Original Unicode/CRLF and tab/inlay assertions pass,
+as do a real two-cell TUI input/render replay and a public Session cold Down/Up
+trace at display column 12,000. No full-prefix synchronous scan was restored.
+
+Three older expectations were updated to exercise the selected native contract:
+core horizontal visibility follows explicit measured feedback; wrapped explicit
+pan is corrected by current complete extents while stale clamps remain inert; and
+the TUI paints the translated viewport on its scheduled next frame. Terminal
+extent checks now also assert visibility of the EOF caret cell. Focused affected
+checks and strict core/TUI Clippy pass. These navigation repairs followed the
+production measurements above; no additional stress or full gate was rerun here.
