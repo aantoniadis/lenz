@@ -41,6 +41,35 @@ fn editor_text_metadata_survives_materialization() {
 }
 
 #[test]
+fn editor_text_materialization_observes_cancellation_after_assembly_starts() {
+    let text = "aé😀e\u{301}\n".repeat(10_000);
+    let snapshot = TextSnapshot::from_document(BufferId(71), &Document::decode("cancel.txt".into(), 1, text.as_bytes()));
+    let checks = std::cell::Cell::new(0);
+    let worker = snapshot.materialize_while(|| { let next = checks.get() + 1; checks.set(next); next <= 2 });
+    assert!(worker.is_none(), "cancellation after assembly begins must discard the obsolete conversion");
+    assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), text);
+}
+
+#[test]
+fn editor_text_cancellable_materialization_keeps_unicode_chunk_line_indices_and_metadata() {
+    let text = format!("{}\r\n😀e\u{301}\n{}\r\n", "x".repeat(4095), "y".repeat(4095));
+    let mut bytes = vec![0xff, 0xfe]; bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let original = Document::decode("legacy.txt".into(), 1, &bytes);
+    let snapshot = TextSnapshot::from_document(BufferId(72), &original).apply_edits(2, &[TextEdit { range: 0..0, text: Arc::from("Ω\n") }]).unwrap();
+    let worker = snapshot.materialize_while(|| true).unwrap();
+    assert_eq!(worker.text().as_ref(), format!("Ω\n{text}"));
+    assert_eq!(worker.line_count(), 5);
+    assert_eq!(worker.line_range(0), 0..2);
+    assert_eq!(worker.line_range(1), 3..4098);
+    assert_eq!(worker.line_range(2), 4100..4107);
+    assert_eq!(worker.line_range(3), 4108..8203);
+    assert_eq!(worker.line_range(4), 8205..8205);
+    assert_eq!(worker.encoding(), "UTF-16LE BOM");
+    assert!(Arc::ptr_eq(worker.source_meta(), original.source_meta()));
+    assert_eq!(worker.is_large(), snapshot.materialize().is_large());
+}
+
+#[test]
 fn editor_text_long_line_windows_keep_absolute_unicode_coordinates() {
     let text = format!("{}\n", "aé😀e\u{301}".repeat(90_000));
     assert_eq!(text.len(), 900_001);
@@ -158,4 +187,41 @@ fn editor_text_release_workload() {
     eprintln!("raw_cycle_ns={samples:?}");
     samples.sort_unstable();
     eprintln!("900001-byte Unicode line, 10000 insert/window/UTF16/delete cycles; p50={}ns p95={}ns p99={}ns", samples[5000], samples[9500], samples[9900]);
+}
+
+/// Primitive worker conversion, distinct from UI feedback or parser readiness. Run release and alone.
+#[test]
+#[ignore = "timing: snapshot conversion and cancellation; run in release, alone"]
+fn editor_text_materialization_release_workload() {
+    use std::{sync::atomic::{AtomicBool, Ordering}, time::Instant};
+    let unit = "/// Café 😀\r\npub fn item() { let name = \"é\"; }\r\n";
+    let text = unit.repeat(20_000);
+    let mut bytes = vec![0xff, 0xfe]; bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let original = Document::decode("materialize.rs".into(), 1, &bytes);
+    let snapshot = TextSnapshot::from_document(BufferId(73), &original).apply_edits(2, &[TextEdit { range: 0..0, text: Arc::from("// draft\n") }]).unwrap();
+    let live = AtomicBool::new(true);
+    let (mut old, mut admitted, mut cancelled) = (Vec::new(), Vec::new(), Vec::new());
+    for trial in 0..321 {
+        for mode in if trial % 2 == 0 { [0, 1] } else { [1, 0] } {
+            let started = Instant::now();
+            let worker = if mode == 0 { snapshot.materialize() } else { snapshot.materialize_while(|| live.load(Ordering::Acquire)).unwrap() };
+            let elapsed = started.elapsed().as_secs_f64() * 1_000_000.0;
+            assert_eq!(worker.line_count(), 40_002);
+            assert_eq!(worker.line(0), "// draft");
+            assert_eq!(worker.line(20_000), "pub fn item() { let name = \"é\"; }");
+            assert_eq!(worker.line_range(20_000), snapshot.line_range(20_000).unwrap());
+            assert!(Arc::ptr_eq(worker.source_meta(), original.source_meta()));
+            if trial > 20 { if mode == 0 { old.push(elapsed); } else { admitted.push(elapsed); } }
+        }
+        let checks = std::cell::Cell::new(0);
+        let started = Instant::now();
+        let result = snapshot.materialize_while(|| { let next = checks.get() + 1; checks.set(next); next <= 2 });
+        let elapsed = started.elapsed().as_secs_f64() * 1_000_000.0;
+        assert!(result.is_none()); assert_eq!(checks.get(), 3);
+        if trial > 20 { cancelled.push(elapsed); }
+    }
+    eprintln!("READER_CONFIG {}", serde_json::json!({"bytes":snapshot.len_bytes(),"lines":snapshot.line_count(),"original_encoding":original.encoding(),"samples":300,"unit":"us","note":"conversion only; one atomic cancellation predicate; interleaved old/new order"}));
+    for (name, samples) in [("reader/materialize-original-api", old), ("reader/materialize-cancellable-indexed", admitted), ("reader/materialize-cancel-after-first-chunk", cancelled)] {
+        eprintln!("READER_PERF {}", serde_json::json!({"name":name,"unit":"us","samples":samples}));
+    }
 }

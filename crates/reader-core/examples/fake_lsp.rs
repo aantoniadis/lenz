@@ -305,6 +305,12 @@ fn main() {
                 reply(&mut out, json!({ "capabilities": caps, "serverInfo": { "name": "fake" } }));
             }
             "initialized" => {
+                if let Some(release) = env("FAKE_LSP_PAUSE_INPUT") {
+                    let release = PathBuf::from(release);
+                    let _ = std::fs::write(release.with_extension("paused"), b"");
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    while !release.exists() && std::time::Instant::now() < until { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
                 // As rust-analyzer does when asked for `serverStatusNotification`.
                 let quiescent = env("FAKE_LSP_INDEXING").is_none();
                 let _ = write_message(&mut out, &json!({ "jsonrpc": "2.0", "method": "experimental/serverStatus", "params": { "health": "ok", "quiescent": quiescent } }));
@@ -338,6 +344,13 @@ fn main() {
             "textDocument/didOpen" => {
                 let d = &m["params"]["textDocument"];
                 fake.docs.insert(d["uri"].as_str().unwrap_or_default().into(), d["text"].as_str().unwrap_or_default().into());
+                if env("FAKE_LSP_CLOSE_INPUT_AFTER_OPEN").is_some() {
+                    // The provider exits but a helper keeps stdout open: input failure must stop the
+                    // owned group even though the output reader cannot observe EOF yet.
+                    let child = std::process::Command::new("sleep").arg("60").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::inherit()).spawn().unwrap();
+                    fake.log(&json!({ "input_child": child.id() }));
+                    std::process::exit(0);
+                }
             }
             "textDocument/didChange" => {
                 let uri = m["params"]["textDocument"]["uri"].as_str().unwrap_or_default().to_owned();

@@ -697,6 +697,726 @@ fn finder_perf() {
 }
 
 #[test]
+fn replacing_selection_expansion_bounds_queued_source_owners() {
+    let d = tempfile::tempdir().unwrap(); let file = write(d.path(), "expand.rs", b"fn main() { let value = 1; value; }\n"); let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "expand.rs"); settle(&mut s, |s| s.state().highlights().is_some());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for index in 0..129 {
+        let at = index % 10 + 3; s.dispatch(Command::Select(Selection { anchor: at, head: at })); s.dispatch(Command::ExtendSelection);
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.expanding.is_none());
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded syntax selection requests retained {queued} source closures");
+}
+
+#[test]
+fn split_find_consumers_keep_independent_latest_queries_for_one_snapshot() {
+    let d = tempfile::tempdir().unwrap(); let file = write(d.path(), "split.txt", b"alpha beta beta gamma gamma gamma\n");
+    let mut s = session(d.path()); open(&mut s, Command::Open(file), "split.txt");
+    s.dispatch(Command::Split(Split::Columns));
+    let first = s.state().shown(0).unwrap().id(); let second = s.state().shown(1).unwrap().id();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::Find("alpha".into()));
+    s.dispatch(Command::FocusPane(1)); s.dispatch(Command::Find("beta".into()));
+    s.dispatch(Command::FocusPane(0));
+    for _ in 0..128 { s.dispatch(Command::Find("gamma".into())); }
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| [first, second].iter().all(|id| s.state.tabs.iter().find(|t| t.id == *id).unwrap().find.as_ref().is_some_and(|f| !f.pending)));
+    assert_eq!(s.state.tabs.iter().find(|t| t.id == first).unwrap().find.as_ref().unwrap().matches.len(), 3);
+    assert_eq!(s.state.tabs.iter().find(|t| t.id == second).unwrap().find.as_ref().unwrap().matches.len(), 2);
+}
+
+#[test]
+fn visible_find_is_admitted_when_background_analysis_submissions_are_saturated() {
+    let d = tempfile::tempdir().unwrap(); let mut s = session(d.path());
+    let mut inputs = Vec::new();
+    for i in 0..3 {
+        let path = write(d.path(), &format!("background-{i}.txt"), b"background\n");
+        s.dispatch(Command::OpenRetained(path)); settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some());
+        let snapshot = s.state().view(s.state.active.unwrap()).unwrap().snapshot().clone();
+        inputs.push(crate::analysis::Input::new(snapshot, Arc::downgrade(s.state().document().unwrap()), 0, false));
+    }
+    let path = write(d.path(), "foreground.txt", b"needle\n"); open(&mut s, Command::Open(path), "foreground.txt");
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    let mut background = Vec::new();
+    for input in inputs {
+        let (release, wait) = std::sync::mpsc::channel(); background.push(release);
+        s.analysis.request(input, crate::analysis::Consumer::Index, 1, Priority::Background, move |_, _lease| { let _ = wait.recv_timeout(Duration::from_secs(5)); });
+    }
+    s.dispatch(Command::SelectAll); // admit the three current background consumers
+    s.dispatch(Command::Find("needle".into()));
+    releases[0].send(()).unwrap();
+    let rx = s.completions(); let until = std::time::Instant::now() + Duration::from_millis(500); let mut found = false;
+    while std::time::Instant::now() < until {
+        if let Ok(c) = rx.try_recv() {
+            found |= matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Matched { .. }));
+            s.dispatch(c); if found { break; }
+        } else { std::thread::yield_now(); }
+    }
+    for release in background { let _ = release.send(()); }
+    for release in releases.iter().skip(1) { let _ = release.send(()); }
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert!(found, "visible work must reach the pool's visible queue despite saturated background admission");
+}
+
+#[test]
+fn equal_version_numbers_in_different_buffers_cannot_share_analysis_results() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "a.rs", b"fn a() {}\n"); let b = write(d.path(), "b.rs", b"fn b() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(a), "a.rs");
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::Open(b), "b.rs");
+    settle(&mut s, |s| s.state().shown(0).unwrap().highlights.is_some() && s.state().shown(1).unwrap().highlights.is_some());
+    let tabs: Vec<_> = [s.state.active.unwrap(), s.state.other.unwrap()].into_iter().collect();
+    for tab in &tabs {
+        let old = s.state().view(*tab).unwrap().snapshot().clone();
+        let text = format!("fn only_{}() {{}}\n", tab.0);
+        let current = Arc::new(old.apply_edits(99, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: text.into() }]).unwrap());
+        s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current);
+        s.tab_mut(*tab).unwrap().new_content();
+    }
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::FocusPane(1));
+    releases[0].send(()).unwrap();
+    let rx = s.completions();
+    let first = loop { let c = rx.recv_blocking_timeout().unwrap(); if matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Highlighted { .. })) { break c; } s.dispatch(c); };
+    s.dispatch(first);
+    let installed = tabs.iter().filter(|tab| s.state.tabs.iter().find(|t| t.id == **tab).unwrap().highlights.is_some()).count();
+    for release in releases.iter().skip(1) { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().shown(0).unwrap().highlights.is_some() && s.state().shown(1).unwrap().highlights.is_some());
+    assert_eq!(installed, 1, "a result carries buffer identity in addition to version");
+}
+
+#[test]
+fn a_panicking_old_consumer_releases_its_version_and_admits_the_latest_find() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "panic.txt", b"old\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "panic.txt");
+    let tab = s.state.active.unwrap();
+    let snapshot = s.state().view(tab).unwrap().snapshot().clone();
+    let loaded = Arc::downgrade(s.state().document().unwrap());
+    let input = crate::analysis::Input::new(snapshot, loaded, s.project_generation.load(Ordering::Relaxed), true);
+    let (started, entered) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    // The injected unwind is at the real CPU execution boundary; the actual pool catches it.
+    s.analysis.request(input, crate::analysis::Consumer::Syntax, 99, Priority::Background, move |_, _lease| {
+        started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); panic!("controlled analysis unwind");
+    });
+    s.dispatch(Command::Find("latest".into()));
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let mut replaced = None;
+    for text in ["discarded\n", "latest\n"] {
+        std::fs::write(&file, text).unwrap();
+        s.dispatch(Command::Reload);
+        let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        s.dispatch(Completion::Loaded { request: s.request, tab, path: file.clone(), result: Ok((Stamp::of(&file), Arc::new(Document::decode(file.clone(), version, text.as_bytes())), std::fs::canonicalize(&file).ok())) });
+        if replaced.is_none() { replaced = Some(Arc::downgrade(s.state().view(tab).unwrap().snapshot())); }
+    }
+    let released = replaced.unwrap().upgrade().is_none();
+    release.send(()).unwrap();
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert!(released, "replacing pending demand drops its snapshot before the old worker returns");
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert_eq!(s.state().document().unwrap().text().as_ref(), "latest\n");
+}
+
+#[test]
+fn visible_find_promotes_its_queued_background_materialization() {
+    for operation in [Command::Find("latest_draft".into()), Command::Documentation] {
+    let finding = matches!(operation, Command::Find(_));
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.rs", b"fn saved() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "draft.rs");
+    settle(&mut s, |s| s.state().highlights().is_some());
+    let tab = s.state.active.unwrap();
+    let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1,
+        &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("fn latest_draft() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    let (sentinel, sentinel_rx) = std::sync::mpsc::channel();
+    let count = s.analysis.materializations.clone();
+    s.jobs.submit(Priority::Background, move || { sentinel.send(count.load(Ordering::Acquire)).unwrap(); });
+    // The split requests syntax and LSP readiness in the background while all workers are gated.
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    s.dispatch(operation);
+    releases[0].send(()).unwrap();
+    let before_sentinel = sentinel_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    for release in releases.iter().skip(1) { release.send(()).unwrap(); }
+    if finding { settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending)); }
+    assert_eq!(before_sentinel, 1, "new visible demand must promote an already queued background materializer");
+    if finding { assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1); }
+    }
+}
+
+#[cfg(unix)]
+fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
+    let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
+    let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]);
+    if profile.ends_with("release") { build.arg("--release"); }
+    assert!(build.status().unwrap().success());
+    let log = dir.join("fake.log");
+    let script = dir.join("fake-server");
+    std::fs::write(&script, format!("#!/bin/sh\nexport FAKE_LSP_LOG='{}'\nexec '{}' \"$@\"\n", log.display(), profile.join("examples/fake_lsp").display())).unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut s = session(dir);
+    let providers = dir.join("config/lenz-reader/providers.json");
+    let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&providers).unwrap()).unwrap();
+    settings["providers"]["rust-analyzer"]["executable"] = serde_json::json!(script);
+    std::fs::write(providers, settings.to_string()).unwrap();
+    s.state.semantics.reload_runtime("rust-analyzer");
+    (s, log)
+}
+
+#[test]
+fn semantic_sync_does_not_materialize_plain_drafts_without_a_provider() {
+    for (name, draft) in [("plain.txt", "plain draft".repeat(10_000)), ("large.rs", "x".repeat(crate::document::LARGE_BYTES + 1))] {
+    let d = tempfile::tempdir().unwrap(); let file = write(d.path(), name, b"saved\n"); let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), name);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(c) = s.completions().try_recv() { s.dispatch(c); }
+    let tab = s.state.active.unwrap(); let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from(draft) }]).unwrap());
+    s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current.clone()); s.tab_mut(tab).unwrap().new_content();
+    s.dispatch(Command::Scroll(0));
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < until {
+        if let Ok(c) = s.completions().try_recv() { s.dispatch(c); } else { std::thread::sleep(Duration::from_millis(1)); }
+    }
+    assert_eq!(s.analysis.materializations.load(Ordering::Acquire), 0, "LSP demand without a provider must not copy an otherwise idle plain draft");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"saved\n");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn background_semantic_readiness_starts_in_the_dispatch_that_registers_it() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"background\"\n");
+    let file = write(d.path(), "background.rs", b"fn saved() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "background.rs");
+    settle(&mut s, |s| s.state().active().unwrap().tokens.is_some() && s.state().active().unwrap().hints.is_some() && s.state().highlights().is_some());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(c) = s.completions().try_recv() { s.dispatch(c); }
+    let tab = s.state.active.unwrap(); let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("fn current_background() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current.clone()); s.tab_mut(tab).unwrap().new_content();
+    s.dispatch(Command::Scroll(0)); // only the footer requests semantic readiness
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_millis(500);
+    while s.state.semantics.desired().get(&file).is_none_or(|d| d.version() != current.key().version) && std::time::Instant::now() < until {
+        if let Ok(c) = s.completions().try_recv() {
+            // Suppress unrelated provider/watch events: only the materializer's own finalization
+            // may drive readiness, so an incidental message cannot conceal a missing submission.
+            if matches!(c, Completion::AnalysisWake) { s.dispatch(c); }
+        } else { std::thread::sleep(Duration::from_millis(1)); }
+    }
+    assert!(s.state.semantics.desired().get(&file).is_some_and(|d| d.version() == current.key().version), "new footer demand must not depend on an unrelated input or the five-second tick");
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn already_resolved_semantic_targets_do_not_navigate_after_the_origin_changes() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n"); write(d.path(), "lib.rs", b"pub fn target() {}\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    let rx = s.completions();
+    let old = loop { let c = rx.recv_blocking_timeout().unwrap();
+        if matches!(&c, Completion::Targets { .. }) || matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Targets { .. })) { break c; }
+        s.dispatch(c);
+    };
+    std::fs::write(&file, b"fn main() { changed(); }\n").unwrap(); s.dispatch(Command::Reload);
+    settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.text().contains("changed")));
+    let current = s.state().view(s.state.active.unwrap()).unwrap().snapshot().clone();
+    s.dispatch(old);
+    assert_eq!(s.state().active().unwrap().source(), file.as_path(), "the request's origin must be revalidated after target resolution");
+    assert!(Arc::ptr_eq(s.state().view(s.state.active.unwrap()).unwrap().snapshot(), &current));
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_semantic_target_replies_bounds_actual_document_retaining_jobs() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n"); let target = write(d.path(), "lib.rs", b"pub fn target() {}\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some());
+    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for _ in 0..129 {
+        s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+        let request = s.state.asking.as_ref().unwrap().request;
+        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false,
+            result: Ok(serde_json::json!([{ "uri": semantics::lsp::file_uri(&target), "range": { "start": {"line": 0,"character": 7}, "end": {"line":0,"character":13} } }])) });
+        s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source() == target));
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded semantic target replies retained {queued} document-map closures");
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
+    use crate::analysis::{ResultFence, ResultSlot, ResultStage};
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"targets\"\n");
+    let file = write(d.path(), "main.rs", b"fn main() { target(); }\n");
+    let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    let asking = s.state.asking.as_ref().unwrap();
+    let fence = ResultFence { slot: ResultSlot { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
+    s.analysis.request_result(fence, Priority::Visible, || |_| panic!("semantic resolver failed")).unwrap();
+    s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
+    settle(&mut s, |s| s.state.asking.is_none());
+    assert!(s.state.messages.iter().any(|m| m.contains("cancelled or could not complete")));
+    s.dispatch(Command::Definition { peek: false });
+    let request = s.state.asking.as_ref().unwrap().request;
+    let project = s.project_generation.load(Ordering::Acquire);
+    for n in 1000..1065 {
+        let fence = ResultFence { slot: ResultSlot { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
+        if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
+    }
+    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });
+    assert!(effect.repaint); assert!(s.state.asking.is_none(), "capacity pressure must end this server's answer visibly");
+    assert!(s.state.messages.iter().any(|m| m.contains("capacity is full")));
+}
+
+#[cfg(unix)]
+#[test]
+fn replacing_hover_replies_keeps_provider_markup_out_of_unbounded_worker_queues() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"hover\"\n");
+    let file = write(d.path(), "hover.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file), "hover.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && s.state().active().unwrap().hints.is_some() && s.state().active().unwrap().tokens.is_some());
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    let rx = s.completions();
+    for _ in 0..129 {
+        s.dispatch(Command::Documentation);
+        loop {
+            let c = rx.recv_blocking_timeout().unwrap();
+            let replied = matches!(&c, Completion::Semantic(semantics::Event::Message { message, .. }) if message["result"]["contents"]["kind"] == "markdown");
+            s.dispatch(c); if replied { break; }
+        }
+    }
+    let queued = s.jobs.queued();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().documentation().is_some());
+    assert!(queued <= 2 * crate::jobs::MAX_JOBS, "superseded hover markup retained {queued} worker closures");
+}
+
+#[cfg(unix)]
+#[test]
+fn documentation_from_before_a_version_preserving_rename_is_not_published() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"rename\"\n");
+    let file = write(d.path(), "old.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "old.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Documentation);
+    let rx = s.completions();
+    let old = loop { let c = rx.recv_blocking_timeout().unwrap(); if matches!(&c, Completion::DocumentationReady { .. }) || matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::DocumentationReady { .. })) { break c; } s.dispatch(c); };
+    let tab = s.state.active.unwrap(); let version = s.state().view(tab).unwrap().snapshot().key().version;
+    let token = s.state().active().unwrap().refresh; let renamed = d.path().join("renamed.rs");
+    std::fs::rename(&file, &renamed).unwrap();
+    s.dispatch(Completion::Moved { tab, token, to: renamed.clone(), stamp: Stamp::of(&renamed), canonical: std::fs::canonicalize(&renamed).ok() });
+    assert_eq!(s.state().view(tab).unwrap().snapshot().key().version, version);
+    s.dispatch(old);
+    assert!(s.state().documentation().is_none(), "source metadata must match after rendering, not only tab and version");
+    s.dispatch(Command::Documentation); settle(&mut s, |s| s.state().documentation().is_some());
+    let token = s.state().active().unwrap().refresh; let again = d.path().join("again.rs"); std::fs::rename(&renamed, &again).unwrap();
+    s.dispatch(Completion::Moved { tab, token, to: again.clone(), stamp: Stamp::of(&again), canonical: std::fs::canonicalize(&again).ok() });
+    assert!(s.state().documentation().is_none(), "already displayed documentation also belongs to its source metadata");
+}
+
+#[cfg(unix)]
+#[test]
+fn decoded_decorations_from_a_restarted_provider_cannot_complete_a_new_request() {
+    let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"restart\"\n");
+    let file = write(d.path(), "restart.rs", b"fn target() { let value = 1; }\n");
+    let (mut s, log) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "restart.rs");
+    let rx = s.completions();
+    let old = loop { let c = rx.recv_blocking_timeout().unwrap();
+        if matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Decorated { data, .. } if data.kind() == Decor::Tokens)) { break c; }
+        s.dispatch(c);
+    };
+    let old_session = s.state.semantics.session_of(s.state().document().unwrap()).unwrap();
+    let old_request = match &old { Completion::Analyzed { result, .. } => match result.as_ref() { Completion::Decorated { request, .. } => *request, _ => unreachable!() }, _ => unreachable!() };
+    assert!(s.state().active().unwrap().tokens.is_none());
+    s.dispatch(Command::RestartServer);
+    settle(&mut s, |s| !s.state.semantics.has_session(old_session) && s.state.semantics.latest(&file, Decor::Tokens) == Some(old_request));
+    s.dispatch(old);
+    let stale_installed = s.state().active().unwrap().tokens.is_some();
+    settle(&mut s, |s| s.state().active().unwrap().tokens.is_some());
+    assert!(!stale_installed, "a restarted provider can reuse its request numbers; the server session must also match");
+    let other = write(d.path(), "other.rs", b"fn other() {}\n");
+    s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::Open(other), "other.rs"); s.dispatch(Command::FocusPane(0));
+    settle(&mut s, |s| s.state().shown(0).unwrap().highlights.is_some() && s.state().shown(1).unwrap().highlights.is_some());
+    let tab = s.state.active.unwrap(); let old = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(old.apply_edits(old.key().version + 1, &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("fn target() { let changed = 2; }\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&old.key().buffer).unwrap().snapshot = Some(current.clone()); s.tab_mut(tab).unwrap().new_content();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Documentation);
+    s.dispatch(Command::RestartServer);
+    // Resolve the known disposable Cargo root at the filesystem boundary while CPU work is gated,
+    // allowing the replacement real fake-provider process to initialize before text readiness.
+    let provider = semantics::provider::for_language(highlight::Language::Rust).unwrap().0;
+    s.dispatch(Completion::Semantic(semantics::Event::Resolved { provider, dir: d.path().to_owned(), root: Some(d.path().to_owned()), serve: provider }));
+    settle(&mut s, |s| s.state().provider().is_some_and(|p| p.status == semantics::Status::Ready));
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state.semantics.desired().get(&file).is_some_and(|d| d.version() == current.key().version));
+    // A barrier request drains the same FIFO after the new source; cancelled documentation must not
+    // be revived in the replacement server once its materialization finally becomes ready.
+    s.dispatch(Command::FileSymbols); settle(&mut s, |s| s.state().asking().is_none());
+    let frames: Vec<serde_json::Value> = std::fs::read_to_string(log).unwrap().lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    assert!(!frames.iter().any(|m| m["method"] == "textDocument/hover"), "provider restart cancels materialization-waiting requests");
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_text() {
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"draft\"\n");
+    let saved = b"fn saved() {}\n";
+    let file = write(d.path(), "draft.rs", saved);
+    let (mut s, log) = fake_semantic_session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    let tab = s.state.active.unwrap();
+    let old = s.state().view(tab).unwrap().snapshot().clone();
+    let text = "fn current_draft() { let unicode = \"é𝄞\"; }\n";
+    let current = Arc::new(old.apply_edits(old.key().version + 1,
+        &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from(text) }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    s.dispatch(Command::Documentation);
+    s.dispatch(Command::HighlightAt);
+    settle(&mut s, |s| s.state().documentation().is_some() && s.state().occurrences().is_some());
+    assert_eq!(s.state().documentation().unwrap().at, 3..16, "the name range comes from current text");
+    assert_eq!(s.state().documentation().unwrap().version, current.key().version);
+    assert_eq!(s.state().occurrences().unwrap().ranges[0].0, 3..16);
+    s.dispatch(Command::Definition { peek: false });
+    settle(&mut s, |s| s.state().asking().is_none());
+    let frames: Vec<serde_json::Value> = std::fs::read_to_string(log).unwrap().lines().filter_map(|line| serde_json::from_str(line).ok()).collect();
+    let request = frames.iter().position(|m| m["method"] == "textDocument/definition").unwrap();
+    let change = frames.iter().position(|m| m["method"] == "textDocument/didChange" && m["params"]["contentChanges"][0]["text"] == text);
+    assert!(change.is_some_and(|change| change < request), "exact draft text must precede its request: {frames:?}");
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1);
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), saved);
+}
+
+#[test]
+fn large_encoded_sources_keep_their_existing_syntax_reduction() {
+    let d = tempfile::tempdir().unwrap();
+    let text = format!("/*{}*/", "x".repeat(3 << 20));
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let file = write(d.path(), "encoded.rs", &bytes);
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "encoded.rs");
+    assert!(s.state().document().unwrap().is_large());
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+    let parsed = s.state().highlights().is_some();
+    for release in releases { release.send(()).unwrap(); }
+    assert!(!parsed, "a read-path migration must not enable parsing previously reduced encoded files");
+}
+
+#[test]
+fn an_old_analysis_result_cannot_complete_a_reopened_view_request() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "again.rs", b"fn current() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "again.rs");
+    let receiver = s.completions();
+    let old = loop {
+        let completion = receiver.recv_blocking_timeout().unwrap();
+        if matches!(&completion, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Highlighted { .. })) { break completion; }
+        s.dispatch(completion);
+    };
+    s.dispatch(Command::Close);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Open(file.clone()));
+    let tab = s.state.active.unwrap();
+    s.dispatch(Completion::Checked { request: s.request, tab, path: file.clone(), stamp: Stamp::of(&file) });
+    assert!(s.state().highlights().is_none());
+    s.dispatch(old);
+    let stale_installed = s.state().highlights().is_some();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().highlights().is_some());
+    assert!(!stale_installed, "a previous admission's response cannot complete a new view request");
+}
+
+#[test]
+fn rebuilding_the_index_uses_an_open_buffers_admitted_snapshot() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "draft.rs", b"fn saved() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, |s| s.state().project().is_some_and(|p| matches!(p.coverage(), crate::project::Coverage::Complete(_)))
+        && s.state().index_coverage().complete() && s.state().index_coverage().indexed == 1);
+    open(&mut s, Command::Open(file.clone()), "draft.rs");
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("fn draft_only() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::RebuildIndex);
+    settle(&mut s, |s| !s.index_rebuilding && s.state().index_coverage().complete());
+    s.dispatch(Command::FindDeclarations("draft_only".into()));
+    settle(&mut s, |s| s.state().results().is_some_and(|r| r.done));
+    assert_eq!(s.state().results().unwrap().hits.len(), 1, "current declarations must not come from old saved text");
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+}
+
+#[test]
+fn markdown_syntax_and_find_use_the_same_current_admission() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.md", b"# saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.md");
+    settle(&mut s, |s| s.state().highlights().is_some());
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let text = "# draft-only\n\n```rust\nfn current() {}\n```\n";
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from(text) }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::ToggleMarkdownSource);
+    s.dispatch(Command::FocusPane(0));
+    s.dispatch(Command::Find("draft-only".into()));
+    settle(&mut s, |s| s.state().shown(1).unwrap().preview.as_ref().is_some_and(|p| p.as_ref().is_ok_and(|p| p.doc.source.as_ref() == text))
+        && s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1);
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"# saved\n");
+}
+
+#[test]
+fn syntax_and_find_share_one_current_materialization_across_split_views() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.rs", b"fn saved() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.rs");
+    settle(&mut s, |s| s.state().highlights().is_some());
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("fn draft_only() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::SetBreadcrumbs(true));
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Find("draft_only".into()));
+    settle(&mut s, |s| s.state().shown(0).unwrap().declarations.as_ref().is_some_and(|d| d.items.iter().any(|d| d.name.as_ref() == "draft_only"))
+        && s.state().shown(1).unwrap().declarations.as_ref().is_some_and(|d| d.items.iter().any(|d| d.name.as_ref() == "draft_only"))
+        && s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1, "the admitted version is shared by syntax and Find");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+}
+
+#[test]
+fn find_materializes_the_current_snapshot_without_replacing_it() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.txt", b"saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.txt");
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("draft-only\n") }]).unwrap());
+    // A draft fixture keeps the old compatibility Document until its adapter migration.
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.dispatch(Command::Find("draft-only".into()));
+    assert_eq!(s.state().active().unwrap().find().unwrap().version, current.key().version);
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(s.state().document().unwrap().text().as_ref(), "saved\n");
+    assert_eq!(std::fs::read(&file).unwrap(), b"saved\n");
+}
+
+#[test]
+fn reloading_without_a_find_releases_superseded_pending_analysis_text() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "versions.txt", b"alpha\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "versions.txt");
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || {
+            started.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Find("alpha".into()));
+    let mut superseded = None;
+    for text in ["beta\n", "gamma\n"] {
+        std::fs::write(&file, text).unwrap();
+        s.dispatch(Command::Reload);
+        let tab = s.state.active.unwrap();
+        let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        // The filesystem boundary is held; deliver the exact decoded bytes through its real completion.
+        s.dispatch(Completion::Loaded { request: s.request, tab, path: file.clone(),
+            result: Ok((Stamp::of(&file), Arc::new(Document::decode(file.clone(), version, text.as_bytes())), std::fs::canonicalize(&file).ok())) });
+        if superseded.is_none() {
+            superseded = Some(Arc::downgrade(s.state().view(tab).unwrap().snapshot()));
+            s.dispatch(Command::CloseFind);
+        }
+    }
+    let released = superseded.unwrap().upgrade().is_none();
+    for release in releases { release.send(()).unwrap(); }
+    s.dispatch(Command::Find("gamma".into()));
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().document().unwrap().text().as_ref(), "gamma\n");
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(released, "a superseded pending snapshot must be released before blocked work resumes");
+}
+
+#[test]
+fn replacing_pending_find_requests_bounds_retained_document_owners() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "find.txt", b"needle\nother\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "find.txt");
+    let doc = s.state().document().unwrap().clone();
+    let before = Arc::strong_count(&doc);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || {
+            started.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for i in 0..128 { s.dispatch(Command::Find(format!("superseded-{i}"))); }
+    s.dispatch(Command::Find("needle".into()));
+    let retained = Arc::strong_count(&doc);
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    let found = s.state().active().unwrap().find().unwrap();
+    assert_eq!(found.query, "needle");
+    assert_eq!(found.matches.len(), 1);
+    assert!(retained <= before + 8, "superseded queued requests retained {} extra Documents", retained - before);
+}
+
+#[test]
+fn dropping_a_split_session_cancels_its_other_panes_running_parser() {
+    let d = tempfile::tempdir().unwrap();
+    let mut s = session(d.path());
+    let a = write(d.path(), "a.txt", b"first\n");
+    let b = write(d.path(), "b.txt", b"second\n");
+    open(&mut s, Command::Open(a), "a.txt");
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::Open(b), "b.txt");
+    let version = s.state().shown(0).unwrap().document().unwrap().version();
+    let wanted = s.wanted(version);
+    let receiver = s.completions();
+    let (started, entered) = std::sync::mpsc::channel();
+    let (release, wait) = std::sync::mpsc::channel();
+    let (finished, result) = std::sync::mpsc::channel();
+    s.jobs.submit(Priority::Background, move || {
+        let first = std::sync::atomic::AtomicBool::new(true);
+        let wait = std::sync::Mutex::new(wait);
+        let parsed = highlight::parse_with(Language::Rust, "fn cancelled() { let value = 1; }\n".repeat(2_000).into(),
+            highlight::Want { folds: true, declarations: true }, move || {
+                if first.swap(false, Ordering::Relaxed) {
+                    started.send(()).unwrap();
+                    if wait.lock().unwrap().recv_timeout(Duration::from_secs(5)).is_err() { return false; }
+                }
+                wanted()
+            });
+        finished.send(parsed.is_none()).unwrap();
+    });
+    entered.recv_timeout(Duration::from_secs(5)).unwrap();
+    let dropping = std::thread::spawn(move || drop(s));
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    while !receiver.is_closed() && std::time::Instant::now() < until { std::thread::yield_now(); }
+    let closed = receiver.is_closed();
+    release.send(()).unwrap();
+    let cancelled = result.recv_timeout(Duration::from_secs(5)).unwrap();
+    dropping.join().unwrap();
+    assert!(closed, "session teardown reached worker cancellation");
+    assert!(cancelled, "the real parser must observe cancellation after its session closes");
+}
+
+#[test]
 fn dropping_a_session_with_a_full_channel_does_not_hang() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("many");
@@ -5940,6 +6660,11 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     s.cache = InactiveCache::new(900);
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     let tab = s.state().active().unwrap().id();
+    let admitted = s.state().view(tab).unwrap().snapshot().clone();
+    let loaded = Arc::downgrade(s.state().document().unwrap());
+    assert!(s.analysis.ensure(crate::analysis::Input::new(admitted.clone(), loaded.clone(), 0, true), Priority::Background));
+    assert!(s.analysis.ready(&admitted, 0).is_some(), "matching saved text registers synchronously");
+    drop(admitted);
     let snapshot = s.state().view(tab).unwrap().snapshot();
     let key = snapshot.key();
     let weak = Arc::downgrade(snapshot);
@@ -5952,6 +6677,7 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     open(&mut s, Command::OpenRetained(c), "c.txt");
     open(&mut s, Command::OpenRetained(fourth), "d.txt");
     assert!(weak.upgrade().is_none(), "eviction frees the actual indexed text");
+    assert!(loaded.upgrade().is_none(), "admission must not turn evicted frontend data into a strong cache");
     assert!(s.inactive_bytes() <= 900, "both representations share the budget");
     s.dispatch(Command::ActivateTab(tab));
     settle(&mut s, |s| s.state().view(tab).is_some());

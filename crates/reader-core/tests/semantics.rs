@@ -393,6 +393,88 @@ const LIB: &str = "pub fn helper() {}\npub struct Thing;\n";
 const MAIN: &str = "fn main() {\n    let s = \"é𝄞\"; helper();\n    let t: Thing = Thing;\n    nothing_here();\n}\n";
 
 #[test]
+fn a_blocked_writer_keeps_only_bounded_text_versions_and_sends_current_text_before_asking() {
+    let controls = tempfile::tempdir().unwrap();
+    let release = controls.path().join("release");
+    let release_text = release.to_string_lossy();
+    let source = |version| format!("fn keep() {{}}\n/*version-{version:02} {}*/\n", "x".repeat(256 * 1024));
+    let mut f = fixture(&[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")], &[("src/main.rs", &source(0))]);
+    let path = f.root.join("src/main.rs");
+    f.s.dispatch(Command::Open(path.clone()));
+    f.settle(|s| s.state().document().is_some() && ready(s));
+    f.settle_until(|| release.with_extension("paused").exists());
+    let mut texts = Vec::new();
+    for version in 1..=32 {
+        texts.push(std::sync::Arc::downgrade(f.s.state().document().unwrap().text()));
+        std::fs::write(&path, source(version)).unwrap();
+        f.s.dispatch(Command::Reload);
+        let expected = format!("version-{version:02}");
+        f.settle(|s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.text().contains(&expected)));
+    }
+    f.settle(|s| s.state().highlights().is_some());
+    let retained = texts.iter().filter(|text| text.upgrade().is_some()).count();
+    f.definition("keep", false);
+    std::fs::write(&release, b"").unwrap();
+    f.asked();
+    let messages = messages(&f.log);
+    let asked = messages.iter().position(|m| m["method"] == "textDocument/definition").unwrap();
+    let current = messages.iter().position(|m| m["method"] == "textDocument/didChange" && m["params"]["contentChanges"][0]["text"].as_str().is_some_and(|text| text.contains("version-32"))).unwrap();
+    assert!(current < asked, "a request cannot overtake its exact current text");
+    assert!(retained <= 3, "the blocked protocol writer retained {retained} superseded text versions");
+}
+
+#[test]
+fn decoded_expansion_and_closed_uri_churn_obey_the_global_writer_byte_budget() {
+    let controls = tempfile::tempdir().unwrap();
+    let release = controls.path().join("release");
+    let release_text = release.to_string_lossy();
+    let mut f = fixture(&[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")], &[("src/start.rs", "fn start() {}\n")]);
+    f.s.dispatch(Command::Open(f.root.join("src/start.rs")));
+    f.settle(|s| s.state().document().is_some() && ready(s));
+    f.settle_until(|| release.with_extension("paused").exists());
+    f.s.dispatch(Command::Close);
+    // A BOM-declared UTF16 source remains below the existing raw-byte large-file threshold, while
+    // its CJK characters expand to three UTF8 bytes each. Closed URIs cannot replenish writer credit.
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend("/*".encode_utf16().chain(std::iter::repeat_n(0x4e00, 2_500_000)).chain("*/\n".encode_utf16()).flat_map(u16::to_le_bytes));
+    let mut old = Vec::new();
+    for i in 0..4 {
+        let path = f.root.join(format!("src/expanded-{i}.rs"));
+        std::fs::write(&path, &bytes).unwrap();
+        f.s.dispatch(Command::Open(path.clone()));
+        f.settle(|s| s.state().document().is_some_and(|d| d.source() == path));
+        let doc = f.s.state().document().unwrap();
+        assert!(!doc.is_large(), "existing raw-byte eligibility must be preserved");
+        assert!(doc.text().len() > 7 << 20, "fixture must demonstrate legacy decoding expansion: {}", doc.encoding());
+        old.push((std::sync::Arc::downgrade(doc.text()), doc.text().len()));
+        f.s.dispatch(Command::Close);
+    }
+    // Replacing the cached saved copy releases frontend/source-cache ownership. Remaining old text
+    // belongs to the blocked transport, rather than to the separately budgeted inactive cache.
+    for i in 0..4 {
+        let path = f.root.join(format!("src/expanded-{i}.rs"));
+        std::fs::write(&path, b"fn replacement() {}\n").unwrap();
+        f.s.dispatch(Command::Open(path.clone()));
+        f.settle(|s| s.state().document().is_some_and(|d| d.source() == path && d.text().starts_with("fn replacement")));
+        f.s.dispatch(Command::Close);
+    }
+    // Let cancellation and cache releases finish before counting protocol ownership.
+    f.s.dispatch(Command::Open(f.root.join("src/start.rs")));
+    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("start.rs")) && s.state().highlights().is_some());
+    // Cancellation is cooperative; drain its acknowledgements while stdin remains blocked.
+    let until = Instant::now() + Duration::from_secs(3);
+    while old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum::<usize>() > 15 << 20 && Instant::now() < until {
+        if let Ok(c) = recv(&f.s.completions()) { f.s.dispatch(c); }
+    }
+    let retained: usize = old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum();
+    std::fs::write(&release, b"").unwrap();
+    assert!(retained <= 15 << 20, "closed historical UTF8 payload retained {retained} bytes");
+    let log = f.log.clone();
+    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with("start.rs"))).count() >= 2);
+    assert!(ready(&f.s), "backpressure must defer without failing the provider");
+}
+
+#[test]
 fn starts_on_the_first_relevant_source_and_follows_a_unicode_definition() {
     for encoding in ["none", "utf-8"] {
         let mut f = fixture(&[("FAKE_LSP_ENCODING", encoding)], &[("src/lib.rs", LIB), ("src/main.rs", MAIN), ("README.md", "# x\n")]);
@@ -715,6 +797,28 @@ fn at_most_two_servers_start_at_once_and_each_workspace_has_its_own() {
     f.s.dispatch(Command::OpenRetained(f.root.join("a/src/more.rs")));
     f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("more.rs")) && ready(s));
     assert_eq!(f.s.state().servers().len(), 3);
+}
+
+#[test]
+fn writer_failure_fails_the_request_and_stops_a_helper_that_keeps_output_open() {
+    let mut f = fixture(&[("FAKE_LSP_CLOSE_INPUT_AFTER_OPEN", "1"), ("FAKE_LSP_NO_DECOR", "1")], &[("src/main.rs", "fn target() {}\n")]);
+    f.open("src/main.rs");
+    let log = f.log.clone(); f.settle_until(move || messages(&log).iter().any(|m| m.get("input_child").is_some()));
+    let child = messages(&f.log).iter().find_map(|m| m["input_child"].as_u64()).unwrap();
+    f.definition("target", false); f.asked();
+    assert!(matches!(f.s.state().provider().unwrap().status, Status::Failed(_)));
+    let until = Instant::now() + Duration::from_secs(8);
+    while alive(child) && Instant::now() < until { if let Ok(c) = recv(&f.s.completions()) { f.s.dispatch(c); } }
+    let stopped = !alive(child);
+    if !stopped {
+        // Clean the deliberately broken provider before reporting a failure; ownership remains with
+        // Session, including signalling its reserved process group and reaping the exited parent.
+        let other = f._dir.path().join("cleanup"); std::fs::create_dir(&other).unwrap(); f.s.dispatch(Command::OpenRoot(other));
+        let until = Instant::now() + Duration::from_secs(8);
+        while alive(child) && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+    }
+    assert!(!alive(child), "cleanup must release the disposable helper");
+    assert!(stopped, "writer failure must stop the owned group even when its output remains open");
 }
 
 #[test]

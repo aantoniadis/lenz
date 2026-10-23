@@ -40,6 +40,7 @@ impl Indexed {
 }
 
 /// What indexing one file found.
+#[derive(Clone)]
 pub enum FileIndex {
     Done { stamp: Option<Stamp>, items: Arc<[Indexed]>, syntax_errors: bool, fingerprint: Option<[u8; 32]> },
     /// Over the large-file thresholds: not parsed.
@@ -295,7 +296,6 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
     if doc.is_large() {
         return FileIndex::TooLarge;
     }
-    let Some(lang) = doc.language() else { return FileIndex::Unreadable };
     if let Some((items, syntax_errors)) = key.as_ref().and_then(|key| cache.as_mut()?.get(key))
         && items.iter().all(|i| {
             let d = &i.decl;
@@ -307,7 +307,26 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
         }) {
         return FileIndex::Done { stamp, items, syntax_errors, fingerprint };
     }
-    let Some(found) = highlight::declarations_while(lang, doc.text().clone(), current.clone()) else { return FileIndex::Unreadable };
+    let Some((items, syntax_errors)) = declaration_records(&doc, current.clone()) else { return FileIndex::Unreadable };
+    if current() && let (Some(cache), Some(key)) = (cache, key) { cache.insert(key, items.clone(), syntax_errors); }
+    FileIndex::Done { stamp, items, syntax_errors, fingerprint }
+}
+
+/// Current-buffer declarations reuse the admitted Document and never persist a draft in the disk cache.
+pub(crate) fn index_document(doc: &crate::document::Document, stamp: Option<Stamp>, current: impl Fn() -> bool + Send + Clone + 'static) -> FileIndex {
+    if doc.is_large() { return FileIndex::TooLarge; }
+    let Some((items, syntax_errors)) = declaration_records(doc, current.clone()) else { return FileIndex::Unreadable };
+    let fingerprint = stamp.filter(|_| !doc.source_meta().had_bom() && !doc.source_meta().is_lossy() && doc.source_meta().original_encoding() == "UTF-8")
+        .and_then(|_| doc.language()).map(|language| {
+            use sha2::{Digest, Sha256};
+            let mut hash = Sha256::new(); hash.update(format!("{language:?}\0")); hash.update(doc.text().as_bytes()); hash.finalize().into()
+        });
+    FileIndex::Done { stamp, items, syntax_errors, fingerprint }
+}
+
+fn declaration_records(doc: &crate::document::Document, current: impl Fn() -> bool + Send + Clone + 'static) -> Option<(Arc<[Indexed]>, bool)> {
+    let lang = doc.language()?;
+    let found = highlight::declarations_while(lang, doc.text().clone(), current)?;
     // `impl` blocks and Markdown sections are scopes for sticky lines and breadcrumbs, not names to search for.
     let items: Arc<[Indexed]> = found
         .items
@@ -319,8 +338,7 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
             Indexed::new(d, line as u32, start as u32)
         })
         .collect();
-    if current() && let (Some(cache), Some(key)) = (cache, key) { cache.insert(key, items.clone(), found.syntax_errors); }
-    FileIndex::Done { stamp, items, syntax_errors: found.syntax_errors, fingerprint }
+    Some((items, found.syntax_errors))
 }
 
 /// The best [`DECL_LIMIT`] declarations for `query` (Lenz's fuzzy ranking over names), with how many matched.

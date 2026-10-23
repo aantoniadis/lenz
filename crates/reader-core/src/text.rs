@@ -273,6 +273,26 @@ impl TextSnapshot {
         Document::from_snapshot_parts(self.source.clone(), self.key.version, text.into())
     }
 
+    /// Contiguous worker conversion which can be abandoned when its source/context is superseded.
+    pub fn materialize_while(&self, current: impl Fn() -> bool) -> Option<Document> {
+        if !current() { return None; }
+        let mut text = String::with_capacity(self.bytes);
+        let mut lines = Vec::with_capacity(self.newlines + 1);
+        lines.push(0);
+        for entry in self.chunks.iter() {
+            if !current() { return None; }
+            text.push_str(entry.chunk.text());
+            for index in 0..entry.chunk.newline_range.len() {
+                if let Some(local) = entry.chunk.newline(index) { lines.push(entry.byte + local + 1); }
+            }
+        }
+        if !current() { return None; }
+        let text: Arc<str> = text.into();
+        let lines: Arc<[usize]> = lines.into();
+        if !current() { return None; }
+        Some(Document::from_indexed_snapshot_parts(self.source.clone(), self.key.version, text, lines))
+    }
+
     /// Apply one exact transaction. Ranges refer to this snapshot, sorted in ascending order.
     /// Validation completes before any copying; held snapshots retain their original chunks.
     pub fn apply_edits(&self, version: u64, edits: &[TextEdit]) -> Result<Self, EditError> {
