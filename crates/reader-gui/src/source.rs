@@ -178,6 +178,7 @@ struct Pane {
     serial: u64,
     work: usize,
     seen: bool,
+    active: bool,
     metric: Option<(gpui::Font, u32)>,
 }
 
@@ -191,6 +192,7 @@ impl Cache {
             if pane.metric.as_ref() != Some(&metric) { pane.lines.clear(); pane.metric = Some(metric); }
             pane.work = FRAME_WORK;
             pane.seen = false;
+            pane.active = false;
             for line in &mut pane.lines { line.touched = false; }
         }
     }
@@ -198,6 +200,10 @@ impl Cache {
     #[allow(clippy::too_many_arguments)]
     pub fn row(&mut self, pane: u8, view: &View<'_>, line: usize, skip: f32, width: f32, batch: Option<&Batch>, window: &Window, metrics: Metrics<'_>) -> Row {
         let Some(slot) = self.panes.get_mut(pane as usize) else { return Row::default() };
+        slot.active = true;
+        slot.lines.retain(|line| line.tab == view.tab().id() && line.position.cursor.matches(view.snapshot(), view.inlay_hints()));
+        if slot.pending.as_ref().is_some_and(|request| request.tab != view.tab().id() || !request.cursor.matches(view.snapshot(), view.inlay_hints()))
+            && let Some(old) = slot.pending.take() { self.commands.push(Command::CancelProjection { pane, request: old.request }); }
         let at = slot.lines.iter().position(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.position.cursor.matches(view.snapshot(), view.inlay_hints()));
         let Some(mut entry) = at.and_then(|at| slot.lines.remove(at)).or_else(|| Line::new(view,line,skip,width)) else { return Row::default() };
         entry.retarget(view,skip,width);
@@ -246,6 +252,7 @@ impl Cache {
 
     pub fn finish(&mut self) -> Vec<Command> {
         for (pane,slot) in self.panes.iter_mut().enumerate() {
+            if !slot.active { slot.lines.clear(); }
             let mut offscreen = 0;
             slot.lines.retain(|line| { if line.touched { true } else { offscreen += 1; offscreen <= OFFSCREEN_LINES } });
             if !slot.seen && let Some(old) = slot.pending.take() { self.commands.push(Command::CancelProjection { pane: pane as u8, request: old.request }); }

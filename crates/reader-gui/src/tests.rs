@@ -321,6 +321,24 @@ fn source_windows_scroll_and_select_past_the_old_long_line_prefix(cx: &mut TestA
 }
 
 #[gpui::test]
+fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("closed.txt", b"owned source")));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let metadata = f.view.read_with(&v, |r, _| {
+        let tab = r.session().state().active().unwrap();
+        Arc::downgrade(r.session().state().view(tab.id()).unwrap().snapshot().source_meta())
+    });
+    std::fs::write(f.dir.path().join("closed.txt"), b"replacement source").unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Reload, cx));
+    settle(cx, &f, |r| r.session().state().document().is_some_and(|doc| doc.text().as_ref() == "replacement source"));
+    draw(&mut v);
+    assert!(metadata.upgrade().is_none(), "a refreshed source view must release obsolete projection metadata");
+    assert_eq!(std::fs::read(f.dir.path().join("closed.txt")).unwrap(), b"replacement source");
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));
