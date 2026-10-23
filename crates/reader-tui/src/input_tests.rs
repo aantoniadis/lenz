@@ -1636,7 +1636,7 @@ fn navigation_wheel_keeps_hidden_selection_for_enter() {
     a.modal.as_mut().unwrap().at = index;
     draw(&mut a, 40, 10);
     let before = a.session.state().soft_wrap();
-    for _ in 0..100 {
+    for _ in 0..200 {
         a.handle(Event::Mouse(MouseEvent {
             kind: MouseEventKind::ScrollUp,
             column: 0,
@@ -2265,7 +2265,7 @@ fn a_rows_menu_makes_a_branch_and_the_revision_prompt_checks_out() {
     typed(&mut a, "v1");
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     assert!(matches!(prompt_kind(&a), Some(Prompt::BranchMenu { .. })));
-    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…"]);
+    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…", "Compare with Working Tree"]);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert_eq!((prompt_kind(&a), a.modal.as_ref().unwrap().input.as_str()), (Some(Prompt::Branches), "v1"), "back to the list");
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
@@ -2285,7 +2285,7 @@ fn a_rows_menu_makes_a_branch_and_the_revision_prompt_checks_out() {
     settle(&mut a, |a| !a.session.state().checking_out());
     assert_eq!(a.session.branch_label().as_deref(), Some("⎇ from-v1"));
     a.run(CommandId::CheckoutRevision);
-    assert_eq!(prompt_kind(&a), Some(Prompt::Revision));
+    assert_eq!(prompt_kind(&a), Some(Prompt::Revision { compare: false }));
     typed(&mut a, "nope");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("No commit named \"nope\""));
@@ -2376,4 +2376,77 @@ fn enter_on_the_current_branch_or_worktree_does_nothing_and_keeps_the_popup() {
         assert_eq!(prompt_kind(&a), Some(Prompt::Branches), "{current}: the popup stays");
     }
     assert!(!a.session.status_details().contains("Checking out"));
+}
+
+/// A Lenz Diff terminal app beside where the app thinks Lenz Code is.
+fn lenz_diff_beside(a: &mut App) -> tempfile::TempDir {
+    let bin = tempfile::tempdir().unwrap();
+    std::fs::write(bin.path().join("lenz-diff-tui"), "").unwrap();
+    a.exe = Some(bin.path().join("lenz-code"));
+    bin
+}
+fn foreground_args(a: &mut App) -> Option<Vec<String>> {
+    a.foreground.take().map(|l| l.args)
+}
+
+#[test]
+fn the_git_menu_compares_the_working_tree_in_this_terminal() {
+    let (r, _wt, mut a) = branches_app();
+    let _bin = lenz_diff_beside(&mut a);
+    a.run(CommandId::ShowLocalChanges);
+    let launch = a.foreground.take().unwrap();
+    assert!(launch.program.ends_with("lenz-diff-tui"), "{}", launch.program);
+    assert_eq!(launch.args, ["HEAD"]);
+    a.run(CommandId::ShowBranchChanges);
+    assert!(a.foreground.is_none());
+    assert!(a.session.status_message().contains("main is the base branch"), "{}", a.session.status_message());
+    a.run(CommandId::CompareWithRevision);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Revision { compare: true }));
+    assert!(a.modal_title().starts_with("Compare the working tree with"), "{}", a.modal_title());
+    typed(&mut a, "nope");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("No commit named \"nope\""));
+    for _ in 0..4 { key(&mut a, KeyCode::Backspace, KeyModifiers::NONE); }
+    typed(&mut a, "v1");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(foreground_args(&mut a), Some(vec!["v1".to_string()]));
+    assert!(a.modal.is_none());
+    assert_eq!(a.session.branch_label().as_deref(), Some("⎇ main"), "nothing checked out");
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n");
+}
+
+#[test]
+fn rows_compare_and_compare_with_worktree_lists_the_other_worktree() {
+    let (r, wt, mut a) = branches_app();
+    let _bin = lenz_diff_beside(&mut a);
+    open_popup(&mut a);
+    typed(&mut a, "other");
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
+    for _ in 0..3 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let split = lenz_content::git::testing::git(r.path(), &["rev-parse", "main"]).trim().to_string();
+    assert_eq!(foreground_args(&mut a), Some(vec![split]));
+    assert!(a.modal.is_none() && a.session.state().branches().is_none());
+    a.run(CommandId::CompareWithWorktree);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(&mut a, 100, 20);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Branches));
+    assert!(a.modal_title().starts_with("Compare with Worktree · type to filter · Enter compares"), "{}", a.modal_title());
+    assert_eq!(a.choices().len(), 1);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let args = foreground_args(&mut a).unwrap();
+    assert_eq!(args.last().map(String::as_str), Some(&*wt.path().join("second").to_string_lossy()));
+    // Gone: the popup says so in a tiny terminal; Enter does nothing and Esc closes.
+    std::fs::remove_dir_all(wt.path().join("second")).unwrap();
+    a.run(CommandId::CompareWithWorktree);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(&mut a, 20, 6);
+    assert_eq!(a.modal_title(), "Compare with Worktree · No other worktree");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 20, 6);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none() && a.session.state().branches().is_none() && a.foreground.is_none());
 }
