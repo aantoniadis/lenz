@@ -789,7 +789,7 @@ fn list_plain(cwd: &Path, left: &Path, right: &Path) -> Result<Vec<Comparison>, 
 
 /// Pairs by relative path; files only on one side with byte-identical content become renames.
 fn diff_dirs(l: &Path, r: &Path) -> Result<Vec<Comparison>, String> {
-    let (left, right) = (walk(l)?, walk(r)?);
+    let (left, right) = (files(l)?, files(r)?);
     let read = |p: &PathBuf| fs::read(p).map_err(io_error(p));
     let file = |p: &PathBuf| Content::File(p.clone());
     let mut list = Vec::new();
@@ -840,7 +840,33 @@ fn diff_dirs(l: &Path, r: &Path) -> Result<Vec<Comparison>, String> {
     Ok(list)
 }
 
-/// Every file under `root` by `/`-separated relative path. Symlinks are read through, never descended
+/// Every file of a compared folder by `/`-separated relative path: inside a git work tree (and not itself ignored)
+/// the files git lists, tracked and untracked but not ignored; else every file under it.
+fn files(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
+    // `git difftool -d` exports GIT_DIR and GIT_WORK_TREE, and git would then list that repository's files for
+    // its temporary folders.
+    let env = |name| std::env::var_os(name).is_some();
+    if env("GIT_DIR") || env("GIT_WORK_TREE") || !git::may_be_in_repository(root) {
+        return walk(root);
+    }
+    // Fails outside a work tree (and inside `.git`); lists nothing in an ignored folder such as `target/`.
+    let out = match git::run(root, &["ls-files", "-co", "--exclude-standard", "-z"]) {
+        Ok(out) if !out.is_empty() || git::run(root, &["check-ignore", "-q", "."]).is_err() => out,
+        _ => return walk(root),
+    };
+    let mut files = BTreeMap::new();
+    for entry in out.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let rel = git::path_text(entry)?.to_string();
+        let path = root.join(&rel);
+        // Deleted tracked files, submodules and nested repositories (`x/`) are not files here.
+        if path.is_file() {
+            files.insert(rel, path);
+        }
+    }
+    Ok(files)
+}
+
+/// Every file under `root` by `/`-separated relative path, `.git` aside. Symlinks are read through, never descended
 /// (`git difftool -d` links files into the working tree; directory links could loop).
 fn walk(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     let mut files = BTreeMap::new();
@@ -848,6 +874,9 @@ fn walk(root: &Path) -> Result<BTreeMap<String, PathBuf>, String> {
     while let Some((dir, prefix)) = dirs.pop() {
         for entry in fs::read_dir(&dir).map_err(io_error(&dir))? {
             let entry = entry.map_err(io_error(&dir))?;
+            if entry.file_name() == ".git" {
+                continue;
+            }
             let rel = format!("{prefix}{}", git::path_text(entry.file_name().as_encoded_bytes())?);
             let kind = entry.file_type().map_err(io_error(&entry.path()))?;
             if kind.is_dir() {
@@ -895,6 +924,7 @@ mod tests {
         std::fs::write(other.path().join(std::ffi::OsString::from_vec(b"u\xff".to_vec())), "keep").unwrap();
         assert!(list_git(other.path(), other.path(), false, &[], &[], true).is_err());
         assert!(walk(dir.path()).is_err());
+        assert!(files(dir.path()).is_err() && files(other.path()).is_err());
     }
 
     #[test]
@@ -1387,6 +1417,66 @@ mod tests {
         assert_eq!(texts(&set, 0), pair("d\n", ""));
         assert_eq!(texts(&set, 1), pair("", "a\n"));
         assert_eq!(texts(&set, 2), pair("1\n", "2\n"));
+    }
+
+    #[test]
+    fn folder_compare_lists_git_files_inside_a_work_tree() {
+        let r = repo();
+        write(r.path(), ".gitignore", "target/\n*.log\n");
+        write(r.path(), "src/a.rs", "a\n");
+        write(r.path(), "gone.txt", "g\n");
+        commit_all(r.path(), "1");
+        let other = r.path().join("wt");
+        git(r.path(), &["worktree", "add", "-q", other.to_str().unwrap()]);
+        write(r.path(), ".gitignore", "target/\n*.log\nwt/\n");
+        for dir in [r.path(), other.as_path()] {
+            write(dir, "target/debug/out", "built\n");
+            write(dir, "run.log", "log\n");
+        }
+        write(&other, "src/a.rs", "b\n");
+        write(&other, "new.txt", "n\n");
+        std::fs::remove_file(other.join("gone.txt")).unwrap();
+        git(&other, &["init", "-q", "nested"]);
+        write(&other, "nested/z.txt", "z\n");
+        let set = plain(r.path(), ".", "wt").unwrap();
+        assert_eq!(
+            listing(&set),
+            [(".gitignore", Status::Modified), ("gone.txt", Status::Deleted), ("new.txt", Status::Added), ("src/a.rs", Status::Modified)]
+        );
+    }
+
+    #[test]
+    fn folder_compare_of_two_subfolders_of_one_repo() {
+        let r = repo();
+        write(r.path(), ".gitignore", "*.log\n");
+        write(r.path(), "l/a.txt", "1\n");
+        write(r.path(), "r/a.txt", "2\n");
+        write(r.path(), "l/x.log", "x\n");
+        commit_all(r.path(), "1");
+        write(r.path(), "r/sub/new.txt", "n\n");
+        let set = plain(&r.path().join("l"), ".", "../r").unwrap();
+        assert_eq!(listing(&set), [("a.txt", Status::Modified), ("sub/new.txt", Status::Added)]);
+    }
+
+    #[test]
+    fn an_ignored_folder_is_walked() {
+        let r = repo();
+        write(r.path(), ".gitignore", "target/\n");
+        commit_all(r.path(), "1");
+        write(r.path(), "target/a/out", "1\n");
+        write(r.path(), "plain/a/out", "2\n");
+        let set = plain(r.path(), "target", "plain").unwrap();
+        assert_eq!(listing(&set), [("a/out", Status::Modified)]);
+    }
+
+    #[test]
+    fn plain_folders_never_compare_dot_git() {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "l/.git", "gitdir: /somewhere\n");
+        write(d.path(), "r/.git/config", "[core]\n");
+        write(d.path(), "l/a.txt", "1\n");
+        write(d.path(), "r/a.txt", "1\n");
+        assert!(plain(d.path(), "l", "r").unwrap().comparisons.is_empty());
     }
 
     #[test]
