@@ -49,6 +49,29 @@ impl SourceMeta {
     pub fn is_binary(&self) -> bool { self.binary }
     pub fn language(&self) -> Option<Language> { self.language }
     pub fn image(&self) -> Option<&Arc<Image>> { self.image.as_ref() }
+    pub(crate) fn notices(&self, large: bool) -> Vec<String> {
+        let mut notices = Vec::new();
+        if self.shown_encoding {
+            notices.push(format!("Encoding: {}", self.encoding));
+        }
+        if self.lossy {
+            notices.push(encoding::LOSSY_NOTICE.into());
+        }
+        if large {
+            notices.push("Large file: syntax highlighting off".into());
+        }
+        if let Some(i) = &self.image {
+            notices.push(match &i.pixels {
+                Ok(_) => {
+                    let scaled = if i.downscaled { format!(", shown downscaled to fit {} px", img::MAX_SIDE) } else { String::new() };
+                    format!("{} image, {}×{} px, {}{scaled}", i.format.name(), i.width, i.height, size_label(i.byte_size))
+                }
+                Err(e) => format!("{} image, {}: cannot be shown ({e})", i.format.name(), size_label(i.byte_size)),
+            });
+        }
+        notices
+    }
+
 }
 
 #[derive(Debug)]
@@ -198,6 +221,8 @@ impl Document {
         &self.text
     }
 
+    pub(crate) fn line_starts(&self) -> &[usize] { &self.line_starts }
+
     pub fn line_count(&self) -> usize {
         self.line_starts.len()
     }
@@ -260,26 +285,7 @@ impl Document {
 
     /// What the reader should say about this snapshot: a notable encoding, lost bytes, large-file mode.
     pub fn notices(&self) -> Vec<String> {
-        let mut notices = Vec::new();
-        if self.source.shown_encoding {
-            notices.push(format!("Encoding: {}", self.source.encoding));
-        }
-        if self.source.lossy {
-            notices.push(encoding::LOSSY_NOTICE.into());
-        }
-        if self.large {
-            notices.push("Large file: syntax highlighting off".into());
-        }
-        if let Some(i) = &self.source.image {
-            notices.push(match &i.pixels {
-                Ok(_) => {
-                    let scaled = if i.downscaled { format!(", shown downscaled to fit {} px", img::MAX_SIDE) } else { String::new() };
-                    format!("{} image, {}×{} px, {}{scaled}", i.format.name(), i.width, i.height, size_label(i.byte_size))
-                }
-                Err(e) => format!("{} image, {}: cannot be shown ({e})", i.format.name(), size_label(i.byte_size)),
-            });
-        }
-        notices
+        self.source.notices(self.large)
     }
 
     /// Memory this snapshot holds, for cache accounting.

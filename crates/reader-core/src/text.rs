@@ -24,19 +24,36 @@ pub struct TextWindow<'a> {
 }
 
 #[derive(Debug)]
-struct Chunk { text: Box<str>, newlines: Box<[usize]>, utf16: usize }
+struct Chunk { text: Arc<str>, range: Range<usize>, shared_source: bool, newlines: Box<[usize]>, utf16: usize }
 impl Chunk {
+    fn text(&self) -> &str { self.text.get(self.range.clone()).unwrap_or_default() }
+    fn indexed(text: Arc<str>, range: Range<usize>, shared_source: bool) -> Arc<Self> {
+        let part = text.get(range.clone()).unwrap_or_default();
+        let newlines = part.match_indices('\n').map(|(i, _)| i).collect();
+        let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
+        Arc::new(Self { text, range, shared_source, newlines, utf16 })
+    }
+    fn shared(text: Arc<str>, lines: &[usize]) -> Vec<Arc<Self>> {
+        let mut chunks = Vec::with_capacity(text.len().div_ceil(CHUNK_BYTES));
+        let (mut from, mut first_line) = (0, 1);
+        while from < text.len() {
+            let end = text.floor_char_boundary(from.saturating_add(CHUNK_BYTES).min(text.len()));
+            let after = lines.partition_point(|&offset| offset <= end);
+            let newlines = lines.get(first_line..after).unwrap_or_default().iter().map(|&offset| offset - 1 - from).collect();
+            let part = text.get(from..end).unwrap_or_default();
+            let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
+            chunks.push(Arc::new(Self { text: text.clone(), range: from..end, shared_source: true, newlines, utf16 }));
+            from = end;
+            first_line = after;
+        }
+        chunks
+    }
     fn split(mut text: &str) -> Vec<Arc<Self>> {
         let mut chunks = Vec::new();
         while !text.is_empty() {
             let end = text.floor_char_boundary(CHUNK_BYTES.min(text.len()));
-            // floor_char_boundary proves end is in bounds and on a UTF-8 boundary.
             let (part, rest) = text.split_at(end);
-            chunks.push(Arc::new(Self {
-                newlines: part.match_indices('\n').map(|(i, _)| i).collect(),
-                utf16: part.chars().map(char::len_utf16).sum(),
-                text: part.into(),
-            }));
+            chunks.push(Self::indexed(part.into(), 0..part.len(), false));
             text = rest;
         }
         chunks
@@ -55,43 +72,110 @@ pub struct TextSnapshot {
     bytes: usize,
     newlines: usize,
     utf16: usize,
+    owned_bytes: usize,
 }
 
 impl TextSnapshot {
     pub fn from_document(buffer: BufferId, document: &Document) -> Self {
-        Self::indexed(SnapshotKey { buffer, version: document.version() }, document.source_meta().clone(), Chunk::split(document.text()))
+        Self::indexed(SnapshotKey { buffer, version: document.version() }, document.source_meta().clone(), Chunk::shared(document.text().clone(), document.line_starts()))
     }
 
     fn indexed(key: SnapshotKey, source: Arc<SourceMeta>, chunks: Vec<Arc<Chunk>>) -> Self {
         let (mut bytes, mut newlines, mut utf16) = (0, 0, 0);
-        let chunks = chunks.into_iter().filter(|c| !c.text.is_empty()).map(|chunk| {
+        let chunks = chunks.into_iter().filter(|c| !c.text().is_empty()).map(|chunk| {
             let entry = Entry { chunk, byte: bytes, newline: newlines, utf16 };
-            bytes += entry.chunk.text.len();
+            bytes += entry.chunk.text().len();
             newlines += entry.chunk.newlines.len();
             utf16 += entry.chunk.utf16;
             entry
         }).collect();
-        Self { key, source, chunks, bytes, newlines, utf16 }
+        let chunks: Arc<[Entry]> = chunks;
+        let owned_bytes = size_of::<Self>() + chunks.len() * size_of::<Entry>()
+            + chunks.iter().map(|entry| size_of::<Chunk>() + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() } + entry.chunk.newlines.len() * size_of::<usize>()).sum::<usize>();
+        Self { key, source, chunks, bytes, newlines, utf16, owned_bytes }
     }
 
+    pub(crate) fn with_source_meta(&self, source: Arc<SourceMeta>) -> Self { Self { source, ..self.clone() } }
     pub fn key(&self) -> SnapshotKey { self.key }
     pub fn source(&self) -> &Path { self.source.source() }
     pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
     pub fn language(&self) -> Option<Language> { self.source.language() }
+    pub fn notices(&self) -> Vec<String> { self.source.notices(self.is_large()) }
+    pub fn image(&self) -> Option<&Arc<crate::document::Image>> { self.source.image() }
     pub fn encoding(&self) -> &str { self.source.encoding() }
     pub fn len_bytes(&self) -> usize { self.bytes }
     pub fn len_utf16(&self) -> usize { self.utf16 }
     pub fn line_count(&self) -> usize { self.newlines + 1 }
 
+    /// Additional indexed storage beside the compatibility Document, excluding shared source text/metadata.
+    pub fn storage_bytes(&self) -> usize { self.owned_bytes }
+
+    pub(crate) fn reader_line_range(&self, line: usize) -> Range<usize> {
+        self.line_range(line.min(self.line_count() - 1)).unwrap_or(0..0)
+    }
+    fn char_at(&self, byte: usize) -> Option<char> {
+        let entry = self.entry(byte)?;
+        entry.chunk.text().get(byte - entry.byte..)?.chars().next()
+    }
+    /// Word, whitespace or punctuation run at a source caret, without assembling its line.
+    pub(crate) fn word_at(&self, byte: usize) -> Range<usize> {
+        let range = self.reader_line_range(self.line_of(byte));
+        let mut at = self.floor_char_boundary(byte).clamp(range.start, range.end);
+        if at == range.end && at > range.start { at = self.previous_char_boundary(at); }
+        let class = |c: char| if c.is_alphanumeric() || c == '_' { 0 } else if c.is_whitespace() { 1 } else { 2 };
+        let Some(kind) = self.char_at(at).filter(|_| at < range.end).map(class) else { return at..at };
+        let index = self.chunks.partition_point(|entry| entry.byte <= at).saturating_sub(1);
+        let mut start = at;
+        'before: for entry in self.chunks[..=index].iter().rev() {
+            let from = range.start.saturating_sub(entry.byte);
+            let to = (at - entry.byte).min(entry.chunk.text().len());
+            if from >= to { continue; }
+            for (offset, c) in entry.chunk.text().get(from..to).unwrap_or_default().char_indices().rev() {
+                if class(c) != kind { start = entry.byte + from + offset + c.len_utf8(); break 'before; }
+            }
+            start = entry.byte + from;
+            if start == range.start { break; }
+        }
+        let mut end = at;
+        'after: for entry in &self.chunks[index..] {
+            if entry.byte >= range.end { break; }
+            let from = at.saturating_sub(entry.byte);
+            let to = (range.end - entry.byte).min(entry.chunk.text().len());
+            for (offset, c) in entry.chunk.text().get(from..to).unwrap_or_default().char_indices() {
+                if class(c) != kind { end = entry.byte + from + offset; break 'after; }
+            }
+            end = entry.byte + to;
+        }
+        start..end
+    }
+    pub(crate) fn byte_at_column(&self, line: usize, mut column: usize) -> usize {
+        let range = self.reader_line_range(line);
+        let first = self.chunks.partition_point(|entry| entry.byte <= range.start).saturating_sub(1);
+        for entry in &self.chunks[first..] {
+            if entry.byte >= range.end { break; }
+            let from = range.start.saturating_sub(entry.byte);
+            let to = (range.end - entry.byte).min(entry.chunk.text().len());
+            for (offset, _) in entry.chunk.text().get(from..to).unwrap_or_default().char_indices() {
+                if column == 0 { return entry.byte + from + offset; }
+                column -= 1;
+            }
+        }
+        range.end
+    }
+    pub fn is_large(&self) -> bool {
+        let nonempty_rows = self.line_count() - usize::from(self.bytes > 0 && self.byte_at(self.bytes - 1) == Some(b'\n'));
+        self.bytes > crate::document::LARGE_BYTES || nonempty_rows > crate::document::LARGE_LINES
+    }
+
     fn entry(&self, byte: usize) -> Option<&Entry> {
         self.chunks.get(self.chunks.partition_point(|c| c.byte <= byte).checked_sub(1)?)
     }
     fn boundary(&self, byte: usize) -> bool {
-        byte == self.bytes || byte < self.bytes && self.entry(byte).is_some_and(|e| e.chunk.text.is_char_boundary(byte - e.byte))
+        byte == self.bytes || byte < self.bytes && self.entry(byte).is_some_and(|e| e.chunk.text().is_char_boundary(byte - e.byte))
     }
     fn byte_at(&self, byte: usize) -> Option<u8> {
         let e = self.entry(byte)?;
-        e.chunk.text.as_bytes().get(byte - e.byte).copied()
+        e.chunk.text().as_bytes().get(byte - e.byte).copied()
     }
     fn line_start(&self, line: usize) -> Option<usize> {
         if line == 0 { return Some(0); }
@@ -131,14 +215,14 @@ impl TextSnapshot {
     pub fn byte_to_utf16(&self, byte: usize) -> Option<usize> {
         if !self.boundary(byte) { return None; }
         let Some(e) = self.entry(byte) else { return Some(0); };
-        Some(e.utf16 + e.chunk.text.get(..byte - e.byte)?.chars().map(char::len_utf16).sum::<usize>())
+        Some(e.utf16 + e.chunk.text().get(..byte - e.byte)?.chars().map(char::len_utf16).sum::<usize>())
     }
     pub fn utf16_to_byte(&self, unit: usize) -> Option<usize> {
         if unit > self.utf16 { return None; }
         if unit == self.utf16 { return Some(self.bytes); }
         let e = &self.chunks[self.chunks.partition_point(|e| e.utf16 <= unit) - 1];
         let mut at = e.utf16;
-        for (byte, c) in e.chunk.text.char_indices() {
+        for (byte, c) in e.chunk.text().char_indices() {
             if at == unit { return Some(e.byte + byte); }
             at += c.len_utf16();
             if at > unit { return None; }
@@ -150,16 +234,16 @@ impl TextSnapshot {
         if bytes.start > bytes.end || !self.boundary(bytes.start) || !self.boundary(bytes.end) { return None; }
         if bytes.is_empty() { return Some(Cow::Borrowed("")); }
         let e = self.entry(bytes.start)?;
-        if bytes.end <= e.byte + e.chunk.text.len() {
-            return Some(Cow::Borrowed(e.chunk.text.get(bytes.start - e.byte..bytes.end - e.byte)?));
+        if bytes.end <= e.byte + e.chunk.text().len() {
+            return Some(Cow::Borrowed(e.chunk.text().get(bytes.start - e.byte..bytes.end - e.byte)?));
         }
         let mut text = String::with_capacity(bytes.len());
         let start = self.chunks.partition_point(|e| e.byte <= bytes.start) - 1;
         for e in &self.chunks[start..] {
             if e.byte >= bytes.end { break; }
             let from = bytes.start.saturating_sub(e.byte);
-            let to = (bytes.end - e.byte).min(e.chunk.text.len());
-            text.push_str(e.chunk.text.get(from..to)?);
+            let to = (bytes.end - e.byte).min(e.chunk.text().len());
+            text.push_str(e.chunk.text().get(from..to)?);
         }
         Some(Cow::Owned(text))
     }
@@ -178,7 +262,7 @@ impl TextSnapshot {
     /// Explicit full conversion for admitted background analysis; never call from input/render paths.
     pub fn materialize(&self) -> Document {
         let mut text = String::with_capacity(self.bytes);
-        for e in self.chunks.iter() { text.push_str(&e.chunk.text); }
+        for e in self.chunks.iter() { text.push_str(e.chunk.text()); }
         Document::from_snapshot_parts(self.source.clone(), self.key.version, text.into())
     }
 
@@ -211,12 +295,12 @@ impl TextSnapshot {
         let a = &self.chunks[first];
         let b = &self.chunks[last];
         let mut rebuilt = String::new();
-        rebuilt.push_str(a.chunk.text.get(..edit.range.start - a.byte).ok_or(EditError::InvalidRange)?);
+        rebuilt.push_str(a.chunk.text().get(..edit.range.start - a.byte).ok_or(EditError::InvalidRange)?);
         rebuilt.push_str(&edit.text);
-        rebuilt.push_str(b.chunk.text.get(edit.range.end - b.byte..).ok_or(EditError::InvalidRange)?);
+        rebuilt.push_str(b.chunk.text().get(edit.range.end - b.byte..).ok_or(EditError::InvalidRange)?);
         // Rechunk one neighbour so repeated typing does not accumulate tiny chunks.
         let after = if let Some(next) = self.chunks.get(last + 1) {
-            rebuilt.push_str(&next.chunk.text);
+            rebuilt.push_str(next.chunk.text());
             last + 2
         } else { last + 1 };
         let mut chunks = Vec::with_capacity(self.chunks.len() + rebuilt.len() / CHUNK_BYTES + 2);

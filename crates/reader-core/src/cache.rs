@@ -65,8 +65,13 @@ impl InactiveCache {
     /// Keep `doc`, read as `stamp`, as the most recently left; evicts the least recently left until within
     /// the budget. A document larger than the whole budget is not kept.
     pub fn put(&mut self, stamp: Stamp, doc: Arc<Document>) {
+        self.put_current(stamp, doc, 0);
+    }
+
+    /// Keep compatibility text and its additional indexed storage in the same budget.
+    pub(crate) fn put_current(&mut self, stamp: Stamp, doc: Arc<Document>, indexed_bytes: usize) {
         self.remove(doc.source());
-        let bytes = doc.bytes();
+        let bytes = doc.bytes().saturating_add(indexed_bytes);
         if bytes > self.limit {
             return;
         }
