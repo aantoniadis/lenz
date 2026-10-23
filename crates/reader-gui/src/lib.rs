@@ -28,6 +28,7 @@ pub mod icons;
 mod preview;
 mod navigation;
 mod search;
+mod source;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -289,6 +290,7 @@ pub struct ReaderView {
     pub find_focus: Option<u8>,
     /// Each pane's text size (columns, rows) last reported to the core.
     sent_size: [(usize, usize); 2],
+    source: source::Cache,
 }
 
 /// Open a reader window with its own session; `path` opens a file in it.
@@ -493,7 +495,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -2326,15 +2328,22 @@ impl ReaderView {
     /// Include a partial last column so its final glyph can become fully visible.
     fn max_column(&self) -> usize { (self.max_hscroll() / self.char_w).ceil() as usize }
 
-    /// The widest visible line's drawn width, generously estimated, so a long line can be scrolled to its end.
+    /// Unknown extents allow further movement; a completed measurement supplies the exact clamp.
     fn max_hscroll(&self) -> f32 {
-        let Some(t) = self.session.state().active().filter(|t| t.document().is_some()) else { return 0.0 };
-        if self.session.state().wrap_cols(t).is_some() {
-            return 0.0; // wrapped lines fit
+        let state = self.session.state();
+        let Some(tab) = state.active() else { return 0.0 };
+        if state.wrap_cols(tab).is_some() { return 0.0; }
+        let Some(view) = state.view(tab.id()) else { return 0.0 };
+        let pane = state.focused_pane();
+        let width = (self.text_bounds.map_or(self.width - self.sidebar_w, |b| f32::from(b.size.width)) - num_w() - 16.0).max(1.0);
+        let mut widest = 0.0_f32;
+        let mut complete = true;
+        for line in view.visible().lines(tab.top_line(), self.rows) {
+            if let Some(extent) = self.source.extent(pane,&view,line) { widest = widest.max(extent); }
+            else { complete = false; }
         }
-        let widest = t.visible().lines(t.top_line(), self.rows).into_iter().map(|l| t.shown_line(l).text.chars().count()).max().unwrap_or(0);
-        let width = self.text_bounds.map_or(self.width - self.sidebar_w, |b| f32::from(b.size.width));
-        (widest as f32 * self.char_w - (width - num_w() - 16.0)).max(0.0)
+        let known = (widest - width).max(0.0);
+        if complete { known } else { known.max(self.hscroll() + width) }
     }
 
     /// Runs a Git Branches row's action.
@@ -2419,6 +2428,20 @@ impl ReaderView {
 
     /// The line under a window point in `tab`'s text at `bounds`, and the byte in that line nearest the point.
     fn byte_in(&self, window: &Window, tab: &Tab, bounds: Bounds<Pixels>, x: f32, y: f32) -> Option<(usize, usize)> {
+        let state = self.session.state();
+        let view = state.view(tab.id())?;
+        if state.wrap_cols(tab).is_none() {
+            if y < f32::from(bounds.origin.y) { return None; }
+            let row = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
+            let line = view.visible().lines(tab.top_line(), row + 1).last().copied()?;
+            let pane = self.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == tab.id()))?.pane;
+            let scroll = tab.column() as f32 * self.char_w;
+            let width = (f32::from(bounds.size.width) - num_w() - 16.0).max(1.0);
+            let projected = self.source.get(pane,&view,line,scroll,width)?;
+            let tx = lenz_gpui::text_x(self.metrics(),f32::from(bounds.origin.x),scroll);
+            let byte = projected.hit(window,self.metrics(),x - tx)?;
+            return Some((line,byte - view.snapshot().line_range(line)?.start));
+        }
         tab.document()?;
         if y < f32::from(bounds.origin.y) {
             return None; // the toolbar, not text
@@ -3540,9 +3563,74 @@ impl ReaderView {
         (rows, decor)
     }
 
+    fn prepare_source(&mut self, panes: &[PaneGeom], window: &mut Window) {
+        let font = self.font.clone();
+        let metrics = metrics(&font);
+        self.source.begin(metrics);
+        for g in panes {
+            let state = self.session.state();
+            let Some(tab) = state.shown(g.pane) else { continue };
+            if state.wrap_cols(tab).is_some() || matches!(tab.rendering(),Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
+            let Some(view) = state.view(tab.id()) else { continue };
+            if view.snapshot().image().is_some() && !tab.image_source() { continue; }
+            let batch = self.session.projection(g.pane).cloned();
+            let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
+            for line in view.visible().lines(tab.top_line(),g.rows) {
+                self.source.row(g.pane,&view,line,tab.column() as f32 * self.char_w,width,batch.as_deref(),window,metrics);
+            }
+        }
+        for command in self.source.finish() { self.session.dispatch(command); }
+        let max = self.max_column();
+        if self.session.state().column() > max {
+            self.session.dispatch(Command::ScrollColumn(max));
+            window.request_animation_frame();
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn projected_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32,std::ops::Range<usize>,u32,u8)>) {
+        if matches!(tab.rendering(),Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
+        let state = self.session.state();
+        let Some(view) = state.view(tab.id()) else { return Default::default() };
+        let Some(g) = self.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == tab.id())) else { return Default::default() };
+        let palette = state.palette();
+        let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
+        let selection = tab.selection();
+        let occurrences = state.occurrences().filter(|_| state.active().is_some_and(|a| a.id() == tab.id()));
+        let (read,write) = (lenz_content::theme::mix(palette.bg,palette.accent,0.18),lenz_content::theme::mix(palette.bg,palette.accent,0.32));
+        let mut out = Vec::new();
+        let mut decor = Vec::new();
+        for (i,line) in view.visible().lines(tab.top_line(),rows.max(1)).into_iter().enumerate() {
+            let Some(projected) = self.source.get(g.pane,&view,line,tab.column() as f32 * self.char_w,width) else { continue };
+            let Some(range) = view.snapshot().line_range(line) else { continue };
+            let color = |c: Option<lenz_content::highlight::Capture>| c.map_or(palette.fg,|c| palette.syntax_color(c));
+            let spans = tab.spans(line);
+            let mut fg: Vec<_> = projected.hints().into_iter().map(|r| (r,palette.num_fg)).collect();
+            fg.extend(spans.iter().filter_map(|(r,c,_)| { let r = projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((r,color(*c))) }));
+            decor.extend(spans.iter().filter(|(_,_,m)| *m != 0).filter_map(|(r,c,m)| { let r = projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((i as f32,r,color(*c),*m)) }));
+            let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
+            let caret = selection.and_then(|sel| projected.caret(sel.head));
+            let mut bg: Vec<_> = occurrences.map_or_else(Vec::new,|o| o.ranges.iter().filter_map(|(r,w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r,if *w {write} else {read})) }).collect());
+            bg.extend(tab.find().map_or(&[][..],|f| f.in_line(line)).iter().filter_map(|(_,r)| { let r=projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((r,palette.found_bg)) }));
+            let mut row = TextRow { y:i as f32,number:line as u32+1,text:projected.text.clone(),fg,bg,selected,caret };
+            if let Some((fold,true)) = tab.fold_at(line) && projected.extent.is_some() {
+                let at=row.text.len();
+                row.text.push_str(PLACEHOLDER);
+                row.bg.push((at+1..at+PLACEHOLDER.len()-1,lenz_content::theme::mix(palette.bg,palette.num_fg,0.25)));
+                row.fg.push((at..at+PLACEHOLDER.len(),palette.num_fg));
+                if fold.closes && let Some(last)=view.snapshot().line_range(fold.last as usize)
+                    && let Some(text)=view.line_window(fold.last as usize,last.start,512) { row.text.push_str(text.text.trim()); }
+                if selection.is_some_and(|s| s.range().start<=range.end && s.range().end>range.end) { row.selected=Some(row.selected.map_or(at,|r|r.start)..row.text.len()); }
+            }
+            out.push(row);
+        }
+        (out,decor)
+    }
+
     /// `tab`'s shown rows, and their underlines and strikethroughs (row, display range, colour, modifier bits).
     #[allow(clippy::type_complexity)]
     fn tab_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
+        if self.session.state().wrap_cols(tab).is_none() { return self.projected_rows(tab, rows); }
         let Some(doc) = tab.document() else { return Default::default() };
         if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) {
             return Default::default(); // a Markdown preview is shown instead
@@ -4093,6 +4181,7 @@ impl Render for ReaderView {
         if self.session.state().document().is_some() && self.session.state().column() > max {
             self.session.dispatch(Command::ScrollColumn(max));
         }
+        self.prepare_source(&panes, window);
         // Each pane's content: an image, a Markdown preview laid out for its width, or its text rows.
         let mut frames = Vec::new();
         let mut sticky_hits = Vec::new();
@@ -4171,7 +4260,8 @@ impl Render for ReaderView {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            frames.push(PaneFrame { preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            let row_origins = tab.filter(|t| state.wrap_cols(t).is_none()).and_then(|t| state.view(t.id())).map_or_else(Vec::new, |view| rows.iter().map(|row| self.source.get(g.pane, &view, row.number.saturating_sub(1) as usize, hscroll, (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0)).map_or(0.0, |r| r.origin)).collect());
+            frames.push(PaneFrame { row_origins, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
@@ -4455,8 +4545,8 @@ impl Render for ReaderView {
                                 if let Some(hint) = f.hint {
                                     lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0, hint, palette.dim);
                                 }
-                                for row in &f.rows {
-                                    lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row);
+                                for (i, row) in f.rows.iter().enumerate() {
+                                    lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll - f.row_origins.get(i).copied().unwrap_or(0.0), row);
                                 }
                                 for &(row, collapsed, bright) in &f.marks {
                                     let color = if bright { palette.fg } else { palette.num_fg };
@@ -4750,6 +4840,7 @@ struct PaneFrame {
     /// Underlines (mutable) and strikethroughs (deprecated): row, display range, colour, modifier bits.
     decor: Vec<(f32, std::ops::Range<usize>, u32, u8)>,
     hscroll: f32,
+    row_origins: Vec<f32>,
     picture: Option<(Arc<gpui::RenderImage>, (u32, u32))>,
     markdown: Option<PreviewFrame>,
     pending: bool,
