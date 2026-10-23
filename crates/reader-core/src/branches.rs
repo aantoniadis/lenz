@@ -28,6 +28,17 @@ pub struct BranchesView {
     pub worktrees_only: bool,
 }
 
+impl BranchesView {
+    /// The popup's name.
+    pub fn heading(&self) -> &'static str {
+        if self.worktrees_only { "Compare with Worktree" } else { "Git Branches" }
+    }
+    /// Why it shows no rows yet: loading, or what went wrong.
+    pub fn state_text(&self) -> Option<&str> {
+        if self.loading { Some("loading…") } else { self.error.as_deref() }
+    }
+}
+
 /// What a popup row stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchTarget {

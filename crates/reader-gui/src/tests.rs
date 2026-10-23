@@ -5228,7 +5228,7 @@ fn gui_a_rows_menu_makes_a_branch_from_it_and_the_revision_prompt_checks_out(cx:
     type_text(&mut v, "v1");
     v.simulate_keystrokes("right");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
-    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…"]);
+    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree"]);
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "v1")), "back to the list");
     v.simulate_keystrokes("right down enter");
@@ -5312,7 +5312,7 @@ fn gui_a_worktree_opens_here_or_in_a_new_window(cx: &mut TestAppContext) {
     type_text(&mut v, "second");
     v.simulate_keystrokes("right");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
-    assert_eq!(&menu[1..], ["Open", "Open in New Window"]);
+    assert_eq!(&menu[1..], ["Open", "Open in New Window", "Compare with Working Tree"]);
     v.simulate_keystrokes("down enter");
     let second = std::fs::canonicalize(wt.path().join("second")).unwrap();
     assert_eq!(f.view.read_with(&v, |r, _| r.opened_windows.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>()), [second]);
@@ -5323,3 +5323,94 @@ fn gui_a_worktree_opens_here_or_in_a_new_window(cx: &mut TestAppContext) {
     settle_for(cx, &f, 10, &|r| branch_of(r).as_deref() == Some("⎇ side"));
 }
 
+
+/// A Lenz Diff (and its terminal app) beside where the view thinks Lenz Code is.
+fn lenz_diff_beside(cx: &mut TestAppContext, f: &Fixture) -> tempfile::TempDir {
+    let bin = tempfile::tempdir().unwrap();
+    for name in ["lenz-diff", "lenz-diff-tui"] {
+        std::fs::write(bin.path().join(name), "").unwrap();
+    }
+    let exe = bin.path().join("lenz-code");
+    f.view.update(cx, |r, _| r.exe = Some(exe));
+    bin
+}
+fn launched_args(v: &mut VisualTestContext, f: &Fixture) -> Vec<Vec<String>> {
+    f.view.read_with(v, |r, _| r.launched.iter().map(|l| l.args.clone()).collect())
+}
+
+#[gpui::test]
+fn gui_the_git_menu_compares_the_working_tree(cx: &mut TestAppContext) {
+    let (f, _wt) = branches_fixture(cx);
+    let _bin = lenz_diff_beside(cx, &f);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ShowLocalChanges, w, cx));
+    assert_eq!(launched_args(&mut v, &f), [vec!["HEAD".to_string()]]);
+    // On main, the base branch: it says so and starts nothing.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ShowBranchChanges, w, cx));
+    assert!(f.view.read_with(&v, |r, _| r.status()).contains("main is the base branch"));
+    assert_eq!(launched_args(&mut v, &f).len(), 1);
+    // Compare with Branch, Tag or Revision…: refused in the prompt, then compared.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithRevision, w, cx));
+    draw(&mut v);
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(rows[1].starts_with("Compare the working tree with a branch, tag or revision"), "{rows:?}");
+    type_text(&mut v, "nope");
+    v.simulate_keystrokes("enter");
+    let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(refused.iter().any(|r| r == "No commit named \"nope\""), "{refused:?}");
+    for _ in 0..4 { v.simulate_keystrokes("backspace"); }
+    type_text(&mut v, "v1");
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(launched_args(&mut v, &f)[1], ["v1"]);
+    assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ main"), "nothing checked out");
+    assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n");
+}
+
+#[gpui::test]
+fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppContext) {
+    let (f, wt) = branches_fixture(cx);
+    let _bin = lenz_diff_beside(cx, &f);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    type_text(&mut v, "other");
+    v.simulate_keystrokes("right");
+    let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
+    v.simulate_keystrokes("down down enter");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().branches().is_none()));
+    assert_eq!(launched_args(&mut v, &f), [vec!["refs/heads/other".to_string()]]);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    type_text(&mut v, "other");
+    v.simulate_keystrokes("right down down down enter");
+    let split = lenz_content::git::testing::git(f.dir.path(), &["rev-parse", "main"]).trim().to_string();
+    assert_eq!(launched_args(&mut v, &f)[1], [split]);
+    // Compare with Worktree…: only the other worktree; Enter compares the folders.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithWorktree, w, cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(rows[1].starts_with("Compare with Worktree — type to filter; Enter compares"), "{rows:?}");
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    v.simulate_keystrokes("enter");
+    let second = wt.path().join("second").to_string_lossy().into_owned();
+    assert_eq!(launched_args(&mut v, &f)[2].last(), Some(&second));
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    // With the other worktree gone the popup says so, and Escape closes it.
+    std::fs::remove_dir_all(wt.path().join("second")).unwrap();
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithWorktree, w, cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    v.simulate_resize(size(px(300.0), px(200.0)));
+    draw(&mut v);
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert_eq!(rows[1], "Compare with Worktree — No other worktree");
+    v.simulate_keystrokes("enter escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().branches().is_none()));
+    assert_eq!(launched_args(&mut v, &f).len(), 3);
+}
