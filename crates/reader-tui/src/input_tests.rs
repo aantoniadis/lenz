@@ -1690,7 +1690,7 @@ fn folded_source_does_not_accept_hits_from_the_old_projection() {
     let before = a.session.state().selection();
     click(&mut a, x, y);
     assert_eq!(a.session.state().selection(), before);
-    assert!(a.session.state().active().unwrap().visible().hidden(1));
+    assert!(a.session.state().view(a.session.state().active().unwrap().id()).unwrap().visible().hidden(1));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 

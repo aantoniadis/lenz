@@ -4274,7 +4274,7 @@ fn sticky_lines_draw_their_fold_marks_over_the_rows_under_them(cx: &mut TestAppC
     let text = format!("mod m {{\n    fn f() {{\n{}    }}\n}}\n", "        if a {\n            b;\n        }\n".repeat(20));
     std::fs::write(&path, &text).unwrap();
     f.view.update(cx, |v, cx| v.open(path.clone(), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|tab| v.session().state().view(tab.id()).is_some_and(|view| view.declarations().is_some()) && tab.fold_at(11).is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|tab| v.session().state().view(tab.id()).is_some_and(|view| view.declarations().is_some() && view.fold_at(11).is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -4388,7 +4388,7 @@ fn a_preview_with_collapsed_folds_scrolls(cx: &mut TestAppContext) {
     show(&mut v);
     v.simulate_keystrokes("ctrl-shift--");
     show(&mut v);
-    assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().visible().hidden(2)), "precondition: sections collapsed");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().view(r.session().state().active().unwrap().id()).unwrap().visible().hidden(2)), "precondition: sections collapsed");
     v.simulate_keystrokes("ctrl-shift-v");
     drop(v);
     settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Preview(p)) if p.images.is_some()));
@@ -5044,7 +5044,7 @@ fn plain_arrows_move_unicode_caret_and_reveal_without_editing(cx: &mut TestAppCo
 fn plain_arrows_follow_wrapped_and_folded_visible_rows(cx: &mut TestAppContext) {
     let text = format!("fn folded() {{\n{}\n}}\nfn next() {{}}\n", "    word word word word word word word word word word;\n".repeat(30));
     let f = fixture(cx, Some(("folded.rs", text.as_bytes())));
-    settle(cx, &f, |r| r.session.state().active().is_some_and(|t| t.fold_at(0).is_some()));
+    settle(cx, &f, |r| r.session.state().active().is_some_and(|tab| r.session.state().view(tab.id()).is_some_and(|view| view.fold_at(0).is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(360.0), px(240.0)));
     draw(&mut v);
