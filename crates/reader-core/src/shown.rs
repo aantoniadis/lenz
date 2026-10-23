@@ -42,8 +42,7 @@ impl Shown {
 
 /// `line` as drawn ([`lenz_content::display::display_line`]) with `hints` (sorted by byte) inserted before their
 /// bytes. Hints past the drawn part of a cut line, or inside a character, are left out.
-#[cfg(test)]
-pub(crate) fn shown_line(line: &str, hints: &[Hint]) -> Shown {
+pub fn shown_line(line: &str, hints: &[Hint]) -> Shown {
     let (text, mut map) = lenz_content::display::display_line(line);
     let cut = map.len() - 1;
     let hints: Vec<&Hint> = hints.iter().filter(|h| (h.byte as usize) <= cut && line.is_char_boundary(h.byte as usize)).collect();
