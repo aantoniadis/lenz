@@ -372,8 +372,9 @@ impl App {
             geometry.controls.extend(pane.controls.iter().copied());
             if pane.preview
                 && let Some(tab) = self.session.state().shown(pane.pane)
+                && let Some(view) = self.session.state().view(tab.id())
             {
-                if let Some(view) = self.session.state().view(tab.id()) { self.preview_scroll.insert(tab.id(), (crate::app::PreviewSource::new(&view), pane.preview_top)); }
+                self.preview_scroll.insert(tab.id(), (crate::app::PreviewSource::new(&view), pane.preview_top));
             }
         }
         self.draw_results(frame, geometry.results, p);
