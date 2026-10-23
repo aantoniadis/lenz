@@ -1670,3 +1670,35 @@ in both baseline and candidate; their exact cause remains untraced. Typical cach
 rose by about 0.2 µs while p95 improved. The full local gate passed at `39a830c`, including actual adapters,
 collectors and release checks. Native macOS, physical display latency, complete rendering/input migration
 and long-session behavior remain unverified by this prerequisite.
+
+## 2026-10-23 GUI snapshot windows
+
+The [scoped GUI report](research/reader-snapshot-gui.md) records the migration from
+whole-line compatibility reads to current snapshots, shared resumable layout and
+bounded native fragments. Paint, hit-testing, decorations and documentation anchors
+share the same native origins. The 32-case focused adapter batch passes; the complete
+08–10 integration gate remains pending.
+
+A 50,000-mark source exposed966 retained window references after display suppression.
+Omitting empty pieces/windows and coalescing hidden source intervals fixed retention
+without losing the caret boundary or original copy bytes. The first long-emoji oracle
+was invalid because an unbounded native prefix accumulated `f32` rounding; a painted
+literal/glyph-width comparison now verifies exact selection. A combined constructor
+check also caught and fixed the skipped failed-SVG source fallback. An early command
+without the GUI test feature ran no adapter tests and is excluded from evidence.
+
+A sequential release pair suggested 1–2 ms slower GUI startup, but eight alternating
+pairs measured 142.45→142.39 ms and did not reproduce it. Ten-tab settled RSS measured
+172.50→172.03 MiB; both 15-second scroll runs produced 314 frames and matching 48 ms
+intervals on the owned Xvfb/Mesa display. No GUI performance exception is taken.
+Raw samples and exact executables remain under `target/perf/editor-implementation/08/`.
+The optional native-width diagnostic is version 1 and is excluded from production.
+Its sampled default font did not reproduce the proposed positive-column/zero-advance
+pair; TestPlatform glyph metrics differ from native ones. Native macOS, physical
+presentation, GPU memory, arbitrary fonts and long sessions remain unverified.
+
+A later owned native GUI/PTY probe found a shared Go To reveal gap: the correct
+Unicode source byte is selected and copied, but its native glyph position is not
+scrolled into view. Scalar columns and native pixels/cells differ, so the final
+adapter acceptance remains pending a shared, identity-validated native reveal goal.
+The native red screenshot/OCR/clipboard evidence is retained under `08/native-goto-red/`.

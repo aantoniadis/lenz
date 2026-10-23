@@ -351,6 +351,12 @@ The warm OS page cache and shader cache were retained in both startup cases;
 servers or GPU allocations. See [Reader measurements](docs/code/performance.md) for
 raw samples, fixture details, reproduction and limits.
 
+The bounded-source GUI migration measured **142.45→142.39 ms** startup in eight
+alternating release pairs, **172.50→172.03 MiB** settled RSS for ten kept tabs, and
+matching 15-second wrapped/unwrapped scroll intervals. These use a separate generated
+fixture and owned software display; see the [migration measurements](docs/research/reader-snapshot-gui.md)
+for endpoints, limits and the pending integrated gate.
+
 The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
 (seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a
 60-second navigation run. Timings end at PTY bytes, and RSS excludes GPU and
