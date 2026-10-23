@@ -31,7 +31,7 @@ One `lenz` command opens both, each a separate executable:
 
 **Status:** beta (0.0.4). Diff is tested on Linux and macOS (Apple Silicon), with automated
 GUI interaction coverage on Linux. The Code Reader and the launcher are verified on Linux;
-native macOS validation is pending. The Reader is read-only, with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
+native macOS validation is pending. The Reader never edits files (Git checkouts you choose aside), with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
@@ -64,7 +64,7 @@ native macOS validation is pending. The Reader is read-only, with desktop and te
 - **Share appearance** with Diff: theme selection, custom themes and desktop font
   preferences. Each app keeps its own documents and navigation state.
 
-The Reader does not edit the files it displays. Archive browsing is currently a
+The Reader does not edit the files it displays; only the checkouts and branches you choose change your repository. Archive browsing is currently a
 Diff feature. See the [Reader guide](docs/code/README.md) for controls and limits,
 and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
 

@@ -3,8 +3,10 @@
 
 use std::{
     collections::BTreeMap,
-    path::{Path, PathBuf},
+    path::Path,
 };
+
+pub use lenz_content::branches::{Worktree, worktrees};
 
 use crate::{
     changeset::{ChangeSet, Status, list_git, toplevel},
@@ -37,19 +39,6 @@ pub struct Tag {
     pub commit: String,
     /// The tagger date of an annotated tag, else the commit's date; seconds since the epoch.
     pub date: i64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Worktree {
-    pub path: PathBuf,
-    /// `None` for a bare repository.
-    pub head: Option<String>,
-    /// `None` when detached (or bare).
-    pub branch: Option<String>,
-    /// The worktree Lenz runs in.
-    pub current: bool,
-    /// Paths with local changes; `None` when they can't be read (bare, or its directory is gone).
-    pub dirty: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -149,32 +138,6 @@ pub fn tags(cwd: &Path) -> Result<Vec<Tag>, String> {
         .collect())
 }
 
-/// The repository's worktrees, main first, each with its count of changed paths.
-pub fn worktrees(cwd: &Path) -> Result<Vec<Worktree>, String> {
-    let out = git::run(cwd, &["worktree", "list", "--porcelain"])?;
-    let here = toplevel(cwd).ok().and_then(|p| p.canonicalize().ok());
-    let mut list = Vec::new();
-    // ponytail: `-z` needs git 2.36; a path with a newline would be C-quoted here.
-    for block in String::from_utf8_lossy(&out).split("\n\n").filter(|b| !b.trim().is_empty()) {
-        let mut w = Worktree { path: PathBuf::new(), head: None, branch: None, current: false, dirty: None };
-        let mut readable = true;
-        for line in block.lines() {
-            let (key, value) = line.split_once(' ').unwrap_or((line, ""));
-            match key {
-                "worktree" => w.path = PathBuf::from(value),
-                "HEAD" => w.head = Some(value.to_string()),
-                "branch" => w.branch = Some(value.strip_prefix("refs/heads/").unwrap_or(value).to_string()),
-                "bare" | "prunable" => readable = false,
-                _ => {}
-            }
-        }
-        w.current = here.is_some() && w.path.canonicalize().ok() == here;
-        w.dirty = if readable { dirty(&w.path).ok() } else { None };
-        list.push(w);
-    }
-    Ok(list)
-}
-
 /// Stashes, newest first. Listed only: never applied or dropped.
 pub fn stashes(cwd: &Path) -> Result<Vec<Stash>, String> {
     let out = git::run(cwd, &["stash", "list", "--format=%H%x00%ct%x00%gs"])?;
@@ -206,21 +169,6 @@ fn refs_limited<const N:usize>(cwd:&Path,pattern:&str,sort:&str,fields:[&str;N],
             values.try_into().map_err(|_| format!("lenz: unexpected `git for-each-ref` output: {line:?}"))
         })
         .collect()
-}
-
-/// How many paths `git status` lists in `dir`, untracked files included.
-fn dirty(dir: &Path) -> Result<usize, String> {
-    let args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"];
-    let out = git::run(dir, &args)?;
-    let mut entries = out.split(|&b| b == 0).filter(|e| !e.is_empty());
-    let mut count = 0;
-    while let Some(entry) = entries.next() {
-        if entry.starts_with(b"2 ") {
-            entries.next(); // a rename's original path
-        }
-        count += 1;
-    }
-    Ok(count)
 }
 
 #[cfg(test)]

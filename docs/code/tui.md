@@ -56,6 +56,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
 | Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
+| Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the status bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
 | Annotate with Git blame | Alt-B (View menu, right-click); click an annotation for its commit (d Show Diff, c Copy Revision); the status line shows the caret line's commit |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |

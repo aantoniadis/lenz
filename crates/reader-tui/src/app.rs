@@ -65,8 +65,24 @@ pub(crate) enum Prompt {
     },
     Help,
     /// Read-only text (About adds its half-block logo when there is room).
-    /// `commit`: the core's commit popup (its text follows the core; Show Diff / Copy Revision / Close).
-    Details { title: &'static str, body: String, logo: bool, commit: bool },
+    /// `kind`: plain text, or one of the core's dialogs whose text and buttons follow the core (the commit popup:
+    /// Show Diff / Copy Revision / Close; the checkout problem: its choices).
+    Details { title: &'static str, body: String, logo: bool, kind: Details },
+    /// The Git Branches popup (the core's lists; `input` filters).
+    Branches,
+    /// A popup row's actions, and the popup's filter and row to go back to.
+    BranchMenu { target: reader_core::branches::BranchTarget, label: String, query: String, row: usize },
+    /// A new branch's name (`input`), where it starts (`None`: HEAD) and whether to check it out (Tab).
+    NewBranch { from: Option<String>, checkout: bool },
+    /// Checkout Tag or Revision (`input`).
+    Revision,
+}
+/// What a details prompt is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Details {
+    Text,
+    Commit,
+    Checkout,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -98,6 +114,9 @@ pub(crate) enum ChoiceTarget {
         crumb: usize,
         index: usize,
     },
+    /// A Git Branches row (Enter runs its first action), or one of a row's actions.
+    Branch(reader_core::branches::BranchTarget),
+    BranchAction(reader_core::branches::BranchTarget, reader_core::branches::BranchAction),
 }
 #[derive(Clone, Copy)]
 struct Hover {
@@ -123,6 +142,8 @@ pub(crate) struct App {
     pub independent_view: Option<(usize, usize)>,
     pub quit: bool,
     pub new_view: bool,
+    /// The folder the new view opens (Open in New Window on a worktree).
+    pub new_view_root: Option<PathBuf>,
     pub copy: Option<String>,
     /// Lenz Diff's terminal app, for the runtime to run in this terminal until it quits.
     pub foreground: Option<lenz_content::open::Launch>,
@@ -157,6 +178,7 @@ impl App {
             independent_view: None,
             quit: false,
             new_view: false,
+            new_view_root: None,
             copy: None,
             foreground: None,
             #[cfg(test)]
@@ -399,16 +421,24 @@ impl App {
     }
     pub(crate) fn show_documentation(&mut self) {
         // The core's commit popup opens, follows and closes its dialog.
-        match (self.session.commit_text(), self.modal.as_mut()) {
-            (Some(text), Some(Modal { kind: Prompt::Details { commit: true, body, .. }, .. })) => *body = text,
-            (None, Some(Modal { kind: Prompt::Details { commit: true, .. }, .. })) => self.modal = None,
-            (Some(body), None) => self.prompt(Prompt::Details { title: "Commit", body, logo: false, commit: true }),
+        for (kind, title, now) in [(Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+            match (now, self.modal.as_mut()) {
+                (Some(text), Some(Modal { kind: Prompt::Details { kind: k, body, .. }, .. })) if *k == kind => *body = text,
+                (None, Some(Modal { kind: Prompt::Details { kind: k, .. }, .. })) if *k == kind => self.modal = None,
+                (Some(body), None) => self.prompt(Prompt::Details { title, body, logo: false, kind }),
+                _ => {}
+            }
+        }
+        // The core's Git Branches popup opens and closes its list.
+        match (self.session.state().branches().is_some(), self.modal.as_ref().map(|m| &m.kind)) {
+            (true, None) => self.prompt(Prompt::Branches),
+            (false, Some(Prompt::Branches | Prompt::BranchMenu { .. })) => self.modal = None,
             _ => {}
         }
         if self.modal.is_none()
             && let Some(doc) = self.session.state().documentation()
         {
-            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false, commit: false });
+            self.prompt(Prompt::Details { title: "Documentation", body: doc.preview.doc.text.clone(), logo: false, kind: Details::Text });
         }
     }
     fn open_root(&mut self, path: PathBuf) {
@@ -574,6 +604,16 @@ impl App {
                 }
                 return;
             }
+            InterfaceAction::NewBranch => Prompt::NewBranch { from: None, checkout: true },
+            InterfaceAction::CheckoutRevision => Prompt::Revision,
+            InterfaceAction::ResolveConflicts => {
+                let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                match self.session.merge_launch(&exe, true) {
+                    Ok(launch) => self.foreground = Some(launch),
+                    Err(e) => return self.dispatch(Command::Notice(e)),
+                }
+                return;
+            }
             InterfaceAction::ShowCommitDiff => {
                 let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
                 let launch = self.session.commit_diff_launch(&exe, true);
@@ -625,9 +665,9 @@ impl App {
                     details.push_str("\n\nTerminal notice\n");
                     details.push_str(notice);
                 }
-                Prompt::Details { title, body: details, logo: false, commit: false }
+                Prompt::Details { title, body: details, logo: false, kind: Details::Text }
             },
-            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true, commit: false },
+            InterfaceAction::About => Prompt::Details { title: reader_core::chrome::ABOUT_TITLE, body: reader_core::chrome::about(), logo: true, kind: Details::Text },
             InterfaceAction::NewWindow => {
                 self.new_view = true;
                 return;
@@ -778,7 +818,9 @@ impl App {
                 Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
-                Prompt::Details { commit: true, .. } => self.dispatch(Command::CloseCommit),
+                Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
+                Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel)),
+                Prompt::Branches | Prompt::BranchMenu { .. } => self.dispatch(Command::CloseBranches),
                 Prompt::Details { .. } if self.session.state().documentation().is_some() => {
                     self.dispatch(Command::CloseDocumentation)
                 }
@@ -927,6 +969,19 @@ impl App {
                     target: ChoiceTarget::Place(r.place),
                 })
                 .collect(),
+            Prompt::Branches => self
+                .session
+                .state()
+                .branch_rows(&modal.input)
+                .into_iter()
+                .map(|r| simple(reader_core::branches::row_text(&r), ChoiceTarget::Branch(r.target)))
+                .collect(),
+            Prompt::BranchMenu { ref target, .. } => self
+                .session
+                .branch_actions(target)
+                .into_iter()
+                .map(|(label, action)| simple(label.into(), ChoiceTarget::BranchAction(target.clone(), action)))
+                .collect(),
             Prompt::Siblings { pane, crumb } => self
                 .session
                 .state()
@@ -944,7 +999,7 @@ impl App {
         };
         if matches!(
             modal.kind,
-            Prompt::Places(_) | Prompt::ServerRuntime | Prompt::Themes
+            Prompt::Places(_) | Prompt::ServerRuntime | Prompt::Themes | Prompt::Branches | Prompt::BranchMenu { .. }
         ) || query.is_empty()
         {
             choices
@@ -983,6 +1038,14 @@ impl App {
                 Prompt::Siblings { .. } => "Breadcrumb entries",
                 Prompt::Help => "Reader help",
                 Prompt::Details { title, .. } => title,
+                Prompt::Branches => match self.session.state().branches() {
+                    Some(b) if b.loading => "Git Branches · loading…",
+                    _ => "Git Branches · type to filter · Enter checks out · → more",
+                },
+                Prompt::BranchMenu { .. } => "Actions · ← back",
+                Prompt::NewBranch { checkout: true, from } => return format!("New branch from {} · [x] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
+                Prompt::NewBranch { checkout: false, from } => return format!("New branch from {} · [ ] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
+                Prompt::Revision => "Checkout tag or revision · Enter",
             }
             .to_owned()
         })
@@ -1119,7 +1182,48 @@ impl App {
             self.run(CommandId::CopyServerDetails);
             return;
         }
-        if let Prompt::Details { commit: true, .. } = &kind
+        if let Prompt::Details { kind: Details::Checkout, .. } = &kind {
+            // s Smart Checkout, f Force, y confirms the discard (another key than f, so a held f never does); Esc
+            // cancels; Enter takes the first safe choice.
+            use reader_core::branches::CheckoutChoice as C;
+            let choices: Vec<C> = self.session.checkout_choices().into_iter().map(|c| c.1).collect();
+            let pick = match key.code {
+                KeyCode::Esc => Some(C::Cancel),
+                KeyCode::Char('s' | 'S') if !control && !alt => Some(C::Smart),
+                KeyCode::Char('f' | 'F') if !control && !alt => Some(C::Force),
+                KeyCode::Char('y' | 'Y') if !control && !alt => Some(C::ConfirmForce),
+                KeyCode::Enter => choices.first().copied().filter(|c| *c != C::ConfirmForce),
+                _ => None,
+            };
+            if let Some(c) = pick.filter(|c| choices.contains(c)) {
+                self.dispatch(Command::CheckoutChoice(c));
+            }
+            return;
+        }
+        // The Git Branches popup: Right opens the highlighted row's actions; in them Left or Esc goes back.
+        if kind == Prompt::Branches && key.code == KeyCode::Right {
+            return self.open_branch_menu(self.modal.as_ref().map_or(0, |m| m.at));
+        }
+        if matches!(kind, Prompt::BranchMenu { .. }) && key.code == KeyCode::Right {
+            return self.accept();
+        }
+        if let Prompt::BranchMenu { query, row, .. } = &kind
+            && matches!(key.code, KeyCode::Left | KeyCode::Esc)
+        {
+            let (query, row) = (query.clone(), *row);
+            self.prompt(Prompt::Branches);
+            if let Some(m) = self.modal.as_mut() {
+                (m.input, m.at) = (query, row);
+            }
+            return;
+        }
+        if key.code == KeyCode::Tab
+            && let Some(Modal { kind: Prompt::NewBranch { checkout, .. }, .. }) = self.modal.as_mut()
+        {
+            *checkout = !*checkout;
+            return;
+        }
+        if let Prompt::Details { kind: Details::Commit, .. } = &kind
             && !alt
         {
             match key.code {
@@ -1300,6 +1404,34 @@ impl App {
         }
     }
     // The initial Some guard keeps the modal present in error branches; successful dismissals do not reuse it.
+    /// The actions of Git Branches row `at` (none for the popup's own commands).
+    fn open_branch_menu(&mut self, at: usize) {
+        let query = self.modal.as_ref().map(|m| m.input.clone()).unwrap_or_default();
+        let Some(r) = self.session.state().branch_rows(&query).into_iter().nth(at) else { return };
+        if self.session.branch_actions(&r.target).is_empty() {
+            return;
+        }
+        self.prompt(Prompt::BranchMenu { target: r.target, label: r.label, query, row: at });
+    }
+    /// Runs a Git Branches row's action.
+    fn branch_action(&mut self, target: reader_core::branches::BranchTarget, action: reader_core::branches::BranchAction) {
+        use reader_core::branches::{BranchAction, BranchTarget};
+        self.dispatch(Command::CloseBranches);
+        match (action, target) {
+            (BranchAction::Checkout, t) => {
+                if let Some(target) = t.checkout() {
+                    self.dispatch(Command::Checkout(target));
+                }
+            }
+            (BranchAction::NewBranchFrom, t) => self.prompt(Prompt::NewBranch { from: t.rev(), checkout: true }),
+            (BranchAction::Open, BranchTarget::Worktree(path)) => self.dispatch(Command::OpenWorktree(path)),
+            (BranchAction::OpenInNewWindow, BranchTarget::Worktree(path)) => {
+                self.new_view = true;
+                self.new_view_root = Some(path);
+            }
+            (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
+        }
+    }
     fn accept(&mut self) {
         let Some(m) = self.modal.as_ref() else { return };
         let (kind, input, secondary, at) =
@@ -1427,7 +1559,23 @@ impl App {
                 self.focus = Focus::Results;
             }
             Prompt::Help | Prompt::Details { .. } => self.close_modal(),
+            Prompt::NewBranch { from, checkout } => match self.session.validate_branch_name(&input) {
+                Ok(()) => {
+                    self.close_modal();
+                    self.dispatch(Command::NewBranch { name: input.trim().to_string(), from, checkout });
+                }
+                Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
+            },
+            Prompt::Revision => match self.session.validate_revision(&input) {
+                Ok(_) => {
+                    self.close_modal();
+                    self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(input.trim().to_string())));
+                }
+                Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
+            },
             Prompt::Mnemonic => {}
+            // Enter on the current branch or worktree does nothing (its other actions are in its menu), as in the GUI.
+            Prompt::Branches if self.choices().get(at).is_some_and(|c| matches!(&c.target, ChoiceTarget::Branch(t) if !matches!(t, reader_core::branches::BranchTarget::Action(_)) && self.session.branch_enter(t).is_none())) => {}
             _ => {
                 let Some(choice) = self.choices().get(at).cloned() else {
                     return;
@@ -1451,6 +1599,15 @@ impl App {
                         }
                     }
                     ChoiceTarget::Place(place) => self.dispatch(Command::GoToPlace(place)),
+                    ChoiceTarget::Branch(target) => match target {
+                        reader_core::branches::BranchTarget::Action(id) => self.run(id),
+                        t => {
+                            if let Some(action) = self.session.branch_enter(&t) {
+                                self.branch_action(t, action);
+                            }
+                        }
+                    },
+                    ChoiceTarget::BranchAction(target, action) => self.branch_action(target, action),
                     ChoiceTarget::Sibling { pane, crumb, index } => {
                         self.dispatch(Command::FocusPane(pane));
                         if let Some(s) = self.session.state().siblings(pane, crumb).get(index) {
@@ -1587,6 +1744,7 @@ impl App {
             (KeyCode::Char('e'), true, false, false) => Some(CommandId::RecentFiles),
             (KeyCode::Char('b'), true, false, true) => Some(CommandId::Implementation),
             (KeyCode::Char('b'), false, false, true) => Some(CommandId::AnnotateBlame),
+            (KeyCode::Char('`' | '~'), true, _, _) => Some(CommandId::GitBranches),
             (KeyCode::Char('b' | 'B'), true, true, _) => Some(CommandId::TypeDefinition),
             (KeyCode::Char('b'), true, false, false) => Some(CommandId::ToggleExplorer),
             (KeyCode::Char('h'), true, _, true) => Some(CommandId::CallHierarchy),
@@ -1960,9 +2118,19 @@ impl App {
                 }
             }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
-                && let Some(Modal { kind: Prompt::Details { body, commit, .. }, .. }) = &self.modal
+                && let Some(Modal { kind: Prompt::Details { kind: Details::Checkout, .. }, .. }) = &self.modal
             {
-                if *commit {
+                if let Some(i) = self.layout.details_choices.iter().position(|b| b.contains(point))
+                    && let Some(&(_, c)) = self.session.checkout_choices().get(i)
+                {
+                    self.dispatch(Command::CheckoutChoice(c));
+                }
+                return;
+            }
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
+                && let Some(Modal { kind: Prompt::Details { body, kind, .. }, .. }) = &self.modal
+            {
+                if *kind == Details::Commit {
                     if self.layout.details_diff.contains(point) {
                         return self.run(CommandId::ShowCommitDiff);
                     }
@@ -1978,6 +2146,17 @@ impl App {
                     self.close_modal();
                     return;
                 }
+            }
+            // A Git Branches row: a right click shows its actions.
+            if matches!(event.kind, MouseEventKind::Down(MouseButton::Right))
+                && self.modal.as_ref().is_some_and(|m| m.kind == Prompt::Branches)
+                && self.layout.modal_rows.contains(point)
+            {
+                let screen_row = y.saturating_sub(self.layout.modal_rows.y) as usize;
+                if let Some(&row) = self.layout.modal_items.get(screen_row) {
+                    self.open_branch_menu(row);
+                }
+                return;
             }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && self.layout.modal_rows.contains(point)

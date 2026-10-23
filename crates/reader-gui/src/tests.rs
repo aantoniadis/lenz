@@ -186,7 +186,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), selected);
     draw(&mut v);
-    let [copy, close] = f.view.read_with(&v, |r, _| <[_; 2]>::try_from(r.modal_layout().unwrap().details_buttons(r.char_w, details_labels(false))).unwrap());
+    let [copy, close] = f.view.read_with(&v, |r, _| <[_; 2]>::try_from(r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Text))).unwrap());
     v.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into())));
     v.simulate_click(copy.center(), Modifiers::default());
     assert_eq!(clipboard(&mut v).as_deref(), Some(expected.as_str()));
@@ -4897,10 +4897,10 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, c) = r.status_segments();
-                assert!(a.0.right() <= b.0.left() && b.0.right() <= c.0.left());
+                let (a, b, g, c) = r.status_segments();
+                assert!(a.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
                 assert!(c.0.right() <= px(w));
-                for (bounds, text) in [a, b, c] {
+                for (bounds, text) in [a, b, g, c] {
                     assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
                 }
                 assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
@@ -4911,7 +4911,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { .. }))));
             // A long Unicode snapshot exercises the adapter's wrapping and independent scroll viewport.
             let text = format!("{}\n{}", "日本語 e\u{301} ".repeat(100), "details\n".repeat(60));
-            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { commit: false, title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
+            f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::StatusDetails { kind: Details::Text, title: "Status details", text: text.clone(), logo: None }); cx.notify(); });
             v.simulate_keystrokes("end up");
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
@@ -5053,11 +5053,11 @@ fn gui_annotation_column_shifts_text_and_click_opens_the_commit(cx: &mut TestApp
     v.simulate_click(at, Modifiers::default());
     settle(cx, &f, |r| r.session().state().commit_popup().is_some_and(|p| p.details.is_some()));
     draw(&mut v);
-    let text = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::StatusDetails { commit: true, text, .. }) => text.clone(), _ => String::new() });
+    let text = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::StatusDetails { kind: Details::Commit, text, .. }) => text.clone(), _ => String::new() });
     assert!(text.starts_with(&format!("commit {sha}")), "{text}");
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 4..4, "the caret is on the clicked line");
     // Copy Revision, then Show Diff (Lenz Diff is not beside the test binary: it says so).
-    let button = |v: &mut VisualTestContext, i: usize| f.view.read_with(v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, details_labels(true))[i].center());
+    let button = |v: &mut VisualTestContext, i: usize| f.view.read_with(v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Commit))[i].center());
     let copy = button(&mut v, 1);
     v.simulate_click(copy, Modifiers::default());
     assert_eq!(cx.update(|cx| cx.read_from_clipboard().and_then(|c| c.text())), Some(sha.clone()));
@@ -5157,3 +5157,169 @@ fn gui_the_hovered_annotation_follows_a_scroll(cx: &mut TestAppContext) {
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.ann_hovered().map(|h| h.2)), Some(5), "the line now under the pointer");
 }
+
+/// A fixture on a git repository: `main` with `a.txt`, branch `other` changing it, tag `v1`, a second worktree.
+fn branches_fixture(cx: &mut TestAppContext) -> (Fixture, tempfile::TempDir) {
+    use lenz_content::git::testing::{commit_all, git};
+    let f = fixture(cx, Some(("a.txt", b"main\n")));
+    let d = f.dir.path();
+    git(d, &["init", "-q", "-b", "main"]);
+    git(d, &["config", "user.name", "t"]);
+    git(d, &["config", "user.email", "t@t"]);
+    std::fs::write(d.join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
+    commit_all(d, "main");
+    git(d, &["tag", "v1"]);
+    git(d, &["switch", "-q", "-c", "other"]);
+    std::fs::write(d.join("a.txt"), "other\n").unwrap();
+    commit_all(d, "other");
+    git(d, &["switch", "-q", "main"]);
+    let wt = tempfile::tempdir().unwrap();
+    git(d, &["worktree", "add", "-q", "-b", "side", &wt.path().join("second").to_string_lossy()]);
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(d.to_path_buf()), cx));
+    settle_for(cx, &f, 10, &|v| v.session().branch_label().is_some() && v.session().state().document().is_some());
+    (f, wt)
+}
+fn branch_of(v: &ReaderView) -> Option<String> {
+    v.session().branch_label()
+}
+fn type_text(v: &mut VisualTestContext, text: &str) {
+    for c in text.chars() {
+        v.simulate_keystrokes(&c.to_string());
+    }
+}
+
+#[gpui::test]
+fn gui_the_status_branch_opens_the_popup_and_enter_checks_out(cx: &mut TestAppContext) {
+    let (f, _wt) = branches_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    let (bounds, text) = f.view.read_with(&v, |r, _| r.status_branch());
+    assert_eq!(text, "⎇ main");
+    v.simulate_click(bounds.center(), Modifiers::default());
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { .. }))));
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(rows.iter().any(|r| r.contains("● main")), "{rows:?}");
+    type_text(&mut v, "oth");
+    let found: Vec<_> = f.view.read_with(&v, |r, _| r.session().state().branch_rows("oth").into_iter().map(|r| (r.section, r.label)).collect());
+    assert_eq!(found, [("Recent", "other".to_string()), ("Local", "other".to_string())]);
+    v.simulate_keystrokes("enter");
+    settle_for(cx, &f, 10, &|r| !r.session().state().checking_out());
+    assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ other"));
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.text().as_ref() == "other\n"));
+    // Narrow: no branch cell.
+    v.simulate_resize(size(px(400.0), px(300.0)));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.status_branch().1), "");
+}
+
+#[gpui::test]
+fn gui_a_rows_menu_makes_a_branch_from_it_and_the_revision_prompt_checks_out(cx: &mut TestAppContext) {
+    let (f, _wt) = branches_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    type_text(&mut v, "v1");
+    v.simulate_keystrokes("right");
+    let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…"]);
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "v1")), "back to the list");
+    v.simulate_keystrokes("right down enter");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewBranch { from: Some(f), .. }) if f == "refs/tags/v1")));
+    type_text(&mut v, "other");
+    v.simulate_keystrokes("enter");
+    let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(refused.iter().any(|r| r == "A branch named \"other\" already exists"), "{refused:?}");
+    for _ in 0..5 { v.simulate_keystrokes("backspace"); }
+    type_text(&mut v, "from-v1");
+    v.simulate_keystrokes("enter");
+    settle_for(cx, &f, 10, &|r| !r.session().state().checking_out());
+    assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ from-v1"));
+    // Checkout Tag or Revision…: a bad name is refused in the prompt, a good one checks out detached.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CheckoutRevision, w, cx));
+    // A paste goes in (its first line).
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("pasted\nsecond line".into()));
+    v.simulate_keystrokes("ctrl-v");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Revision { input, .. }) if input == "pasted")));
+    for _ in 0..6 { v.simulate_keystrokes("backspace"); }
+    type_text(&mut v, "nope");
+    v.simulate_keystrokes("enter");
+    let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(refused.iter().any(|r| r == "No commit named \"nope\""), "{refused:?}");
+    for _ in 0..4 { v.simulate_keystrokes("backspace"); }
+    type_text(&mut v, "v1");
+    v.simulate_keystrokes("enter");
+    settle_for(cx, &f, 10, &|r| !r.session().state().checking_out());
+    let sha = lenz_content::git::testing::git(f.dir.path(), &["rev-parse", "v1"]).trim().to_string();
+    assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)), Some(format!("⎇ {}", &sha[..7])));
+}
+
+#[gpui::test]
+fn gui_checkout_problems_offer_smart_and_a_confirmed_force(cx: &mut TestAppContext) {
+    let (f, _wt) = branches_fixture(cx);
+    std::fs::write(f.dir.path().join("a.txt"), "mine\n").unwrap();
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Checkout(lenz_content::branches::Target::Branch("other".into())), cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().checkout_problem().is_some());
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Notice(String::new()), cx));
+    draw(&mut v);
+    let dialog = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::StatusDetails { kind: Details::Checkout, text, .. }) => Some(text.clone()), _ => None });
+    assert!(dialog.as_deref().is_some_and(|t| t.contains("a.txt")), "{dialog:?}");
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Checkout)), ["Smart Checkout", "Force Checkout", "Cancel"]);
+    // Force: a second step lists what is discarded; Enter there does nothing; f confirms.
+    v.simulate_keystrokes("f");
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Checkout)), ["Force Checkout", "Cancel"]);
+    v.simulate_keystrokes("enter");
+    v.simulate_keystrokes("f");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "mine\n", "neither Enter nor a second f discards");
+    assert_eq!(f.view.read_with(&v, |r, _| r.details_labels(Details::Checkout)), ["Force Checkout", "Cancel"]);
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().checkout_problem().is_none()));
+    // Again, then the Force button and its confirmation button.
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Checkout(lenz_content::branches::Target::Branch("other".into())), cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().checkout_problem().is_some());
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Notice(String::new()), cx));
+    draw(&mut v);
+    let button = |v: &mut VisualTestContext, i: usize| f.view.read_with(v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Checkout))[i].center());
+    let force = button(&mut v, 1);
+    v.simulate_click(force, Modifiers::default());
+    draw(&mut v);
+    let confirm = button(&mut v, 0);
+    v.simulate_click(confirm, Modifiers::default());
+    settle_for(cx, &f, 10, &|r| !r.session().state().checking_out());
+    assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ other"));
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "other\n");
+}
+
+#[gpui::test]
+fn gui_a_worktree_opens_here_or_in_a_new_window(cx: &mut TestAppContext) {
+    let (f, wt) = branches_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    type_text(&mut v, "second");
+    v.simulate_keystrokes("right");
+    let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert_eq!(&menu[1..], ["Open", "Open in New Window"]);
+    v.simulate_keystrokes("down enter");
+    let second = std::fs::canonicalize(wt.path().join("second")).unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.opened_windows.iter().map(|p| std::fs::canonicalize(p).unwrap()).collect::<Vec<_>>()), [second]);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    type_text(&mut v, "second");
+    v.simulate_keystrokes("enter");
+    settle_for(cx, &f, 10, &|r| branch_of(r).as_deref() == Some("⎇ side"));
+}
+

@@ -79,8 +79,8 @@ pub enum Modal {
     /// Shared server management actions, with diagnostics in Server Details.
     LanguageServer { at: usize },
     /// A frozen, read-only diagnostic snapshot (or About, with its logo); Copy preserves the complete text.
-    /// `commit`: the core's commit popup (its text follows the core; Show Diff / Copy Revision / Close buttons).
-    StatusDetails { title: &'static str, text: String, logo: Option<AboutLogo>, commit: bool },
+    /// `kind`: plain text (Copy / Close), or one of the core's dialogs whose text and buttons follow the core.
+    StatusDetails { title: &'static str, text: String, logo: Option<AboutLogo>, kind: Details },
     /// The theme chooser: "system" then each theme ID, and the highlighted one.
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
@@ -107,11 +107,22 @@ pub enum Modal {
     Places { list: PlaceList, query: String, at: usize },
     /// The bookmark key chooser: the next 0–9 / A–Z key sets it on the caret's line.
     Mnemonic,
+    /// The Git Branches popup (the core's lists): the filter typed so far and the highlighted row.
+    Branches { query: String, at: usize },
+    /// A popup row's actions: the row, its label, the highlighted action, and the popup's filter and row to go back to.
+    BranchMenu { target: reader_core::branches::BranchTarget, label: String, at: usize, query: String, row: usize },
+    /// A new branch: where it starts (`None`: HEAD), its name so far, whether to check it out, and why it was refused.
+    NewBranch { from: Option<String>, name: String, checkout: bool, error: Option<String> },
+    /// Checkout Tag or Revision: what is typed so far, and why it was refused.
+    Revision { input: String, error: Option<String> },
 }
 
-/// The details dialog's buttons: the commit popup's actions, else Copy and Close.
-fn details_labels(commit: bool) -> &'static [&'static str] {
-    if commit { &["Show Diff", "Copy Revision", "Close"] } else { &["Copy", "Close"] }
+/// What a details dialog is: plain text, the core's commit popup, or its checkout-problem dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Details {
+    Text,
+    Commit,
+    Checkout,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -175,6 +186,9 @@ pub struct ReaderView {
     pub(crate) crumb_focus: Option<(u8, usize)>,
     /// The pointer over a blame column; what it is over is found when drawn (it follows scrolling).
     ann_hover: Option<gpui::Point<Pixels>>,
+    /// For tests: worktrees Open in New Window was asked for (a real window is not opened).
+    #[cfg(feature = "test-support")]
+    pub opened_windows: Vec<PathBuf>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -475,7 +489,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -635,7 +649,9 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
-            Some(Modal::StatusDetails { commit: true, .. }) => self.dispatch(Command::CloseCommit, cx),
+            Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
+            Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
+            Some(Modal::StatusDetails { kind: Details::Checkout, .. }) => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel), cx),
             _ => {}
         }
         cx.notify();
@@ -748,14 +764,23 @@ impl ReaderView {
             cx.write_to_primary(ClipboardItem::new_string(text.to_owned()));
         }
         // The core's commit popup opens, follows and closes its dialog.
-        match (self.session.commit_text(), &mut self.modal) {
-            (Some(t), Some(Modal::StatusDetails { commit: true, text, .. })) => *text = t,
-            (None, Some(Modal::StatusDetails { commit: true, .. })) => self.modal = None,
-            (Some(text), None) => {
-                self.modal_scroll.set(0);
-                self.modal = Some(Modal::StatusDetails { title: "Commit", text, logo: None, commit: true });
-            }
+        // The core's Git Branches popup opens and closes its list.
+        match (self.session.state().branches().is_some(), &self.modal) {
+            (true, None) => self.modal = Some(Modal::Branches { query: String::new(), at: 0 }),
+            (false, Some(Modal::Branches { .. } | Modal::BranchMenu { .. })) => self.modal = None,
             _ => {}
+        }
+        // So do the checkout-problem dialog's.
+        for (kind, title, now) in [(Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+            match (now, &mut self.modal) {
+                (Some(t), Some(Modal::StatusDetails { kind: k, text, .. })) if *k == kind => *text = t,
+                (None, Some(Modal::StatusDetails { kind: k, .. })) if *k == kind => self.modal = None,
+                (Some(text), None) => {
+                    self.modal_scroll.set(0);
+                    self.modal = Some(Modal::StatusDetails { title, text, logo: None, kind });
+                }
+                _ => {}
+            }
         }
         if effect.repaint {
             cx.notify();
@@ -855,7 +880,7 @@ impl ReaderView {
                     } else {
                         ("Status details", self.session.status_details())
                     };
-                    self.modal = Some(Modal::StatusDetails { title, text, logo: None, commit: false });
+                    self.modal = Some(Modal::StatusDetails { title, text, logo: None, kind: Details::Text });
                     cx.notify();
                 }
                 InterfaceAction::About => {
@@ -865,11 +890,18 @@ impl ReaderView {
                     let logo = lenz_content::image::decode(lenz_content::about::LOGO_PNG, lenz_content::image::Format::Png)
                         .ok()
                         .map(|d| AboutLogo(lenz_gpui::image::texture(d.pixels)));
-                    self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo, commit: false });
+                    self.modal = Some(Modal::StatusDetails { title: reader_core::chrome::ABOUT_TITLE, text: reader_core::chrome::about(), logo, kind: Details::Text });
                     cx.notify();
                 }
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
+                InterfaceAction::NewBranch => self.modal = Some(Modal::NewBranch { from: None, name: String::new(), checkout: true, error: None }),
+                InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None }),
+                InterfaceAction::ResolveConflicts => {
+                    let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
+                    let launch = self.session.merge_launch(&exe, false);
+                    self.start(launch, None, cx);
+                }
                 InterfaceAction::ShowCommitDiff => {
                     let exe = std::env::current_exe().and_then(std::fs::canonicalize).unwrap_or_default();
                     let launch = self.session.commit_diff_launch(&exe, false);
@@ -1123,6 +1155,7 @@ impl ReaderView {
             ("tab", true, true) => self.run(CommandId::PreviousTab, window, cx),
             ("k", true, true) => self.run(CommandId::PinTab, window, cx),
             // Ctrl+\ splits side by side, Ctrl+Shift+\ one above the other; Ctrl+1 / Ctrl+2 focus a pane.
+            ("`", true, true) | ("~", true, _) => self.run(CommandId::GitBranches, window, cx),
             ("\\", true, false) => self.run(CommandId::SplitRight, window, cx),
             ("\\", true, true) | ("|", true, _) => self.run(CommandId::SplitDown, window, cx),
             // Bookmarks (IntelliJ): F11 toggles, Ctrl+F11 picks a key, Shift+F11 lists; Ctrl+Shift+digit sets that key,
@@ -1263,6 +1296,25 @@ impl ReaderView {
                     self.follow_sibling(item.target, cx);
                 }
             }
+            Some(Modal::Branches { query, at }) => {
+                use reader_core::branches::BranchTarget;
+                let Some(row) = self.session.state().branch_rows(&query).into_iter().nth(at) else { return self.modal = Some(Modal::Branches { query, at }) };
+                match &row.target {
+                    BranchTarget::Action(id) => {
+                        self.dispatch(Command::CloseBranches, cx);
+                        self.run(*id, window, cx);
+                    }
+                    t => match self.session.branch_enter(t) {
+                        Some(action) => self.branch_action(t, action, window, cx),
+                        None => self.modal = Some(Modal::Branches { query, at }),
+                    },
+                }
+            }
+            Some(Modal::BranchMenu { target, label, at, query, row }) => match self.session.branch_actions(&target).get(at) {
+                Some(&(_, action)) => self.branch_action(&target, action, window, cx),
+                None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
+            },
+            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. }) => self.modal = m,
             Some(Modal::Places { list, query, at }) => {
                 let row = self.session.state().place_rows(list, &query).into_iter().nth(at).filter(|r| !r.missing);
                 match row {
@@ -1296,11 +1348,15 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
+            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic) | None => return,
+            Some(Modal::BranchMenu { at, .. }) => match row.checked_sub(1) {
+                Some(i) => *at = i,
+                None => return,
+            },
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -1310,9 +1366,30 @@ impl ReaderView {
             return self.navigation_key(ev, window, cx);
         }
         let key = ev.keystroke.key.as_str();
-        if let Some(Modal::StatusDetails { text, commit, .. }) = &self.modal {
+        if let Some(Modal::StatusDetails { kind: Details::Checkout, .. }) = &self.modal {
+            // s Smart Checkout, f Force, y confirms the discard (another key than f, and never a held one); Escape
+            // cancels; Enter takes the first safe choice.
+            use reader_core::branches::CheckoutChoice as C;
+            let choices: Vec<C> = self.session.checkout_choices().into_iter().map(|c| c.1).collect();
+            let m = &ev.keystroke.modifiers;
+            let plain = !(m.control || m.platform || m.alt) && !ev.is_held;
+            let pick = match key {
+                "escape" => Some(C::Cancel),
+                "s" if plain => Some(C::Smart),
+                "f" if plain => Some(C::Force),
+                "y" if plain => Some(C::ConfirmForce),
+                "enter" => choices.first().copied().filter(|c| *c != C::ConfirmForce),
+                _ => None,
+            };
+            if let Some(c) = pick.filter(|c| choices.contains(c)) {
+                self.dispatch(Command::CheckoutChoice(c), cx);
+            }
+            return cx.notify();
+        }
+        if let Some(Modal::StatusDetails { text, kind, .. }) = &self.modal {
+            let commit = *kind == Details::Commit;
             let copy = key == "c" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform);
-            if copy && *commit {
+            if copy && commit {
                 self.run(CommandId::CopyRevision, window, cx);
             } else if copy {
                 cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
@@ -1388,6 +1465,106 @@ impl ReaderView {
                     return;
                 }
             }
+        }
+        // The Git Branches popup: typing filters, Up/Down move, Enter checks out (or opens a worktree), Right shows the
+        // row's actions, Escape closes.
+        if let Some(Modal::Branches { query, at }) = self.modal.clone() {
+            let rows = self.session.state().branch_rows(&query);
+            let last = rows.len().saturating_sub(1);
+            let at = at.min(last);
+            let typed = ev.keystroke.key_char.clone().filter(|_| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform);
+            let set = |query: String, at: usize| Some(Modal::Branches { query, at });
+            match key {
+                "escape" => self.close_modal(cx),
+                "up" => self.modal = set(query, at.saturating_sub(1)),
+                "down" => self.modal = set(query, (at + 1).min(last)),
+                "home" => self.modal = set(query, 0),
+                "end" => self.modal = set(query, last),
+                "enter" => {
+                    self.modal = set(query, at);
+                    self.modal_accept(window, cx);
+                }
+                "right" => self.modal = match rows.get(at) {
+                    Some(r) if !self.session.branch_actions(&r.target).is_empty() => Some(Modal::BranchMenu { target: r.target.clone(), label: r.label.clone(), at: 0, query, row: at }),
+                    _ => set(query, at),
+                },
+                "backspace" => self.modal = set(query.chars().take(query.chars().count().saturating_sub(1)).collect(), 0),
+                _ => {
+                    if let Some(text) = typed.filter(|t| !t.chars().any(char::is_control)) {
+                        self.modal = set(query + &text, 0);
+                    }
+                }
+            }
+            return cx.notify();
+        }
+        if let Some(Modal::BranchMenu { target, label, at, query, row }) = self.modal.clone() {
+            let last = self.session.branch_actions(&target).len().saturating_sub(1);
+            match key {
+                "escape" | "left" => self.modal = Some(Modal::Branches { query, at: row }),
+                "up" => self.modal = Some(Modal::BranchMenu { target, label, at: at.saturating_sub(1), query, row }),
+                "down" => self.modal = Some(Modal::BranchMenu { target, label, at: (at + 1).min(last), query, row }),
+                "enter" | "right" => self.modal_accept(window, cx),
+                _ => {}
+            }
+            return cx.notify();
+        }
+        // The Git prompts take a paste (a commit id, a branch name): its first line.
+        let paste = (key == "v" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform)).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten()
+            .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
+        if let (Some(text), Some(Modal::NewBranch { name: input, error, .. } | Modal::Revision { input, error })) = (&paste, &mut self.modal) {
+            input.push_str(text);
+            *error = None;
+            return cx.notify();
+        }
+        // A new branch's name: typing edits it, Tab turns Check out on or off, Enter makes it, Escape cancels.
+        if let Some(Modal::NewBranch { from, name, checkout, error }) = &mut self.modal {
+            match key {
+                "escape" => self.modal = None,
+                "backspace" => {
+                    name.pop();
+                    *error = None;
+                }
+                "tab" => *checkout = !*checkout,
+                "enter" => match self.session.validate_branch_name(name) {
+                    Ok(()) => {
+                        let (name, from, checkout) = (name.trim().to_string(), from.clone(), *checkout);
+                        self.modal = None;
+                        self.dispatch(Command::NewBranch { name, from, checkout }, cx);
+                    }
+                    Err(e) => *error = Some(e),
+                },
+                _ => {
+                    if let Some(text) = ev.keystroke.key_char.clone().filter(|t| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !t.chars().any(char::is_control)) {
+                        name.push_str(&text);
+                        *error = None;
+                    }
+                }
+            }
+            return cx.notify();
+        }
+        if let Some(Modal::Revision { input, error }) = &mut self.modal {
+            match key {
+                "escape" => self.modal = None,
+                "backspace" => {
+                    input.pop();
+                    *error = None;
+                }
+                "enter" => match self.session.validate_revision(input) {
+                    Ok(_) => {
+                        let rev = input.trim().to_string();
+                        self.modal = None;
+                        self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(rev)), cx);
+                    }
+                    Err(e) => *error = Some(e),
+                },
+                _ => {
+                    if let Some(text) = ev.keystroke.key_char.clone().filter(|t| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !t.chars().any(char::is_control)) {
+                        input.push_str(&text);
+                        *error = None;
+                    }
+                }
+            }
+            return cx.notify();
         }
         // A list of places: typing filters, Up/Down move, Enter goes there, Delete forgets, Escape back to the text.
         if let Some(Modal::Places { list, query, at }) = self.modal.clone() {
@@ -1586,7 +1763,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -2124,6 +2301,46 @@ impl ReaderView {
         (widest as f32 * self.char_w - (width - num_w() - 16.0)).max(0.0)
     }
 
+    /// Runs a Git Branches row's action.
+    fn branch_action(&mut self, target: &reader_core::branches::BranchTarget, action: reader_core::branches::BranchAction, window: &mut Window, cx: &mut Context<Self>) {
+        use reader_core::branches::{BranchAction, BranchTarget};
+        let _ = window;
+        self.dispatch(Command::CloseBranches, cx);
+        match (action, target) {
+            (BranchAction::Checkout, t) => {
+                if let Some(target) = t.checkout() {
+                    self.dispatch(Command::Checkout(target), cx);
+                }
+            }
+            (BranchAction::NewBranchFrom, t) => self.modal = Some(Modal::NewBranch { from: t.rev(), name: String::new(), checkout: true, error: None }),
+            (BranchAction::Open, BranchTarget::Worktree(path)) => self.dispatch(Command::OpenWorktree(path.clone()), cx),
+            (BranchAction::OpenInNewWindow, BranchTarget::Worktree(path)) => {
+                let (make_config, path) = (self.make_config.clone(), path.clone());
+                #[cfg(feature = "test-support")]
+                self.opened_windows.push(path.clone());
+                #[cfg(not(feature = "test-support"))]
+                cx.defer(move |cx| {
+                    if let Err(e) = open_window(cx, make_config, Some(path)) {
+                        eprintln!("lenz-reader: cannot open a window: {e}");
+                    }
+                });
+                #[cfg(feature = "test-support")]
+                let _ = make_config;
+            }
+            (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
+        }
+        cx.notify();
+    }
+
+    /// A details dialog's buttons: the core's checkout choices, the commit popup's actions, else Copy and Close.
+    pub(crate) fn details_labels(&self, kind: Details) -> Vec<&'static str> {
+        match kind {
+            Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
+            Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
+            Details::Text => vec!["Copy", "Close"],
+        }
+    }
+
     /// The annotation under the pointer, as laid out now (none while a dialog is open).
     pub(crate) fn ann_hovered(&self) -> Option<(u8, TabId, usize)> {
         self.ann_hover.filter(|_| self.modal.is_none()).and_then(|at| self.annotation_at(at))
@@ -2384,13 +2601,18 @@ impl ReaderView {
             let inside = self.modal_layout().filter(|l| l.bounds.contains(&ev.position) && !matches!(self.modal, Some(Modal::GoTo { .. })));
             match inside {
                 Some(l) => {
-                    if let Some(Modal::StatusDetails { text, commit, .. }) = &self.modal {
-                        let (text, commit) = (text.clone(), *commit);
-                        let hit = l.details_buttons(self.char_w, details_labels(commit)).iter().position(|b| b.contains(&ev.position));
-                        match (commit, hit) {
-                            (true, Some(0)) => self.run(CommandId::ShowCommitDiff, window, cx),
-                            (true, Some(1)) => self.run(CommandId::CopyRevision, window, cx),
-                            (false, Some(0)) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+                    if let Some(Modal::StatusDetails { text, kind, .. }) = &self.modal {
+                        let (text, kind) = (text.clone(), *kind);
+                        let hit = l.details_buttons(self.char_w, &self.details_labels(kind)).iter().position(|b| b.contains(&ev.position));
+                        match (kind, hit) {
+                            (Details::Checkout, Some(i)) => {
+                                if let Some(&(_, c)) = self.session.checkout_choices().get(i) {
+                                    self.dispatch(Command::CheckoutChoice(c), cx);
+                                }
+                            }
+                            (Details::Commit, Some(0)) => self.run(CommandId::ShowCommitDiff, window, cx),
+                            (Details::Commit, Some(1)) => self.run(CommandId::CopyRevision, window, cx),
+                            (Details::Text, Some(0)) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
                             (_, Some(_)) => self.close_modal(cx),
                             (_, None) => {}
                         }
@@ -2412,8 +2634,9 @@ impl ReaderView {
                 self.open_navigation(reader_core::navigation::Scope::Actions, cx);
                 return;
             }
-            let (server, _, _) = self.status_segments();
-            self.run(if server.0.contains(&ev.position) { CommandId::LanguageServer } else { CommandId::StatusDetails }, window, cx);
+            let (server, _, branch, _) = self.status_segments();
+            let id = if server.0.contains(&ev.position) { CommandId::LanguageServer } else if branch.0.contains(&ev.position) { CommandId::GitBranches } else { CommandId::StatusDetails };
+            self.run(id, window, cx);
             return;
         }
         // A divider: dragged until the button is released.
@@ -2585,6 +2808,20 @@ impl ReaderView {
     /// the selection, and the context menu opens there.
     fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.double_shift.interrupt();
+        // A Git Branches row: its actions.
+        if let Some(Modal::Branches { query, .. }) = self.modal.clone()
+            && let Some(l) = self.modal_layout().filter(|l| l.bounds.contains(&ev.position))
+        {
+            let n = ((f32::from(ev.position.y) - f32::from(l.bounds.origin.y) - 4.0) / line_h()).floor();
+            let row = (n >= 0.0).then(|| l.lines.get(l.first + n as usize).map(|r| r.0)).flatten().and_then(|r| r.checked_sub(FINDER_HEADER_ROWS));
+            if let Some(i) = row
+                && let Some(r) = self.session.state().branch_rows(&query).into_iter().nth(i)
+                && !self.session.branch_actions(&r.target).is_empty()
+            {
+                self.modal = Some(Modal::BranchMenu { target: r.target, label: r.label, at: 0, query, row: i });
+            }
+            return cx.notify();
+        }
         if self.modal.as_ref().is_some_and(|m| !matches!(m, Modal::Context { .. })) {
             return;
         }
@@ -2714,8 +2951,9 @@ impl ReaderView {
         let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
             .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
                 if self.modal.is_none() && y >= self.body_bottom() && self.status_h() > 0.0 {
-                    let (server, message, _) = self.status_segments();
+                    let (server, message, branch, _) = self.status_segments();
                     if server.0.contains(&ev.position) { Some(CommandId::LanguageServer) }
+                    else if branch.0.contains(&ev.position) { Some(CommandId::GitBranches) }
                     else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
             });
@@ -2879,7 +3117,7 @@ impl ReaderView {
     }
 
     /// Independent footer cells; narrow windows keep recovery and message targets accessible.
-    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell) {
+    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell) {
         let left = STATUS_PAD.min(self.width / 2.0);
         let right = self.commands_button().map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
@@ -2891,7 +3129,11 @@ impl ReaderView {
             let cols = (w.max(0.0) / self.char_w).floor() as usize;
             (Bounds { origin: gpui::point(px(x), px(self.body_bottom())), size: gpui::size(px(w.max(0.0)), px(self.status_h())) }, reader_core::chrome::ellipsize(text, cols))
         };
-        (cell(left, server_w, &label), cell(left + server_w, (room - server_w - position_w).max(0.0), &self.session.status_message()), cell(right - position_w, position_w, &position))
+        // The branch, before the position, when there is room for both.
+        let branch = self.session.branch_label().filter(|_| self.width >= 480.0).unwrap_or_default();
+        let branch_w = if branch.is_empty() { 0.0 } else { ((lenz_content::wrap::width(&branch) as f32 + 2.0) * self.char_w).min(room * 0.25) };
+        let message_w = (room - server_w - position_w - branch_w).max(0.0);
+        (cell(left, server_w, &label), cell(left + server_w, message_w, &self.session.status_message()), cell(right - position_w - branch_w, branch_w, &branch), cell(right - position_w, position_w, &position))
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
@@ -3349,6 +3591,8 @@ impl ReaderView {
 
     /// The elastic message cell's displayed text (full content is in Status details).
     pub fn status_line(&self) -> String { self.status_segments().1.1 }
+    /// For tests: the status bar's branch cell.
+    pub fn status_branch(&self) -> StatusCell { self.status_segments().2 }
 
     /// The status bar's height: none in a window too short for it and the toolbar.
     fn status_h(&self) -> f32 {
@@ -3515,6 +3759,30 @@ impl ReaderView {
                 rows.extend(self.sibling_items(*pane, *crumb, query).into_iter().map(|s| (if s.dir { format!("{}/", s.label) } else { s.label }, None)));
                 rows
             }
+            Some(Modal::Branches { query, .. }) => {
+                let hint = match self.session.state().branches() {
+                    Some(b) if b.loading => "Git Branches — loading…".to_string(),
+                    Some(b) if b.error.is_some() => format!("Git Branches — {}", b.error.as_deref().unwrap_or_default()),
+                    _ => "Git Branches — type to filter; Enter checks out (or opens a worktree), Right more, Escape closes".to_string(),
+                };
+                let mut rows = vec![(format!("› {query}"), None), (hint, None)];
+                rows.extend(self.session.state().branch_rows(query).into_iter().map(|r| (reader_core::branches::row_text(&r), None)));
+                rows
+            }
+            Some(Modal::BranchMenu { target, label, .. }) => {
+                let mut rows = vec![(format!("‹ {label} — Escape back"), None)];
+                rows.extend(self.session.branch_actions(target).into_iter().map(|(l, _)| (l.to_string(), None)));
+                rows
+            }
+            Some(Modal::NewBranch { from, name, checkout, error }) => {
+                let start = from.as_deref().map_or("HEAD", reader_core::branches::short_ref);
+                let hint = error.clone().unwrap_or_else(|| format!("New branch from {start} — Enter; Tab: check it out or not"));
+                vec![(format!("› {name}"), None), (format!("[{}] Check out the new branch", if *checkout { "x" } else { " " }), None), (hint, None)]
+            }
+            Some(Modal::Revision { input, error }) => {
+                let hint = error.clone().unwrap_or_else(|| "Checkout tag or revision (a tag, branch, commit id or HEAD~2) — Enter".to_string());
+                vec![(format!("› {input}"), None), (hint, None)]
+            }
             Some(Modal::Places { list, query, .. }) => {
                 let hint = match list {
                     PlaceList::Bookmarks => "Bookmarks — type to filter; Enter goes there, Delete removes, Escape back",
@@ -3574,7 +3842,7 @@ impl Render for ReaderView {
         let narrow = self.width < 320.0;
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
         self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
-        let (server_cell, message_cell, position_cell) = self.status_segments();
+        let (server_cell, message_cell, branch_cell, position_cell) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
@@ -3916,7 +4184,10 @@ impl Render for ReaderView {
             eprintln!("lenz-reader: slow render {:.1} ms", render_started.elapsed().as_secs_f64() * 1000.0);
         }
         let details_modal = matches!(self.modal, Some(Modal::StatusDetails { .. }));
-        let modal_commit = matches!(self.modal, Some(Modal::StatusDetails { commit: true, .. }));
+        let details_buttons = match &self.modal {
+            Some(Modal::StatusDetails { kind, .. }) => self.details_labels(*kind),
+            _ => Vec::new(),
+        };
         // The hovered annotation's commit, beside the pointer.
         let ann_tip = self.ann_hovered().zip(self.ann_hover).and_then(|((_, t, line), at)| {
             let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
@@ -4032,7 +4303,7 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&position_cell, palette.dim, None)] {
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&branch_cell, palette.fg, Some(CommandId::GitBranches)), (&position_cell, palette.dim, None)] {
                                 let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
                                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                     if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }
@@ -4242,8 +4513,7 @@ impl Render for ReaderView {
                             let menu = Bounds { origin: gpui::point(px(mx), px(my)), size: l.bounds.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
                                 if details_modal {
-                                    let labels = details_labels(modal_commit);
-                                    for (b, &label) in l.details_buttons(char_w, labels).iter().zip(labels) {
+                                    for (b, &label) in l.details_buttons(char_w, &details_buttons).iter().zip(&details_buttons) {
                                         let (x, y) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y));
                                         let clip = Bounds { origin: gpui::point(px(x), px(y)), size: b.size };
                                         window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
@@ -4587,8 +4857,10 @@ impl Modal {
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } => 0,
             Modal::Context { at, .. } => *at,
+            Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
+            Modal::BranchMenu { at, .. } => *at + 1,
         }
     }
 }
