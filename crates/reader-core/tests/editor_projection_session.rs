@@ -110,3 +110,25 @@ fn wrapped_end_then_up_reaches_the_real_tail_and_new_input_cancels_cold_motion()
     }
     assert_eq!(s.state().selection().unwrap().head, head, "a stale cold Down must not override later input");
 }
+
+#[test]
+fn byte_limited_whitespace_rows_support_real_navigation_and_exact_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("whitespace.txt");
+    let source = " ".repeat(20_000) + "END";
+    std::fs::write(&path, &source).unwrap();
+    let mut session = session(dir.path());
+    session.dispatch(Command::Open(path.clone()));
+    assert!(wait(&mut session, |session| session.state().active().is_some_and(|tab| tab.loaded())));
+    session.dispatch(Command::SetTextSize { pane: 0, cols: 8, rows: 10 });
+    session.dispatch(Command::SetSoftWrap(true));
+    session.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(1) }));
+    session.dispatch(Command::MoveCaret(Motion::Down));
+    assert!(wait(&mut session, |session| session.state().selection().is_some_and(|selection| selection.head == reader_core::layout::ROW_BYTES)));
+    session.dispatch(Command::Extend(Motion::Down));
+    assert!(wait(&mut session, |session| session.state().selection().is_some_and(|selection| selection.head == 2 * reader_core::layout::ROW_BYTES)));
+    assert_eq!(session.dispatch(Command::Copy).copy.as_deref(), Some(" ".repeat(reader_core::layout::ROW_BYTES).as_str()));
+    session.dispatch(Command::MoveCaret(Motion::Up));
+    assert!(wait(&mut session, |session| session.state().selection().is_some_and(|selection| selection.head == reader_core::layout::ROW_BYTES)));
+    assert_eq!(std::fs::read(path).unwrap(), source.as_bytes());
+}
