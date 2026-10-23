@@ -3,6 +3,7 @@
 mod app;
 mod render;
 mod runtime;
+mod source;
 
 #[cfg(all(test, feature = "gui-test"))]
 mod parity_tests;

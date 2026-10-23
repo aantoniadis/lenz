@@ -154,6 +154,8 @@ pub(crate) struct App {
     #[cfg(test)]
     pub exe: Option<PathBuf>,
     pub layout: crate::render::Geometry,
+    pub source_cache: std::cell::RefCell<crate::source::Cache>,
+    pub(crate) source_redraw: bool,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
     /// The last text click (when, where) and how many came in a row there: two take the word, three its group.
@@ -189,6 +191,8 @@ impl App {
             #[cfg(test)]
             exe: None,
             layout: Default::default(),
+            source_cache: Default::default(),
+            source_redraw: false,
             crumb_at: 0,
             drag: None,
             clicks: None,
@@ -356,29 +360,30 @@ impl App {
         self.clamp();
     }
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.hover.map(|h| h.due)
+        if self.source_redraw { Some(Instant::now()) } else { self.hover.map(|h| h.due) }
     }
     fn hover_current(&self, hover: Hover) -> bool {
         self.modal.is_none()
             && self.session.state().documentation_on_hover()
-            && (0..=1)
-                .filter_map(|pane| self.session.state().shown(pane))
-                .any(|tab| {
-                    tab.id() == hover.tab
-                        && tab.version() == hover.version
-                        && tab.top_line() == hover.top
+            && self.layout.panes.iter()
+                .filter_map(|pane| pane.source_view(self))
+                .any(|view| {
+                    view.tab().id() == hover.tab
+                        && view.snapshot().key().version == hover.version
+                        && view.tab().top_line() == hover.top
                 })
     }
     pub fn tick(&mut self, now: Instant) -> bool {
+        let repaint = std::mem::take(&mut self.source_redraw);
         let Some(hover) = self.hover else {
-            return false;
+            return repaint;
         };
         if !self.hover_current(hover) {
             self.hover = None;
-            return false;
+            return repaint;
         }
         if now < hover.due {
-            return false;
+            return repaint;
         }
         self.hover = None;
         self.dispatch(Command::DocumentationAt {
@@ -545,7 +550,7 @@ impl App {
         if let Some((id, version, _)) = self.preview_selection {
             let current = self.session.state().active().is_some_and(|tab| {
                 tab.id() == id
-                    && tab.document().is_some_and(|doc| doc.version() == version)
+                    && self.session.state().view(id).is_some_and(|view| view.snapshot().key().version == version)
                     && matches!(tab.rendering(), Some(Rendering::Preview(_)))
             });
             if !current {
@@ -561,11 +566,11 @@ impl App {
         let Some(tab) = self.session.state().active() else {
             return false;
         };
-        let (Some(doc), Some(Rendering::Preview(preview))) = (tab.document(), tab.rendering())
+        let (Some(view), Some(Rendering::Preview(preview))) = (self.session.state().view(tab.id()), tab.rendering())
         else {
             return false;
         };
-        let (id, version) = (tab.id(), doc.version());
+        let (id, version) = (tab.id(), view.snapshot().key().version);
         if matches!(command, Command::SelectAll) {
             self.preview_selection = Some((
                 id,
@@ -1135,6 +1140,7 @@ impl App {
             Event::FocusGained => self.dispatch(Command::Recheck),
             Event::Resize(_, _) => {
                 self.hover = None;
+                self.layout.invalidate_source();
                 self.clamp();
             }
             Event::FocusLost => {
@@ -1969,7 +1975,7 @@ impl App {
                     key.code,
                     KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
                 ) && self.session.state().active().is_some_and(|tab| {
-                    tab.document().is_some()
+                    self.session.state().view(tab.id()).is_some()
                         && !matches!(
                             tab.rendering(),
                             Some(Rendering::Preview(_) | Rendering::Pending)
@@ -2064,15 +2070,16 @@ impl App {
                         .hits
                         .iter()
                         .find(|h| h.y == y && h.x <= x && x < h.x.saturating_add(h.width.max(1)))?;
-                    let tab = self.session.state().shown(pane.pane)?;
-                    let doc = tab.document()?;
-                    if hit.line >= doc.line_count() || tab.linkable(hit.line, hit.byte).is_none() {
+                    let view = pane.source_view(self)?;
+                    let tab = view.tab();
+                    let snapshot = view.snapshot();
+                    if hit.line >= snapshot.line_count() || view.linkable(hit.line, hit.byte).is_none() {
                         return None;
                     }
                     Some((
                         tab.id(),
-                        doc.version(),
-                        doc.line_range(hit.line).start + hit.byte,
+                        snapshot.key().version,
+                        snapshot.line_range(hit.line)?.start + hit.byte,
                         tab.top_line(),
                     ))
                 })
@@ -2333,6 +2340,9 @@ impl App {
                     self.prompt(Prompt::Siblings { pane, crumb });
                     return;
                 }
+                if pane.source_view(self).is_none() {
+                    continue;
+                }
                 // A click on an annotation opens its commit.
                 if !drag
                     && (pane.gutter_x..pane.gutter_x + pane.ann).contains(&x)
@@ -2367,12 +2377,12 @@ impl App {
                         let Some(tab) = self.session.state().shown(pane_id) else {
                             return;
                         };
-                        let (Some(doc), Some(Rendering::Preview(preview))) =
-                            (tab.document(), tab.rendering())
+                        let (Some(view), Some(Rendering::Preview(preview))) =
+                            (self.session.state().view(tab.id()), tab.rendering())
                         else {
                             return;
                         };
-                        let (id, version, len) = (tab.id(), doc.version(), preview.doc.text.len());
+                        let (id, version, len) = (tab.id(), view.snapshot().key().version, preview.doc.text.len());
                         if drag
                             && self
                                 .drag
@@ -2396,11 +2406,10 @@ impl App {
                         self.focus = Focus::Text;
                         return;
                     }
-                    let Some(tab) = self.session.state().shown(pane_id) else {
+                    let Some(view) = pane.source_view(self) else {
                         return;
                     };
-                    let Some(doc) = tab.document() else { return };
-                    let (id, version) = (tab.id(), doc.version());
+                    let (id, version) = (view.tab().id(), view.snapshot().key().version);
                     if drag
                         && self
                             .drag
@@ -2409,7 +2418,8 @@ impl App {
                         self.drag = None;
                         return;
                     }
-                    let offset = (doc.line_range(line).start + byte).min(doc.text().len());
+                    let Some(source_line) = view.snapshot().line_range(line) else { return };
+                    let offset = (source_line.start + byte).min(view.snapshot().len_bytes());
                     if !drag && !event.modifiers.contains(KeyModifiers::CONTROL) {
                         // Clicks on one cell within 400 ms count up: caret, word, group, then caret again.
                         let now = Instant::now();
@@ -2511,6 +2521,7 @@ impl App {
         };
         let pane_id = pane.pane;
         let preview = pane.preview;
+        let Some(view) = pane.source_view(self) else { return };
         let offset = (!preview)
             .then(|| {
                 let line = pane.rows.iter().find(|(row, _, _)| *row == y)?.1;
@@ -2521,8 +2532,7 @@ impl App {
                     .filter(|h| h.y == y && h.line == line && h.x <= x && x >= pane.text.x)
                     .max_by_key(|h| h.x)
                     .map_or(0, |h| h.byte);
-                let doc = self.session.state().shown(pane_id)?.document()?;
-                Some((doc.line_range(line).start + byte).min(doc.text().len()))
+                Some((view.snapshot().line_range(line)?.start + byte).min(view.snapshot().len_bytes()))
             })
             .flatten();
         if self.session.state().shown(pane_id).is_none() {

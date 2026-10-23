@@ -5106,6 +5106,7 @@ dependencies = [
  "resvg 0.48.1",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
 ]
 
 [[package]]

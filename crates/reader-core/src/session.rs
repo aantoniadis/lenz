@@ -96,6 +96,8 @@ pub enum Command {
     Forward,
     /// The active tab's horizontal position, in display columns.
     ScrollColumn(usize),
+    /// Clamp a pane using its adapter's measured extent, rejecting obsolete source or width identities.
+    ClampColumn { pane: u8, tab: TabId, identity: crate::projection::Cursor, cols: usize, max: usize },
     /// Check every open source against the disk (focus regained, or notifications unavailable).
     Recheck,
     /// Search the project or the active document for literal text, case-insensitively.
@@ -1188,6 +1190,39 @@ impl<'a> View<'a> {
 }
 
 impl View<'_> {
+    /// Syntax and semantic style at a line-relative source byte; no full-line span list is built.
+    pub fn style_at(&self, line: usize, byte: usize) -> (Option<lenz_content::highlight::Capture>, u8) {
+        if self.snapshot.line_range(line).is_none_or(|range| byte >= range.len()) { return (None, 0); }
+        let syntax = self.tab.highlights().filter(|_| self.tab.version() == self.snapshot.key().version)
+            .and_then(|parsed| parsed.capture_at(line, byte));
+        let tokens = self.tab.tokens.as_ref().filter(|(version, _)| *version == self.snapshot.key().version)
+            .map_or(&[][..], |(_, tokens)| tokens.line(line));
+        let token = tokens.get(tokens.partition_point(|token| token.end as usize <= byte))
+            .filter(|token| token.start as usize <= byte);
+        token.map_or((syntax, 0), |token| (token.capture.or(syntax), token.mods))
+    }
+}
+
+impl View<'_> {
+    /// A line-relative hover identifier; names clipped by the 4 KiB inspection window are omitted.
+    pub fn linkable(&self, line: usize, byte: usize) -> Option<std::ops::Range<usize>> {
+        let source = self.snapshot.line_range(line)?;
+        let at = source.start.checked_add(byte)?;
+        if at >= source.end || self.snapshot.floor_char_boundary(at) != at { return None; }
+        let from = self.snapshot.floor_char_boundary(at.saturating_sub(2048).max(source.start));
+        let end = self.snapshot.floor_char_boundary(from.saturating_add(4096).min(source.end));
+        let text = self.snapshot.copy_range(from..end)?;
+        let word = crate::document::identifier(&text, at - from)?;
+        if (word.start == 0 && from > source.start) || (word.end == text.len() && end < source.end) { return None; }
+        let word = from + word.start - source.start..from + word.end - source.start;
+        use lenz_content::highlight::Capture as C;
+        let quiet = self.tab.highlights().and_then(|parsed| parsed.capture_at(line, word.start))
+            .is_some_and(|capture| matches!(capture, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin));
+        (!quiet).then_some(word)
+    }
+}
+
+impl View<'_> {
     fn layout_query<T>(&self, cols: Option<usize>, mut query: impl FnMut(&mut crate::layout::Cache) -> crate::layout::Query<T>) -> crate::layout::Query<T> {
         use crate::layout::Query;
         let mut cache = self.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1598,6 +1633,9 @@ impl State {
     fn wants_declarations(&self) -> bool {
         self.settings.sticky_scroll || self.settings.breadcrumbs
     }
+
+    /// The adapter's current text viewport, in its own columns and rows.
+    pub fn text_size(&self, pane: u8) -> Option<(usize, usize)> { self.text_size.get(pane as usize).copied() }
 
     /// The columns `tab`'s lines wrap at: `None` when wrap is off, the width is not known yet, or the tab shows a
     /// large file, an image or a Markdown preview.
@@ -2574,7 +2612,7 @@ impl Session {
         let input = input.into();
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::SetTextSize { .. })) {
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. })) {
             self.layout_intents = Default::default();
         }
         if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
@@ -2981,6 +3019,17 @@ impl Session {
             Command::FindDeclarations(query) => self.find_declarations(query),
             Command::SelectResult(i) => self.select_result(i),
             Command::OpenResult(i) => self.validate_result(i),
+            Command::ClampColumn { pane, tab, identity, cols, max } => {
+                let valid = self.state.text_size.get(pane as usize).is_some_and(|size| size.0 == cols)
+                    && self.state.shown(pane).is_some_and(|t| t.id() == tab)
+                    && self.state.view(tab).is_some_and(|view| identity.matches(view.snapshot(), view.inlay_hints()));
+                if !valid { return Effect::default(); }
+                let max = if self.state.shown(pane).is_some_and(|t| self.state.wrap_cols(t).is_some()) { 0 } else { max };
+                match self.state.tabs.iter_mut().find(|t| t.id == tab) {
+                    Some(t) if t.column > max => { t.column = max; repaint }
+                    _ => Effect::default(),
+                }
+            }
             Command::ScrollColumn(_) if self.state.active().is_some_and(|t| self.state.wrap_cols(t).is_some()) => Effect::default(),
             Command::ScrollColumn(column) => match self.active_mut() {
                 Some(t) if t.column != column => {
