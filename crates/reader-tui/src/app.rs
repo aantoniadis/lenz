@@ -126,6 +126,14 @@ struct Hover {
     top: usize,
     due: Instant,
 }
+/// Current preview coordinates retain metadata identity as well as text version.
+#[derive(Clone, Debug)]
+pub(crate) struct PreviewSource { key: reader_core::text::SnapshotKey, metadata: std::sync::Arc<reader_core::document::SourceMeta> }
+impl PreviewSource {
+    pub(crate) fn new(view: &reader_core::session::View<'_>) -> Self { Self { key: view.snapshot().key(), metadata: view.snapshot().source_meta().clone() } }
+    pub(crate) fn matches(&self, view: &reader_core::session::View<'_>) -> bool { self.key == view.snapshot().key() && std::sync::Arc::ptr_eq(&self.metadata, view.snapshot().source_meta()) }
+}
+
 pub(crate) struct App {
     /// `LENZ_ICONS=nerd|plain` for this run, over the File Icons setting until that is toggled here.
     pub icons_override: Option<bool>,
@@ -162,8 +170,8 @@ pub(crate) struct App {
     clicks: Option<(Instant, (u8, TabId, usize), u8)>,
     hover: Option<Hover>,
     double_shift: DoubleShift,
-    pub(crate) preview_selection: Option<(TabId, u64, Selection)>,
-    pub(crate) preview_scroll: HashMap<TabId, (u64, usize)>,
+    pub(crate) preview_selection: Option<(TabId, PreviewSource, Selection)>,
+    pub(crate) preview_scroll: HashMap<TabId, (PreviewSource, usize)>,
 }
 impl App {
     pub fn new(config: Config, path: Option<PathBuf>) -> Self {
@@ -518,13 +526,13 @@ impl App {
         let Some(tab) = state.active() else {
             return false;
         };
-        if !matches!(tab.rendering(), Some(Rendering::Preview(_))) {
+        if !matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_))) {
             return false;
         }
         let current = self
             .preview_scroll
             .get(&tab.id())
-            .filter(|(version, _)| *version == tab.version())
+            .filter(|(source, _)| state.view(tab.id()).is_some_and(|v| source.matches(&v)))
             .map_or(pane.preview_top, |(_, top)| *top);
         let top = match delta {
             Some(delta) => current.saturating_add_signed(delta),
@@ -535,28 +543,17 @@ impl App {
                 .saturating_sub(pane.text.height.max(1) as usize),
         );
         let source = pane.preview_source_lines.get(top).copied().unwrap_or(0);
-        self.preview_scroll.insert(tab.id(), (tab.version(), top));
+        if let Some(view) = state.view(tab.id()) { self.preview_scroll.insert(tab.id(), (PreviewSource::new(&view), top)); }
         self.session.dispatch(Command::Scroll(source));
         true
     }
     fn sync_preview_selection(&mut self) {
-        self.preview_scroll.retain(|id, (version, _)| {
-            self.session
-                .state()
-                .tabs()
-                .iter()
-                .any(|tab| tab.id() == *id && (tab.version() == 0 || tab.version() == *version))
-        });
-        if let Some((id, version, _)) = self.preview_selection {
-            let current = self.session.state().active().is_some_and(|tab| {
-                tab.id() == id
-                    && self.session.state().view(id).is_some_and(|view| view.snapshot().key().version == version)
-                    && matches!(tab.rendering(), Some(Rendering::Preview(_)))
-            });
-            if !current {
-                self.preview_selection = None;
-                self.drag = None;
-            }
+        let state = self.session.state();
+        self.preview_scroll.retain(|id, (source, _)| state.view(*id).is_some_and(|v| source.matches(&v)));
+        if let Some((id, source, _)) = &self.preview_selection {
+            let current = state.active().is_some_and(|tab| tab.id() == *id)
+                && state.view(*id).is_some_and(|view| source.matches(&view) && matches!(view.rendering(), Some(Rendering::Preview(_))));
+            if !current { self.preview_selection = None; self.drag = None; }
         }
     }
     fn preview_command(&mut self, command: &Command) -> bool {
@@ -566,15 +563,15 @@ impl App {
         let Some(tab) = self.session.state().active() else {
             return false;
         };
-        let (Some(view), Some(Rendering::Preview(preview))) = (self.session.state().view(tab.id()), tab.rendering())
+        let (Some(view), Some(Rendering::Preview(preview))) = (self.session.state().view(tab.id()), self.session.state().view(tab.id()).and_then(|v| v.rendering()))
         else {
             return false;
         };
-        let (id, version) = (tab.id(), view.snapshot().key().version);
+        let (id, source) = (tab.id(), PreviewSource::new(&view));
         if matches!(command, Command::SelectAll) {
             self.preview_selection = Some((
                 id,
-                version,
+                source,
                 Selection {
                     anchor: 0,
                     head: preview.doc.text.len(),
@@ -582,8 +579,8 @@ impl App {
             ));
         } else {
             let text = self
-                .preview_selection
-                .filter(|(tab, v, _)| *tab == id && *v == version)
+                .preview_selection.as_ref()
+                .filter(|(tab, source, _)| *tab == id && source.matches(&view))
                 .and_then(|(_, _, s)| preview.doc.text.get(s.range()))
                 .unwrap_or_default()
                 .to_owned();
@@ -1977,7 +1974,7 @@ impl App {
                 ) && self.session.state().active().is_some_and(|tab| {
                     self.session.state().view(tab.id()).is_some()
                         && !matches!(
-                            tab.rendering(),
+                            self.session.state().view(tab.id()).and_then(|v| v.rendering()),
                             Some(Rendering::Preview(_) | Rendering::Pending)
                         )
                 }) && let Some(motion) = motion
@@ -2378,11 +2375,12 @@ impl App {
                             return;
                         };
                         let (Some(view), Some(Rendering::Preview(preview))) =
-                            (self.session.state().view(tab.id()), tab.rendering())
+                            (self.session.state().view(tab.id()), self.session.state().view(tab.id()).and_then(|v| v.rendering()))
                         else {
                             return;
                         };
                         let (id, version, len) = (tab.id(), view.snapshot().key().version, preview.doc.text.len());
+                        let source = PreviewSource::new(&view);
                         if drag
                             && self
                                 .drag
@@ -2401,7 +2399,7 @@ impl App {
                         }
                         .unwrap_or(head);
                         self.dispatch(Command::FocusPane(pane_id));
-                        self.preview_selection = Some((id, version, Selection { anchor, head }));
+                        self.preview_selection = Some((id, source, Selection { anchor, head }));
                         self.drag = Some((pane_id, id, version, anchor));
                         self.focus = Focus::Text;
                         return;

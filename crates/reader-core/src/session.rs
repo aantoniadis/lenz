@@ -1231,7 +1231,12 @@ impl<'a> View<'a> {
         self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         self.tab.folds.as_ref()
     }
+    pub fn fold_at(&self, line: usize) -> Option<(lenz_content::highlight::Fold, bool)> {
+        let fold = self.folds()?.starting(line)?;
+        Some((fold, self.tab.collapsed.get(line) == Some(fold.kind)))
+    }
     pub fn tokens(&self) -> Option<&'a Arc<crate::decor::Tokens>> {
+        self.tab.decor_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         let (version, tokens) = self.tab.tokens.as_ref()?;
         (*version == self.snapshot.key().version).then_some(tokens)
     }
@@ -1239,6 +1244,7 @@ impl<'a> View<'a> {
         (self.snapshot.language() == Some(Language::Markdown)).then_some(())?;
         Some(match &self.tab.preview {
             _ if self.tab.markdown_source => Rendering::Source,
+            _ if !self.tab.preview_source.as_ref().is_some_and(|source| source.matches(self.snapshot)) => Rendering::Pending,
             None => Rendering::Pending,
             Some(Ok(preview)) => Rendering::Preview(preview),
             Some(Err(_)) => Rendering::Source,
@@ -1350,7 +1356,7 @@ impl<'a> View<'a> {
 
     pub fn layout_sticky(&self, max: usize, cols: Option<usize>) -> crate::layout::Query<Arc<[crate::tabs::StickyLine]>> {
         use crate::layout::Query;
-        let Some(declarations) = self.tab.declarations.as_ref().filter(|_| max > 0) else { return Query::Ready(Arc::from([])) };
+        let Some(declarations) = self.declarations().filter(|_| max > 0) else { return Query::Ready(Arc::from([])) };
         let shown = self.layout_rows(max.saturating_add(1), cols);
         if let Some(work) = shown.pending { return Query::Pending(work); }
         let row_of = |line: u32| shown.rows.iter().position(|row| row.line as u32 >= line).map_or(u32::MAX, |at| at as u32);
@@ -1365,6 +1371,7 @@ impl<'a> View<'a> {
     }
 
     pub fn inlay_hints(&self) -> Option<&Arc<crate::decor::Hints>> {
+        self.tab.decor_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         let (version, hints) = self.tab.hints.as_ref()?;
         (*version == self.snapshot.key().version).then_some(hints)
     }
@@ -1680,7 +1687,7 @@ impl State {
     /// What is inside crumb `crumb` of pane `pane`'s bar.
     pub fn siblings(&self, pane: u8, crumb: usize) -> Vec<Sibling> {
         let (Some(bar), Some(tab)) = (self.breadcrumbs_for(pane), self.shown(pane)) else { return Vec::new() };
-        crate::breadcrumbs::inside(&bar, crumb, tab, self.project.as_ref())
+        crate::breadcrumbs::inside(&bar, crumb, tab, self.view(tab.id).as_ref(), self.project.as_ref())
     }
     /// Whether parses should find declarations (sticky scroll or breadcrumbs is on).
     fn wants_declarations(&self) -> bool {
@@ -2116,7 +2123,7 @@ impl Session {
     }
 
     #[cfg(test)]
-    fn cache_entries(&self) -> Vec<Arc<Document>> {
+    fn cache_entries(&self) -> Vec<Arc<crate::text::TextSnapshot>> {
         self.cache.documents()
     }
 
@@ -2136,7 +2143,7 @@ impl Session {
         if doc.language().is_none() {
             return Some("No folds for this file type");
         }
-        t.folds.is_none().then_some("Folds are not ready yet")
+        self.state.view(t.id).is_none_or(|v| v.folds().is_none()).then_some("Folds are not ready yet")
     }
 
     pub fn actions(&self) -> Vec<Action> {
@@ -3927,7 +3934,7 @@ impl Session {
                 continue;
             }
             let Some(doc) = self.admitted_document(wait.tab, Priority::Visible) else { self.semantic_wait.insert(lane, wait); continue };
-            // Readiness changes the fingerprint independently of the compatibility Tab.doc.
+            // Readiness changes independently of the view's source identity.
             self.synced = 0;
             self.sync_semantics();
             if let Some(ask) = wait.foreground { repaint |= self.ask_ready(doc, wait.offset, ask, wait.request).repaint; }
@@ -4795,6 +4802,7 @@ impl Session {
                 let sources = &self.state.sources.buffers;
                 for t in self.state.tabs.iter_mut().filter(|t| buffer.is_none_or(|buffer| t.buffer == Some(buffer))
                     && t.buffer.and_then(|id| sources.get(&id)).and_then(|e| e.snapshot.as_ref()).is_some_and(|s| s.key().version == version)) {
+                    t.decor_source = t.buffer.and_then(|id| sources.get(&id)).and_then(|e| e.snapshot.as_ref()).map(|s| SemanticSource::new(s));
                     match &data {
                         crate::decor::Decorated::Hints(h) => {
                             t.hints = Some((version, h.clone()));
@@ -4809,16 +4817,16 @@ impl Session {
             Completion::Rendered { version, preview } => {
                 // Superseded: another version, tab or presentation.
                 let preview = Some(preview.map(Arc::new));
-                let snapshot = self.state.tabs.iter().filter_map(|t| self.state.source(t.id)).find(|s| s.key().version == version && buffer.is_none_or(|b| b == s.key().buffer)).cloned();
+                let source = self.state.tabs.iter().filter_map(|t| self.state.source(t.id)).find(|s| s.key().version == version && buffer.is_none_or(|b| b == s.key().buffer)).map(|s| SemanticSource::new(s));
                 let mut repaint = false;
                 for t in self.shown_mut(version, buffer).filter(|t| t.preview.is_none() && !t.markdown_source) {
                     t.preview = preview.clone();
+                    t.preview_source = source.clone();
                     repaint = true;
                 }
                 Effect { repaint, copy: None }
             }
             Completion::PreviewImages { version, doc, images } => {
-                let snapshot = self.state.tabs.iter().filter_map(|t| self.state.source(t.id)).find(|s| s.key().version == version && buffer.is_none_or(|b| b == s.key().buffer)).cloned();
                 let mut repaint = false;
                 for t in self.shown_mut(version, buffer) {
                     // Only for the preview they were decoded for, once.
@@ -5354,6 +5362,8 @@ impl Session {
                         if self.cache.contains(&to) && let Some(stamp) = self.cache.stamp(&to) { self.cache.put(stamp, snapshot); }
                     }
                 }
+                for t in self.state.tabs.iter_mut().filter(|t| t.buffer == buffer && t.loaded) { t.new_content(); }
+                if self.is_shown(tab) { self.decorate(tab); }
                 self.release_current();
                 // Its bookmarks and recent places follow it.
                 if Arc::make_mut(&mut self.state.places).rename(&from, &to) {
@@ -5783,7 +5793,7 @@ impl Session {
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
         self.state.results = Some(self.new_results(id, ResultsKind::Outline, String::new(), Scope::File(doc.source().to_owned()), None, 1, false));
-        let (latest, tx) = (self.search_latest.clone(), self.tx.clone());
+        let latest = self.search_latest.clone();
         let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
         let input = crate::analysis::Input::new(doc, loaded, self.project_generation.load(Ordering::Acquire), true);
         self.analysis.request(input, crate::analysis::Consumer::Outline, id, Priority::Visible, move |doc, lease| {
@@ -6968,7 +6978,6 @@ impl Session {
             self.current.store(0, Ordering::Relaxed);
         }
         let snapshot = self.state.source(id).cloned();
-        let snapshot = self.state.source(id).cloned();
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token; // a check started while it was shown must not put content back
@@ -7718,13 +7727,7 @@ fn syntax_level_while(usages: Vec<semantics::Target>, direction: Direction, enco
     out
 }
 
-fn floor_char_boundary(text: &str, mut i: usize) -> usize {
-    i = i.min(text.len());
-    while !text.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
+
 
 /// "<server> does not provide type hierarchy", as a disabled reason (`&'static str` like every other): made once per
 /// provider name and kept for the process (at most one short string per provider).

@@ -55,7 +55,7 @@ impl NativeViewport {
         Some(Self(Arc::new(Viewport { pane, tab: tab.id(), identity: view.display_start(tab.top_line())?,
             context: reveals.context(pane)?, epoch: reveals.serial, size: state.text_size(pane)?,
             top: (tab.top_line(), tab.top_row(), tab.column()), visible: view.visible(),
-            declarations: tab.declarations_handle().cloned(), wrapped: state.wrap_cols(tab).is_some() })))
+            declarations: view.declarations_handle().cloned(), wrapped: state.wrap_cols(tab).is_some() })))
     }
     pub(crate) fn current(&self, state: &State, reveals: &Reveals) -> bool {
         let Some(now) = Self::capture(state, reveals, self.0.pane) else { return false };
