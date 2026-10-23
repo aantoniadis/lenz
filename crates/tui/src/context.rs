@@ -23,6 +23,8 @@ enum Action {
     CompareWithBranch,
     /// Put this text on the clipboard.
     Copy(String),
+    /// A sidebar row's entry, as the core lists them.
+    Source(lenz::repository_session::SourceEntry),
 }
 struct Item {
     label: String,
@@ -234,6 +236,9 @@ impl App {
                     match item.action {
                         Action::Palette => self.open_palette(),
                         Action::Run(action) => self.run_action(action),
+                        Action::Source(lenz::repository_session::SourceEntry::Run(action)) => self.run_action(action),
+                        Action::Source(lenz::repository_session::SourceEntry::Command(command)) => self.git_command(command),
+                        Action::Source(lenz::repository_session::SourceEntry::NewBranchFrom(from)) => if let Some(repo) = &mut self.repository { repo.begin_new_branch(Some(from)); },
                         Action::Fold(block) => self.session.fold_block(block),
                         Action::Apply(block, onto) => self.session.edit(lenz::edit_session::EditCommand::Apply { block, onto }),
                         Action::Text(command) => self.interaction(command),
@@ -313,10 +318,18 @@ impl App {
             let Some(card) = card else { return true };
             self.context.items = vec![Item { label: "Copy comment".into(), reason: None, action: Action::Copy(card.body) }];
             if !card.url.is_empty() { self.context.items.push(Item { label: "Copy link to comment".into(), reason: None, action: Action::Copy(card.url) }); }
-        } else if let Some(entries) = point.and_then(|p| self.repository.as_ref().and_then(|r| r.source_menu(p))) {
+        } else if let Some(entries) = self.repository.as_ref().and_then(|r| r.source_menu(point)) {
             // a sidebar row: only its own entries, and no menu without any
             if entries.is_empty() { return true; }
-            self.context.items = entries.into_iter().map(|(label, action)| Item { label: label.into(), reason: lenz::catalog::Availability::disabled(&*self, action).map(|r| r.into_owned()), action: Action::Run(action) }).collect();
+            use lenz::repository_session::SourceEntry;
+            self.context.items = entries.into_iter().map(|(label, entry)| {
+                let reason = match &entry {
+                    SourceEntry::Run(action) => lenz::catalog::Availability::disabled(&*self, *action).map(|r| r.into_owned()),
+                    SourceEntry::Command(command) => self.repository.as_ref().and_then(|r| r.core.disabled(command)).map(str::to_string),
+                    SourceEntry::NewBranchFrom(_) => None,
+                };
+                Item { label: label.into(), reason, action: Action::Source(entry) }
+            }).collect();
         } else if let Some((message, sha)) = commit {
             self.context.items = vec![
                 Item { label: "Copy commit message".into(), reason: None, action: Action::Copy(message) },

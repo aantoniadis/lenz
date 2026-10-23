@@ -765,7 +765,8 @@ impl App {
                 }
             }
         }
-        if self.prompt.is_none() && let Some(repo)=&mut self.repository && repo.handle(event.clone()){let quit=repo.quit;let interaction=repo.interaction.take();let palette=std::mem::take(&mut repo.palette_request);if let Some(command)=interaction{self.interaction(command);}
+        if self.prompt.is_none() && let Some(repo)=&mut self.repository && repo.handle(event.clone()){let quit=repo.quit;let interaction=repo.interaction.take();let git=repo.git.take();let palette=std::mem::take(&mut repo.palette_request);if let Some(command)=interaction{self.interaction(command);}
+            if let Some(command)=git{self.git_command(command);}
             if palette{self.open_palette();}
             if quit{self.request_quit();}return true;}
         if self.prompt.is_none() && self.markdown_input(&event){return true;}

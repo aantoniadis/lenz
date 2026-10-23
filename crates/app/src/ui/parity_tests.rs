@@ -4093,9 +4093,9 @@ fn gui_branch_menu_compares_with_current(cx:&mut TestAppContext) {
     // a click on the branch shows its log; the menu only adds the comparison
     let (x,y)=row(cx);
     f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{button:MouseButton::Right,position:point(px(x),px(y)),modifiers:Default::default(),click_count:1,first_mouse:false},w,cx)).unwrap();
-    assert_eq!(f.viewer.read_with(cx,|v,_|v.menu.as_ref().map(|m|m.items.iter().map(|i|i.0.clone()).collect::<Vec<_>>())),Some(vec!["Compare with Current".to_string()]));
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.menu.as_ref().map(|m|m.items.iter().map(|i|i.0.clone()).collect::<Vec<_>>())),Some(vec!["Checkout".to_string(),"New Branch from Here…".to_string(),"Compare with Current".to_string()]));
     key(cx,&f,"escape",false,false,false);
-    let (n,label)=(0,"Compare with Current");
+    let (n,label)=(2,"Compare with Current");
     let (x,y)=row(cx);
     f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{button:MouseButton::Right,position:point(px(x),px(y)),modifiers:Default::default(),click_count:1,first_mouse:false},w,cx)).unwrap();
     let items=f.viewer.read_with(cx,|v,_|v.menu.as_ref().map(|m|m.items.iter().map(|i|i.0.clone()).collect::<Vec<_>>()));
@@ -4126,8 +4126,8 @@ fn gui_menu_entries_over_a_pane_divider_still_run(cx:&mut TestAppContext) {
         toolbar_ids_y(v,i)
     });
     f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{button:MouseButton::Right,position:point(px(150.),px(y)),modifiers:Default::default(),click_count:1,first_mouse:false},w,cx)).unwrap();
-    // the first entry, clicked right where the sidebar's divider runs under the menu
-    let (mx,my)=f.viewer.read_with(cx,|v,_|{let m=v.menu.as_ref().unwrap();let (_,my,_,_)=m.layout(v.panes.viewport,v.char_w);(v.picker_w(),my+4.+0.5*line_h())});
+    // Compare with Current (the third entry), clicked right where the sidebar's divider runs under the menu
+    let (mx,my)=f.viewer.read_with(cx,|v,_|{let m=v.menu.as_ref().unwrap();assert_eq!(m.items[2].0,"Compare with Current");let (_,my,_,_)=m.layout(v.panes.viewport,v.char_w);(v.picker_w(),my+4.+2.5*line_h())});
     f.window.update(cx,|v,w,cx|v.on_mouse_down(&MouseDownEvent{button:MouseButton::Left,position:point(px(mx),px(my)),modifiers:Default::default(),click_count:1,first_mouse:false},w,cx)).unwrap();
     workflow_wait(cx,&f,|v|v.repo.as_ref().is_some_and(|r|!r.busy()));
     f.viewer.read_with(cx,|v,_|{assert!(v.menu.is_none());assert!(v.panes.drag.is_none(),"no resize starts under a menu");assert!(v.repo.as_ref().unwrap().picker.compare.is_some(),"Compare with Current ran");});

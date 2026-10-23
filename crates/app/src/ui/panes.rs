@@ -66,7 +66,7 @@ impl Viewer {
     }
     pub(super) fn resize_blocked(&self) -> bool {
         self.discard_modal()||self.theme_chooser.is_some()||self.about.is_some()
-            ||self.help||self.goto.is_some()||self.switcher.is_some()||self.popup.is_some()||self.menu.is_some()||self.command_palette.is_some()||self.diff_options.is_some()
+            ||self.help||self.goto.is_some()||self.git_prompt.is_some()||self.checkout_modal()||self.switcher.is_some()||self.popup.is_some()||self.menu.is_some()||self.command_palette.is_some()||self.diff_options.is_some()
             ||self.comparison.find.is_some()
             ||self.conflicts.as_ref().is_some_and(|s|s.confirming())
             ||self.search.as_ref().is_some_and(|s|s.editing)

@@ -19,11 +19,15 @@ use ratatui::{
 use std::path::PathBuf;
 
 const HELP: &str = "Repository commands (F6/Tab cycles Sidebar / Commits / Files / Diff):\nCtrl-R picker; Ctrl-S sidebar; Ctrl-L log; F5 refresh; F10 command palette; Shift-F10 context menu\nSidebar: arrows select; Enter opens; / filters; Esc clears\nc compare selected branch against current; C tips; o open worktree; a all; b current\nCommits/Files: type or Ctrl-F to find without changing the comparison\nUp/Down or F3/Shift-F3 step matches; Enter opens; Esc cancels\nCtrl-A clears query; Ctrl-C copies commit hash or file path; Ctrl-Q quits\nAll rows stay visible and matches are highlighted. F1 opens help.\nOutside search, Shift-arrows select a range; Ctrl-arrows select a second commit.\nHistory filters and actions are in the F10 command palette and context menus.\nPR controls in the comparison: P open; r refresh; d details; v viewed; t/T threads\nPR review is read-only. Viewed Marks are saved locally.";
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 enum Prompt {
     Filter,
     Sources,
     Pr,
+    /// A new branch's name, where it starts (`None`: HEAD), and whether to check it out (Tab).
+    NewBranch { from: Option<String>, checkout: bool },
+    /// Checkout Tag or Revision.
+    Revision,
 }
 
 pub struct Repository {
@@ -45,6 +49,12 @@ pub struct Repository {
     effects: Vec<RepositoryEffect>,
     /// F10 or `:` in a repository pane: the App opens the command palette.
     pub(crate) palette_request: bool,
+    /// A Git command for the app to run once it has checked for unsaved drafts.
+    pub(crate) git: Option<Command>,
+    /// Why the Git prompt's text was refused.
+    prompt_error: Option<String>,
+    /// The checkout dialog's first shown line (a long Force list scrolls).
+    dialog_scroll: u16,
     /// The log rows and title last drawn, for a restarted log's hold.
     held_log: Option<(Vec<ratatui::text::Line<'static>>,String)>,
     pub(crate) interaction:Option<lenz::commands::Interaction>,
@@ -71,7 +81,7 @@ impl Repository {
             history_path: String::new(),
             size: (80, 24),
             bounds:Rect::new(0,0,80,24),
-            effects: Vec::new(),held_log:None,palette_request:false,interaction:None,
+            effects: Vec::new(),held_log:None,palette_request:false,git:None,prompt_error:None,dialog_scroll:0,interaction:None,
             context_row:None,log_search_origin:None, manual_scroll: [false; 2],source_width:None,log_height:None,resizer:Default::default(),
         }
     }
@@ -148,14 +158,22 @@ impl Repository {
         self.core.execute(Command::Focus(lenz::repository_session::Pane::Log));
         self.begin(Prompt::Filter);
     }
+    /// New Branch… (from HEAD when `from` is `None`).
+    pub(crate) fn begin_new_branch(&mut self, from: Option<String>) {
+        self.begin(Prompt::NewBranch { from, checkout: true });
+    }
+    pub(crate) fn begin_revision(&mut self) {
+        self.begin(Prompt::Revision);
+    }
     fn begin(&mut self, prompt: Prompt) {
-        self.prompt = Some(prompt);
+        self.prompt_error = None;
         self.command_selected = 0;
         self.input = match prompt {
             Prompt::Filter => self.core.picker.filter.clone(),
             Prompt::Sources => self.core.picker.sources.filter.clone(),
             _ => String::new(),
         };
+        self.prompt = Some(prompt);
     }
     fn source(&self) -> Option<SourceAction> {
         self.core
@@ -249,8 +267,14 @@ impl Repository {
         Some(RepositorySession::log_context_commands(row,&self.history_path))
     }
     /// A sidebar row's right-click entries under `point` (the open PR's Refresh).
-    pub(crate) fn source_menu(&self,(x,y):(u16,u16))->Option<Vec<(&'static str,lenz::catalog::Action)>>{
-        let picker=&self.core.picker;let area=self.bounds;let diff=self.area(area);
+    /// The sidebar row's entries under `point`, or (Shift-F10, no point) the selected row's while the sidebar has the
+    /// keyboard.
+    pub(crate) fn source_menu(&self,point:Option<(u16,u16)>)->Option<Vec<(&'static str,lenz::repository_session::SourceEntry)>>{
+        let picker=&self.core.picker;
+        let Some((x,y))=point else{
+            return (picker.shown&&picker.sidebar&&picker.focus==Pane::Sidebar).then(||self.core.source_menu(picker.sources.selected));
+        };
+        let area=self.bounds;let diff=self.area(area);
         if !picker.shown||!picker.sidebar||x>=diff.x||!area.contains((x,y).into())||y<=area.y||y+1>=area.bottom(){return None;}
         Some(self.core.source_menu(usize::from(y-area.y-1)+picker.sources.scroll as usize))
     }
@@ -321,6 +345,15 @@ impl Repository {
         }
         match event {
             Event::Mouse(mouse) => {
+                // The checkout dialog owns the mouse: nothing beneath is clicked or scrolled.
+                if self.core.checkout_problem().is_some() {
+                    match mouse.kind {
+                        MouseEventKind::ScrollUp => self.dialog_scroll = self.dialog_scroll.saturating_sub(3),
+                        MouseEventKind::ScrollDown => self.dialog_scroll = self.dialog_scroll.saturating_add(3),
+                        _ => {}
+                    }
+                    return true;
+                }
                 if self.core.overlay.is_some() {
                     match mouse.kind {
                         MouseEventKind::ScrollUp => {
@@ -409,7 +442,12 @@ impl Repository {
                 true
             }
             Event::Paste(text) if self.prompt.is_some() => {
-                self.input.push_str(&text.replace(['\n', '\r'], " "));
+                self.prompt_error = None;
+                // A name or revision is one line: its first.
+                match self.prompt {
+                    Some(Prompt::NewBranch { .. } | Prompt::Revision) => self.input.push_str(text.lines().next().unwrap_or_default().trim()),
+                    _ => self.input.push_str(&text.replace(['\n', '\r'], " ")),
+                }
                 if self.prompt == Some(Prompt::Filter) {
                     self.execute(Command::Filter(self.input.clone()));
                 }
@@ -422,6 +460,30 @@ impl Repository {
                 let shift = key.modifiers.contains(KeyModifiers::SHIFT);
                 if ctrl && key.code == KeyCode::Char('c') && !(self.core.picker.shown&&self.core.picker.focus==Pane::Log&&!self.modal()) {
                     self.quit = true;
+                    return true;
+                }
+                if let Some(choices) = self.core.checkout_problem().map(|p| p.choices()) {
+                    use lenz::branches::CheckoutChoice as K;
+                    let has = |c| choices.iter().any(|(_, x)| *x == c);
+                    // A repeated key never reaches Force's confirmation.
+                    let press = key.kind == KeyEventKind::Press;
+                    // Letters only bare, and not just as the dialog pops up (keys typed for something else).
+                    let bare = (key.modifiers - KeyModifiers::SHIFT).is_empty() && self.core.checkout_keys_ready();
+                    match key.code {
+                        KeyCode::Up => self.dialog_scroll = self.dialog_scroll.saturating_sub(1),
+                        KeyCode::Down => self.dialog_scroll = self.dialog_scroll.saturating_add(1),
+                        KeyCode::PageUp => self.dialog_scroll = self.dialog_scroll.saturating_sub(8),
+                        KeyCode::PageDown => self.dialog_scroll = self.dialog_scroll.saturating_add(8),
+                        _ => {}
+                    }
+                    self.git = match key.code {
+                        KeyCode::Esc => Some(Command::CheckoutChoice(K::Cancel)),
+                        _ if !bare => None,
+                        KeyCode::Char('s') if has(K::Smart) => Some(Command::CheckoutChoice(K::Smart)),
+                        KeyCode::Char('f') if has(K::Force) && press => Some(Command::CheckoutChoice(K::Force)),
+                        KeyCode::Char('y') if has(K::ConfirmForce) && press => Some(Command::CheckoutChoice(K::ConfirmForce)),
+                        _ => None,
+                    };
                     return true;
                 }
                 if ctrl && self.modal() {if self.prompt.is_some()&&key.code==KeyCode::Char('a'){self.input.clear();self.command_selected=0;}return true;}
@@ -489,7 +551,7 @@ impl Repository {
                     }
                     return true;
                 }
-                if let Some(prompt) = self.prompt {
+                if let Some(prompt) = self.prompt.clone() {
                     match key.code {
                         KeyCode::Esc => {
                             self.prompt = None;
@@ -498,6 +560,25 @@ impl Repository {
                         KeyCode::Backspace => {
                             self.input.pop();
                             self.command_selected = 0;
+                            self.prompt_error = None;
+                        }
+                        KeyCode::Tab => if let Some(Prompt::NewBranch { checkout, .. }) = self.prompt.as_mut() { *checkout = !*checkout; },
+                        // Refused text stays in the prompt with the reason.
+                        KeyCode::Enter if matches!(prompt, Prompt::NewBranch { .. } | Prompt::Revision) => {
+                            let command = match prompt {
+                                Prompt::NewBranch { from, checkout } => self.core.validate_branch_name(&self.input)
+                                    .map(|()| Command::NewBranch { name: self.input.trim().to_string(), from, checkout }),
+                                _ => self.core.validate_revision(&self.input)
+                                    .map(|_| Command::Checkout(lenz::branches::Target::Detached(self.input.trim().to_string()))),
+                            };
+                            match command {
+                                Ok(command) => {
+                                    self.prompt = None;
+                                    self.input.clear();
+                                    self.git = Some(command);
+                                }
+                                Err(e) => self.prompt_error = Some(e),
+                            }
                         }
                         KeyCode::Enter => {
                             self.prompt = None;
@@ -511,11 +592,13 @@ impl Repository {
                                 Prompt::Pr => self.execute(Command::OpenPr(
                                     (!input.trim().is_empty()).then(|| input.trim().into()),
                                 )),
+                                Prompt::NewBranch { .. } | Prompt::Revision => {}
                             }
                         }
                         KeyCode::Char(character) if !ctrl => {
                             self.input.push(character);
                             self.command_selected = 0;
+                            self.prompt_error = None;
                         }
                         _ => {}
                     }
@@ -706,7 +789,7 @@ impl Repository {
         if let Some(pr)=self.core.pr.as_mut().filter(|p|p.details().is_some()){self.pr_dialog.draw(frame,pr,Rect::new(diff.x,diff.y.saturating_add(2),diff.width,diff.height.saturating_sub(4)),crate::chrome::initial_palette());}
         self.draw_popup(frame,area,crate::chrome::initial_palette());
     }
-    pub fn modal(&self)->bool {self.prompt.is_some()||self.core.overlay.is_some()}
+    pub fn modal(&self)->bool {self.prompt.is_some()||self.core.overlay.is_some()||self.core.checkout_problem().is_some()}
     pub fn render_in(&mut self, frame: &mut Frame, area:Rect,palette:&lenz::theme::Palette) {
         self.resizer.grips.clear();
         let diff=self.area(area);
@@ -906,13 +989,44 @@ impl Repository {
         // kept while the PR is open: each tab's scroll survives Files changed
         if self.core.pr.is_none(){self.pr_dialog=Default::default();}
         self.command_hits.clear();self.prompt_area=Rect::default();
-        if let Some(prompt) = self.prompt {
-            let label = match prompt {
-                Prompt::Filter => "Log filter",
-                Prompt::Sources => "Repository source filter",
-                Prompt::Pr => "Pull request number/URL (empty: current)",
+        if self.core.checkout_problem().is_none() { self.dialog_scroll = 0; }
+        if let Some(problem) = self.core.checkout_problem() {
+            let keys: Vec<String> = problem.choices().into_iter().map(|(label, c)| {
+                use lenz::branches::CheckoutChoice as K;
+                let key = match c { K::Smart => "s", K::Force => "f", K::ConfirmForce => "y", K::Cancel => "Esc" };
+                format!("{key} {label}")
+            }).collect();
+            let text = problem.text();
+            let style = crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg));
+            let width = area.width.saturating_sub(4).max(1) as usize;
+            // Wrapped rows, the key line last and always shown; the text scrolls above it.
+            let rows: usize = text.lines().map(|l| l.chars().count().max(1).div_ceil(width)).sum();
+            let height = (rows as u16 + 3).min(area.height.saturating_sub(2));
+            let popup = Rect::new(area.x + 1, area.y + 1, area.width.saturating_sub(2), height);
+            let inner = Rect::new(popup.x + 1, popup.y + 1, popup.width.saturating_sub(2), popup.height.saturating_sub(2));
+            let body = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
+            self.dialog_scroll = self.dialog_scroll.min((rows as u16).saturating_sub(body.height));
+            frame.render_widget(Clear, popup);
+            frame.render_widget(Block::default().borders(Borders::ALL).title("Checkout").style(style), popup);
+            let lines: Vec<Line> = text.lines().map(|l| Line::from(safe_label(l))).collect();
+            frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((self.dialog_scroll, 0)).style(style), body);
+            let hint = Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, inner.height.min(1));
+            frame.render_widget(Paragraph::new(Line::from(keys.join(" · "))).wrap(Wrap { trim: false }).style(style), hint);
+            return;
+        }
+        if let Some(prompt) = self.prompt.clone() {
+            let label = match &prompt {
+                Prompt::Filter => "Log filter".to_string(),
+                Prompt::Sources => "Repository source filter".to_string(),
+                Prompt::Pr => "Pull request number/URL (empty: current)".to_string(),
+                Prompt::NewBranch { from, checkout } => {
+                    let start = from.as_deref().map_or("HEAD", |r| ["refs/heads/", "refs/remotes/", "refs/tags/"].iter().find_map(|p| r.strip_prefix(p)).unwrap_or(r));
+                    format!("New branch from {start} [{}] check out (Tab)", if *checkout { "x" } else { " " })
+                }
+                Prompt::Revision => "Checkout tag or revision".to_string(),
             };
-            let lines = vec![Line::from(format!("{label}: {}▏", safe_label(&self.input)))];
+            let mut lines = vec![Line::from(format!("{label}: {}▏", safe_label(&self.input)))];
+            lines.extend(self.prompt_error.as_deref().map(|e| Line::from(safe_label(e))));
             let popup = Rect::new(
                 area.x + 1,
                 area.y + 1,

@@ -64,7 +64,7 @@ impl App {
             Action::Repository(action @ (RepoAction::StagedChanges | RepoAction::CopyUrl | RepoAction::OpenUrl | RepoAction::LocalChanges
                 | RepoAction::AllBranches | RepoAction::CurrentBranch | RepoAction::CompareBranch { .. } | RepoAction::CompareCommit
                 | RepoAction::NextParent | RepoAction::FileHistory | RepoAction::WriteGraph | RepoAction::CopyHash | RepoAction::CopySubject
-                | RepoAction::CopyDetails | RepoAction::ShowInGraph | RepoAction::ToggleMessage)) => {
+                | RepoAction::CopyDetails | RepoAction::ShowInGraph | RepoAction::ToggleMessage | RepoAction::BranchChanges)) => {
                 let path = self.session.comparisons().get(self.session.current()).map_or(String::new(), |c| c.repository_path().to_owned());
                 match self.repository.as_ref().map(|r| r.core.action_command(action, &path)) {
                     Some(Ok(Some(command))) => self.repository_command(command),
@@ -72,6 +72,8 @@ impl App {
                     Some(Ok(None)) | None => {}
                 }
             }
+            Action::Repository(RepoAction::NewBranch) => if let Some(repo) = &mut self.repository { repo.begin_new_branch(None); },
+            Action::Repository(RepoAction::CheckoutRevision) => if let Some(repo) = &mut self.repository { repo.begin_revision(); },
             Action::Repository(RepoAction::Back) => self.navigate(false),
             Action::Repository(RepoAction::Forward) => self.navigate(true),
             Action::Pr(PrAction::Details(tab)) => self.repository_command(R::PrDetails(tab)),
@@ -98,6 +100,17 @@ impl App {
             },
             Action::Help(HelpAction::Settings) => self.open_settings(),
         }
+    }
+
+    /// A repository command; one that rewrites the working tree waits until no draft is unsaved.
+    pub(crate) fn git_command(&mut self, command: R) {
+        use lenz::branches::CheckoutChoice as K;
+        let writes = matches!(&command, R::Checkout(_) | R::NewBranch { checkout: true, .. } | R::CheckoutChoice(K::Smart | K::ConfirmForce));
+        if writes && self.session.has_dirty() {
+            self.session.set_notice("Unsaved changes — Save or Discard unsaved changes before checking out");
+            return;
+        }
+        self.repository_command(command);
     }
 
     pub(crate) fn repository_command(&mut self, command: R) {
@@ -161,12 +174,12 @@ impl Availability for App {
                 why.or_else(|| self.file_disabled(file, self.session.current())).map(Cow::Borrowed)
             }
             Action::Image(index) => lenz::image_session::image_commands().get(index).zip(self.visual.image()).and_then(|(e, doc)| e.disabled(doc, self.visual.image_state())).map(Cow::Borrowed),
-            Action::Repository(RepoAction::Refresh | RepoAction::Branches) => None,
+            Action::Repository(RepoAction::Refresh | RepoAction::Branches | RepoAction::NewBranch | RepoAction::CheckoutRevision) => None,
             Action::Repository(RepoAction::Filter) => None,
             Action::Repository(action @ (RepoAction::StagedChanges | RepoAction::CopyUrl | RepoAction::OpenUrl | RepoAction::LocalChanges
                 | RepoAction::AllBranches | RepoAction::CurrentBranch | RepoAction::CompareBranch { .. } | RepoAction::CompareCommit
                 | RepoAction::NextParent | RepoAction::FileHistory | RepoAction::WriteGraph | RepoAction::CopyHash | RepoAction::CopySubject
-                | RepoAction::CopyDetails | RepoAction::ShowInGraph | RepoAction::OpenWorktree | RepoAction::ToggleMessage)) => {
+                | RepoAction::CopyDetails | RepoAction::ShowInGraph | RepoAction::OpenWorktree | RepoAction::ToggleMessage | RepoAction::BranchChanges)) => {
                 let path = self.session.comparisons().get(self.session.current()).map_or("", |c| c.repository_path());
                 self.repository.as_ref().and_then(|r| r.core.action_command(action, path).err()).map(Cow::Borrowed)
             }

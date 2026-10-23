@@ -29,6 +29,10 @@ pub enum RepoAction {
     OpenWorktree,
     /// Show or hide the commit message panel in Focus.
     ToggleMessage,
+    /// Ask for a new branch's name (from HEAD); Checkout Tag or Revision… asks for the revision.
+    NewBranch, CheckoutRevision,
+    /// The working tree against where HEAD split from its base branch.
+    BranchChanges,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PrAction { Details(DetailsTab), /** Back from a details tab to the diff. */ Diff, MarkViewedNext, Refresh, OutdatedThreads, Threads, CheckHead }
@@ -215,7 +219,9 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
                             (RepoAction::WriteGraph, command_label(&R::WriteGraph)), (RepoAction::CopyHash, command_label(&R::CopyHash)),
                             (RepoAction::CopySubject, command_label(&R::CopySubject)), (RepoAction::CopyDetails, command_label(&R::CopyDetails)),
                             (RepoAction::ShowInGraph, command_label(&R::ShowInGraph)), (RepoAction::OpenWorktree, "Open selected worktree"),
-                            (RepoAction::ToggleMessage, command_label(&R::ToggleMessage(None)))]
+                            (RepoAction::ToggleMessage, command_label(&R::ToggleMessage(None))),
+                            (RepoAction::NewBranch, "New Branch…"), (RepoAction::CheckoutRevision, "Checkout Tag or Revision…"),
+                            (RepoAction::BranchChanges, command_label(&R::BranchChanges))]
                     .map(|(a, label)| entry(Action::Repository(a), label, G::Repository, None)));
             }
             if scope.pr {
