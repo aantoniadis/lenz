@@ -38,16 +38,20 @@ struct Position {
     carry: Option<Cell>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Target {
     skip: usize,
     width: usize,
+    display: Option<Range<usize>>,
+    source_end: Option<usize>,
 }
 
 struct Line {
     tab: TabId,
     target: Target,
     position: Position,
+    start: Cursor,
+    started: bool,
     checkpoints: VecDeque<Position>,
     cells: Arc<Vec<Cell>>,
     complete: bool,
@@ -59,15 +63,18 @@ struct Line {
 }
 
 impl Line {
-    fn new(view: &View<'_>, line: usize, target: Target) -> Option<Self> {
+    fn new(view: &View<'_>, line: usize, target: Target, start: Option<Cursor>) -> Option<Self> {
+        let start = start.or_else(|| view.display_start(line))?;
         Some(Self {
             tab: view.tab().id(),
             target,
             position: Position {
-                cursor: view.display_start(line)?,
+                cursor: start.clone(),
                 column: 0,
                 carry: None,
             },
+            start,
+            started: false,
             checkpoints: VecDeque::new(),
             cells: Arc::default(),
             complete: false,
@@ -79,35 +86,66 @@ impl Line {
         })
     }
 
-    fn retarget(&mut self, view: &View<'_>, target: Target) {
+    fn retarget(&mut self, target: Target) {
         if self.target == target {
             return;
         }
-        let best = self
+        if self.target.display == target.display
+            && self.target.skip == target.skip
+            && self.target.width == target.width
+        {
+            self.target = target;
+            return;
+        }
+        if let Some((old, _)) = self
+            .target
+            .display
+            .as_ref()
+            .zip(target.display.as_ref())
+            .filter(|(old, new)| {
+                old.start == new.start && old.end < new.end && self.target.width == target.width
+            })
+        {
+            if self.position.column >= target.width {
+                self.target = target;
+                return;
+            }
+            if let Some(position) = self
+                .checkpoints
+                .iter()
+                .rev()
+                .find(|p| p.cursor.display_byte() <= old.end)
+                .cloned()
+            {
+                Arc::make_mut(&mut self.cells).retain(|cell| cell.column < position.column);
+                self.position = position;
+                self.target = target;
+                self.complete = false;
+                self.ready = false;
+                self.started = false;
+                self.failed = false;
+                return;
+            }
+        }
+        self.position = self
             .checkpoints
             .iter()
             .chain(std::iter::once(&self.position))
-            .filter(|p| p.column <= target.skip)
+            .filter(|p| target.skip > 0 && p.column <= target.skip)
             .max_by_key(|p| p.column)
-            .cloned();
-        let position = best.or_else(|| {
-            Some(Position {
-                cursor: view.display_start(self.position.cursor.line())?,
+            .cloned()
+            .unwrap_or_else(|| Position {
+                cursor: self.start.clone(),
                 column: 0,
                 carry: None,
-            })
-        });
-        let Some(position) = position else {
-            self.failed = true;
-            return;
-        };
-        self.position = position;
+            });
         self.target = target;
         self.cells = Arc::default();
         self.complete =
             self.end.as_ref() == Some(&self.position.cursor) && self.position.carry.is_none();
         self.ready = self.complete;
         self.failed = false;
+        self.started = false;
     }
 
     fn emit(&mut self, mut cell: Cell) {
@@ -132,16 +170,43 @@ impl Line {
     }
 
     fn consume(&mut self, window: &Window) {
+        self.started = true;
         self.checkpoints.push_back(self.position.clone());
         if self.checkpoints.len() > CHECKPOINTS {
             self.checkpoints.pop_front();
         }
+        let from = self.target.display.as_ref().map_or(0, |range| {
+            range
+                .start
+                .saturating_sub(window.display.start)
+                .min(window.shown.text.len())
+        });
+        let to = self
+            .target
+            .display
+            .as_ref()
+            .map_or(window.shown.text.len(), |range| {
+                range
+                    .end
+                    .saturating_sub(window.display.start)
+                    .min(window.shown.text.len())
+            });
+        let Some(body) = window.shown.text.get(from..to) else {
+            self.failed = true;
+            return;
+        };
+        let complete = window.complete
+            || self
+                .target
+                .display
+                .as_ref()
+                .is_some_and(|range| range.end <= window.display.end);
         let carry = self.position.carry.take();
         let prefix = carry.as_ref().map_or(0, |cell| cell.text().len());
         let mut text = carry
             .as_ref()
             .map_or_else(String::new, |cell| cell.text().to_owned());
-        text.push_str(&window.shown.text);
+        text.push_str(body);
         let text = Arc::new(text);
         let mut graphemes = text.grapheme_indices(true).peekable();
         while let Some((at, grapheme)) = graphemes.next() {
@@ -151,7 +216,7 @@ impl Line {
                 cell.range = at..at + grapheme.len();
                 cell
             } else {
-                let local = at - prefix;
+                let local = from + at - prefix;
                 let source = window.source_at(local);
                 Cell {
                     column: 0,
@@ -168,7 +233,7 @@ impl Line {
                     caret: window.caret(source) == Some(local),
                 }
             };
-            if graphemes.peek().is_none() && !window.complete {
+            if graphemes.peek().is_none() && !complete {
                 cell.text = Arc::new(grapheme.to_owned());
                 cell.range = 0..grapheme.len();
                 self.position.carry = Some(cell);
@@ -177,7 +242,7 @@ impl Line {
             }
         }
         self.position.cursor = window.next().clone();
-        self.complete = window.complete;
+        self.complete = complete;
         if self.complete {
             self.extent = Some(self.position.column);
             self.end = Some(self.position.cursor.clone());
@@ -191,6 +256,8 @@ impl Line {
 struct Pane {
     lines: VecDeque<Line>,
     pending: Option<Request>,
+    pending_display: Option<usize>,
+    layout: Option<(TabId, reader_core::layout::Work)>,
     serial: u64,
     work: usize,
     seen: bool,
@@ -220,6 +287,7 @@ impl Cache {
                         .matches(view.snapshot(), view.inlay_hints())
                 })
             });
+            pane.layout = None;
             pane.work = FRAME_WORK;
             pane.seen = false;
             for line in &mut pane.lines {
@@ -237,7 +305,58 @@ impl Cache {
         width: usize,
         batch: Option<&Batch>,
     ) -> Row {
-        let target = Target { skip, width };
+        self.project(
+            pane,
+            view,
+            line,
+            Target {
+                skip,
+                width,
+                display: None,
+                source_end: None,
+            },
+            None,
+            batch,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrapped(
+        &mut self,
+        pane: u8,
+        view: &View<'_>,
+        cursor: Cursor,
+        display: Range<usize>,
+        source_end: Option<usize>,
+        width: usize,
+        batch: Option<&Batch>,
+    ) -> Row {
+        self.project(
+            pane,
+            view,
+            cursor.line(),
+            Target {
+                skip: 0,
+                width,
+                display: Some(display),
+                source_end,
+            },
+            Some(cursor),
+            batch,
+        )
+    }
+
+    fn project(
+        &mut self,
+        pane: u8,
+        view: &View<'_>,
+        line: usize,
+        target: Target,
+        start: Option<Cursor>,
+        batch: Option<&Batch>,
+    ) -> Row {
+        let (skip, width) = (target.skip, target.width);
+        let display_start = target.display.as_ref().map(|range| range.start);
         let Some(slot) = self.panes.get_mut(pane as usize) else {
             return Row {
                 cells: Arc::default(),
@@ -250,6 +369,7 @@ impl Cache {
         let at = slot.lines.iter().position(|entry| {
             entry.tab == view.tab().id()
                 && entry.position.cursor.line() == line
+                && entry.target.display.as_ref().map(|range| range.start) == display_start
                 && entry
                     .position
                     .cursor
@@ -257,7 +377,7 @@ impl Cache {
         });
         let Some(mut entry) = at
             .and_then(|at| slot.lines.remove(at))
-            .or_else(|| Line::new(view, line, target))
+            .or_else(|| Line::new(view, line, target.clone(), start))
         else {
             return Row {
                 cells: Arc::default(),
@@ -267,13 +387,11 @@ impl Cache {
                 pending: false,
             };
         };
-        entry.retarget(view, target);
+        entry.retarget(target);
         entry.touched = true;
-        if slot
-            .pending
-            .as_ref()
-            .is_some_and(|r| r.tab == entry.tab && r.cursor.line() == line)
-        {
+        if slot.pending.as_ref().is_some_and(|r| {
+            r.tab == entry.tab && r.cursor.line() == line && slot.pending_display == display_start
+        }) {
             slot.seen = true;
             if let Some(batch) = batch.filter(|batch| slot.pending.as_ref() == Some(&batch.request))
             {
@@ -307,7 +425,7 @@ impl Cache {
         }
         if !entry.ready && !entry.failed {
             // Keep the first frame cheap; cold prefixes continue through the existing core worker lane.
-            if entry.position.cursor.display_byte() == 0
+            if !entry.started
                 && slot.work >= WINDOW_WORK
                 && let Some(window) =
                     view.display_window(&mut entry.position.cursor.clone(), WINDOW_WORK)
@@ -327,20 +445,56 @@ impl Cache {
                 self.commands
                     .push(Command::PrepareProjection(request.clone()));
                 slot.pending = Some(request);
+                slot.pending_display = display_start;
                 slot.seen = true;
             }
         }
         let row = Row {
             cells: entry.cells.clone(),
             end: (entry.complete && entry.position.column <= skip.saturating_add(width))
-                .then(|| entry.position.cursor.source_byte()),
-            extent: entry.extent,
+                .then(|| {
+                    if entry.target.display.is_some() {
+                        entry.target.source_end
+                    } else {
+                        Some(entry.position.cursor.source_byte())
+                    }
+                })
+                .flatten(),
+            extent: entry.extent.filter(|_| entry.target.display.is_none()),
             failed: entry.failed,
             pending: !entry.ready && !entry.failed,
         };
         slot.lines.push_front(entry);
 
         row
+    }
+
+    pub fn layout(&mut self, pane: u8, tab: TabId, work: reader_core::layout::Work) {
+        if let Some(slot) = self
+            .panes
+            .get_mut(pane as usize)
+            .filter(|slot| slot.layout.is_none())
+        {
+            slot.layout = Some((tab, work));
+        }
+    }
+
+    pub fn cursor(&self, pane: u8, view: &View<'_>, line: usize, display: usize) -> Option<Cursor> {
+        self.panes
+            .get(pane as usize)?
+            .lines
+            .iter()
+            .find(|entry| {
+                entry.tab == view.tab().id()
+                    && entry.position.cursor.line() == line
+                    && entry
+                        .target
+                        .display
+                        .as_ref()
+                        .is_some_and(|range| range.start == display)
+                    && entry.start.matches(view.snapshot(), view.inlay_hints())
+            })
+            .map(|entry| entry.start.clone())
     }
 
     pub fn clamp(&mut self, pane: u8, view: &View<'_>, cols: usize, extent: usize) {
@@ -360,6 +514,13 @@ impl Cache {
 
     pub fn finish(&mut self) -> Vec<Command> {
         for (pane, slot) in self.panes.iter_mut().enumerate() {
+            if let Some((tab, work)) = slot.layout.take() {
+                self.commands.push(Command::PrepareLayout {
+                    pane: pane as u8,
+                    tab,
+                    work,
+                });
+            }
             let mut offscreen = 0;
             slot.lines.retain(|line| {
                 if line.touched {
