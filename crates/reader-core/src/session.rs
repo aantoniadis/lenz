@@ -1180,6 +1180,22 @@ impl<'a> View<'a> {
 
 }
 
+impl View<'_> {
+    pub fn inlay_hints(&self) -> Option<&Arc<crate::decor::Hints>> {
+        let (version, hints) = self.tab.hints.as_ref()?;
+        (*version == self.snapshot.key().version).then_some(hints)
+    }
+
+    pub fn display_start(&self, line: usize) -> Option<crate::projection::Cursor> {
+        crate::projection::Cursor::start(self.snapshot, line, self.inlay_hints().cloned())
+    }
+
+    pub fn display_window(&self, cursor: &mut crate::projection::Cursor, work_bytes: usize) -> Option<crate::projection::Window> {
+        if !cursor.matches(self.snapshot, self.inlay_hints()) { return None; }
+        cursor.window(self.snapshot, work_bytes)
+    }
+}
+
 impl State {
     pub fn view(&self, id: TabId) -> Option<View<'_>> {
         let tab = self.tabs.iter().find(|tab| tab.id == id)?;
