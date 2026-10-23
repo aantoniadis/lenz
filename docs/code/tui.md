@@ -57,6 +57,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the status bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
+| Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (typed), Show Branch Changes, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |
 | Annotate with Git blame | Alt-B (View menu, right-click); click an annotation for its commit (d Show Diff, c Copy Revision); the status line shows the caret line's commit |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
