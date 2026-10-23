@@ -37,16 +37,20 @@ pub fn complete_with_catalog(
     if tokens.len() > 4_096 {
         return Err("completion source exceeds 4096 tokens".into());
     }
-    let before = &sql[..cursor];
+    let before = sql.get(..cursor).ok_or("invalid completion offset")?;
     let start = before
         .char_indices()
         .rev()
         .find(|(_, c)| !c.is_alphanumeric() && *c != '_')
         .map_or(0, |(offset, ch)| offset + ch.len_utf8());
-    let prefix = &before[start..];
-    let head = &before[..start];
+    let (head, prefix) = before
+        .split_at_checked(start)
+        .ok_or("invalid completion prefix")?;
     let qualifier = head.strip_suffix('.').map(qualifier_name).transpose()?;
-    let repaired = format!("{}{}{}", &sql[..start], CURSOR, &sql[cursor..]);
+    let repaired = format!(
+        "{head}{CURSOR}{}",
+        sql.get(cursor..).ok_or("invalid completion offset")?
+    );
     let statements =
         Parser::parse_sql(&PostgreSqlDialect {}, &repaired).map_err(|e| e.to_string())?;
     let mut visitor = CompletionVisitor {
@@ -295,7 +299,8 @@ pub fn format(sql: &str) -> Result<String, String> {
             if sql.contains(&placeholder) {
                 return Err("reserved formatter placeholder in source".into());
             }
-            replacements.push((placeholder.clone(), sql[start..end].to_owned()));
+            let literal = sql.get(start..end).ok_or("invalid token range")?;
+            replacements.push((placeholder.clone(), literal.to_owned()));
             masked.replace_range(start..end, &placeholder);
         }
     }
@@ -469,7 +474,7 @@ pub fn signature_help(sql: &str, cursor: usize) -> Result<Option<SignatureHelp>,
     if !sql.is_char_boundary(cursor) {
         return Err("invalid signature offset".into());
     }
-    let tokens = significant_tokens(&sql[..cursor])?;
+    let tokens = significant_tokens(sql.get(..cursor).ok_or("invalid signature offset")?)?;
     let mut calls: Vec<Option<SignatureHelp>> = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         match token {

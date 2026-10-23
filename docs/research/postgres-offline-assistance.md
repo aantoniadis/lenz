@@ -28,6 +28,8 @@ The provider has text/snapshot inputs and text/value outputs; no connection stri
 
 Raw local evidence is under `target/perf/editor-implementation/05/` in the main checkout's shared target directory. `identity.json` records compiler/platform, base revision, exact source hashes, executable SHA-256 and build command; `sources/` and `postgres-assistance-probe` preserve the measured implementation. `*-red.log` retain meaningful failing behavior during development. `boundary.strace`, `boundary-summary.json` and `boundary.log` preserve observed syscalls, destructive source payloads and real results. `measurements.json` retains 100 raw timings per operation, source/response examples, RSS samples and actual sustained duration; `stress.log` retains deterministic assertion results.
 
+Integration replaced seven guarded string slices with checked access to meet the existing panic-site budget. Focused checks are retained under `target/perf/editor-implementation/merge-05/`; the timings below describe the preserved pre-integration executable, not a new measurement of that guard-only change.
+
 The final post-merge release process completed **1,353,858 deterministic workload cycles in 60.000 seconds**. Across 100 measured requests per operation:
 
 | Operation | Median / p95 |
