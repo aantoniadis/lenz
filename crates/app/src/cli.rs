@@ -69,7 +69,7 @@ pub fn wants_help(args: &[String]) -> bool { matches!(args, [a] if a == "--help"
 pub const USAGE: &str = "usage: lenz diff [options] [--staged] [<rev> [<rev>]] [-- <path>...]
        lenz diff [options] [--no-index] <left> <right>
        lenz diff log [<rev>...] [-- <path>...] | lenz diff log --follow <file>
-       lenz diff --about
+       lenz diff --about | --version
        lenz diff report --last [--print]
        lenz diff pr [<number>|<url>]
        lenz diff merge [[--] <path>...] | lenz diff merge <base> <local> <remote> <merged>
