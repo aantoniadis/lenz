@@ -5768,21 +5768,23 @@ impl Session {
     fn find_in(&mut self, tab: TabId, text: String, reveal: bool) -> Effect {
         self.find_seq += 1;
         let request = self.find_seq;
+        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        let snapshot = view.snapshot().clone();
+        let version = snapshot.key().version;
+        let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|entry| entry.document.clone()).unwrap_or_default();
+        let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Relaxed));
         let Some(t) = self.tab_mut(tab) else { return Effect::default() };
-        let Some(doc) = t.doc.clone() else { return Effect::default() };
         // The last matches stay drawn (and counted) until the new ones arrive, when they are for this text: a new
         // version's lines may be fewer.
-        let mut state = crate::find::FindState::new(text.clone(), doc.version(), request);
+        let mut state = crate::find::FindState::new(text.clone(), version, request);
         state.reveal = reveal;
-        if let Some(old) = t.find.take().filter(|o| o.error.is_none() && o.version == doc.version()) {
+        if let Some(old) = t.find.take().filter(|o| o.error.is_none() && o.version == version) {
             (state.matches, state.current, state.capped) = (old.matches, old.current, old.capped);
         }
         t.find = Some(state);
         let latest = t.find_latest.clone();
         let query = lenz_content::find::Query { text, options: self.find_options };
         latest.store(request, Ordering::Relaxed);
-        let Some(view) = self.state.view(tab) else { return Effect::default() };
-        let input = crate::analysis::Input::new(view.snapshot().clone(), Arc::downgrade(&doc), self.project_generation.load(Ordering::Relaxed));
         self.analysis.request(input, crate::analysis::Consumer::Find(tab), request, Priority::Visible, move |doc, lease| {
             let version = doc.version();
             let current = lease.cancellation();

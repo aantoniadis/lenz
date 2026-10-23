@@ -697,6 +697,27 @@ fn finder_perf() {
 }
 
 #[test]
+fn find_materializes_the_current_snapshot_without_replacing_it() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.txt", b"saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.txt");
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("draft-only\n") }]).unwrap());
+    // A draft fixture keeps the old compatibility Document until its adapter migration.
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.dispatch(Command::Find("draft-only".into()));
+    assert_eq!(s.state().active().unwrap().find().unwrap().version, current.key().version);
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(s.state().document().unwrap().text().as_ref(), "saved\n");
+    assert_eq!(std::fs::read(&file).unwrap(), b"saved\n");
+}
+
+#[test]
 fn reloading_without_a_find_releases_superseded_pending_analysis_text() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "versions.txt", b"alpha\n");
