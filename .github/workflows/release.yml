@@ -2,7 +2,7 @@ name: Release
 
 # Builds the release tarballs on native runners when a version tag is pushed and attaches them to a draft release;
 # notes, pre-release and publishing stay manual. Rerun for an existing tag from the Actions tab; a published
-# release is left alone.
+# release is left alone. "Test build only" builds the tarballs (kept as run artifacts) without attaching them.
 on:
   push:
     tags: ['v*']
@@ -11,6 +11,10 @@ on:
       tag:
         description: Existing tag to build, such as v0.0.5
         required: true
+      test_only:
+        description: Test build only (keep the tarballs as run artifacts; attach nothing)
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -75,6 +79,7 @@ jobs:
 
   release:
     needs: package
+    if: ${{ !inputs.test_only }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
