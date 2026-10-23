@@ -43,3 +43,9 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   unwrapped `Extend` path retains source-byte columns. Evaluate that separate
   selection policy before making shift-arrow behavior match ordinary navigation;
   it was not changed by the integration gate repair.
+- **Local gate build concurrency:** the combined 08–10 gate launched many
+  simultaneous linkers and showed substantial host I/O pressure while building
+  workspace test binaries. Compare a bounded Cargo job count on a later cold
+  build before changing the gate; this is an operational observation, not a
+  demonstrated product regression. Evidence: the batch gate log under
+  `target/perf/editor-implementation/merge-08-10/`.
