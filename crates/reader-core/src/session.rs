@@ -64,6 +64,10 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Apply one atomic UTF-8 transaction to this exact current version.
+    Edit { tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind },
+    Undo { tab: TabId },
+    Redo { tab: TabId },
     PrepareProjection(crate::projection::Request),
     SetNativeContext { pane: u8, context: u64 },
     MeasuredReveal { goal: NativeReveal, cols: usize, bounds: std::ops::Range<usize> },
@@ -1171,6 +1175,7 @@ struct CurrentSource {
     snapshot: Option<Arc<crate::text::TextSnapshot>>,
     stamp: Option<Stamp>,
     saved: Option<SemanticSource>,
+    draft: Option<crate::draft::Draft>,
 }
 impl Sources {
     fn admit(&mut self, source: &Path, previous: Option<crate::text::BufferId>, doc: &Arc<Document>, stamp: Option<Stamp>) -> crate::text::BufferId {
@@ -1178,7 +1183,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None });
         if entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -1194,12 +1199,19 @@ impl Sources {
 pub struct View<'a> {
     tab: &'a Tab,
     snapshot: &'a Arc<crate::text::TextSnapshot>,
+    draft: Option<&'a crate::draft::Draft>,
 }
 impl<'a> View<'a> {
     pub fn tab(&self) -> &'a Tab { self.tab }
     pub fn snapshot(&self) -> &'a Arc<crate::text::TextSnapshot> { self.snapshot }
-    pub fn dirty(&self) -> bool { false }
-    pub fn edit_disabled(&self) -> Option<&str> { Some("Editing is not available yet") }
+    pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
+    pub fn can_undo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_undo) }
+    pub fn can_redo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_redo) }
+    pub fn edit_disabled(&self) -> Option<&str> {
+        if self.snapshot.image().is_some() { Some("Images are read-only") }
+        else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
+        else { None }
+    }
     /// Reader source rows include the logical final empty line.
     pub fn line_count(&self) -> usize { self.snapshot.line_count() }
     pub fn visible(&self) -> Arc<crate::folds::Visible> { self.tab.visible_for(self.snapshot) }
@@ -1395,7 +1407,7 @@ impl State {
         let buffer = tab.buffer?;
         let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
         if !tab.loaded { return None; }
-        Some(View { snapshot, tab })
+        Some(View { snapshot, tab, draft: self.sources.buffers.get(&buffer)?.draft.as_ref() })
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
@@ -2774,6 +2786,62 @@ impl Session {
         effect
     }
 
+    fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>) -> Effect {
+        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        if view.snapshot().key() != expected || view.edit_disabled().is_some() { return Effect::default(); }
+        let current = view.snapshot().clone();
+        let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
+        let draft = entry.draft.get_or_insert_with(|| crate::draft::Draft::new(current.clone()));
+        match draft.edit(&current, version, edits.clone()) {
+            Ok(Some(next)) => self.publish_edit(tab, current, Arc::new(next), &edits),
+            Ok(None) | Err(_) => Effect::default(),
+        }
+    }
+
+    fn undo(&mut self, tab: TabId, redo: bool) -> Effect {
+        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        let current = view.snapshot().clone();
+        let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        let Some(draft) = self.state.sources.buffers.get_mut(&current.key().buffer).and_then(|entry| entry.draft.as_mut()) else { return Effect::default() };
+        match draft.undo(&current, version, redo) {
+            Ok(Some((next, edits))) => self.publish_edit(tab, current, Arc::new(next), &edits),
+            Ok(None) | Err(_) => Effect::default(),
+        }
+    }
+
+    fn publish_edit(&mut self, edited: TabId, previous: Arc<crate::text::TextSnapshot>, next: Arc<crate::text::TextSnapshot>, edits: &[crate::text::TextEdit]) -> Effect {
+        let buffer = next.key().buffer;
+        let transform = |byte: usize| {
+            let mut delta: isize = 0;
+            for edit in edits {
+                if byte < edit.range.start { break; }
+                if byte <= edit.range.end { return edit.range.start.checked_add_signed(delta).unwrap_or(0) + edit.text.len(); }
+                delta += edit.text.len() as isize - (edit.range.end - edit.range.start) as isize;
+            }
+            byte.checked_add_signed(delta).unwrap_or(0)
+        };
+        let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
+        entry.snapshot = Some(next.clone());
+        entry.document = Default::default();
+        let mut changed = Vec::new();
+        for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
+            let top = previous.reader_line_range(tab.top_line.min(previous.line_count() - 1)).start;
+            tab.new_content();
+            tab.selection = tab.selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
+            tab.set_top(next.line_of(transform(top)), 0);
+            if tab.id == edited { tab.retained = true; }
+            changed.push(tab.id);
+        }
+        self.analysis.invalidate(&next, self.project_generation.load(Ordering::Relaxed));
+        for tab in changed {
+            if self.is_shown(tab) { self.mark_shown(tab, next.key().version); self.decorate(tab); }
+            if let Some(query) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) { self.find_in(tab, query, false); }
+        }
+        self.synced = 0;
+        Effect { repaint: true, copy: None }
+    }
+
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) {
         let changed = self.state.admit_current(id, doc, stamp);
         let version = self.state.source(id).map_or(0, |snapshot| snapshot.key().version);
@@ -2830,6 +2898,9 @@ impl Session {
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
+            Command::Edit { tab, expected, edits, kind: _ } => self.edit(tab, expected, edits),
+            Command::Undo { tab } => self.undo(tab, false),
+            Command::Redo { tab } => self.undo(tab, true),
             Command::PrepareLayout { pane, tab, work } => {
                 if self.layout_intents.get(pane as usize).is_some_and(Option::is_some) { return Effect::default(); }
                 self.prepare_layout(crate::layout::Request { pane, tab, work });

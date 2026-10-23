@@ -83,6 +83,45 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 }
 
 #[test]
+fn shared_draft_commands_replace_unicode_and_undo_without_writing_disk() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "draft.txt", "α😀\r\nbeta\n".as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path.clone()), "draft.txt");
+    let first = s.state().active().unwrap().id();
+    let original = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab: first, expected: original,
+        edits: vec![TextEdit { range: 0..2, text: "é".into() }], kind: EditKind::Replace });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "é😀\r\nbeta\n");
+    assert!(s.state().active().unwrap().retained());
+    assert!(active_view(&s).dirty());
+    assert!(s.state().current_source().unwrap().key().version > original.version);
+    s.dispatch(Command::Split(Split::Columns));
+    let second = s.state().active().unwrap().id();
+    assert_ne!(first, second);
+    s.dispatch(Command::Select(Selection { anchor: 8, head: 8 }));
+    let second_position = s.state().active().unwrap().selection();
+    s.dispatch(Command::FocusPane(0));
+    s.dispatch(Command::Select(Selection { anchor: 2, head: 2 }));
+    s.dispatch(Command::Undo { tab: first });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀\r\nbeta\n");
+    assert!(!active_view(&s).dirty());
+    assert_eq!(s.state().shown(1).unwrap().selection(), second_position);
+    let undone = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Redo { tab: second });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "é😀\r\nbeta\n");
+    assert!(s.state().current_source().unwrap().key().version > undone.version);
+    assert_eq!(s.state().shown(0).unwrap().selection(), Some(Selection { anchor: 2, head: 2 }));
+    assert_eq!(source_text(pane_view(&s, 1).snapshot()), "é😀\r\nbeta\n");
+    let mut independent = session(&d.path().join("other-session"));
+    open(&mut independent, Command::Open(path.clone()), "draft.txt");
+    assert_eq!(source_text(independent.state().current_source().unwrap()), "α😀\r\nbeta\n");
+    assert!(!active_view(&independent).dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), "α😀\r\nbeta\n".as_bytes());
+}
+
+#[test]
 fn rebuild_discards_saved_and_inflight_records_and_cache_optout_survives_reopen() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
