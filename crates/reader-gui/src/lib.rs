@@ -194,6 +194,9 @@ pub struct ReaderView {
     /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
     #[cfg(feature = "test-support")]
     pub exe: Option<PathBuf>,
+    /// Ticket12 traces explicitly opt in; normal builds expose no writable input.
+    #[cfg(feature = "test-support")]
+    draft_input: bool,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -564,7 +567,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, #[cfg(feature = "test-support")] draft_input: false };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1146,6 +1149,43 @@ impl ReaderView {
         }.layout(g.text, line_h(), self.char_w))
     }
 
+    #[cfg(feature = "test-support")]
+    pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+
+    #[cfg(feature = "test-support")]
+    fn draft_target(&self) -> Option<(TabId, reader_core::text::SnapshotKey, std::ops::Range<usize>)> {
+        if !self.draft_input || self.modal.is_some() || self.tree_focus || self.results_focus || self.find_focus.is_some() || self.crumb_focus.is_some() { return None; }
+        let state = self.session.state();
+        let view = state.view(state.active()?.id())?;
+        if view.edit_disabled().is_some() || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
+        let range = if let Some(selection) = view.tab().selection() { selection.range() }
+            else { let start = view.snapshot().line_range(view.tab().top_line())?.start; start..start };
+        Some((view.tab().id(), view.snapshot().key(), range))
+    }
+
+    #[cfg(feature = "test-support")]
+    fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
+        let Some((tab, expected, range)) = self.draft_target() else { return false };
+        self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);
+        true
+    }
+
+    #[cfg(feature = "test-support")]
+    fn draft_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
+        let key = &ev.keystroke;
+        let control = key.modifiers.control || key.modifiers.platform;
+        if control && !key.modifiers.alt && key.key == "z" {
+            let Some((tab, _, _)) = self.draft_target() else { return false };
+            self.dispatch(if key.modifiers.shift { Command::Redo { tab } } else { Command::Undo { tab } }, cx);
+            true
+        } else if control && !key.modifiers.alt && !key.modifiers.shift && key.key == "v" {
+            cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| self.replace_draft_input(&text, reader_core::text::EditKind::Paste, cx))
+        } else if !control && !key.modifiers.alt {
+            key.key_char.as_deref().filter(|text| !text.chars().any(char::is_control))
+                .is_some_and(|text| self.replace_draft_input(text, reader_core::text::EditKind::Typing, cx))
+        } else { false }
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let k = &ev.keystroke;
         if !matches!(k.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
@@ -1209,6 +1249,8 @@ impl ReaderView {
             ("right", true, _) | ("]", _, true) => return self.run(CommandId::Forward, window, cx),
             _ => {}
         }
+        #[cfg(feature = "test-support")]
+        if self.draft_key(ev, cx) { return; }
         // The preview scrolls in pixels; it has no caret to move.
         if !ctrl && self.focused_markdown().is_some_and(|m| m.layout.is_some()) {
             let view = self.rows as f32 * line_h();

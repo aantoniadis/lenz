@@ -121,6 +121,50 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(cx: &mut TestAppContext) {
+    let original = "é界\r\nline two\r\n";
+    let f = fixture(cx, Some(("draft.txt", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| {
+        let source = view.session().state().current_source().unwrap();
+        source.copy_range(0..source.len_bytes()).unwrap()
+    });
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("ignored".into())));
+    v.simulate_keystrokes("λ ctrl-v");
+    assert_eq!(text(&v), original, "ordinary constructors remain read-only");
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right shift-right");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().range()), 2..5);
+    v.simulate_keystrokes("λ");
+    assert_eq!(text(&v), "éλ\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap()), Selection { anchor: 4, head: 4 });
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| view.visible_rows()[0].text.clone()), "éλ");
+    assert!(f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("👩🏽‍💻".into())));
+    v.simulate_keystrokes("ctrl-v");
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 19);
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "éλ\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 4);
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), original);
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 5);
+    assert!(!f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    v.simulate_keystrokes("ctrl-shift-z ctrl-shift-z");
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    let before_modal = f.view.read_with(&v, |view, _| view.session().state().current_source().unwrap().key());
+    v.simulate_keystrokes("f10 x ctrl-v ctrl-z");
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().current_source().unwrap().key()), before_modal);
+    v.simulate_keystrokes("escape");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("draft.txt")).unwrap(), original);
+}
+
+#[gpui::test]
 fn an_empty_window_renders_and_its_menu_explains_disabled_commands(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);
