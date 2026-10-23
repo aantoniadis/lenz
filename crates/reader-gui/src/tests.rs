@@ -380,7 +380,7 @@ fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppCon
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(400.0), px(220.0)));
     draw(&mut v);
-    v.simulate_keystrokes("alt-z end");
+    v.simulate_keystrokes("alt-z end up");
     for _ in 0..300 {
         cx.run_until_parked();
         f.view.update(&mut v, |r, cx| r.poll(cx));
@@ -388,7 +388,7 @@ fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppCon
         if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End must paint the source tail beyond the old display prefix");
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End followed by Up must paint the original tail: {:?}", f.view.read_with(&v, |r, _| { let t=r.session.state().active().unwrap(); let layout=r.session.state().view(t.id()).unwrap().layout_rows(r.rows,r.session.state().wrap_cols(t)); ((t.top_line(),t.top_row()),format!("{:?}",layout.rows),r.visible_rows().iter().map(|r|r.text.clone()).collect::<Vec<_>>()) }));
     v.simulate_keystrokes("up");
     for _ in 0..100 {
         cx.run_until_parked();

@@ -2361,7 +2361,7 @@ impl ReaderView {
         }
         let delta = lenz_gpui::scroll::shifted(lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w), ev.modifiers.shift);
         let pane = self.session.state().focused_pane() as usize;
-        let tab = self.session.state().active().and_then(|t| Some((t.id(), t.document()?.version())));
+        let tab = self.session.state().active().and_then(|t| Some((t.id(), self.session.state().view(t.id())?.snapshot().key().version)));
         if self.wheel_tab[pane] != tab || matches!(ev.delta, ScrollDelta::Lines(_)) {
             self.wheel[pane] = Default::default();
             self.wheel_tab[pane] = tab;
@@ -2375,8 +2375,10 @@ impl ReaderView {
             self.dispatch(Command::ScrollRows(rows), cx);
         }
         if let Some(t) = self.session.state().active() {
-            let at_end = self.wheel[pane].y > 0.0 && t.visible().step(t.top_line(), 1) == t.top_line()
-                && t.rows(2, self.session.state().wrap_cols(t)).len() < 2;
+            let at_end = self.wheel[pane].y > 0.0 && self.session.state().view(t.id()).is_some_and(|view| {
+                let rows = view.layout_rows(2, self.session.state().wrap_cols(t));
+                rows.pending.is_none() && rows.rows.len() < 2
+            });
             lenz_gpui::scroll::clamp(&mut self.wheel[pane].y, t.top_line() == 0 && t.top_row() == 0, at_end);
             let at_right = self.wheel[pane].x > 0.0 && t.column() >= self.max_column();
             lenz_gpui::scroll::clamp(&mut self.wheel[pane].x, t.column() == 0, at_right);
@@ -2962,7 +2964,7 @@ impl ReaderView {
             if pane != self.session.state().focused_pane() {
                 self.dispatch(Command::FocusPane(pane), cx);
             }
-            let start = self.session.state().tabs().iter().find(|t| t.id() == tab).and_then(|t| t.document()).map(|d| d.line_range(line).start);
+            let start = self.session.state().view(tab).and_then(|view| view.snapshot().line_range(line)).map(|r| r.start);
             if let Some(start) = start {
                 self.dispatch(Command::Select(Selection { anchor: start, head: start }), cx);
             }
@@ -3342,7 +3344,7 @@ impl ReaderView {
     /// For tests: the window point over byte `at` of the focused text, on the first shown line, unwrapped, ASCII.
     pub fn text_point_of(&self, at: usize) -> Option<(f32, f32)> {
         let b = self.text_bounds?;
-        let line = self.session.state().document()?.line_range(0);
+        let line = self.session.state().view(self.session.state().active()?.id())?.snapshot().line_range(0)?;
         let x = f32::from(b.origin.x) + num_w() + 8.0 + (at.checked_sub(line.start)? as f32 + 0.5) * self.char_w;
         Some((x, f32::from(b.origin.y) + line_h() / 2.0))
     }
@@ -3633,7 +3635,7 @@ impl ReaderView {
                         }
                     };
                     if let Some(cursor) = cursor {
-                        self.source.wrapped(g.pane, &view, cursor, row.display.clone(), row.complete.then_some(row.source.end), (width - row.indent as f32 * self.char_w).max(1.0), batch.as_deref(), window, metrics);
+                        self.source.wrapped(g.pane, &view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), (width - row.indent as f32 * self.char_w).max(1.0), batch.as_deref(), window, metrics);
                     }
                 } else {
                     self.source.row(g.pane, &view, row.line, tab.column() as f32 * self.char_w, width, batch.as_deref(), window, metrics);
@@ -4799,52 +4801,6 @@ fn wanted_image(tab: &Tab) -> Option<Arc<lenz_content::image::Pixels>> {
     let image = tab.document()?.image()?;
     let pixels = image.pixels.as_ref().ok()?;
     (image.format != lenz_content::image::Format::Svg || !tab.image_source()).then(|| pixels.clone())
-}
-
-/// Each shown row cut from its whole line's row (`whole`, by line): the row's part of the text, indented, its
-/// colours, selection and caret moved with it; a continuation row has no number, and only a line's last row keeps
-/// what follows its text (a collapsed region's placeholder). Unwrapped lines pass through whole.
-#[allow(clippy::type_complexity)]
-fn split_rows(shown: &[reader_core::wrap::Row], whole: &std::collections::HashMap<usize, (TextRow, Vec<(std::ops::Range<usize>, u32, u8)>)>) -> Vec<TextRow> {
-    shown
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            let line = &whole.get(&r.line)?.0;
-            let last = shown.get(i + 1).is_none_or(|n| n.line != r.line);
-            let (start, end) = (r.display.start, if last { line.text.len() } else { r.display.end });
-            if start == 0 && last {
-                return Some(TextRow { y: i as f32, ..line.clone() });
-            }
-            let pad = r.indent;
-            let shift = |a: usize| a - start + pad;
-            let cut = |x: &std::ops::Range<usize>| (x.start < end && x.end > start).then(|| shift(x.start.max(start))..shift(x.end.min(end)));
-            let text = format!("{}{}", " ".repeat(pad), line.text.get(start..end).unwrap_or_default());
-            Some(TextRow {
-                y: i as f32,
-                number: if r.index == 0 { line.number } else { 0 },
-                text,
-                fg: line.fg.iter().filter_map(|(x, c)| Some((cut(x)?, *c))).collect(),
-                bg: line.bg.iter().filter_map(|(x, c)| Some((cut(x)?, *c))).collect(),
-                selected: line.selected.as_ref().and_then(cut),
-                caret: line.caret.filter(|&c| (start..end).contains(&c) || (last && c == end)).map(shift),
-            })
-        })
-        .collect()
-}
-
-/// Whole lines' underlines and strikethroughs cut to the rows shown, as [`split_rows`] cuts their text.
-#[allow(clippy::type_complexity)]
-fn split_marks(shown: &[reader_core::wrap::Row], whole: &std::collections::HashMap<usize, (TextRow, Vec<(std::ops::Range<usize>, u32, u8)>)>) -> Vec<(f32, std::ops::Range<usize>, u32, u8)> {
-    let mut out = Vec::new();
-    for (i, r) in shown.iter().enumerate() {
-        let Some((row, marks)) = whole.get(&r.line) else { continue };
-        let last = shown.get(i + 1).is_none_or(|n| n.line != r.line);
-        let (start, end) = (r.display.start, if last { row.text.len() } else { r.display.end });
-        let shift = |a: usize| a - start + r.indent;
-        out.extend(marks.iter().filter(|(x, ..)| x.start < end && x.end > start).map(|(x, c, m)| (i as f32, shift(x.start.max(start))..shift(x.end.min(end)), *c, *m)));
-    }
-    out
 }
 
 /// Why `tab`'s raster image cannot be shown, when it cannot (an SVG that cannot be rendered shows its source
