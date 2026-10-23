@@ -1217,24 +1217,24 @@ impl<'a> View<'a> {
 
 }
 
-impl View<'_> {
-    pub fn highlights(&self) -> Option<&Parsed> {
+impl<'a> View<'a> {
+    pub fn highlights(&self) -> Option<&'a Parsed> {
         self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         self.tab.highlights.as_deref()
     }
-    pub fn declarations(&self) -> Option<&lenz_content::highlight::Declarations> {
+    pub fn declarations(&self) -> Option<&'a lenz_content::highlight::Declarations> {
         self.tab.parsed_source.as_ref().filter(|source| source.matches(self.snapshot))?;
         self.tab.declarations.as_deref()
     }
-    pub fn declarations_handle(&self) -> Option<&Arc<lenz_content::highlight::Declarations>> {
+    pub fn declarations_handle(&self) -> Option<&'a Arc<lenz_content::highlight::Declarations>> {
         self.declarations()?;
         self.tab.declarations.as_ref()
     }
-    pub fn tokens(&self) -> Option<&Arc<crate::decor::Tokens>> {
+    pub fn tokens(&self) -> Option<&'a Arc<crate::decor::Tokens>> {
         let (version, tokens) = self.tab.tokens.as_ref()?;
         (*version == self.snapshot.key().version).then_some(tokens)
     }
-    pub fn rendering(&self) -> Option<Rendering<'_>> {
+    pub fn rendering(&self) -> Option<Rendering<'a>> {
         (self.snapshot.language() == Some(Language::Markdown)).then_some(())?;
         Some(match &self.tab.preview {
             _ if self.tab.markdown_source => Rendering::Source,
@@ -1257,7 +1257,7 @@ impl View<'_> {
     }
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
     /// A line-relative hover identifier; names clipped by the 4 KiB inspection window are omitted.
     pub fn linkable(&self, line: usize, byte: usize) -> Option<std::ops::Range<usize>> {
         let source = self.snapshot.line_range(line)?;
@@ -1276,7 +1276,7 @@ impl View<'_> {
     }
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
     fn layout_query<T>(&self, cols: Option<usize>, mut query: impl FnMut(&mut crate::layout::Cache) -> crate::layout::Query<T>) -> crate::layout::Query<T> {
         use crate::layout::Query;
         let mut cache = self.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
