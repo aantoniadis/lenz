@@ -3517,8 +3517,8 @@ mod checkout_tests {
     #[test]
     fn each_sidebar_row_offers_its_actions_in_the_core() {
         let (_r, wt, mut state) = fixture();
-        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags".into())));
-        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Remotes".into())));
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags")));
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Remotes")));
         let local = |name: &'static str| move |a: &SourceAction| matches!(a, SourceAction::Branch(n, _) if n == name);
         assert_eq!(labels(&state, row(&state, local("refs/heads/main"))), ["New Branch from Here…"]);
         assert_eq!(labels(&state, row(&state, local("refs/heads/other"))), ["Checkout", "New Branch from Here…", "Compare with Current"]);
