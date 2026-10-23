@@ -5382,6 +5382,7 @@ mod git_branches {
         // No commit yet: every file is new.
         assert_eq!(args(&s, &GitDiff::LocalChanges, &exe), Ok(vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()]));
         assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Changes Since Branch Start: there is no commit yet".into()));
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Err("Compare with Base Branch: there is no commit yet".into()));
     }
 
     #[test]
@@ -5547,6 +5548,9 @@ mod git_branches {
         assert_eq!(GitDiff::of(&typed[0].target, BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("HEAD~1".into())));
         let other = s.state().branch_rows("oth");
         assert_eq!(other.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Compare with “oth”", "other"]);
+        let exact = s.state().branch_rows("other");
+        assert_eq!(exact.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["other"], "a listed name is picked from the list");
+        assert_eq!(s.branch_actions(&exact[0].target).into_iter().map(|(l, _)| l).collect::<Vec<_>>(), ["Compare with Working Tree", "Show Changes Since Branching from Here"], "the pick list only compares");
         // The full popup is unchanged next time.
         s.dispatch(Command::CloseBranches);
         open_branches(&mut s);
@@ -5559,7 +5563,7 @@ mod git_branches {
         let mut s = session(d.path());
         s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
         settle(&mut s, |s| opened(s) && s.state().repo_checked());
-        for id in [CommandId::ShowLocalChanges, CommandId::CompareWithRevision, CommandId::ShowBranchChanges, CommandId::CompareWithWorktree] {
+        for id in [CommandId::ShowLocalChanges, CommandId::CompareWithRevision, CommandId::CompareWithBase, CommandId::ShowBranchChanges, CommandId::CompareWithWorktree] {
             assert_eq!(s.disabled(id), Some("Not in a Git repository"), "{id:?}");
             assert_eq!(id.group(), crate::actions::CommandGroup::Git);
         }
@@ -5843,27 +5847,45 @@ fn two_explorer_entries_compare_with_ctrl_d() {
         std::fs::write(bin.join(name), b"").unwrap();
     }
     let exe = bin.join("lenz-code");
-    assert_eq!(s.disabled(CommandId::CompareSelected), Some("Ctrl+click a second file or folder in the explorer"));
-    // Ctrl+click on b.rs while a.rs is selected: both are marked.
+    let mark_two = "Mark two files or folders in the explorer (Ctrl+click, or Space)";
+    assert_eq!(s.disabled(CommandId::CompareSelected), Some(mark_two));
+    // Ctrl+click on b.rs while a.rs is highlighted: both are marked.
     s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("a.rs".into()) });
     assert_eq!(s.state().tree_marks(), ["a.rs".into(), "b.rs".into()] as [std::sync::Arc<str>; 2]);
     assert_eq!(s.disabled(CommandId::CompareSelected), None);
-    let launch = s.compare_selected_launch(Some("b.rs"), &exe, false).unwrap();
+    let launch = s.compare_selected_launch(&exe, false).unwrap();
     assert_eq!(launch.args, ["--no-index".to_string(), a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()]);
-    // Ctrl+click again unmarks; one mark and the selected row compare too.
+    // Ctrl+click again unmarks: one mark compares nothing.
     s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("b.rs".into()) });
     assert_eq!(s.state().tree_marks(), ["a.rs".into()] as [std::sync::Arc<str>; 1]);
-    assert_eq!(s.compare_selected_launch(Some("b.rs"), &exe, false).unwrap().args[2], b.to_string_lossy());
-    assert!(s.compare_selected_launch(Some("a.rs"), &exe, false).unwrap_err().contains("Ctrl+click a second"));
-    // A third mark replaces the older; a file with a folder is refused; folders compare.
+    assert_eq!(s.disabled(CommandId::CompareSelected), Some(mark_two));
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), format!("Compare Selected: {mark_two}"));
+    // A third mark replaces the older; folders compare; a file with a folder is refused in Compare Selected's words.
     s.dispatch(Command::MarkTreeRow { path: "sub".into(), selected: None });
     s.dispatch(Command::MarkTreeRow { path: "other".into(), selected: None });
     assert_eq!(s.state().tree_marks(), ["sub".into(), "other".into()] as [std::sync::Arc<str>; 2]);
-    assert_eq!(s.compare_selected_launch(None, &exe, true).unwrap().args[1..], [root.join("sub").to_string_lossy().into_owned(), root.join("other").to_string_lossy().into_owned()]);
+    assert_eq!(s.compare_selected_launch(&exe, true).unwrap().args[1..], [root.join("sub").to_string_lossy().into_owned(), root.join("other").to_string_lossy().into_owned()]);
     s.dispatch(Command::ClearTreeMarks);
     s.dispatch(Command::MarkTreeRow { path: "a.rs".into(), selected: Some("sub".into()) });
-    assert!(s.compare_selected_launch(None, &exe, false).unwrap_err().contains("a folder with a folder"));
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), "Compare Selected: pick a file to compare with a file, or a folder with a folder");
+    // A marked entry that is no longer listed (its folder collapsed) is said so at use.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::ToggleDir("sub".into()));
+    settle(&mut s, |s| s.state().tree_rows().any(|r| &*r.path == "sub/x.rs"));
+    s.dispatch(Command::MarkTreeRow { path: "sub/x.rs".into(), selected: Some("a.rs".into()) });
+    s.dispatch(Command::ToggleDir("sub".into()));
+    assert!(s.compare_selected_launch(&exe, false).unwrap_err().ends_with("one marked entry is no longer listed"));
+    // A deleted file: the missing side is named.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("a.rs".into()) });
+    std::fs::remove_file(&a).unwrap();
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), format!("Compare Selected: no such file or folder: {}", a.display()));
+    // A library or source URI has no file: never marked.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::MarkTreeRow { path: "jdt://contents/x".into(), selected: Some("b.rs".into()) });
+    assert!(s.state().tree_marks().is_empty());
     // Opening another folder forgets the marks.
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: None });
     s.dispatch(Command::OpenRoot(d.path().to_path_buf()));
     assert!(s.state().tree_marks().is_empty());
     assert_eq!(CommandId::CompareSelected.shortcut(), Some("Ctrl+D"));

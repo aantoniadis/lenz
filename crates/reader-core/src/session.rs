@@ -1591,6 +1591,9 @@ pub struct Session {
     rx: async_channel::Receiver<Completion>,
 }
 
+/// Why Compare Selected cannot run yet, in words for both frontends.
+const MARK_TWO: &str = "Mark two files or folders in the explorer (Ctrl+click, or Space)";
+
 /// Lenz Diff beside `exe` (the terminal app when `terminal`), or why not, for the command `what`.
 pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String, String> {
     let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
@@ -1932,7 +1935,7 @@ impl Session {
             },
             // The explorer's selection, which only the adapter knows, is checked when it asks.
             CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
-            CommandId::CompareSelected => self.state.tree_marks.is_empty().then_some("Ctrl+click a second file or folder in the explorer"),
+            CommandId::CompareSelected => (self.state.tree_marks.len() < 2).then_some(MARK_TWO),
             CommandId::CopyPathLine => match self.state.active() {
                 None => Some("No file is open"),
                 Some(t) if t.doc.is_none() => Some("No text to point at"),
@@ -2314,9 +2317,8 @@ impl Session {
     /// app, or the terminal app when `terminal`.
     pub fn compare_launch(&self, left: &Path, right: &Path, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
         let right = std::path::absolute(right).map_err(|e| format!("Compare With: {e}"))?;
-        let (Ok(l), Ok(r)) = (std::fs::metadata(left), std::fs::metadata(&right)) else {
-            return Err(format!("Compare With: no such file or folder: {}", right.display()));
-        };
+        let metadata = |p: &Path| std::fs::metadata(p).map_err(|_| format!("Compare With: no such file or folder: {}", p.display()));
+        let (l, r) = (metadata(left)?, metadata(&right)?);
         if l.is_dir() != r.is_dir() {
             return Err("Compare With: pick a file to compare with a file, or a folder with a folder".into());
         }
@@ -2330,18 +2332,17 @@ impl Session {
         Ok(lenz_content::open::Launch { program, args: args.to_vec(), cwd })
     }
 
-    /// Compare Selected (Ctrl+D): Lenz Diff on the two explorer entries marked, or the one marked and `selected`, the
-    /// highlighted entry.
-    pub fn compare_selected_launch(&self, selected: Option<&str>, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
-        let marks = &self.state.tree_marks;
-        let pair = match (marks.as_slice(), selected) {
-            ([a, b], _) => (a.as_ref(), b.as_ref()),
-            ([a], Some(sel)) if a.as_ref() != sel => (a.as_ref(), sel),
-            _ => return Err("Compare Selected: Ctrl+click a second file or folder in the explorer".into()),
-        };
+    /// Compare Selected (Ctrl+D): Lenz Diff on the two explorer entries marked, while both are still listed.
+    pub fn compare_selected_launch(&self, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
+        // Checked now: a marked entry may have been collapsed away, deleted or renamed since.
+        let listed = |m: &Arc<str>| self.state.tree_rows().any(|r| r.path == *m);
+        let [a, b] = self.state.tree_marks.as_slice() else { return Err(format!("Compare Selected: {MARK_TWO}")) };
+        if !listed(a) || !listed(b) {
+            return Err(format!("Compare Selected: {MARK_TWO}; one marked entry is no longer listed"));
+        }
         let source = |row: &str| self.compare_source(Some(row)).map_err(|e| format!("Compare Selected: {e}"));
-        let (left, right) = (source(pair.0)?, source(pair.1)?);
-        self.compare_launch(&left, &right, exe, terminal)
+        let (left, right) = (source(a)?, source(b)?);
+        self.compare_launch(&left, &right, exe, terminal).map_err(|e| e.replacen("Compare With:", "Compare Selected:", 1))
     }
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
@@ -2850,6 +2851,11 @@ impl Session {
             }
             Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
             Command::MarkTreeRow { path, selected } => {
+                if path.contains("://") {
+                    self.state.messages.push("Compare Selected: this entry has no file on disk".into());
+                    return repaint;
+                }
+                let selected = selected.filter(|s| !s.contains("://"));
                 let marks = &mut self.state.tree_marks;
                 if let Some(at) = marks.iter().position(|m| *m == path) {
                     marks.remove(at);

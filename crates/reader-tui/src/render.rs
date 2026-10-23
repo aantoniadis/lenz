@@ -477,8 +477,10 @@ impl App {
             .take(area.height.saturating_sub(1) as usize)
         {
             let marked = self.session.state().tree_marks().contains(&entry.path);
-            let bg = if i == self.tree_at && self.focus == Focus::Tree || marked {
+            let bg = if i == self.tree_at && self.focus == Focus::Tree {
                 p.selected_bg
+            } else if marked {
+                p.fold_bg
             } else {
                 p.sidebar_bg
             };
@@ -506,6 +508,10 @@ impl App {
                     },
                 ),
             );
+            // Marked for Compare Selected: a check in the row's last cell.
+            if marked && r.width > 2 {
+                frame.buffer_mut()[(r.right() - 2, r.y)].set_symbol("✓").set_style(style(p.fg, bg));
+            }
             let icon_x = r.x.saturating_add(3 + 2 * entry.depth.min(20) as u16);
             if self.nerd_icons() && icon_x < r.right() {
                 frame.buffer_mut()[(icon_x, r.y)].set_fg(color(icon.color_on(p, bg)));

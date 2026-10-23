@@ -2415,9 +2415,15 @@ fn the_git_menu_compares_the_working_tree_in_this_terminal() {
     assert_eq!(foreground_args(&mut a), Some(vec!["refs/heads/other".to_string()]));
     a.run(CommandId::CompareWithRevision);
     settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    // A listed name is picked from the list; other text compares as typed.
     typed(&mut a, "v1");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(foreground_args(&mut a), Some(vec!["v1".to_string()]));
+    assert_eq!(foreground_args(&mut a), Some(vec!["refs/tags/v1".to_string()]));
+    a.run(CommandId::CompareWithRevision);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    typed(&mut a, "HEAD");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(foreground_args(&mut a), Some(vec!["HEAD".to_string()]));
     assert!(a.modal.is_none());
     // A tiny terminal draws the list.
     a.run(CommandId::CompareWithRevision);
@@ -2483,8 +2489,9 @@ fn space_or_ctrl_click_marks_two_entries_and_ctrl_d_compares_them() {
     key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
     a.tree_at = at(&a, "b.txt");
     key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
-    draw(&mut a, 100, 20);
+    let shown = draw_screen(&mut a, 100, 20);
     assert_eq!(a.session.state().tree_marks().len(), 2);
+    assert_eq!(shown.matches('✓').count(), 2, "both marked rows show a check");
     key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL);
     let launch = a.foreground.take().expect("Lenz Diff in this terminal");
     assert_eq!(launch.args, ["--no-index".to_string(), dir.path().join("a.txt").to_string_lossy().into_owned(), dir.path().join("b.txt").to_string_lossy().into_owned()]);
@@ -2501,4 +2508,11 @@ fn space_or_ctrl_click_marks_two_entries_and_ctrl_d_compares_them() {
     click(&mut a, ra, KeyModifiers::NONE);
     assert!(a.session.state().tree_marks().is_empty(), "a plain click forgets them");
     draw(&mut a, 20, 6);
+}
+
+/// The screen as text after a draw.
+fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()
 }

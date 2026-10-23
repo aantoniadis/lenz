@@ -913,7 +913,7 @@ impl ReaderView {
                 InterfaceAction::CompareWithBase => self.git_diff(&reader_core::branches::GitDiff::BaseBranch, cx),
                 InterfaceAction::CompareSelected => {
                     let exe = self.exe();
-                    let launch = self.session.compare_selected_launch(self.tree_sel.as_deref(), &exe, false);
+                    let launch = self.session.compare_selected_launch(&exe, false);
                     self.start(launch, None, cx);
                 }
                 InterfaceAction::ShowLocalChanges => self.git_diff(&reader_core::branches::GitDiff::LocalChanges, cx),
@@ -1490,6 +1490,15 @@ impl ReaderView {
         }
         // The Git Branches popup: typing filters, Up/Down move, Enter checks out (or opens a worktree), Right shows the
         // row's actions, Escape closes.
+        // The Git prompts take a paste (a commit id, a branch name): its first line.
+        let paste = (key == "v" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform)).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten()
+            .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
+        // So does the Git Branches popup's filter (a commit id to compare with).
+        if let (Some(text), Some(Modal::Branches { query, at })) = (&paste, &mut self.modal) {
+            query.push_str(text);
+            *at = 0;
+            return cx.notify();
+        }
         if let Some(Modal::Branches { query, at }) = self.modal.clone() {
             let rows = self.session.state().branch_rows(&query);
             let last = rows.len().saturating_sub(1);
@@ -1530,9 +1539,6 @@ impl ReaderView {
             }
             return cx.notify();
         }
-        // The Git prompts take a paste (a commit id, a branch name): its first line.
-        let paste = (key == "v" && (ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform)).then(|| cx.read_from_clipboard().and_then(|c| c.text())).flatten()
-            .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
         if let (Some(text), Some(Modal::NewBranch { name: input, error, .. } | Modal::Revision { input, error, .. })) = (&paste, &mut self.modal) {
             input.push_str(text);
             *error = None;
@@ -2192,6 +2198,13 @@ impl ReaderView {
             ("right", false) if expanded == Some(false) => self.activate_row(at, false, cx),
             ("left", false) if expanded == Some(true) => self.activate_row(at, false, cx),
             ("escape", false) if !self.session.state().tree_marks().is_empty() => self.dispatch(Command::ClearTreeMarks, cx),
+            // Space marks the highlighted entry for Compare Selected (Ctrl+D), as in the terminal.
+            ("space", false) => {
+                let path = self.session.state().tree_rows().nth(at).map(|r| r.path.clone());
+                if let Some(path) = path {
+                    self.dispatch(Command::MarkTreeRow { path, selected: None }, cx);
+                }
+            }
             ("escape", false) => self.tree_focus = false,
             _ => return false,
         }
@@ -2780,9 +2793,11 @@ impl ReaderView {
             if row < self.tree_rows && i < self.tree_len() {
                 // Ctrl+click (Cmd+click on macOS) marks it for Compare Selected; a plain click forgets the marks.
                 if ev.modifiers.control || ev.modifiers.platform {
+                    // The row drawn highlighted, which is the first one when nothing was picked yet.
+                    let selected = self.session.state().tree_rows().nth(self.tree_at()).map(|r| r.path.clone());
                     let path = self.session.state().tree_rows().nth(i).map(|r| r.path.clone());
                     if let Some(path) = path {
-                        let selected = self.tree_sel.replace(path.clone());
+                        self.tree_sel = Some(path.clone());
                         self.dispatch(Command::MarkTreeRow { path, selected }, cx);
                     }
                 } else {
@@ -4380,8 +4395,10 @@ impl Render for ReaderView {
                             window.with_content_mask(Some(gpui::ContentMask { bounds: body }), |window| {
                                 for (i, line) in tree.iter().enumerate() {
                                     let y = y0 + body_top + i as f32 * line_h();
-                                    if line.selected || line.marked {
-                                        lenz_gpui::fill(window, x0, y, sidebar_w, line_h(), if tree_focus || line.marked { palette.selected_bg } else { palette.fold_bg });
+                                    if line.selected {
+                                        lenz_gpui::fill(window, x0, y, sidebar_w, line_h(), if tree_focus { palette.selected_bg } else { palette.fold_bg });
+                                    } else if line.marked {
+                                        lenz_gpui::fill(window, x0, y, sidebar_w, line_h(), palette.fold_bg);
                                     }
                                     // Chevron, icon and name, indented by depth.
                                     let x = x0 + 6.0 + line.depth as f32 * 2.0 * char_w;
@@ -4392,6 +4409,12 @@ impl Render for ReaderView {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
                                     }
                                     lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icon_w, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
+                                    // Marked for Compare Selected: a check at the row's end, over the name if it is long.
+                                    if line.marked {
+                                        let at = x0 + sidebar_w - 2.0 * char_w;
+                                        lenz_gpui::fill(window, at - char_w * 0.5, y, char_w * 2.0, line_h(), if line.selected && tree_focus { palette.selected_bg } else { palette.fold_bg });
+                                        lenz_gpui::text(window, cx, m, at, y, "✓", palette.fg);
+                                    }
                                 }
                             });
                             lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0 + toolbar_h(), 1.0, body_h + tabs_h, palette.border);

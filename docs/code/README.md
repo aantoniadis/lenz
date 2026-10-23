@@ -168,7 +168,8 @@ highlighted file or folder when the explorer has focus, with a file or folder yo
 a typed path in the terminal), in Lenz Diff: its window from the GUI; from the terminal, Lenz Diff's terminal app
 takes over the terminal until you quit it. Lenz Diff must sit beside Lenz Code, as release packages install it.
 **Compare Selected** (Ctrl+D, Cmd+D on macOS) compares two explorer entries, as in IntelliJ: Ctrl+click (Cmd+click)
-the second one, or in the terminal press Space on each; Escape or a plain click forgets them.
+the second one, or press Space on each; marked entries show a ✓. Escape in the explorer, or a plain click, forgets
+them.
 
 **Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the status bar) lists **New Branch…**,
 **Checkout Tag or Revision…**, then the **Recent**, **Local**, **Remote** and **Tags** branches and, with more than one,

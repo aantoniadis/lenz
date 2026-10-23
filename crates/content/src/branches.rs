@@ -517,7 +517,7 @@ pub fn attempt(root: &Path, retry: &Retry, mode: Mode) -> Result<Outcome, Checko
     }
 }
 
-/// The commit HEAD's changes count from (Show Branch Changes): where HEAD split from `from`, else from the base
+/// The commit HEAD's changes count from (Show Changes Since Branch Start): where HEAD split from `from`, else from the base
 /// branch; refused with no commit yet, with no base, or on the base itself. `git_dir` is `root`'s.
 pub fn changes_since(root: &Path, git_dir: &Path, from: Option<&str>) -> Result<String, String> {
     verify_commit(root, "HEAD").map_err(|_| "there is no commit yet".to_string())?;
@@ -535,7 +535,7 @@ pub fn changes_since(root: &Path, git_dir: &Path, from: Option<&str>) -> Result<
     merge_base(root, &base, "HEAD")
 }
 
-/// The branch a branch's changes are counted from (Show Branch Changes).
+/// The branch a branch's changes are counted from (Show Changes Since Branch Start, Compare with Base Branch).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Base {
     /// Fully named: `refs/remotes/origin/main`.

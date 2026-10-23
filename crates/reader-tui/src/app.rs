@@ -613,9 +613,8 @@ impl App {
             InterfaceAction::CheckoutRevision => Prompt::Revision,
             InterfaceAction::CompareWithBase => return self.git_diff(&reader_core::branches::GitDiff::BaseBranch),
             InterfaceAction::CompareSelected => {
-                let selected = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
                 let exe = self.exe();
-                match self.session.compare_selected_launch(selected.as_deref(), &exe, true) {
+                match self.session.compare_selected_launch(&exe, true) {
                     Ok(launch) => self.foreground = Some(launch),
                     Err(e) => self.dispatch(Command::Notice(e)),
                 }

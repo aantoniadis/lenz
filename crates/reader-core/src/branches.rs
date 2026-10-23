@@ -159,7 +159,8 @@ impl State {
             let mut rows: Vec<_> = self.ref_rows(v).into_iter().filter(|r| matches!(r.section, "Local" | "Remote" | "Tags")).collect();
             let typed = query.trim();
             rows.retain(|r| r.label.to_lowercase().contains(&typed.to_lowercase()));
-            if !typed.is_empty() {
+            // A name already listed is picked from the list (a branch is not mistaken for a tag of that name).
+            if !typed.is_empty() && !rows.iter().any(|r| r.label == typed) {
                 rows.insert(0, row("", &format!("Compare with “{typed}”"), false, BranchTarget::Revision(typed.to_string())));
             }
             return rows;
@@ -214,6 +215,14 @@ impl crate::session::Session {
     }
     /// The actions a row's submenu offers (none for the popup's own commands, which run on Enter).
     pub fn branch_actions(&self, target: &BranchTarget) -> Vec<(&'static str, BranchAction)> {
+        let mut actions = self.row_actions(target);
+        // The pick lists only compare.
+        if self.state().branches().is_some_and(|v| v.revisions_only || v.worktrees_only) {
+            actions.retain(|(_, a)| matches!(a, BranchAction::CompareWithWorkingTree | BranchAction::ChangesSinceBranching));
+        }
+        actions
+    }
+    fn row_actions(&self, target: &BranchTarget) -> Vec<(&'static str, BranchAction)> {
         // What is current comes from the repository itself, not the popup's lists (which close before an action runs).
         let repo = self.state().repo();
         let current = repo.and_then(|r| r.head.branch.as_deref());
@@ -316,7 +325,10 @@ impl crate::session::Session {
                 by_name(root, rev.trim(), sha)
             }
             GitDiff::BranchChanges(from) => git_branches::changes_since(root, &repo.git_dir, from.as_deref()).map_err(fail)?,
-            GitDiff::BaseBranch => git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?.name,
+            GitDiff::BaseBranch => {
+                git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
+                git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?.name
+            }
         };
         let program = crate::session::lenz_diff(exe, terminal, what)?;
         Ok(lenz_content::open::Launch { program, args: vec![rev], cwd: Some(root.clone()) })

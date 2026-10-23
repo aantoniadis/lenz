@@ -5373,10 +5373,12 @@ fn gui_the_git_menu_compares_the_working_tree(cx: &mut TestAppContext) {
     v.simulate_keystrokes("down enter");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
     assert_eq!(launched_args(&mut v, &f)[2], ["refs/heads/other"]);
-    // Typed text: the first row compares with it.
+    // Typed or pasted text: the first row compares with it.
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithRevision, w, cx));
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
-    type_text(&mut v, "HEAD");
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("HEAD\nsecond line".into()));
+    v.simulate_keystrokes("ctrl-v");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "HEAD")));
     v.simulate_keystrokes("enter");
     assert_eq!(launched_args(&mut v, &f)[3], ["HEAD"]);
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ main"), "nothing checked out");
@@ -5446,8 +5448,13 @@ fn gui_ctrl_click_marks_two_entries_and_ctrl_d_compares_them(cx: &mut TestAppCon
         point(px(20.0), px(toolbar_h() + line_h() * (i as f32 + 1.5)))
     });
     let a = row_at(&mut v, "a.txt");
-    v.simulate_click(a, Modifiers::default());
     let b = row_at(&mut v, "b.txt");
+    // Nothing picked yet: the first row is drawn highlighted, and a Ctrl+click marks it too.
+    let first = f.view.read_with(&v, |r, _| r.session().state().tree_rows().next().unwrap().path.clone());
+    v.simulate_click(b, Modifiers { control: true, ..Default::default() });
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().to_vec()), [first, "b.txt".into()]);
+    v.simulate_keystrokes("escape");
+    v.simulate_click(a, Modifiers::default());
     v.simulate_click(b, Modifiers { control: true, ..Default::default() });
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().to_vec()), ["a.txt".into(), "b.txt".into()] as [std::sync::Arc<str>; 2]);
@@ -5461,8 +5468,13 @@ fn gui_ctrl_click_marks_two_entries_and_ctrl_d_compares_them(cx: &mut TestAppCon
     v.simulate_click(b, Modifiers { control: true, ..Default::default() });
     v.simulate_click(a, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().is_empty()));
+    // Space marks the highlighted entry, as in the terminal.
+    v.simulate_click(a, Modifiers::default());
+    v.simulate_keystrokes("space down space");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().len()), 2);
+    v.simulate_keystrokes("escape");
     // Ctrl+D with nothing marked starts nothing (its menu entry says why).
     v.simulate_keystrokes("ctrl-d");
     assert_eq!(f.view.read_with(&v, |r, _| r.launched.len()), 1);
-    assert_eq!(f.view.read_with(&v, |r, _| r.session().disabled(CommandId::CompareSelected)), Some("Ctrl+click a second file or folder in the explorer"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().disabled(CommandId::CompareSelected)), Some("Mark two files or folders in the explorer (Ctrl+click, or Space)"));
 }
