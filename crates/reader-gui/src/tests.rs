@@ -373,6 +373,107 @@ fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mu
 }
 
 #[gpui::test]
+fn source_windows_compact_suppressed_source_and_retain_caret_mapping(cx: &mut TestAppContext) {
+    let source = "a".to_owned() + &"\u{200b}".repeat(50_000) + "END\n";
+    let f = fixture(cx, Some(("invisible.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let view = r.session.state().view(tab.id()).unwrap();
+        let logical = view.layout_rows(r.rows, None).rows;
+        let row = r.source_row(tab, &logical[0]).unwrap();
+        assert!(row.text.contains("END"));
+        assert!(row.text.len() < 256);
+        assert!(r.source.retained_windows() <= 64, "suppressed source must not accumulate projected windows: {}", r.source.retained_windows());
+        let middle = 1 + 25_000 * "\u{200b}".len();
+        assert_eq!(row.caret(middle), row.caret(source.find("END").unwrap()), "hidden source retains the displayed boundary for its caret");
+    });
+    assert_eq!(std::fs::read(f.dir.path().join("invisible.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END tail\r\n";
+    let f = fixture(cx, Some(("wrapped.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(220.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z end up");
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End followed by Up must paint the original tail: {:?}", f.view.read_with(&v, |r, _| { let t=r.session.state().active().unwrap(); let layout=r.session.state().view(t.id()).unwrap().layout_rows(r.rows,r.session.state().wrap_cols(t)); ((t.top_line(),t.top_row()),format!("{:?}",layout.rows),r.visible_rows().iter().map(|r|r.text.clone()).collect::<Vec<_>>()) }));
+    v.simulate_keystrokes("up");
+    for _ in 0..100 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().active().unwrap().top_line() == 0) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (head, tail, first_byte) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let layout = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        (tab.top_row(), r.visible_rows().iter().any(|row| row.text.contains("END")), layout.rows[0].source.start)
+    });
+    assert!(first_byte > 40_000 && tail, "Up must move within the original source tail: row {head}, byte {first_byte}");
+    let (bounds, row, origin, font, char_w) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let logical = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        let row = r.visible_rows().into_iter().find(|r| r.text.contains("END")).unwrap();
+        let origin = r.source_row(tab, &logical.rows[row.y as usize]).unwrap().origin;
+        (r.text_bounds.unwrap(), row, origin, r.font.clone(), r.char_w)
+    });
+    let at = row.text.find("END").unwrap();
+    let x = v.update(|window, _| {
+        let run = gpui::TextRun { len: row.text.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        f32::from(bounds.origin.x) + num_w() + 8.0 + origin + f32::from(window.text_system().shape_line(row.text.clone().into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    let y = bounds.origin.y + px((row.y + 0.5) * line_h());
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    let end = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), end..end + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_scroll_geometry_until_repaint(cx: &mut TestAppContext) {
+    let source = "same long source row\n".repeat(50);
+    let f = fixture(cx, Some(("stale.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    // Both lines are cached: the old viewport must still be rejected after scrolling.
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.session.dispatch(Command::Scroll(1));
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 8.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must not reuse the previous painted viewport");
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0));
+    assert!(hit.is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("stale.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
 fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("closed.txt", b"owned source")));
     settle(cx, &f, |r| r.session().state().document().is_some());

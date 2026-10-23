@@ -291,6 +291,64 @@ pub struct ReaderView {
     /// Each pane's text size (columns, rows) last reported to the core.
     sent_size: [(usize, usize); 2],
     source: source::Cache,
+    source_geometry: [Option<SourceGeometry>; 2],
+}
+
+/// Identity of the last painted source viewport; pointers cannot reuse old geometry.
+struct SourceGeometry {
+    cursor: reader_core::projection::Cursor,
+    tab: TabId,
+    visible: Arc<reader_core::folds::Visible>,
+    declarations: Option<Arc<lenz_content::highlight::Declarations>>,
+    top: (usize, usize),
+    column: usize,
+    cols: Option<usize>,
+    size: Option<(usize, usize)>,
+    breadcrumbs: bool,
+    split: Option<Split>,
+    explorer: bool,
+    results: bool,
+    sticky: bool,
+    annotation_cols: usize,
+    layout: Layout,
+    viewport: (u32, u32, u32),
+}
+
+impl SourceGeometry {
+    fn new(view: &reader_core::session::View<'_>, reader: &ReaderView) -> Option<Self> {
+        if matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
+            || wanted_image(view).is_some() { return None; }
+        let state = reader.session.state();
+        Some(Self {
+            cursor: view.display_start(0)?, tab: view.tab().id(), visible: view.visible(),
+            declarations: view.tab().declarations_handle().cloned(),
+            top: (view.tab().top_line(), view.tab().top_row()), column: view.tab().column(),
+            cols: state.wrap_cols(view.tab()), size: state.text_size(view.tab().pane()),
+            breadcrumbs: state.breadcrumbs(), split: state.split(),
+            explorer: reader.tree_shown && state.has_tree(), results: state.results().is_some(),
+            sticky: state.sticky_scroll(), annotation_cols: view.tab().annotation_cols(),
+            layout: reader.layout, viewport: (reader.width.to_bits(), reader.height.to_bits(), reader.char_w.to_bits()),
+        })
+    }
+
+    fn matches(&self, view: &reader_core::session::View<'_>, reader: &ReaderView) -> bool {
+        let state = reader.session.state();
+        let declarations_match = match (self.declarations.as_ref(), view.tab().declarations_handle()) {
+            (None, None) => true,
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            _ => false,
+        };
+        self.tab == view.tab().id() && self.cursor.matches(view.snapshot(), view.inlay_hints())
+            && Arc::ptr_eq(&self.visible, &view.visible()) && declarations_match
+            && self.top == (view.tab().top_line(), view.tab().top_row()) && self.column == view.tab().column()
+            && self.cols == state.wrap_cols(view.tab()) && self.size == state.text_size(view.tab().pane())
+            && self.breadcrumbs == state.breadcrumbs() && self.split == state.split()
+            && self.explorer == (reader.tree_shown && state.has_tree()) && self.results == state.results().is_some()
+            && self.sticky == state.sticky_scroll() && self.annotation_cols == view.tab().annotation_cols()
+            && self.layout == reader.layout && self.viewport == (reader.width.to_bits(), reader.height.to_bits(), reader.char_w.to_bits())
+            && !matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
+            && wanted_image(view).is_none()
+    }
 }
 
 /// Open a reader window with its own session; `path` opens a file in it.
@@ -345,6 +403,16 @@ mod probe {
         }
         if tabs_ready && !TABS.swap(true, Ordering::Relaxed) {
             eprintln!("lenz-reader: tabs ready {:.1} ms", ms());
+        }
+    }
+    /// Optional bounded native-font diagnostic; TestPlatform does not reproduce native advances.
+    pub fn native_widths(window: &gpui::Window, metrics: lenz_gpui::Metrics<'_>) {
+        static CHECKED: AtomicBool = AtomicBool::new(false);
+        if CHECKED.swap(true, Ordering::Relaxed) || std::env::var_os("READER_PROBE_NATIVE").is_none() { return; }
+        for (name, text) in [("hangul-cho-filler", "\u{115f}\u{200b}"), ("hangul-filler", "\u{3164}\u{200b}"), ("halfwidth-filler", "\u{ffa0}\u{200b}"), ("soft-hyphen", "\u{ad}\u{200b}"), ("family", "👨‍👩‍👧‍👦"), ("marks", "a\u{301}\u{301}")] {
+            let run = gpui::TextRun { len: text.len(), font: metrics.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            let pixels = f32::from(window.text_system().shape_line(text.into(), gpui::px(metrics.font_size), &[run], None).width);
+            eprintln!("READER_NATIVE_WIDTH_V1 {name} columns={} pixels={pixels}", lenz_content::wrap::width(text));
         }
     }
     pub fn files() -> Vec<std::path::PathBuf> {
@@ -495,7 +563,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -677,12 +745,7 @@ impl ReaderView {
         let (completions, themes) = (self.session.completions(), self.session.theme_updates());
         loop {
             if let Ok(c) = completions.try_recv() {
-                // Extend Selection's first step arrives here: keep its head on screen as a key would.
-                let steps = matches!(c, Completion::SelectionSteps { .. });
                 self.dispatch(c, cx);
-                if steps {
-                    self.keep_head_shown(cx);
-                }
             } else if let Ok(u) = themes.try_recv() {
                 self.dispatch(Completion::Theme(Box::new(u)), cx);
             } else {
@@ -733,11 +796,9 @@ impl ReaderView {
         let before = self.session.state().results().map(|r| r.id());
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected = (self.session.state().active().map(|t| t.id()), self.session.state().selection());
-        #[cfg(feature = "perf-probe")]
-        let (input, started): (reader_core::session::Input, _) = (input.into(), std::time::Instant::now());
-        #[cfg(feature = "perf-probe")]
-        let kind = input.kind();
         let input: reader_core::session::Input = input.into();
+        #[cfg(feature = "perf-probe")]
+        let (started, kind) = (std::time::Instant::now(), input.kind());
         let theme_update = matches!(&input, reader_core::session::Input::Command(Command::Theme(_)) | reader_core::session::Input::Completion(Completion::Theme(_)));
         if matches!(&input, reader_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
         let workspace = self.session.state().workspace_revision();
@@ -855,7 +916,6 @@ impl ReaderView {
                         self.results_focus = false;
                         cx.notify();
                     }
-                    CommandId::ExtendSelection | CommandId::ShrinkSelection => self.keep_head_shown(cx),
                     _ => {},
                 }
             }
@@ -2217,19 +2277,6 @@ impl ReaderView {
     /// Extend the selection by `motion` and scroll so its head stays visible.
     fn extend(&mut self, motion: Motion, cx: &mut Context<Self>) {
         self.dispatch(Command::Extend(motion), cx);
-        self.keep_head_shown(cx);
-    }
-
-    /// Scroll so the selection's head is above the view's bottom (the core keeps it below the top).
-    fn keep_head_shown(&mut self, cx: &mut Context<Self>) {
-        let state = self.session.state();
-        if let (Some(t), Some(doc), Some(s)) = (state.active(), state.document(), state.selection()) {
-            let below = t.visible().rows_between(state.top_line(), doc.line_of(s.head));
-            let rows = self.rows.max(1);
-            if below >= rows {
-                self.dispatch(Command::ScrollRows((below + 1 - rows) as isize), cx);
-            }
-        }
     }
 
     fn on_wheel(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2303,7 +2350,7 @@ impl ReaderView {
         }
         let delta = lenz_gpui::scroll::shifted(lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w), ev.modifiers.shift);
         let pane = self.session.state().focused_pane() as usize;
-        let tab = self.session.state().active().and_then(|t| Some((t.id(), t.document()?.version())));
+        let tab = self.session.state().active().and_then(|t| Some((t.id(), self.session.state().view(t.id())?.snapshot().key().version)));
         if self.wheel_tab[pane] != tab || matches!(ev.delta, ScrollDelta::Lines(_)) {
             self.wheel[pane] = Default::default();
             self.wheel_tab[pane] = tab;
@@ -2317,8 +2364,10 @@ impl ReaderView {
             self.dispatch(Command::ScrollRows(rows), cx);
         }
         if let Some(t) = self.session.state().active() {
-            let at_end = self.wheel[pane].y > 0.0 && t.visible().step(t.top_line(), 1) == t.top_line()
-                && t.rows(2, self.session.state().wrap_cols(t)).len() < 2;
+            let at_end = self.wheel[pane].y > 0.0 && self.session.state().view(t.id()).is_some_and(|view| {
+                let rows = view.layout_rows(2, self.session.state().wrap_cols(t));
+                rows.pending.is_none() && rows.rows.len() < 2
+            });
             lenz_gpui::scroll::clamp(&mut self.wheel[pane].y, t.top_line() == 0 && t.top_row() == 0, at_end);
             let at_right = self.wheel[pane].x > 0.0 && t.column() >= self.max_column();
             lenz_gpui::scroll::clamp(&mut self.wheel[pane].x, t.column() == 0, at_right);
@@ -2411,94 +2460,77 @@ impl ReaderView {
         })?;
         let state = self.session.state();
         let tab = state.shown(g.pane)?;
+        if !self.current_source_geometry(tab) { return None; }
         // Beside a sticky line: that line (the rows under the band are hidden).
         if let Some(&(_, _, line)) = self.sticky_hits.iter().find(|(b, pane, _)| *pane == g.pane && at.y >= b.origin.y && at.y < b.origin.y + b.size.height) {
             return Some((g.pane, tab.id(), line));
         }
         let row = ((f32::from(at.y) - f32::from(g.text.origin.y)) / line_h()).floor() as usize;
-        let rows = tab.rows(row + 1, state.wrap_cols(tab));
+        let rows = state.view(tab.id())?.layout_rows(row + 1, state.wrap_cols(tab)).rows;
         let r = rows.get(row).filter(|r| r.index == 0)?;
         Some((g.pane, tab.id(), r.line))
     }
 
-    /// The source byte under a window point in the text area, if a document is shown.
-    fn byte_at(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
-        self.byte_in(window, self.session.state().active()?, self.text_bounds?, x, y).map(|(line, col)| self.session.state().document().map_or(0, |d| d.line_range(line).start) + col)
+    fn current_source_geometry(&self, tab: &Tab) -> bool {
+        self.session.state().view(tab.id()).is_some_and(|view| {
+            self.source_geometry.get(tab.pane() as usize).and_then(Option::as_ref).is_some_and(|g| g.matches(&view, self))
+        })
     }
 
-    /// The line under a window point in `tab`'s text at `bounds`, and the byte in that line nearest the point.
+    /// The source byte under a window point in the text area.
+    fn byte_at(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
+        let tab = self.session.state().active()?;
+        let (line, byte) = self.byte_in(window, tab, self.text_bounds?, x, y)?;
+        Some(self.session.state().view(tab.id())?.snapshot().line_range(line)?.start + byte)
+    }
+
     fn byte_in(&self, window: &Window, tab: &Tab, bounds: Bounds<Pixels>, x: f32, y: f32) -> Option<(usize, usize)> {
+        if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
         let state = self.session.state();
         let view = state.view(tab.id())?;
-        if state.wrap_cols(tab).is_none() {
-            if y < f32::from(bounds.origin.y) { return None; }
-            let row = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
-            let line = view.visible().lines(tab.top_line(), row + 1).last().copied()?;
-            let pane = self.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == tab.id()))?.pane;
-            let scroll = tab.column() as f32 * self.char_w;
-            let width = (f32::from(bounds.size.width) - num_w() - 16.0).max(1.0);
-            let projected = self.source.get(pane,&view,line,scroll,width)?;
-            let tx = lenz_gpui::text_x(self.metrics(),f32::from(bounds.origin.x),scroll);
-            let byte = projected.hit(window,self.metrics(),x - tx)?;
-            return Some((line,byte - view.snapshot().line_range(line)?.start));
-        }
-        tab.document()?;
-        if y < f32::from(bounds.origin.y) {
-            return None; // the toolbar, not text
-        }
-        let row = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
-        // Below the last row: the last one (as before wrapping).
-        let cols = self.session.state().wrap_cols(tab);
-        let r = tab.rows(row + 1, cols).pop()?;
-        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + r.indent as f32 * self.char_w;
-        let s = tab.shown_line(r.line);
-        // An unwrapped row is the whole drawn line.
-        let part = if cols.is_some() { r.display.start.min(s.text.len())..r.display.end.min(s.text.len()) } else { 0..s.text.len() };
-        let d = part.start + lenz_gpui::column_at(window, self.metrics(), &s.text[part.clone()], x - tx);
-        Some((r.line, reader_core::wrap::source_of(&s.map, d)))
+        let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
+        let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
+        let row = rows.get(at).or_else(|| rows.last())?;
+        let projected = self.source_row(tab, row)?;
+        let scroll = tab.column() as f32 * self.char_w;
+        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), scroll) + row.indent as f32 * self.char_w;
+        let byte = projected.hit(window, self.metrics(), x - tx)?;
+        Some((row.line, byte.saturating_sub(view.snapshot().line_range(row.line)?.start)))
     }
 
-    /// The fold a click toggles: a mark in the gutter's fold column, or a collapsed row's placeholder.
     fn fold_click(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
         let (tab, bounds) = (self.session.state().active()?, self.text_bounds?);
-        if y < f32::from(bounds.origin.y) {
-            return None;
-        }
-        let row = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
-        let rows = tab.rows(row + 2, self.session.state().wrap_cols(tab));
-        let r = rows.get(row)?;
-        let line = r.line;
-        let (_, collapsed) = tab.fold_at(line)?;
-        if r.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) {
-            return Some(line);
-        }
-        // The placeholder follows the line's last row only.
-        if rows.get(row + 1).is_some_and(|n| n.line == line) || r.index > 0 {
-            return None;
-        }
-        let shown = tab.shown_line(line).text;
-        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w);
-        let full = format!("{shown}{PLACEHOLDER}");
-        (collapsed && lenz_gpui::column_at(window, self.metrics(), &full, x - tx) > shown.len()).then_some(line)
+        if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
+        let state = self.session.state();
+        let view = state.view(tab.id())?;
+        let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
+        let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
+        let row = rows.get(at)?;
+        let (_, collapsed) = tab.fold_at(row.line)?;
+        if row.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) { return Some(row.line); }
+        let projected = self.source_row(tab, row)?;
+        if !row.last || !projected.complete() || !collapsed { return None; }
+        let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + row.indent as f32 * self.char_w;
+        let end = projected.x_for(window, self.metrics(), projected.text.len())?;
+        (lenz_gpui::column_at(window, self.metrics(), PLACEHOLDER, x - tx - end) > 0).then_some(row.line)
     }
 
-    /// Rows of the focused pane with a fold region starting on them, and whether it is collapsed.
     pub fn fold_marks(&self) -> Vec<(usize, bool)> {
-        self.session.state().active().map_or_else(Vec::new, |t| Self::marks(t, self.rows, self.session.state().wrap_cols(t)))
+        let state = self.session.state();
+        state.active().map_or_else(Vec::new, |tab| Self::marks(state, tab, self.rows))
     }
 
-    /// Rows of the focused pane with a bookmark, and its key.
     pub fn bookmark_marks(&self) -> Vec<(usize, Option<char>)> {
         let state = self.session.state();
-        state.active().map_or_else(Vec::new, |t| Self::bookmark_rows(state, t, self.rows))
+        state.active().map_or_else(Vec::new, |tab| Self::bookmark_rows(state, tab, self.rows))
     }
 
     fn bookmark_rows(state: &reader_core::session::State, tab: &Tab, rows: usize) -> Vec<(usize, Option<char>)> {
-        tab.rows(rows, state.wrap_cols(tab)).iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| state.places().bookmark(tab.source(), r.line).map(|m| (i, m.mnemonic))).collect()
+        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| state.places().bookmark(tab.source(), r.line).map(|m| (i, m.mnemonic))).collect())
     }
 
-    fn marks(tab: &Tab, rows: usize, cols: Option<usize>) -> Vec<(usize, bool)> {
-        tab.rows(rows, cols).iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| tab.fold_at(r.line).map(|(_, c)| (i, c))).collect()
+    fn marks(state: &reader_core::session::State, tab: &Tab, rows: usize) -> Vec<(usize, bool)> {
+        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| tab.fold_at(r.line).map(|(_, c)| (i, c))).collect())
     }
 
     /// The identifier a Ctrl-click at a window point would follow, when `held` and the pane shows text there.
@@ -2512,14 +2544,14 @@ impl ReaderView {
         if g.pane == state.focused_pane() && self.session.disabled(CommandId::Definition).is_some() {
             return None;
         }
-        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) || wanted_image(tab).is_some() || unshowable_image(tab).is_some() {
+        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) || state.view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
             return None; // no text drawn
         }
         // The character under the pointer: the boundary nearest half a cell to its left starts it.
         let (line, col) = self.byte_in(window, tab, g.text, x - self.char_w / 2.0, y)?;
-        let doc = tab.document()?;
-        let word = tab.linkable(line, col)?;
-        let start = doc.line_range(line).start;
+        let view = state.view(tab.id())?;
+        let word = view.linkable(line, col)?;
+        let start = view.snapshot().line_range(line)?.start;
         Some((g.pane, start + word.start..start + word.end))
     }
 
@@ -2586,13 +2618,14 @@ impl ReaderView {
             return None;
         };
         let t = state.shown(g.pane)?;
-        let doc = t.document()?.clone();
-        let (line, top_line, column) = (doc.line_of(at), t.top_line(), t.column());
-        let col = {
-            let s = t.shown_line(line);
-            s.text[..s.caret(at - doc.line_range(line).start)].chars().count()
-        };
-        let row = t.visible().rows_between(top_line, line) as f32;
+        let view = state.view(t.id())?;
+        let (row, anchor_x) = view.layout_rows(g.rows, state.wrap_cols(t)).rows.iter().enumerate().find_map(|(i, r)| {
+            let native = self.source_row(t, r)?;
+            let local = native.caret(at)?;
+            let x = native.x_for(window, self.metrics(), local)?;
+            Some((i as f32, r.indent as f32 * self.char_w + x))
+        }).unwrap_or((0.0, 0.0));
+        let column = t.column();
         let w = (f32::from(g.text.size.width) - 32.0).clamp(120.0, 640.0);
         let fresh = self.doc_popup.as_ref().is_some_and(|p| Arc::ptr_eq(&p.layout.preview, &preview) && p.layout.width == w);
         if !fresh {
@@ -2603,7 +2636,7 @@ impl ReaderView {
         let popup = self.doc_popup.as_mut()?;
         let h = (popup.layout.height + 2.0).min(self.height * 0.4).max(line_h());
         let (tx, ty) = (f32::from(g.text.origin.x), f32::from(g.text.origin.y));
-        let x = (lenz_gpui::text_x(metrics(&self.font), tx, column as f32 * self.char_w) + col as f32 * self.char_w).clamp(0.0, (self.width - w).max(0.0));
+        let x = (lenz_gpui::text_x(metrics(&self.font), tx, column as f32 * self.char_w) + anchor_x).clamp(0.0, (self.width - w).max(0.0));
         let below = ty + (row + 1.0) * line_h() + 4.0;
         let y = if below + h > self.height { (ty + row * line_h() - h - 4.0).max(0.0) } else { below };
         popup.bounds = Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px(w), px(h)) };
@@ -2727,7 +2760,7 @@ impl ReaderView {
         }
         self.crumb_focus = None;
         // A sticky line: its pane gets the keys and the caret goes to the line (Back returns).
-        if let Some(&(_, pane, line)) = self.sticky_hits.iter().find(|h| h.0.contains(&ev.position)) {
+        if let Some(&(_, pane, line)) = self.sticky_hits.iter().find(|h| h.0.contains(&ev.position) && self.session.state().shown(h.1).is_some_and(|tab| self.current_source_geometry(tab))) {
             if pane != self.session.state().focused_pane() {
                 self.dispatch(Command::FocusPane(pane), cx);
             }
@@ -2919,7 +2952,7 @@ impl ReaderView {
             if pane != self.session.state().focused_pane() {
                 self.dispatch(Command::FocusPane(pane), cx);
             }
-            let start = self.session.state().tabs().iter().find(|t| t.id() == tab).and_then(|t| t.document()).map(|d| d.line_range(line).start);
+            let start = self.session.state().view(tab).and_then(|view| view.snapshot().line_range(line)).map(|r| r.start);
             if let Some(start) = start {
                 self.dispatch(Command::Select(Selection { anchor: start, head: start }), cx);
             }
@@ -3299,7 +3332,7 @@ impl ReaderView {
     /// For tests: the window point over byte `at` of the focused text, on the first shown line, unwrapped, ASCII.
     pub fn text_point_of(&self, at: usize) -> Option<(f32, f32)> {
         let b = self.text_bounds?;
-        let line = self.session.state().document()?.line_range(0);
+        let line = self.session.state().view(self.session.state().active()?.id())?.snapshot().line_range(0)?;
         let x = f32::from(b.origin.x) + num_w() + 8.0 + (at.checked_sub(line.start)? as f32 + 0.5) * self.char_w;
         Some((x, f32::from(b.origin.y) + line_h() / 2.0))
     }
@@ -3538,48 +3571,82 @@ impl ReaderView {
         self.session.state().siblings(pane, crumb).into_iter().filter(|s| s.label.to_lowercase().contains(&q)).collect()
     }
 
-    /// `tab`'s sticky lines as rows to draw, with their source lines (syntax colours, no selection or find tints), and
-    /// their underlines and strikethroughs (row, display range, colour, modifier bits).
-    #[allow(clippy::type_complexity)]
-    fn sticky_rows(&self, tab: &Tab, max: usize) -> (Vec<(usize, TextRow)>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
-        if tab.document().is_none() {
-            return Default::default();
+    fn source_row(&self, tab: &Tab, row: &reader_core::layout::Row) -> Option<&source::Row> {
+        let state = self.session.state();
+        let view = state.view(tab.id())?;
+        let g = self.panes.iter().find(|g| g.pane == tab.pane())?;
+        let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
+        if state.wrap_cols(tab).is_some() {
+            self.source.get_wrapped(g.pane, &view, row.line, row.display.start, (width - row.indent as f32 * self.char_w).max(1.0))
+        } else {
+            self.source.get(g.pane, &view, row.line, tab.column() as f32 * self.char_w, width)
         }
-        let palette = self.session.state().palette();
-        let color = |c: Option<lenz_content::highlight::Capture>| c.map_or(palette.fg, |c| palette.syntax_color(c));
-        let mut decor = Vec::new();
-        let rows = tab.sticky(max, self.session.state().wrap_cols(tab))
-            .iter()
-            .map(|s| {
-                let shown = tab.shown_line(s.line);
-                let cut = shown.map.len() - 1;
-                let spans = tab.spans(s.line);
-                let mut fg: Vec<_> = shown.hints.iter().map(|(_, r, _)| (r.clone(), palette.num_fg)).collect();
-                fg.extend(spans.iter().filter(|(r, ..)| r.start < cut).map(|(r, c, _)| (shown.range(r.clone()), color(*c))));
-                decor.extend(spans.iter().filter(|(r, _, m)| *m != 0 && r.start < cut).map(|(r, c, m)| (s.row as f32, shown.range(r.clone()), color(*c), *m)));
-                (s.line, TextRow { y: s.row as f32, number: s.line as u32 + 1, text: shown.text, fg, bg: Vec::new(), selected: None, caret: None })
-            })
-            .collect();
-        (rows, decor)
+    }
+
+    fn source_parts(&self, tab: &Tab, logical: &reader_core::layout::Row, row: &TextRow, window: &Window) -> Vec<(std::ops::Range<usize>, f32)> {
+        let Some(native) = self.source_row(tab, logical) else { return Vec::new() };
+        let indent = logical.indent;
+        let offset = indent as f32 * self.char_w;
+        let mut parts = Vec::new();
+        if indent > 0 { parts.push((0..indent, 0.0)); }
+        parts.extend(native.fragments.iter().map(|(r, x)| (r.start + indent..r.end + indent, x + offset)));
+        if row.text.len() > native.text.len() + indent {
+            parts.push((native.text.len() + indent..row.text.len(), native.x_for(window, self.metrics(), native.text.len()).unwrap_or(0.0) + offset));
+        }
+        if parts.is_empty() { parts.push((0..0, offset)); }
+        parts
     }
 
     fn prepare_source(&mut self, panes: &[PaneGeom], window: &mut Window) {
+        use reader_core::layout::Query;
         let font = self.font.clone();
         let metrics = metrics(&font);
         self.source.begin(metrics);
+        let mut commands = Vec::new();
         for g in panes {
             let state = self.session.state();
             let Some(tab) = state.shown(g.pane) else { continue };
-            if state.wrap_cols(tab).is_some() || matches!(tab.rendering(),Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
+            if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
             let Some(view) = state.view(tab.id()) else { continue };
-            if view.snapshot().image().is_some() && !tab.image_source() { continue; }
+            if wanted_image(&view).is_some() || unshowable_image(&view).is_some() { continue; }
+            let cols = state.wrap_cols(tab);
+            let layout = view.layout_rows(g.rows, cols);
+            let mut pending = layout.pending;
+            let mut rows = layout.rows;
+            if state.sticky_scroll() {
+                match view.layout_sticky(reader_core::tabs::sticky_cap(g.rows), cols) {
+                    Query::Ready(sticky) => for pinned in sticky.iter() {
+                        match view.layout_row(pinned.line, 0, cols) {
+                            Query::Ready(Some(row)) => rows.push(row),
+                            Query::Ready(None) => {},
+                            Query::Pending(work) => { pending = pending.or(Some(work)); },
+                        }
+                    },
+                    Query::Pending(work) => { pending = pending.or(Some(work)); },
+                }
+            }
             let batch = self.session.projection(g.pane).cloned();
             let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
-            for line in view.visible().lines(tab.top_line(),g.rows) {
-                self.source.row(g.pane,&view,line,tab.column() as f32 * self.char_w,width,batch.as_deref(),window,metrics);
+            for row in rows {
+                if cols.is_some() {
+                    let cursor = self.source.cursor(g.pane, &view, row.line, row.display.start);
+                    let cursor = if cursor.is_some() { cursor } else {
+                        match view.layout_cursor(row.line, row.display.start, cols) {
+                            Query::Ready(cursor) => cursor,
+                            Query::Pending(work) => { pending = pending.or(Some(work)); None },
+                        }
+                    };
+                    if let Some(cursor) = cursor {
+                        self.source.wrapped(g.pane, &view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), (width - row.indent as f32 * self.char_w).max(1.0), batch.as_deref(), window, metrics);
+                    }
+                } else {
+                    self.source.row(g.pane, &view, row.line, tab.column() as f32 * self.char_w, width, batch.as_deref(), window, metrics);
+                }
             }
+            if let Some(work) = pending { commands.push(Command::PrepareLayout { pane: g.pane, tab: tab.id(), work }); }
         }
-        for command in self.source.finish() { self.session.dispatch(command); }
+        commands.extend(self.source.finish());
+        for command in commands { self.session.dispatch(command); }
         let max = self.max_column();
         if self.session.state().column() > max {
             self.session.dispatch(Command::ScrollColumn(max));
@@ -3588,107 +3655,92 @@ impl ReaderView {
     }
 
     #[allow(clippy::type_complexity)]
-    fn projected_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32,std::ops::Range<usize>,u32,u8)>) {
-        if matches!(tab.rendering(),Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
+    fn projected_row(&self, tab: &Tab, r: &reader_core::layout::Row, y: f32, sticky: bool) -> Option<(TextRow, Vec<(f32, std::ops::Range<usize>, u32, u8)>)> {
         let state = self.session.state();
-        let Some(view) = state.view(tab.id()) else { return Default::default() };
-        let Some(g) = self.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == tab.id())) else { return Default::default() };
+        let view = state.view(tab.id())?;
+        let projected = self.source_row(tab, r)?;
+        let range = view.snapshot().line_range(r.line)?;
         let palette = state.palette();
-        let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
-        let selection = tab.selection();
-        let occurrences = state.occurrences().filter(|_| state.active().is_some_and(|a| a.id() == tab.id()));
-        let (read,write) = (lenz_content::theme::mix(palette.bg,palette.accent,0.18),lenz_content::theme::mix(palette.bg,palette.accent,0.32));
-        let mut out = Vec::new();
+        let selection = (!sticky).then(|| tab.selection()).flatten();
+        let occurrences = state.occurrences().filter(|_| !sticky && state.active().is_some_and(|a| a.id() == tab.id()));
+        let (read, write) = (lenz_content::theme::mix(palette.bg, palette.accent, 0.18), lenz_content::theme::mix(palette.bg, palette.accent, 0.32));
+        let mut fg: Vec<_> = projected.hints().into_iter().map(|r| (r, palette.num_fg)).collect();
         let mut decor = Vec::new();
-        for (i,line) in view.visible().lines(tab.top_line(),rows.max(1)).into_iter().enumerate() {
-            let Some(projected) = self.source.get(g.pane,&view,line,tab.column() as f32 * self.char_w,width) else { continue };
-            let Some(range) = view.snapshot().line_range(line) else { continue };
-            let color = |c: Option<lenz_content::highlight::Capture>| c.map_or(palette.fg,|c| palette.syntax_color(c));
-            let spans = tab.spans(line);
-            let mut fg: Vec<_> = projected.hints().into_iter().map(|r| (r,palette.num_fg)).collect();
-            fg.extend(spans.iter().filter_map(|(r,c,_)| { let r = projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((r,color(*c))) }));
-            decor.extend(spans.iter().filter(|(_,_,m)| *m != 0).filter_map(|(r,c,m)| { let r = projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((i as f32,r,color(*c),*m)) }));
-            let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
-            let caret = selection.and_then(|sel| projected.caret(sel.head));
-            let mut bg: Vec<_> = occurrences.map_or_else(Vec::new,|o| o.ranges.iter().filter_map(|(r,w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r,if *w {write} else {read})) }).collect());
-            bg.extend(tab.find().map_or(&[][..],|f| f.in_line(line)).iter().filter_map(|(_,r)| { let r=projected.range(range.start+r.start..range.start+r.end); (!r.is_empty()).then_some((r,palette.found_bg)) }));
-            let mut row = TextRow { y:i as f32,number:line as u32+1,text:projected.text.clone(),fg,bg,selected,caret };
-            if let Some((fold,true)) = tab.fold_at(line) && projected.extent.is_some() {
-                let at=row.text.len();
-                row.text.push_str(PLACEHOLDER);
-                row.bg.push((at+1..at+PLACEHOLDER.len()-1,lenz_content::theme::mix(palette.bg,palette.num_fg,0.25)));
-                row.fg.push((at..at+PLACEHOLDER.len(),palette.num_fg));
-                if fold.closes && let Some(last)=view.snapshot().line_range(fold.last as usize)
-                    && let Some(text)=view.line_window(fold.last as usize,last.start,512) { row.text.push_str(text.text.trim()); }
-                if selection.is_some_and(|s| s.range().start<=range.end && s.range().end>range.end) { row.selected=Some(row.selected.map_or(at,|r|r.start)..row.text.len()); }
-            }
-            out.push(row);
+        // Look up only the displayed bytes; a long source line never builds a full span list.
+        let mut spans: Vec<(std::ops::Range<usize>, Option<lenz_content::highlight::Capture>, u8)> = Vec::new();
+        for (at, c) in projected.text.char_indices() {
+            let byte = projected.source_at(at)?;
+            let (capture, mods) = view.style_at(r.line, byte.saturating_sub(range.start));
+            if let Some((old, old_capture, old_mods)) = spans.last_mut()
+                && *old_capture == capture && *old_mods == mods { old.end = at + c.len_utf8(); }
+            else { spans.push((at..at + c.len_utf8(), capture, mods)); }
         }
-        (out,decor)
+        for (range, capture, mods) in spans {
+            let color = capture.map_or(palette.fg, |capture| palette.syntax_color(capture));
+            if capture.is_some() { fg.push((range.clone(), color)); }
+            if mods != 0 { decor.push((y, range, color, mods)); }
+        }
+        let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
+        let caret = selection.and_then(|sel| projected.caret(sel.head));
+        let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
+        if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
+        let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
+        if let Some((fold, true)) = tab.fold_at(r.line) && r.last && projected.complete() {
+            let at = row.text.len();
+            row.text.push_str(PLACEHOLDER);
+            row.bg.push((at + 1..at + PLACEHOLDER.len() - 1, lenz_content::theme::mix(palette.bg, palette.num_fg, 0.25)));
+            row.fg.push((at..at + PLACEHOLDER.len(), palette.num_fg));
+            if fold.closes && let Some(last) = view.snapshot().line_range(fold.last as usize)
+                && let Some(text) = view.line_window(fold.last as usize, last.start, 512) { row.text.push_str(text.text.trim()); }
+            if selection.is_some_and(|s| s.range().start <= range.end && s.range().end > range.end) { row.selected = Some(row.selected.map_or(at, |r| r.start)..row.text.len()); }
+        }
+        if r.indent > 0 {
+            let prefix = " ".repeat(r.indent);
+            let offset = prefix.len();
+            row.text.insert_str(0, &prefix);
+            for (range, _) in &mut row.fg { range.start += offset; range.end += offset; }
+            for (range, _) in &mut row.bg { range.start += offset; range.end += offset; }
+            if let Some(range) = &mut row.selected { range.start += offset; range.end += offset; }
+            if let Some(caret) = &mut row.caret { *caret += offset; }
+            for (_, range, _, _) in &mut decor { range.start += offset; range.end += offset; }
+        }
+        Some((row, decor))
     }
 
-    /// `tab`'s shown rows, and their underlines and strikethroughs (row, display range, colour, modifier bits).
+    #[allow(clippy::type_complexity)]
+    fn sticky_rows(&self, tab: &Tab, max: usize) -> (Vec<(usize, TextRow)>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
+        use reader_core::layout::Query;
+        let state = self.session.state();
+        let Some(view) = state.view(tab.id()) else { return Default::default() };
+        let cols = state.wrap_cols(tab);
+        let Query::Ready(sticky) = view.layout_sticky(max, cols) else { return Default::default() };
+        let mut rows = Vec::new();
+        let mut decor = Vec::new();
+        for pinned in sticky.iter() {
+            if let Query::Ready(Some(r)) = view.layout_row(pinned.line, 0, cols)
+                && let Some((row, marks)) = self.projected_row(tab, &r, pinned.row as f32, true) {
+                rows.push((pinned.line, row));
+                decor.extend(marks);
+            }
+        }
+        (rows, decor)
+    }
+
+    /// Current snapshot windows paired with authoritative logical rows.
     #[allow(clippy::type_complexity)]
     fn tab_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
-        if self.session.state().wrap_cols(tab).is_none() { return self.projected_rows(tab, rows); }
-        let Some(doc) = tab.document() else { return Default::default() };
-        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) {
-            return Default::default(); // a Markdown preview is shown instead
-        }
-        let palette = self.session.state().palette();
-        // The shown rows: collapsed regions' insides are skipped; long lines wrap when soft wrap is on.
-        let cols = self.session.state().wrap_cols(tab);
-        let shown_rows = tab.rows(rows.max(1), cols);
-        let mut lines: Vec<usize> = shown_rows.iter().map(|r| r.line).collect();
-        lines.dedup();
-        let selection = tab.selection();
-        // The occurrences of the name at the caret, tinted (stronger where it is written).
+        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
         let state = self.session.state();
-        let occurrences = state.occurrences().filter(|_| state.active().is_some_and(|a| a.id() == tab.id()));
-        let (read, write) = (lenz_content::theme::mix(palette.bg, palette.accent, 0.18), lenz_content::theme::mix(palette.bg, palette.accent, 0.32));
-        let fold_bg = lenz_content::theme::mix(palette.bg, palette.num_fg, 0.25);
-        let whole: std::collections::HashMap<usize, (TextRow, Vec<(std::ops::Range<usize>, u32, u8)>)> = lines
-            .into_iter()
-            .enumerate()
-            .map(|(i, l)| {
-                let s = tab.shown_line(l);
-                let range = doc.line_range(l);
-                let cut = s.map.len() - 1;
-                let spans = tab.spans(l);
-                let color = |c: Option<lenz_content::highlight::Capture>| c.map_or(palette.fg, |c| palette.syntax_color(c));
-                // Hints first, so their dim colour wins over a syntax span reaching over them.
-                let mut fg: Vec<_> = s.hints.iter().map(|(_, r, _)| (r.clone(), palette.num_fg)).collect();
-                fg.extend(spans.iter().filter(|(r, ..)| r.start < cut).map(|(r, c, _)| (s.range(r.clone()), color(*c))));
-                let marks: Vec<_> = spans.iter().filter(|(r, _, m)| *m != 0 && r.start < cut).map(|(r, c, m)| (s.range(r.clone()), color(*c), *m)).collect();
-                let selected = selection.map(|sel| sel.range()).and_then(|sel| {
-                    let (a, b) = (sel.start.max(range.start), sel.end.min(range.end));
-                    (a < b).then(|| s.range(a - range.start..b - range.start))
-                });
-                let caret = selection.filter(|sel| range.contains(&sel.head) || sel.head == range.end).map(|sel| s.caret(sel.head - range.start));
-                let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| {
-                    o.ranges.iter().filter(|(r, _)| r.start < range.end && r.end > range.start).map(|(r, w)| (s.range(r.start.max(range.start) - range.start..r.end.min(range.end) - range.start), if *w { write } else { read })).collect()
-                });
-                // Every find match on the line (the current one is the selection).
-                bg.extend(tab.find().map_or(&[][..], |f| f.in_line(l)).iter().map(|(_, r)| (s.range(r.clone()), palette.found_bg)));
-                let mut row = TextRow { y: i as f32, number: l as u32 + 1, text: s.text, fg, bg, selected, caret };
-                // A collapsed region: its placeholder on a box, then its closing line when that only closes.
-                if let Some((fold, true)) = tab.fold_at(l) {
-                    let at = row.text.len();
-                    row.text.push_str(PLACEHOLDER);
-                    row.bg.push((at + 1..at + PLACEHOLDER.len() - 1, fold_bg));
-                    row.fg.push((at..at + PLACEHOLDER.len(), palette.num_fg));
-                    if fold.closes {
-                        row.text.push_str(doc.line(fold.last as usize).trim());
-                    }
-                    // A selection reaching into the hidden lines covers the placeholder too.
-                    if selection.is_some_and(|s| s.range().start <= range.end && s.range().end > range.end) {
-                        row.selected = Some(row.selected.map_or(at, |r| r.start)..row.text.len());
-                    }
-                }
-                (l, (row, marks))
-            })
-            .collect();
-        (split_rows(&shown_rows, &whole), split_marks(&shown_rows, &whole))
+        let Some(view) = state.view(tab.id()) else { return Default::default() };
+        let mut out = Vec::new();
+        let mut decor = Vec::new();
+        for (i, r) in view.layout_rows(rows.max(1), state.wrap_cols(tab)).rows.iter().enumerate() {
+            if let Some((row, marks)) = self.projected_row(tab, r, i as f32, false) {
+                out.push(row);
+                decor.extend(marks);
+            }
+        }
+        (out, decor)
     }
 
     /// The active tab's image as a texture, when it shows one (a raster image, or an SVG not shown as source).
@@ -3697,7 +3749,7 @@ impl ReaderView {
     /// nothing is drawn.
     fn shown_image(&mut self, pane: u8, cx: &mut Context<Self>) -> Option<(Arc<gpui::RenderImage>, (u32, u32))> {
         let i = pane as usize;
-        let wanted = self.session.state().shown(pane).and_then(wanted_image);
+        let wanted = self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| wanted_image(&view));
         let Some(pixels) = wanted else {
             self.image[i] = None; // its texture's CPU pixels go too, not only its atlas entry
             return None;
@@ -3722,7 +3774,7 @@ impl ReaderView {
 
     /// Why the active raster image cannot be shown, when it cannot.
     pub fn unshowable_image(&self) -> Option<String> {
-        self.session.state().active().and_then(unshowable_image)
+        self.session.state().active().and_then(|tab| self.session.state().view(tab.id())).and_then(|view| unshowable_image(&view))
     }
 
     /// The focused pane's image drawn now: its size in pixels, for tests.
@@ -3988,6 +4040,8 @@ impl Render for ReaderView {
         let run = gpui::TextRun { len: 10, font: self.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
         let shaped = window.text_system().shape_line("0123456789".into(), px(font_size()), &[run], None);
         self.char_w = (f32::from(shaped.width) / 10.0).max(1.0);
+        #[cfg(feature = "perf-probe")]
+        probe::native_widths(window, self.metrics());
         self.width = f32::from(viewport.width);
         self.height = f32::from(viewport.height);
         // The explorer takes a share of the width (or what its divider was dragged to); below 320 px it shows only
@@ -4069,7 +4123,7 @@ impl Render for ReaderView {
         for g in &mut panes {
             let state = self.session.state();
             let Some(t) = state.shown(g.pane) else { continue };
-            let text = t.document().is_some_and(|d| d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+            let text = state.view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
             let w = t.annotation_cols() as f32 * self.char_w + 12.0;
             if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
                 g.ann = w;
@@ -4178,7 +4232,7 @@ impl Render for ReaderView {
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
         let max = self.max_column();
-        if self.session.state().document().is_some() && self.session.state().column() > max {
+        if self.session.state().active().is_some_and(|t| self.session.state().view(t.id()).is_some()) && self.session.state().column() > max {
             self.session.dispatch(Command::ScrollColumn(max));
         }
         self.prepare_source(&panes, window);
@@ -4195,32 +4249,36 @@ impl Render for ReaderView {
             let state = self.session.state();
             let tab = state.shown(g.pane);
             let pending = matches!(tab.and_then(Tab::rendering), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
-            let unshowable = tab.and_then(unshowable_image);
+            let unshowable = tab.and_then(|tab| state.view(tab.id())).and_then(|view| unshowable_image(&view));
             let (mut rows, decor) = match tab {
                 Some(t) if picture.is_none() && unshowable.is_none() => self.tab_rows(t, g.rows),
                 _ => Default::default(),
             };
             // The Ctrl-hovered identifier, in the link colour and underlined.
-            let link = self.link.clone().filter(|l| l.0 == g.pane).and_then(|(_, r)| {
-                let doc = tab?.document()?;
-                let line = doc.line_of(r.start);
-                let row = rows.iter_mut().find(|r| r.number as usize == line + 1)?;
-                let start = doc.line_range(line).start;
-                let shown = tab?.shown_line(line).range(r.start.saturating_sub(start)..r.end.saturating_sub(start));
+            let link = self.link.clone().filter(|l| l.0 == g.pane).and_then(|(_, range)| {
+                let tab = tab?;
+                let view = state.view(tab.id())?;
+                let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
+                let (at, r) = logical.iter().enumerate().find(|(_, r)| r.source.start <= range.start && range.start < r.source.end)?;
+                let native = self.source_row(tab, r)?;
+                let shown = native.range(range);
+                if shown.is_empty() { return None; }
+                let row = rows.iter_mut().find(|row| row.y == at as f32)?;
+                let shown = shown.start + r.indent..shown.end + r.indent;
                 row.fg.insert(0, (shown.clone(), state.palette().syntax.link));
                 Some((row.y, shown))
             });
             let hint = match tab {
-                Some(t) if t.document().is_some() || state.loading().is_some() => None,
+                Some(t) if state.view(t.id()).is_some() || state.loading().is_some() => None,
                 None if split.is_some() => Some("Open a file here, or drag a tab to this pane"),
                 _ if state.project().is_some() => Some("Pick a file in the tree, or find one with Ctrl+P"),
                 _ => Some("Open a file to read it (Ctrl+O)"),
             };
             let hscroll = tab.map_or(0.0, |t| t.column() as f32 * self.char_w);
             // Fold marks, bright on the caret's row or while the pointer is over this gutter.
-            let caret_line = tab.and_then(|t| Some(t.document()?.line_of(t.selection()?.head)));
+            let caret_line = tab.and_then(|t| Some(state.view(t.id())?.snapshot().line_of(t.selection()?.head)));
             let mut marks = match tab {
-                Some(t) if !rows.is_empty() => Self::marks(t, g.rows, self.session.state().wrap_cols(t)).into_iter().map(|(i, c)| (i, c, self.gutter_hover == Some(g.pane) || rows.get(i).is_some_and(|r| r.number > 0 && Some(r.number as usize - 1) == caret_line))).collect(),
+                Some(t) if !rows.is_empty() => Self::marks(state, t, g.rows).into_iter().map(|(i, c)| (i, c, self.gutter_hover == Some(g.pane) || rows.get(i).is_some_and(|r| r.number > 0 && Some(r.number as usize - 1) == caret_line))).collect(),
                 _ => Vec::new(),
             };
             // Sticky lines: the enclosing declarations' first lines over the top rows (at most a third, none under 6).
@@ -4255,14 +4313,24 @@ impl Render for ReaderView {
             };
             bookmarks.retain(|(y, _)| *y >= band);
             marks.retain(|&(i, ..)| i as f32 >= band);
+            let sticky_parts = tab.map_or_else(Vec::new, |tab| sticky.iter().map(|(line, row)| {
+                state.view(tab.id()).and_then(|view| match view.layout_row(*line, 0, state.wrap_cols(tab)) {
+                    reader_core::layout::Query::Ready(Some(logical)) => Some(self.source_parts(tab, &logical, row, window)),
+                    _ => None,
+                }).unwrap_or_default()
+            }).collect());
             let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| t.fold_at(line)).map(|(_, c)| c))).collect();
             if g.pane == state.focused_pane() {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            let row_origins = tab.filter(|t| state.wrap_cols(t).is_none()).and_then(|t| state.view(t.id())).map_or_else(Vec::new, |view| rows.iter().map(|row| self.source.get(g.pane, &view, row.number.saturating_sub(1) as usize, hscroll, (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0)).map_or(0.0, |r| r.origin)).collect());
-            frames.push(PaneFrame { row_origins, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            let row_parts = tab.and_then(|tab| state.view(tab.id()).map(|view| (tab, view))).map_or_else(Vec::new, |(tab, view)| {
+                let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
+                rows.iter().map(|row| logical.get(row.y as usize).map(|r| self.source_parts(tab, r, row, window)).unwrap_or_default()).collect()
+            });
+            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
+        self.source_geometry = [0, 1].map(|pane| self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
         self.fold_marks_drawn = folds_drawn;
@@ -4332,7 +4400,7 @@ impl Render for ReaderView {
         let probe = {
             let state = self.session.state();
             let wanted = probe::files();
-            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.document().is_some() && state.tabs().len() >= wanted.len())
+            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.active().is_some_and(|t| state.view(t.id()).is_some()) && state.tabs().len() >= wanted.len())
         };
         #[cfg(feature = "perf-probe")]
         if render_started.elapsed().as_millis() >= 30 {
@@ -4546,7 +4614,7 @@ impl Render for ReaderView {
                                     lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0, hint, palette.dim);
                                 }
                                 for (i, row) in f.rows.iter().enumerate() {
-                                    lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll - f.row_origins.get(i).copied().unwrap_or(0.0), row);
+                                    paint_source_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row, f.row_parts.get(i).map_or(&[], Vec::as_slice));
                                 }
                                 for &(row, collapsed, bright) in &f.marks {
                                     let color = if bright { palette.fg } else { palette.num_fg };
@@ -4556,16 +4624,15 @@ impl Render for ReaderView {
                                 if let Some((ry, shown)) = &f.link
                                     && let Some(row) = f.rows.iter().find(|r| r.y == *ry)
                                 {
-                                    let run = gpui::TextRun { len: row.text.len(), font: m.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
-                                    let line = window.text_system().shape_line(row.text.clone().into(), px(m.font_size), &[run], None);
-                                    let (a, b) = (f32::from(line.x_for_index(shown.start)), f32::from(line.x_for_index(shown.end)));
+                                    let parts = f.rows.iter().position(|row| row.y == *ry).and_then(|i| f.row_parts.get(i)).map_or(&[][..], Vec::as_slice);
+                                    let (a, b) = (native_x(window, m, row, parts, shown.start), native_x(window, m, row, parts, shown.end));
                                     let lx = lenz_gpui::text_x(m, tx, f.hscroll);
                                     window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
                                         lenz_gpui::fill(window, lx + a, ty + ry * m.line_h + m.line_h - 3.0, b - a, 1.0, palette.syntax.link);
                                     });
                                 }
                                 window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
-                                    paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, char_w, |y| f.rows.iter().find(|r| r.y == y), &f.decor);
+                                    paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, |y| f.rows.iter().enumerate().find(|(_, r)| r.y == y).map(|(i, row)| (row, f.row_parts.get(i).map_or(&[][..], Vec::as_slice))), &f.decor);
                                 });
                                 if let Some((texture, (iw, ih))) = &f.picture {
                                     // Fitted to the view, never enlarged, centred, over a checkerboard.
@@ -4591,11 +4658,11 @@ impl Render for ReaderView {
                                 }
                                 if let Some(n) = f.sticky.iter().map(|(r, _)| r.y + 1.0).reduce(f32::max) {
                                     lenz_gpui::fill(window, tx, ty, tw, n * m.line_h, palette.header_bg);
-                                    for (row, _) in &f.sticky {
-                                        lenz_gpui::paint_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row);
+                                    for (i, (row, _)) in f.sticky.iter().enumerate() {
+                                        paint_source_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row, f.sticky_parts.get(i).map_or(&[], Vec::as_slice));
                                     }
                                     window.with_content_mask(Some(lenz_gpui::clip(text, tx + m.num_w + 4.0, tw - m.num_w - 4.0)), |window| {
-                                        paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, char_w, |y| f.sticky.iter().map(|(r, _)| r).find(|r| r.y == y), &f.sticky_decor);
+                                        paint_decor(window, m, lenz_gpui::text_x(m, tx, f.hscroll), ty, |y| f.sticky.iter().enumerate().find(|(_, (r, _))| r.y == y).map(|(i, (row, _))| (row, f.sticky_parts.get(i).map_or(&[][..], Vec::as_slice))), &f.sticky_decor);
                                     });
                                     // Their own fold marks, over the marks of the rows the band hides (those are not drawn).
                                     for (row, fold) in &f.sticky {
@@ -4739,62 +4806,16 @@ impl Render for ReaderView {
     }
 }
 
-fn wanted_image(tab: &Tab) -> Option<Arc<lenz_content::image::Pixels>> {
-    let image = tab.document()?.image()?;
+fn wanted_image(view: &reader_core::session::View<'_>) -> Option<Arc<lenz_content::image::Pixels>> {
+    let image = view.snapshot().image()?;
     let pixels = image.pixels.as_ref().ok()?;
-    (image.format != lenz_content::image::Format::Svg || !tab.image_source()).then(|| pixels.clone())
-}
-
-/// Each shown row cut from its whole line's row (`whole`, by line): the row's part of the text, indented, its
-/// colours, selection and caret moved with it; a continuation row has no number, and only a line's last row keeps
-/// what follows its text (a collapsed region's placeholder). Unwrapped lines pass through whole.
-#[allow(clippy::type_complexity)]
-fn split_rows(shown: &[reader_core::wrap::Row], whole: &std::collections::HashMap<usize, (TextRow, Vec<(std::ops::Range<usize>, u32, u8)>)>) -> Vec<TextRow> {
-    shown
-        .iter()
-        .enumerate()
-        .filter_map(|(i, r)| {
-            let line = &whole.get(&r.line)?.0;
-            let last = shown.get(i + 1).is_none_or(|n| n.line != r.line);
-            let (start, end) = (r.display.start, if last { line.text.len() } else { r.display.end });
-            if start == 0 && last {
-                return Some(TextRow { y: i as f32, ..line.clone() });
-            }
-            let pad = r.indent;
-            let shift = |a: usize| a - start + pad;
-            let cut = |x: &std::ops::Range<usize>| (x.start < end && x.end > start).then(|| shift(x.start.max(start))..shift(x.end.min(end)));
-            let text = format!("{}{}", " ".repeat(pad), line.text.get(start..end).unwrap_or_default());
-            Some(TextRow {
-                y: i as f32,
-                number: if r.index == 0 { line.number } else { 0 },
-                text,
-                fg: line.fg.iter().filter_map(|(x, c)| Some((cut(x)?, *c))).collect(),
-                bg: line.bg.iter().filter_map(|(x, c)| Some((cut(x)?, *c))).collect(),
-                selected: line.selected.as_ref().and_then(cut),
-                caret: line.caret.filter(|&c| (start..end).contains(&c) || (last && c == end)).map(shift),
-            })
-        })
-        .collect()
-}
-
-/// Whole lines' underlines and strikethroughs cut to the rows shown, as [`split_rows`] cuts their text.
-#[allow(clippy::type_complexity)]
-fn split_marks(shown: &[reader_core::wrap::Row], whole: &std::collections::HashMap<usize, (TextRow, Vec<(std::ops::Range<usize>, u32, u8)>)>) -> Vec<(f32, std::ops::Range<usize>, u32, u8)> {
-    let mut out = Vec::new();
-    for (i, r) in shown.iter().enumerate() {
-        let Some((row, marks)) = whole.get(&r.line) else { continue };
-        let last = shown.get(i + 1).is_none_or(|n| n.line != r.line);
-        let (start, end) = (r.display.start, if last { row.text.len() } else { r.display.end });
-        let shift = |a: usize| a - start + r.indent;
-        out.extend(marks.iter().filter(|(x, ..)| x.start < end && x.end > start).map(|(x, c, m)| (i as f32, shift(x.start.max(start))..shift(x.end.min(end)), *c, *m)));
-    }
-    out
+    (image.format != lenz_content::image::Format::Svg || !view.tab().image_source()).then(|| pixels.clone())
 }
 
 /// Why `tab`'s raster image cannot be shown, when it cannot (an SVG that cannot be rendered shows its source
 /// instead, with the reason in the status bar).
-fn unshowable_image(tab: &Tab) -> Option<String> {
-    let image = tab.document()?.image()?;
+fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
+    let image = view.snapshot().image()?;
     if image.format == lenz_content::image::Format::Svg {
         return None;
     }
@@ -4840,7 +4861,8 @@ struct PaneFrame {
     /// Underlines (mutable) and strikethroughs (deprecated): row, display range, colour, modifier bits.
     decor: Vec<(f32, std::ops::Range<usize>, u32, u8)>,
     hscroll: f32,
-    row_origins: Vec<f32>,
+    row_parts: Vec<Vec<(std::ops::Range<usize>, f32)>>,
+    sticky_parts: Vec<Vec<(std::ops::Range<usize>, f32)>>,
     picture: Option<(Arc<gpui::RenderImage>, (u32, u32))>,
     markdown: Option<PreviewFrame>,
     pending: bool,
@@ -4848,6 +4870,34 @@ struct PaneFrame {
     hint: Option<&'static str>,
     /// Blame annotations: row, label, age shade (`None`: not committed), of the hovered commit.
     ann: Vec<(f32, String, Option<f32>, bool)>,
+}
+
+fn native_x(window: &Window, metrics: Metrics<'_>, row: &TextRow, parts: &[(std::ops::Range<usize>, f32)], at: usize) -> f32 {
+    let Some((range, origin)) = parts.iter().rev().find(|(r, _)| r.start <= at && at <= r.end) else { return 0.0 };
+    let Some(text) = row.text.get(range.clone()) else { return *origin };
+    debug_assert!(text.len() <= 6144);
+    let run = gpui::TextRun { len: text.len(), font: metrics.font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+    origin + f32::from(window.text_system().shape_line(text.to_owned().into(), px(metrics.font_size), &[run], None).x_for_index(at - range.start))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, palette: &lenz_content::theme::Palette, bounds: Bounds<Pixels>, x: f32, width: f32, scroll: f32, row: &TextRow, parts: &[(std::ops::Range<usize>, f32)]) {
+    for (i, (part, origin)) in parts.iter().enumerate() {
+        let cut = |range: &std::ops::Range<usize>| {
+            let (start, end) = (range.start.max(part.start), range.end.min(part.end));
+            (start < end).then(|| start - part.start..end - part.start)
+        };
+        let fragment = TextRow {
+            y: row.y, number: if i == 0 { row.number } else { 0 },
+            text: row.text.get(part.clone()).unwrap_or_default().to_owned(),
+            fg: row.fg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
+            bg: row.bg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
+            selected: row.selected.as_ref().and_then(cut),
+            caret: row.caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start),
+        };
+        debug_assert!(fragment.text.len() <= 6144);
+        lenz_gpui::paint_row(window, cx, metrics, palette, bounds, x, width, scroll - origin, &fragment);
+    }
 }
 
 /// Bookmark marks at the gutter's left edge (line numbers are right-aligned): the key, or a dot when it has none.
@@ -4860,10 +4910,10 @@ fn paint_bookmarks(window: &mut Window, cx: &mut App, m: Metrics, tx: f32, ty: f
 
 /// Underlines (mutable) and strikethroughs (deprecated) on the rows `row_at` finds by their y, drawn from `lx` (the
 /// text's left edge after scrolling) under the pane top `ty`: row, display range, colour and modifier bits each.
-fn paint_decor<'a>(window: &mut Window, m: Metrics, lx: f32, ty: f32, char_w: f32, row_at: impl Fn(f32) -> Option<&'a TextRow>, decor: &[(f32, std::ops::Range<usize>, u32, u8)]) {
+fn paint_decor<'a>(window: &mut Window, m: Metrics, lx: f32, ty: f32, row_at: impl Fn(f32) -> Option<(&'a TextRow, &'a [(std::ops::Range<usize>, f32)])>, decor: &[(f32, std::ops::Range<usize>, u32, u8)]) {
     for (ry, r, color, mods) in decor {
-        let Some(row) = row_at(*ry) else { continue };
-        let x = |b: usize| lenz_content::wrap::width(row.text.get(..b).unwrap_or_default()) as f32 * char_w;
+        let Some((row, parts)) = row_at(*ry) else { continue };
+        let x = |b: usize| native_x(window, m, row, parts, b);
         let (a, w, y) = (x(r.start), x(r.end) - x(r.start), ty + ry * m.line_h);
         if mods & reader_core::decor::MUTABLE != 0 {
             lenz_gpui::fill(window, lx + a, y + m.line_h - 2.0, w, 1.0, *color);

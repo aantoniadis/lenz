@@ -10,6 +10,7 @@ const CHECKPOINTS: usize = 8;
 const OFFSCREEN_LINES: usize = 16;
 
 fn shape(window: &Window, metrics: Metrics<'_>, text: &str) -> ShapedLine {
+    debug_assert!(text.len() <= WINDOW_WORK + 257);
     let run = TextRun { len: text.len(), font: metrics.font.clone(), color: Hsla::default(), background_color: None, underline: None, strikethrough: None };
     window.text_system().shape_line(SharedString::from(text.to_owned()), px(metrics.font_size), &[run], None)
 }
@@ -31,14 +32,18 @@ struct Piece {
     windows: Vec<Arc<Projected>>,
 }
 
+#[derive(Clone)]
+struct Hidden { source: Range<usize>, display: usize }
+
 /// The same bounded text and pixel origin are used for painting and pointer conversion.
 #[derive(Clone, Default)]
 pub(crate) struct Row {
     pub text: String,
     pub origin: f32,
-    pub extent: Option<f32>,
+    pub fragments: Vec<(Range<usize>, f32)>,
     display: Range<usize>,
     windows: Vec<Arc<Projected>>,
+    hidden: Vec<Hidden>,
     end: Option<usize>,
 }
 
@@ -59,18 +64,16 @@ impl Row {
     }
 
     pub fn caret(&self, source: usize) -> Option<usize> {
-        self.windows.iter().find_map(|window| {
-            let at = window.display.start + window.caret(source)?;
-            self.display.contains(&at).then_some(at - self.display.start)
-                .or_else(|| (at == self.display.end).then_some(at - self.display.start))
-        })
+        let display = self.windows.iter().find_map(|window| Some(window.display.start + window.caret(source)?))
+            .or_else(|| self.hidden.iter().find(|h| h.source.start <= source && source <= h.source.end).map(|h| h.display))?;
+        (self.display.start <= display && display <= self.display.end).then(|| display - self.display.start)
     }
 
     pub fn hints(&self) -> Vec<Range<usize>> {
         self.windows.iter().flat_map(|window| window.shown.hints.iter().filter_map(|(_, range, _)| {
             let start = (window.display.start + range.start).max(self.display.start);
             let end = (window.display.start + range.end).min(self.display.end);
-            (start < end).then_some(start - self.display.start..end - self.display.start)
+            (start < end).then(|| start - self.display.start..end - self.display.start)
         })).collect()
     }
 
@@ -82,9 +85,19 @@ impl Row {
     }
 
     pub fn hit(&self, window: &Window, metrics: Metrics<'_>, x: f32) -> Option<usize> {
-        let at = shape(window, metrics, &self.text).closest_index_for_x(px((x - self.origin).max(0.0)));
-        self.source_at(at)
+        if self.text.is_empty() { return self.end; }
+        let (range, origin) = self.fragments.iter().rev().find(|(_, origin)| *origin <= x)
+            .or_else(|| self.fragments.first())?;
+        let at = shape(window, metrics, self.text.get(range.clone())?).closest_index_for_x(px((x - origin).max(0.0)));
+        self.source_at(range.start + at)
     }
+
+    pub fn x_for(&self, window: &Window, metrics: Metrics<'_>, at: usize) -> Option<f32> {
+        if self.text.is_empty() && at == 0 { return Some(self.origin); }
+        let (range, origin) = self.fragments.iter().rev().find(|(range, _)| range.start <= at && at <= range.end)?;
+        Some(*origin + f32::from(shape(window, metrics, self.text.get(range.clone())?).x_for_index(at - range.start)))
+    }
+
 }
 
 #[derive(Clone, PartialEq)]
@@ -98,6 +111,7 @@ struct Line {
     position: Position,
     checkpoints: VecDeque<Position>,
     pieces: Vec<Piece>,
+    hidden: Vec<Hidden>,
     row: Row,
     extent: Option<f32>,
     end: Option<Cursor>,
@@ -113,7 +127,7 @@ impl Line {
             || target.display.as_ref().is_some_and(|range| start.display_byte() > range.start) { return None; }
         Some(Self { tab: view.tab().id(), target, start: start.clone(), started: false,
             position: Position { cursor: start, x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() },
-            checkpoints: VecDeque::new(), pieces: Vec::new(), row: Row::default(), extent: None, end: None, ready: false, failed: false, touched: true })
+            checkpoints: VecDeque::new(), pieces: Vec::new(), hidden: Vec::new(), row: Row::default(), extent: None, end: None, ready: false, failed: false, touched: true })
     }
 
     fn retarget(&mut self, target: Target) {
@@ -145,7 +159,7 @@ impl Line {
             .filter(|p| target.skip > 0.0 && p.x <= target.skip).max_by(|a,b| a.x.total_cmp(&b.x)).cloned();
         self.position = best.unwrap_or_else(|| Position { cursor: self.start.clone(), x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() });
         self.target = target;
-        self.pieces.clear(); self.row = Row::default();
+        self.pieces.clear(); self.hidden.clear(); self.row = Row::default();
         self.ready = false; self.failed = false; self.started = false;
         self.extent = None; self.end = None;
     }
@@ -162,11 +176,17 @@ impl Line {
         let mut text = std::mem::take(&mut self.position.carry);
         text.push_str(body);
         let mut windows = std::mem::take(&mut self.position.carry_windows);
-        windows.push(Arc::new(projected.clone()));
+        if !body.is_empty() { windows.push(Arc::new(projected.clone())); }
+        if projected.shown.text.is_empty() && !projected.source.is_empty() {
+            if let Some(last) = self.hidden.last_mut()
+                && last.display == projected.display.start && last.source.end == projected.source.start {
+                last.source.end = projected.source.end;
+            } else { self.hidden.push(Hidden { source: projected.source.clone(), display: projected.display.start }); }
+        }
         let shaped = shape(window, metrics, &text);
         let commit = if complete { text.len() } else { text.grapheme_indices(true).next_back().map_or(0, |(at,_)| at) };
         let right = self.position.x + f32::from(shaped.x_for_index(commit));
-        if !text.is_empty() && right >= self.target.skip {
+        if commit > 0 && right >= self.target.skip {
             self.pieces.push(Piece { display: start..start + commit, origin: self.position.x, text: Arc::new(text.clone()), windows: windows.clone() });
         }
         self.position.x = right;
@@ -183,30 +203,33 @@ impl Line {
     }
 
     fn source_end(&self) -> Option<usize> {
-        if self.end.is_none() { return None; }
+        self.end.as_ref()?;
         if self.target.display.is_some() { self.target.source_end } else { self.end.as_ref().map(Cursor::source_byte) }
     }
 
     fn finish_row(&mut self) {
         let Some(first) = self.pieces.first() else {
-            self.row = Row { extent: self.extent.filter(|_| self.target.display.is_none()), end: self.source_end(), ..Default::default() };
+            self.row = Row { end: self.source_end(), ..Default::default() };
             return;
         };
         let (start, origin) = (first.display.start, first.origin);
         let mut text = String::new();
         let mut end = start;
         let mut windows = Vec::new();
+        let mut fragments = Vec::new();
         for piece in &self.pieces {
             let from = end.max(piece.display.start);
             if let Some(part) = piece.text.get(from - piece.display.start..piece.display.end - piece.display.start) {
+                let local = text.len();
                 text.push_str(part);
+                fragments.push((local..text.len(), piece.origin));
                 end = piece.display.end;
             }
             for window in &piece.windows {
-                if !windows.iter().any(|old: &Arc<Projected>| old.display == window.display) { windows.push(window.clone()); }
+                if !windows.iter().any(|old: &Arc<Projected>| old.display == window.display && old.source == window.source) { windows.push(window.clone()); }
             }
         }
-        self.row = Row { text, origin, extent: self.extent.filter(|_| self.target.display.is_none()), display: start..end, windows, end: self.source_end() };
+        self.row = Row { text, origin, fragments, display: start..end, windows, hidden: self.hidden.iter().filter(|h| start <= h.display && h.display <= end).cloned().collect(), end: self.source_end() };
     }
 }
 
@@ -226,6 +249,14 @@ struct Pane {
 pub(crate) struct Cache { panes: [Pane;2], commands: Vec<Command> }
 
 impl Cache {
+    #[cfg(all(test, feature = "test-support"))]
+    pub fn retained_windows(&self) -> usize {
+        self.panes.iter().flat_map(|pane| &pane.lines).map(|line| {
+            line.position.carry_windows.len() + line.checkpoints.iter().map(|p| p.carry_windows.len()).sum::<usize>()
+                + line.pieces.iter().map(|p| p.windows.len()).sum::<usize>() + line.row.windows.len()
+        }).sum()
+    }
+
     pub fn begin(&mut self, metrics: Metrics<'_>) {
         for pane in &mut self.panes {
             let metric = (metrics.font.clone(), metrics.font_size.to_bits());
