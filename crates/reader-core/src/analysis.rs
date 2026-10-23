@@ -1,6 +1,6 @@
 //! Bounded current-buffer analysis; the generic job pool remains the executor.
 use std::{collections::{HashMap, VecDeque}, sync::{Arc, OnceLock, Weak, atomic::{AtomicBool, AtomicU64, Ordering}}};
-use crate::{document::Document, jobs::{Jobs, Priority, MAX_JOBS}, session::Completion, tabs::TabId, text::{BufferId, SnapshotKey, TextSnapshot}};
+use crate::{document::{Document, SourceMeta}, jobs::{Jobs, Priority, MAX_JOBS}, session::Completion, tabs::TabId, text::{BufferId, SnapshotKey, TextSnapshot}};
 
 const BUFFERS: usize = 64;
 
@@ -10,10 +10,10 @@ pub(crate) enum Consumer { Find(TabId), Syntax, Markdown, Index }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Ticket { scope: Scope, consumer: Consumer, request: u64 }
+#[derive(Clone, Debug)]
+pub struct Ticket { scope: Scope, consumer: Consumer, request: u64, run: u64, metadata: Weak<SourceMeta> }
 impl Ticket {
-    pub(crate) fn matches(&self, snapshot: &TextSnapshot, project: u64) -> bool { self.scope == scope(snapshot, project) }
+    pub(crate) fn matches(&self, snapshot: &TextSnapshot, project: u64) -> bool { self.scope == scope(snapshot, project) && self.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta())) }
     pub(crate) fn buffer(&self) -> BufferId { self.scope.key.buffer }
 }
 fn scope(snapshot: &TextSnapshot, project: u64) -> Scope {
@@ -32,6 +32,8 @@ type Work = Box<dyn FnOnce(Arc<Document>, Lease) + Send>;
 struct Intent { request: u64, priority: Priority, work: Work }
 struct Task { done: Arc<AtomicBool>, cancel: Arc<AtomicBool> }
 struct Group {
+    run: u64,
+    metadata: Weak<SourceMeta>,
     scope: Scope,
     snapshot: Weak<TextSnapshot>,
     document: Arc<OnceLock<Arc<Document>>>,
@@ -42,12 +44,12 @@ struct Group {
     latest: HashMap<Consumer, u64>,
 }
 impl Group {
-    fn new(input: Input) -> Self {
+    fn new(input: Input, run: u64) -> Self {
         let document = OnceLock::new();
         if let Some(loaded) = input.loaded.upgrade().filter(|doc| doc.version() == input.scope.key.version && Arc::ptr_eq(doc.source_meta(), input.snapshot.source_meta())) {
             let _ = document.set(loaded);
         }
-        Self { scope: input.scope, snapshot: Arc::downgrade(&input.snapshot), document: Arc::new(document), cancel: Arc::new(AtomicBool::new(true)), materializing: None, inflight: HashMap::new(), waiting: HashMap::new(), latest: HashMap::new() }
+        Self { run, metadata: Arc::downgrade(input.snapshot.source_meta()), scope: input.scope, snapshot: Arc::downgrade(&input.snapshot), document: Arc::new(document), cancel: Arc::new(AtomicBool::new(true)), materializing: None, inflight: HashMap::new(), waiting: HashMap::new(), latest: HashMap::new() }
     }
     fn running(&self) -> bool { self.materializing.is_some() || !self.inflight.is_empty() }
     fn cancel(&mut self) {
@@ -71,9 +73,9 @@ pub(crate) struct Lease {
 }
 impl Lease {
     pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) && self.project.load(Ordering::Acquire) == self.ticket.scope.project }
-    pub(crate) fn ticket(&self) -> Ticket { self.ticket }
+    pub(crate) fn ticket(&self) -> Ticket { self.ticket.clone() }
     pub(crate) fn send(&self, result: Completion) -> bool {
-        self.wanted() && self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket, result: Box::new(result) }).is_ok()
+        self.wanted() && self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket.clone(), result: Box::new(result) }).is_ok()
     }
     pub(crate) fn cancellation(&self) -> impl Fn() -> bool + Send + Clone + 'static {
         let (group, cancel, project, expected) = (self.group.clone(), self.cancel.clone(), self.project.clone(), self.ticket.scope.project);
@@ -90,7 +92,7 @@ impl Drop for Lease {
 
 #[derive(Default)]
 pub(crate) struct Analysis {
-    entries: HashMap<BufferId, Entry>, queue: VecDeque<BufferId>, running: usize,
+    entries: HashMap<BufferId, Entry>, queue: VecDeque<BufferId>, running: usize, next: u64,
     #[cfg(test)]
     pub(crate) materializations: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -118,7 +120,8 @@ impl Analysis {
                 entry.group.waiting.insert(consumer, intent);
             }
         } else {
-            let mut group = Group::new(input);
+            self.next += 1;
+            let mut group = Group::new(input, self.next);
             group.latest.insert(consumer, request);
             group.waiting.insert(consumer, intent);
             self.entries.insert(id, Entry { group, pending: None, queued: false, live });
@@ -134,9 +137,9 @@ impl Analysis {
         }
     }
 
-    pub(crate) fn accepts(&self, ticket: Ticket) -> bool {
+    pub(crate) fn accepts(&self, ticket: &Ticket) -> bool {
         self.entries.get(&ticket.scope.key.buffer).is_some_and(|entry| entry.pending.is_none() && entry.group.scope == ticket.scope
-            && entry.group.cancel.load(Ordering::Acquire) && entry.group.latest.get(&ticket.consumer) == Some(&ticket.request))
+            && entry.group.run == ticket.run && entry.group.cancel.load(Ordering::Acquire) && entry.group.latest.get(&ticket.consumer) == Some(&ticket.request))
     }
 
     pub(crate) fn forget(&mut self, id: BufferId) {
@@ -179,7 +182,8 @@ impl Analysis {
                 keep
             });
             if !entry.group.running() && let Some(pending) = entry.pending.take() {
-                entry.group = Group::new(pending.input);
+                self.next += 1;
+                entry.group = Group::new(pending.input, self.next);
                 for (consumer, intent) in pending.intents {
                     entry.group.latest.insert(consumer, intent.request);
                     entry.group.waiting.insert(consumer, intent);
@@ -204,7 +208,7 @@ impl Analysis {
             let Some(consumer) = intent else { continue };
             let Some(intent) = group.waiting.remove(&consumer) else { continue };
             let (done, cancel) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
-            let lease = Lease { ticket: Ticket { scope: group.scope, consumer, request: intent.request }, group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), project: project.clone(), tx: tx.clone() };
+            let lease = Lease { ticket: Ticket { scope: group.scope, consumer, request: intent.request, run: group.run, metadata: group.metadata.clone() }, group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), project: project.clone(), tx: tx.clone() };
             if let Some(doc) = group.document.get().cloned() {
                 group.inflight.insert(consumer, Task { done, cancel });
                 self.running += 1;

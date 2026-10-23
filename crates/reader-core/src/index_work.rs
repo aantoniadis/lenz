@@ -36,7 +36,7 @@ impl Part {
         }
     }
     pub fn record_all(&self, ticket: Ticket, result: FileIndex) {
-        for path in &self.paths { self.record(path, Some(ticket), result.clone()); }
+        for path in &self.paths { self.record(path, Some(ticket.clone()), result.clone()); }
     }
 }
 impl Drop for Part { fn drop(&mut self) { self.batch.finish(); } }

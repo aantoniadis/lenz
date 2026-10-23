@@ -697,6 +697,38 @@ fn finder_perf() {
 }
 
 #[test]
+fn an_old_analysis_result_cannot_complete_a_reopened_view_request() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "again.rs", b"fn current() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "again.rs");
+    let receiver = s.completions();
+    let old = loop {
+        let completion = receiver.recv_blocking_timeout().unwrap();
+        if matches!(&completion, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Highlighted { .. })) { break completion; }
+        s.dispatch(completion);
+    };
+    s.dispatch(Command::Close);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Open(file.clone()));
+    let tab = s.state.active.unwrap();
+    s.dispatch(Completion::Checked { request: s.request, tab, path: file.clone(), stamp: Stamp::of(&file) });
+    assert!(s.state().highlights().is_none());
+    s.dispatch(old);
+    let stale_installed = s.state().highlights().is_some();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().highlights().is_some());
+    assert!(!stale_installed, "a previous admission's response cannot complete a new view request");
+}
+
+#[test]
 fn rebuilding_the_index_uses_an_open_buffers_admitted_snapshot() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();

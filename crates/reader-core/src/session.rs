@@ -3941,7 +3941,7 @@ impl Session {
             Completion::Analyzed { ticket, result } => {
                 let current = self.state.sources.buffers.get(&ticket.buffer()).and_then(|entry| entry.snapshot.as_ref())
                     .is_some_and(|snapshot| ticket.matches(snapshot, self.project_generation.load(Ordering::Relaxed)));
-                if current && self.analysis.accepts(ticket) { self.complete(*result) } else { Effect::default() }
+                if current && self.analysis.accepts(&ticket) { self.complete(*result) } else { Effect::default() }
             }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
