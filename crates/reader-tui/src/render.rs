@@ -240,7 +240,7 @@ fn clamp(at: &mut usize, top: &mut usize, len: usize, height: usize) {
 impl App {
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.show_documentation();
-        self.source_cache.borrow_mut().begin();
+        self.source_cache.borrow_mut().begin(self.session.state());
         let area = frame.area();
         let palette = **self.session.state().palette();
         let p = &palette;

@@ -1,7 +1,7 @@
 //! Bounded terminal measurement over shared resumable projections.
 use reader_core::{
     projection::{Batch, Cursor, Request, WINDOW_WORK, Window},
-    session::{Command, View},
+    session::{Command, State, View},
     tabs::TabId,
 };
 use std::{collections::VecDeque, ops::Range, sync::Arc};
@@ -211,8 +211,15 @@ pub(crate) struct Row {
 }
 
 impl Cache {
-    pub fn begin(&mut self) {
+    pub fn begin(&mut self, state: &State) {
         for pane in &mut self.panes {
+            pane.lines.retain(|line| {
+                state.view(line.tab).is_some_and(|view| {
+                    line.position
+                        .cursor
+                        .matches(view.snapshot(), view.inlay_hints())
+                })
+            });
             pane.work = FRAME_WORK;
             pane.seen = false;
             for line in &mut pane.lines {

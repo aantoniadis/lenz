@@ -740,6 +740,40 @@ fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 #[test]
+fn cold_horizontal_seek_completes_every_visible_long_line_without_starving_later_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("many-long-lines.txt");
+    let source: String = (0..40).map(|line| format!("{}TAIL_{line:02}{}\n", "x".repeat(12_000), " ".repeat(100))).collect();
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 100, 50);
+    a.dispatch(Command::ScrollColumn(12_000));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(&mut a, 100, 50);
+        let pane = &a.layout.panes[0];
+        if (0..40).all(|line| pane.hits.iter().any(|hit| hit.line == line && hit.byte == 12_000)) { break; }
+        assert!(Instant::now() < deadline, "visible cold lines did not finish");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    assert!(a.session.projection(0).is_none(), "finished viewports must release the raw batch");
+    key(&mut a, KeyCode::Left, KeyModifiers::CONTROL | KeyModifiers::ALT);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        draw(&mut a, 100, 50);
+        if a.layout.panes[0].hits.iter().any(|hit| hit.line == 0 && hit.byte == 11_996) { break; }
+        assert!(Instant::now() < deadline);
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+    }
+    assert_eq!(a.session.state().column(), 11_996);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("joined.txt");
@@ -1279,11 +1313,14 @@ fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.hints().is_some()));
     assert!(a.next_deadline().is_none(), "late hint layout invalidates the pending hover target");
     draw(&mut a, 80, 20);
+    let old_hints = Arc::downgrade(a.session.state().active().unwrap().hints().unwrap());
     let (x, y) = (a.layout.panes[0].text.x + 24, a.layout.panes[0].text.y);
     a.dispatch(Command::SetInlayTypes(false));
     let before = a.session.state().selection();
     click(&mut a, x, y);
     assert_eq!(a.session.state().selection(), before);
+    draw(&mut a, 80, 20);
+    assert!(old_hints.upgrade().is_none(), "obsolete native layout must release replaced hint labels");
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 
