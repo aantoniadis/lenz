@@ -3064,7 +3064,7 @@ fn documentation_on_rest_shows_in_either_pane_and_never_under_a_menu(cx: &mut Te
 fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     let src = "fn f() {\n    if x {\n        y();\n    }\n}\nfn g() {\n    z();\n}\n";
     let f = fixture(cx, Some(("a.rs", src.as_bytes())));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.folds().is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -3405,7 +3405,9 @@ fn clicks_on_wrapped_rows_land_on_their_bytes(cx: &mut TestAppContext) {
     let (text_b, char_w, row1) = f.view.read_with(&v, |r, _| {
         let s = r.session().state();
         let t = s.active().unwrap();
-        (r.text_bounds.unwrap(), r.char_w, t.rows(3, s.wrap_cols(t))[1].clone())
+        let layout = s.view(t.id()).unwrap().layout_rows(3, s.wrap_cols(t));
+        assert!(layout.pending.is_none(), "the rendered short fixture has complete shared rows");
+        (r.text_bounds.unwrap(), r.char_w, layout.rows[1].clone())
     });
     assert_eq!(row1.index, 1, "the line wrapped");
     // The first character of the second row, just right of its indent.
@@ -3789,7 +3791,10 @@ fn ctrl_shift_digit_sets_a_numbered_bookmark_as_linux_reports_it(cx: &mut TestAp
 const HINTED: &str = "fn main() {\n    let v = add(1);\n}\nfn old_add(a: i32) -> i32 { a }\n";
 
 fn hinted(r: &ReaderView) -> bool {
-    r.session().state().active().is_some_and(|t| t.hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some())
+    let state = r.session().state();
+    state.active().and_then(|tab| state.view(tab.id())).is_some_and(|view| {
+        view.inlay_hints().is_some_and(|hints| !hints.is_empty()) && view.tokens().is_some()
+    })
 }
 
 #[gpui::test]
@@ -3868,7 +3873,7 @@ fn the_toggles_run_from_the_command_menu_and_show_their_state(cx: &mut TestAppCo
         label
     };
     assert_eq!(menu(&mut v, CommandId::InlayTypes), "Inlay Hints: Types (on)");
-    settle(cx, &f, |r| r.session().state().active().and_then(|t| t.hints()).is_some_and(|h| h.line(1).iter().all(|h| h.kind == reader_core::decor::HintKind::Parameter) && !h.is_empty()));
+    settle(cx, &f, |r| r.session().state().active().and_then(|tab| r.session().state().view(tab.id())).is_some_and(|view| view.inlay_hints().is_some_and(|h| h.line(1).iter().all(|h| h.kind == reader_core::decor::HintKind::Parameter) && !h.is_empty())));
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.visible_rows()[1].text.clone()), "    let v = add(a: 1);");
     assert_eq!(menu(&mut v, CommandId::InlayParameters), "Inlay Hints: Parameter Names (on)");
@@ -3902,7 +3907,7 @@ fn hinted_lines_show_in_both_panes_and_in_sticky_lines(cx: &mut TestAppContext) 
     // The other pane shares the snapshot and its hints.
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(0), cx));
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Split(reader_core::session::Split::Columns), cx));
-    settle(cx, &f, |r| r.session().state().shown(1).is_some_and(|t| t.hints().is_some()));
+    settle(cx, &f, |r| r.session().state().shown(1).is_some_and(|tab| r.session().state().view(tab.id()).is_some_and(|view| view.inlay_hints().is_some())));
     let other = f.view.read_with(&v, |r, _| {
         let t = r.session().state().shown(1).unwrap();
         r.tab_rows(t, 5).0[1].text.clone()
@@ -3924,7 +3929,13 @@ fn hinted_lines_wrap_and_clicks_land_on_their_bytes(cx: &mut TestAppContext) {
     let (rows, shown) = f.view.read_with(&v, |r, _| {
         let s = r.session().state();
         let t = s.active().unwrap();
-        (t.rows(8, s.wrap_cols(t)), t.shown_line(1).text)
+        let view = s.view(t.id()).unwrap();
+        let layout = view.layout_rows(8, s.wrap_cols(t));
+        assert!(layout.pending.is_none(), "the rendered hinted fixture has complete shared rows");
+        let mut cursor = view.display_start(1).unwrap();
+        let projected = view.display_window(&mut cursor, reader_core::projection::WINDOW_WORK).unwrap();
+        assert!(projected.complete, "the short hinted line fits a bounded projection");
+        (layout.rows, projected.shown.text)
     });
     let line1: Vec<_> = rows.iter().filter(|r| r.line == 1).cloned().collect();
     assert!(line1.len() >= 2, "{rows:?}");
@@ -3934,7 +3945,8 @@ fn hinted_lines_wrap_and_clicks_land_on_their_bytes(cx: &mut TestAppContext) {
     let x = f32::from(text_b.origin.x) + num_w() + 8.0 + (line1[1].indent as f32 + 0.3) * char_w;
     v.simulate_click(point(px(x), px(f32::from(text_b.origin.y) + line_h() * (i as f32 + 0.5))), Modifiers::default());
     let start = text.find("    let head").unwrap();
-    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().head), start + line1[1].source.start);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().head), line1[1].source.start);
+    assert!(line1[1].source.start >= start, "shared row source ranges are absolute UTF8 bytes");
 }
 
 #[gpui::test]
@@ -4235,7 +4247,7 @@ fn sticky_lines_carry_mutable_and_deprecated_marks(cx: &mut TestAppContext) {
     let text = format!("mod m {{\n    fn old_g() {{ let mut top = 1;\n{body}    }}\n}}\n");
     let f = fixture_with(cx, None, &fake_lsp());
     let pkg = fake_package(cx, &f, &[("src/main.rs", &text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.tokens().is_some() && t.declarations().is_some()));
+    settle(cx, &f, |r| r.session().state().active().and_then(|tab| r.session().state().view(tab.id())).is_some_and(|view| view.tokens().is_some() && view.declarations().is_some()));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -4258,7 +4270,7 @@ fn sticky_lines_draw_their_fold_marks_over_the_rows_under_them(cx: &mut TestAppC
     let text = format!("mod m {{\n    fn f() {{\n{}    }}\n}}\n", "        if a {\n            b;\n        }\n".repeat(20));
     std::fs::write(&path, &text).unwrap();
     f.view.update(cx, |v, cx| v.open(path.clone(), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.declarations().is_some() && t.fold_at(11).is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|tab| v.session().state().view(tab.id()).is_some_and(|view| view.declarations().is_some()) && tab.fold_at(11).is_some()));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -4366,7 +4378,7 @@ fn a_tree_click_selects_the_row_drawn_there(cx: &mut TestAppContext) {
 fn a_preview_with_collapsed_folds_scrolls(cx: &mut TestAppContext) {
     let source = (0..40).map(|i| format!("# Section {i}\n\n{}\n\n", "Some words here. ".repeat(8))).collect::<String>();
     let f = fixture(cx, Some(("a.md", source.as_bytes())));
-    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)) && v.session().state().active().is_some_and(|t| t.folds().is_some()));
+    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)) && v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(500.0)));
     show(&mut v);

@@ -1679,7 +1679,7 @@ fn folded_source_does_not_accept_hits_from_the_old_projection() {
     std::fs::write(&path, source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.folds().is_some()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y + 1);
     a.dispatch(Command::ToggleFold(0));
@@ -2344,7 +2344,7 @@ fn plain_arrows_follow_visual_wrap_rows_and_skip_collapsed_source_lines() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.folds().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some()))
     });
     a.dispatch(Command::ToggleFold(0));
     draw(&mut a, 70, 12);

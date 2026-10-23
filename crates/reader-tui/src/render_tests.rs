@@ -432,7 +432,7 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.folds().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some()))
     });
     app.dispatch(Command::ToggleFold(0));
     let buffer = draw(&mut app, 70, 16);
@@ -449,7 +449,7 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.declarations().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.declarations().is_some()))
     });
     app.dispatch(Command::Scroll(1));
     draw(&mut app, 70, 16);
