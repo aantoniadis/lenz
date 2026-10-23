@@ -1460,3 +1460,129 @@ fn double_and_triple_click_select_the_word_and_its_syntax_group() {
     assert_eq!(selected(&app), "", "a fourth click starts over");
     assert_eq!(std::fs::read_to_string(dir.path().join("right.rs")).unwrap(), src);
 }
+
+/// A repository window on `main` (`a.txt`, `m.txt`), branch `other` changing `a.txt`, tag `v1`; `m.txt` changed.
+fn checkout_repository() -> (tempfile::TempDir, App) {
+    let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["config", "user.email", "t@t"]);
+    std::fs::write(root.join("a.txt"), "main\n").unwrap();
+    std::fs::write(root.join("m.txt"), "base\n").unwrap();
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "main"]);
+    git(root, &["tag", "v1"]);
+    git(root, &["switch", "-q", "-c", "other"]);
+    std::fs::write(root.join("a.txt"), "other\n").unwrap();
+    git(root, &["commit", "-qam", "other"]);
+    git(root, &["switch", "-q", "main"]);
+    std::fs::write(root.join("m.txt"), "changed\n").unwrap();
+    let app = open(root, &["log"]);
+    (dir, app)
+}
+fn current_branch(root: &Path) -> String {
+    git(root, &["branch", "--show-current"])
+}
+/// Where `needle` starts on screen.
+fn find(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    let width = buffer.area.width as usize;
+    let cells: Vec<&str> = buffer.content.iter().map(|c| c.symbol()).collect();
+    for y in 0..buffer.area.height as usize {
+        let line: String = cells[y * width..(y + 1) * width].concat();
+        if let Some(at) = line.find(needle) {
+            return (line[..at].chars().count() as u16, y as u16);
+        }
+    }
+    panic!("{needle:?} not on screen:\n{}", screen(buffer));
+}
+
+#[test]
+fn the_sidebar_menu_checks_out_a_branch_in_the_terminal() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let (dir, mut app) = checkout_repository();
+    let buffer = draw(&mut app, 160, 40);
+    let (x, y) = find(&buffer, "⎇ other");
+    app.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: x + 2, row: y, modifiers: KeyModifiers::NONE }));
+    let menu = screen(&draw(&mut app, 160, 40));
+    assert!(menu.contains("Checkout") && menu.contains("New Branch from Here…") && menu.contains("Compare with Current"), "{menu}");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "other");
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "other\n");
+    assert_eq!(std::fs::read_to_string(dir.path().join("m.txt")).unwrap(), "changed\n", "the local change went along");
+    assert_eq!(app.repository.as_ref().unwrap().core.picker.title_branch, "other");
+}
+
+#[test]
+fn the_checkout_dialog_offers_smart_and_a_confirmed_force_in_the_terminal() {
+    use crossterm::event::KeyEventKind;
+    let (dir, mut app) = checkout_repository();
+    std::fs::write(dir.path().join("a.txt"), "mine\n").unwrap();
+    app.git_command(lenz::repository_session::RepositoryCommand::Checkout(lenz::branches::Target::Branch("other".into())));
+    ready(&mut app);
+    let shown = screen(&draw(&mut app, 120, 30));
+    assert!(shown.contains("s Smart Checkout") && shown.contains("would overwrite your local changes"), "{shown}");
+    key(&mut app, KeyCode::Char('f'), KeyModifiers::NONE);
+    ready(&mut app);
+    assert!(screen(&draw(&mut app, 120, 30)).contains("y Force Checkout"));
+    // Enter, a held y and s do nothing at the confirmation.
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    let mut held = KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE);
+    held.kind = KeyEventKind::Repeat;
+    app.handle(Event::Key(held));
+    key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "mine\n");
+    // Tiny terminals draw it; then y confirms.
+    draw(&mut app, 20, 6);
+    key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "other");
+    assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "other\n");
+    assert!(!app.repository.as_ref().unwrap().modal());
+}
+
+#[test]
+fn new_branch_and_revision_prompts_refuse_in_place_in_the_terminal() {
+    use lenz::catalog::{Action, RepoAction};
+    let (dir, mut app) = checkout_repository();
+    app.run_action(Action::Repository(RepoAction::NewBranch));
+    text(&mut app, "other");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(screen(&draw(&mut app, 160, 40)).contains("A branch named \"other\" already exists"));
+    app.handle(Event::Paste("-x".into()));
+    key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    assert!(screen(&draw(&mut app, 160, 40)).contains("[ ] check out (Tab): other-x"));
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "main");
+    assert_eq!(git(dir.path(), &["rev-parse", "other-x"]), git(dir.path(), &["rev-parse", "main"]));
+    app.run_action(Action::Repository(RepoAction::CheckoutRevision));
+    text(&mut app, "nope");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(screen(&draw(&mut app, 160, 40)).contains("No commit named \"nope\""));
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(!app.repository.as_ref().unwrap().modal());
+    app.run_action(Action::Repository(RepoAction::CheckoutRevision));
+    text(&mut app, "v1");
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "");
+}
+
+#[test]
+fn an_unsaved_draft_blocks_a_checkout_in_the_terminal() {
+    let (dir, mut app) = checkout_repository();
+    let index = app.session.comparisons().iter().position(|c| c.path == "m.txt").unwrap();
+    app.session.open_file(index);
+    ready(&mut app);
+    app.edit_menu(lenz::edit_session::EditMenuCommand::Revert);
+    ready(&mut app);
+    assert!(app.session.has_dirty());
+    app.git_command(lenz::repository_session::RepositoryCommand::Checkout(lenz::branches::Target::Branch("other".into())));
+    ready(&mut app);
+    assert_eq!(current_branch(dir.path()), "main");
+    assert_eq!(std::fs::read_to_string(dir.path().join("m.txt")).unwrap(), "changed\n");
+    assert!(app.session.has_dirty() && app.session.notice().is_some_and(|n| n.starts_with("Unsaved changes")));
+}
