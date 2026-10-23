@@ -73,7 +73,8 @@ Session cancels the lanes before closing its completion receiver on drop.
 Core caret movement, wrapped scrolling, End, selection visibility, navigation
 reveal and sticky-band clearance consume these exact rows. Initial wrapped arrow
 input without a caret starts at the visible top row. Existing whole-line helpers
-remain compatibility APIs for consumers outside this migration.
+were retained during the adapter migration and removed by
+[the current-source ownership contraction](reader-current-source-ownership.md).
 
 ## Focused verification
 

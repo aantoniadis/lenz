@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    document::Document,
-    tabs::{ANCHOR_CHARS, Location},
+    text::TextSnapshot,
+    tabs::Location,
 };
 
 /// Recent files kept.
@@ -30,7 +30,7 @@ const VERSION: u32 = 1;
 /// The largest line or byte offset read from a places file: past any document, and clear of overflow.
 pub const MAX_POSITION: usize = i32::MAX as usize;
 
-/// A place in a file: its line and the line's text (its first [`ANCHOR_CHARS`] characters) to find it again.
+/// A place in a file: its line and the line's text (its first [`crate::tabs::ANCHOR_CHARS`] characters) to find it again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mark {
     pub source: Arc<Path>,
@@ -46,10 +46,10 @@ pub struct Mark {
 
 impl Mark {
     /// Byte `offset` of line `line` of `doc` (both clamped), shown from `source`.
-    pub fn at(source: &Path, doc: &Document, line: usize, offset: usize) -> Self {
+    pub fn at(source: &Path, doc: &TextSnapshot, line: usize, offset: usize) -> Self {
         let line = line.min(doc.line_count() - 1);
-        let text = doc.line(line);
-        Self { source: source.into(), line, anchor: text.chars().take(ANCHOR_CHARS).collect::<String>().into(), offset: floor(text, offset), mnemonic: None, moved: false }
+        let range = doc.reader_line_range(line);
+        Self { source: source.into(), line, anchor: crate::tabs::anchor(doc, line).into(), offset: doc.floor_char_boundary(range.start.saturating_add(offset).min(range.end)) - range.start, mnemonic: None, moved: false }
     }
 
     pub fn from_location(at: &Location) -> Self {
@@ -61,20 +61,12 @@ impl Mark {
     }
 }
 
-pub(crate) fn floor(text: &str, mut b: usize) -> usize {
-    b = b.min(text.len());
-    while !text.is_char_boundary(b) {
-        b -= 1;
-    }
-    b
-}
-
 /// Moves `source`'s marks to the line of `doc` whose text is their anchor, nearest the old line (a tie goes up); a
 /// mark without one keeps its line, even past the end (a file cut short and restored gets each mark back, key and
 /// all), and is `moved`; going there stops at the last line. Whether any mark changed.
-fn relocate(marks: &mut [Mark], source: &Path, doc: &Document) -> bool {
+fn relocate(marks: &mut [Mark], source: &Path, doc: &TextSnapshot) -> bool {
     let last = doc.line_count() - 1;
-    let anchored = |l: usize, m: &Mark| doc.line(l).chars().take(ANCHOR_CHARS).eq(m.anchor.chars());
+    let anchored = |l: usize, m: &Mark| crate::tabs::anchor_matches(doc, l, &m.anchor);
     // ponytail: one String per line, built only when some mark's line changed; an index per document if this shows up.
     let mut lines: Option<HashMap<String, Vec<usize>>> = None;
     let mut changed = false;
@@ -86,7 +78,7 @@ fn relocate(marks: &mut [Mark], source: &Path, doc: &Document) -> bool {
             let lines = lines.get_or_insert_with(|| {
                 let mut map: HashMap<String, Vec<usize>> = HashMap::new();
                 for l in 0..=last {
-                    map.entry(doc.line(l).chars().take(ANCHOR_CHARS).collect()).or_default().push(l);
+                    map.entry(crate::tabs::anchor(doc, l).into()).or_default().push(l);
                 }
                 map
             });
@@ -96,7 +88,7 @@ fn relocate(marks: &mut [Mark], source: &Path, doc: &Document) -> bool {
             }
         }
         if m.line <= last {
-            m.offset = floor(doc.line(m.line), m.offset);
+            m.offset = { let r = doc.reader_line_range(m.line); doc.floor_char_boundary(r.start.saturating_add(m.offset).min(r.end)) - r.start };
         }
         changed |= before != (m.line, m.offset, m.moved);
     }
@@ -261,7 +253,7 @@ impl Places {
     }
 
     /// `source` now reads as `doc`: its marks move with their lines. Whether any changed.
-    pub fn relocate(&mut self, source: &Path, doc: &Document) -> bool {
+    pub fn relocate(&mut self, source: &Path, doc: &TextSnapshot) -> bool {
         let changed = relocate(&mut self.bookmarks, source, doc) | relocate(self.recent_locations.make_contiguous(), source, doc);
         if changed {
             self.bookmarks.sort_by(|a, b| a.key().cmp(&b.key()));
@@ -662,13 +654,13 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn doc(text: &str) -> Document {
-        Document::decode(PathBuf::from("/p/a.rs"), 1, text.as_bytes())
+    fn doc(text: &str) -> TextSnapshot {
+        TextSnapshot::from_document(crate::text::BufferId(1), &crate::document::Document::decode(PathBuf::from("/p/a.rs"), 1, text.as_bytes()))
     }
     fn a() -> &'static Path {
         Path::new("/p/a.rs")
     }
-    fn mark(d: &Document, line: usize) -> Mark {
+    fn mark(d: &TextSnapshot, line: usize) -> Mark {
         Mark::at(a(), d, line, 0)
     }
 

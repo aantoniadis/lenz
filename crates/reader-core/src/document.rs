@@ -38,9 +38,21 @@ pub struct SourceMeta {
     language: Option<Language>,
     image: Option<Arc<Image>>,
     fingerprint: u64,
+    /// Reader restrictions inherited from the original encoded load.
+    large: bool,
+    loaded_version: Option<u64>,
 }
 
 impl SourceMeta {
+    pub(crate) fn fingerprint(&self) -> u64 { self.fingerprint }
+    pub(crate) fn is_large(&self) -> bool { self.large }
+    pub(crate) fn loaded_version(&self) -> Option<u64> { self.loaded_version }
+    pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, ..self.clone() } }
+    pub(crate) fn bytes(&self) -> usize {
+        size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity()
+            + self.image.as_ref().map_or(0, |i| size_of::<Image>() + 2 * size_of::<usize>()
+                + i.pixels.as_ref().map_or_else(|why| why.capacity(), |p| size_of::<img::Pixels>() + 2 * size_of::<usize>() + p.as_raw().capacity()))
+    }
     pub fn source(&self) -> &std::path::Path { &self.source }
     pub fn encoding(&self) -> &str { &self.encoding }
     pub fn original_encoding(&self) -> &'static str { self.original_encoding }
@@ -127,6 +139,8 @@ impl Document {
                 source,
                 image,
                 fingerprint,
+                large,
+                loaded_version: Some(version),
             }),
             text: decoded.text.into(),
             line_starts,
@@ -150,8 +164,12 @@ impl Document {
             source,
             image: None,
             fingerprint: 0,
+            large: false,
+            loaded_version: None,
         };
         let mut document = Self::from_snapshot_parts(Arc::new(metadata), version, decoded.text.into());
+        Arc::make_mut(&mut document.source).large = document.large;
+        Arc::make_mut(&mut document.source).loaded_version = Some(version);
         Arc::make_mut(&mut document.source).language = highlight::detect(document.source(), document.line(0));
         document
     }
@@ -166,7 +184,8 @@ impl Document {
     /// an unrelated index through the public document boundary.
     pub(crate) fn from_indexed_snapshot_parts(source: Arc<SourceMeta>, version: u64, text: Arc<str>, line_starts: Arc<[usize]>) -> Self {
         let lines = line_starts.len() - usize::from(text.ends_with('\n'));
-        let large = text.len() > LARGE_BYTES || lines > LARGE_LINES;
+        let large = if source.loaded_version == Some(version) { source.large }
+            else { source.large || text.len() > LARGE_BYTES || lines > LARGE_LINES };
         Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new() }
     }
 
@@ -202,8 +221,7 @@ impl Document {
 
     /// The same snapshot under a new path (a confirmed move): text and offsets are shared, not copied.
     pub fn renamed(&self, source: PathBuf) -> Self {
-        let mut metadata = (*self.source).clone();
-        metadata.source = source;
+        let metadata = self.source.renamed(source);
         Self {
             source: Arc::new(metadata),
             version: self.version,

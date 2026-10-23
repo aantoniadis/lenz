@@ -84,7 +84,7 @@ pub struct Sibling {
 
 /// The bar for `tab`: its path relative to `project` (its absolute path outside it), then the declarations holding
 /// its caret (the top line's start without one). Previews and images show the path only.
-pub(crate) fn build(tab: &Tab, project: Option<&Project>) -> Breadcrumbs {
+pub(crate) fn build(tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>) -> Breadcrumbs {
     let mut crumbs = Vec::new();
     match project.and_then(|p| p.relative(&tab.source).filter(|rel| p.has_file(rel))) {
         Some(rel) => {
@@ -113,11 +113,11 @@ pub(crate) fn build(tab: &Tab, project: Option<&Project>) -> Breadcrumbs {
             }
         }
     }
-    let doc = tab.document();
+    let doc = view.map(|v| v.snapshot());
     let large = doc.is_some_and(|d| d.is_large());
-    let text = doc.is_some_and(|d| d.image().is_none() || tab.image_source) && !matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
-    if let (Some(doc), Some(d), true) = (doc, tab.declarations(), text) {
-        let at = tab.selection().map_or_else(|| doc.line_range(tab.top_line().min(doc.line_count().saturating_sub(1))).start, |s| s.head);
+    let text = doc.is_some_and(|d| d.image().is_none() || tab.image_source) && !matches!(view.and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
+    if let (Some(doc), Some(d), true) = (doc, view.and_then(|v| v.declarations()), text) {
+        let at = tab.selection().map_or_else(|| doc.reader_line_range(tab.top_line().min(doc.line_count().saturating_sub(1))).start, |s| s.head);
         let at = u32::try_from(at).unwrap_or(u32::MAX);
         for decl in d.enclosing(at) {
             let index = index_of(d, decl);
@@ -136,7 +136,7 @@ fn index_of(d: &Declarations, decl: &lenz_content::highlight::Declaration) -> u3
 
 /// The list after crumb `i` of `bar`: a folder's entries (project folders only), the entries of a file's folder,
 /// the declarations at a declaration's depth under the same parent.
-pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, project: Option<&Project>) -> Vec<Sibling> {
+pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>) -> Vec<Sibling> {
     let entries = |rel: &str| -> Vec<Sibling> {
         project.map_or_else(Vec::new, |p| {
             p.children(rel)
@@ -156,7 +156,7 @@ pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, project: Option<&Pr
             _ => Vec::new(),
         },
         Some(Crumb::Decl { index, .. }) => {
-            let Some(d) = tab.declarations() else { return Vec::new() };
+            let Some(d) = view.and_then(|v| v.declarations()) else { return Vec::new() };
             let parent = d.items.get(*index as usize).and_then(|x| x.parent);
             d.items
                 .iter()

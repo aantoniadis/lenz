@@ -136,9 +136,9 @@ mod tests {
         let s = shown_line("ab", &[h(1, "XYZ")]);
         assert_eq!(s.text, "aXYZb");
         for d in 1..=4 {
-            assert_eq!(crate::wrap::source_of(&s.map, d), 1, "offset {d}");
+            assert_eq!(s.map.partition_point(|&x| x < d).min(s.map.len() - 1), 1, "offset {d}");
         }
-        assert_eq!(crate::wrap::source_of(&s.map, 5), 2);
+        assert_eq!(s.map.partition_point(|&x| x < 5).min(s.map.len() - 1), 2);
     }
 
     #[test]

@@ -1,8 +1,32 @@
 use super::*;
 use crate::tabs::TabId;
+use crate::text::TextSnapshot;
 use std::time::Duration;
 use lenz_content::find::FindOption;
 use lenz_content::goto::LineColumn;
+
+// Exact source assertions may copy a whole fixture; production reads remain windowed.
+fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.len_bytes()).unwrap() }
+fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
+fn active_view(s: &Session) -> View<'_> { s.state().view(s.state().active().unwrap().id()).unwrap() }
+fn pane_view(s: &Session, pane: u8) -> View<'_> { s.state().view(s.state().shown(pane).unwrap().id()).unwrap() }
+fn source_rows(view: View<'_>, count: usize, cols: Option<usize>) -> Vec<crate::layout::Row> {
+    let rows = view.layout_rows(count, cols);
+    assert!(rows.pending.is_none(), "fixture layout must be ready before asserting rows");
+    rows.rows
+}
+fn analysis_document(s: &mut Session) -> Arc<Document> {
+    let tab = s.state().active().unwrap().id();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Some(doc) = s.admitted_document(tab, Priority::Visible) { return doc; }
+        assert!(std::time::Instant::now() < until, "analysis representation did not become ready");
+        s.dispatch(Completion::AnalysisWake);
+        if let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+        else { std::thread::yield_now(); }
+    }
+}
+
 
 fn session(dir: &Path) -> Session {
     // Never a real language server: the settings name one that does not exist.
@@ -55,7 +79,7 @@ impl RecvTimeout for async_channel::Receiver<Completion> {
 }
 
 fn doc_bytes(s: &Session, name: &str) -> usize {
-    s.cache_entries().iter().find(|d| d.source().ends_with(name)).map_or(0, |d| d.bytes())
+    s.cache_entries().iter().find(|d| d.source().ends_with(name)).map_or(0, |source| source.storage_bytes())
 }
 
 #[test]
@@ -82,7 +106,7 @@ fn rebuild_discards_saved_and_inflight_records_and_cache_optout_survives_reopen(
     assert_eq!(s.state.index.coverage().indexed, 0, "held pre-rebuild chunk is obsolete");
     settle(&mut s, |s| !s.index_rebuilding && s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete()
         && s.state.results.as_ref().is_some_and(|r| r.done && r.hits.len() == 1)
-        && s.state.document().is_some_and(|d| d.text().contains("Omega")));
+        && s.state.current_source().is_some_and(|d| source_text(d).contains("Omega")));
     assert_eq!(index::rank(&s.state.index.snapshot(), "Alpha", || true).unwrap().1, 0);
     assert_eq!(index::rank(&s.state.index.snapshot(), "Omega", || true).unwrap().1, 1);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "class Omega; end\n");
@@ -200,7 +224,7 @@ fn saved_declarations_match_fresh_extraction_across_languages_and_content_change
 }
 
 fn opened(s: &Session) -> bool {
-    s.state().loading().is_none() && (s.state().document().is_some() || !s.state().notices().is_empty())
+    s.state().loading().is_none() && (s.state().current_source().is_some() || !s.state().notices().is_empty())
 }
 
 fn write(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
@@ -238,7 +262,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::OpenRecent), Some("No recent folders"));
     assert_eq!(disabled(CommandId::OpenInEditor), Some("No file is open"));
     assert_eq!(disabled(CommandId::CompareWith), Some("No file or folder is open"));
-    assert!(s.state().document().is_none() && s.state().loading().is_none());
+    assert!(s.state().current_source().is_none() && s.state().loading().is_none());
 }
 
 #[test]
@@ -249,9 +273,9 @@ fn opening_shows_text_then_highlights_without_touching_the_file() {
     let mut s = session(d.path());
     assert!(s.dispatch(Command::Open(path.clone())).repaint);
     assert_eq!(s.state().loading(), Some(path.as_path()));
-    settle(&mut s, |s| s.state().document().is_some());
-    let doc = s.state().document().unwrap().clone();
-    assert_eq!(doc.line(1), "    let café = 1;");
+    settle(&mut s, |s| s.state().current_source().is_some());
+    let doc = s.state().current_source().unwrap().clone();
+    assert_eq!(source_line(&doc, 1), "    let café = 1;");
     settle(&mut s, |s| s.state().highlights().is_some());
     assert!(!s.state().highlights().unwrap().spans(0..1)[0].is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), bytes, "reading never writes");
@@ -292,7 +316,7 @@ fn unavailable_files_report_instead_of_opening() {
     let mut s = session(d.path());
     s.dispatch(Command::Open(d.path().join("missing.rs")));
     settle(&mut s, opened);
-    assert!(s.state().document().is_none());
+    assert!(s.state().current_source().is_none());
     assert!(s.state().notices().iter().any(|n| n.starts_with("Cannot open")), "{:?}", s.state().notices());
     s.dispatch(Command::Open(d.path().to_owned()));
     settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("not a regular file")));
@@ -311,8 +335,8 @@ fn a_superseded_load_is_discarded() {
     let effect = s.dispatch(Completion::Loaded { request: stale, tab, path: a, result: Ok((None, doc, None)) });
     assert_eq!(effect, Effect::default());
     assert_eq!(s.state().loading(), Some(b.as_path()));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == b));
-    assert_eq!(s.state().document().unwrap().line(0), "b");
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == b));
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "b");
 }
 
 #[test]
@@ -321,8 +345,8 @@ fn stale_highlights_are_discarded() {
     let path = write(d.path(), "a.rs", b"fn a() {}\n");
     let mut s = session(d.path());
     s.dispatch(Command::Open(path));
-    settle(&mut s, |s| s.state().document().is_some());
-    let old = s.state().document().unwrap().version() - 1;
+    settle(&mut s, |s| s.state().current_source().is_some());
+    let old = s.state().current_source().unwrap().key().version - 1;
     let parsed = highlight::parse_while(highlight::Language::Rust, "fn a() {}\n".into(), || true);
     assert_eq!(s.dispatch(Completion::Highlighted { version: old, parsed, folds: None, declarations: None }), Effect::default());
 }
@@ -334,17 +358,17 @@ fn reload_reads_a_new_version_and_keeps_the_last_content_when_the_file_disappear
     let mut s = session(d.path());
     s.dispatch(Command::Open(path.clone()));
     settle(&mut s, opened);
-    let first = s.state().document().unwrap().version();
+    let first = s.state().current_source().unwrap().key().version;
     s.dispatch(Command::Scroll(2));
     std::fs::write(&path, b"uno\n").unwrap();
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.version() > first));
-    assert_eq!(s.state().document().unwrap().line(0), "uno");
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.key().version > first));
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "uno");
     assert_eq!(s.state().top_line(), 1, "kept, clamped to the new length");
     std::fs::remove_file(&path).unwrap();
     s.dispatch(Command::Reload);
     settle(&mut s, |s| s.state().loading().is_none());
-    assert_eq!(s.state().document().unwrap().line(0), "uno");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "uno");
     assert!(s.state().notices().iter().any(|n| n.starts_with("Unavailable")));
     assert!(!path.exists(), "the file is never recreated");
 }
@@ -356,25 +380,25 @@ fn leaving_a_file_keeps_it_inactive_and_returning_reuses_it() {
     let mut s = session(d.path());
     s.dispatch(Command::Open(a.clone()));
     settle(&mut s, opened);
-    let first = s.state().document().unwrap().clone();
+    let first = s.state().current_source().unwrap().clone();
     let current = s.state().current().unwrap();
     s.dispatch(Command::Open(b));
-    settle(&mut s, |s| s.state().document().is_some());
-    assert_eq!(s.inactive_bytes(), first.bytes() + current.storage_bytes());
+    settle(&mut s, |s| s.state().current_source().is_some());
+    assert_eq!(s.inactive_bytes(), current.storage_bytes());
     s.dispatch(Command::Open(a.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
-    assert!(Arc::ptr_eq(s.state().document().unwrap(), &first), "served from the cache, not read again");
-    assert!(Arc::ptr_eq(&s.state().current().unwrap(), &current), "indexed text is reused with the compatibility document");
-    assert!(s.inactive_bytes() > doc_bytes(&s, "b.txt"));
+    settle(&mut s, |s| s.state().current_source().is_some());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &first), "served from the cache, not read again");
+    assert!(Arc::ptr_eq(&s.state().current().unwrap(), &current), "the same indexed text is reused");
+    assert_eq!(s.inactive_bytes(), doc_bytes(&s, "b.txt"));
     // A file changed since it was left is read again.
     s.dispatch(Command::Open(d.path().join("b.txt")));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.txt")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.txt")));
     std::fs::write(&a, b"alpha, longer now\n").unwrap();
     s.dispatch(Command::Open(a));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
-    assert_eq!(s.state().document().unwrap().line(0), "alpha, longer now");
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "alpha, longer now");
     s.dispatch(Command::Close);
-    assert!(s.state().document().is_none());
+    assert!(s.state().current_source().is_none());
     assert_eq!(s.disabled(CommandId::Reload), Some("No file is open"));
 }
 
@@ -385,7 +409,7 @@ fn large_files_skip_syntax_and_say_so() {
     let mut s = session(d.path());
     s.dispatch(Command::Open(path));
     settle(&mut s, opened);
-    let doc = s.state().document().unwrap().clone();
+    let doc = s.state().current_source().unwrap().clone();
     assert!(doc.is_large());
     assert!(s.state().notices().iter().any(|n| n.starts_with("Large file")));
     std::thread::sleep(Duration::from_millis(100));
@@ -479,9 +503,9 @@ fn repeated_opening_releases_content_beyond_the_budget() {
     for i in 0..48 {
         let path = write(d.path(), &format!("{i}.txt"), &vec![b'a'; 1 << 20]);
         s.dispatch(Command::Open(path));
-        settle(&mut s, |s| s.state().document().is_some());
+        settle(&mut s, |s| s.state().current_source().is_some());
         if i == 0 {
-            first = Some(Arc::downgrade(s.state().document().unwrap()));
+            first = Some(Arc::downgrade(s.state().current_source().unwrap()));
         }
         assert!(s.inactive_bytes() <= crate::cache::INACTIVE_BYTES, "{} bytes kept", s.inactive_bytes());
     }
@@ -512,7 +536,7 @@ fn open_trials(dir: &Path, name: &str, source: &str) {
         let started = std::time::Instant::now();
         s.dispatch(Command::Open(path.clone()));
         let rx = s.completions();
-        while s.state().document().is_none() {
+        while s.state().current_source().is_none() {
             s.dispatch(rx.recv_blocking_timeout().expect("load"));
         }
         let text = started.elapsed();
@@ -520,7 +544,7 @@ fn open_trials(dir: &Path, name: &str, source: &str) {
             s.dispatch(rx.recv_blocking_timeout().expect("syntax"));
         }
         let syntax = started.elapsed();
-        assert_eq!(s.state().document().unwrap().line_count(), lines);
+        assert_eq!(s.state().current_source().unwrap().line_count(), lines);
         if trial > 0 {
             shown.push(text.as_secs_f64() * 1000.0);
             highlighted.push(syntax.as_secs_f64() * 1000.0);
@@ -570,10 +594,10 @@ fn opening_a_folder_discovers_it_and_the_finder_ranks_its_files() {
     assert_eq!(f.searched, 4);
     // Selecting a result opens it; an ignored file opened explicitly is readable too.
     s.dispatch(Command::Open(root.join(&*f.hits[1].clone())));
-    settle(&mut s, |s| s.state().document().is_some());
-    assert_eq!(s.state().document().unwrap().line(0), "src/ui/main.rs");
+    settle(&mut s, |s| s.state().current_source().is_some());
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "src/ui/main.rs");
     s.dispatch(Command::Open(root.join("build/out.rs")));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("out.rs")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("out.rs")));
     s.dispatch(Command::ToggleDir("src".into()));
     assert!(s.state().project().unwrap().rows().iter().any(|r| &*r.path == "src/ui"));
     s.dispatch(Command::CloseFinder);
@@ -599,7 +623,7 @@ fn the_tree_order_is_remembered_and_the_opened_file_can_be_located() {
     assert_eq!(names(&s), ["src", "src/ui", "src/ui/view.rs", "src/lib.rs", "a.md"]);
     std::fs::write(d.path().join("outside.rs"), "").unwrap();
     s.dispatch(Command::Open(d.path().join("outside.rs")));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("outside.rs")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("outside.rs")));
     assert_eq!(s.disabled(CommandId::LocateFile), Some("The file is not in the explorer"));
     s.dispatch(Command::SetFoldersFirst(false));
     assert_eq!(names(&s), ["a.md", "src", "src/lib.rs", "src/ui", "src/ui/view.rs"]);
@@ -737,11 +761,15 @@ fn split_find_consumers_keep_independent_latest_queries_for_one_snapshot() {
 fn visible_find_is_admitted_when_background_analysis_submissions_are_saturated() {
     let d = tempfile::tempdir().unwrap(); let mut s = session(d.path());
     let mut inputs = Vec::new();
+    // Explicit analysis owners keep these inputs ready while admission is gated.
+    let mut background_documents = Vec::new();
     for i in 0..3 {
         let path = write(d.path(), &format!("background-{i}.txt"), b"background\n");
-        s.dispatch(Command::OpenRetained(path)); settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some());
+        s.dispatch(Command::OpenRetained(path)); settle(&mut s, |s| s.state().loading().is_none() && s.state().current_source().is_some());
         let snapshot = s.state().view(s.state.active.unwrap()).unwrap().snapshot().clone();
-        inputs.push(crate::analysis::Input::new(snapshot, Arc::downgrade(s.state().document().unwrap()), 0, false));
+        let doc = analysis_document(&mut s);
+        inputs.push(crate::analysis::Input::new(snapshot, Arc::downgrade(&doc), 0, false));
+        background_documents.push(doc);
     }
     let path = write(d.path(), "foreground.txt", b"needle\n"); open(&mut s, Command::Open(path), "foreground.txt");
     let (started, entered) = std::sync::mpsc::channel();
@@ -809,7 +837,8 @@ fn a_panicking_old_consumer_releases_its_version_and_admits_the_latest_find() {
     open(&mut s, Command::Open(file.clone()), "panic.txt");
     let tab = s.state.active.unwrap();
     let snapshot = s.state().view(tab).unwrap().snapshot().clone();
-    let loaded = Arc::downgrade(s.state().document().unwrap());
+    let worker_document = analysis_document(&mut s);
+    let loaded = Arc::downgrade(&worker_document);
     let input = crate::analysis::Input::new(snapshot, loaded, s.project_generation.load(Ordering::Relaxed), true);
     let (started, entered) = std::sync::mpsc::channel();
     let (release, wait) = std::sync::mpsc::channel();
@@ -832,7 +861,7 @@ fn a_panicking_old_consumer_releases_its_version_and_admits_the_latest_find() {
     settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
     assert!(released, "replacing pending demand drops its snapshot before the old worker returns");
     assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
-    assert_eq!(s.state().document().unwrap().text().as_ref(), "latest\n");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "latest\n");
 }
 
 #[test]
@@ -873,7 +902,10 @@ fn visible_find_promotes_its_queued_background_materialization() {
 }
 
 #[cfg(unix)]
-fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
+fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) { fake_semantic_session_with_env(dir, &[]) }
+
+#[cfg(unix)]
+fn fake_semantic_session_with_env(dir: &Path, env: &[(&str, &str)]) -> (Session, PathBuf) {
     let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
     let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
     build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]);
@@ -881,7 +913,10 @@ fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
     assert!(build.status().unwrap().success());
     let log = dir.join("fake.log");
     let script = dir.join("fake-server");
-    std::fs::write(&script, format!("#!/bin/sh\nexport FAKE_LSP_LOG='{}'\nexec '{}' \"$@\"\n", log.display(), profile.join("examples/fake_lsp").display())).unwrap();
+    let mut sh = format!("#!/bin/sh\nexport FAKE_LSP_LOG='{}'\n", log.display());
+    for (key, value) in env { sh.push_str(&format!("export {key}='{}'\n", value.replace('\'', "'\\''"))); }
+    sh.push_str(&format!("exec '{}' \"$@\"\n", profile.join("examples/fake_lsp").display()));
+    std::fs::write(&script, sh).unwrap();
     std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut s = session(dir);
     let providers = dir.join("config/lenz-reader/providers.json");
@@ -890,6 +925,133 @@ fn fake_semantic_session(dir: &Path) -> (Session, PathBuf) {
     std::fs::write(providers, settings.to_string()).unwrap();
     s.state.semantics.reload_runtime("rust-analyzer");
     (s, log)
+}
+
+
+#[cfg(unix)]
+fn desired_matches_current(s: &Session, path: &Path) -> bool {
+    s.state().current_source().is_some_and(|source| source.source() == path
+        && s.state.semantics.desired().get(path).is_some_and(|doc| doc.version() == source.key().version))
+}
+
+#[cfg(unix)]
+fn desired_text_probe(s: &Session, path: &Path) -> (std::sync::Weak<str>, usize) {
+    let desired = s.state.semantics.desired();
+    let doc = desired.get(path).unwrap();
+    assert_eq!(doc.version(), s.state().current_source().unwrap().key().version);
+    // Outgoing::Text and TextFlight retain this same Arc; drop the cloned map on return.
+    (Arc::downgrade(doc.text()), doc.text().len())
+}
+
+#[cfg(unix)]
+fn release_historical_protocol_reader_owners(s: &mut Session) {
+    // Current text stays usable; historical source/cache/analysis owners must be gone.
+    s.cache = InactiveCache::new(0);
+    s.release_current();
+    s.analysis.close();
+    s.analysis.retain_sources(|_| false);
+    // Occupying all existing workers behind earlier work is a drain barrier, not another pool.
+    let (entered, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let entered = entered.clone();
+        s.jobs.submit(Priority::Background, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).expect("old CPU work drained"); }
+    for release in releases { release.send(()).unwrap(); }
+    while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+    s.dispatch(Completion::AnalysisWake);
+    assert!(s.cache.is_empty());
+    assert!(s.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref()).all(|source| {
+        s.state().current_source().is_some_and(|current| source.key() == current.key())
+    }), "historical frontend source owners were released");
+}
+
+#[cfg(unix)]
+fn protocol_messages(log: &Path) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(log).unwrap_or_default().lines().map(|line| serde_json::from_str(line).unwrap()).collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn a_blocked_writer_keeps_only_bounded_text_versions_and_sends_current_text_before_asking() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"writer\"\n");
+    let release = d.path().join("release"); let release_text = release.to_string_lossy();
+    let source = |version| format!("fn keep() {{}}\n/*version-{version:02} {}*/\n", "x".repeat(256 * 1024));
+    let path = write(&root, "src/main.rs", source(0).as_bytes());
+    let (mut s, log) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")]);
+    s.dispatch(Command::Open(path.clone()));
+    settle(&mut s, |s| desired_matches_current(s, &path) && s.state().provider().is_some_and(|v| matches!(v.status, semantics::Status::Ready | semantics::Status::Indexing(_))));
+    settle(&mut s, |_| release.with_extension("paused").exists());
+    let mut texts = Vec::new();
+    for version in 1..=32 {
+        settle(&mut s, |s| desired_matches_current(s, &path));
+        texts.push(desired_text_probe(&s, &path).0);
+        std::fs::write(&path, source(version)).unwrap(); s.dispatch(Command::Reload);
+        let expected = format!("version-{version:02}");
+        settle(&mut s, |s| s.state().loading().is_none() && s.state().current_source().is_some_and(|current| source_text(current).contains(&expected)));
+    }
+    settle(&mut s, |s| desired_matches_current(s, &path) && s.state().highlights().is_some());
+    release_historical_protocol_reader_owners(&mut s);
+    assert!(texts[0].upgrade().is_some(), "positive control: first blocked historical payload survives reader-owner release");
+    let retained = texts.iter().filter(|text| text.upgrade().is_some()).count();
+    assert!(retained <= 3, "the blocked protocol writer retained {retained} superseded text versions");
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Definition { peek: false });
+    assert!(s.state().asking().is_some());
+    std::fs::write(&release, b"").unwrap(); settle(&mut s, |s| s.state().asking().is_none());
+    settle(&mut s, |_| texts.iter().all(|text| text.upgrade().is_none()));
+    let messages = protocol_messages(&log);
+    let asked = messages.iter().position(|m| m["method"] == "textDocument/definition").unwrap();
+    let current_text = source(32);
+    let changed = messages.iter().position(|m| m["method"] == "textDocument/didChange" && m["params"]["contentChanges"][0]["text"].as_str() == Some(&current_text)).unwrap();
+    assert!(changed < asked, "a request cannot overtake its exact current text");
+}
+
+#[cfg(unix)]
+#[test]
+fn decoded_expansion_and_closed_uri_churn_obey_the_global_writer_byte_budget() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"writer\"\n");
+    let start = write(&root, "src/start.rs", b"fn start() {}\n");
+    let release = d.path().join("release"); let release_text = release.to_string_lossy();
+    let (mut s, log) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")]);
+    s.dispatch(Command::Open(start.clone())); settle(&mut s, |s| desired_matches_current(s, &start));
+    settle(&mut s, |_| release.with_extension("paused").exists()); s.dispatch(Command::Close);
+    // Raw UTF16 bytes remain eligible while CJK expands to three UTF8 bytes per character.
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend("/*".encode_utf16().chain(std::iter::repeat_n(0x4e00, 2_500_000)).chain("*/\n".encode_utf16()).flat_map(u16::to_le_bytes));
+    let mut old = Vec::new();
+    for i in 0..4 {
+        let path = write(&root, &format!("src/expanded-{i}.rs"), &bytes);
+        s.dispatch(Command::Open(path.clone())); settle(&mut s, |s| desired_matches_current(s, &path));
+        let current = s.state().current_source().unwrap();
+        assert!(!current.is_large(), "existing raw-byte eligibility must be preserved");
+        assert!(current.len_bytes() > 7 << 20, "fixture must demonstrate legacy decoding expansion: {}", current.encoding());
+        old.push(desired_text_probe(&s, &path)); s.dispatch(Command::Close);
+    }
+    // Replace each cached source before measuring the transport's historical ownership.
+    for i in 0..4 {
+        let path = write(&root, &format!("src/expanded-{i}.rs"), b"fn replacement() {}\n");
+        s.dispatch(Command::Open(path.clone()));
+        settle(&mut s, |s| desired_matches_current(s, &path) && s.state().current_source().is_some_and(|source| source_text(source).starts_with("fn replacement")));
+        s.dispatch(Command::Close);
+    }
+    s.dispatch(Command::Open(start.clone()));
+    settle(&mut s, |s| desired_matches_current(s, &start) && s.state().highlights().is_some());
+    release_historical_protocol_reader_owners(&mut s);
+    assert!(old[0].0.upgrade().is_some(), "positive control: first expanded blocked payload survives reader-owner release");
+    let retained: usize = old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum();
+    assert!(retained <= 15 << 20, "closed historical UTF8 payload retained {retained} bytes");
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Definition { peek: false });
+    assert!(s.state().asking().is_some()); std::fs::write(&release, b"").unwrap();
+    settle(&mut s, |s| s.state().asking().is_none());
+    settle(&mut s, |_| old.iter().all(|(text, _)| text.upgrade().is_none()));
+    let messages = protocol_messages(&log);
+    assert!(messages.iter().filter(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|uri| uri.ends_with("start.rs"))).count() >= 2);
+    assert!(s.state().provider().is_some_and(|v| matches!(v.status, semantics::Status::Ready | semantics::Status::Indexing(_))), "backpressure defers without failing the provider");
 }
 
 #[test]
@@ -923,7 +1085,7 @@ fn background_semantic_readiness_starts_in_the_dispatch_that_registers_it() {
     let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"background\"\n");
     let file = write(d.path(), "background.rs", b"fn saved() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
     open(&mut s, Command::Open(file.clone()), "background.rs");
-    settle(&mut s, |s| s.state().active().unwrap().tokens.is_some() && s.state().active().unwrap().hints.is_some() && s.state().highlights().is_some());
+    settle(&mut s, |s| active_view(s).tokens().is_some() && active_view(s).inlay_hints().is_some() && s.state().highlights().is_some());
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
         s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
@@ -960,7 +1122,7 @@ fn already_resolved_semantic_targets_do_not_navigate_after_the_origin_changes() 
         s.dispatch(c);
     };
     std::fs::write(&file, b"fn main() { changed(); }\n").unwrap(); s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.text().contains("changed")));
+    settle(&mut s, |s| s.state().loading().is_none() && s.state().current_source().is_some_and(|d| source_text(d).contains("changed")));
     let current = s.state().view(s.state.active.unwrap()).unwrap().snapshot().clone();
     s.dispatch(old);
     assert_eq!(s.state().active().unwrap().source(), file.as_path(), "the request's origin must be revalidated after target resolution");
@@ -974,7 +1136,8 @@ fn replacing_semantic_target_replies_bounds_actual_document_retaining_jobs() {
     let file = write(d.path(), "main.rs", b"fn main() { target(); }\n"); let target = write(d.path(), "lib.rs", b"pub fn target() {}\n");
     let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
     settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some());
-    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    let source_document = analysis_document(&mut s);
+    let server = s.state.semantics.session_of(&source_document).unwrap();
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
         s.jobs.submit(Priority::Background, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
@@ -1000,10 +1163,11 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
     let file = write(d.path(), "main.rs", b"fn main() { target(); }\n");
     let (mut s, _) = fake_semantic_session(d.path()); open(&mut s, Command::Open(file), "main.rs");
     settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
-    let server = s.state.semantics.session_of(s.state.document().unwrap()).unwrap();
+    let source_document = analysis_document(&mut s);
+    let server = s.state.semantics.session_of(&source_document).unwrap();
     s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
     let asking = s.state.asking.as_ref().unwrap();
-    let fence = ResultFence { slot: ResultSlot { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
+    let fence = ResultFence { slot: ResultSlot::Semantic { server, lane: semantics::Lane::Foreground }, project: asking.project, request: asking.request, stage: ResultStage::Targets, result_set: None, node: None, source: asking.source.clone() };
     s.analysis.request_result(fence, Priority::Visible, || |_| panic!("semantic resolver failed")).unwrap();
     s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
     settle(&mut s, |s| s.state.asking.is_none());
@@ -1012,7 +1176,7 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
     let request = s.state.asking.as_ref().unwrap().request;
     let project = s.project_generation.load(Ordering::Acquire);
     for n in 1000..1065 {
-        let fence = ResultFence { slot: ResultSlot { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
+        let fence = ResultFence { slot: ResultSlot::Semantic { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
         if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
     }
     let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });
@@ -1026,7 +1190,7 @@ fn replacing_hover_replies_keeps_provider_markup_out_of_unbounded_worker_queues(
     let d = tempfile::tempdir().unwrap(); write(d.path(), "Cargo.toml", b"[package]\nname = \"hover\"\n");
     let file = write(d.path(), "hover.rs", b"fn target() {}\n"); let (mut s, _) = fake_semantic_session(d.path());
     open(&mut s, Command::Open(file), "hover.rs");
-    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && s.state().active().unwrap().hints.is_some() && s.state().active().unwrap().tokens.is_some());
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready) && s.state().highlights().is_some() && active_view(s).inlay_hints().is_some() && active_view(s).tokens().is_some());
     s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
@@ -1082,14 +1246,15 @@ fn decoded_decorations_from_a_restarted_provider_cannot_complete_a_new_request()
         if matches!(&c, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Decorated { data, .. } if data.kind() == Decor::Tokens)) { break c; }
         s.dispatch(c);
     };
-    let old_session = s.state.semantics.session_of(s.state().document().unwrap()).unwrap();
+    let source_document = analysis_document(&mut s);
+    let old_session = s.state.semantics.session_of(&source_document).unwrap();
     let old_request = match &old { Completion::Analyzed { result, .. } => match result.as_ref() { Completion::Decorated { request, .. } => *request, _ => unreachable!() }, _ => unreachable!() };
-    assert!(s.state().active().unwrap().tokens.is_none());
+    assert!(active_view(&s).tokens().is_none());
     s.dispatch(Command::RestartServer);
     settle(&mut s, |s| !s.state.semantics.has_session(old_session) && s.state.semantics.latest(&file, Decor::Tokens) == Some(old_request));
     s.dispatch(old);
-    let stale_installed = s.state().active().unwrap().tokens.is_some();
-    settle(&mut s, |s| s.state().active().unwrap().tokens.is_some());
+    let stale_installed = active_view(&s).tokens().is_some();
+    settle(&mut s, |s| active_view(s).tokens().is_some());
     assert!(!stale_installed, "a restarted provider can reuse its request numbers; the server session must also match");
     let other = write(d.path(), "other.rs", b"fn other() {}\n");
     s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::Open(other), "other.rs"); s.dispatch(Command::FocusPane(0));
@@ -1161,7 +1326,7 @@ fn large_encoded_sources_keep_their_existing_syntax_reduction() {
     let file = write(d.path(), "encoded.rs", &bytes);
     let mut s = session(d.path());
     open(&mut s, Command::Open(file), "encoded.rs");
-    assert!(s.state().document().unwrap().is_large());
+    assert!(s.state().current_source().unwrap().is_large());
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
         let (release, wait) = std::sync::mpsc::channel();
@@ -1285,6 +1450,25 @@ fn syntax_and_find_share_one_current_materialization_across_split_views() {
 }
 
 #[test]
+fn current_reader_status_uses_snapshot_coordinates_before_worker_admission() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "current-status.txt", b"saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "current-status.txt");
+    let tab = s.state().active().unwrap().id();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("one\ntwo\n😀end\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.dispatch(Command::GoToLine(LineColumn { line: 3, column: Some(2) }));
+    assert_eq!(s.status_position(), "3:5", "status must use the current source, before a worker needs contiguous text");
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("one\ntwo\n😀end\n"));
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"saved\n");
+}
+
+#[test]
 fn find_materializes_the_current_snapshot_without_replacing_it() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "draft.txt", b"saved\n");
@@ -1294,14 +1478,18 @@ fn find_materializes_the_current_snapshot_without_replacing_it() {
     let initial = s.state().view(tab).unwrap().snapshot().clone();
     let current = Arc::new(initial.apply_edits(initial.key().version + 1,
         &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("draft-only\n") }]).unwrap());
-    // A draft fixture keeps the old compatibility Document until its adapter migration.
+    // Installing a current draft must leave the saved identity distinct from analysis reuse.
     s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
     s.dispatch(Command::Find("draft-only".into()));
     assert_eq!(s.state().active().unwrap().find().unwrap().version, current.key().version);
     settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
     assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
     assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
-    assert_eq!(s.state().document().unwrap().text().as_ref(), "saved\n");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft-only\n");
+    assert_eq!(source_text(&initial), "saved\n");
+    let saved = s.state.sources.buffers[&current.key().buffer].saved.as_ref().unwrap();
+    assert!(saved.matches(&initial), "analysis must preserve the confirmed saved identity");
+    assert!(!saved.matches(&current), "an admitted draft is not a new saved baseline");
     assert_eq!(std::fs::read(&file).unwrap(), b"saved\n");
 }
 
@@ -1341,7 +1529,7 @@ fn reloading_without_a_find_releases_superseded_pending_analysis_text() {
     for release in releases { release.send(()).unwrap(); }
     s.dispatch(Command::Find("gamma".into()));
     settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
-    assert_eq!(s.state().document().unwrap().text().as_ref(), "gamma\n");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "gamma\n");
     assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
     assert!(released, "a superseded pending snapshot must be released before blocked work resumes");
 }
@@ -1352,7 +1540,7 @@ fn replacing_pending_find_requests_bounds_retained_document_owners() {
     let file = write(d.path(), "find.txt", b"needle\nother\n");
     let mut s = session(d.path());
     open(&mut s, Command::Open(file), "find.txt");
-    let doc = s.state().document().unwrap().clone();
+    let doc = analysis_document(&mut s);
     let before = Arc::strong_count(&doc);
     let (started, entered) = std::sync::mpsc::channel();
     let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
@@ -1385,7 +1573,7 @@ fn dropping_a_split_session_cancels_its_other_panes_running_parser() {
     open(&mut s, Command::Open(a), "a.txt");
     s.dispatch(Command::Split(Split::Columns));
     open(&mut s, Command::Open(b), "b.txt");
-    let version = s.state().shown(0).unwrap().document().unwrap().version();
+    let version = pane_view(&s, 0).snapshot().key().version;
     let wanted = s.wanted(version);
     let receiver = s.completions();
     let (started, entered) = std::sync::mpsc::channel();
@@ -1440,7 +1628,7 @@ fn titles(s: &Session) -> Vec<String> {
 
 fn open(s: &mut Session, c: Command, name: &str) {
     s.dispatch(c);
-    settle(s, |s| s.state().document().is_some_and(|d| d.source().ends_with(name)) && s.state().loading().is_none());
+    settle(s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with(name)) && s.state().loading().is_none());
 }
 
 #[test]
@@ -1469,7 +1657,7 @@ fn single_opens_reuse_the_preview_and_retained_tabs_stay() {
     for t in s.state().tabs().iter().map(|t| t.id()).collect::<Vec<_>>() {
         s.dispatch(Command::CloseTab(t));
     }
-    assert!(s.state().tabs().is_empty() && s.state().document().is_none());
+    assert!(s.state().tabs().is_empty() && s.state().current_source().is_none());
 }
 
 #[test]
@@ -1490,7 +1678,7 @@ fn each_tab_keeps_its_own_position_and_released_content_reloads_there() {
     assert_eq!((a_state.top_line(), a_state.column()), (40, 7));
     assert!(s.inactive_bytes() > 0);
     s.dispatch(Command::ActivateTab(a_tab));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
     assert_eq!((s.state().top_line(), s.state().selection().map(|x| x.range()), s.state().column()), (40, Some(205..209), 7));
 }
 
@@ -1523,7 +1711,7 @@ fn back_and_forward_restore_positions_and_reopen_closed_sources() {
     for t in s.state().tabs().iter().map(|t| t.id()).collect::<Vec<_>>() {
         s.dispatch(Command::CloseTab(t));
     }
-    assert!(s.state().document().is_none());
+    assert!(s.state().current_source().is_none());
     open(&mut s, Command::Back, "c.txt");
     open(&mut s, Command::Back, "a.txt");
     assert_eq!(s.state().top_line(), 20);
@@ -1575,15 +1763,15 @@ fn tab_perf() {
         for (i, id) in ids.iter().enumerate() {
             let started = std::time::Instant::now();
             s.dispatch(Command::ActivateTab(*id));
-            let released = s.state().document().is_none();
-            settle(&mut s, |s| s.state().document().is_some() && s.state().loading().is_none());
+            let released = s.state().current_source().is_none();
+            settle(&mut s, |s| s.state().current_source().is_some() && s.state().loading().is_none());
             if timed { switch.push(started.elapsed().as_secs_f64() * 1000.0); }
             if timed && i > 0 { assert!(released, "an inactive tab's content was released and comes back from the cache"); }
         }
         for c in [Command::Back, Command::Forward] {
             let started = std::time::Instant::now();
             s.dispatch(c);
-            settle(&mut s, |s| s.state().document().is_some() && s.state().loading().is_none());
+            settle(&mut s, |s| s.state().current_source().is_some() && s.state().loading().is_none());
             if timed { history.push(started.elapsed().as_secs_f64() * 1000.0); }
         }
     }
@@ -1605,7 +1793,7 @@ fn closing_the_active_tab_keeps_it_reachable_through_history() {
         open(&mut s, Command::OpenRetained(p.clone()), n);
     }
     s.dispatch(Command::Close); // c closes; b shows
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.txt")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.txt")));
     open(&mut s, Command::Back, "c.txt");
     assert_eq!(titles(&s), ["a.txt", "b.txt", "c.txt~*"], "the closed source reopens in a preview tab");
     open(&mut s, Command::Back, "b.txt");
@@ -1617,7 +1805,7 @@ fn closing_the_active_tab_keeps_it_reachable_through_history() {
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     open(&mut s, Command::OpenRetained(b.clone()), "b.txt");
     s.dispatch(Command::Close);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
     open(&mut s, Command::OpenRetained(c.clone()), "c.txt");
     open(&mut s, Command::Back, "a.txt");
     open(&mut s, Command::Back, "b.txt");
@@ -1635,7 +1823,7 @@ fn a_kept_tab_whose_file_disappeared_stays_and_says_so() {
     s.dispatch(Command::ActivateTab(a_tab));
     settle(&mut s, |s| s.state().loading().is_none());
     assert_eq!(titles(&s), ["a.txt*", "b.txt"], "the tab stays");
-    assert!(s.state().document().is_none());
+    assert!(s.state().current_source().is_none());
     assert!(s.state().notices().iter().any(|n| n.starts_with("Unavailable")), "{:?}", s.state().notices());
     assert!(!a.exists(), "never recreated");
 }
@@ -1657,21 +1845,21 @@ fn an_external_replacement_advances_the_version_and_follows_the_context() {
     open(&mut s, Command::Open(a.clone()), "a.rs");
     s.dispatch(Command::Scroll(2));
     s.dispatch(Command::Select(Selection { anchor: 27, head: 33 }));
-    let (version, history) = (s.state().active().unwrap().version(), s.state().can_back());
+    let (version, history) = (active_view(&s).snapshot().key().version, s.state().can_back());
     replace(&a, b"// header\n// more\nfn one() {}\nfn two() {}\nfn target() {}\n");
-    settle(&mut s, |s| s.state().active().unwrap().version() > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     let tab = s.state().active().unwrap();
-    assert_eq!(s.state().document().unwrap().line(4), "fn target() {}");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 4), "fn target() {}");
     assert_eq!((tab.top_line(), tab.selection().map(|x| x.range())), (4, Some(45..51)), "the selection follows its line");
     assert!(!tab.retained() && s.state().can_back() == history, "the role and history are unchanged");
     // Rewriting the same bytes is not a new version.
-    let version = s.state().active().unwrap().version();
+    let version = active_view(&s).snapshot().key().version;
     replace(&a, b"// header\n// more\nfn one() {}\nfn two() {}\nfn target() {}\n");
     std::thread::sleep(Duration::from_millis(300));
     while let Ok(c) = s.completions().try_recv() {
         s.dispatch(c);
     }
-    assert_eq!(s.state().active().unwrap().version(), version);
+    assert_eq!(active_view(&s).snapshot().key().version, version);
 }
 
 #[test]
@@ -1681,19 +1869,19 @@ fn shortening_deleting_and_restoring_keep_the_reader_honest() {
     let mut s = session(d.path());
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     s.dispatch(Command::Scroll(40));
-    let version = s.state().active().unwrap().version();
+    let version = active_view(&s).snapshot().key().version;
     std::fs::write(&a, b"short\n").unwrap();
-    settle(&mut s, |s| s.state().active().unwrap().version() > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     assert_eq!(s.state().top_line(), 1, "clamped to the new length");
     assert!(s.state().notices().iter().any(|n| n.starts_with("Approximate")));
     std::fs::remove_file(&a).unwrap();
     settle(&mut s, |s| s.state().active().unwrap().unavailable().is_some());
-    assert_eq!(s.state().document().unwrap().line(0), "short", "the last content stays");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "short", "the last content stays");
     assert!(s.state().notices().iter().any(|n| n.starts_with("Unavailable")));
     assert!(!a.exists());
     std::fs::write(&a, b"back again\n").unwrap();
     settle(&mut s, |s| s.state().active().unwrap().unavailable().is_none());
-    assert_eq!(s.state().document().unwrap().line(0), "back again");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "back again");
 }
 
 #[test]
@@ -1710,11 +1898,11 @@ fn a_released_tabs_file_deleted_comes_back_from_the_cache_and_is_kept() {
     assert!(s.state().tabs()[0].loaded(), "taken back from the cache before it could be evicted");
     assert_eq!(s.inactive_bytes(), 0);
     s.dispatch(Command::ActivateTab(a_tab));
-    assert_eq!(s.state().document().unwrap().line(0), "alpha");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "alpha");
     // Leaving it again does not release it: it is no longer reloadable.
     let b_tab = s.state().tabs()[1].id();
     s.dispatch(Command::ActivateTab(b_tab));
-    settle(&mut s, |s| s.state().document().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some());
     assert!(s.state().tabs()[0].loaded());
     s.dispatch(Command::CloseTab(a_tab));
     assert_eq!(s.state().tabs().len(), 1, "closing releases it");
@@ -1729,7 +1917,7 @@ fn a_confirmed_rename_is_followed_and_a_same_name_replacement_is_not() {
     let moved = d.path().join("moved.txt");
     std::fs::rename(&a, &moved).unwrap();
     settle(&mut s, |s| s.state().active().unwrap().source() == moved);
-    assert_eq!(s.state().document().unwrap().line(0), "content");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "content");
     assert!(s.state().active().unwrap().unavailable().is_none());
     // A different file appearing where the old one was is not the same document.
     std::fs::write(&a, b"impostor\n").unwrap();
@@ -1738,7 +1926,7 @@ fn a_confirmed_rename_is_followed_and_a_same_name_replacement_is_not() {
         s.dispatch(c);
     }
     assert_eq!(s.state().active().unwrap().source(), moved);
-    assert_eq!(s.state().document().unwrap().line(0), "content");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "content");
 }
 
 #[test]
@@ -1750,7 +1938,7 @@ fn rapid_changes_end_on_the_last_content_and_recheck_works_without_events() {
     for i in 1..=50 {
         replace(&a, format!("{i}\n").as_bytes());
     }
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line(0) == "50"));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "50"));
     // A late result for an older check does nothing.
     let id = s.state().active().unwrap().id();
     let stale = Completion::Refreshed { tab: id, token: 0, result: Refresh::Gone("old".into()) };
@@ -1759,7 +1947,7 @@ fn rapid_changes_end_on_the_last_content_and_recheck_works_without_events() {
     s.watcher.set(Default::default());
     std::fs::write(&a, b"rechecked\n").unwrap();
     s.dispatch(Command::Recheck);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line(0) == "rechecked"));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "rechecked"));
 }
 
 #[test]
@@ -1811,10 +1999,10 @@ fn refresh_perf() {
     let (mut latency, mut memory) = (Vec::new(), Vec::new());
     // Ten untimed warmup changes, then 1,000.
     for i in 0..1010 {
-        let version = s.state().active().unwrap().version();
+        let version = active_view(&s).snapshot().key().version;
         let started = std::time::Instant::now();
         replace(&a, format!("// change {i}\n{body}").as_bytes());
-        settle(&mut s, |s| s.state().active().unwrap().version() > version);
+        settle(&mut s, |s| active_view(s).snapshot().key().version > version);
         if i >= 10 {
             latency.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1838,13 +2026,13 @@ fn refreshes_keep_encodings_line_endings_roles_and_bytes() {
     let latin = write(d.path(), "latin.txt", b"caf\xe9 au lait, cr\xe8me br\xfbl\xe9e\r\nsecond\r\n");
     let mut s = session(d.path());
     open(&mut s, Command::OpenRetained(latin.clone()), "latin.txt");
-    let version = s.state().active().unwrap().version();
+    let version = active_view(&s).snapshot().key().version;
     let after = b"caf\xe9 au lait, cr\xe8me br\xfbl\xe9e\r\nchanged\r\n".to_vec();
     replace(&latin, &after);
-    settle(&mut s, |s| s.state().active().unwrap().version() > version);
-    let doc = s.state().document().unwrap();
-    assert_eq!((doc.line(1), doc.encoding()), ("changed", "windows-1252"));
-    assert_eq!(&doc.text()[doc.line_range(0).end..doc.line_range(1).start], "\r\n", "line endings kept");
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
+    let doc = s.state().current_source().unwrap();
+    assert_eq!((source_line(doc, 1), doc.encoding()), ("changed".to_string(), "windows-1252"));
+    assert_eq!(doc.copy_range(doc.line_range(0).unwrap().end..doc.line_range(1).unwrap().start).unwrap(), "\r\n", "line endings kept");
     assert!(s.state().notices().iter().any(|n| n == "Encoding: windows-1252"));
     assert!(s.state().active().unwrap().retained(), "a kept tab stays kept");
     s.dispatch(Command::SelectAll);
@@ -1861,7 +2049,7 @@ fn a_refresh_during_a_pending_load_does_not_cross_it() {
     // Before the load lands, the file changes and a recheck runs.
     replace(&a, b"second\n");
     s.dispatch(Command::Recheck);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line(0) == "second") && s.state().loading().is_none());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "second") && s.state().loading().is_none());
 }
 
 #[test]
@@ -1872,10 +2060,10 @@ fn two_sessions_watching_one_file_both_follow_it() {
     open(&mut x, Command::Open(a.clone()), "a.txt");
     open(&mut y, Command::OpenRetained(a.clone()), "a.txt");
     replace(&a, b"two\n");
-    settle(&mut x, |s| s.state().document().is_some_and(|d| d.line(0) == "two"));
-    settle(&mut y, |s| s.state().document().is_some_and(|d| d.line(0) == "two"));
+    settle(&mut x, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "two"));
+    settle(&mut y, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "two"));
     x.dispatch(Command::Close);
-    assert!(y.state().document().is_some(), "closing in one window leaves the other");
+    assert!(y.state().current_source().is_some(), "closing in one window leaves the other");
 }
 
 #[test]
@@ -1887,7 +2075,7 @@ fn an_editor_backup_rename_keeps_the_reader_on_the_original_path() {
     // Like an editor with backups: move the file aside, then write the new one in its place.
     std::fs::rename(&a, d.path().join("a.txt~")).unwrap();
     std::fs::write(&a, b"new\n").unwrap();
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line(0) == "new"));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "new"));
     assert_eq!(s.state().active().unwrap().source(), a.as_path());
 }
 
@@ -1906,13 +2094,88 @@ fn two_spellings_of_one_file_share_a_tab_and_keep_the_requested_name() {
     s.dispatch(Command::OpenRetained(dotted));
     assert_eq!(s.state().tabs().len(), 1, "`..` normalizes to the same identity");
     s.dispatch(Command::OpenRetained(real));
-    settle(&mut s, |s| s.state().loading().is_none() && s.state().document().is_some());
+    settle(&mut s, |s| s.state().loading().is_none() && s.state().current_source().is_some());
     assert_eq!(s.state().tabs().len(), 1, "the symlink and its target are one document");
     assert_eq!(s.state().active().unwrap().title(), "link.txt");
 }
 
 fn searched(s: &Session) -> bool {
     s.state().results().is_some_and(|r| r.done())
+}
+
+
+#[test]
+fn active_file_search_finishes_after_its_source_view_is_released() {
+    let d = tempfile::tempdir().unwrap();
+    let a_bytes = b"A-only needle\nsecond needle\n"; let b_bytes = b"B stays current\n";
+    let a = write(d.path(), "A.txt", a_bytes); let b = write(d.path(), "B.txt", b_bytes);
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(a.clone()), "A.txt");
+    let a_tab = s.state().active().unwrap().id();
+    let (entered, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let entered = entered.clone();
+        s.jobs.submit(Priority::Visible, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::ActiveFile });
+    let result_id = s.state().results().unwrap().id();
+    assert!(!searched(&s));
+    s.dispatch(Command::OpenRetained(b.clone()));
+    let b_tab = s.state().active().unwrap().id();
+    let Ok((stamp, bytes)) = read(&b) else { panic!("stable disposable B") };
+    let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+    // Deliver the pending real filesystem read while the CPU executor remains gated.
+    s.dispatch(Completion::Loaded { request: s.request, tab: b_tab, path: b.clone(),
+        result: Ok((Some(stamp), Arc::new(Document::decode(b.clone(), version, &bytes)), std::fs::canonicalize(&b).ok())) });
+    assert!(s.state().view(a_tab).is_none(), "A's reloadable view was released");
+    assert_eq!(s.state().current_source().unwrap().source(), b.as_path());
+    assert_eq!(s.state().results().unwrap().id(), result_id, "the results remain independently visible");
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !searched(&s) && std::time::Instant::now() < until {
+        if let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+        else { std::thread::yield_now(); }
+    }
+    assert!(searched(&s), "a retained file search must finish after switching away from its source view");
+    let results = s.state().results().unwrap();
+    assert_eq!(results.id(), result_id);
+    assert_eq!(results.hits().iter().map(|hit| (hit.line, hit.text.as_ref())).collect::<Vec<_>>(), [(0, "A-only needle"), (1, "second needle")]);
+    assert!(results.hits().iter().all(|hit| hit.path.as_ref() == a.to_string_lossy()));
+    assert_eq!(s.state().current_source().unwrap().source(), b.as_path());
+    assert_eq!(source_text(s.state().current_source().unwrap()).as_bytes(), b_bytes);
+    assert_eq!(std::fs::read(a).unwrap(), a_bytes); assert_eq!(std::fs::read(b).unwrap(), b_bytes);
+}
+
+#[test]
+fn queued_result_validation_rechecks_the_retained_current_target() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "target.txt", b"token\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(file.clone()), "target.txt");
+    s.dispatch(Command::Search { query: "token".into(), scope: SearchIn::ActiveFile });
+    settle(&mut s, |s| s.state().results().is_some_and(|r| r.done()));
+    let tab = s.state.active.unwrap();
+    let old = s.state().view(tab).unwrap().snapshot().clone();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::OpenResult(0));
+    let current = Arc::new(old.apply_edits(old.key().version + 1,
+        &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("changed target\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.tab_mut(tab).unwrap().new_content();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("current source changed")));
+    assert!(s.state().results().unwrap().is_stale(0));
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("changed target\n"));
+    assert_eq!(std::fs::read(file).unwrap(), b"token\n");
 }
 
 #[test]
@@ -1942,13 +2205,13 @@ fn project_search_previews_without_moving_and_opens_validated_results() {
     let a_index = r.hits().iter().position(|h| &*h.path == "a.rs" && h.line == 1).unwrap();
     s.dispatch(Command::SelectResult(a_index));
     settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|p| p.index == a_index));
-    assert_eq!(s.state().document().unwrap().source(), other);
+    assert_eq!(s.state().current_source().unwrap().source(), other);
     assert_eq!(s.state().can_back(), history);
     // Opening checks the file, then moves the main area to the match and records history.
     s.dispatch(Command::OpenResult(a_index));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("a.rs")) && s.state().loading().is_none());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.rs")) && s.state().loading().is_none());
     let sel = s.state().selection().unwrap().range();
-    assert_eq!(&s.state().document().unwrap().text()[sel], "NEEDLE");
+    assert_eq!(&source_text(s.state().current_source().unwrap())[sel], "NEEDLE");
     assert!(s.state().can_back());
     assert!(s.state().results().is_some(), "the results stay for the next one");
 }
@@ -2069,7 +2332,7 @@ fn changed_targets_are_stale_and_are_not_opened_when_they_no_longer_match() {
     settle(&mut s, |s| s.state().results().unwrap().is_stale(0));
     s.dispatch(Command::OpenResult(0));
     settle(&mut s, |s| s.state().notices().iter().any(|n| n.starts_with("This result no longer matches")));
-    assert!(s.state().document().is_none(), "the view stays where it was");
+    assert!(s.state().current_source().is_none(), "the view stays where it was");
     s.dispatch(Command::RerunSearch);
     settle(&mut s, searched);
     assert!(s.state().results().unwrap().hits().is_empty());
@@ -2162,7 +2425,7 @@ fn a_late_result_check_does_not_move_the_view_after_another_navigation() {
     while let Ok(c) = s.completions().try_recv() {
         s.dispatch(c);
     }
-    assert!(s.state().document().unwrap().source().ends_with("b.rs"));
+    assert!(s.state().current_source().unwrap().source().ends_with("b.rs"));
 }
 
 #[test]
@@ -2181,7 +2444,7 @@ fn file_search_reruns_and_validates_against_the_held_document() {
     // The file disappears; the reader still holds its content, so the result opens from it.
     let a_tab = s.state().tabs()[0].id();
     s.dispatch(Command::ActivateTab(a_tab));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
     std::fs::remove_file(&a).unwrap();
     settle(&mut s, |s| s.state().active().unwrap().unavailable().is_some());
     s.dispatch(Command::OpenResult(0));
@@ -2352,7 +2615,7 @@ fn the_outline_lists_declarations_in_order_and_opens_one_as_a_step() {
     s.dispatch(Command::OpenResult(1));
     settle(&mut s, |s| s.state().selection().is_some());
     let sel = s.state().selection().unwrap().range();
-    assert_eq!(&s.state().document().unwrap().text()[sel], "Café");
+    assert_eq!(&source_text(s.state().current_source().unwrap())[sel], "Café");
     // Incomplete source is outlined as far as it parses, and says so.
     let b = write(d.path(), "b.rs", b"fn ok() {}\nfn broken( {\n");
     open(&mut s, Command::Open(b), "b.rs");
@@ -2406,17 +2669,17 @@ fn declaration_search_covers_the_project_and_follows_changes() {
     settle(&mut s, searched);
     let i = s.state().results().unwrap().hits().iter().position(|h| &*h.text == "render").unwrap();
     s.dispatch(Command::OpenResult(i));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")) && s.state().selection().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")) && s.state().selection().is_some());
     let sel = s.state().selection().unwrap().range();
-    assert_eq!(&s.state().document().unwrap().text()[sel], "render");
+    assert_eq!(&source_text(s.state().current_source().unwrap())[sel], "render");
     // A name spanning lines (a selector list) is shown and validated by its first line.
     s.dispatch(Command::FindDeclarations("wide".into()));
     settle(&mut s, searched);
     let i = s.state().results().unwrap().hits().iter().position(|h| &*h.text == ".wide,").unwrap();
     s.dispatch(Command::OpenResult(i));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("s.css")) && s.state().selection().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("s.css")) && s.state().selection().is_some());
     let sel = s.state().selection().unwrap().range();
-    assert_eq!(&s.state().document().unwrap().text()[sel], ".wide,");
+    assert_eq!(&source_text(s.state().current_source().unwrap())[sel], ".wide,");
     // A deleted large file leaves the coverage counts.
     std::fs::remove_file(root.join("big.rs")).unwrap();
     settle(&mut s, |s| s.state().index_coverage().candidates == 4);
@@ -2504,18 +2767,18 @@ fn images_follow_external_changes_and_keep_their_last_content_when_gone() {
     let path = write(d.path(), "a.png", &png(4, 3, [255, 0, 0, 255]));
     let mut s = session(d.path());
     s.dispatch(Command::Open(path.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
-    let first = s.state().document().unwrap().clone();
+    settle(&mut s, |s| s.state().current_source().is_some());
+    let first = s.state().current_source().unwrap().clone();
     assert_eq!(first.image().unwrap().pixels.as_ref().unwrap().get_pixel(0, 0).0, [255, 0, 0, 255]);
     // Same size, other pixels (no text either way): a new version.
     std::fs::write(&path, png(4, 3, [0, 0, 255, 255])).unwrap();
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.version() != first.version()));
-    let doc = s.state().document().unwrap();
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.key().version != first.key().version));
+    let doc = s.state().current_source().unwrap();
     assert_eq!(doc.image().unwrap().pixels.as_ref().unwrap().get_pixel(0, 0).0, [0, 0, 255, 255]);
     // Deleted: the last image stays, said to be unavailable; nothing is written.
     std::fs::remove_file(&path).unwrap();
     settle(&mut s, |s| s.state().notices().iter().any(|n| n.starts_with("Unavailable")));
-    assert!(s.state().document().unwrap().image().unwrap().pixels.is_ok());
+    assert!(s.state().current_source().unwrap().image().unwrap().pixels.is_ok());
     assert!(!path.exists());
 }
 
@@ -2545,7 +2808,7 @@ fn image_perf() {
         for path in [&big, &small] {
             let t = std::time::Instant::now();
             s.dispatch(Command::Open(path.clone()));
-            settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == path.as_path() && d.image().is_some_and(|i| i.pixels.is_ok())));
+            settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == path.as_path() && d.image().is_some_and(|i| i.pixels.is_ok())));
             if i >= 2 {
                 opens.push(t.elapsed().as_secs_f64() * 1000.0);
             }
@@ -2571,12 +2834,12 @@ fn history_returns_to_images_like_any_source() {
     let mut s = session(d.path());
     for p in [&image, &text] {
         s.dispatch(Command::Open(p.clone()));
-        settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == p.as_path()));
+        settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == p.as_path()));
     }
     s.dispatch(Command::Back);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == image.as_path() && d.image().is_some()));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == image.as_path() && d.image().is_some()));
     s.dispatch(Command::Forward);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == text.as_path()));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == text.as_path()));
 }
 
 fn rendered(s: &Session) -> Option<Arc<crate::markdown::Preview>> {
@@ -2594,7 +2857,7 @@ fn markdown_opens_as_source_and_previews_on_request_in_place() {
     let plain = write(d.path(), "notes.txt", b"plain\n");
     let mut s = session(d.path());
     s.dispatch(Command::Open(plain.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some());
     assert_eq!(s.disabled(CommandId::MarkdownSource), Some("Not a Markdown file"));
     assert!(s.state().rendering().is_none());
     assert!(s.preview_control(0).is_none());
@@ -2609,7 +2872,7 @@ fn markdown_opens_as_source_and_previews_on_request_in_place() {
     // The preview, made off the UI thread: its blocks map back to source lines, code blocks are highlighted.
     settle(&mut s, |s| rendered(s).is_some());
     let p = rendered(&s).unwrap();
-    let doc = s.state().document().unwrap().clone();
+    let doc = s.state().current_source().unwrap().clone();
     let lines: Vec<_> = p.doc.blocks.iter().map(|b| doc.line_of(b.source.start)).collect();
     assert_eq!(lines, [0, 2, 4, 8, 10]);
     assert!(p.syntax.get(&2).is_some_and(|s| !s.is_empty()), "the Rust block's keywords");
@@ -2641,7 +2904,7 @@ fn markdown_previews_show_local_images_inside_the_folder_only() {
     let mut s = session(d.path());
     s.dispatch(Command::OpenRoot(root.clone()));
     s.dispatch(Command::Open(md.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some());
     s.dispatch(Command::ToggleMarkdownSource);
     settle(&mut s, |s| rendered(s).is_some_and(|p| p.images.is_some()));
     let p = rendered(&s).unwrap();
@@ -2663,19 +2926,19 @@ fn markdown_previews_follow_external_changes_and_say_when_they_cannot_be_shown()
     let md = write(d.path(), "a.md", b"# One\n");
     let mut s = session(d.path());
     s.dispatch(Command::Open(md.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some());
     s.dispatch(Command::ToggleMarkdownSource);
     settle(&mut s, |s| rendered(s).is_some());
-    let first = s.state().document().unwrap().version();
+    let first = s.state().current_source().unwrap().key().version;
     // Replaced: the new version is previewed; an older version's preview arriving late is ignored.
     std::fs::write(&md, b"# Two\n\nMore.\n").unwrap();
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.version() != first) && rendered(s).is_some());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.key().version != first) && rendered(s).is_some());
     assert_eq!(rendered(&s).unwrap().doc.blocks.len(), 2);
     let stale = crate::markdown::render("# Old\n".into(), || true).unwrap();
     s.dispatch(Completion::Rendered { version: first, preview: Ok(stale) });
     assert_eq!(rendered(&s).unwrap().doc.blocks.len(), 2, "an obsolete version's preview is rejected");
     // Images decoded for another preview of this version (one replaced by a quick toggle) are rejected too.
-    let version = s.state().document().unwrap().version();
+    let version = s.state().current_source().unwrap().key().version;
     let other = crate::markdown::render("# Two\n\nMore.\n".into(), || true).unwrap().doc;
     s.dispatch(Completion::PreviewImages { version, doc: other, images: [(99, Err("foreign"))].into() });
     assert!(rendered(&s).unwrap().images.as_ref().is_none_or(|i| !i.contains_key(&99)));
@@ -2687,7 +2950,7 @@ fn markdown_previews_follow_external_changes_and_say_when_they_cannot_be_shown()
     // Beyond the parser's limits: the source, and why.
     let big = write(d.path(), "big.md", "word ".repeat(1 << 20).as_bytes());
     s.dispatch(Command::Open(big.clone()));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == big));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == big));
     if s.state().active().unwrap().markdown_source() {
         s.dispatch(Command::ToggleMarkdownSource);
     }
@@ -2718,10 +2981,10 @@ fn markdown_perf() {
     };
     let (a, b) = (write(d.path(), "a.md", doc("A").as_bytes()), write(d.path(), "b.md", doc("B").as_bytes()));
     let mut s = session(d.path());
-    let ready = |s: &Session, path: &Path| s.state().document().is_some_and(|d| d.source() == path) && rendered(s).is_some_and(|p| p.images.is_some());
+    let ready = |s: &Session, path: &Path| s.state().current_source().is_some_and(|d| d.source() == path) && rendered(s).is_some_and(|p| p.images.is_some());
     // The preview tab shows previews from here on (its presentation state stays with it).
     s.dispatch(Command::Open(a.clone()));
-    settle(&mut s, |s| s.state().document().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some());
     s.dispatch(Command::ToggleMarkdownSource);
     let (mut opens, mut memory, mut peak) = (Vec::new(), Vec::new(), 0.0f64);
     for i in 0..100 {
@@ -2743,10 +3006,10 @@ fn markdown_perf() {
     let (mut refreshes, mut after) = (Vec::new(), Vec::new());
     let rewrites: usize = std::env::var("READER_MD_REWRITES").ok().and_then(|n| n.parse().ok()).unwrap_or(50);
     for i in 0..rewrites {
-        let version = s.state().document().unwrap().version();
+        let version = s.state().current_source().unwrap().key().version;
         let t = std::time::Instant::now();
         std::fs::write(&b, doc(&format!("B{i}"))).unwrap();
-        settle(&mut s, |s| s.state().document().is_some_and(|d| d.version() != version) && rendered(s).is_some_and(|p| p.images.is_some()));
+        settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.key().version != version) && rendered(s).is_some_and(|p| p.images.is_some()));
         refreshes.push(t.elapsed().as_secs_f64() * 1000.0);
         if i % 10 == 9 && let Some(m) = rss() {
             after.push((m * 10.0).round() / 10.0);
@@ -2832,7 +3095,7 @@ fn acceptance_perf() {
         let mut s = session(d.path());
         let started = std::time::Instant::now();
         s.dispatch(Command::Open((*p).clone()));
-        settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
+        settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
         fresh.push(started.elapsed().as_secs_f64() * 1000.0);
     }
     report("open-fresh-cache", fresh, 100.0);
@@ -2842,7 +3105,7 @@ fn acceptance_perf() {
         for p in &picks {
             let started = std::time::Instant::now();
             s.dispatch(Command::Open((*p).clone()));
-            settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
+            settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
             if round == 1 {
                 cached.push(started.elapsed().as_secs_f64() * 1000.0);
             }
@@ -2852,7 +3115,7 @@ fn acceptance_perf() {
     // Ten retained tabs: switches and history steps.
     for p in picks.iter().take(10) {
         s.dispatch(Command::OpenRetained((*p).clone()));
-        settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
+        settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == p.as_path()) && s.state().loading().is_none());
     }
     let ids: Vec<_> = s.state().tabs().iter().filter(|t| t.retained()).map(|t| t.id()).collect();
     let mut switches = Vec::new();
@@ -2860,7 +3123,7 @@ fn acceptance_perf() {
         let id = ids[i % ids.len()];
         let started = std::time::Instant::now();
         s.dispatch(Command::ActivateTab(id));
-        settle(&mut s, |s| s.state().active().is_some_and(|t| t.id() == id) && s.state().document().is_some() && s.state().loading().is_none());
+        settle(&mut s, |s| s.state().active().is_some_and(|t| t.id() == id) && s.state().current_source().is_some() && s.state().loading().is_none());
         if i >= 100 {
             switches.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -2870,7 +3133,7 @@ fn acceptance_perf() {
     for i in 0..1100 {
         let started = std::time::Instant::now();
         s.dispatch(if i % 2 == 0 { Command::Back } else { Command::Forward });
-        settle(&mut s, |s| s.state().document().is_some() && s.state().loading().is_none());
+        settle(&mut s, |s| s.state().current_source().is_some() && s.state().loading().is_none());
         if i >= 100 {
             history.push(started.elapsed().as_secs_f64() * 1000.0);
         }
@@ -2986,7 +3249,7 @@ fn stress_perf() {
         let i = iterations as usize;
         let id = ids[i % ids.len()];
         s.dispatch(Command::ActivateTab(id));
-        settle(&mut s, |s| s.state().active().is_some_and(|t| t.id() == id) && s.state().document().is_some() && s.state().loading().is_none());
+        settle(&mut s, |s| s.state().active().is_some_and(|t| t.id() == id) && s.state().current_source().is_some() && s.state().loading().is_none());
         s.dispatch(if i.is_multiple_of(2) { Command::Back } else { Command::Forward });
         settle(&mut s, |s| s.state().loading().is_none());
         s.dispatch(Command::FindFile(queries[i % queries.len()].into()));
@@ -3005,7 +3268,7 @@ fn stress_perf() {
             std::fs::write(&edit, text).unwrap();
             let tab = ids[ids.len() - 1];
             s.dispatch(Command::ActivateTab(tab));
-            settle(&mut s, |s| s.state().document().is_some_and(|d| d.source() == edit && &**d.text() == text));
+            settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source() == edit && source_text(d) == text));
         }
         // Ownership: the tabs stay the working set, released content stays within the inactive cache's budget,
         // and nothing else holds documents.
@@ -3154,12 +3417,12 @@ fn a_split_shows_the_source_twice_and_each_pane_keeps_its_tabs_and_place() {
     assert_eq!((s.state().split(), s.state().focused_pane()), (Some(Split::Columns), 1));
     assert_eq!(s.disabled(CommandId::SplitRight), Some("Already split side by side"));
     let (left, right) = (s.state().shown(0).unwrap(), s.state().shown(1).unwrap());
-    assert!(Arc::ptr_eq(left.document().unwrap(), right.document().unwrap()), "one snapshot for both");
+    assert!(Arc::ptr_eq(s.state().view(left.id()).unwrap().snapshot(), s.state().view(right.id()).unwrap().snapshot()), "one snapshot for both");
     assert_eq!(right.top_line(), 50, "the new pane opens at the same place");
     // Each pane scrolls on its own; both stay coloured.
     s.dispatch(Command::Scroll(120));
     assert_eq!((s.state().shown(0).unwrap().top_line(), s.state().top_line()), (50, 120));
-    settle(&mut s, |s| s.state().shown(0).unwrap().highlights().is_some() && s.state().shown(1).unwrap().highlights().is_some());
+    settle(&mut s, |s| pane_view(s, 0).highlights().is_some() && pane_view(s, 1).highlights().is_some());
     // Opening in the focused pane leaves the other showing its file, in memory.
     s.dispatch(Command::Open(b.clone()));
     settle(&mut s, opened);
@@ -3279,18 +3542,17 @@ fn folded(d: &Path, src: &str) -> Session {
     let path = write(d, "a.rs", src.as_bytes());
     let mut s = session(d);
     s.dispatch(Command::Open(path));
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.folds().is_some()));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.folds().is_some()));
     s
 }
 
 fn caret(s: &mut Session, line: usize) {
-    let at = s.state().document().unwrap().line_range(line).start;
+    let at = s.state().current_source().unwrap().line_range(line).unwrap().start;
     s.dispatch(Command::Select(Selection { anchor: at, head: at }));
 }
 
 fn shown(s: &Session, n: usize) -> Vec<usize> {
-    let t = s.state().active().unwrap();
-    t.visible().lines(0, n)
+    active_view(s).visible().lines(0, n)
 }
 
 #[test]
@@ -3302,7 +3564,7 @@ fn collapse_expand_and_all_change_the_visible_lines() {
     s.dispatch(Command::Collapse);
     assert_eq!(shown(&s, 20), vec![0, 1, 2, 3, 6, 7, 8, 9, 10]);
     let head = s.state().selection().unwrap().head;
-    assert_eq!(head, s.state().document().unwrap().line_range(3).end, "the caret leaves the hidden lines for the fold's first line");
+    assert_eq!(head, s.state().current_source().unwrap().line_range(3).unwrap().end, "the caret leaves the hidden lines for the fold's first line");
     s.dispatch(Command::Collapse); // again: the next enclosing region, fn f
     assert_eq!(shown(&s, 20), vec![0, 1, 2, 7, 8, 9, 10]);
     s.dispatch(Command::Expand);
@@ -3332,9 +3594,9 @@ fn scrolling_and_shift_keys_move_over_collapsed_lines() {
     assert_eq!(s.state().top_line(), 10, "the last line (the empty one after the final line ending)");
     caret(&mut s, 2);
     s.dispatch(Command::Extend(Motion::Down));
-    assert_eq!(s.state().document().unwrap().line_of(s.state().selection().unwrap().head), 7);
+    assert_eq!(s.state().current_source().unwrap().line_of(s.state().selection().unwrap().head), 7);
     s.dispatch(Command::Extend(Motion::Up));
-    assert_eq!(s.state().document().unwrap().line_of(s.state().selection().unwrap().head), 2);
+    assert_eq!(s.state().current_source().unwrap().line_of(s.state().selection().unwrap().head), 2);
 }
 
 #[test]
@@ -3342,14 +3604,14 @@ fn navigation_into_a_collapsed_region_unfolds_it() {
     let d = tempfile::tempdir().unwrap();
     let mut s = folded(d.path(), NESTED);
     s.dispatch(Command::ToggleFold(2));
-    assert!(s.state().active().unwrap().visible().hidden(4));
+    assert!(active_view(&s).visible().hidden(4));
     s.dispatch(Command::Search { query: "y()".into(), scope: SearchIn::ActiveFile });
     settle(&mut s, searched);
     s.dispatch(Command::OpenResult(0));
     settle(&mut s, |s| s.state().selection().is_some_and(|x| !x.range().is_empty()));
     let t = s.state().active().unwrap();
-    assert_eq!(t.document().unwrap().line_of(t.selection().unwrap().head), 4);
-    assert!(!t.visible().hidden(4), "a result inside a collapsed region unfolds it");
+    assert_eq!(s.state().view(t.id()).unwrap().snapshot().line_of(t.selection().unwrap().head), 4);
+    assert!(!active_view(&s).visible().hidden(4), "a result inside a collapsed region unfolds it");
 }
 
 #[test]
@@ -3360,16 +3622,15 @@ fn reload_keeps_matching_folds_and_drops_the_rest() {
     s.dispatch(Command::ToggleFold(7));
     // Line 2 still starts `fn f`; line 7 now starts a comment run.
     std::fs::write(d.path().join("a.rs"), NESTED.replace("fn g() {\n    z();\n}\n", "// c\n// d\n")).unwrap();
-    let before = s.state().active().unwrap().version();
+    let before = active_view(&s).snapshot().key().version;
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.version() > before && t.folds().is_some()));
-    let t = s.state().active().unwrap();
-    assert!(t.visible().hidden(3) && !t.visible().hidden(8));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.snapshot().key().version > before && v.folds().is_some()));
+    assert!(active_view(&s).visible().hidden(3) && !active_view(&s).visible().hidden(8));
     // A file shorter than every fold.
     std::fs::write(d.path().join("a.rs"), "x\n").unwrap();
-    let before = t.version();
+    let before = active_view(&s).snapshot().key().version;
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.version() > before && t.folds().is_some()));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.snapshot().key().version > before && v.folds().is_some()));
     assert_eq!(shown(&s, 5), vec![0, 1]);
 }
 
@@ -3379,9 +3640,9 @@ fn panes_fold_independently() {
     let mut s = folded(d.path(), NESTED);
     s.dispatch(Command::Split(Split::Columns));
     s.dispatch(Command::ToggleFold(2));
-    assert!(s.state().active().unwrap().visible().hidden(3));
+    assert!(active_view(&s).visible().hidden(3));
     s.dispatch(Command::FocusPane(0));
-    assert!(!s.state().active().unwrap().visible().hidden(3), "the other pane's tab keeps its own folds");
+    assert!(!active_view(&s).visible().hidden(3), "the other pane's tab keeps its own folds");
 }
 
 #[test]
@@ -3394,11 +3655,11 @@ fn fold_commands_explain_when_unavailable() {
     assert_eq!(s.disabled(CommandId::CollapseAll), Some("No folds for this file type"));
     let big = format!("fn f() {{\n{}}}\n", "    x();\n".repeat(crate::document::LARGE_LINES));
     s.dispatch(Command::Open(write(d.path(), "big.rs", big.as_bytes())));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.is_large()));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.is_large()));
     assert_eq!(s.disabled(CommandId::Expand), Some("Folding is off for large files"));
     assert!(CommandId::ALL.contains(&CommandId::CollapseCommentsImports));
     s.dispatch(Command::Open(write(d.path(), "c.rs", b"fn c() {}\n")));
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source().ends_with("c.rs") && t.folds().is_some()));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.tab().source().ends_with("c.rs") && v.folds().is_some()));
     assert!(s.context_menu().contains(&MenuEntry::Command(CommandId::Collapse)));
 }
 
@@ -3541,7 +3802,7 @@ fn repeated_extend_and_tab_switches_keep_only_short_chains() {
         s.dispatch(Command::OpenRetained(other.clone()));
         settle(&mut s, opened);
         s.dispatch(Command::ActivateTab(a));
-        settle(&mut s, |s| s.state().active().is_some_and(|t| t.id() == a && t.folds().is_some()));
+        settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.tab().id() == a && v.folds().is_some()));
     }
 }
 
@@ -3553,17 +3814,17 @@ fn copy_with_a_caret_copies_its_line_and_across_folds_copies_the_source() {
     assert_eq!(s.disabled(CommandId::Copy), None, "a caret copies its line");
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("        y();\n"));
     s.dispatch(Command::ToggleFold(2));
-    let doc = s.state().document().unwrap().clone();
-    s.dispatch(Command::Select(Selection { anchor: doc.line_range(2).start, head: doc.line_range(7).start }));
+    let doc = s.state().current_source().unwrap().clone();
+    s.dispatch(Command::Select(Selection { anchor: doc.line_range(2).unwrap().start, head: doc.line_range(7).unwrap().start }));
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("fn f() {\n    if x {\n        y();\n    }\n}\n"));
-    assert_eq!(s.state().selected_text(), Some("fn f() {\n    if x {\n        y();\n    }\n}\n"));
+    assert_eq!(s.state().selected_text().as_deref(), Some("fn f() {\n    if x {\n        y();\n    }\n}\n"));
     // The line ending as written; the last line without one copies as it is.
     let path = write(d.path(), "c.txt", b"a\r\nlast");
     s.dispatch(Command::Open(path));
     settle(&mut s, |s| s.state().active().is_some_and(|t| t.source().ends_with("c.txt") && t.loaded()));
     s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("a\r\n"));
-    assert_eq!(s.state().selected_text(), None, "a caret selects nothing");
+    assert_eq!(s.state().selected_text().as_deref(), None, "a caret selects nothing");
     s.dispatch(Command::Select(Selection { anchor: 5, head: 5 }));
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("last"));
 }
@@ -3594,12 +3855,13 @@ fn shrinking_after_a_scroll_brings_the_selection_back_into_view() {
     caret(&mut s, 10);
     for _ in 0..4 {
         s.dispatch(Command::ExtendSelection);
+        settle(&mut s, |s| s.expanding.is_none());
     }
     assert_eq!(s.state().selection().unwrap().range(), 0..src.len());
     s.dispatch(Command::Scroll(usize::MAX));
     s.dispatch(Command::ShrinkSelection);
     s.dispatch(Command::ShrinkSelection);
-    let head = s.state().document().unwrap().line_of(s.state().selection().unwrap().head);
+    let head = s.state().current_source().unwrap().line_of(s.state().selection().unwrap().head);
     assert!(s.state().top_line() <= head, "top {} head {head}", s.state().top_line());
 }
 
@@ -3607,19 +3869,19 @@ fn shrinking_after_a_scroll_brings_the_selection_back_into_view() {
 fn collapsing_keeps_a_selection_that_reaches_into_the_region() {
     let d = tempfile::tempdir().unwrap();
     let mut s = folded(d.path(), NESTED);
-    let doc = s.state().document().unwrap().clone();
-    let inside = Selection { anchor: doc.line_range(3).start, head: doc.line_range(5).end };
+    let doc = s.state().current_source().unwrap().clone();
+    let inside = Selection { anchor: doc.line_range(3).unwrap().start, head: doc.line_range(5).unwrap().end };
     s.dispatch(Command::Select(inside));
     s.dispatch(Command::CollapseAll);
     assert_eq!(s.state().selection(), Some(inside), "the selection still covers the hidden lines");
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("    if x {\n        y();\n    }"));
     // Expand with the head on a hidden line opens the region showing it.
     s.dispatch(Command::Expand);
-    assert!(!s.state().active().unwrap().visible().hidden(3));
+    assert!(!active_view(&s).visible().hidden(3));
     // A caret on a hidden line still moves to the fold's first line.
     caret(&mut s, 4);
     s.dispatch(Command::CollapseAll);
-    assert_eq!(s.state().selection().unwrap().head, doc.line_range(2).end);
+    assert_eq!(s.state().selection().unwrap().head, doc.line_range(2).unwrap().end);
 }
 
 #[test]
@@ -3627,15 +3889,14 @@ fn the_visible_lines_are_kept_until_the_folds_change() {
     let d = tempfile::tempdir().unwrap();
     let mut s = folded(d.path(), NESTED);
     s.dispatch(Command::CollapseAll);
-    let t = s.state().active().unwrap();
-    let (a, b) = (t.visible(), t.visible());
+    let (a, b) = (active_view(&s).visible(), active_view(&s).visible());
     assert!(Arc::ptr_eq(&a, &b), "made once while nothing changes");
     s.dispatch(Command::ToggleFold(0));
-    let c = s.state().active().unwrap().visible();
+    let c = active_view(&s).visible();
     assert!(!Arc::ptr_eq(&a, &c) && !c.hidden(1), "a fold change makes them again");
     s.dispatch(Command::ToggleFold(0));
     s.dispatch(Command::ExpandAll);
-    assert!(!s.state().active().unwrap().visible().hidden(3));
+    assert!(!active_view(&s).visible().hidden(3));
 }
 
 #[test]
@@ -3648,7 +3909,7 @@ fn visible_lines_perf() {
     let t = s.state().active().unwrap();
     let start = std::time::Instant::now();
     for _ in 0..1000 {
-        std::hint::black_box(t.visible().lines(t.top_line(), 60));
+        std::hint::black_box(active_view(&s).visible().lines(t.top_line(), 60));
     }
     eprintln!("visible().lines(60) with 33k collapsed regions: {:.1} µs per call", start.elapsed().as_secs_f64() * 1000.0);
 }
@@ -3719,12 +3980,12 @@ fn reload_reruns_find_and_a_folded_match_unfolds() {
     let d = tempfile::tempdir().unwrap();
     let mut s = folded(d.path(), "fn a() {\n    x\n}\nfn b() {\n    target\n}\n");
     s.dispatch(Command::CollapseAll);
-    assert!(s.state().active().unwrap().visible().hidden(4));
+    assert!(active_view(&s).visible().hidden(4));
     find(&mut s, "target");
-    assert!(!s.state().active().unwrap().visible().hidden(4), "the match's region unfolded");
+    assert!(!active_view(&s).visible().hidden(4), "the match's region unfolded");
     write(d.path(), "a.rs", b"target\nfn a() {}\n");
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line(0) == "target") && found(s));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "target") && found(s));
     assert_eq!(s.state().active().unwrap().find().unwrap().matches(), &[(0, 0..6)]);
 }
 
@@ -3744,10 +4005,10 @@ fn find_is_unavailable_without_a_file_and_in_previews() {
 }
 
 fn caret_at(s: &Session) -> (usize, usize) {
-    let d = s.state().document().unwrap();
+    let d = s.state().current_source().unwrap();
     let head = s.state().selection().unwrap().head;
     let line = d.line_of(head);
-    (line, head - d.line_range(line).start)
+    (line, head - d.line_range(line).unwrap().start)
 }
 
 #[test]
@@ -3758,7 +4019,7 @@ fn go_to_line_clamps_unfolds_and_records_history() {
     s.dispatch(Command::CollapseAll);
     s.dispatch(Command::GoToLine(LineColumn { line: 3, column: Some(5) }));
     assert_eq!(caret_at(&s), (2, 4));
-    assert!(!s.state().active().unwrap().visible().hidden(2), "the target's region unfolded");
+    assert!(!active_view(&s).visible().hidden(2), "the target's region unfolded");
     s.dispatch(Command::GoToLine(LineColumn { line: 99, column: Some(99) }));
     assert_eq!(caret_at(&s), (5, 0), "the last line (empty after the final newline), its end");
     s.dispatch(Command::Back);
@@ -3781,7 +4042,7 @@ fn the_finder_takes_name_colon_line() {
     assert_eq!(f.hits.iter().map(|h| &**h).collect::<Vec<_>>(), ["src/session.rs"], "the name ranks, the line does not");
     assert_eq!(f.at(), Some(LineColumn { line: 120, column: None }));
     s.dispatch(Command::OpenAt { path: root.join("src/session.rs"), at: LineColumn { line: 120, column: None } });
-    settle(&mut s, |s| s.state().document().is_some() && s.state().selection().is_some());
+    settle(&mut s, |s| s.state().current_source().is_some() && s.state().selection().is_some());
     assert_eq!(caret_at(&s), (119, 0));
 }
 
@@ -3801,7 +4062,7 @@ fn wrapped_rows_scroll_page_and_end() {
     s.dispatch(Command::SetSoftWrap(true));
     assert!(s.state().soft_wrap());
     let t = s.state().active().unwrap();
-    let rows = t.rows(30, s.state().wrap_cols(t));
+    let rows = source_rows(active_view(&s), 30, s.state().wrap_cols(t));
     assert_eq!(rows.iter().filter(|r| r.line == 0).count(), 10, "200 columns in rows of 20");
     s.dispatch(Command::ScrollRows(3));
     let t = s.state().active().unwrap();
@@ -3811,7 +4072,7 @@ fn wrapped_rows_scroll_page_and_end() {
     assert_eq!((t.top_line(), t.top_row()), (0, 0), "clamped at the start");
     s.dispatch(Command::Scroll(usize::MAX));
     let t = s.state().active().unwrap();
-    assert_eq!(t.rows(5, s.state().wrap_cols(t)).last().unwrap().line, 2, "End shows the last line");
+    assert_eq!(source_rows(active_view(&s), 5, s.state().wrap_cols(t)).last().unwrap().line, 2, "End shows the last line");
 }
 
 #[test]
@@ -3837,17 +4098,17 @@ fn shift_down_moves_one_visual_row_and_folds_still_skip() {
     let mut s = folded(d.path(), &format!("fn a() {{\n    {}\n}}\nfn b() {{}}\n", "x ".repeat(30)));
     s.dispatch(Command::SetTextSize { pane: 0, cols: 20, rows: 10 });
     s.dispatch(Command::SetSoftWrap(true));
-    let at = s.state().document().unwrap().line_range(1).start + 6;
+    let at = s.state().current_source().unwrap().line_range(1).unwrap().start + 6;
     s.dispatch(Command::Select(Selection { anchor: at, head: at }));
     s.dispatch(Command::Extend(Motion::Down));
     let head = s.state().selection().unwrap().head;
-    assert_eq!(s.state().document().unwrap().line_of(head), 1, "the next visual row is still line 1");
+    assert_eq!(s.state().current_source().unwrap().line_of(head), 1, "the next visual row is still line 1");
     assert!(head > at + 10, "one row further: {head} from {at}");
     s.dispatch(Command::Extend(Motion::Up));
     assert_eq!(s.state().selection().unwrap().head, at, "back to the same column");
     s.dispatch(Command::CollapseAll);
     let t = s.state().active().unwrap();
-    assert!(t.rows(10, s.state().wrap_cols(t)).iter().all(|r| r.line != 1), "collapsed lines are not rows");
+    assert!(source_rows(active_view(&s), 10, s.state().wrap_cols(t)).iter().all(|r| r.line != 1), "collapsed lines are not rows");
 }
 
 #[test]
@@ -3868,7 +4129,7 @@ fn large_files_refuse_wrap_and_wrapping_resets_then_clamps_native_pan() {
     assert_eq!(s.state().active().unwrap().column(), 0, "current complete native extents clamp a fitting wrapped row");
     let big = write(d.path(), "big.txt", "x\n".repeat(crate::document::LARGE_BYTES / 2 + 1).as_bytes());
     s.dispatch(Command::Open(big));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.is_large()));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.is_large()));
     assert_eq!(s.disabled(CommandId::SoftWrap), Some("Too large to wrap"));
     let t = s.state().active().unwrap();
     assert_eq!(s.state().wrap_cols(t), None);
@@ -3915,13 +4176,13 @@ fn matches_and_go_to_line_come_into_view_counting_wrapped_rows() {
     let mut s = txt(d.path(), &text);
     s.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 10 });
     s.dispatch(Command::SetSoftWrap(true));
-    let shown = |s: &Session| { let t = s.state().active().unwrap(); t.rows(10, s.state().wrap_cols(t)).iter().map(|r| r.line).collect::<Vec<_>>() };
+    let shown = |s: &Session| { let t = s.state().active().unwrap(); source_rows(active_view(s), 10, s.state().wrap_cols(t)).iter().map(|r| r.line).collect::<Vec<_>>() };
     find(&mut s, "cccc008");
     let head = s.state().selection().unwrap().head;
-    let line = s.state().document().unwrap().line_of(head);
+    let line = s.state().current_source().unwrap().line_of(head);
     assert!(shown(&s).contains(&line), "the match's line is on screen: {:?}", shown(&s));
     s.dispatch(Command::GoToLine(LineColumn { line: 16, column: None }));
-    let rows = { let t = s.state().active().unwrap(); t.rows(10, s.state().wrap_cols(t)) };
+    let rows = { let t = s.state().active().unwrap(); source_rows(active_view(&s), 10, s.state().wrap_cols(t)) };
     let at = rows.iter().position(|r| r.line == 15).expect("line 16 on screen");
     assert_eq!(at, 3, "three rows below the top, as other navigation: {rows:?}");
 }
@@ -3934,9 +4195,9 @@ fn shift_down_into_a_shorter_wrapped_row_stays_on_that_row() {
     s.dispatch(Command::SetSoftWrap(true));
     s.dispatch(Command::Select(Selection { anchor: 11, head: 11 }));
     s.dispatch(Command::Extend(Motion::Down));
-    let doc = s.state().document().unwrap().clone();
+    let doc = s.state().current_source().unwrap().clone();
     let head = s.state().selection().unwrap().head;
-    let start = doc.line_range(1).start;
+    let start = doc.line_range(1).unwrap().start;
     assert_eq!(doc.line_of(head), 1);
     assert!(head - start < 10, "on line 2's first row (\"aaaa bbbb \"), not its second: byte {}", head - start);
     s.dispatch(Command::Extend(Motion::Down));
@@ -3949,12 +4210,13 @@ const STICKY: &str = "mod m {\n    fn f() {\n        a;\n        b;\n        c;\
 /// A session showing `src` as `a.rs` with its declarations.
 fn declared(d: &Path, src: &str) -> Session {
     let mut s = folded(d, src);
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.declarations().is_some()));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.declarations().is_some()));
     s
 }
 
 fn sticky_of(s: &Session) -> Vec<usize> {
-    s.state().active().unwrap().sticky(5, s.state().wrap_cols(s.state().active().unwrap())).iter().map(|k| k.line).collect()
+    let crate::layout::Query::Ready(sticky) = active_view(s).layout_sticky(5, s.state().wrap_cols(s.state().active().unwrap())) else { panic!("fixture sticky layout pending") };
+    sticky.iter().map(|k| k.line).collect()
 }
 
 #[test]
@@ -3991,10 +4253,10 @@ fn toggles_are_saved_and_turning_one_on_parses_for_declarations() {
     settle(&mut s, |_| saved("sticky_scroll") == Some(false) && saved("breadcrumbs") == Some(false));
     let path = write(d.path(), "a.rs", STICKY.as_bytes());
     s.dispatch(Command::Open(path));
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.folds().is_some()));
-    assert!(s.state().active().unwrap().declarations().is_none(), "both off: no declarations asked for");
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.folds().is_some()));
+    assert!(active_view(&s).declarations().is_none(), "both off: no declarations asked for");
     s.dispatch(Command::SetStickyScroll(true));
-    settle(&mut s, |s| s.state().active().is_some_and(|t| t.declarations().is_some() && t.folds().is_some()));
+    settle(&mut s, |s| s.state().view(s.state.active.unwrap()).is_some_and(|v| v.declarations().is_some() && v.folds().is_some()));
 }
 
 #[test]
@@ -4004,8 +4266,8 @@ fn a_reload_drops_the_old_versions_declarations() {
     s.dispatch(Command::Scroll(3));
     write(d.path(), "a.rs", b"x\n");
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line_count() <= 2));
-    let lines = s.state().document().unwrap().line_count();
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.line_count() <= 2));
+    let lines = s.state().current_source().unwrap().line_count();
     assert!(sticky_of(&s).iter().all(|&l| l < lines), "no header past the new text: {:?}", sticky_of(&s));
 }
 
@@ -4040,7 +4302,7 @@ fn project_with(dir: &Path, files: &[(&str, &str)], open: &str) -> Session {
 fn open_and_settle(s: &mut Session, path: &Path) {
     s.dispatch(Command::Open(path.to_owned()));
     let p = path.to_owned();
-    settle(s, |s| s.state().document().is_some_and(|d| d.source() == p) && s.state().active().is_some_and(|t| t.declarations().is_some() || t.document().is_some_and(|d| d.is_large())));
+    settle(s, |s| s.state().current_source().is_some_and(|d| d.source() == p) && s.state().view(s.state.active.unwrap()).is_some_and(|v| v.declarations().is_some() || v.snapshot().is_large()));
 }
 
 fn crumb_names(s: &Session) -> Vec<String> {
@@ -4119,7 +4381,7 @@ fn a_header_slides_by_shown_rows_over_a_collapsed_region() {
     s.dispatch(Command::Collapse);
     s.dispatch(Command::Scroll(3));
     // Shown: the collapsed `if` (line 3), then f's `}` (15), impl's (16), m's (17): f's scope has ended a row down.
-    let rows: Vec<usize> = s.state().active().unwrap().rows(4, None).iter().map(|r| r.line).collect();
+    let rows: Vec<usize> = source_rows(active_view(&s), 4, None).iter().map(|r| r.line).collect();
     assert_eq!(rows, [3, 15, 16, 17]);
     assert_eq!(sticky_of(&s), [0, 1], "fn f's header would sit below its own end");
 }
@@ -4136,7 +4398,7 @@ fn banded(d: &Path) -> Session {
 
 /// The row line `line` is shown on, from the top.
 fn row_of(s: &Session, line: usize) -> Option<usize> {
-    s.state().active().unwrap().rows(20, None).iter().position(|r| r.line == line)
+    source_rows(active_view(s), 20, None).iter().position(|r| r.line == line)
 }
 
 #[test]
@@ -4173,7 +4435,7 @@ fn open_project(s: &mut Session, root: &Path, file: &str) {
 }
 
 fn caret_at_line(s: &mut Session, line: usize) {
-    let at = s.state().document().unwrap().line_range(line).start;
+    let at = s.state().current_source().unwrap().line_range(line).unwrap().start;
     s.dispatch(Command::Select(Selection { anchor: at, head: at }));
 }
 
@@ -4255,7 +4517,7 @@ fn a_reload_moves_bookmarks_with_their_line() {
     s.dispatch(Command::ToggleBookmark);
     std::fs::write(root.join("a.rs"), "new\nnew\na\nfn f() {}\nb\n").unwrap();
     s.dispatch(Command::Reload);
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.line_count() == 6));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.line_count() == 6));
     let lines: Vec<usize> = s.state().places().bookmarks().iter().map(|m| m.line).collect();
     assert_eq!(lines, [3]);
 }
@@ -4286,7 +4548,7 @@ fn bookmarked_project(d: &Path) -> (Session, PathBuf) {
 
 fn caret_line(s: &Session) -> usize {
     let st = s.state();
-    st.document().unwrap().line_of(st.selection().unwrap().head)
+    st.current_source().unwrap().line_of(st.selection().unwrap().head)
 }
 
 #[test]
@@ -4356,9 +4618,9 @@ fn a_bookmark_inside_a_collapsed_region_opens_it() {
     s.dispatch(Command::SetMnemonic('1'));
     caret_at_line(&mut s, 0);
     s.dispatch(Command::Collapse);
-    assert!(s.state().active().unwrap().visible().hidden(2));
+    assert!(active_view(&s).visible().hidden(2));
     s.dispatch(Command::JumpMnemonic('1'));
-    assert!(!s.state().active().unwrap().visible().hidden(2));
+    assert!(!active_view(&s).visible().hidden(2));
     assert_eq!(caret_line(&s), 2);
 }
 
@@ -4705,9 +4967,10 @@ fn up_and_down_keep_the_drawn_column_across_hints() {
     settle(&mut s, opened);
     s.dispatch(Command::SetSoftWrap(true));
     s.dispatch(Command::SetTextSize { pane: 0, cols: 40, rows: 10 });
-    let version = s.state().document().unwrap().version();
+    let version = s.state().current_source().unwrap().key().version;
     let hint = crate::decor::Hint { byte: 1, label: "XYZ".into(), kind: crate::decor::HintKind::Type };
     s.state.tabs[0].hints = Some((version, std::sync::Arc::new(crate::decor::Hints::new(vec![(1, hint)]))));
+    s.state.tabs[0].decor_source = Some(SemanticSource::new(active_view(&s).snapshot()));
     // Column 5 of line 0 is drawn above "aXYZb|c…": byte 2 of line 1.
     s.dispatch(Command::Select(Selection { anchor: 5, head: 5 }));
     s.dispatch(Command::Extend(Motion::Down));
@@ -4766,11 +5029,16 @@ fn up_from_a_hints_byte_at_a_wrap_break_leaves_its_drawn_row() {
     settle(&mut s, opened);
     s.dispatch(Command::SetSoftWrap(true));
     s.dispatch(Command::SetTextSize { pane: 0, cols: 6, rows: 10 });
-    let version = s.state().document().unwrap().version();
+    let version = s.state().current_source().unwrap().key().version;
     let hint = crate::decor::Hint { byte: 2, label: ": xyz".into(), kind: crate::decor::HintKind::Type };
     s.state.tabs[0].hints = Some((version, std::sync::Arc::new(crate::decor::Hints::new(vec![(1, hint)]))));
+    s.state.tabs[0].decor_source = Some(SemanticSource::new(active_view(&s).snapshot()));
     // Line 1 is drawn "ab: " then "xyz cd": the caret at its byte 2 is drawn at the end of the first row.
-    let rows = s.state().active().unwrap().line_rows(1, Some(6));
+    let view = active_view(&s);
+    let rows: Vec<_> = (0..2).map(|index| match view.layout_row(1, index, Some(6)) {
+        crate::layout::Query::Ready(Some(row)) => row,
+        _ => panic!("fixture hint row must be ready"),
+    }).collect();
     assert_eq!(rows.iter().map(|r| r.display.clone()).collect::<Vec<_>>(), vec![0..4, 4..10]);
     s.dispatch(Command::Select(Selection { anchor: 5, head: 5 }));
     s.dispatch(Command::Extend(Motion::Up));
@@ -4816,9 +5084,9 @@ fn a_regex_search_result_opens() {
     settle(&mut s, searched);
     assert_eq!(s.state().results().unwrap().hits().len(), 1);
     s.dispatch(Command::OpenResult(0));
-    settle(&mut s, |s| s.state().document().is_some() || !s.state().notices().is_empty());
+    settle(&mut s, |s| s.state().current_source().is_some() || !s.state().notices().is_empty());
     assert_eq!(s.state().notices(), &[] as &[String], "no notice");
-    assert!(s.state().document().unwrap().source().ends_with("a.rs"));
+    assert!(s.state().current_source().unwrap().source().ends_with("a.rs"));
 }
 
 #[test]
@@ -4828,9 +5096,9 @@ fn a_find_over_a_file_that_shrinks_on_disk_steps_safely() {
     let mut s = session(d.path());
     open(&mut s, Command::Open(a.clone()), "a.rs");
     find(&mut s, "foo");
-    let version = s.state().active().unwrap().version();
+    let version = active_view(&s).snapshot().key().version;
     replace(&a, b"x\n");
-    settle(&mut s, |s| s.state().active().unwrap().version() > version);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > version);
     s.dispatch(Command::FindStep { forward: true }); // before the new matches arrive
     settle(&mut s, found);
     s.dispatch(Command::FindStep { forward: true });
@@ -4854,7 +5122,7 @@ fn the_old_path_of_a_followed_rename_opens_the_file_now_there() {
     s.dispatch(Command::Open(a.clone()));
     settle(&mut s, opened);
     assert_eq!(s.state().active().unwrap().source(), a, "a tab for a.txt");
-    assert_eq!(s.state().document().unwrap().line(0), "new");
+    assert_eq!(source_line(s.state().current_source().unwrap(), 0), "new");
     assert_ne!(s.state().current().unwrap().key().buffer, original);
 }
 
@@ -4866,7 +5134,7 @@ fn an_open_at_superseded_before_it_lands_does_not_fire_later() {
     let mut s = session(d.path());
     s.dispatch(Command::OpenAt { path: a.clone(), at: LineColumn { line: 150, column: None } });
     s.dispatch(Command::Open(b));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.rs")));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.rs")));
     open(&mut s, Command::Open(a), "a.rs");
     assert_eq!((s.state().top_line(), s.state().selection().map(|x| x.head)), (0, None), "a plain open shows the top");
 }
@@ -4960,7 +5228,7 @@ fn a_jump_whose_tab_closed_before_it_landed_does_not_fire_later() {
     s.dispatch(Command::OpenAt { path: a.clone(), at: LineColumn { line: 150, column: None } });
     let id = s.state().active().unwrap().id();
     s.dispatch(Command::CloseTab(id));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.rs")) && s.state().loading().is_none());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.rs")) && s.state().loading().is_none());
     open(&mut s, Command::Open(a), "a.rs");
     assert_eq!((s.state().top_line(), s.state().selection().map(|x| x.head)), (0, None), "a plain open shows the top");
 }
@@ -4975,7 +5243,7 @@ fn a_jump_left_for_another_tab_before_it_landed_does_not_fire_later() {
     let bid = s.state().active().unwrap().id();
     s.dispatch(Command::OpenAt { path: a.clone(), at: LineColumn { line: 150, column: None } });
     s.dispatch(Command::ActivateTab(bid));
-    settle(&mut s, |s| s.state().document().is_some_and(|d| d.source().ends_with("b.rs")) && s.state().loading().is_none());
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.rs")) && s.state().loading().is_none());
     open(&mut s, Command::Open(a), "a.rs");
     assert_eq!((s.state().top_line(), s.state().selection().map(|x| x.head)), (0, None), "a plain open shows the top");
 }
@@ -4992,16 +5260,16 @@ fn next_bookmark_passes_a_bookmark_past_the_end_of_its_file() {
     open(&mut s, Command::OpenRetained(a.clone()), "a.rs");
     caret(&mut s, 3);
     s.dispatch(Command::ToggleBookmark);
-    let v = s.state().active().unwrap().version();
+    let v = active_view(&s).snapshot().key().version;
     replace(&a, b"x\n");
-    settle(&mut s, |s| s.state().active().unwrap().version() > v);
+    settle(&mut s, |s| active_view(s).snapshot().key().version > v);
     caret(&mut s, 0);
     s.dispatch(Command::StepBookmark { forward: true });
     settle(&mut s, opened);
     assert_eq!(caret_line(&s), 1, "the bookmark past the end: the last line");
     s.dispatch(Command::StepBookmark { forward: true });
     settle(&mut s, opened);
-    assert!(s.state().document().unwrap().source().ends_with("b.rs"), "the second Next reaches b.rs: {:?}", s.state().places().bookmarks().iter().map(|m| (m.source.to_path_buf(), m.line)).collect::<Vec<_>>());
+    assert!(s.state().current_source().unwrap().source().ends_with("b.rs"), "the second Next reaches b.rs: {:?}", s.state().places().bookmarks().iter().map(|m| (m.source.to_path_buf(), m.line)).collect::<Vec<_>>());
 }
 
 #[test]
@@ -5017,10 +5285,10 @@ fn a_change_on_disk_with_find_open_keeps_the_view() {
     s.dispatch(Command::Scroll(200));
     let top = s.state().top_line();
     assert!(top >= 150, "precondition: scrolled away, top {top}");
-    let v = s.state().active().unwrap().version();
+    let v = active_view(&s).snapshot().key().version;
     text.push_str("appended\n");
     replace(&a, text.as_bytes());
-    settle(&mut s, |s| s.state().active().unwrap().version() > v && found(s));
+    settle(&mut s, |s| active_view(s).snapshot().key().version > v && found(s));
     assert_eq!(s.state().top_line(), top, "an external append does not move the view");
 }
 
@@ -5120,12 +5388,12 @@ fn extending_selection_keeps_its_head_in_the_reported_viewport_with_and_without_
         for _ in 0..30 {
             s.dispatch(Command::Extend(Motion::Down));
             let tab = s.state().active().unwrap();
-            let doc = tab.document().unwrap();
+            let view = s.state().view(tab.id()).unwrap();
             let head = tab.selection().unwrap().head;
-            let line = doc.line_of(head);
+            let line = view.snapshot().line_of(head);
             let cols = s.state().wrap_cols(tab);
-            let row = tab.caret_row(line, head - doc.line_range(line).start, cols);
-            assert!(tab.rows(8, cols).iter().any(|r| r.line == line && r.index == row), "selection head left the viewport (wrap={wrap})");
+            let crate::layout::Query::Ready(Some(position)) = view.layout_position(head, cols) else { panic!("fixture caret layout pending") };
+            assert!(source_rows(view, 8, cols).iter().any(|r| r.line == line && r.index == position.row), "selection head left the viewport (wrap={wrap})");
         }
         assert_eq!(std::fs::read(file).unwrap(), text.as_bytes());
     }
@@ -5160,7 +5428,7 @@ fn workspace_restores_tabs_positions_split_and_explorer_without_loading_inactive
     drop(one);
     let mut two = session(d.path());
     two.dispatch(Command::OpenRoot(root.clone()));
-    settle(&mut two, |s| scanned(s) && s.state.document().is_some() && s.state.shown(0).is_some_and(|t| t.doc.is_some()));
+    settle(&mut two, |s| scanned(s) && s.state.current_source().is_some() && s.state.shown(0).is_some_and(|t| t.loaded));
     assert_eq!(snapshot(&two), expected);
     assert_eq!(two.state.active().unwrap().source, active);
     assert_eq!(two.state.focused, 1);
@@ -5168,7 +5436,7 @@ fn workspace_restores_tabs_positions_split_and_explorer_without_loading_inactive
     assert_eq!(two.state.layout().explorer_width, Some(220));
     assert!(!two.state.explorer.visible);
     assert!(two.state.project().unwrap().rows().iter().any(|r| &*r.path == "src/a.txt"));
-    assert_eq!(two.state.tabs.iter().filter(|t| t.doc.is_some()).count(), 2, "only the two shown tabs are loaded");
+    assert_eq!(two.state.tabs.iter().filter(|t| t.loaded).count(), 2, "only the two shown tabs are loaded");
     assert_eq!(std::fs::read_to_string(root.join("src/a.txt")).unwrap(), source);
 }
 
@@ -5183,10 +5451,10 @@ fn workspace_directory_switches_flush_old_state_and_restore_each_directory() {
     assert!(s.state.tabs.is_empty());
     s.dispatch(Command::Open(b.join("b.txt"))); settle(&mut s, opened);
     s.dispatch(Command::OpenRoot(a.clone()));
-    settle(&mut s, |s| s.state.document().is_some_and(|d| d.source() == a.join("a.txt")));
+    settle(&mut s, |s| s.state.current_source().is_some_and(|d| d.source() == a.join("a.txt")));
     assert_eq!(s.state.tabs.len(), 1);
     s.dispatch(Command::OpenRoot(b.clone()));
-    settle(&mut s, |s| s.state.document().is_some_and(|d| d.source() == b.join("b.txt")));
+    settle(&mut s, |s| s.state.current_source().is_some_and(|d| d.source() == b.join("b.txt")));
     assert_eq!(s.state.tabs.len(), 1);
 }
 
@@ -5205,11 +5473,11 @@ fn workspace_skips_missing_tabs_and_clamps_positions_in_changed_utf8_files() {
     std::fs::remove_file(root.join("a.txt")).unwrap(); std::fs::remove_file(root.join("c.txt")).unwrap();
     std::fs::write(root.join("b.txt"), "é\n").unwrap();
     let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root.clone()));
-    settle(&mut s, |s| s.state.document().is_some());
+    settle(&mut s, |s| s.state.current_source().is_some());
     assert_eq!(s.state.tabs.len(), 1);
     assert!(s.state.active().unwrap().source.ends_with("b.txt"));
-    assert!(s.state.top_line() < s.state.document().unwrap().line_count());
-    for at in [s.state.selection().unwrap().anchor, s.state.selection().unwrap().head] { assert!(s.state.document().unwrap().text().is_char_boundary(at)); }
+    assert!(s.state.top_line() < s.state.current_source().unwrap().line_count());
+    for at in [s.state.selection().unwrap().anchor, s.state.selection().unwrap().head] { assert!(source_text(s.state.current_source().unwrap()).is_char_boundary(at)); }
 }
 
 #[test]
@@ -5248,13 +5516,13 @@ fn unified_navigation_finds_files_symbols_and_actions_without_loading_search_can
     settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
     let n = s.state().navigation().unwrap();
     for kind in [Kind::File,Kind::Symbol,Kind::Action] { assert!(n.rows.iter().any(|r| r.kind == kind), "{kind:?}: {:?}", n.rows); }
-    assert!(s.state().document().is_none() && s.state().results().is_none(), "ranking must not open documents or replace search results");
+    assert!(s.state().current_source().is_none() && s.state().results().is_none(), "ranking must not open documents or replace search results");
     let row = n.rows.iter().position(|r| r.kind == Kind::Symbol && r.label == "wrap").unwrap();
     let chosen = s.navigation_choice(n.revision, row).unwrap();
     s.dispatch(Command::CloseSearchEverywhere);
     let Chosen::Command(command) = chosen else { panic!("expected source navigation") };
     s.dispatch(command);
-    settle(&mut s, |s| s.state().document().is_some() && s.state().active().is_some_and(|t| t.selection().is_some()));
+    settle(&mut s, |s| s.state().current_source().is_some() && s.state().active().is_some_and(|t| t.selection().is_some()));
     assert_eq!(s.state().active().unwrap().source(), path);
     assert_eq!(s.state().selection().unwrap().head, "// source\n".len());
     assert_eq!(std::fs::read(path).unwrap(), b"// source\nfn wrap() {}\n");
@@ -5414,9 +5682,10 @@ fn caret_vertical_movement_uses_expanded_tabs_and_inlay_columns() {
     s.dispatch(Command::Select(Selection { anchor: 6, head: 6 }));
     s.dispatch(Command::MoveCaret(Motion::Down));
     assert_eq!(s.state().selection().unwrap().head, 10, "expanded tab preserves display column six");
-    let version = s.state().document().unwrap().version();
+    let version = s.state().current_source().unwrap().key().version;
     let hint = crate::decor::Hint { byte: 1, label: "XYZ".into(), kind: crate::decor::HintKind::Type };
     s.state.tabs[0].hints = Some((version, Arc::new(crate::decor::Hints::new(vec![(1, hint)]))));
+    s.state.tabs[0].decor_source = Some(SemanticSource::new(active_view(&s).snapshot()));
     s.dispatch(Command::Select(Selection { anchor: 6, head: 6 }));
     s.dispatch(Command::MoveCaret(Motion::Down));
     assert_eq!(s.state().selection().unwrap().head, 8, "column six falls in the hint after the tab");
@@ -5585,7 +5854,7 @@ mod blame {
     /// The active tab's annotation labels, line by line ("" for a line without one).
     fn labels(s: &Session) -> Vec<String> {
         let t = s.state().active().unwrap();
-        (0..t.document().unwrap().line_count()).map(|l| s.annotation(t.id(), l).map_or(String::new(), |a| a.label)).collect()
+        (0..s.state().view(t.id()).unwrap().line_count()).map(|l| s.annotation(t.id(), l).map_or(String::new(), |a| a.label)).collect()
     }
     fn blamed(s: &Session) -> bool {
         s.state().active().and_then(|t| t.blame.as_ref()).is_some_and(|b| b.done)
@@ -5650,11 +5919,11 @@ mod blame {
         annotate(&mut s);
         let before = request(&s);
         s.dispatch(Command::OpenRetained(r.path().join("b.txt")));
-        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.source().ends_with("b.txt")));
+        settle(&mut s, |s| opened(s) && s.state().current_source().is_some_and(|d| d.source().ends_with("b.txt")));
         assert_eq!(s.on(CommandId::AnnotateBlame), Some(false), "per tab");
         let a = s.state().tabs().iter().find(|t| t.source().ends_with("a.txt")).unwrap().id();
         s.dispatch(Command::ActivateTab(a));
-        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.source().ends_with("a.txt")));
+        settle(&mut s, |s| opened(s) && s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
         assert_eq!((request(&s), blamed(&s)), (before, true), "kept, not blamed again");
         assert!(labels(&s)[0].ends_with(" t"));
     }
@@ -5720,7 +5989,7 @@ mod blame {
         settle(&mut s, opened);
         assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("Only text can be annotated"));
         s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
-        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.image().is_none()));
+        settle(&mut s, |s| opened(s) && s.state().current_source().is_some_and(|d| d.image().is_none()));
         assert_eq!(s.disabled(CommandId::AnnotateBlame), None);
         assert_eq!(s.disabled(CommandId::CloseAnnotations), Some("Annotations are off"));
     }
@@ -5863,7 +6132,7 @@ mod blame {
         settle(&mut s, opened);
         assert_eq!(s.disabled(CommandId::AnnotateBlame), None);
         s.dispatch(Command::Open(r.path().join("i.svg")));
-        settle(&mut s, |s| opened(s) && s.state().document().is_some_and(|d| d.image().is_some()));
+        settle(&mut s, |s| opened(s) && s.state().current_source().is_some_and(|d| d.image().is_some()));
         assert_eq!(s.disabled(CommandId::AnnotateBlame), Some("Only text can be annotated"), "the rendered image");
         s.dispatch(Command::ToggleImageSource);
         assert!(s.state().active().unwrap().image_source());
@@ -6344,7 +6613,7 @@ mod git_branches {
         assert!(s.status_details().contains("Checked out feature/x"), "{}", s.status_details());
         assert!(s.state().branches().is_none(), "the popup closes");
         checkout(&mut s, Target::Branch("main".into()));
-        settle(&mut s, |s| (0..2).all(|p| s.state().shown(p).is_some_and(|t| t.unavailable.is_none() && t.document().is_some())));
+        settle(&mut s, |s| (0..2).all(|p| s.state().shown(p).is_some_and(|t| t.unavailable.is_none() && t.loaded)));
         assert_eq!(on_disk(&r, "a.txt"), "main\n");
     }
 
@@ -6666,20 +6935,24 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     let c = write(d.path(), "c.txt", &[b'c'; 128]);
     let fourth = write(d.path(), "d.txt", &[b'd'; 128]);
     let mut s = session(d.path());
-    s.cache = InactiveCache::new(900);
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     let tab = s.state().active().unwrap().id();
     let admitted = s.state().view(tab).unwrap().snapshot().clone();
-    let loaded = Arc::downgrade(s.state().document().unwrap());
+    let budget = admitted.storage_bytes() * 2;
+    s.cache = InactiveCache::new(budget);
+    let worker_document = analysis_document(&mut s);
+    let loaded = Arc::downgrade(&worker_document);
     assert!(s.analysis.ensure(crate::analysis::Input::new(admitted.clone(), loaded.clone(), 0, true), Priority::Background));
     assert!(s.analysis.ready(&admitted, 0).is_some(), "matching saved text registers synchronously");
     drop(admitted);
+    drop(worker_document);
     let snapshot = s.state().view(tab).unwrap().snapshot();
     let key = snapshot.key();
     let weak = Arc::downgrade(snapshot);
     open(&mut s, Command::OpenRetained(b.clone()), "b.txt");
     assert!(s.state().view(tab).is_none());
     assert!(weak.upgrade().is_some(), "the inactive cache retains reusable text");
+    assert!(s.cache.peek(&a).is_some_and(|cached| std::sync::Weak::ptr_eq(&weak, &Arc::downgrade(&cached))), "reuse comes from the actual inactive cache");
     open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
     assert!(Arc::ptr_eq(&weak.upgrade().unwrap(), s.state().view(tab).unwrap().snapshot()));
     open(&mut s, Command::OpenRetained(b), "b.txt");
@@ -6687,7 +6960,7 @@ fn current_text_is_released_with_evicted_clean_content_and_reloaded_with_its_ide
     open(&mut s, Command::OpenRetained(fourth), "d.txt");
     assert!(weak.upgrade().is_none(), "eviction frees the actual indexed text");
     assert!(loaded.upgrade().is_none(), "admission must not turn evicted frontend data into a strong cache");
-    assert!(s.inactive_bytes() <= 900, "both representations share the budget");
+    assert!(s.inactive_bytes() <= budget, "retained source storage stays within the fixture budget");
     s.dispatch(Command::ActivateTab(tab));
     settle(&mut s, |s| s.state().view(tab).is_some());
     let current = s.state().view(tab).unwrap();
@@ -6771,7 +7044,7 @@ fn current_refresh_updates_split_compatibility_without_merging_view_positions_or
     let second = s.state().active().unwrap().id();
     s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(4) }));
     let second_position = s.state().selection();
-    settle(&mut s, |s| s.state().tabs().iter().all(|tab| tab.highlights().is_some()));
+    settle(&mut s, |s| s.state().tabs().iter().all(|tab| s.state().view(tab.id()).is_some_and(|view| view.highlights().is_some())));
     let previous = s.state().view(first).unwrap().snapshot().key();
     std::fs::write(&path, b"fn alpha() {}\nfn zeta() {}\n").unwrap();
     s.dispatch(Command::Reload);
@@ -6779,15 +7052,15 @@ fn current_refresh_updates_split_compatibility_without_merging_view_positions_or
     let left = s.state().view(first).unwrap();
     let right = s.state().view(second).unwrap();
     assert!(Arc::ptr_eq(left.snapshot(), right.snapshot()));
-    assert!(Arc::ptr_eq(left.tab().document().unwrap(), right.tab().document().unwrap()));
+    assert_eq!(left.tab().buffer, right.tab().buffer, "both views resolve the shared source identity");
     assert_eq!(left.copy_selection().as_deref(), Some("alpha"));
     assert_eq!(right.tab().selection(), second_position);
     assert_eq!(right.snapshot().copy_range(17..21).as_deref(), Some("zeta"));
-    assert_eq!(left.tab().document().unwrap().line(1), "fn zeta() {}");
-    assert!(left.tab().highlights().is_none() && right.tab().highlights().is_none(), "derived products from the previous version are not presented");
+    assert_eq!(source_line(left.snapshot(), 1), "fn zeta() {}");
+    assert!(left.highlights().is_none() && right.highlights().is_none(), "derived products from the previous version are not presented");
     let other = other.state().view(other.state().active().unwrap().id()).unwrap();
     assert_eq!(other.snapshot().copy_range(17..21).as_deref(), Some("beta"));
-    assert_eq!(other.tab().document().unwrap().line(0), "fn alpha() {}");
+    assert_eq!(source_line(other.snapshot(), 0), "fn alpha() {}");
 }
 
 #[test]

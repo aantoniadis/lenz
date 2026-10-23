@@ -7,6 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn copied_selection(state: &reader_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
+}
+
 fn config(dir: &Path) -> Config {
     Config {
         themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-reader"),
@@ -64,7 +68,7 @@ fn declaration_search_follows_a_coarse_checkout_through_keys() {
     assert!(text.contains("WatchOmega"), "{text}");
     assert!(!text.contains("WatchAlpha"));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    settle(&mut a, |a| a.session.state().selected_text() == Some("WatchOmega"));
+    settle(&mut a, |a| copied_selection(a.session.state()).as_deref() == Some("WatchOmega"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
 }
 #[test]
@@ -74,7 +78,7 @@ fn right_click_uses_the_shared_context_actions_and_left_click_selects_text() {
     std::fs::write(&path, "hello world\nsecond\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 100, 26);
     let p = &a.layout.panes[0];
     let (x, y) = (p.text.x, p.text.y);
@@ -113,7 +117,7 @@ fn right_click_uses_the_shared_context_actions_and_left_click_selects_text() {
         .collect();
     assert_eq!(actions, expected);
     assert!(!actions.contains(&CommandId::OpenFolder));
-    assert_eq!(a.session.state().selected_text(), Some("hello"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("hello"));
     draw(&mut a, 40, 12);
     let before = a.session.state().selection();
     click(&mut a, 0, 11);
@@ -134,7 +138,7 @@ fn top_bar_back_control_navigates_instead_of_opening_the_palette() {
     std::fs::write(&two, "two\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::OpenRetained(one.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::OpenRetained(two));
     settle(&mut a, |a| {
         a.session
@@ -170,7 +174,7 @@ fn context_menu_follows_the_clicked_split_and_preview_and_scrolls_in_tiny_frames
     std::fs::write(&markdown, "# Heading\n\nBody\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::OpenRetained(text.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.run(CommandId::SplitRight);
     a.dispatch(Command::OpenRetained(markdown));
     settle(&mut a, |a| {
@@ -178,7 +182,7 @@ fn context_menu_follows_the_clicked_split_and_preview_and_scrolls_in_tiny_frames
             .state()
             .active()
             .is_some_and(|t| t.source().ends_with("b.md"))
-            && a.session.state().document().is_some()
+            && a.session.state().current_source().is_some()
     });
     a.run(CommandId::MarkdownSource);
     settle(&mut a, |a| {
@@ -232,7 +236,7 @@ fn modal_input_is_isolated_and_reader_never_writes_sources() {
     std::fs::write(&path, "hello\nworld\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::Select(Selection { anchor: 0, head: 5 }));
     a.run(CommandId::GoToLine);
     key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
@@ -362,7 +366,7 @@ fn theme_chooser_wheel_and_header_keep_preview_and_modal_blocks_source_input() {
     std::fs::write(&path, source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::Select(Selection { anchor: 0, head: 5 }));
     let selection = a.session.state().selection();
     let original = a.session.state().palette().clone();
@@ -582,7 +586,7 @@ fn finder_and_find_use_real_core_workers() {
             .is_some_and(|s| !s.pending && !s.rows.is_empty())
     });
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     assert_eq!(a.session.state().active().unwrap().source(), path);
     assert_eq!(a.session.state().selection().unwrap().head, 7);
     a.run(CommandId::FindInFile);
@@ -641,7 +645,7 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
     std::fs::write(&path, "α界 z\nsecond\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = {
         let p = &a.layout.panes[0];
@@ -654,7 +658,7 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
         row: y,
         modifiers: KeyModifiers::NONE,
     }));
-    assert_eq!(a.session.state().selected_text(), Some("α界"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("α界"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("α界"));
     let before = a.session.state().selection();
@@ -672,7 +676,7 @@ fn horizontal_scroll_is_clamped_to_current_terminal_extents_after_input_and_resi
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     a.dispatch(Command::SetStickyScroll(false));
     draw(&mut a, 40, 10);
@@ -710,7 +714,7 @@ fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     a.dispatch(Command::SetStickyScroll(false));
     let view = a.session.state().view(a.session.state().active().unwrap().id()).unwrap();
@@ -735,7 +739,7 @@ fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection
     assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "E");
     click(&mut a, x + 3, y);
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: x + 6, row: y, modifiers: KeyModifiers::NONE }));
-    assert_eq!(a.session.state().selected_text(), Some("END"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("END"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("END"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -748,7 +752,7 @@ fn leading_zero_width_source_keeps_its_first_hit_after_resizing() {
     std::fs::write(&path, source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     for width in [80, 70, 80] {
         draw(&mut a, width, 20);
@@ -796,7 +800,7 @@ fn unicode_go_to_caret_repaints_after_native_overscroll_clamping() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(wrapped));
     a.dispatch(Command::SetStickyScroll(false));
     draw(&mut a, width, 36);
@@ -914,7 +918,7 @@ fn suppressed_zero_width_windows_keep_bounded_hits_and_exact_source_end() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     a.dispatch(Command::SetStickyScroll(false));
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -944,7 +948,7 @@ fn wrapped_continuation_whitespace_keeps_the_caret_on_its_clicked_row() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(true));
     a.dispatch(Command::SetStickyScroll(false));
     draw(&mut a, 28, 10);
@@ -965,7 +969,7 @@ fn unwrapped_end_then_up_starts_the_caret_at_the_visible_source_tail() {
         std::fs::write(&path, &source).unwrap();
         let mut a = app(dir.path());
         a.dispatch(Command::Open(path.clone()));
-        settle(&mut a, |a| a.session.state().document().is_some());
+        settle(&mut a, |a| a.session.state().current_source().is_some());
         a.dispatch(Command::SetSoftWrap(false));
         draw(&mut a, 80, 20);
         key(&mut a, KeyCode::End, KeyModifiers::NONE);
@@ -975,7 +979,7 @@ fn unwrapped_end_then_up_starts_the_caret_at_the_visible_source_tail() {
         let state = a.session.state();
         let view = state.view(state.active().unwrap().id()).unwrap();
         assert_eq!(view.snapshot().line_of(state.selection().unwrap().head), 99);
-        if shift { assert_eq!(state.selected_text(), Some("line099\n")); }
+        if shift { assert_eq!(copied_selection(state).as_deref(), Some("line099\n")); }
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 }
@@ -988,7 +992,7 @@ fn wrapped_end_then_up_reaches_unicode_tail_and_copies_absolute_source_bytes() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(true));
     a.dispatch(Command::SetStickyScroll(false));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(28, 10)).unwrap();
@@ -1053,7 +1057,7 @@ fn cold_horizontal_seek_completes_every_visible_long_line_without_starving_later
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     a.dispatch(Command::SetStickyScroll(false));
     draw(&mut a, 100, 50);
@@ -1087,7 +1091,7 @@ fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::SetSoftWrap(false));
     a.dispatch(Command::SetStickyScroll(false));
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
@@ -1101,7 +1105,7 @@ fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
     assert_eq!(escape, "[U+200D]");
     click(&mut a, x, y);
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: end, row: y, modifiers: KeyModifiers::NONE }));
-    assert_eq!(a.session.state().selected_text(), Some("\u{200D}"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("\u{200D}"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("\u{200D}"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -1114,18 +1118,18 @@ fn double_and_triple_click_select_word_and_group() {
     std::fs::write(&path, src).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = {
         let p = &a.layout.panes[0];
         (p.text.x + src.find("world").unwrap() as u16 + 2, p.text.y)
     };
-    let sel = |a: &App| a.session.state().selected_text().unwrap_or_default().to_string();
+    let sel = |a: &App| copied_selection(a.session.state()).unwrap_or_default();
     click(&mut a, x, y);
     click(&mut a, x, y);
     assert_eq!(sel(&a), "world");
     click(&mut a, x, y);
-    settle(&mut a, |a| a.session.state().selected_text().is_some_and(|t| t.len() > 5));
+    settle(&mut a, |a| copied_selection(a.session.state()).as_deref().is_some_and(|t| t.len() > 5));
     assert_eq!(sel(&a), "hello world");
     click(&mut a, x, y);
     assert_eq!(sel(&a), "", "a fourth click starts over");
@@ -1146,7 +1150,7 @@ fn split_tab_and_bookmark_shortcuts_reach_shared_state() {
     std::fs::write(&second, "other\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::OpenRetained(first.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     key(&mut a, KeyCode::Char('\\'), KeyModifiers::CONTROL);
     assert_eq!(
         a.session.state().split(),
@@ -1216,7 +1220,7 @@ fn project_search_results_preview_then_open_through_input() {
     });
     assert!(a.session.state().active().is_none());
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     assert_eq!(a.session.state().active().unwrap().source(), path);
     assert_eq!(a.session.state().selection().unwrap().range(), 6..12);
 }
@@ -1227,7 +1231,7 @@ fn path_validation_and_empty_independent_view_preserve_open_document() {
     std::fs::write(&path, "one").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.run(CommandId::OpenFolder);
     a.handle(Event::Paste("one.txt".into()));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -1253,7 +1257,7 @@ fn open_in_editor_starts_the_launch_and_compare_with_asks_for_the_other_side() {
     std::fs::write(dir.path().join("sub/two.txt"), "two").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some() && a.session.state().tree_rows().any(|r| &*r.name == "sub"));
+    settle(&mut a, |a| a.session.state().current_source().is_some() && a.session.state().tree_rows().any(|r| &*r.name == "sub"));
     a.run(CommandId::OpenInEditor);
     a.run(CommandId::OpenWithDefaultApp);
     assert_eq!(a.launched.len(), 2);
@@ -1287,7 +1291,7 @@ fn markdown_preview_selects_and_copies_rendered_text_without_source_selection() 
     std::fs::write(&path, "# Heading\n\nSome **bold** text.\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.run(CommandId::MarkdownSource);
     settle(&mut a, |a| {
         matches!(a.session.state().rendering(), Some(Rendering::Preview(_)))
@@ -1341,7 +1345,7 @@ fn terminal_shortcuts_wrap_toggle_preview_reorder_tabs_and_reverse_focus() {
     std::fs::write(&two, "two\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::OpenRetained(one));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::OpenRetained(two));
     settle(&mut a, |a| {
         a.session
@@ -1371,7 +1375,7 @@ fn long_single_line_markdown_preview_scrolls_within_block_and_clamps() {
     std::fs::write(&path, "word ".repeat(2_000)).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     key(
         &mut a,
         KeyCode::Char('v'),
@@ -1397,6 +1401,45 @@ fn long_single_line_markdown_preview_scrolls_within_block_and_clamps() {
     key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     draw(&mut a, 25, 8);
     assert_eq!(a.layout.panes[0].preview_top, 0);
+}
+
+#[test]
+fn markdown_preview_keeps_its_scroll_when_a_retained_tab_is_released_and_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let markdown = dir.path().join("cached-preview.md");
+    let other = dir.path().join("other.txt");
+    let source = "word ".repeat(2_000);
+    std::fs::write(&markdown, &source).unwrap();
+    std::fs::write(&other, "other source\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRetained(markdown.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    key(&mut a, KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    draw(&mut a, 60, 15);
+    key(&mut a, KeyCode::PageDown, KeyModifiers::NONE);
+    draw(&mut a, 60, 15);
+    let id = a.session.state().active().unwrap().id();
+    let pane = a.session.state().focused_pane();
+    let top = a.layout.panes[pane as usize].preview_top;
+    let first_byte = a.layout.panes[pane as usize].hits.first().unwrap().byte;
+    assert!(top > 0 && first_byte > 0, "fixture must be scrolled inside the long Markdown block");
+
+    a.dispatch(Command::OpenRetained(other.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.source() == other && tab.loaded()));
+    draw(&mut a, 60, 15);
+    assert!(a.session.state().tabs().iter().any(|tab| tab.id() == id && !tab.loaded()), "Markdown remains retained as an inactive released tab");
+    assert!(a.session.state().view(id).is_none(), "released text must not be exposed as a loaded view");
+
+    key(&mut a, KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.id() == id && tab.loaded())
+        && matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    draw(&mut a, 60, 15);
+    assert_eq!(a.session.state().focused_pane(), pane);
+    assert_eq!(a.layout.panes[pane as usize].preview_top, top, "cached Markdown resumes the same preview row");
+    assert_eq!(a.layout.panes[pane as usize].hits.first().unwrap().byte, first_byte, "the same rendered source position is visible");
+    assert_eq!(std::fs::read_to_string(markdown).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(other).unwrap(), "other source\n");
 }
 
 #[test]
@@ -1469,7 +1512,7 @@ fn hover_is_debounced_cancelled_and_uses_real_core_documentation_request() {
             .state()
             .provider()
             .is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
-            && a.session.state().active().unwrap().highlights().is_some()
+            && a.session.state().view(a.session.state().active().unwrap().id()).unwrap().highlights().is_some()
     });
     draw(&mut a, 100, 30);
     let at = source.find("helper").unwrap();
@@ -1535,14 +1578,14 @@ fn shifted_selection_head_stays_in_real_terminal_viewport() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 12);
     for _ in 0..30 {
         key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
         draw(&mut a, 80, 12);
     }
     let head = a.session.state().selection().unwrap().head;
-    let line = a.session.state().document().unwrap().line_of(head);
+    let line = a.session.state().current_source().unwrap().line_of(head);
     assert_eq!(line, 30);
     assert!(a.layout.panes[0].rows.iter().any(|(_, l, _)| *l == line));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -1556,7 +1599,7 @@ fn followed_rename_invalidates_source_context_hits_without_changing_text_version
     std::fs::write(&path, "relative-link target\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::OpenRetained(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
     let tab = a.session.state().active().unwrap().id();
@@ -1580,7 +1623,7 @@ fn hover_identifier_lookup_uses_bounded_current_snapshot_windows() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     let state = a.session.state();
     let view = state.view(state.active().unwrap().id()).unwrap();
     assert_eq!(view.linkable(1, 12_002), Some(12_000..12_006));
@@ -1611,15 +1654,15 @@ fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     let mut a = App::new(cfg, Some(root));
     a.dispatch(Command::Open(path.clone()));
     settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
-        && a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+        && a.session.state().active().is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 25, a.layout.panes[0].text.y);
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }));
     assert!(a.next_deadline().is_some());
-    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.hints().is_some()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.inlay_hints().is_some())));
     assert!(a.next_deadline().is_none(), "late hint layout invalidates the pending hover target");
     draw(&mut a, 80, 20);
-    let old_hints = Arc::downgrade(a.session.state().active().unwrap().hints().unwrap());
+    let old_hints = Arc::downgrade(a.session.state().view(a.session.state().active().unwrap().id()).unwrap().inlay_hints().unwrap());
     let (x, y) = (a.layout.panes[0].text.x + 24, a.layout.panes[0].text.y);
     a.dispatch(Command::SetInlayTypes(false));
     let before = a.session.state().selection();
@@ -1637,7 +1680,7 @@ fn source_hits_do_not_select_source_after_switching_to_markdown_preview() {
     std::fs::write(&path, "# Header\n\nBody\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 2, a.layout.panes[0].text.y);
     a.run(CommandId::MarkdownSource);
@@ -1656,7 +1699,7 @@ fn source_hits_are_invalidated_by_header_split_and_explorer_layout_changes() {
         let mut a = app(dir.path());
         a.dispatch(Command::OpenRoot(dir.path().to_path_buf()));
         a.dispatch(Command::Open(path.clone()));
-        settle(&mut a, |a| a.session.state().document().is_some());
+        settle(&mut a, |a| a.session.state().current_source().is_some());
         draw(&mut a, 100, 24);
         let (x, y) = (a.layout.panes[0].text.x + 2, a.layout.panes[0].text.y);
         match change {
@@ -1679,14 +1722,14 @@ fn folded_source_does_not_accept_hits_from_the_old_projection() {
     std::fs::write(&path, source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.folds().is_some()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y + 1);
     a.dispatch(Command::ToggleFold(0));
     let before = a.session.state().selection();
     click(&mut a, x, y);
     assert_eq!(a.session.state().selection(), before);
-    assert!(a.session.state().active().unwrap().visible().hidden(1));
+    assert!(a.session.state().view(a.session.state().active().unwrap().id()).unwrap().visible().hidden(1));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 
@@ -1699,7 +1742,7 @@ fn source_hits_wait_for_render_after_scrolling_or_resizing() {
         std::fs::write(&path, &source).unwrap();
         let mut a = app(dir.path());
         a.dispatch(Command::Open(path.clone()));
-        settle(&mut a, |a| a.session.state().document().is_some());
+        settle(&mut a, |a| a.session.state().current_source().is_some());
         draw(&mut a, 80, 20);
         let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
         match mode {
@@ -1725,16 +1768,16 @@ fn stale_source_geometry_cannot_target_reloaded_text() {
     std::fs::write(&path, "original content\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = {
         let pane = &a.layout.panes[0];
         (pane.text.x + 4, pane.text.y)
     };
-    let version = a.session.state().document().unwrap().version();
+    let version = a.session.state().current_source().unwrap().key().version;
     std::fs::write(&path, "replacement text\n").unwrap();
     a.run(CommandId::Reload);
-    settle(&mut a, |a| a.session.state().document().is_some_and(|d| d.version() != version));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|d| d.key().version != version));
     let before = a.session.state().selection();
     click(&mut a, x, y);
     assert_eq!(a.session.state().selection(), before);
@@ -1748,21 +1791,21 @@ fn a_drag_started_on_an_old_document_version_cannot_select_reloaded_text() {
     std::fs::write(&path, "original content\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 80, 20);
     let (x, y) = {
         let h = &a.layout.panes[0].hits[0];
         (h.x, h.y)
     };
     click(&mut a, x, y);
-    let version = a.session.state().document().unwrap().version();
+    let version = a.session.state().current_source().unwrap().key().version;
     std::fs::write(&path, "replaced\n").unwrap();
     a.run(CommandId::Reload);
     settle(&mut a, |a| {
         a.session
             .state()
-            .document()
-            .is_some_and(|d| d.version() != version)
+            .current_source()
+            .is_some_and(|d| d.key().version != version)
     });
     draw(&mut a, 80, 20);
     let selection = a.session.state().selection();
@@ -1794,7 +1837,7 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document() {
     std::fs::write(&settings, original).unwrap();
     let mut a = App::new(cfg, Some(dir.path().into()));
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
     let selected = a.session.state().selection();
     key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
@@ -1877,7 +1920,7 @@ fn navigation_shortcuts_cycle_scopes_and_keep_modal_input_isolated() {
     std::fs::write(&path, source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::Select(Selection { anchor: 0, head: 5 }));
     let selection = a.session.state().selection();
     let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
@@ -1941,7 +1984,7 @@ fn navigation_opens_syntactic_symbols_and_toggles_actions_through_events() {
         })
     });
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     assert_eq!(a.session.state().active().unwrap().source(), path);
     assert_eq!(
         a.session.state().selection().unwrap().head,
@@ -2078,7 +2121,7 @@ fn navigation_enhanced_keyboard_repeats_move_caret_and_modal_selection() {
     std::fs::write(&path, "line\n".repeat(100)).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 100, 26);
     let repeat = |a: &mut App, code| {
         a.handle(Event::Key(KeyEvent::new_with_kind(
@@ -2148,7 +2191,7 @@ fn popup_wheel_moves_visible_rows_without_changing_enter_target_or_document() {
     std::fs::write(&path, "hello\nworld\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.dispatch(Command::Select(Selection { anchor: 0, head: 5 }));
     let selection = a.session.state().selection();
     a.prompt(Prompt::Commands);
@@ -2187,7 +2230,7 @@ fn plain_arrow_keys_move_utf8_caret_and_keep_both_axes_visible() {
     std::fs::write(&path, &source).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     draw(&mut a, 40, 12);
     for (code, head) in [
         (KeyCode::Right, 2),
@@ -2201,8 +2244,8 @@ fn plain_arrow_keys_move_utf8_caret_and_keep_both_axes_visible() {
             a.session.state().selection(),
             Some(Selection { anchor: head, head }),
             "{code:?} lines {:?} {:?}",
-            a.session.state().document().unwrap().line_range(0),
-            a.session.state().document().unwrap().line_range(1)
+            a.session.state().current_source().unwrap().line_range(0),
+            a.session.state().current_source().unwrap().line_range(1)
         );
     }
     for _ in 0..50 {
@@ -2228,7 +2271,7 @@ fn plain_arrow_keys_move_utf8_caret_and_keep_both_axes_visible() {
     let line = a
         .session
         .state()
-        .document()
+        .current_source()
         .unwrap()
         .line_of(selection.head);
     assert_eq!(line, 30);
@@ -2248,7 +2291,7 @@ fn ctrl_e_opens_the_same_searchable_file_popup_as_find_files() {
     std::fs::write(&path, "recent\n").unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     key(&mut a, KeyCode::Char('e'), KeyModifiers::CONTROL);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Navigation);
     navigation_ready(&mut a);
@@ -2344,7 +2387,7 @@ fn plain_arrows_follow_visual_wrap_rows_and_skip_collapsed_source_lines() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.folds().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some()))
     });
     a.dispatch(Command::ToggleFold(0));
     draw(&mut a, 70, 12);
@@ -2354,7 +2397,7 @@ fn plain_arrows_follow_visual_wrap_rows_and_skip_collapsed_source_lines() {
     assert_eq!(
         a.session
             .state()
-            .document()
+            .current_source()
             .unwrap()
             .line_of(selection.head),
         4
@@ -2385,7 +2428,7 @@ fn plain_arrows_follow_visual_wrap_rows_and_skip_collapsed_source_lines() {
     assert_eq!(
         a.session
             .state()
-            .document()
+            .current_source()
             .unwrap()
             .line_of(selection.head),
         0
@@ -2495,7 +2538,7 @@ fn chrome_status_click_opens_copyable_snapshot_and_keeps_document_input_modal() 
     std::fs::write(&path, bytes).unwrap();
     let mut a = app(dir.path());
     a.dispatch(Command::Open(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     a.notice = Some("Adapter warning 界e\u{301} ".repeat(20) + "\nsecond diagnostic line");
     draw(&mut a, 100, 26);
     let before = a.session.state().selection();
@@ -2530,7 +2573,7 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
     let bytes = "first\nsecond\n";
     std::fs::write(&path, bytes).unwrap();
     let mut a = App::new(config(dir.path()), Some(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     let caret = a.session.state().selection();
     let kind = |a: &App| a.modal.as_ref().map(|m| m.kind.clone());
     let labels = |a: &App| a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>();
@@ -2698,7 +2741,7 @@ fn about_opens_from_the_application_menu_with_its_logo_and_closes_to_the_documen
     let path = dir.path().join("a.txt");
     std::fs::write(&path, "first\n").unwrap();
     let mut a = App::new(config(dir.path()), Some(path.clone()));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     let screen = |a: &mut App, w: u16, h: u16| {
         let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         terminal.draw(|f| a.draw(f)).unwrap();
@@ -2729,7 +2772,7 @@ fn about_opens_from_the_application_menu_with_its_logo_and_closes_to_the_documen
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.modal.is_none());
     assert_eq!(std::fs::read(&path).unwrap(), b"first\n");
-    assert!(a.session.state().document().is_some_and(|d| d.text().to_string() == "first\n"));
+    assert!(a.session.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap() == "first\n"));
 }
 
 /// An app on a git repository with `a.txt` (two lines) committed as "First line", annotated with Alt+B.
@@ -2741,7 +2784,7 @@ fn annotated_app() -> (tempfile::TempDir, App, String) {
     let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
     let mut a = app(r.path());
     a.dispatch(Command::Open(r.path().join("a.txt")));
-    settle(&mut a, |a| a.session.state().document().is_some());
+    settle(&mut a, |a| a.session.state().current_source().is_some());
     key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT);
     settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.annotation(1).is_some()));
     draw(&mut a, 100, 20);

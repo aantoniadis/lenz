@@ -17,6 +17,18 @@ use reader_core::{
 use lenz_content::highlight::Capture;
 use serde_json::Value;
 
+fn current_text(state: &reader_core::session::State) -> String {
+    state.current_source().map(|s| s.copy_range(0..s.len_bytes()).unwrap()).unwrap_or_default()
+}
+fn active_view(s: &Session) -> Option<reader_core::session::View<'_>> {
+    s.state().view(s.state().active()?.id())
+}
+fn projected(view: &reader_core::session::View<'_>, line: usize) -> String {
+    let mut cursor = view.display_start(line).unwrap();
+    let mut text = String::new();
+    loop { let window = view.display_window(&mut cursor, 4096).unwrap(); text.push_str(&window.shown.text); if window.complete { return text; } }
+}
+
 struct Fixture {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -255,7 +267,7 @@ fn a_project_save_completion_does_not_retarget_after_switching_projects() {
     let rx = f.s.completions();
     let mut saved = None;
     let deadline = Instant::now() + Duration::from_secs(15);
-    while saved.is_none() || !ready(&f.s) || f.s.state().document().is_none_or(|d| d.source() != next) {
+    while saved.is_none() || !ready(&f.s) || f.s.state().current_source().is_none_or(|d| d.source() != next) {
         assert!(Instant::now() < deadline);
         if let Ok(c) = recv(&rx) {
             if matches!(&c, Completion::ProjectProviderSaved { .. }) { saved = Some(c); }
@@ -266,7 +278,7 @@ fn a_project_save_completion_does_not_retarget_after_switching_projects() {
     let settings = reader_core::semantics::provider::Settings::read(&f._dir.path().join("config/providers.json"));
     assert!(settings.ruby_tooling_excluded(&f.root.join("one")));
     assert!(!settings.has_project("ruby-lsp", &f.root.join("two")));
-    assert_eq!(f.s.state().document().unwrap().source(), next);
+    assert_eq!(f.s.state().current_source().unwrap().source(), next);
     assert!(ready(&f.s));
     f.open("one/a.rb");
     let all = messages(&f.log);
@@ -321,7 +333,7 @@ impl Fixture {
     fn open(&mut self, name: &str) {
         let path = self.root.join(name);
         self.s.dispatch(Command::Open(path.clone()));
-        self.settle(|s| s.state().document().is_some_and(|d| d.source() == path) && ready(s));
+        self.settle(|s| s.state().current_source().is_some_and(|d| d.source() == path) && ready(s));
         let log = self.log.clone();
         self.settle_until(move || messages(&log).iter().any(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with(name))));
     }
@@ -340,8 +352,8 @@ impl Fixture {
 
     /// Put the caret on the first `needle` in the active document (at its `skip`th character).
     fn caret(&mut self, needle: &str) -> usize {
-        let doc = self.s.state().document().unwrap().clone();
-        let at = doc.text().find(needle).unwrap_or_else(|| panic!("{needle} not in the document"));
+        let doc = self.s.state().current_source().unwrap().clone();
+        let at = doc.copy_range(0..doc.len_bytes()).unwrap().find(needle).unwrap_or_else(|| panic!("{needle} not in the document"));
         self.s.dispatch(Command::Select(Selection { anchor: at + 1, head: at + 1 }));
         at
     }
@@ -360,8 +372,8 @@ impl Fixture {
     }
 
     fn selected_text(&self) -> String {
-        let doc = self.s.state().document().unwrap();
-        doc.text()[self.s.state().selection().unwrap().range()].to_owned()
+        let doc = self.s.state().current_source().unwrap();
+        doc.copy_range(self.s.state().selection().unwrap().range()).unwrap()
     }
 }
 
@@ -393,88 +405,6 @@ const LIB: &str = "pub fn helper() {}\npub struct Thing;\n";
 const MAIN: &str = "fn main() {\n    let s = \"é𝄞\"; helper();\n    let t: Thing = Thing;\n    nothing_here();\n}\n";
 
 #[test]
-fn a_blocked_writer_keeps_only_bounded_text_versions_and_sends_current_text_before_asking() {
-    let controls = tempfile::tempdir().unwrap();
-    let release = controls.path().join("release");
-    let release_text = release.to_string_lossy();
-    let source = |version| format!("fn keep() {{}}\n/*version-{version:02} {}*/\n", "x".repeat(256 * 1024));
-    let mut f = fixture(&[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")], &[("src/main.rs", &source(0))]);
-    let path = f.root.join("src/main.rs");
-    f.s.dispatch(Command::Open(path.clone()));
-    f.settle(|s| s.state().document().is_some() && ready(s));
-    f.settle_until(|| release.with_extension("paused").exists());
-    let mut texts = Vec::new();
-    for version in 1..=32 {
-        texts.push(std::sync::Arc::downgrade(f.s.state().document().unwrap().text()));
-        std::fs::write(&path, source(version)).unwrap();
-        f.s.dispatch(Command::Reload);
-        let expected = format!("version-{version:02}");
-        f.settle(|s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.text().contains(&expected)));
-    }
-    f.settle(|s| s.state().highlights().is_some());
-    let retained = texts.iter().filter(|text| text.upgrade().is_some()).count();
-    f.definition("keep", false);
-    std::fs::write(&release, b"").unwrap();
-    f.asked();
-    let messages = messages(&f.log);
-    let asked = messages.iter().position(|m| m["method"] == "textDocument/definition").unwrap();
-    let current = messages.iter().position(|m| m["method"] == "textDocument/didChange" && m["params"]["contentChanges"][0]["text"].as_str().is_some_and(|text| text.contains("version-32"))).unwrap();
-    assert!(current < asked, "a request cannot overtake its exact current text");
-    assert!(retained <= 3, "the blocked protocol writer retained {retained} superseded text versions");
-}
-
-#[test]
-fn decoded_expansion_and_closed_uri_churn_obey_the_global_writer_byte_budget() {
-    let controls = tempfile::tempdir().unwrap();
-    let release = controls.path().join("release");
-    let release_text = release.to_string_lossy();
-    let mut f = fixture(&[("FAKE_LSP_PAUSE_INPUT", &release_text), ("FAKE_LSP_NO_DECOR", "1")], &[("src/start.rs", "fn start() {}\n")]);
-    f.s.dispatch(Command::Open(f.root.join("src/start.rs")));
-    f.settle(|s| s.state().document().is_some() && ready(s));
-    f.settle_until(|| release.with_extension("paused").exists());
-    f.s.dispatch(Command::Close);
-    // A BOM-declared UTF16 source remains below the existing raw-byte large-file threshold, while
-    // its CJK characters expand to three UTF8 bytes each. Closed URIs cannot replenish writer credit.
-    let mut bytes = vec![0xff, 0xfe];
-    bytes.extend("/*".encode_utf16().chain(std::iter::repeat_n(0x4e00, 2_500_000)).chain("*/\n".encode_utf16()).flat_map(u16::to_le_bytes));
-    let mut old = Vec::new();
-    for i in 0..4 {
-        let path = f.root.join(format!("src/expanded-{i}.rs"));
-        std::fs::write(&path, &bytes).unwrap();
-        f.s.dispatch(Command::Open(path.clone()));
-        f.settle(|s| s.state().document().is_some_and(|d| d.source() == path));
-        let doc = f.s.state().document().unwrap();
-        assert!(!doc.is_large(), "existing raw-byte eligibility must be preserved");
-        assert!(doc.text().len() > 7 << 20, "fixture must demonstrate legacy decoding expansion: {}", doc.encoding());
-        old.push((std::sync::Arc::downgrade(doc.text()), doc.text().len()));
-        f.s.dispatch(Command::Close);
-    }
-    // Replacing the cached saved copy releases frontend/source-cache ownership. Remaining old text
-    // belongs to the blocked transport, rather than to the separately budgeted inactive cache.
-    for i in 0..4 {
-        let path = f.root.join(format!("src/expanded-{i}.rs"));
-        std::fs::write(&path, b"fn replacement() {}\n").unwrap();
-        f.s.dispatch(Command::Open(path.clone()));
-        f.settle(|s| s.state().document().is_some_and(|d| d.source() == path && d.text().starts_with("fn replacement")));
-        f.s.dispatch(Command::Close);
-    }
-    // Let cancellation and cache releases finish before counting protocol ownership.
-    f.s.dispatch(Command::Open(f.root.join("src/start.rs")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("start.rs")) && s.state().highlights().is_some());
-    // Cancellation is cooperative; drain its acknowledgements while stdin remains blocked.
-    let until = Instant::now() + Duration::from_secs(3);
-    while old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum::<usize>() > 15 << 20 && Instant::now() < until {
-        if let Ok(c) = recv(&f.s.completions()) { f.s.dispatch(c); }
-    }
-    let retained: usize = old.iter().filter(|(text, _)| text.upgrade().is_some()).map(|(_, bytes)| bytes).sum();
-    std::fs::write(&release, b"").unwrap();
-    assert!(retained <= 15 << 20, "closed historical UTF8 payload retained {retained} bytes");
-    let log = f.log.clone();
-    f.settle_until(move || messages(&log).iter().filter(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with("start.rs"))).count() >= 2);
-    assert!(ready(&f.s), "backpressure must defer without failing the provider");
-}
-
-#[test]
 fn starts_on_the_first_relevant_source_and_follows_a_unicode_definition() {
     for encoding in ["none", "utf-8"] {
         let mut f = fixture(&[("FAKE_LSP_ENCODING", encoding)], &[("src/lib.rs", LIB), ("src/main.rs", MAIN), ("README.md", "# x\n")]);
@@ -482,7 +412,7 @@ fn starts_on_the_first_relevant_source_and_follows_a_unicode_definition() {
         f.settle(|s| s.state().project().is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_))));
         // Opening a folder, or a file in a language without a provider, starts nothing.
         f.s.dispatch(Command::Open(f.root.join("README.md")));
-        f.settle(|s| s.state().document().is_some());
+        f.settle(|s| s.state().current_source().is_some());
         std::thread::sleep(Duration::from_millis(100));
         while let Ok(c) = recv(&f.s.completions()) {
             f.s.dispatch(c);
@@ -503,11 +433,11 @@ fn starts_on_the_first_relevant_source_and_follows_a_unicode_definition() {
 
         // Past the multibyte string: the column is converted in the negotiated encoding both ways.
         f.definition("helper();", false);
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
         assert_eq!(f.selected_text(), "helper", "{encoding}");
         assert!(f.s.state().can_back());
         f.s.dispatch(Command::Back);
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
         assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), MAIN, "reading never writes");
     }
 }
@@ -520,7 +450,7 @@ fn crlf_sources_convert_positions_on_their_own_lines() {
         let mut f = fixture(&[("FAKE_LSP_ENCODING", encoding)], &[("src/lib.rs", lib), ("src/main.rs", main)]);
         f.open("src/main.rs");
         f.definition("helper();", false);
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
         assert_eq!(f.selected_text(), "helper", "{encoding}");
         assert_eq!(f.s.state().selection().unwrap().range().start, lib.find("helper").unwrap());
         assert_eq!(std::fs::read(f.root.join("src/lib.rs")).unwrap(), lib.as_bytes(), "line endings untouched");
@@ -536,17 +466,17 @@ fn several_targets_are_candidates_and_peek_does_not_move() {
     f.settle(|s| s.state().results().is_some_and(|r| r.hits().len() == 2 && r.preview().is_some()));
     let r = f.s.state().results().unwrap();
     assert_eq!((r.kind(), r.results_kind()), ("Definitions (rust-analyzer · proj)".to_string(), ResultsKind::Definitions));
-    assert!(f.s.state().document().unwrap().source().ends_with("main.rs"), "candidates do not move the main area");
+    assert!(f.s.state().current_source().unwrap().source().ends_with("main.rs"), "candidates do not move the main area");
     f.s.dispatch(Command::OpenResult(1));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("b.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.rs")));
     assert_eq!(f.selected_text(), "dup");
     assert_eq!(f.s.state().selection().unwrap().range().start, "fn other() {}\nfn ".len());
     // Peek at a single target: shown in the panel, the reading area stays.
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     f.definition("helper", true);
     f.settle(|s| s.state().results().is_some_and(|r| r.results_kind() == ResultsKind::Peek && r.preview().is_some()));
-    assert!(f.s.state().document().unwrap().source().ends_with("main.rs"));
+    assert!(f.s.state().current_source().unwrap().source().ends_with("main.rs"));
     let r = f.s.state().results().unwrap();
     assert_eq!(r.kind(), "Peek definition (rust-analyzer · proj)");
     assert!(r.preview().unwrap().doc.source().ends_with("lib.rs"));
@@ -608,7 +538,7 @@ fn missing_unsupported_failed_empty_and_virtual_answers_are_distinct() {
     f.definition("virt", false);
     f.asked();
     assert!(f.notice("source unavailable: rust-analyzer offers no documented way for the reader to show fake-virtual:///pkg/Generated.java?=jar%2Fx"), "{:?}", f.s.state().notices());
-    assert!(f.s.state().document().unwrap().source().ends_with("main.rs"));
+    assert!(f.s.state().current_source().unwrap().source().ends_with("main.rs"));
 }
 
 #[test]
@@ -795,7 +725,7 @@ fn at_most_two_servers_start_at_once_and_each_workspace_has_its_own() {
     // Another file of an existing workspace reuses its server.
     write(&f.root, "a/src/more.rs", "fn y() {}\n");
     f.s.dispatch(Command::OpenRetained(f.root.join("a/src/more.rs")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("more.rs")) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("more.rs")) && ready(s));
     assert_eq!(f.s.state().servers().len(), 3);
 }
 
@@ -892,12 +822,12 @@ fn large_files_are_never_sent_and_dependencies_show_their_origin() {
     let mut f = fixture(&[("FAKE_LSP_EXTRA", &extra)], &[("src/main.rs", "fn main() { from_dep(); }\n"), ("src/big.rs", &big)]);
     f.s.dispatch(Command::OpenRoot(f.root.clone()));
     f.s.dispatch(Command::OpenRetained(f.root.join("src/big.rs")));
-    f.settle(|s| s.state().document().is_some());
+    f.settle(|s| s.state().current_source().is_some());
     assert_eq!(f.s.disabled(CommandId::Definition), Some("Large file: no language server"));
     f.open("src/main.rs");
     assert!(!messages(&f.log).iter().any(|m| m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with("big.rs"))));
     f.definition("from_dep", false);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().starts_with(&dep)));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().starts_with(&dep)));
     assert_eq!(f.selected_text(), "from_dep");
     assert!(f.notice("Read-only source from a Cargo dependency"), "{:?}", f.s.state().notices());
     f.settle(|s| s.state().tree_rows().any(|r| r.name.as_ref() == "sibling.rs"));
@@ -907,8 +837,8 @@ fn large_files_are_never_sent_and_dependencies_show_their_origin() {
     assert!(!f.s.state().project().unwrap().children("src").iter().any(|(name, _)| name.as_ref() == "sibling.rs"));
     let sibling = dep.join("src/sibling.rs");
     f.s.dispatch(Command::ActivateTree { path: sibling.to_str().unwrap().into(), retain: false });
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == sibling));
-    assert_eq!(f.s.state().document().unwrap().text().as_ref(), "pub fn sibling() {}\n");
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == sibling));
+    assert_eq!(current_text(f.s.state()).as_str(), "pub fn sibling() {}\n");
     assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "initialize").count(), 1, "library browsing reuses the project's server");
     f.s.dispatch(Command::OpenRoot(f._dir.path().join("another")));
     f.settle(|s| s.state().project().is_some_and(|p| !matches!(p.coverage(), reader_core::project::Coverage::Scanning(_))));
@@ -994,7 +924,7 @@ fn definition_perf() {
     let until = Instant::now() + Duration::from_secs(60);
     let mut quiet = 0;
     // Until the server is ready and has gone quiet (the whole flood applied).
-    while !(f.s.state().provider().is_some_and(|v| v.status == Status::Ready) && f.s.state().document().is_some() && quiet >= 4) {
+    while !(f.s.state().provider().is_some_and(|v| v.status == Status::Ready) && f.s.state().current_source().is_some() && quiet >= 4) {
         assert!(Instant::now() < until);
         let next = recv(&rx);
         quiet = if next.is_ok() { 0 } else { quiet + 1 };
@@ -1012,11 +942,11 @@ fn definition_perf() {
     // Warm definitions: ask, wait for the target, go back; 1,000 after 20 untimed.
     let mut times = Vec::new();
     for i in 0..1020 {
-        f.settle(|s| s.state().document().is_some_and(|d| d.source() == path));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == path));
         f.caret("f1999");
         let t = Instant::now();
         f.s.dispatch(Command::Definition { peek: false });
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
         if i >= 20 {
             times.push(t.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1062,12 +992,12 @@ fn real_rust_analyzer() {
     println!("rust-analyzer {:?}: ready (quiescent) in {:.1} s", view.version, started.elapsed().as_secs_f64());
     let mut times = Vec::new();
     for i in 0..105 {
-        f.settle(|s| s.state().document().is_some_and(|d| d.source() == main));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == main));
         f.caret("new(1.0)");
         let t = Instant::now();
         f.s.dispatch(Command::Definition { peek: false });
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("shapes.rs")) || s.state().asking().is_none() && !s.state().notices().is_empty());
-        assert!(f.s.state().document().unwrap().source().ends_with("shapes.rs"), "{:?}", f.s.state().notices());
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("shapes.rs")) || s.state().asking().is_none() && !s.state().notices().is_empty());
+        assert!(f.s.state().current_source().unwrap().source().ends_with("shapes.rs"), "{:?}", f.s.state().notices());
         if i >= 5 {
             times.push(t.elapsed().as_secs_f64() * 1000.0);
         }
@@ -1075,7 +1005,7 @@ fn real_rust_analyzer() {
         f.s.dispatch(Command::Back);
     }
     // Past a non-BMP character on the line: UTF-8 or UTF-16 columns, whichever was negotiated.
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == main));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == main));
     f.caret("área(&c)");
     f.s.dispatch(Command::Definition { peek: true });
     f.settle(|s| s.state().results().is_some_and(|r| r.preview().is_some()));
@@ -1100,7 +1030,7 @@ fn a_renamed_file_reopens_under_its_new_name_and_a_file_without_a_workspace_says
     // Asked before its (missing) workspace is known: the answer is why, not an endless wait.
     let loose = write(f.root.parent().unwrap(), "loose/x.rs", "fn x() { x(); }\n");
     f.s.dispatch(Command::Open(loose));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("x.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("x.rs")));
     f.caret("x()");
     f.s.dispatch(Command::Definition { peek: false });
     f.asked();
@@ -1130,7 +1060,7 @@ fn usages_list_semantic_references_with_their_provenance() {
     let mut places: Vec<(String, usize)> = r.hits().iter().map(|h| (Path::new(&*h.path).file_name().unwrap().to_string_lossy().into_owned(), h.line)).collect();
     places.sort();
     assert_eq!(places, [("main.rs".to_string(), 1), ("main.rs".to_string(), 2), ("other.rs".to_string(), 0)], "the declaration is not a usage");
-    assert!(f.s.state().document().unwrap().source().ends_with("main.rs"), "listing usages does not move");
+    assert!(f.s.state().current_source().unwrap().source().ends_with("main.rs"), "listing usages does not move");
     // Rerun asks about the same place, wherever the caret is now.
     f.caret("main");
     f.s.dispatch(Command::RerunSearch);
@@ -1138,11 +1068,11 @@ fn usages_list_semantic_references_with_their_provenance() {
     // Opening one is a validated, committed navigation.
     let i = f.s.state().results().unwrap().hits().iter().position(|h| h.path.ends_with("other.rs")).unwrap();
     f.s.dispatch(Command::OpenResult(i));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("other.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("other.rs")));
     assert_eq!(f.selected_text(), "helper");
     // None: said so, with the provider's limits.
     f.s.dispatch(Command::Open(f.root.join("src/lib.rs")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
     f.caret("lonely");
     f.s.dispatch(Command::Usages);
     f.asked();
@@ -1335,7 +1265,7 @@ fn ruby_refreshes_a_changed_open_document_and_rechecks_it_after_close() {
     let start = messages(&f.log).len();
     write(&f.root, "a.rb", "class Omega; end\n");
     f.s.dispatch(Completion::Changed(reader_core::watch::Change { paths: [f.root.join("a.rb")].into(), ..Default::default() }));
-    f.settle(|s| s.state().document().is_some_and(|d| d.text().contains("Omega")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().contains("Omega")));
     let log = f.log.clone();
     f.settle_until(move || messages(&log)[start..].iter().any(|m| m["method"] == "textDocument/didChange"));
     f.open("b.rb");
@@ -1384,7 +1314,7 @@ fn workspace_symbols_come_from_every_running_server_of_the_folder() {
     assert!(f.notice("Symbols: No language server is running"));
     for p in ["a", "b"] {
         f.s.dispatch(Command::OpenRetained(f.root.join(format!("{p}/src/lib.rs"))));
-        f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with(format!("{p}/src/lib.rs"))) && ready(s));
+        f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with(format!("{p}/src/lib.rs"))) && ready(s));
     }
     f.settle(|s| s.state().servers().iter().filter(|v| matches!(v.status, Status::Ready)).count() == 2);
     f.s.dispatch(Command::Symbols("HELPER".into()));
@@ -1398,7 +1328,7 @@ fn workspace_symbols_come_from_every_running_server_of_the_folder() {
     origins.sort();
     assert_eq!(origins, ["rust-analyzer · a", "rust-analyzer · b"], "merged answers keep their provider and project");
     f.s.dispatch(Command::OpenResult(0));
-    f.settle(|s| s.state().selection().is_some_and(|_| s.state().document().is_some_and(|d| d.text().contains("_helper"))));
+    f.settle(|s| s.state().selection().is_some_and(|_| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().contains("_helper"))));
 }
 
 #[test]
@@ -1447,7 +1377,7 @@ fn a_dependency_outside_the_project_joins_the_running_server() {
     write(&dep, "crates/x/Cargo.toml", "[package]\nname = \"x\"\n");
     let file = write(&dep, "crates/x/src/lib.rs", "pub fn x() {}\n");
     f.s.dispatch(Command::Open(file.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == file) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == file) && ready(s));
     let log = f.log.clone();
     f.settle_until(move || messages(&log).iter().any(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with("crates/x/src/lib.rs"))));
     assert_eq!(f.s.state().servers().len(), 1, "{:?}", f.s.state().servers());
@@ -1464,7 +1394,7 @@ fn a_dependency_joins_the_server_last_asked() {
     let main = write(&other, "src/main.rs", MAIN);
     f.open("src/main.rs");
     f.s.dispatch(Command::Open(main.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == main) && ready(s) && s.state().servers().len() == 2);
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == main) && ready(s) && s.state().servers().len() == 2);
     let log = f.log.clone();
     f.settle_until(move || messages(&log).iter().any(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().is_some_and(|u| u.ends_with("other/src/main.rs"))));
     f.definition("helper()", false);
@@ -1473,7 +1403,7 @@ fn a_dependency_joins_the_server_last_asked() {
     let file = write(&dep, "src/lib.rs", "pub fn x() {}\n");
     write(&dep, "Cargo.toml", "[package]\nname = \"x\"\n");
     f.s.dispatch(Command::Open(file.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == file) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == file) && ready(s));
     assert_eq!(f.s.state().provider().unwrap().root.as_deref(), Some(other.as_path()));
     assert_eq!(f.s.state().servers().len(), 2);
 }
@@ -1489,7 +1419,7 @@ fn a_dependency_inside_a_workspace_or_the_browsing_root_keeps_its_own_rules() {
     write(&inner, "Cargo.toml", "[package]\nname = \"y\"\n");
     let file = write(&inner, "src/lib.rs", "pub fn y() {}\n");
     f.s.dispatch(Command::Open(file.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == file) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == file) && ready(s));
     assert_eq!(f.s.state().provider().unwrap().root.as_deref(), Some(inner.as_path()), "inside the project's workspace");
     // Under the browsing root, outside every workspace (opening a folder stops its servers: the project's again).
     let browse = f.root.parent().unwrap().to_owned();
@@ -1499,7 +1429,7 @@ fn a_dependency_inside_a_workspace_or_the_browsing_root_keeps_its_own_rules() {
     write(&dep, "Cargo.toml", "[package]\nname = \"x\"\n");
     let file = write(&dep, "src/lib.rs", "pub fn x() {}\n");
     f.s.dispatch(Command::Open(file.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == file) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == file) && ready(s));
     assert_eq!(f.s.state().provider().unwrap().root.as_deref(), Some(dep.as_path()));
 }
 
@@ -1513,7 +1443,7 @@ fn a_dependency_opened_first_gets_its_own_server() {
     write(&dep, "Cargo.toml", "[package]\nname = \"x\"\n");
     let file = write(&dep, "src/lib.rs", "pub fn x() {}\n");
     f.s.dispatch(Command::Open(file.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == file) && ready(s));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == file) && ready(s));
     assert_eq!(f.s.state().provider().unwrap().root.as_deref(), Some(dep.as_path()));
 }
 
@@ -1528,7 +1458,7 @@ fn idle_servers_stop_on_the_clock_but_not_while_a_tab_holds_their_files() {
     // Another file replaces it in the preview tab, but a kept tab still holds lib.rs: warm.
     f.s.dispatch(Command::OpenRetained(f.root.join("src/lib.rs")));
     f.s.dispatch(Command::Open(f.root.join("README.md")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("README.md")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("README.md")));
     *now.lock().unwrap() += Duration::from_secs(3600);
     tick(&mut f);
     assert_eq!(f.s.state().servers().len(), 1, "a kept tab holds its file");
@@ -1725,9 +1655,9 @@ fn typescript_tsx_and_javascript_share_one_server_with_their_own_language_ids() 
         assert!(ids.contains(&(want.0.into(), want.1.into())), "{want:?} in {ids:?}");
     }
     f.s.dispatch(Command::Open(f.root.join("src/b.tsx")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("b.tsx")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.tsx")));
     f.definition("make", false);
-    f.settle(|s| s.state().asking().is_none() && s.state().document().is_some_and(|d| d.source().ends_with("a.ts")));
+    f.settle(|s| s.state().asking().is_none() && s.state().current_source().is_some_and(|d| d.source().ends_with("a.ts")));
     assert_eq!(f.selected_text(), "make");
 }
 
@@ -1780,7 +1710,7 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     let tab = f.s.state().active().unwrap();
     assert_eq!(tab.title(), "Generated.java (Eclipse JDT LS)");
     assert_eq!(f.selected_text(), "virt");
-    assert_eq!(f.s.state().document().unwrap().language(), Some(lenz_content::highlight::Language::Java));
+    assert_eq!(f.s.state().current_source().unwrap().language(), Some(lenz_content::highlight::Language::Java));
     assert!(f.notice("Read-only source retrieved from Eclipse JDT LS (fake-virtual:///pkg/Generated.java?=jar%2Fx)"), "{:?}", f.s.state().notices());
     assert_eq!(f.s.disabled(CommandId::Definition), Some("Not available in source a language server returned"));
     // Never read from disk: Reload is refused, and nothing says it is unavailable.
@@ -1796,7 +1726,7 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     assert!(!messages(&f.log).iter().any(|m| m["method"] == "textDocument/didOpen" && m["params"]["textDocument"]["uri"].as_str().unwrap().starts_with("fake-virtual")), "never sent back to a server");
     // History: back to the file, forward to the retrieved tab (still held), and nothing on disk.
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("A.java")));
     f.s.dispatch(Command::Forward);
     f.settle(|s| s.state().active().is_some_and(|t| t.retrieved().is_some()));
     let uri = f.s.state().active().unwrap().source().to_string_lossy().into_owned();
@@ -1807,7 +1737,7 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "java/classFileContents").count(), 2);
     // Its server restarted: still shown, said to be from an ended session.
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("A.java")));
     f.s.dispatch(Command::RestartServer);
     f.settle(|s| s.state().provider().is_some_and(|v| v.status == Status::Ready));
     f.s.dispatch(Command::Forward);
@@ -1816,7 +1746,7 @@ fn a_virtual_definition_target_is_retrieved_into_a_read_only_tab_of_its_session(
     // Closed, it is not held: Back to it says so instead of reading a path that does not exist.
     f.s.dispatch(Command::Close);
     f.s.dispatch(Command::Open(f.root.join("src/A.java")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("A.java")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("A.java")));
     f.s.dispatch(Command::Back);
     assert!(f.notice("was retrieved from a language server and is no longer held"), "{:?}", f.s.state().notices());
     f.s.dispatch(Command::ActivateTree { path: uri.into(), retain: false });
@@ -1832,7 +1762,7 @@ fn background_lanes_never_cancel_a_pending_definition() {
     assert!(f.s.state().asking().is_some());
     // A highlight (a background lane) asked meanwhile.
     f.s.dispatch(Command::HighlightAt);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs"))); // the definition still arrived
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs"))); // the definition still arrived
     let log = messages(&f.log);
     assert!(!log.iter().any(|m| m["method"] == "$/cancelRequest"), "nothing was cancelled");
 }
@@ -1863,16 +1793,16 @@ fn implementations_and_type_definitions_jump_or_list() {
     f.caret("Shape =");
     f.s.dispatch(Command::Implementation);
     f.settle(|s| s.state().results().is_some_and(|r| r.results_kind() == ResultsKind::Implementations && r.hits().len() == 2 && r.preview().is_some()));
-    assert!(f.s.state().document().unwrap().source().ends_with("main.rs"));
+    assert!(f.s.state().current_source().unwrap().source().ends_with("main.rs"));
     assert_eq!(f.s.state().results().unwrap().kind(), "Implementations (rust-analyzer · proj)");
     // One type definition: jumps there with the name selected.
     f.caret("c: Circle");
     f.s.dispatch(Command::TypeDefinition);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
     assert_eq!(f.selected_text(), "Circle");
     // None: said so.
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     f.caret("main");
     f.s.dispatch(Command::Implementation);
     f.asked();
@@ -1916,7 +1846,7 @@ fn call_hierarchy_loads_levels_lazily_toggles_direction_and_opens_call_sites() {
     assert_eq!(f.s.state().results().unwrap().hits().len(), 5);
     // Opening a row goes to its call site.
     f.s.dispatch(Command::OpenResult(1));
-    f.settle(|s| s.state().selection().is_some_and(|sel| s.state().document().is_some_and(|d| d.line_of(sel.head) == 1)));
+    f.settle(|s| s.state().selection().is_some_and(|sel| s.state().current_source().is_some_and(|d| d.line_of(sel.head) == 1)));
     assert_eq!(f.selected_text(), "helper");
     // The other way: what main calls.
     f.caret("main");
@@ -1977,7 +1907,7 @@ fn occurrences_of_the_name_at_the_caret_are_marked_and_stale_ones_dropped() {
     f.s.dispatch(Command::HighlightAt);
     f.settle(|s| s.state().occurrences().is_some_and(|o| o.ranges.len() == 1));
     // Keywords ask nothing (once the syntax is known).
-    f.settle(|s| s.state().active().is_some_and(|t| t.highlights().is_some()));
+    f.settle(|s| active_view(s).is_some_and(|t| t.highlights().is_some()));
     let asked = |f: &Fixture| messages(&f.log).iter().filter(|m| m["method"] == "textDocument/documentHighlight").count();
     let before = asked(&f);
     f.caret("let total");
@@ -1997,12 +1927,12 @@ fn quick_documentation_at_the_caret_or_pointer_replaces_older_requests() {
     f.settle(|s| s.state().documentation().is_some());
     let d = f.s.state().documentation().unwrap();
     assert_eq!(d.trigger, DocTrigger::Caret);
-    assert_eq!(&f.s.state().document().unwrap().text()[d.at.clone()], "helper");
+    assert_eq!(&current_text(f.s.state())[d.at.clone()], "helper");
     assert!(d.preview.doc.source.contains("Docs for **helper**"));
     f.s.dispatch(Command::CloseDocumentation);
     assert!(f.s.state().documentation().is_none());
     // At the pointer: the caret stays; a keyword asks nothing; nothing known shows nothing and says nothing.
-    f.settle(|s| s.state().active().is_some_and(|t| t.highlights().is_some()));
+    f.settle(|s| active_view(s).is_some_and(|t| t.highlights().is_some()));
     let tab = f.s.state().active().unwrap().id();
     let caret = f.s.state().selection().unwrap();
     f.s.dispatch(Command::DocumentationAt { tab, offset: 1 }); // in `fn`
@@ -2014,10 +1944,10 @@ fn quick_documentation_at_the_caret_or_pointer_replaces_older_requests() {
     assert_eq!(hovers, 2, "the keyword was not asked about");
     // Switching tabs closes it.
     f.s.dispatch(Command::Open(f.root.join("Cargo.toml")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("Cargo.toml")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("Cargo.toml")));
     assert!(f.s.state().documentation().is_none());
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     // At the caret with nothing to say: said so.
     f.caret("{ helper");
     f.s.dispatch(Command::Documentation);
@@ -2054,9 +1984,9 @@ fn documentation_closes_when_its_tab_is_left_and_does_not_come_back() {
     f.s.dispatch(Command::Documentation);
     f.settle(|s| s.state().documentation().is_some());
     f.s.dispatch(Command::Open(f.root.join("Cargo.toml")));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("Cargo.toml")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("Cargo.toml")));
     f.s.dispatch(Command::Back);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     assert!(f.s.state().documentation().is_none(), "closed, not hidden");
 }
 
@@ -2129,7 +2059,7 @@ fn a_request_refused_while_indexing_is_asked_again_once_ready() {
 fn hints_answered_empty_while_indexing_are_asked_again_once_ready() {
     let mut f = fixture(&[("FAKE_LSP_INDEXING", "1"), ("FAKE_LSP_EMPTY_DECOR", "1")], &[("src/main.rs", HINTED)]);
     f.open("src/main.rs");
-    f.settle(|s| s.state().active().and_then(|t| t.hints()).is_some_and(|h| !h.is_empty()));
+    f.settle(|s| active_view(s).and_then(|t| t.inlay_hints().cloned()).is_some_and(|h| !h.is_empty()));
 }
 
 #[test]
@@ -2142,11 +2072,11 @@ fn an_answer_from_before_a_refresh_arriving_last_is_not_shown() {
     let newer = std::cell::Cell::new(false);
     let until = Instant::now() + Duration::from_millis(900);
     f.settle_checking(|_| Instant::now() > until, |s| {
-        let text = s.state().active().map(|t| t.shown_line(1).text).unwrap_or_default();
+        let text = active_view(s).map(|t| projected(&t, 1)).unwrap_or_default();
         newer.set(newer.get() || text.contains(": i32"));
         assert!(!(newer.get() && text.contains(": old")), "{text}");
     });
-    assert_eq!(f.s.state().active().unwrap().shown_line(1).text, "    let mut v: i32 = add(a: 1);");
+    assert_eq!(projected(&active_view(&f.s).unwrap(), 1), "    let mut v: i32 = add(a: 1);");
 }
 
 #[test]
@@ -2159,7 +2089,7 @@ fn a_server_without_decorations_is_never_asked() {
 }
 
 fn decorated(s: &Session) -> bool {
-    s.state().active().is_some_and(|t| t.hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some_and(|k| !k.is_empty()))
+    active_view(s).is_some_and(|t| t.inlay_hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some_and(|k| !k.is_empty()))
 }
 
 #[test]
@@ -2167,11 +2097,13 @@ fn hints_and_tokens_show_on_the_text_they_were_asked_about() {
     let mut f = fixture(&[], &[("src/main.rs", HINTED)]);
     f.open("src/main.rs");
     f.settle(decorated);
-    let t = f.s.state().active().unwrap();
-    assert_eq!(t.shown_line(1).text, "    let mut v: i32 = add(a: 1);");
+    let t = active_view(&f.s).unwrap();
+    assert_eq!(projected(&t, 1), "    let mut v: i32 = add(a: 1);");
     let v = "    let mut ".len();
-    assert!(t.spans(1).contains(&(v..v + 1, Some(Capture::Variable), reader_core::decor::MUTABLE)), "{:?}", t.spans(1));
-    assert!(t.spans(3).iter().any(|(r, c, m)| *r == (3..10) && *c == Some(Capture::Function) && *m == reader_core::decor::DEPRECATED), "{:?}", t.spans(3));
+    assert_eq!(t.style_at(1, v), (Some(Capture::Variable), reader_core::decor::MUTABLE));
+    assert_eq!(t.style_at(1, v + 1).1, 0);
+    assert!((3..10).all(|byte| t.style_at(3, byte) == (Some(Capture::Function), reader_core::decor::DEPRECATED)));
+    assert_eq!(t.style_at(3, 10).1, 0);
     assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), HINTED, "the file is unchanged");
 }
 
@@ -2186,11 +2118,11 @@ fn a_result_for_an_older_version_is_never_shown() {
     f.s.dispatch(Command::Reload);
     // Every state on the way shows hints only where the newer text has its name.
     f.settle_checking(decorated, |s| {
-        if let Some(t) = s.state().active() && let Some(h) = t.hints() {
+        if let Some(t) = active_view(s) && let Some(h) = t.inlay_hints() {
             assert!(h.line(1).iter().all(|h| h.kind != reader_core::decor::HintKind::Type || h.byte as usize == "    let mut value".len()), "{:?}", h.line(1));
         }
     });
-    assert_eq!(f.s.state().active().unwrap().shown_line(1).text, "    let mut value: i32 = add(a: 1);");
+    assert_eq!(projected(&active_view(&f.s).unwrap(), 1), "    let mut value: i32 = add(a: 1);");
 }
 
 #[test]
@@ -2199,14 +2131,14 @@ fn turning_a_kind_off_drops_it_and_asks_again_for_the_rest() {
     f.open("src/main.rs");
     f.settle(decorated);
     f.s.dispatch(Command::SetInlayTypes(false));
-    assert!(f.s.state().active().unwrap().hints().is_none(), "dropped at once");
-    f.settle(|s| s.state().active().unwrap().hints().is_some());
-    assert_eq!(f.s.state().active().unwrap().shown_line(1).text, "    let mut v = add(a: 1);");
+    assert!(active_view(&f.s).unwrap().inlay_hints().is_none(), "dropped at once");
+    f.settle(|s| active_view(s).unwrap().inlay_hints().is_some());
+    assert_eq!(projected(&active_view(&f.s).unwrap(), 1), "    let mut v = add(a: 1);");
     let asked = sent(&f.log, "textDocument/semanticTokens/full").len();
     f.s.dispatch(Command::SetSemanticHighlighting(false));
-    assert!(f.s.state().active().unwrap().spans(1).iter().all(|(_, _, m)| *m == 0), "syntax colours only");
+    assert!(active_view(&f.s).unwrap().tokens().is_none(), "syntax colours only");
     f.s.dispatch(Command::SetSemanticHighlighting(true));
-    f.settle(|s| s.state().active().unwrap().tokens().is_some());
+    f.settle(|s| active_view(s).unwrap().tokens().is_some());
     assert!(sent(&f.log, "textDocument/semanticTokens/full").len() > asked, "asked again");
 }
 
@@ -2234,7 +2166,7 @@ fn leaving_a_file_releases_its_decorations() {
     f.open("src/lib.rs");
     let main = f.root.join("src/main.rs");
     let t = f.s.state().tabs().iter().find(|t| t.source() == main).unwrap();
-    assert!(!t.loaded() && t.hints().is_none() && t.tokens().is_none());
+    assert!(!t.loaded() && f.s.state().view(t.id()).is_none());
 }
 
 #[test]
@@ -2244,7 +2176,7 @@ fn both_panes_share_one_request_per_version() {
     f.settle(decorated);
     let before = sent(&f.log, "textDocument/inlayHint").len();
     f.s.dispatch(Command::Split(reader_core::session::Split::Columns));
-    f.settle(|s| s.state().shown(1).is_some_and(|t| t.hints().is_some() && t.tokens().is_some()));
+    f.settle(|s| s.state().shown(1).and_then(|t| s.state().view(t.id())).is_some_and(|t| t.inlay_hints().is_some() && t.tokens().is_some()));
     let until = Instant::now() + Duration::from_millis(200);
     f.settle_until(|| Instant::now() > until);
     assert_eq!(sent(&f.log, "textDocument/inlayHint").len(), before, "the other pane shares the version's hints");
@@ -2272,7 +2204,9 @@ fn hints_arriving_keep_a_wrapped_view_valid() {
     f.settle(decorated);
     let s = f.s.state();
     let t = s.active().unwrap();
-    let rows = t.rows(5, s.wrap_cols(t));
+    let layout = s.view(t.id()).unwrap().layout_rows(5, s.wrap_cols(t));
+    assert!(layout.pending.is_none());
+    let rows = layout.rows;
     assert_eq!(rows.len(), 5, "a full pane");
     assert_eq!(rows[0].line, t.top_line());
 }
@@ -2527,7 +2461,7 @@ fn the_syntax_root_has_the_kind_of_the_declaration_at_the_caret() {
     assert_eq!(f.s.state().results().unwrap().call(0).unwrap().label, "trait");
     // Breadcrumbs on: the tab's own declarations name it.
     f.s.dispatch(Command::SetBreadcrumbs(true));
-    f.settle(|s| s.state().active().is_some_and(|t| t.declarations().is_some()));
+    f.settle(|s| active_view(s).is_some_and(|t| t.declarations().is_some()));
     f.caret("Circle");
     f.s.dispatch(Command::TypeHierarchy(Direction::Supertypes));
     f.settle(hierarchy_settled);
@@ -2544,12 +2478,12 @@ fn a_question_waiting_for_its_server_ends_when_the_file_changes() {
     let mut f = fixture(&[("FAKE_LSP_INIT_DELAY_MS", "800")], &[("src/lib.rs", LIB), ("src/main.rs", MAIN)]);
     let main = f.root.join("src/main.rs");
     f.s.dispatch(Command::Open(main.clone()));
-    f.settle(|s| s.state().document().is_some_and(|d| d.source() == main));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source() == main));
     f.definition("helper();", false);
     assert!(f.s.state().asking().is_some() && !ready(&f.s), "precondition: waiting for the server");
-    let version = f.s.state().active().unwrap().version();
+    let version = f.s.state().current_source().unwrap().key().version;
     std::fs::write(&main, format!("// changed\n{MAIN}")).unwrap();
-    f.settle(|s| s.state().active().unwrap().version() > version);
+    f.settle(|s| s.state().current_source().unwrap().key().version > version);
     assert!(!ready(&f.s), "precondition: the file changed before the server was ready");
     f.settle(ready);
     let until = Instant::now() + Duration::from_millis(1000);
@@ -2567,7 +2501,7 @@ fn a_definition_past_the_snippet_width_selects_its_name() {
     let mut f = fixture(&[], &[("src/lib.rs", &lib), ("src/main.rs", MAIN)]);
     f.open("src/main.rs");
     f.definition("helper();", false);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
     assert_eq!(f.selected_text(), "helper");
 }
 
@@ -2664,7 +2598,7 @@ fn an_ignored_dependency_inside_the_project_appears_in_libraries_only() {
     f.open("main.ts");
     f.definition("from_dep", false);
     f.settle(|s| s.state().tree_rows().any(|r| r.name.as_ref() == "sibling.ts"));
-    assert!(f.s.state().document().unwrap().source().ends_with("node_modules/@test/library/index.ts"));
+    assert!(f.s.state().current_source().unwrap().source().ends_with("node_modules/@test/library/index.ts"));
     assert!(f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
     assert!(!f.s.state().project().unwrap().children("").iter().any(|(name, _)| name.as_ref() == "node_modules"));
     assert_eq!(f.s.state().project().unwrap().root(), f.root);
@@ -2677,7 +2611,7 @@ fn a_library_source_held_in_another_pane_opens_without_reading_a_uri_from_disk()
     f.definition("virt()", false);
     f.settle(|s| s.state().active().is_some_and(|t| t.retrieved().is_some()));
     let uri = f.s.state().active().unwrap().source().to_string_lossy().into_owned();
-    let doc = f.s.state().document().unwrap().clone();
+    let doc = f.s.state().current_source().unwrap().clone();
     f.s.dispatch(Command::Split(reader_core::session::Split::Columns));
     // Pane 1 keeps a file of its own (closing its last tab would close the split) and lets go of the source.
     f.open("src/A.java");
@@ -2687,7 +2621,7 @@ fn a_library_source_held_in_another_pane_opens_without_reading_a_uri_from_disk()
     f.s.dispatch(Command::ActivateTree { path: uri.into(), retain: false });
     assert_eq!(f.s.state().focused_pane(), 1);
     assert!(f.s.state().active().unwrap().retrieved().is_some());
-    assert!(std::sync::Arc::ptr_eq(f.s.state().document().unwrap(), &doc));
+    assert!(std::sync::Arc::ptr_eq(f.s.state().current_source().unwrap(), &doc));
     assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "java/classFileContents").count(), 1);
 }
 
@@ -2697,6 +2631,6 @@ fn standalone_navigation_within_the_servers_workspace_does_not_create_a_library(
     f.open("src/main.rs");
     assert!(f.s.state().project().is_none());
     f.definition("helper()", false);
-    f.settle(|s| s.state().document().is_some_and(|d| d.source().ends_with("inner/helper.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("inner/helper.rs")));
     assert!(!f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
 }

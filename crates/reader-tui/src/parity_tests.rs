@@ -11,6 +11,10 @@ use std::{
 
 use crate::app::App;
 
+fn copied_selection(state: &reader_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
+}
+
 fn config(base: &Path) -> Config {
     let providers = base.join("providers.json");
     std::fs::create_dir_all(base).unwrap();
@@ -66,9 +70,9 @@ fn snapshot(s: &State) -> Snapshot {
             .map(|t| (t.pane(), t.title(), t.retained()))
             .collect(),
         active: s.active().map(|t| t.title()),
-        text: s.document().map(|d| d.text().to_string()),
+        text: s.current_source().map(|d| d.copy_range(0..d.len_bytes()).unwrap()),
         selection: s.selection(),
-        selected: s.selected_text().map(str::to_owned),
+        selected: copied_selection(s),
         split: s.split(),
         pane: s.focused_pane(),
         wrap: s.soft_wrap(),
@@ -102,7 +106,7 @@ fn markdown_header_buttons_target_their_own_pane_and_respect_modals(cx: &mut Tes
                 loop {
                     gui.update(visual, |v, cx| v.poll(cx));
                     while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
-                    let ready = |s: &State| s.document().is_some() && (0..2).all(|pane| !matches!(s.shown(pane).and_then(|t| t.rendering()), Some(Rendering::Pending)));
+                    let ready = |s: &State| s.current_source().is_some() && (0..2).all(|pane| !s.shown(pane).is_some_and(|t| s.view(t.id()).is_some_and(|view| matches!(view.rendering(), Some(Rendering::Pending)))));
                     if gui.read_with(visual, |v, _| ready(v.session().state())) && ready(tui.session.state()) { break; }
                     assert!(Instant::now() < deadline);
                     std::thread::sleep(Duration::from_millis(2));
@@ -363,7 +367,7 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
             }
             let ready = |s: &State| {
                 s.loading().is_none()
-                    && s.document().is_some()
+                    && s.current_source().is_some()
                     && s.active()
                         .and_then(|t| t.find())
                         .is_none_or(|f| !f.pending())
@@ -386,7 +390,7 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
     visual.simulate_keystrokes("ctrl-a");
     key(&mut tui, KeyCode::Char('a'), KeyModifiers::CONTROL);
     settle(&mut visual, &mut tui);
-    assert_eq!(tui.session.state().selected_text(), Some(original));
+    assert_eq!(copied_selection(tui.session.state()).as_deref(), Some(original));
 
     // Both tab bars expose the same navigation, and actual right-clicks expose the same context actions.
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -649,7 +653,7 @@ fn gui_and_tui_server_runtime_repairs_produce_the_same_settings(cx: &mut TestApp
                         s.server_runtime()
                             .is_some_and(|m| m.message.contains("saved."))
                     } else {
-                        s.document().is_some()
+                        s.current_source().is_some()
                     }
                 };
                 if gui.read_with(visual, |v, _| done(v.session().state()))
@@ -740,7 +744,7 @@ fn workspace_reopens_from_tui_to_gui_and_back_with_real_input(cx: &mut TestAppCo
                 "workspace wait: {:?}, {:?}, {:?}",
                 app.session.state().loading(),
                 app.session.state().notices(),
-                app.session.state().document().map(|d| d.source())
+                app.session.state().current_source().map(|d| d.source())
             );
             if let Ok(c) = app.session.completions().try_recv() {
                 app.apply(c);
@@ -762,7 +766,7 @@ fn workspace_reopens_from_tui_to_gui_and_back_with_real_input(cx: &mut TestAppCo
         });
         key(app, KeyCode::Enter, KeyModifiers::NONE);
         wait(app, &|s| {
-            s.document().is_some_and(|d| d.source().ends_with(name))
+            s.current_source().is_some_and(|d| d.source().ends_with(name))
         });
     };
     open(&mut tui, "a.txt");
@@ -790,12 +794,12 @@ fn workspace_reopens_from_tui_to_gui_and_back_with_real_input(cx: &mut TestAppCo
         if gui.read_with(cx, |r, _| {
             r.session()
                 .state()
-                .document()
+                .current_source()
                 .is_some_and(|d| d.source().ends_with("b.txt"))
                 && r.session()
                     .state()
                     .shown(0)
-                    .is_some_and(|t| t.document().is_some())
+                    .is_some_and(|t| t.loaded())
         }) {
             break;
         }
@@ -838,7 +842,7 @@ fn workspace_reopens_from_tui_to_gui_and_back_with_real_input(cx: &mut TestAppCo
     }
     let mut tui = App::new(config(&base), Some(root.clone()));
     wait(&mut tui, &|s| {
-        s.document().is_some_and(|d| d.source().ends_with("a.txt"))
+        s.current_source().is_some_and(|d| d.source().ends_with("a.txt"))
     });
     assert_eq!(snapshot(tui.session.state()), changed);
     assert!(tui.tree_shown);
@@ -960,7 +964,7 @@ fn unified_name_search_replays_files_symbols_actions_caret_and_recents_in_both_a
     visual.simulate_keystrokes("enter");
     key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
     settle(&mut visual, &mut tui);
-    assert!(tui.session.state().document().is_some());
+    assert!(tui.session.state().current_source().is_some());
     visual.simulate_keystrokes("ctrl-alt-shift-n w r a p");
     key(
         &mut tui,
@@ -1151,7 +1155,7 @@ fn dependency_definitions_reveal_browsable_libraries_in_both_explorers(cx: &mut 
             for _ in 0..13 { visual.simulate_keystrokes("right"); tui.handle(Event::Key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE))); }
             visual.simulate_keystrokes("f12");
             tui.handle(Event::Key(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE)));
-            settle(&mut visual, &mut tui, &|s| s.document().is_some_and(|d| d.source() == target) && s.tree_rows().any(|r| r.name.as_ref() == "sibling.rs") && s.tree_rows().all(|r| !r.name.contains("loading")));
+            settle(&mut visual, &mut tui, &|s| s.current_source().is_some_and(|d| d.source() == target) && s.tree_rows().any(|r| r.name.as_ref() == "sibling.rs") && s.tree_rows().all(|r| !r.name.contains("loading")));
             let tree = |s: &State| s.tree_rows().map(|r| (r.depth, r.path.to_string(), r.name.to_string(), r.dir)).collect::<Vec<_>>();
             assert_eq!(gui.read_with(&visual, |v, _| tree(v.session().state())), tree(tui.session.state()));
             assert_eq!(tui.session.state().project().map(|p| p.root()), folder.then_some(root.as_path()));
@@ -1186,7 +1190,7 @@ fn dependency_definitions_reveal_browsable_libraries_in_both_explorers(cx: &mut 
             select(&mut visual, &mut tui, &dep.join("unopened/nested.rs"));
             visual.simulate_keystrokes("enter");
             tui.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
-            settle(&mut visual, &mut tui, &|s| s.document().is_some_and(|d| d.source().ends_with("nested.rs")));
+            settle(&mut visual, &mut tui, &|s| s.current_source().is_some_and(|d| d.source().ends_with("nested.rs")));
             assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
             // A menu owns input, including clicks on the explorer behind it.
             draw(&mut visual, &mut tui, 900., 500., 100, 30);
@@ -1194,8 +1198,8 @@ fn dependency_definitions_reveal_browsable_libraries_in_both_explorers(cx: &mut 
             tui.handle(Event::Key(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE)));
             visual.simulate_click(gpui::point(gpui::px(30.), gpui::px(60.)), gpui::Modifiers::default());
             tui.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: tui.layout.tree.x + 1, row: tui.layout.tree.y, modifiers: KeyModifiers::NONE }));
-            assert!(tui.session.state().document().unwrap().source().ends_with("nested.rs"));
-            assert!(gui.read_with(&visual, |v, _| v.session().state().document().unwrap().source().ends_with("nested.rs")));
+            assert!(tui.session.state().current_source().unwrap().source().ends_with("nested.rs"));
+            assert!(gui.read_with(&visual, |v, _| v.session().state().current_source().unwrap().source().ends_with("nested.rs")));
             visual.simulate_keystrokes("escape ctrl-shift-e end up");
             for (key, modifiers) in [(KeyCode::Esc, KeyModifiers::NONE), (KeyCode::Char('e'), KeyModifiers::CONTROL | KeyModifiers::SHIFT), (KeyCode::End, KeyModifiers::NONE), (KeyCode::Up, KeyModifiers::NONE)] { tui.handle(Event::Key(KeyEvent::new(key, modifiers))); }
             for (w, h, cols, rows) in [(280., 180., 35, 8), (70., 55., 8, 3), (900., 500., 100, 30)] { draw(&mut visual, &mut tui, w, h, cols, rows); }
@@ -1228,16 +1232,16 @@ fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: 
             terminal.draw(|f| tui.draw(f)).unwrap();
             if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
             assert!(Instant::now() < deadline, "adapters did not settle: GUI selection {:?}, TUI selection {:?}",
-                gui.read_with(visual, |v, _| v.session().state().selected_text().map(str::to_owned)),
-                tui.session.state().selected_text());
+                gui.read_with(visual, |v, _| copied_selection(v.session().state())),
+                copied_selection(tui.session.state()).as_deref());
             std::thread::sleep(Duration::from_millis(2));
         }
     };
-    settle(&mut visual, &mut tui, &|s| s.document().is_some());
+    settle(&mut visual, &mut tui, &|s| s.current_source().is_some());
     let at = src.find("world").unwrap() + 2;
     let (gx, gy) = gui.read_with(&visual, |v, _| v.text_point_of(at)).unwrap();
     let text = tui.layout.panes[0].text;
-    let selected = |s: &State| s.selected_text().unwrap_or_default().to_string();
+    let selected = |s: &State| copied_selection(s).unwrap_or_default();
     for clicks in 1..=3 {
         visual.simulate_event(gpui::MouseDownEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks, first_mouse: false });
         visual.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks });
@@ -1272,11 +1276,11 @@ fn gui_and_terminal_blame_through_their_menus_show_the_same_commit(cx: &mut Test
             gui.update(visual, |v, cx| v.poll(cx));
             while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
             if gui.read_with(visual, |v, _| done(v.session())) && done(&tui.session) { break; }
-            assert!(Instant::now() < deadline, "adapters did not settle: gui {} / tui {}", gui.read_with(visual, |v, _| { let s = v.session(); format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), t.document().map(|d| d.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) }), { let s = &tui.session; format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), t.document().map(|d| d.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) });
+            assert!(Instant::now() < deadline, "adapters did not settle: gui {} / tui {}", gui.read_with(visual, |v, _| { let s = v.session(); format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), s.state().view(t.id()).map(|view| view.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) }), { let s = &tui.session; format!("{:?} {:?} {}", s.state().active().map(|t| (t.annotation_cols(), t.annotation(0).map(|a| a.label), s.state().view(t.id()).map(|view| view.line_count()))), s.disabled(CommandId::AnnotateBlame), s.status_message()) });
             std::thread::sleep(Duration::from_millis(2));
         }
     };
-    settle(&mut visual, &mut tui, &|s| s.state().document().is_some());
+    settle(&mut visual, &mut tui, &|s| s.state().current_source().is_some());
     visual.update(|w, cx| { let _ = w.draw(cx); });
     terminal.draw(|f| tui.draw(f)).unwrap();
     // The same command from each adapter's application menu: its group, then its row.

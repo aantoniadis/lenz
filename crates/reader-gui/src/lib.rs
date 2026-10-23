@@ -317,12 +317,12 @@ struct SourceGeometry {
 
 impl SourceGeometry {
     fn new(view: &reader_core::session::View<'_>, reader: &ReaderView) -> Option<Self> {
-        if matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
+        if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
             || wanted_image(view).is_some() { return None; }
         let state = reader.session.state();
         Some(Self {
             font: reader.font.clone(), cursor: view.display_start(0)?, tab: view.tab().id(), visible: view.visible(),
-            declarations: view.tab().declarations_handle().cloned(),
+            declarations: view.declarations_handle().cloned(),
             top: (view.tab().top_line(), view.tab().top_row()), column: view.tab().column(),
             cols: state.wrap_cols(view.tab()), size: state.text_size(view.tab().pane()),
             breadcrumbs: state.breadcrumbs(), split: state.split(),
@@ -334,7 +334,7 @@ impl SourceGeometry {
 
     fn matches(&self, view: &reader_core::session::View<'_>, reader: &ReaderView) -> bool {
         let state = reader.session.state();
-        let declarations_match = match (self.declarations.as_ref(), view.tab().declarations_handle()) {
+        let declarations_match = match (self.declarations.as_ref(), view.declarations_handle()) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
@@ -347,7 +347,7 @@ impl SourceGeometry {
             && self.explorer == (reader.tree_shown && state.has_tree()) && self.results == state.results().is_some()
             && self.sticky == state.sticky_scroll() && self.annotation_cols == view.tab().annotation_cols()
             && self.layout == reader.layout && self.viewport == (reader.width.to_bits(), reader.height.to_bits(), reader.char_w.to_bits())
-            && !matches!(view.tab().rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
+            && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))
             && wanted_image(view).is_none()
     }
 }
@@ -2521,7 +2521,7 @@ impl ReaderView {
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
         let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
         let row = rows.get(at)?;
-        let (_, collapsed) = tab.fold_at(row.line)?;
+        let (_, collapsed) = view.fold_at(row.line)?;
         if row.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) { return Some(row.line); }
         let projected = self.ready_source_row(tab, row)?;
         if !row.last || !projected.complete() || !collapsed { return None; }
@@ -2545,7 +2545,7 @@ impl ReaderView {
     }
 
     fn marks(state: &reader_core::session::State, tab: &Tab, rows: usize) -> Vec<(usize, bool)> {
-        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| tab.fold_at(r.line).map(|(_, c)| (i, c))).collect())
+        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| view.fold_at(r.line).map(|(_, c)| (i, c))).collect())
     }
 
     /// The identifier a Ctrl-click at a window point would follow, when `held` and the pane shows text there.
@@ -2559,7 +2559,7 @@ impl ReaderView {
         if g.pane == state.focused_pane() && self.session.disabled(CommandId::Definition).is_some() {
             return None;
         }
-        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) || state.view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
+        if matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) || state.view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
             return None; // no text drawn
         }
         // The character under the pointer: the boundary nearest half a cell to its left starts it.
@@ -3386,7 +3386,8 @@ impl ReaderView {
         let state = self.session.state();
         let i = pane as usize;
         let shown = state.shown(pane);
-        let (Some(Rendering::Preview(p)), Some(tab), Some(doc)) = (shown.and_then(Tab::rendering), shown, shown.and_then(Tab::document)) else {
+        let source = shown.and_then(|tab| state.view(tab.id()));
+        let (Some(Rendering::Preview(p)), Some(tab), Some(doc)) = (source.as_ref().and_then(|v| v.rendering()), shown, source.as_ref().map(|v| v.snapshot())) else {
             self.markdown[i] = None; // its layout and textures go with it
             return None;
         };
@@ -3632,7 +3633,7 @@ impl ReaderView {
         for g in panes {
             let state = self.session.state();
             let Some(tab) = state.shown(g.pane) else { continue };
-            if g.rows == 0 || matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
+            if g.rows == 0 || matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
             let Some(view) = state.view(tab.id()) else { continue };
             if wanted_image(&view).is_some() || unshowable_image(&view).is_some() { continue; }
             let cols = state.wrap_cols(tab);
@@ -3735,7 +3736,7 @@ impl ReaderView {
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
         let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
-        if let Some((fold, true)) = tab.fold_at(r.line) && r.last && projected.complete() {
+        if let Some((fold, true)) = view.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
             row.text.push_str(PLACEHOLDER);
             row.bg.push((at + 1..at + PLACEHOLDER.len() - 1, lenz_content::theme::mix(palette.bg, palette.num_fg, 0.25)));
@@ -3779,7 +3780,7 @@ impl ReaderView {
     /// Current snapshot windows paired with authoritative logical rows.
     #[allow(clippy::type_complexity)]
     fn tab_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
-        if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
+        if matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
         let state = self.session.state();
         let Some(view) = state.view(tab.id()) else { return Default::default() };
         let mut out = Vec::new();
@@ -4173,7 +4174,7 @@ impl Render for ReaderView {
         for g in &mut panes {
             let state = self.session.state();
             let Some(t) = state.shown(g.pane) else { continue };
-            let text = state.view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+            let text = state.view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(state.view(t.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
             let w = t.annotation_cols() as f32 * self.char_w + 12.0;
             if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
                 g.ann = w;
@@ -4294,7 +4295,7 @@ impl Render for ReaderView {
             let markdown = self.preview_frame(g.pane, window, f32::from(g.text.size.width), g.rows, cx);
             let state = self.session.state();
             let tab = state.shown(g.pane);
-            let pending = matches!(tab.and_then(Tab::rendering), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
+            let pending = matches!(tab.and_then(|tab| state.view(tab.id())).and_then(|v| v.rendering()), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
             let unshowable = tab.and_then(|tab| state.view(tab.id())).and_then(|view| unshowable_image(&view));
             let (mut rows, decor) = match tab {
                 Some(t) if picture.is_none() && unshowable.is_none() => self.tab_rows(t, g.rows),
@@ -4365,7 +4366,7 @@ impl Render for ReaderView {
                     _ => None,
                 }).unwrap_or_default()
             }).collect());
-            let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| t.fold_at(line)).map(|(_, c)| c))).collect();
+            let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| state.view(t.id())).and_then(|v| v.fold_at(line)).map(|(_, c)| c))).collect();
             if g.pane == state.focused_pane() {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
@@ -4425,7 +4426,7 @@ impl Render for ReaderView {
         #[cfg(feature = "perf-probe")]
         if let Some(seconds) = probe::scroll_seconds()
             && frames.iter().any(|f| !f.rows.is_empty())
-            && (!probe::decor() || self.session.state().active().is_some_and(|t| t.hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some_and(|k| !k.is_empty())))
+            && (!probe::decor() || self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.inlay_hints().is_some_and(|h| !h.is_empty()) && v.tokens().is_some_and(|k| !k.is_empty())))
         {
             if probe::decor() && !probe::DECORATED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!("lenz-reader: decorated {:.1} ms", probe::START.get().map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0));
@@ -4433,11 +4434,11 @@ impl Render for ReaderView {
             if probe::frame(seconds) {
                 cx.quit();
             } else {
-                if probe::fold() && self.session.state().active().is_some_and(|t| t.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if probe::fold() && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     self.session.dispatch(Command::CollapseAll);
                 }
                 // One row further each frame (over collapsed regions), wrapping at the end.
-                let at_end = self.session.state().active().is_none_or(|t| { let v = t.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
+                let at_end = self.session.state().active().is_none_or(|t| { let Some(view) = self.session.state().view(t.id()) else { return true }; let v = view.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
                 self.session.dispatch(if at_end { Command::Scroll(0) } else { Command::ScrollRows(1) });
                 window.request_animation_frame();
             }

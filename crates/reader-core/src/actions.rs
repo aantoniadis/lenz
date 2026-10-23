@@ -88,7 +88,7 @@ impl Session {
 
     /// The Markdown toggle belongs to the file shown in this pane, including an unfocused pane.
     pub fn preview_control(&self, pane: u8) -> Option<Action> {
-        let tab = self.state().shown(pane).filter(|t| t.rendering().is_some())?;
+        let tab = self.state().shown(pane).filter(|t| self.state().view(t.id()).is_some_and(|v| v.rendering().is_some()))?;
         Some(Action {
             id: CommandId::MarkdownSource,
             label: if tab.markdown_source() { "Preview" } else { "Source" },
@@ -203,7 +203,7 @@ impl Session {
             CommandId::AnnotateBlame => Command::SetAnnotate(state.active().is_none_or(|t| t.blame.is_none())),
             CommandId::CloseAnnotations => Command::SetAnnotate(false),
             CommandId::CopyRevision => Command::CopyRevision,
-            CommandId::ShowCommit => match state.active().and_then(|t| Some((t.id(), t.document()?.line_of(t.selection()?.head)))) {
+            CommandId::ShowCommit => match state.active().and_then(|t| Some((t.id(), state.view(t.id())?.snapshot().line_of(t.selection()?.head)))) {
                 Some((tab, line)) => Command::ShowCommitAt { tab, line },
                 None => return CatalogAction::Disabled("No line is selected"),
             },

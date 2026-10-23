@@ -17,6 +17,18 @@ use reader_core::{
 };
 use serde_json::{Value, json};
 
+fn current_text(state: &reader_core::session::State) -> String {
+    state.current_source().map(|s| s.copy_range(0..s.len_bytes()).unwrap()).unwrap_or_default()
+}
+fn active_view(s: &Session) -> Option<reader_core::session::View<'_>> {
+    s.state().view(s.state().active()?.id())
+}
+fn projected(view: &reader_core::session::View<'_>, line: usize) -> String {
+    let mut cursor = view.display_start(line).unwrap();
+    let mut text = String::new();
+    loop { let window = view.display_window(&mut cursor, 4096).unwrap(); text.push_str(&window.shown.text); if window.complete { return text; } }
+}
+
 struct Real {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -115,23 +127,23 @@ impl Real {
         let path = self.root.join(name);
         self.s.dispatch(Command::OpenRoot(self.root.clone()));
         self.s.dispatch(Command::Open(path.clone()));
-        self.settle("ready", Duration::from_secs(180), |s| s.state().document().is_some_and(|d| d.source() == path) && s.state().provider().is_some_and(|v| v.status == Status::Ready));
+        self.settle("ready", Duration::from_secs(180), |s| s.state().current_source().is_some_and(|d| d.source() == path) && s.state().provider().is_some_and(|v| v.status == Status::Ready));
     }
 
     fn show(&mut self, name: &str) {
         let path = self.root.join(name);
         self.s.dispatch(Command::Open(path.clone()));
-        self.settle("open", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.source() == path));
+        self.settle("open", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.source() == path));
     }
 
     fn caret(&mut self, needle: &str, skip: usize) {
-        let at = self.s.state().document().unwrap().text().find(needle).unwrap_or_else(|| panic!("{needle}")) + skip;
+        let at = current_text(self.s.state()).find(needle).unwrap_or_else(|| panic!("{needle}")) + skip;
         self.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
     }
 
     fn selected(&self) -> String {
-        let doc = self.s.state().document().unwrap();
-        doc.text()[self.s.state().selection().unwrap().range()].to_owned()
+        let doc = self.s.state().current_source().unwrap();
+        doc.copy_range(self.s.state().selection().unwrap().range()).unwrap()
     }
 
     fn notices(&self) -> Vec<String> {
@@ -145,7 +157,7 @@ impl Real {
         let before = self.s.state().selection();
         self.s.dispatch(Command::Definition { peek: false });
         self.settle("definition", Duration::from_secs(60), |s| {
-            s.state().asking().is_none() && s.state().loading().is_none() && s.state().document().is_some() && (s.state().selection() != before || s.state().results().is_some() || !s.state().notices().is_empty())
+            s.state().asking().is_none() && s.state().loading().is_none() && s.state().current_source().is_some() && (s.state().selection() != before || s.state().results().is_some() || !s.state().notices().is_empty())
         });
         t.elapsed()
     }
@@ -153,7 +165,7 @@ impl Real {
     /// Ask for the definition at `needle` until it lands in `file`: early answers (a server still loading its
     /// project) may be empty or stop short, and must say so.
     fn definition_until(&mut self, needle: &str, skip: usize, file: &str) {
-        let shown = self.s.state().document().unwrap().source().to_owned();
+        let shown = self.s.state().current_source().unwrap().source().to_owned();
         let asked = Instant::now();
         loop {
             self.definition(needle, skip);
@@ -163,7 +175,7 @@ impl Real {
             assert!(self.notices().iter().any(|n| n.contains("may still be loading")), "{:?}", self.notices());
             assert!(asked.elapsed() < Duration::from_secs(30), "{:?}", self.notices());
             self.s.dispatch(Command::Open(shown.clone()));
-            self.settle("reopen", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.source() == shown));
+            self.settle("reopen", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.source() == shown));
             std::thread::sleep(Duration::from_millis(250));
         }
     }
@@ -171,21 +183,21 @@ impl Real {
     /// Ask for the definition at `needle` until it reaches a file whose path contains `fragment` (directly, or as
     /// a candidate then opened): early answers may come before the server has indexed that far.
     fn definition_into(&mut self, needle: &str, skip: usize, fragment: &str) {
-        let shown = self.s.state().document().unwrap().source().to_owned();
+        let shown = self.s.state().current_source().unwrap().source().to_owned();
         let asked = Instant::now();
         loop {
             self.definition(needle, skip);
             if let Some(i) = self.s.state().results().and_then(|r| r.hits().iter().position(|h| h.path.contains(fragment))) {
                 self.s.dispatch(Command::OpenResult(i));
-                self.settle("candidate", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.source().to_string_lossy().contains(fragment)));
+                self.settle("candidate", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.source().to_string_lossy().contains(fragment)));
             }
-            if self.s.state().document().unwrap().source().to_string_lossy().contains(fragment) {
+            if self.s.state().current_source().unwrap().source().to_string_lossy().contains(fragment) {
                 self.s.dispatch(Command::CloseResults);
                 return;
             }
             assert!(asked.elapsed() < Duration::from_secs(30), "{:?}", self.notices());
             self.s.dispatch(Command::Open(shown.clone()));
-            self.settle("reopen", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.source() == shown));
+            self.settle("reopen", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.source() == shown));
             std::thread::sleep(Duration::from_millis(250));
         }
     }
@@ -193,7 +205,7 @@ impl Real {
     fn back(&mut self, name: &str) {
         self.s.dispatch(Command::Back);
         let path = self.root.join(name);
-        self.settle("back", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.source() == path));
+        self.settle("back", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.source() == path));
     }
 
     fn usages(&mut self, needle: &str, skip: usize) -> Duration {
@@ -212,7 +224,7 @@ impl Real {
 }
 
 fn file_of(s: &Session) -> String {
-    s.state().document().unwrap().source().file_name().unwrap().to_string_lossy().into_owned()
+    s.state().current_source().unwrap().source().file_name().unwrap().to_string_lossy().into_owned()
 }
 
 fn percentile(samples: &mut [f64], p: f64) -> f64 {
@@ -265,11 +277,11 @@ fn real_pyright() {
         // Several stub declarations (overloads, platform variants) are candidates: open the first.
         println!("Pyright join candidates: {:?}", r.hits().iter().map(|h| (h.path.to_string(), h.line)).collect::<Vec<_>>());
         f.s.dispatch(Command::OpenResult(0));
-        f.settle("candidate", Duration::from_secs(10), |s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.source().to_string_lossy().contains("typeshed")));
+        f.settle("candidate", Duration::from_secs(10), |s| s.state().loading().is_none() && s.state().current_source().is_some_and(|d| d.source().to_string_lossy().contains("typeshed")));
         f.s.dispatch(Command::CloseResults);
     }
-    println!("join: {:?} {:?}", f.s.state().document().unwrap().source(), f.notices());
-    assert!(f.s.state().document().unwrap().source().to_string_lossy().contains("typeshed"), "{:?}", f.s.state().document().unwrap().source());
+    println!("join: {:?} {:?}", f.s.state().current_source().unwrap().source(), f.notices());
+    assert!(f.s.state().current_source().unwrap().source().to_string_lossy().contains("typeshed"), "{:?}", f.s.state().current_source().unwrap().source());
     assert!(f.notices().iter().any(|n| n == "Read-only source from Pyright's bundled type stubs"), "{:?}", f.notices());
     f.back("app.py");
     // Usages of `make`, asked at its declaration: both calls and the import, not the definition itself.
@@ -311,7 +323,7 @@ fn real_pyright() {
     // An external edit: the server answers about the new text.
     std::fs::write(f.root.join("app.py"), format!("# moved down\r\n{PY_APP}")).unwrap();
     f.show("app.py");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("# moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("# moved")));
     f.definition("make(1.0)", 0);
     assert_eq!((file_of(&f.s), f.selected()), ("geometry.py".to_string(), "make".to_string()), "{:?}", f.notices());
     f.back("app.py");
@@ -452,10 +464,10 @@ fn real_typescript() {
     f.definition("max(", 0);
     if f.s.state().results().is_some() {
         f.s.dispatch(Command::OpenResult(0));
-        f.settle("candidate", Duration::from_secs(10), |s| s.state().loading().is_none() && s.state().document().is_some_and(|d| d.source().to_string_lossy().contains("lib.")));
+        f.settle("candidate", Duration::from_secs(10), |s| s.state().loading().is_none() && s.state().current_source().is_some_and(|d| d.source().to_string_lossy().contains("lib.")));
         f.s.dispatch(Command::CloseResults);
     }
-    println!("Math.max: {:?} {:?}", f.s.state().document().unwrap().source(), f.notices());
+    println!("Math.max: {:?} {:?}", f.s.state().current_source().unwrap().source(), f.notices());
     assert!(f.notices().iter().any(|n| n == "Read-only source from TypeScript's library declarations"), "{:?}", f.notices());
     f.back("src/app.ts");
     // TSX and JavaScript files: the same server.
@@ -523,7 +535,7 @@ fn real_typescript() {
     // An external edit.
     std::fs::write(f.root.join("src/app.ts"), format!("// moved\r\n{TS_APP}")).unwrap();
     f.show("src/app.ts");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("// moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("// moved")));
     f.definition("make(2)", 0);
     assert_eq!((file_of(&f.s), f.selected()), ("geometry.ts".into(), "make".into()), "{:?}", f.notices());
     f.back("src/app.ts");
@@ -603,7 +615,7 @@ fn real_typescript_go() {
         f.settle("candidate", Duration::from_secs(10), |s| s.state().loading().is_none());
         f.s.dispatch(Command::CloseResults);
     }
-    println!("Math.max: {:?} {:?}", f.s.state().document().map(|d| d.source().to_owned()), f.notices());
+    println!("Math.max: {:?} {:?}", f.s.state().current_source().map(|d| d.source().to_owned()), f.notices());
     assert!(f.notices().iter().any(|n| n == "Read-only source from TypeScript's library declarations"), "{:?}", f.notices());
     f.show("src/view.tsx");
     f.definition("make(1)", 0);
@@ -638,7 +650,7 @@ fn real_typescript_go() {
     f.s.dispatch(Command::CloseResults);
     std::fs::write(f.root.join("src/app.ts"), format!("// moved\r\n{TS_APP}")).unwrap();
     f.show("src/app.ts");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("// moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("// moved")));
     f.definition("make(2)", 0);
     assert_eq!((file_of(&f.s), f.selected()), ("geometry.ts".into(), "make".into()), "{:?}", f.notices());
     f.back("src/app.ts");
@@ -753,7 +765,7 @@ fn real_jdtls() {
     assert!(tab.retrieved().is_some_and(|v| v.uri.starts_with("jdt://")), "{:?}", f.notices());
     assert!(tab.title().starts_with("PrintStream") && tab.title().ends_with("(Eclipse JDT LS)"));
     assert_eq!(f.selected(), "println");
-    assert!(f.s.state().document().unwrap().text().contains("class PrintStream"));
+    assert!(current_text(f.s.state()).contains("class PrintStream"));
     f.back("src/App.java");
     // Usages of `make`, asked at its declaration.
     f.show("src/geo/Circulo.java");
@@ -775,7 +787,7 @@ fn real_jdtls() {
     // An external edit.
     std::fs::write(f.root.join("src/App.java"), format!("// moved\r\n{JAVA_APP}")).unwrap();
     f.show("src/App.java");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("// moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("// moved")));
     f.definition_until("make(2)", 0, "Circulo.java");
     f.back("src/App.java");
     let mut defs = Vec::new();
@@ -874,7 +886,7 @@ fn real_css() {
     f.definition("var(--café)", 6);
     assert_eq!(f.selected(), "--café");
     f.definition("spin 1s", 1);
-    assert_eq!(f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head), 5);
+    assert_eq!(f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head), 5);
     f.usages("--accent:", 3);
     // The declaration comes too (the server ignores `includeDeclaration: false`).
     assert_eq!(places(&f.s), [("style.css".into(), 1), ("style.css".into(), 4), ("style.css".into(), 6)]);
@@ -888,9 +900,9 @@ fn real_css() {
     assert!(f.notices().iter().any(|n| n.contains("VS Code CSS found no definition")), "{:?}", f.notices());
     // An external edit: the new text is what it answers about.
     std::fs::write(f.root.join("site/style.css"), format!("/* moved */\n\n{CSS}")).unwrap();
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("/* moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("/* moved")));
     f.definition("--accent);", 3);
-    assert_eq!(f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head), 3);
+    assert_eq!(f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head), 3);
     let mut warm = Vec::new();
     for i in 0..105 {
         let t = f.definition("--accent);", 3).as_secs_f64() * 1000.0;
@@ -921,7 +933,7 @@ fn real_html() {
     // A function in the page's script, called after a non-ASCII name.
     f.definition("greet(é)", 1);
     assert_eq!((file_of(&f.s), f.selected()), ("index.html".into(), "greet".into()));
-    assert_eq!(f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head), 5);
+    assert_eq!(f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head), 5);
     f.usages("greet(name)", 1);
     // The declaration and both calls (the server ignores `includeDeclaration: false`).
     assert_eq!(places(&f.s), [("index.html".into(), 5), ("index.html".into(), 6), ("index.html".into(), 6)]);
@@ -960,7 +972,7 @@ fn real_web_without_node() {
     f.settle("missing", Duration::from_secs(10), |s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Missing(_))));
     let Status::Missing(why) = f.s.state().provider().unwrap().status else { unreachable!() };
     assert!(why.contains("VS Code's built-in server") && why.contains("needs Node.js"), "{why}");
-    assert!(f.s.state().document().unwrap().text().starts_with(":root"));
+    assert!(current_text(f.s.state()).starts_with(":root"));
 }
 
 /// The files under `root`, relative and sorted.
@@ -1034,7 +1046,7 @@ fn real_ruby() {
     let asked = Instant::now();
     loop {
         f.definition("Invoice.new", 1);
-        if f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head) == 1 {
+        if f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head) == 1 {
             break;
         }
         assert!(asked.elapsed() < Duration::from_secs(30), "{:?}", f.notices());
@@ -1057,12 +1069,12 @@ fn real_ruby() {
     f.show("lib/app.rb");
     std::fs::write(f.root.join("lib/shapes.rb"), format!("# moved\n\n{RB_SHAPES}")).unwrap();
     f.show("lib/shapes.rb");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("# moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("# moved")));
     f.show("lib/app.rb");
     let moved = Instant::now();
     loop {
         f.definition("Círculo.new(2)", 1);
-        if f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head) == 5 {
+        if f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head) == 5 {
             break;
         }
         assert!(moved.elapsed() < Duration::from_secs(30), "{:?}", f.notices());
@@ -1188,12 +1200,12 @@ fn real_kotlin() {
     // An external edit moves the function.
     std::fs::write(f.root.join("src/main/kotlin/geo/Shapes.kt"), format!("// moved\n\n{KT_SHAPES}")).unwrap();
     f.show("src/main/kotlin/geo/Shapes.kt");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("// moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("// moved")));
     f.show("src/main/kotlin/geo/Main.kt");
     let moved = Instant::now();
     loop {
         f.definition("make(2.0)", 1);
-        if file_of(&f.s) == "Shapes.kt" && f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head) == 8 {
+        if file_of(&f.s) == "Shapes.kt" && f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head) == 8 {
             break;
         }
         assert!(moved.elapsed() < Duration::from_secs(30), "{:?}", f.notices());
@@ -1288,7 +1300,7 @@ fn real_kotlin_only_restart_no_build_and_missing() {
     std::thread::sleep(Duration::from_secs(3));
     // Within the file it still resolves; across files it does not, and says so with its limits.
     f.definition("loose()\n", 1);
-    assert_eq!((file_of(&f.s), f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head)), ("Loose.kt".into(), 0));
+    assert_eq!((file_of(&f.s), f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head)), ("Loose.kt".into(), 0));
     f.show("plain/Use.kt");
     std::thread::sleep(Duration::from_secs(3));
     f.definition("loose()", 1);
@@ -1300,7 +1312,7 @@ fn real_kotlin_only_restart_no_build_and_missing() {
     g.settle("missing", Duration::from_secs(10), |s| s.state().provider().is_some_and(|v| matches!(v.status, Status::Missing(_))));
     let Status::Missing(why) = g.s.state().provider().unwrap().status else { unreachable!() };
     assert!(why.contains("Install JetBrains' standalone Kotlin LSP"), "{why}");
-    assert!(g.s.state().document().unwrap().text().starts_with("package geo"), "reading goes on");
+    assert!(current_text(g.s.state()).starts_with("package geo"), "reading goes on");
 }
 
 const RS_FILES: [(&str, &str); 6] = [
@@ -1353,7 +1365,7 @@ fn real_rust() {
     // Into the standard library (rust-src), with its origin.
     f.show("app/src/main.rs");
     f.definition("Vec::new", 6);
-    assert!(f.s.state().document().unwrap().source().to_string_lossy().contains("/rustlib/src/"), "{:?}", f.s.state().document().map(|d| d.source().to_owned()));
+    assert!(f.s.state().current_source().unwrap().source().to_string_lossy().contains("/rustlib/src/"), "{:?}", f.s.state().current_source().map(|d| d.source().to_owned()));
     assert!(f.notices().iter().any(|n| n == "Read-only source from the Rust standard library"), "{:?}", f.notices());
     // The project's server answers there: no server of its own for the standard library's workspace.
     f.s.dispatch(Command::FileSymbols);
@@ -1362,7 +1374,7 @@ fn real_rust() {
     f.s.dispatch(Command::CloseResults);
     // Understood, not only parsed: a definition from there into another standard-library file.
     f.definition("buf: RawVec<T, A>", 5);
-    assert!(f.s.state().document().unwrap().source().to_string_lossy().contains("/raw_vec"), "{:?} {:?}", f.s.state().document().map(|d| d.source().to_owned()), f.notices());
+    assert!(f.s.state().current_source().unwrap().source().to_string_lossy().contains("/raw_vec"), "{:?} {:?}", f.s.state().current_source().map(|d| d.source().to_owned()), f.notices());
     assert_eq!(f.s.state().servers().len(), 1, "{:?}", f.s.state().servers());
     f.show("app/src/main.rs");
     f.usages("make(2.0)", 1);
@@ -1379,12 +1391,12 @@ fn real_rust() {
     // An external edit moves the function.
     std::fs::write(f.root.join("shapes/src/lib.rs"), format!("// moved\n\n{}", RS_FILES[2].1)).unwrap();
     f.show("shapes/src/lib.rs");
-    f.settle("refresh", Duration::from_secs(10), |s| s.state().document().is_some_and(|d| d.text().starts_with("// moved")));
+    f.settle("refresh", Duration::from_secs(10), |s| s.state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap().starts_with("// moved")));
     f.show("app/src/main.rs");
     let moved = Instant::now();
     loop {
         f.definition("make(2.0)", 1);
-        if file_of(&f.s) == "lib.rs" && f.s.state().document().unwrap().line_of(f.s.state().selection().unwrap().head) == 12 {
+        if file_of(&f.s) == "lib.rs" && f.s.state().current_source().unwrap().line_of(f.s.state().selection().unwrap().head) == 12 {
             break;
         }
         assert!(moved.elapsed() < Duration::from_secs(30), "{:?}", f.notices());
@@ -1503,14 +1515,14 @@ fn real_rust_analyzer_decorations() {
     let mut f = real("rust-analyzer", &exe, path.as_deref(), &[("Cargo.toml", "[package]\nname = \"p\"\nedition = \"2021\"\n"), ("src/main.rs", main)]);
     f.open_ready("src/main.rs");
     let v = "    let mut ".len();
-    let mutable = move |t: &reader_core::tabs::Tab| t.spans(1).iter().any(|(r, _, m)| r.start == v && m & reader_core::decor::MUTABLE != 0);
+    let mutable = move |t: &reader_core::session::View<'_>| t.style_at(1, v).1 & reader_core::decor::MUTABLE != 0;
     // Answers made while it loads may lack the semantics; the final ones (asked again once ready) have them.
-    f.settle("decorations", Duration::from_secs(120), |s| s.state().active().is_some_and(|t| t.hints().is_some_and(|h| h.len() >= 2) && mutable(t)));
-    let t = f.s.state().active().unwrap();
-    println!("line 1: {}\nline 3: {}", t.shown_line(1).text, t.shown_line(3).text);
-    assert!(t.shown_line(1).text.contains("v: Vec<i32"), "{}", t.shown_line(1).text);
-    assert!(t.shown_line(3).text.contains("count: 5"), "{}", t.shown_line(3).text);
-    println!("hints {} ({} B), tokens {} ({} B)", t.hints().unwrap().len(), t.hints().unwrap().bytes(), t.tokens().unwrap().len(), t.tokens().unwrap().bytes());
+    f.settle("decorations", Duration::from_secs(120), |s| active_view(s).is_some_and(|t| t.inlay_hints().is_some_and(|h| h.len() >= 2) && mutable(&t)));
+    let t = active_view(&f.s).unwrap();
+    println!("line 1: {}\nline 3: {}", projected(&t, 1), projected(&t, 3));
+    assert!(projected(&t, 1).contains("v: Vec<i32"), "{}", projected(&t, 1));
+    assert!(projected(&t, 3).contains("count: 5"), "{}", projected(&t, 3));
+    println!("hints {} ({} B), tokens {} ({} B)", t.inlay_hints().unwrap().len(), t.inlay_hints().unwrap().bytes(), t.tokens().unwrap().len(), t.tokens().unwrap().bytes());
 }
 
 #[test]
@@ -1564,7 +1576,7 @@ fn jdtls_on_a_build_project(build: (&str, &str), dir: &str) {
     f.definition_until("Circle()", 0, "Circle.java");
     println!("definition after {:.1} s", started.elapsed().as_secs_f64());
     f.s.dispatch(Command::Open(f.root.join(&shape)));
-    f.settle("shape", Duration::from_secs(30), |s| s.state().document().is_some_and(|d| d.source().ends_with("Shape.java")));
+    f.settle("shape", Duration::from_secs(30), |s| s.state().current_source().is_some_and(|d| d.source().ends_with("Shape.java")));
     f.caret("Shape", 0);
     let has = |s: &reader_core::session::Session| s.state().results().is_some_and(|r| (0..r.hits().len()).filter_map(|i| r.call(i)).any(|c| c.name == "Circle"));
     while !has(&f.s) {

@@ -119,15 +119,15 @@ enum SourceRendering {
 }
 
 impl SourceRendering {
-    fn new(tab: &Tab) -> Self {
-        match tab.rendering() {
+    fn new(view: &View<'_>) -> Self {
+        match view.rendering() {
             Some(Rendering::Preview(preview)) => Self::Preview(preview.clone()),
             Some(Rendering::Pending) => Self::Pending,
             _ => Self::Text,
         }
     }
-    fn matches(&self, tab: &Tab) -> bool {
-        match (self, tab.rendering()) {
+    fn matches(&self, view: &View<'_>) -> bool {
+        match (self, view.rendering()) {
             (Self::Text, None | Some(Rendering::Source)) | (Self::Pending, Some(Rendering::Pending)) => true,
             (Self::Preview(held), Some(Rendering::Preview(current))) => Arc::ptr_eq(held, current),
             _ => false,
@@ -146,8 +146,8 @@ impl SourceIdentity {
             size: state.text_size(tab.pane()), visible: view.visible(),
             breadcrumbs: state.breadcrumbs(), split: state.split(),
             explorer: app.tree_shown && state.has_tree(), results: state.results().is_some(),
-            rendering: SourceRendering::new(tab), image_source: tab.image_source(),
-            hints: tab.hints().cloned(), declarations: tab.declarations_handle().cloned(),
+            rendering: SourceRendering::new(view), image_source: tab.image_source(),
+            hints: view.inlay_hints().cloned(), declarations: view.declarations_handle().cloned(),
             sticky: state.sticky_scroll(), annotation_cols: tab.annotation_cols(),
         }
     }
@@ -163,9 +163,9 @@ impl SourceIdentity {
             && self.breadcrumbs == state.breadcrumbs() && self.split == state.split()
             && self.explorer == (app.tree_shown && state.has_tree())
             && self.results == state.results().is_some()
-            && self.rendering.matches(tab) && self.image_source == tab.image_source()
-            && same_arc(self.hints.as_ref(), tab.hints())
-            && same_arc(self.declarations.as_ref(), tab.declarations_handle())
+            && self.rendering.matches(view) && self.image_source == tab.image_source()
+            && same_arc(self.hints.as_ref(), view.inlay_hints())
+            && same_arc(self.declarations.as_ref(), view.declarations_handle())
             && self.sticky == state.sticky_scroll() && self.annotation_cols == tab.annotation_cols()
     }
 }
@@ -372,9 +372,9 @@ impl App {
             geometry.controls.extend(pane.controls.iter().copied());
             if pane.preview
                 && let Some(tab) = self.session.state().shown(pane.pane)
+                && let Some(view) = self.session.state().view(tab.id())
             {
-                self.preview_scroll
-                    .insert(tab.id(), (tab.version(), pane.preview_top));
+                self.preview_scroll.insert(tab.id(), (crate::app::PreviewSource::new(&view), pane.preview_top));
             }
         }
         self.draw_results(frame, geometry.results, p);
@@ -1521,7 +1521,7 @@ fn number_cells(lines: usize) -> u16 {
 fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
     let Some(t) = state.shown(pane) else { return 0 };
     let Some(view) = state.view(t.id()) else { return 0 };
-    let text = (view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+    let text = (view.snapshot().image().is_none() || t.image_source()) && !matches!(state.view(t.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
     let cells = t.annotation_cols() as u16 + 1;
     let digits = number_cells(view.line_count()) + 3;
     if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
@@ -1553,10 +1553,10 @@ fn draw_pane(
     let state = app.session.state();
     let focus = app.focus;
     let crumb_at = app.crumb_at;
-    let preview_selection = app.preview_selection;
+    let preview_selection = app.preview_selection.clone();
     let preview_scroll = state
         .shown(pane)
-        .and_then(|tab| app.preview_scroll.get(&tab.id()).copied());
+        .and_then(|tab| app.preview_scroll.get(&tab.id()).cloned());
     let old_markdown = app
         .layout
         .panes
@@ -1794,7 +1794,7 @@ fn draw_pane(
         }
         return geometry;
     }
-    if let Some(rendering) = tab.rendering() {
+    if let Some(rendering) = state.view(tab.id()).and_then(|v| v.rendering()) {
         match rendering {
             Rendering::Preview(preview) => {
                 geometry.preview = true;
@@ -1802,13 +1802,13 @@ fn draw_pane(
                     layout.width != geometry.text.width
                         || !std::sync::Arc::ptr_eq(&layout.preview, preview)
                 });
-                let anchor = preview_scroll
-                    .filter(|(version, _)| *version == tab.version())
+                let anchor = preview_scroll.as_ref()
+                    .filter(|(source, _)| source.matches(&view))
                     .and_then(|(_, top)| {
                         old_markdown
                             .as_ref()
                             .filter(|old| std::sync::Arc::ptr_eq(&old.preview.doc, &preview.doc))
-                            .and_then(|old| old.rows.get(top))
+                            .and_then(|old| old.rows.get(*top))
                             .map(|row| (row.block, row.range.start))
                     });
                 let layout = old_markdown
@@ -1826,7 +1826,7 @@ fn draw_pane(
                 geometry.preview_total = layout.rows.len();
                 geometry.preview_source_lines = layout.source_lines.clone();
                 geometry.preview_top = preview_scroll
-                    .filter(|(version, _)| *version == tab.version())
+                    .filter(|(source, _)| source.matches(&view))
                     .map(|(_, top)| {
                         if remap && let Some((block, offset)) = anchor {
                             layout
@@ -1856,7 +1856,7 @@ fn draw_pane(
                     frame.buffer_mut(),
                     &mut geometry,
                     preview_selection
-                        .filter(|(id, version, _)| *id == tab.id() && *version == tab.version())
+                        .filter(|(id, source, _)| *id == tab.id() && source.matches(&view))
                         .map(|(_, _, selection)| selection),
                     &layout,
                     p,
@@ -2041,7 +2041,7 @@ fn draw_source_row(
     );
     let bookmark = state.places().bookmark(tab.source(), r.line);
     let fold = if r.index == 0 {
-        tab.fold_at(r.line)
+        view.fold_at(r.line)
     } else {
         None
     };

@@ -24,18 +24,18 @@ pub struct TextWindow<'a> {
 }
 
 #[derive(Debug)]
-struct Chunk { text: Arc<str>, range: Range<usize>, shared_source: bool, newlines: Arc<[usize]>, newline_range: Range<usize>, newline_base: usize, utf16: usize }
+struct Chunk { text: Arc<str>, range: Range<usize>, newlines: Arc<[usize]>, newline_range: Range<usize>, newline_base: usize, utf16: usize }
 impl Chunk {
     fn text(&self) -> &str { self.text.get(self.range.clone()).unwrap_or_default() }
     fn newline(&self, index: usize) -> Option<usize> {
         self.newlines.get(self.newline_range.clone())?.get(index)?.checked_sub(self.newline_base)
     }
-    fn indexed(text: Arc<str>, range: Range<usize>, shared_source: bool) -> Arc<Self> {
+    fn indexed(text: Arc<str>, range: Range<usize>) -> Arc<Self> {
         let part = text.get(range.clone()).unwrap_or_default();
         let newlines: Arc<[usize]> = part.match_indices('\n').map(|(i, _)| i).collect();
         let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
         let newline_range = 0..newlines.len();
-        Arc::new(Self { text, range, shared_source, newlines, newline_range, newline_base: 0, utf16 })
+        Arc::new(Self { text, range, newlines, newline_range, newline_base: 0, utf16 })
     }
     fn shared(text: Arc<str>, lines: Arc<[usize]>) -> Vec<Arc<Self>> {
         let mut chunks = Vec::with_capacity(text.len().div_ceil(CHUNK_BYTES));
@@ -45,7 +45,7 @@ impl Chunk {
             let after = lines.partition_point(|&offset| offset <= end);
             let part = text.get(from..end).unwrap_or_default();
             let utf16 = if part.is_ascii() { part.len() } else { part.chars().map(char::len_utf16).sum() };
-            chunks.push(Arc::new(Self { text: text.clone(), range: from..end, shared_source: true,
+            chunks.push(Arc::new(Self { text: text.clone(), range: from..end,
                 newlines: lines.clone(), newline_range: first_line..after, newline_base: from + 1, utf16 }));
             from = end;
             first_line = after;
@@ -57,7 +57,7 @@ impl Chunk {
         while !text.is_empty() {
             let end = text.floor_char_boundary(CHUNK_BYTES.min(text.len()));
             let (part, rest) = text.split_at(end);
-            chunks.push(Self::indexed(part.into(), 0..part.len(), false));
+            chunks.push(Self::indexed(part.into(), 0..part.len()));
             text = rest;
         }
         chunks
@@ -86,21 +86,27 @@ impl TextSnapshot {
 
     fn indexed(key: SnapshotKey, source: Arc<SourceMeta>, chunks: Vec<Arc<Chunk>>) -> Self {
         let (mut bytes, mut newlines, mut utf16) = (0, 0, 0);
-        let mut owned_bytes = size_of::<Self>();
+        let arc_header = 2 * size_of::<usize>();
+        let mut owned_bytes = size_of::<Self>() + 2 * arc_header + source.bytes();
+        let mut texts = std::collections::HashSet::new();
+        let mut newlines_seen = std::collections::HashSet::new();
+        let mut chunks_seen = std::collections::HashSet::new();
         let chunks = chunks.into_iter().map(|chunk| {
             let entry = Entry { chunk, byte: bytes, newline: newlines, utf16 };
             bytes += entry.chunk.text().len();
             newlines += entry.chunk.newline_range.len();
             utf16 += entry.chunk.utf16;
-            owned_bytes += size_of::<Entry>() + size_of::<Chunk>()
-                + if entry.chunk.shared_source { 0 } else { entry.chunk.text().len() + entry.chunk.newline_range.len() * size_of::<usize>() };
+            owned_bytes += size_of::<Entry>();
+            if chunks_seen.insert(Arc::as_ptr(&entry.chunk)) { owned_bytes += size_of::<Chunk>() + arc_header; }
+            if texts.insert(Arc::as_ptr(&entry.chunk.text)) { owned_bytes += entry.chunk.text.len() + arc_header; }
+            if newlines_seen.insert(Arc::as_ptr(&entry.chunk.newlines)) { owned_bytes += entry.chunk.newlines.len() * size_of::<usize>() + arc_header; }
             entry
         }).collect();
         let chunks: Arc<[Entry]> = chunks;
         Self { key, source, chunks, bytes, newlines, utf16, owned_bytes }
     }
 
-    pub(crate) fn with_source_meta(&self, source: Arc<SourceMeta>) -> Self { Self { source, ..self.clone() } }
+    pub(crate) fn with_source_meta(&self, source: Arc<SourceMeta>) -> Self { Self { owned_bytes: self.owned_bytes - self.source.bytes() + source.bytes(), source, ..self.clone() } }
     pub fn key(&self) -> SnapshotKey { self.key }
     pub fn source(&self) -> &Path { self.source.source() }
     pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
@@ -112,7 +118,8 @@ impl TextSnapshot {
     pub fn len_utf16(&self) -> usize { self.utf16 }
     pub fn line_count(&self) -> usize { self.newlines + 1 }
 
-    /// Additional indexed storage beside the compatibility Document; shared text, line offsets and metadata excluded.
+    /// Retained source/index storage; each shared backing allocation is charged once, including
+    /// the full allocation when a chunk retains only a slice. Worker/protocol Documents are separate.
     pub fn storage_bytes(&self) -> usize { self.owned_bytes }
 
     pub(crate) fn reader_line_range(&self, line: usize) -> Range<usize> {
@@ -169,8 +176,11 @@ impl TextSnapshot {
         range.end
     }
     pub fn is_large(&self) -> bool {
+        if self.source.loaded_version() == Some(self.key.version) { return self.source.is_large(); }
+        // Changed drafts keep the original restriction and additionally account for their
+        // current normalized text cost. An unchanged loaded source preserves encoded-load policy.
         let nonempty_rows = self.line_count() - usize::from(self.bytes > 0 && self.byte_at(self.bytes - 1) == Some(b'\n'));
-        self.bytes > crate::document::LARGE_BYTES || nonempty_rows > crate::document::LARGE_LINES
+        self.source.is_large() || self.bytes > crate::document::LARGE_BYTES || nonempty_rows > crate::document::LARGE_LINES
     }
 
     fn entry(&self, byte: usize) -> Option<&Entry> {
@@ -253,6 +263,18 @@ impl TextSnapshot {
             text.push_str(e.chunk.text().get(from..to)?);
         }
         Some(Cow::Owned(text))
+    }
+    pub(crate) fn matches_document(&self, doc: &Document) -> bool {
+        self.bytes == doc.text().len() && self.source.fingerprint() == doc.content_fingerprint()
+            && self.chunks.iter().all(|e| doc.text().get(e.byte..e.byte + e.chunk.text().len()) == Some(e.chunk.text()))
+    }
+    pub(crate) fn column_of(&self, byte: usize) -> usize {
+        let byte = self.floor_char_boundary(byte);
+        let start = self.reader_line_range(self.line_of(byte)).start;
+        let first = self.chunks.partition_point(|e| e.byte <= start).saturating_sub(1);
+        self.chunks[first..].iter().take_while(|e| e.byte < byte).map(|e| {
+            e.chunk.text().get(start.saturating_sub(e.byte)..(byte - e.byte).min(e.chunk.text().len())).unwrap_or_default().chars().count()
+        }).sum()
     }
     pub fn copy_range(&self, bytes: Range<usize>) -> Option<String> { self.range(bytes).map(Cow::into_owned) }
 
