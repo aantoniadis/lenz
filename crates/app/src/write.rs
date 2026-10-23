@@ -189,10 +189,14 @@ pub fn write_text(snapshot: &Snapshot, text: &str) -> Result<Snapshot, WriteErro
     }
     let bytes = encode(text, snapshot.encoding, snapshot.bom, snapshot.crlf)?;
     let (target, old) = snapshot.current()?;
+    #[cfg(test)]
+    readiness_fault::point(readiness_fault::Fault::BeforeReplace).map_err(io_err("writing", &target))?;
     match &old {
         Some(old) => replace(&target, &bytes, None, Some(old))?,
         None => create(&target, |tmp| new_temp(tmp, None, &bytes))?,
     }
+    #[cfg(test)]
+    readiness_fault::point(readiness_fault::Fault::AfterReplace).map_err(io_err("reading", &target))?;
     let meta = fs::metadata(&target).map_err(io_err("reading", &target))?;
     Ok(Snapshot { hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(), ..snapshot.clone() })
 }
@@ -439,6 +443,8 @@ fn in_place(target: &Path, meta: &fs::Metadata, mode: u32, bytes: &[u8], old: &[
     }
     let write = |file: &mut File, bytes: &[u8]| -> io::Result<()> {
         file.rewind()?;
+        #[cfg(test)]
+        readiness_fault::partial(file, bytes)?;
         file.write_all(bytes)?;
         file.set_len(bytes.len() as u64)?;
         file.sync_all()
@@ -453,6 +459,39 @@ fn sync_dir(path: &Path) {
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     if let Ok(dir) = File::open(dir) {
         let _ = dir.sync_all();
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod readiness_fault {
+    use std::{cell::Cell, fs::File, io::{self, Write}};
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Fault { BeforeReplace, Write, WriteAndRollback, AfterReplace }
+    thread_local! { static ACTIVE: Cell<Option<(Fault, usize)>> = const { Cell::new(None) }; }
+    pub fn during<T>(fault: Fault, action: impl FnOnce() -> T) -> T {
+        assert!(ACTIVE.get().is_none());
+        ACTIVE.set(Some((fault, 0)));
+        struct Reset;
+        impl Drop for Reset { fn drop(&mut self) { ACTIVE.set(None); } }
+        let _reset = Reset;
+        action()
+    }
+    pub(super) fn point(fault: Fault) -> io::Result<()> {
+        if ACTIVE.get().is_some_and(|(selected,_)| selected == fault) {
+            return Err(io::Error::other("readiness injected I/O failure"));
+        }
+        Ok(())
+    }
+    pub(super) fn partial(file: &mut File, bytes: &[u8]) -> io::Result<()> {
+        let Some((fault, attempt)) = ACTIVE.get() else { return Ok(()) };
+        ACTIVE.set(Some((fault, attempt + 1)));
+        let prefix = match (fault, attempt) {
+            (Fault::Write | Fault::WriteAndRollback, 0) => 3,
+            (Fault::WriteAndRollback, 1) => 1,
+            _ => return Ok(()),
+        };
+        file.write_all(&bytes[..bytes.len().min(prefix)])?;
+        Err(io::Error::other("readiness injected partial write"))
     }
 }
 
@@ -822,5 +861,45 @@ mod tests {
         }
         assert_eq!(fs::read_to_string(&path).unwrap(), "two\n");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+    }
+
+    fn failed_save_bytes(fault: readiness_fault::Fault, linked: bool) -> Vec<u8> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        fs::write(&path, b"abcdef").unwrap();
+        let alias = dir.path().join("alias");
+        if linked { fs::hard_link(&path, &alias).unwrap(); }
+        let (snapshot, _) = Snapshot::read(&path, None).unwrap();
+        let result = readiness_fault::during(fault, || write_text(&snapshot, "UVWXYZ"));
+        assert!(matches!(result, Err(WriteError::Io(_))), "expected injected I/O failure: {result:?}");
+        let bytes = fs::read(&path).unwrap();
+        if linked { assert_eq!(fs::read(alias).unwrap(), bytes); }
+        assert!(no_temps(dir.path()));
+        bytes
+    }
+
+    #[test]
+    fn readiness_failure_before_replace_keeps_original() {
+        assert_eq!(failed_save_bytes(readiness_fault::Fault::BeforeReplace, false), b"abcdef");
+    }
+
+    #[test]
+    fn readiness_partial_write_can_restore_original() {
+        assert_eq!(failed_save_bytes(readiness_fault::Fault::Write, true), b"abcdef");
+    }
+
+    #[test]
+    fn readiness_failed_rollback_can_leave_partial_bytes() {
+        assert_eq!(failed_save_bytes(readiness_fault::Fault::WriteAndRollback, true), b"aVWdef");
+    }
+
+    #[test]
+    fn readiness_error_after_replace_can_leave_complete_new_bytes() {
+        assert_eq!(failed_save_bytes(readiness_fault::Fault::AfterReplace, false), b"UVWXYZ");
+    }
+
+    #[test]
+    fn readiness_unchanged_mixed_endings_are_normalized_by_diff_writer() {
+        assert_eq!(round_trip(b"a\r\nb\r\nc\n", "a\r\nb\r\nc\n"), b"a\r\nb\r\nc\r\n");
     }
 }

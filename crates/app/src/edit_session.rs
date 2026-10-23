@@ -454,6 +454,25 @@ mod tests {
     }
 
     #[test]
+    fn readiness_uncertain_save_retains_draft_history_and_confirmed_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+        let document = doc("draft\n", "disk\n", &left, &right);
+        let mut history = EditSession::default();
+        let view = document.view(&document.line_diff(&Options::default()), 20.0);
+        let draft = history.execute(0, &document, &view, EditCommand::Apply { block: 0, onto: Side::Right }, [&left, &right]).unwrap().document;
+        let result = write::readiness_fault::during(write::readiness_fault::Fault::AfterReplace,
+            || history.execute(0, &draft, &view, EditCommand::Save, [&left, &right]));
+        assert!(result.is_err());
+        assert!(history.has_dirty() && history.has_undo(0));
+        let pending = history.histories[&0].pending.as_ref().unwrap();
+        assert_eq!(&*pending.current[1], "draft\n");
+        assert_eq!(&*pending.saved[1], "disk\n");
+        assert_eq!(std::fs::read_to_string(&right).unwrap(), "draft\n");
+        assert!(matches!(history.execute(0, &draft, &view, EditCommand::Save, [&left, &right]), Err(EditError::Write(WriteError::ChangedOnDisk))));
+    }
+
+    #[test]
     fn symlink_replacement_before_apply_cannot_gain_write_permission() {
         let dir=tempfile::tempdir().unwrap();let(l,r)=(dir.path().join("l"),dir.path().join("r"));let doc=doc("draft\n","disk\n",&l,&r);
         let external=dir.path().join("external");std::fs::write(&external,"disk\n").unwrap();std::fs::remove_file(&r).unwrap();std::os::unix::fs::symlink(&external,&r).unwrap();
