@@ -41,7 +41,7 @@ The final post-merge release process completed **1,353,858 deterministic workloa
 
 Sampled stress RSS stayed between **8.41 and 8.52 MiB**; the final-quarter median was 8.51 MiB. The sampler retains one status record per second, so its allocations are included. A separately retained first run (`first/`) produced the same deterministic outcomes, zero network/provider-child syscalls, and a similarly bounded short-run RSS range. Large supplied catalogs and long-running product workloads were not measured.
 
-Build with `CARGO_BUILD_JOBS=4` and the same `CARGO_TARGET_DIR` as the main checkout:
+Build with `CARGO_BUILD_JOBS=4` and an isolated `CARGO_TARGET_DIR` for each worktree. Concurrent worktrees must not share Cargo build outputs; source/artifact collisions invalidate those measurements:
 
 ```sh
 cargo test --locked -p reader-core --lib --test postgres_assistance
