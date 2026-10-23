@@ -247,7 +247,7 @@ impl WorkState {
             let rows = self.scan.consume(&window, self.key.cols.unwrap_or(usize::MAX).max(1));
             for row in rows {
                 let wanted = match self.target {
-                    Target::Rows { first, count } => row.index >= first.saturating_sub(3) && row.index < first.saturating_add(count).saturating_add(3),
+                    Target::Rows { first, count } => row.index >= first.saturating_sub((KEPT_ROWS - count).min(KEPT_ROWS / 2)),
                     Target::Display(display) => contains_display(&row, display),
                     Target::End => row.last,
                     Target::Byte(_) | Target::Cursor(_) | Target::Column(_) => false,
@@ -270,6 +270,102 @@ impl WorkState {
         delta.scan = self.scan;
         delta.work = spent;
         Some(delta)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{decor::{Hint, HintKind}, document::Document, text::BufferId};
+
+    fn snapshot(text: &str) -> TextSnapshot {
+        TextSnapshot::from_document(BufferId(1), &Document::decode("bounded.txt".into(), 1, text.as_bytes()))
+    }
+
+    #[test]
+    fn cold_work_yields_inside_whitespace_hidden_marks_and_hint_labels() {
+        let mut first_prefix = None;
+        for len in [100_000, 1_000_000] {
+            let source = snapshot(&" ".repeat(len));
+            let mut cache = Cache::default(); cache.configure(&source, Some(10), None);
+            let Query::Pending(work) = cache.row(&source, 0, 0, 10) else { panic!("cold row") };
+            let delta = work.run(&source, usize::MAX, || true).unwrap();
+            assert!(delta.work <= 16 * WINDOW_WORK && !delta.scan.complete && delta.scan.cursor.source_byte() < len);
+            assert!(delta.scan.pending.len() <= 257);
+            cache.apply(delta);
+            let prefix = cache.prefix(&source, 0, 0).unwrap();
+            assert!(!prefix.complete && !prefix.last);
+            if let Some(previous) = &first_prefix { assert_eq!(&prefix, previous); } else { first_prefix = Some(prefix); }
+        }
+
+        for hints in [false, true] {
+            let source = snapshot(if hints { "ab" } else { "a" });
+            let hints = hints.then(|| Arc::new(Hints::new(vec![(0, Hint { byte: 0, label: "hint ".repeat(200_000).into(), kind: HintKind::Parameter })])));
+            let marks = hints.is_none().then(|| snapshot(&("a".to_string() + &"\u{301}".repeat(500_000))));
+            let source = marks.as_ref().unwrap_or(&source);
+            let mut cache = Cache::default(); cache.configure(source, Some(10), hints.as_ref());
+            let Query::Pending(work) = cache.last(source, 0) else { panic!("cold end") };
+            let delta = work.clone().run(source, 256, || true).unwrap();
+            assert!(delta.work <= 256 && !delta.scan.complete);
+            assert!(work.run(source, 256, || false).is_none());
+            assert!(cache.apply(delta));
+        }
+    }
+
+    #[test]
+    fn row_metadata_and_query_continuations_stay_bounded() {
+        let source = snapshot(&"x".repeat(200_000));
+        let mut cache = Cache::default(); cache.configure(&source, Some(1), None);
+        for _ in 0..64 {
+            match cache.last(&source, 0) {
+                Query::Ready(last) => { assert_eq!(last.unwrap().index, 199_999); break; }
+                Query::Pending(work) => { cache.apply(work.run(&source, usize::MAX, || true).unwrap()); }
+            }
+        }
+        assert_eq!(cache.lines[&0].last.as_ref().unwrap().index, 199_999);
+        assert_eq!(cache.lines[&0].rows.len(), 1, "End must not retain every preceding row");
+        for index in 0..6000 {
+            loop {
+                match cache.row(&source, 0, index, 32) {
+                    Query::Ready(Some(row)) => { assert_eq!(row.index, index); break; }
+                    Query::Ready(None) => panic!("existing row"),
+                    Query::Pending(work) => { cache.apply(work.run(&source, WINDOW_WORK, || true).unwrap()); }
+                }
+            }
+        }
+        let held = &cache.lines[&0];
+        assert!(held.rows.len() <= KEPT_ROWS && held.checkpoints.len() <= CHECKPOINTS && held.queries.len() <= 16);
+        assert!(held.bytes() < CACHE_BYTES);
+        let mut work_after_first_seek = 0;
+        for (round, index) in (195_000..195_500).chain((195_000..195_500).rev()).enumerate() {
+            loop {
+                match cache.row(&source, 0, index, 32) {
+                    Query::Ready(Some(row)) => { assert_eq!(row.index, index); break; }
+                    Query::Ready(None) => panic!("existing row"),
+                    Query::Pending(work) => {
+                        let delta = work.run(&source, WINDOW_WORK, || true).unwrap();
+                        if round > 0 { work_after_first_seek += delta.work; }
+                        cache.apply(delta);
+                    }
+                }
+            }
+        }
+        assert!(work_after_first_seek <= 2 * WINDOW_WORK, "bidirectional scrolling must reuse the bounded row neighborhood: {work_after_first_seek}");
+    }
+
+    #[test]
+    fn stale_layout_work_cannot_publish_after_width_or_metadata_changes() {
+        let source = snapshot(&"word ".repeat(10_000));
+        let mut cache = Cache::default(); cache.configure(&source, Some(10), None);
+        let Query::Pending(work) = cache.last(&source, 0) else { panic!("cold end") };
+        let delta = work.clone().run(&source, WINDOW_WORK, || true).unwrap();
+        cache.configure(&source, Some(20), None);
+        assert!(!cache.apply(delta));
+        assert!(!work.matches(&source, Some(20), None));
+        let renamed = TextSnapshot::from_document(BufferId(1), &Document::decode("renamed.txt".into(), 1, b"word"));
+        assert_eq!(renamed.key(), source.key());
+        assert!(!work.matches(&renamed, Some(10), None));
+        assert!(work.run(&renamed, WINDOW_WORK, || true).is_none());
     }
 }
 
@@ -312,7 +408,7 @@ impl Line {
             Target::Cursor(display) => s.cursor.display_byte() <= *display,
             Target::Column(column) => s.cursor.logical_column() <= *column,
         }) { return scan.clone(); }
-        self.checkpoints.iter().chain(std::iter::once(&self.progress)).filter(|s| match target {
+        self.checkpoints.iter().chain(std::iter::once(&self.progress)).chain(self.queries.iter().map(|(_, scan)| scan)).filter(|s| match target {
             Target::Rows { first, .. } => s.row <= *first,
             Target::End => true,
             Target::Byte(byte) => s.cursor.source_byte() <= *byte,
