@@ -9,6 +9,10 @@ const KEPT_ROWS: usize = 4096;
 const KEPT_POINTS: usize = 128;
 const CACHE_BYTES: usize = 4 * 1024 * 1024;
 
+/// A wrapped logical row's maximum projected UTF-8 bytes, including hints and hanging whitespace.
+/// Break before a whole projected grapheme would exceed this limit; no source bytes are omitted.
+pub const ROW_BYTES: usize = 4096;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Row {
     pub line: usize,
@@ -81,7 +85,6 @@ struct Scan {
     indent: usize,
     leading: bool,
     last_break: Option<Break>,
-    after_break: usize,
     last_source: usize,
     work: usize,
     complete: bool,
@@ -92,7 +95,7 @@ impl Scan {
         let source = cursor.source_byte();
         Self { cursor, pending: String::new(), pending_source: source, processed: 0, processed_source: source,
             column: 0, row: 0, row_display: 0, row_source: source, row_column: 0, used: 0, indent: 0,
-            leading: true, last_break: None, after_break: 0, last_source: source, work: 0, complete: false }
+            leading: true, last_break: None, last_source: source, work: 0, complete: false }
     }
 
     fn row(&self, line: usize, end: usize, source: usize, complete: bool, last: bool) -> Row {
@@ -107,7 +110,7 @@ impl Scan {
         let mut can_break = false;
         for c in text.chars() {
             if self.leading && matches!(c, ' ' | '\t') {
-                self.indent = (self.indent + lenz_content::wrap::width(c.encode_utf8(&mut [0; 4]))).min(cols / 2);
+                self.indent = (self.indent + lenz_content::wrap::width(c.encode_utf8(&mut [0; 4]))).min(cols / 2).min(ROW_BYTES / 2);
             } else {
                 self.leading = false;
                 can_break |= c.is_whitespace() || matches!(c, ',' | ';' | '.' | ')' | ']' | '}' | '>' | '-' | '/' | '|' | '&');
@@ -115,8 +118,10 @@ impl Scan {
         }
         let room = if self.row == 0 { cols } else { cols.saturating_sub(self.indent).max(1) };
         let mut emitted = None;
-        if self.used.saturating_add(width) > room && display.start > self.row_display && !hanging {
-            let at = self.last_break.clone().filter(|b| b.display > self.row_display && b.display <= display.start)
+        let byte_limit = display.end.saturating_sub(self.row_display) > ROW_BYTES;
+        if display.start > self.row_display && (byte_limit || self.used.saturating_add(width) > room && !hanging) {
+            let at = (!byte_limit).then(|| self.last_break.clone()).flatten()
+                .filter(|b| b.display > self.row_display && b.display <= display.start)
                 .unwrap_or(Break { display: display.start, source: source.start, column: self.column, last_source: self.last_source });
             let mut row = self.row(line, at.display, at.source, true, false);
             row.width = at.column - self.row_column;
@@ -126,9 +131,8 @@ impl Scan {
             self.row_display = at.display;
             self.row_source = at.source;
             self.row_column = at.column;
-            self.used = if self.last_break.is_some() { self.after_break } else { 0 };
+            self.used = self.column.saturating_sub(at.column);
             self.last_break = None;
-            self.after_break = 0;
         }
         self.used += width;
         self.column += width;
@@ -137,8 +141,7 @@ impl Scan {
         self.last_source = source.start;
         if can_break {
             self.last_break = Some(Break { display: display.end, source: source.end, column: self.column, last_source: source.start });
-            self.after_break = 0;
-        } else if self.last_break.is_some() { self.after_break += width; }
+        }
         emitted
     }
 
@@ -298,8 +301,8 @@ mod tests {
             assert!(delta.work <= 16 * WINDOW_WORK && !delta.scan.complete && delta.scan.cursor.source_byte() < len);
             assert!(delta.scan.pending.len() <= 257);
             cache.apply(delta);
-            let prefix = cache.prefix(&source, 0, 0).unwrap();
-            assert!(!prefix.complete && !prefix.last);
+            let Query::Ready(Some(prefix)) = cache.row(&source, 0, 0, 10) else { panic!("bounded whitespace row should already be complete") };
+            assert!(prefix.complete && !prefix.last && prefix.display.len() <= ROW_BYTES);
             if let Some(previous) = &first_prefix { assert_eq!(&prefix, previous); } else { first_prefix = Some(prefix); }
         }
 

@@ -15,8 +15,11 @@ for their bounded work.
   with a maximum 4,096 work bytes. It can stop inside a hint or suppressed mark
   run. Source coordinates are absolute UTF-8 offsets; display ranges are global
   bytes in the projected line, and each `Shown` map is local to its window.
-- Source tabs, control replacement and the existing 30-mark suppression rule run
-  before a streaming grapheme guard. If another scalar would extend a projected
+- Source tabs, control replacement and a continuous 30-mark suppression rule run
+  before a streaming grapheme guard. Source and inlay-hint scalars share the mark
+  count, including across adjacent labels, projection windows and logical rows.
+  Suppressed hint scalars still consume work and retain their original anchor;
+  type carets remain before the type label. If another scalar would extend a projected
   grapheme beyond 256 UTF-8 bytes, that scalar is displayed as `[U+XXXX]`. A
   preceding Unicode Prepend may attach to `[`, so the maximum projected grapheme
   is 257 bytes. The remaining ASCII escape creates a boundary. No invisible
@@ -29,6 +32,16 @@ for their bounded work.
   and hanging-indent conventions. Breaks occur between complete projected
   graphemes. A grapheme wider than the logical room stays whole. These logical
   columns do not represent terminal cells or font pixels.
+- Wrapped logical rows also have a strict projected-byte ceiling,
+  `layout::ROW_BYTES = 4096`. Before a complete grapheme would exceed it, the
+  scanner creates a real continuation row, including within leading or hanging
+  whitespace and inlay labels. No display or source tail is omitted. Graphemes
+  are already bounded to 257 bytes, so no overshoot is needed. Continuation
+  indentation is at most `min(cols / 2, ROW_BYTES / 2)`; a row body plus its ASCII
+  indent therefore occupies at most 6,144 bytes. Normal wrapping below the byte
+  ceiling is unchanged. This bounds wrapped native input independently of a
+  whitespace run's total length; unwrapped adapters still bound their own native
+  shaping/measurement input.
 - `layout::Row` has absolute source and global display ranges. `complete=false`
   is a stable prefix with an unknown row end; its final whitespace is not an
   end-of-row hit target. An unwrapped row has known source extent and one visual
@@ -73,7 +86,13 @@ multiple real worker completions to reach a cold row.
 Primitive checks cover later-line CRLF absolute origins, hanging indentation,
 ordinary grapheme boundaries, overwide emoji, source/hint mapping, fragmented
 labels, suppressed marks, direct Prepend overflow, source metadata changes and
-width changes. Work-limit checks compare equal first prefixes with 100,000 and
+width changes. The hint-mark regression first emitted 409,467 projected bytes
+instead of 105; the continuous guard passes at 16, 31, 64 and 4,096 work budgets.
+The row-limit regression first returned one 50,000-byte whitespace row, and the
+wide-column indentation regression first returned an 8,193-column indent.
+Leading/trailing whitespace, whitespace with marks, whole graphemes at the byte
+boundary, one huge or many adjacent hint labels, continuation mapping and exact
+source Copy now pass the strict row/indent bounds. Work-limit checks compare equal first rows with 100,000 and
 1,000,000 unseen whitespace bytes. The metadata stress seeks End in 200,000
 one-column rows, visits 6,000 rows, then performs 1,000 forward/backward row
 queries while asserting bounded retention and neighborhood reuse.

@@ -2,6 +2,51 @@ use std::sync::Arc;
 use reader_core::{decor::{Hint, HintKind, Hints}, document::Document, projection::{Cursor, WINDOW_WORK}, text::{BufferId, TextEdit, TextSnapshot}};
 
 #[test]
+fn mark_limit_is_continuous_across_source_hints_labels_and_windows() {
+    let marks = lenz_content::display::MAX_MARKS;
+    let source = format!("a{}b{}END", "\u{301}".repeat(10), "\u{301}".repeat(20));
+    let snapshot = TextSnapshot::from_document(BufferId(91), &Document::decode("marks.txt".into(), 1, source.as_bytes()));
+    let anchor = 1 + 10 * "\u{301}".len();
+    let hints = Arc::new(Hints::new(vec![
+        (0, Hint { byte: anchor as u32, label: "\u{301}".repeat(15).into(), kind: HintKind::Parameter }),
+        (0, Hint { byte: anchor as u32, label: "\u{301}".repeat(200_000).into(), kind: HintKind::Type }),
+    ]));
+    for budget in [16, 31, 64, WINDOW_WORK] {
+        let mut cursor = Cursor::start(&snapshot, 0, Some(hints.clone())).unwrap();
+        let (mut drawn, mut carets, mut b) = (String::new(), Vec::new(), String::new());
+        loop {
+            let window = cursor.window(&snapshot, budget).unwrap();
+            assert!(window.work <= budget && window.shown.text.len() <= budget);
+            for display in 0..=window.shown.text.len() {
+                let at = window.source_at(display);
+                assert_eq!(snapshot.floor_char_boundary(at), at);
+            }
+            if let Some(at) = window.caret(anchor) { carets.push(window.display.start + at); }
+            b += window.shown.text.get(window.range(anchor..anchor + 1)).unwrap();
+            drawn += &window.shown.text;
+            if window.complete { break; }
+        }
+        let expected = format!("a{}b{}END", "\u{301}".repeat(marks), "\u{301}".repeat(20));
+        assert_eq!(drawn.len(), expected.len(), "hints share the source mark-run cap");
+        assert_eq!(drawn, expected);
+        assert!(!carets.is_empty() && carets.iter().all(|&at| at == 1 + 25 * "\u{301}".len()), "type caret stays before its label");
+        assert_eq!(b, "b");
+    }
+    assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), source);
+
+    let snapshot = TextSnapshot::from_document(BufferId(92), &Document::decode("adjacent.txt".into(), 1, b"ab"));
+    let hints = Arc::new(Hints::new((0..1000).map(|_| (0, Hint { byte: 1, label: "\u{200B}".into(), kind: HintKind::Parameter })).collect()));
+    let mut cursor = Cursor::start(&snapshot, 0, Some(hints)).unwrap();
+    let mut drawn = String::new();
+    loop {
+        let window = cursor.window(&snapshot, 64).unwrap();
+        drawn += &window.shown.text;
+        if window.complete { break; }
+    }
+    assert_eq!(drawn, format!("a{}b", "\u{200B}".repeat(marks)));
+}
+
+#[test]
 fn bounded_source_projection_reaches_tail_with_exact_unicode_coordinates() {
     let text = format!("{}é😀e\u{301}\t\x07\r\n", "a".repeat(12_000));
     let snapshot = TextSnapshot::from_document(BufferId(1), &Document::decode("long.txt".into(), 1, text.as_bytes()));

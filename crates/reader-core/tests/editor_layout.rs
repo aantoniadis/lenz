@@ -1,7 +1,80 @@
-use reader_core::{document::Document, layout::{Cache, Query}, projection::Cursor, text::{BufferId, TextSnapshot}};
+use reader_core::{document::Document, layout::{Cache, Query, ROW_BYTES}, projection::Cursor, text::{BufferId, TextSnapshot}};
 
 fn snapshot(text: &str) -> TextSnapshot {
     TextSnapshot::from_document(BufferId(1), &Document::decode("layout.txt".into(), 1, text.as_bytes()))
+}
+
+#[test]
+fn hanging_whitespace_and_hint_rows_have_a_real_projected_byte_ceiling() {
+    use std::sync::Arc;
+    use reader_core::decor::{Hint, HintKind, Hints};
+    const LIMIT: usize = ROW_BYTES;
+    assert_eq!(LIMIT, 4096);
+    let mut sources = vec![
+        " ".repeat(50_000) + "END",
+        "x".to_string() + &" ".repeat(50_000) + "END",
+        " \u{301}\u{301}".repeat(10_000) + "END",
+    ];
+    sources.push(" ".repeat(4095) + "e\u{301}" + &" ".repeat(4095) + "END");
+    for source in sources {
+        let doc = snapshot(&source);
+        let mut cache = Cache::default(); cache.configure(&doc, Some(8), None);
+        let mut cursor = Cursor::start(&doc, 0, None).unwrap();
+        let mut projected = String::new();
+        loop {
+            let window = cursor.window(&doc, 64).unwrap(); projected += &window.shown.text;
+            if window.complete { break; }
+        }
+        let mut joined = String::new();
+        let mut previous = 0;
+        for index in 0..1000 {
+            let Some(row) = ready(&mut cache, &doc, |cache| cache.row(&doc, 0, index, 32)) else { break };
+            assert!(row.complete && row.display.len() <= LIMIT, "row {} has {} projected bytes", row.index, row.display.len());
+            assert_eq!(row.display.start, previous);
+            assert_eq!(doc.floor_char_boundary(row.source.start), row.source.start);
+            assert_eq!(doc.floor_char_boundary(row.source.end), row.source.end);
+            joined += projected.get(row.display.clone()).unwrap();
+            previous = row.display.end;
+            if row.last { break; }
+        }
+        assert_eq!(joined, projected, "a byte ceiling wraps; it never hides a tail");
+        assert_eq!(doc.copy_range(0..doc.len_bytes()).unwrap(), source);
+    }
+
+    let doc = snapshot("abEND");
+    for labels in [vec![" ".repeat(50_000)], vec![" ".repeat(500); 100]] {
+        let hints = Arc::new(Hints::new(labels.into_iter().map(|label| (0, Hint { byte: 1, label: label.into(), kind: HintKind::Parameter })).collect()));
+        let mut cache = Cache::default(); cache.configure(&doc, Some(8), Some(&hints));
+        let mut end = 0;
+        for index in 0..1000 {
+            let Some(row) = ready(&mut cache, &doc, |cache| cache.row(&doc, 0, index, 32)) else { break };
+            assert!(row.display.len() <= LIMIT);
+            assert_eq!(row.display.start, end); end = row.display.end;
+            assert!(row.source.end <= doc.len_bytes());
+            if row.last { break; }
+        }
+        assert_eq!(end, 50_005);
+    }
+
+    let doc = snapshot(&(" ".repeat(20_000) + "END"));
+    let mut cache = Cache::default(); cache.configure(&doc, Some(8), None);
+    let row = ready(&mut cache, &doc, |cache| cache.row(&doc, 0, 1, 32)).unwrap();
+    assert_eq!(row.display, LIMIT..LIMIT * 2);
+    assert_eq!(row.end_byte(), LIMIT * 2 - 1);
+    let at = ready(&mut cache, &doc, |cache| cache.position(&doc, 0, LIMIT + 1)).unwrap();
+    assert_eq!((at.row, at.column), (1, row.indent + 1));
+    assert_eq!(ready(&mut cache, &doc, |cache| cache.byte_at(&doc, &row, row.indent + 1)), Some(LIMIT + 1));
+    assert_eq!(doc.copy_range(LIMIT - 1..LIMIT + 1).unwrap(), "  ");
+}
+
+#[test]
+fn wide_columns_keep_the_continuation_indent_inside_the_native_byte_budget() {
+    let doc = snapshot(&(" ".repeat(20_000) + "END"));
+    let mut cache = Cache::default(); cache.configure(&doc, Some(100_000), None);
+    let row = ready(&mut cache, &doc, |cache| cache.row(&doc, 0, 1, 32)).unwrap();
+    assert!(row.indent <= ROW_BYTES / 2, "continuation indentation must be bounded even at enormous column widths: {}", row.indent);
+    assert!(row.indent + row.display.len() <= ROW_BYTES + ROW_BYTES / 2);
+    assert_eq!(row.display, ROW_BYTES..ROW_BYTES * 2);
 }
 
 #[track_caller]
