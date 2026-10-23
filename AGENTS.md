@@ -97,3 +97,17 @@ keep the user's active desktop and repositories outside stress workloads.
 For documentation-only changes, verify local links and `git diff --check`;
 runtime tests and benchmark reruns are unnecessary unless executable behavior
 or benchmark definitions also change.
+
+## Agent skills
+
+### Issue tracker
+
+For specs, tickets and their dependencies, use local Markdown under `.scratch/`; read [tracker conventions](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+Before triaging or publishing work, read the [triage-label mapping](docs/agents/triage-labels.md); the five canonical labels use their default names.
+
+### Domain docs
+
+Before exploring domain concepts or writing specs/tickets, read the [single-context domain rules](docs/agents/domain.md).
