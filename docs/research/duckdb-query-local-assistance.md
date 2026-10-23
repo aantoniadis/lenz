@@ -69,11 +69,14 @@ it is not a statement about a future catalog adapter.
 Evidence is retained under `target/perf/editor-implementation/06/`: red/green logs,
 `native-boundary.jsonl`, `native-fixture.json`, `syscalls/`, `syscall-summary.json`,
 `measurements.json`, `native-resources.json`, `identity.json` and check logs.
-The release API sample has 20 completions and eight syntax/help requests each.
-Median completion was 0.013 ms, syntax 30.93 ms and help 46.02 ms. Fifteen separate
-native parser process samples measured 25.49 ms median and 45.86 MiB median child
-maximum RSS (Linux wait4). These short, contended-host prerequisite samples are
-not production frontend, persistent-worker, sustained-memory or display claims.
+The earlier shared-target Rust API timing samples do not establish source/artifact
+provenance and are excluded from acceptance evidence. Private-target checks and
+explicitly debug-profile API samples are retained in the ticket worktree under
+`target/private-validation-06/`, using `target/private-06` for compilation with
+DEV/TEST debug symbols disabled and incremental compilation disabled. These short,
+contended-host prerequisite samples are not production frontend, persistent-worker,
+sustained-memory or display measurements. Separate direct native parser process
+samples remain in `native-resources.json` (Linux wait4 RSS, not Rust API timings).
 
 Limits remain explicit: no UNION/recursive CTE or table-function output/type
 inference; wildcard RENAME/REPLACE and general DuckDB case-insensitive quoted-name
@@ -83,10 +86,12 @@ reader, editor application, async cancellation, dialect persistence or GUI/TUI
 integration here. Native macOS, production performance and those ticket 62
 behaviors remain unverified. No tool installer or new dependency was added.
 
-Final verification on the merged prerequisite branch: all 539 ordinary
-reader-core tests passed (including 16 PostgreSQL and five DuckDB assertions),
-three explicit native DuckDB tests and the release measurement passed, strict
-reader-core Clippy passed, and the Reader panic-site ratchet retained its existing
-limits (including 108 string-slice sites). Documentation links and diff whitespace
-checks passed. GUI/TUI input checks and the full workspace/local release gate were
-not rerun for this unused prerequisite API; editor integration remains later work.
+Private validation reruns the PostgreSQL/DuckDB public-boundary tests, all ordinary
+reader-core tests, strict reader-core Clippy, and the explicit native checks. The
+native classification test accepts syntactically valid CREATE, DROP, INSERT,
+UPDATE, DELETE and EXPLAIN documents as syntax-only success, despite the native
+SELECT-only JSON serialization limit; malformed non-SELECT or later statements
+retain parser diagnostics. Original SQL and EXPLAIN remain data throughout.
+Raw native classification output is retained alongside the private check logs.
+GUI/TUI input checks, the full workspace/local release gate, and production
+performance were not rerun for this unused prerequisite API.
