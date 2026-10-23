@@ -17,6 +17,46 @@ pub struct NativeReveal {
     pub context: u64,
 }
 
+/// Opaque identity of the viewport whose complete native extents were measured.
+#[derive(Clone, Debug)]
+pub struct NativeViewport {
+    pub(crate) pane: u8,
+    pub(crate) tab: TabId,
+    identity: Cursor,
+    context: u64,
+    epoch: u64,
+    size: (usize, usize),
+    top: (usize, usize, usize),
+    visible: Arc<Visible>,
+    declarations: Option<Arc<lenz_content::highlight::Declarations>>,
+    wrapped: bool,
+}
+impl PartialEq for NativeViewport {
+    fn eq(&self, other: &Self) -> bool {
+        self.pane == other.pane && self.tab == other.tab && self.identity == other.identity
+            && self.context == other.context && self.epoch == other.epoch && self.size == other.size && self.top == other.top
+            && self.wrapped == other.wrapped && Arc::ptr_eq(&self.visible, &other.visible)
+            && match (&self.declarations, &other.declarations) {
+                (None, None) => true, (Some(a), Some(b)) => Arc::ptr_eq(a, b), _ => false,
+            }
+    }
+}
+impl Eq for NativeViewport {}
+impl NativeViewport {
+    pub(crate) fn capture(state: &State, reveals: &Reveals, pane: u8) -> Option<Self> {
+        let tab = state.shown(pane)?;
+        let view = state.view(tab.id())?;
+        Some(Self { pane, tab: tab.id(), identity: view.display_start(tab.top_line())?,
+            context: reveals.context(pane)?, epoch: reveals.serial, size: state.text_size(pane)?,
+            top: (tab.top_line(), tab.top_row(), tab.column()), visible: view.visible(),
+            declarations: tab.declarations_handle().cloned(), wrapped: state.wrap_cols(tab).is_some() })
+    }
+    pub(crate) fn current(&self, state: &State, reveals: &Reveals) -> bool {
+        let Some(now) = Self::capture(state, reveals, self.pane) else { return false };
+        self == &now
+    }
+}
+
 struct Pending {
     goal: NativeReveal,
     selection: Option<Selection>,
@@ -59,6 +99,7 @@ impl Reveals {
             .map(|pending| &pending.goal)
     }
     pub fn cancel(&mut self) {
+        self.serial = self.serial.wrapping_add(1);
         self.pending = Default::default();
     }
     pub fn invalidate(&mut self, state: &State) {
@@ -99,6 +140,7 @@ impl Reveals {
         });
     }
     pub fn regenerate(&mut self, state: &State, pane: u8) {
+        self.serial = self.serial.wrapping_add(1);
         let old = self.pending.get_mut(pane as usize).and_then(Option::take);
         if let Some(old) = old.filter(|old| {
             state.view(old.goal.tab).is_some_and(|view| {
