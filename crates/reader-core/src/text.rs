@@ -26,18 +26,18 @@ pub struct TextWindow<'a> {
 #[derive(Debug)]
 struct Chunk { text: Box<str>, newlines: Box<[usize]>, utf16: usize }
 impl Chunk {
-    fn split(text: &str) -> Vec<Arc<Self>> {
+    fn split(mut text: &str) -> Vec<Arc<Self>> {
         let mut chunks = Vec::new();
-        let mut start = 0;
-        while start < text.len() {
-            let end = text.floor_char_boundary((start + CHUNK_BYTES).min(text.len()));
-            let text = &text[start..end];
+        while !text.is_empty() {
+            let end = text.floor_char_boundary(CHUNK_BYTES.min(text.len()));
+            // floor_char_boundary proves end is in bounds and on a UTF-8 boundary.
+            let (part, rest) = text.split_at(end);
             chunks.push(Arc::new(Self {
-                newlines: text.match_indices('\n').map(|(i, _)| i).collect(),
-                utf16: text.chars().map(char::len_utf16).sum(),
-                text: text.into(),
+                newlines: part.match_indices('\n').map(|(i, _)| i).collect(),
+                utf16: part.chars().map(char::len_utf16).sum(),
+                text: part.into(),
             }));
-            start = end;
+            text = rest;
         }
         chunks
     }
@@ -130,7 +130,8 @@ impl TextSnapshot {
     }
     pub fn byte_to_utf16(&self, byte: usize) -> Option<usize> {
         if !self.boundary(byte) { return None; }
-        Some(self.entry(byte).map_or(0, |e| e.utf16 + e.chunk.text[..byte - e.byte].chars().map(char::len_utf16).sum::<usize>()))
+        let Some(e) = self.entry(byte) else { return Some(0); };
+        Some(e.utf16 + e.chunk.text.get(..byte - e.byte)?.chars().map(char::len_utf16).sum::<usize>())
     }
     pub fn utf16_to_byte(&self, unit: usize) -> Option<usize> {
         if unit > self.utf16 { return None; }
@@ -150,7 +151,7 @@ impl TextSnapshot {
         if bytes.is_empty() { return Some(Cow::Borrowed("")); }
         let e = self.entry(bytes.start)?;
         if bytes.end <= e.byte + e.chunk.text.len() {
-            return Some(Cow::Borrowed(&e.chunk.text[bytes.start - e.byte..bytes.end - e.byte]));
+            return Some(Cow::Borrowed(e.chunk.text.get(bytes.start - e.byte..bytes.end - e.byte)?));
         }
         let mut text = String::with_capacity(bytes.len());
         let start = self.chunks.partition_point(|e| e.byte <= bytes.start) - 1;
@@ -158,7 +159,7 @@ impl TextSnapshot {
             if e.byte >= bytes.end { break; }
             let from = bytes.start.saturating_sub(e.byte);
             let to = (bytes.end - e.byte).min(e.chunk.text.len());
-            text.push_str(&e.chunk.text[from..to]);
+            text.push_str(e.chunk.text.get(from..to)?);
         }
         Some(Cow::Owned(text))
     }
@@ -176,7 +177,9 @@ impl TextSnapshot {
 
     /// Explicit full conversion for admitted background analysis; never call from input/render paths.
     pub fn materialize(&self) -> Document {
-        Document::from_snapshot_parts(self.source.clone(), self.key.version, self.copy_range(0..self.bytes).expect("valid full range").into())
+        let mut text = String::with_capacity(self.bytes);
+        for e in self.chunks.iter() { text.push_str(&e.chunk.text); }
+        Document::from_snapshot_parts(self.source.clone(), self.key.version, text.into())
     }
 
     /// Apply one exact transaction. Ranges refer to this snapshot, sorted in ascending order.
@@ -193,24 +196,24 @@ impl TextSnapshot {
         }
         let mut result = self.clone();
         // Reverse order keeps all source ranges valid without retaining intermediate snapshots.
-        for edit in edits.iter().rev() { result.replace(edit); }
+        for edit in edits.iter().rev() { result.replace(edit)?; }
         result.key.version = version;
         Ok(result)
     }
 
-    fn replace(&mut self, edit: &TextEdit) {
+    fn replace(&mut self, edit: &TextEdit) -> Result<(), EditError> {
         if self.chunks.is_empty() {
             *self = Self::indexed(self.key, self.source.clone(), Chunk::split(&edit.text));
-            return;
+            return Ok(());
         }
         let first = self.chunks.partition_point(|e| e.byte <= edit.range.start) - 1;
         let last = self.chunks.partition_point(|e| e.byte <= edit.range.end) - 1;
         let a = &self.chunks[first];
         let b = &self.chunks[last];
         let mut rebuilt = String::new();
-        rebuilt.push_str(&a.chunk.text[..edit.range.start - a.byte]);
+        rebuilt.push_str(a.chunk.text.get(..edit.range.start - a.byte).ok_or(EditError::InvalidRange)?);
         rebuilt.push_str(&edit.text);
-        rebuilt.push_str(&b.chunk.text[edit.range.end - b.byte..]);
+        rebuilt.push_str(b.chunk.text.get(edit.range.end - b.byte..).ok_or(EditError::InvalidRange)?);
         // Rechunk one neighbour so repeated typing does not accumulate tiny chunks.
         let after = if let Some(next) = self.chunks.get(last + 1) {
             rebuilt.push_str(&next.chunk.text);
@@ -221,5 +224,6 @@ impl TextSnapshot {
         chunks.extend(Chunk::split(&rebuilt));
         chunks.extend(self.chunks[after..].iter().map(|e| e.chunk.clone()));
         *self = Self::indexed(self.key, self.source.clone(), chunks);
+        Ok(())
     }
 }
