@@ -314,3 +314,29 @@ fn duckdb_assistance_measurements() {
         "scope":"isolated prerequisite API on a contended development host; no production UI or worker claim"
     })).unwrap()).unwrap();
 }
+
+#[test]
+#[ignore = "explicit native parser classification; no statements are executed"]
+fn native_non_select_serialization_limit_is_not_reported_as_invalid_syntax() {
+    use reader_core::duckdb_assistance::DuckDb;
+    let native = DuckDb::new(std::env::var_os("LENZ_TEST_DUCKDB").unwrap());
+    for sql in [
+        "CREATE TABLE absent_table(id INTEGER)",
+        "DROP TABLE absent_table",
+        "INSERT INTO absent_table VALUES (1)",
+        "UPDATE absent_table SET id = 2",
+        "DELETE FROM absent_table",
+        "EXPLAIN SELECT * FROM absent_table",
+    ] {
+        assert_eq!(native.diagnose(sql), Ok(()), "{sql}");
+    }
+    for sql in [
+        "UPDATE absent_table SET",
+        "CREATE TABLE absent_table(id INTEGER); SELECT 1 +",
+        "DROP TABLE absent_table; SELECT '😀', )",
+    ] {
+        let error = native.diagnose(sql).unwrap_err();
+        assert!(error.byte_offset.is_some(), "{sql}: {error:?}");
+        assert!(!error.message.contains("Only SELECT statements"));
+    }
+}
