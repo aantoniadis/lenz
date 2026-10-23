@@ -2997,16 +2997,33 @@ impl Session {
                 Effect { repaint: true, ..effect }
             }
             Command::SetTextSize { pane, cols, rows } => {
-                let Some(size) = self.state.text_size.get_mut(pane as usize) else { return Effect::default() };
-                let changed = *size != (cols, rows);
-                let rewrap = size.0 != cols;
-                *size = (cols, rows);
+                let Some(old_size) = self.state.text_size(pane) else { return Effect::default() };
+                let changed = old_size != (cols, rows);
+                let rewrap = old_size.0 != cols;
+                let goal = self.native.goal(pane, &self.state).cloned();
+                let intent = changed.then(|| self.layout_intents[pane as usize].take()).flatten()
+                    .filter(|intent| layout_intent_current(&self.state, intent));
+                self.state.text_size[pane as usize] = (cols, rows);
                 if rewrap {
                     // Wrapped rows change with the width: the top line stays, from its first row.
                     self.state.tabs.iter_mut().filter(|t| t.pane == pane).for_each(|t| t.set_top(t.top_line, 0));
                 }
-                if changed { self.native.regenerate(&self.state, pane); }
-                Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None }
+                let mut effect = Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None };
+                if changed {
+                    self.native.regenerate(&self.state, pane);
+                    if let Some(intent) = intent {
+                        let resumed = self.resume_layout(intent);
+                        effect.repaint |= resumed.repaint;
+                        effect.copy = resumed.copy;
+                    } else if let Some(goal) = goal {
+                        let target = self.state.view(goal.tab).map(|view| {
+                            let line = view.snapshot().line_of(goal.source);
+                            (line, goal.source.saturating_sub(view.snapshot().reader_line_range(line).start))
+                        });
+                        if let Some((line, byte)) = target { self.bring_into_view(goal.tab, line, byte); }
+                    }
+                }
+                effect
             }
             Command::RerunSearch => match self.state.results.as_ref().map(|r| (r.kind, r.query.clone(), r.scope.clone())) {
                 Some((ResultsKind::Text, query, scope)) => {
@@ -4160,6 +4177,20 @@ impl Session {
         Effect { repaint: true, copy: None }
     }
 
+    fn resume_layout(&mut self, intent: LayoutIntent) -> Effect {
+        match intent.purpose {
+            LayoutPurpose::Command(command) => {
+                let reveal = matches!(&command, Command::MoveCaret(_) | Command::Extend(_));
+                let effect = self.command(command);
+                if reveal && effect.repaint { self.keep_selection_visible(); }
+                effect
+            }
+            LayoutPurpose::Selection => { self.keep_selection_visible(); Effect::default() }
+            LayoutPurpose::Reveal { line, byte } => { self.bring_into_view(intent.request.tab, line, byte); Effect::default() }
+            LayoutPurpose::Band { line, row } => { self.clear_of_band(intent.request.tab, line, row); Effect::default() }
+        }
+    }
+
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
             Completion::LaidOut(done) => {
@@ -4175,17 +4206,8 @@ impl Session {
                 });
                 let mut effect = Effect { repaint: applied || failed, copy: None };
                 if applied && let Some(intent) = self.layout_intents.get_mut(pane).and_then(Option::take).filter(|intent| layout_intent_current(&self.state, intent)) {
-                    match intent.purpose {
-                        LayoutPurpose::Command(command) => {
-                            let reveal = matches!(&command, Command::MoveCaret(_) | Command::Extend(_));
-                            let result = self.command(command);
-                            if reveal && result.repaint { self.keep_selection_visible(); }
-                            effect.repaint |= result.repaint; effect.copy = result.copy;
-                        }
-                        LayoutPurpose::Selection => self.keep_selection_visible(),
-                        LayoutPurpose::Reveal { line, byte } => self.bring_into_view(intent.request.tab, line, byte),
-                        LayoutPurpose::Band { line, row } => self.clear_of_band(intent.request.tab, line, row),
-                    }
+                    let resumed = self.resume_layout(intent);
+                    effect.repaint |= resumed.repaint; effect.copy = resumed.copy;
                 }
                 effect
             }

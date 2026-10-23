@@ -173,7 +173,7 @@ impl Line {
         );
         cell.column = self.position.column;
         cell.width = UnicodeWidthStr::width(cell.text());
-        if self.goal_display.is_some_and(|display| (cell.display..cell.display + cell.text().len()).contains(&display)) {
+        if self.bounds.is_none() && self.goal_display.is_some_and(|display| (cell.display..cell.display + cell.text().len()).contains(&display)) {
             self.bounds = Some(cell.column..cell.column.saturating_add(cell.width.max(1)));
         }
         if cell.column >= self.target.skip

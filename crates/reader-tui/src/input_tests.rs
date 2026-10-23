@@ -801,6 +801,31 @@ fn unicode_go_to_caret_repaints_after_native_overscroll_clamping() {
     }
 }
 #[test]
+fn resizing_a_pending_wrapped_reveal_keeps_its_exact_caret_row_visible() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("resize-keycaps.txt");
+    let source = "1\u{FE0F}\u{20E3}".repeat(500) + " END";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.loaded()));
+    a.dispatch(Command::SetSoftWrap(true));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 80, 10);
+    a.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(1_502) }));
+    settle(&mut a, |a| a.session.native_reveal(0).is_some());
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        draw(&mut a, 28, 10);
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 3_501) { break; }
+        assert!(Instant::now() < deadline, "resize lost the pending caret's logical row");
+        while let Ok(done) = a.session.completions().try_recv() { a.apply(done); }
+        std::thread::yield_now();
+    }
+    assert_eq!(a.session.state().selection().unwrap().head, 3_501);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn wrapped_keycap_in_one_text_cell_has_an_exact_source_indicator() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("keycap.txt");

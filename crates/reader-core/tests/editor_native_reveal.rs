@@ -45,4 +45,19 @@ fn native_reveal_feedback_is_versioned_context_bound_and_does_not_replay_after_u
     s.dispatch(Command::ScrollColumn(0));
     s.dispatch(Command::MeasuredReveal { goal: superseded, cols: 30, bounds: 20_001..20_002 });
     assert_eq!(s.state().column(), 0, "even a no-op user pan supersedes pending reveal");
+    s.dispatch(Command::SetSoftWrap(true));
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 40, rows: 10 });
+    s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(20_002) }));
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 20, rows: 10 });
+    let until = Instant::now() + Duration::from_secs(2);
+    while s.native_reveal(0).is_none() {
+        assert!(Instant::now() < until, "resized cold logical seek must resume");
+        while let Ok(done) = s.completions().try_recv() { s.dispatch(done); }
+        std::thread::yield_now();
+    }
+    let tab = s.state().active().unwrap().id();
+    let view = s.state().view(tab).unwrap();
+    let reader_core::layout::Query::Ready(Some(position)) = view.layout_position(20_001, Some(20)) else { panic!("completed caret row") };
+    assert!(view.layout_rows(10, Some(20)).rows.iter().any(|row| row.index == position.row));
+
 }
