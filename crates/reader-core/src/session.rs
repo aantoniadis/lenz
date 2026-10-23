@@ -1640,6 +1640,9 @@ impl State {
         self.settings.sticky_scroll || self.settings.breadcrumbs
     }
 
+    /// The adapter's current text viewport, in its own columns and rows.
+    pub fn text_size(&self, pane: u8) -> Option<(usize, usize)> { self.text_size.get(pane as usize).copied() }
+
     /// The columns `tab`'s lines wrap at: `None` when wrap is off, the width is not known yet, or the tab shows a
     /// large file, an image or a Markdown preview.
     pub fn wrap_cols(&self, tab: &Tab) -> Option<usize> {
