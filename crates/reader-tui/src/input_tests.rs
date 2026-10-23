@@ -7,6 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+fn copied_selection(state: &reader_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
+}
+
 fn config(dir: &Path) -> Config {
     Config {
         themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-reader"),
@@ -64,7 +68,7 @@ fn declaration_search_follows_a_coarse_checkout_through_keys() {
     assert!(text.contains("WatchOmega"), "{text}");
     assert!(!text.contains("WatchAlpha"));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    settle(&mut a, |a| a.session.state().selected_text().as_deref() == Some("WatchOmega"));
+    settle(&mut a, |a| copied_selection(a.session.state()).as_deref() == Some("WatchOmega"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
 }
 #[test]
@@ -113,7 +117,7 @@ fn right_click_uses_the_shared_context_actions_and_left_click_selects_text() {
         .collect();
     assert_eq!(actions, expected);
     assert!(!actions.contains(&CommandId::OpenFolder));
-    assert_eq!(a.session.state().selected_text().as_deref(), Some("hello"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("hello"));
     draw(&mut a, 40, 12);
     let before = a.session.state().selection();
     click(&mut a, 0, 11);
@@ -654,7 +658,7 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
         row: y,
         modifiers: KeyModifiers::NONE,
     }));
-    assert_eq!(a.session.state().selected_text().as_deref(), Some("α界"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("α界"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("α界"));
     let before = a.session.state().selection();
@@ -735,7 +739,7 @@ fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection
     assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "E");
     click(&mut a, x + 3, y);
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: x + 6, row: y, modifiers: KeyModifiers::NONE }));
-    assert_eq!(a.session.state().selected_text().as_deref(), Some("END"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("END"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("END"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -975,7 +979,7 @@ fn unwrapped_end_then_up_starts_the_caret_at_the_visible_source_tail() {
         let state = a.session.state();
         let view = state.view(state.active().unwrap().id()).unwrap();
         assert_eq!(view.snapshot().line_of(state.selection().unwrap().head), 99);
-        if shift { assert_eq!(state.selected_text().as_deref(), Some("line099\n")); }
+        if shift { assert_eq!(copied_selection(state).as_deref(), Some("line099\n")); }
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
 }
@@ -1101,7 +1105,7 @@ fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
     assert_eq!(escape, "[U+200D]");
     click(&mut a, x, y);
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: end, row: y, modifiers: KeyModifiers::NONE }));
-    assert_eq!(a.session.state().selected_text().as_deref(), Some("\u{200D}"));
+    assert_eq!(copied_selection(a.session.state()).as_deref(), Some("\u{200D}"));
     key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
     assert_eq!(a.copy.take().as_deref(), Some("\u{200D}"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
@@ -1120,12 +1124,12 @@ fn double_and_triple_click_select_word_and_group() {
         let p = &a.layout.panes[0];
         (p.text.x + src.find("world").unwrap() as u16 + 2, p.text.y)
     };
-    let sel = |a: &App| a.session.state().selected_text().as_deref().unwrap_or_default().to_string();
+    let sel = |a: &App| copied_selection(a.session.state()).unwrap_or_default();
     click(&mut a, x, y);
     click(&mut a, x, y);
     assert_eq!(sel(&a), "world");
     click(&mut a, x, y);
-    settle(&mut a, |a| a.session.state().selected_text().as_deref().is_some_and(|t| t.len() > 5));
+    settle(&mut a, |a| copied_selection(a.session.state()).as_deref().is_some_and(|t| t.len() > 5));
     assert_eq!(sel(&a), "hello world");
     click(&mut a, x, y);
     assert_eq!(sel(&a), "", "a fourth click starts over");

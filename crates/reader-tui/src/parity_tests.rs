@@ -11,6 +11,10 @@ use std::{
 
 use crate::app::App;
 
+fn copied_selection(state: &reader_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
+}
+
 fn config(base: &Path) -> Config {
     let providers = base.join("providers.json");
     std::fs::create_dir_all(base).unwrap();
@@ -68,7 +72,7 @@ fn snapshot(s: &State) -> Snapshot {
         active: s.active().map(|t| t.title()),
         text: s.current_source().map(|d| d.copy_range(0..d.len_bytes()).unwrap()),
         selection: s.selection(),
-        selected: s.selected_text().as_deref().map(|text| text.to_owned()),
+        selected: copied_selection(s),
         split: s.split(),
         pane: s.focused_pane(),
         wrap: s.soft_wrap(),
@@ -386,7 +390,7 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
     visual.simulate_keystrokes("ctrl-a");
     key(&mut tui, KeyCode::Char('a'), KeyModifiers::CONTROL);
     settle(&mut visual, &mut tui);
-    assert_eq!(tui.session.state().selected_text().as_deref(), Some(original));
+    assert_eq!(copied_selection(tui.session.state()).as_deref(), Some(original));
 
     // Both tab bars expose the same navigation, and actual right-clicks expose the same context actions.
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
@@ -1228,8 +1232,8 @@ fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: 
             terminal.draw(|f| tui.draw(f)).unwrap();
             if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
             assert!(Instant::now() < deadline, "adapters did not settle: GUI selection {:?}, TUI selection {:?}",
-                gui.read_with(visual, |v, _| v.session().state().selected_text().as_deref().map(|text| text.to_owned())),
-                tui.session.state().selected_text().as_deref());
+                gui.read_with(visual, |v, _| copied_selection(v.session().state())),
+                copied_selection(tui.session.state()).as_deref());
             std::thread::sleep(Duration::from_millis(2));
         }
     };
@@ -1237,7 +1241,7 @@ fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: 
     let at = src.find("world").unwrap() + 2;
     let (gx, gy) = gui.read_with(&visual, |v, _| v.text_point_of(at)).unwrap();
     let text = tui.layout.panes[0].text;
-    let selected = |s: &State| s.selected_text().as_deref().unwrap_or_default().to_string();
+    let selected = |s: &State| copied_selection(s).unwrap_or_default();
     for clicks in 1..=3 {
         visual.simulate_event(gpui::MouseDownEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks, first_mouse: false });
         visual.simulate_event(gpui::MouseUpEvent { button: gpui::MouseButton::Left, position: gpui::point(gpui::px(gx), gpui::px(gy)), modifiers: gpui::Modifiers::default(), click_count: clicks });
