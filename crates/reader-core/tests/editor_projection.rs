@@ -75,3 +75,25 @@ fn projection_guard_and_source_mapping_survive_every_budget_and_hint_continuatio
     assert!(cursor.window(&changed, 64).is_none());
     assert_eq!(cursor.source_byte(), old);
 }
+
+#[test]
+fn later_crlf_line_hints_keep_absolute_source_coordinates() {
+    let snapshot = TextSnapshot::from_document(BufferId(4), &Document::decode("lines.txt".into(), 7, b"header\r\nab\r\n"));
+    let hints = Arc::new(Hints::new(vec![(1, Hint { byte: 1, label: "a long hint".into(), kind: HintKind::Parameter })]));
+    let mut cursor = Cursor::start(&snapshot, 1, Some(hints)).unwrap();
+    let (mut drawn, mut selected) = (String::new(), String::new());
+    loop {
+        let window = cursor.window(&snapshot, 17).unwrap();
+        assert!(window.source.start >= 8 && window.source.end <= 10);
+        for (_, r, _) in &window.shown.hints {
+            for d in r.clone() { assert_eq!(window.source_at(d), 9); }
+        }
+        selected += window.shown.text.get(window.range(9..10)).unwrap();
+        drawn += &window.shown.text;
+        if window.complete { break; }
+    }
+    assert_eq!(drawn, "aa long hintb");
+    assert_eq!(selected, "b");
+    assert_eq!(cursor.source_byte(), 10);
+    assert_eq!(snapshot.copy_range(8..10).unwrap(), "ab");
+}
