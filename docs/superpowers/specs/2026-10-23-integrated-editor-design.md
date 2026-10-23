@@ -2,7 +2,7 @@
 
 Date: 2026-10-23
 
-Status: consolidated design from the accepted interview decisions Q1–Q30, including the additions of Haml, PostgreSQL and DuckDB. This describes required behavior, not implemented capabilities. Implementation planning follows review of this document.
+Status: consolidated design from the accepted interview decisions Q1–Q30, including the additions of Haml, PostgreSQL and DuckDB, and the draft-aware navigation and external-handoff decisions accepted during the plan review. This describes required behavior, not implemented capabilities. The [readiness plan](../plans/2026-10-23-editor-readiness.md#review-decisions-and-evidence) records the review and remaining feasibility work.
 
 ## Intent and release boundary
 
@@ -29,11 +29,21 @@ Save is explicit by default. Show unsaved state separately from Git status. Clos
 
 Reuse the existing safe-write behavior at the shared-core boundary: maintain encoding, BOM, line endings and file mode; validate source identity and external changes; preserve error handling for symlinks, hard links, failed writes and lossy decoding. A failed save leaves the draft available.
 
+Distinguish a save rejected before modification from an I/O failure whose disk outcome is uncertain. Keep the draft, undo history and last confirmed save baseline after an unconfirmed save; report the uncertainty and recheck disk before reconciliation or another write. Existing in-place writing uses best-effort rollback, so preserving its compatibility does not establish universal atomicity or crash durability. Do not silently retry against a newly read baseline.
+
 Keep private local recovery copies of unsaved work, including new documents. Reopening a project restores tabs, split layout, positions and recovered drafts. Clearly identify recovered content, check the original against the recovery baseline and ensure explicit Discard prevents a discarded draft from returning. Recovery does not write the original file. Keep source contents and database credentials out of diagnostic logs and shareable project configuration.
 
 When disk content changes under a dirty draft, retain the draft and offer a comparison. Let the user take the disk version, retain their version or resolve the differences. Recheck the chosen disk baseline at save time. A clean document may follow external changes using the existing refresh behavior.
 
 Formatting is an explicit command by default. Offer project-specific format-on-save and respect the project's formatter and indentation configuration. Resolve EditorConfig/project preferences without changing unrelated files or installing tools.
+
+## Reading and navigation while editing
+
+Project search, symbol search and navigation use unsaved drafts for open files and disk for unopened files. Results, previews and activation must agree on the text and source version. If a target changes after a result arrives, revalidate or recompute it; do not navigate using obsolete disk coordinates or replace a draft with disk text. Preserve this behavior for existing usages, peek and definition workflows, including a different dirty target file.
+
+Blame annotations and their commit actions must refer to the displayed text. Invalidate obsolete attribution after edits; while recomputation is pending, show that state and prevent actions on stale annotations. Keep folds, bookmarks, selections and find results consistent with the edited document as well.
+
+Opening a dirty file in an external editor or app offers **Save and Open**, **Open Saved Version**, and **Cancel**. Save and Open launches only after confirmed save success. Open Saved Version leaves the draft untouched and uses a position from the saved text, omitting a precise position when it cannot be established. Cancel launches nothing. Existing external comparisons must identify their disk inputs; internal editable comparisons use the shared draft as specified below.
 
 ## Keyboard and completion interaction
 
@@ -122,6 +132,7 @@ Acceptance must include:
 6. ERB/Haml Ruby and markup cases, distinct PostgreSQL/DuckDB fixtures, offline SQL assistance and explicit metadata connection tests proving edited statements are not executed.
 7. Light/dark appearances, narrow layouts, tiny terminals and actual input-to-command mappings. GUI automation uses a private display and disposable repositories.
 8. Equivalent release startup, typing/completion feedback, large-file edits, peak/settled memory and sustained editing stress, including child language-server resources where relevant. Keep raw samples and identities; report untested platforms, including native macOS when not exercised.
+9. Draft-aware project/symbol search and result preview/activation, including edits after results arrive and dirty target files; accurate blame actions after line insertion/deletion/undo; explicit external-open choices without silent saves or launches after save failure.
 
 Use `scripts/ci-local.sh` as the local gate, the real Reader GUI/TUI adapter and parity suites, and the Diff adapter checks when shared or comparison behavior changes. Follow the repository's documentation-only checks while this remains a design change.
 
