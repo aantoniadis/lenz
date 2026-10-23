@@ -133,9 +133,22 @@ impl Analysis {
     }
 
     pub(crate) fn forget(&mut self, id: BufferId) {
-        if let Some(entry) = self.entries.get_mut(&id) { entry.live = false; entry.pending = None; entry.group.cancel(); }
+        if let Some(entry) = self.entries.get_mut(&id) { entry.live = false; entry.pending = None; entry.queued = false; entry.group.cancel(); }
         self.queue.retain(|queued| *queued != id);
         if self.entries.get(&id).is_some_and(|entry| !entry.group.running()) { self.entries.remove(&id); }
+    }
+
+    pub(crate) fn invalidate(&mut self, snapshot: &TextSnapshot, project: u64) {
+        let current = scope(snapshot, project);
+        let id = current.key.buffer;
+        if let Some(entry) = self.entries.get_mut(&id)
+            && entry.pending.as_ref().map_or(entry.group.scope, |pending| pending.input.scope) != current
+        {
+            entry.group.cancel();
+            entry.pending = None;
+            entry.queued = false;
+            self.queue.retain(|queued| *queued != id);
+        }
     }
 
     pub(crate) fn close(&mut self) {
@@ -163,7 +176,7 @@ impl Analysis {
                 }
             }
             if !entry.group.waiting.is_empty() { retry.push(*id); }
-            entry.live || entry.group.running()
+            (entry.live && entry.group.cancel.load(Ordering::Acquire)) || entry.group.running()
         });
         for id in retry { self.enqueue(id); }
         let mut turns = self.queue.len();

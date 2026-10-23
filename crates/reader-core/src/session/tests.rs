@@ -697,6 +697,47 @@ fn finder_perf() {
 }
 
 #[test]
+fn reloading_without_a_find_releases_superseded_pending_analysis_text() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "versions.txt", b"alpha\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "versions.txt");
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || {
+            started.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Find("alpha".into()));
+    let mut superseded = None;
+    for text in ["beta\n", "gamma\n"] {
+        std::fs::write(&file, text).unwrap();
+        s.dispatch(Command::Reload);
+        let tab = s.state.active.unwrap();
+        let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        // The filesystem boundary is held; deliver the exact decoded bytes through its real completion.
+        s.dispatch(Completion::Loaded { request: s.request, tab, path: file.clone(),
+            result: Ok((Stamp::of(&file), Arc::new(Document::decode(file.clone(), version, text.as_bytes())), std::fs::canonicalize(&file).ok())) });
+        if superseded.is_none() {
+            superseded = Some(Arc::downgrade(s.state().view(tab).unwrap().snapshot()));
+            s.dispatch(Command::CloseFind);
+        }
+    }
+    let released = superseded.unwrap().upgrade().is_none();
+    for release in releases { release.send(()).unwrap(); }
+    s.dispatch(Command::Find("gamma".into()));
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().document().unwrap().text().as_ref(), "gamma\n");
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(released, "a superseded pending snapshot must be released before blocked work resumes");
+}
+
+#[test]
 fn replacing_pending_find_requests_bounds_retained_document_owners() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "find.txt", b"needle\nother\n");

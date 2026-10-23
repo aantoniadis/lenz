@@ -2496,6 +2496,9 @@ impl Session {
 
     fn admit_current(&mut self, id: TabId) {
         let changed = self.state.admit_current(id);
+        if let Some(view) = self.state.view(id) {
+            self.analysis.invalidate(view.snapshot(), self.project_generation.load(Ordering::Relaxed));
+        }
         for id in changed {
             if let Some(doc) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.doc.clone()) {
                 if self.is_shown(id) {
