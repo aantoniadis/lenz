@@ -41,3 +41,4 @@ pub mod duckdb_assistance;
 pub mod projection;
 mod projection_jobs;
 pub mod layout;
+mod layout_jobs;
