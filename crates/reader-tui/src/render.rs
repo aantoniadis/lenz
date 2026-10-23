@@ -90,6 +90,7 @@ struct SourceIdentity {
     top: (usize, usize),
     column: usize,
     cols: Option<usize>,
+    size: Option<(usize, usize)>,
     visible: Arc<reader_core::folds::Visible>,
     breadcrumbs: bool,
     split: Option<Split>,
@@ -142,7 +143,7 @@ impl SourceIdentity {
             tab: tab.id(), snapshot: view.snapshot().key(),
             metadata: view.snapshot().source_meta().clone(),
             top: (tab.top_line(), tab.top_row()), column: tab.column(), cols: state.wrap_cols(tab),
-            visible: view.visible(),
+            size: state.text_size(tab.pane()), visible: view.visible(),
             breadcrumbs: state.breadcrumbs(), split: state.split(),
             explorer: app.tree_shown && state.has_tree(), results: state.results().is_some(),
             rendering: SourceRendering::new(tab), image_source: tab.image_source(),
@@ -156,7 +157,7 @@ impl SourceIdentity {
         self.tab == tab.id() && self.snapshot == view.snapshot().key()
             && Arc::ptr_eq(&self.metadata, view.snapshot().source_meta())
             && self.top == (tab.top_line(), tab.top_row()) && self.column == tab.column()
-            && self.cols == state.wrap_cols(tab)
+            && self.cols == state.wrap_cols(tab) && self.size == state.text_size(tab.pane())
             && Arc::ptr_eq(&self.visible, &view.visible())
             && self.breadcrumbs == state.breadcrumbs() && self.split == state.split()
             && self.explorer == (app.tree_shown && state.has_tree())
@@ -1874,24 +1875,22 @@ fn draw_pane(
         }
     }
     let cols = state.wrap_cols(tab);
-    let sticky = if state.sticky_scroll() {
-        tab.sticky(
-            reader_core::tabs::sticky_cap(geometry.text.height as usize),
-            cols,
-        )
-    } else {
-        std::sync::Arc::from([])
-    };
-    let rows = if cols.is_some() { tab.rows(geometry.text.height as usize, cols) } else {
-        view.visible().lines(tab.top_line(), geometry.text.height as usize).into_iter().map(|line| {
-            let len = view.snapshot().line_range(line).map_or(0, |range| range.len());
-            reader_core::wrap::Row { line, index: 0, display: 0..0, source: 0..len, indent: 0 }
-        }).collect()
-    };
+    use reader_core::layout::Query;
+    let (sticky, sticky_pending) = if state.sticky_scroll() {
+        match view.layout_sticky(reader_core::tabs::sticky_cap(geometry.text.height as usize), cols) {
+            Query::Ready(lines) => (lines, None),
+            Query::Pending(work) => (Arc::from([]), Some(work)),
+        }
+    } else { (Arc::from([]), None) };
+    let layout = view.layout_rows(geometry.text.height as usize, cols);
+    let rows = layout.rows;
+    if rows.is_empty() && layout.pending.is_some() {
+        line(frame.buffer_mut(), geometry.text, "Preparing text…", style(p.dim, p.bg));
+    }
     let mut extent = Some(0usize);
     for (n, r) in rows.iter().enumerate() {
         let y = geometry.text.y + n as u16;
-        let native = cols.is_none().then(|| app.source_cache.borrow_mut().row(pane, &view, r.line, tab.column(), geometry.text.width as usize, app.session.projection(pane).map(AsRef::as_ref)));
+        let native = native_source_row(app, pane, &view, r, cols, geometry.text.width);
         extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         draw_source_row(
             frame.buffer_mut(),
@@ -1909,15 +1908,13 @@ fn draw_pane(
         geometry.rows.push((y, r.line, r.index));
     }
     for pinned in sticky.iter() {
-        let r = if cols.is_some() {
-            let Some(row) = tab.line_rows(pinned.line, cols).first().cloned() else { continue };
-            row
-        } else {
-            let len = view.snapshot().line_range(pinned.line).map_or(0, |range| range.len());
-            reader_core::wrap::Row { line: pinned.line, index: 0, display: 0..0, source: 0..len, indent: 0 }
+        let r = match view.layout_row(pinned.line, 0, cols) {
+            Query::Ready(Some(row)) => row,
+            Query::Ready(None) => continue,
+            Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, tab.id(), work); continue; }
         };
         let y = geometry.text.y + pinned.row as u16;
-        let native = cols.is_none().then(|| app.source_cache.borrow_mut().row(pane, &view, r.line, tab.column(), geometry.text.width as usize, app.session.projection(pane).map(AsRef::as_ref)));
+        let native = native_source_row(app, pane, &view, &r, cols, geometry.text.width);
         extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         geometry.hits.retain(|h| h.y != y);
         geometry.rows.retain(|(cy, ..)| *cy != y);
@@ -1936,17 +1933,33 @@ fn draw_pane(
         );
         geometry.rows.push((y, r.line, r.index));
     }
+    if let Some(work) = layout.pending.or(sticky_pending) {
+        app.source_cache.borrow_mut().layout(pane, tab.id(), work);
+    }
     if let Some(extent) = extent {
         app.source_cache.borrow_mut().clamp(pane, &view, geometry.text.width as usize, extent);
     }
     geometry
 }
 
+fn native_source_row(app: &App, pane: u8, view: &View<'_>, row: &reader_core::layout::Row, cols: Option<usize>, width: u16) -> Option<crate::source::Row> {
+    if cols.is_none() {
+        return Some(app.source_cache.borrow_mut().row(pane, view, row.line, view.tab().column(), width as usize, app.session.projection(pane).map(AsRef::as_ref)));
+    }
+    let held = app.source_cache.borrow().cursor(pane, view, row.line, row.display.start);
+    let cursor = if let Some(cursor) = held { cursor } else {
+        match view.layout_cursor(row.line, row.display.start, cols) {
+            reader_core::layout::Query::Ready(cursor) => cursor?,
+            reader_core::layout::Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, view.tab().id(), work); return None; }
+        }
+    };
+    Some(app.source_cache.borrow_mut().wrapped(pane, view, cursor, row.display.clone(), row.complete.then_some(row.source.end), (width as usize).saturating_sub(row.indent), app.session.projection(pane).map(AsRef::as_ref)))
+}
+
 struct SourceCell<'a> {
     x: u16,
     width: u16,
     byte: usize,
-    display: usize,
     text: &'a str,
 }
 fn source_cells(
@@ -1981,7 +1994,6 @@ fn source_cells(
                 x: (col - skip) as u16,
                 width: w as u16,
                 byte: source,
-                display,
                 text: grapheme,
             });
         }
@@ -1998,7 +2010,7 @@ fn draw_source_row(
     buf: &mut Buffer,
     state: &State,
     view: &View<'_>,
-    r: &reader_core::wrap::Row,
+    r: &reader_core::layout::Row,
     native: Option<crate::source::Row>,
     area: Rect,
     y: u16,
@@ -2012,7 +2024,6 @@ fn draw_source_row(
     }
     let tab = view.tab();
     let Some(source_line) = view.snapshot().line_range(r.line) else { return };
-    let shown = native.is_none().then(|| tab.shown_line(r.line));
     let base = if sticky { p.header_bg } else { p.bg };
     fill(
         buf,
@@ -2068,13 +2079,16 @@ fn draw_source_row(
             p.gutter_bg,
         ),
     );
-    if let Some(native) = native.as_ref().filter(|row| row.failed || (row.pending && row.cells.is_empty())) {
+    let Some(native) = native.as_ref() else {
+        line(buf, Rect::new(area.x, y, area.width, 1), "Preparing text…", style(p.dim, base));
+        return;
+    };
+    if native.failed || (native.pending && native.cells.is_empty()) {
         line(buf, Rect::new(area.x, y, area.width, 1), if native.failed { "Text layout failed" } else { "Preparing text…" }, style(p.dim, base));
         return;
     }
     let start = source_line.start;
     let selection = tab.selection();
-    let spans = tab.spans(r.line);
     let find = tab.find();
     let occurrences = (state.active().is_some_and(|a| a.id() == tab.id()))
         .then(|| state.occurrences())
@@ -2085,40 +2099,16 @@ fn draw_source_row(
         tab.column()
     };
     let indent = r.indent.min(area.width as usize);
-    struct PaintedCell<'a> {
-        x: u16, width: u16, byte: usize, text: &'a str, hint: bool, caret: bool,
-    }
-    let (cells, end): (Vec<PaintedCell>, _) = if let Some(native) = native.as_ref() {
-        (native.cells.iter().map(|cell| PaintedCell {
-            x: cell.column.saturating_sub(skip) as u16, width: cell.width as u16,
-            byte: cell.byte.saturating_sub(start), text: cell.text(),
-            hint: cell.hint, caret: cell.caret,
-        }).collect(), native.end.map(|end| end.saturating_sub(start)))
-    } else {
-        let Some(shown) = shown.as_ref() else { return };
-        (source_cells(shown, r.display.clone(), skip, (area.width as usize).saturating_sub(indent)).into_iter().map(|cell| PaintedCell {
-            x: cell.x, width: cell.width, byte: cell.byte, text: cell.text,
-            hint: shown.hints.iter().any(|(_, range, _)| range.contains(&cell.display)),
-            caret: shown.caret(cell.byte) == cell.display,
-        }).collect(), Some(r.source.end.min(source_line.len())))
-    };
     let mut end_x = area.x + indent as u16;
-    for cell in cells {
-        let source = start + cell.byte;
+    for cell in native.cells.iter() {
+        let source = cell.byte;
+        let byte = source.saturating_sub(start);
+        let width = cell.width as u16;
         let mut st = style(p.fg, base);
-        if let Some((_, capture, mods)) =
-            spans.iter().find(|(range, ..)| range.contains(&cell.byte))
-        {
-            if let Some(capture) = capture {
-                st = st.fg(color(p.syntax_color(*capture)));
-            }
-            if mods & reader_core::decor::MUTABLE != 0 {
-                st = st.add_modifier(Modifier::UNDERLINED);
-            }
-            if mods & reader_core::decor::DEPRECATED != 0 {
-                st = st.add_modifier(Modifier::CROSSED_OUT);
-            }
-        }
+        let (capture, mods) = view.style_at(r.line, byte);
+        if let Some(capture) = capture { st = st.fg(color(p.syntax_color(capture))); }
+        if mods & reader_core::decor::MUTABLE != 0 { st = st.add_modifier(Modifier::UNDERLINED); }
+        if mods & reader_core::decor::DEPRECATED != 0 { st = st.add_modifier(Modifier::CROSSED_OUT); }
         let hint = cell.hint;
         if hint {
             st = style(p.dim, base).add_modifier(Modifier::ITALIC);
@@ -2130,7 +2120,7 @@ fn draw_source_row(
             && find.is_some_and(|f| {
                 f.in_line(r.line)
                     .iter()
-                    .any(|(_, range)| range.contains(&cell.byte))
+                    .any(|(_, range)| range.contains(&byte))
             })
         {
             st = st.bg(color(p.found_bg));
@@ -2143,18 +2133,18 @@ fn draw_source_row(
         {
             st = st.add_modifier(Modifier::REVERSED);
         }
-        let x = area.x + indent as u16 + cell.x;
-        buf.set_stringn(x, y, cell.text, cell.width as usize, st);
+        let x = area.x + indent as u16 + cell.column.saturating_sub(skip) as u16;
+        buf.set_stringn(x, y, cell.text(), cell.width, st);
         hits.push(TextHit {
             x,
             y,
-            width: cell.width.max(1),
+            width: width.max(1),
             line: r.line,
-            byte: cell.byte,
+            byte,
         });
-        end_x = x + cell.width;
+        end_x = x + width;
     }
-    if end_x < area.right() && let Some(end) = end {
+    if end_x < area.right() && let Some(end) = native.end.map(|end| end.saturating_sub(start)) {
         hits.push(TextHit {
             x: end_x,
             y,

@@ -3333,7 +3333,10 @@ impl Session {
                 } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 if doc.source_meta().image().is_some() && !t.image_source { return Effect::default(); }
-                let s = t.selection.unwrap_or(Selection {anchor:0,head:0});
+                let s = t.selection.unwrap_or_else(|| {
+                    let origin = if cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
+                    Selection { anchor: origin, head: origin }
+                });
                 let visible = t.visible();
                 let line = doc.line_of(s.head);
                 let range = doc.reader_line_range(line);
@@ -3352,7 +3355,8 @@ impl Session {
                 repaint
             }
             Command::Extend(motion) => {
-                let cols = self.state.active().and_then(|t| self.state.wrap_cols(t)).filter(|_| matches!(motion, Motion::Up | Motion::Down));
+                let wrap_cols = self.state.active().and_then(|t| self.state.wrap_cols(t));
+                let cols = wrap_cols.filter(|_| matches!(motion, Motion::Up | Motion::Down));
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let wrapped = if let Some(cols) = cols {
                     let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
@@ -3362,7 +3366,10 @@ impl Session {
                     }
                 } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let s = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
+                let s = t.selection.unwrap_or_else(|| {
+                    let origin = if wrap_cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
+                    Selection { anchor: origin, head: origin }
+                });
                 let head = wrapped.unwrap_or_else(|| moved(&doc, &t.visible(), s.head, motion));
                 let line = doc.line_of(head);
                 // Keep the head on screen as far as the core knows the view: at or below the top line, and below the
