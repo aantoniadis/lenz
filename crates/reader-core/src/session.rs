@@ -1207,6 +1207,100 @@ impl View<'_> {
 }
 
 impl View<'_> {
+    fn layout_query<T>(&self, cols: Option<usize>, mut query: impl FnMut(&mut crate::layout::Cache) -> crate::layout::Query<T>) -> crate::layout::Query<T> {
+        use crate::layout::Query;
+        let mut cache = self.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        cache.configure(self.snapshot, cols, self.inlay_hints());
+        match query(&mut cache) {
+            Query::Pending(work) => {
+                if let Some(delta) = work.clone().run(self.snapshot, crate::projection::WINDOW_WORK, || true) { cache.apply(delta); }
+                query(&mut cache)
+            }
+            ready => ready,
+        }
+    }
+
+    pub fn layout_row(&self, line: usize, index: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Row>> {
+        self.layout_query(cols, |cache| cache.row(self.snapshot, line, index, 32))
+    }
+
+    pub fn layout_last(&self, line: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Row>> {
+        self.layout_query(cols, |cache| cache.last(self.snapshot, line))
+    }
+
+    pub fn layout_position(&self, source: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::layout::Position>> {
+        self.layout_query(cols, |cache| cache.position(self.snapshot, self.snapshot.line_of(source), source))
+    }
+
+    /// A projection cursor at or before the global display byte, within one bounded raw window.
+    pub fn layout_cursor(&self, line: usize, display: usize, cols: Option<usize>) -> crate::layout::Query<Option<crate::projection::Cursor>> {
+        self.layout_query(cols, |cache| cache.cursor(self.snapshot, line, display))
+    }
+
+    pub fn layout_byte_at(&self, row: &crate::layout::Row, column: usize, cols: Option<usize>) -> crate::layout::Query<Option<usize>> {
+        self.layout_query(cols, |cache| cache.byte_at(self.snapshot, row, column))
+    }
+
+    pub fn layout_rows(&self, count: usize, cols: Option<usize>) -> crate::layout::Rows {
+        use crate::layout::{Query, Rows};
+        let visible = self.visible();
+        let count = count.min(4096);
+        let mut out = Vec::with_capacity(count);
+        let query = self.layout_query(cols, |cache| {
+            out.clear();
+            let (mut line, mut index) = (self.tab.top_line(), if cols.is_some() { self.tab.top_row() } else { 0 });
+            while out.len() < count {
+                match cache.row(self.snapshot, line, index, count - out.len()) {
+                    Query::Ready(Some(row)) => {
+                        let last = row.last;
+                        out.push(row);
+                        if !last { index += 1; continue; }
+                    }
+                    Query::Ready(None) => {}
+                    Query::Pending(work) => {
+                        if let Some(prefix) = cache.prefix(self.snapshot, line, index) { out.push(prefix); }
+                        return Query::Pending(work);
+                    }
+                }
+                let next = visible.step(line, 1);
+                if next == line { break; }
+                line = next; index = 0;
+            }
+            Query::Ready(())
+        });
+        Rows { rows: out, pending: match query { Query::Pending(work) => Some(work), Query::Ready(()) => None } }
+    }
+
+    pub fn layout_step(&self, from: (usize, usize), delta: isize, cols: usize) -> crate::layout::Query<(usize, usize)> {
+        use crate::layout::Query;
+        let visible = self.visible();
+        self.layout_query(Some(cols), |cache| {
+            let (mut line, mut row) = from;
+            // Command-sized steps; a distant line end remains resumable source work.
+            for _ in 0..delta.unsigned_abs().min(4096) {
+                if delta > 0 {
+                    match cache.row(self.snapshot, line, row.saturating_add(1), 32) {
+                        Query::Ready(Some(_)) => { row += 1; continue; }
+                        Query::Pending(work) => return Query::Pending(work),
+                        Query::Ready(None) => {}
+                    }
+                    let next = visible.step(line, 1);
+                    if next == line { break; }
+                    (line, row) = (next, 0);
+                } else if row > 0 { row -= 1; }
+                else {
+                    let previous = visible.step(line, -1);
+                    if previous == line { break; }
+                    match cache.last(self.snapshot, previous) {
+                        Query::Ready(last) => (line, row) = (previous, last.map_or(0, |row| row.index)),
+                        Query::Pending(work) => return Query::Pending(work),
+                    }
+                }
+            }
+            Query::Ready((line, row))
+        })
+    }
+
     pub fn inlay_hints(&self) -> Option<&Arc<crate::decor::Hints>> {
         let (version, hints) = self.tab.hints.as_ref()?;
         (*version == self.snapshot.key().version).then_some(hints)

@@ -288,6 +288,39 @@ fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn source_windows_scroll_and_select_past_the_old_long_line_prefix(cx: &mut TestAppContext) {
+    let source = format!("{}END😀\t\x07{}\r\n", "a".repeat(12_000), "tail ".repeat(1_000));
+    let f = fixture(cx, Some(("long.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(12_000), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (bounds, column, char_w, shown) = f.view.read_with(&v, |r, _| {
+        (r.text_bounds.unwrap(), r.session().state().column(), r.char_w, r.visible_rows()[0].text.clone())
+    });
+    assert!(shown.contains("END"), "the viewport must reach the original tail: {shown:?}");
+    assert!(column > 10_000);
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + (12_000 - column) as f32 * char_w;
+    let y = bounds.origin.y + px(line_h() / 2.0);
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 12_000..12_003);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("long.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));

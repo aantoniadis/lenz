@@ -1,0 +1,60 @@
+use reader_core::{document::Document, layout::{Cache, Query}, projection::Cursor, text::{BufferId, TextSnapshot}};
+
+fn snapshot(text: &str) -> TextSnapshot {
+    TextSnapshot::from_document(BufferId(1), &Document::decode("layout.txt".into(), 1, text.as_bytes()))
+}
+
+#[track_caller]
+fn ready<T>(cache: &mut Cache, snapshot: &TextSnapshot, mut query: impl FnMut(&mut Cache) -> Query<T>) -> T {
+    for _ in 0..512 {
+        match query(cache) {
+            Query::Ready(value) => return value,
+            Query::Pending(work) => { assert!(cache.apply(work.run(snapshot, 4096, || true).unwrap())); }
+        }
+    }
+    panic!("layout did not make progress");
+}
+
+#[test]
+fn shared_wrap_rows_and_far_coordinates_do_not_stop_at_the_old_prefix() {
+    let doc = snapshot("\tab cd ef\n");
+    let mut cache = Cache::default();
+    cache.configure(&doc, Some(6), None);
+    let rows: Vec<_> = (0..3).map(|i| ready(&mut cache, &doc, |c| c.row(&doc, 0, i, 3)).unwrap()).collect();
+    assert_eq!(rows.iter().map(|r| r.display.clone()).collect::<Vec<_>>(), [0..7, 7..10, 10..12]);
+    assert_eq!(rows.iter().map(|r| r.source.clone()).collect::<Vec<_>>(), [0..4, 4..7, 7..9]);
+    assert_eq!(rows.iter().map(|r| r.indent).collect::<Vec<_>>(), [0, 3, 3]);
+    assert!(rows[2].last && rows.iter().all(|r| r.complete));
+
+    let doc = snapshot(&("header\r\n".to_string() + &"x".repeat(20_000) + "\r\n"));
+    cache.configure(&doc, Some(10), None);
+    let row = ready(&mut cache, &doc, |c| c.row(&doc, 1, 1200, 20)).unwrap();
+    assert_eq!(row.display, 12_000..12_010);
+    assert_eq!(row.source, 12_008..12_018);
+    let p = ready(&mut cache, &doc, |c| c.position(&doc, 1, 12_013)).unwrap();
+    assert_eq!((p.row, p.display, p.column), (1200, 12_005, 5));
+    let cursor = ready(&mut cache, &doc, |c| c.cursor(&doc, 1, row.display.start)).unwrap();
+    assert!(cursor.display_byte() <= row.display.start && row.display.start - cursor.display_byte() <= 4096);
+    let byte = ready(&mut cache, &doc, |c| c.byte_at(&doc, &row, 5)).unwrap();
+    assert_eq!(byte, 12_013);
+}
+
+#[test]
+fn logical_wrap_never_splits_an_ordinary_projected_grapheme() {
+    let text = "🇬🇷 👩🏽‍💻 e\u{301}";
+    let doc = snapshot(text);
+    let mut cache = Cache::default();
+    cache.configure(&doc, Some(4), None);
+    let mut actual = Vec::new();
+    for i in 0..10 {
+        let Some(row) = ready(&mut cache, &doc, |c| c.row(&doc, 0, i, 10)) else { break };
+        actual.push(text.get(row.display).unwrap().to_string());
+    }
+    assert_eq!(actual, ["🇬🇷 ", "👩🏽‍💻 ", "e\u{301}"]);
+    let doc = snapshot("👩‍💻X");
+    cache.configure(&doc, Some(1), None);
+    let row = ready(&mut cache, &doc, |c| c.row(&doc, 0, 0, 3)).unwrap();
+    assert_eq!(row.display, 0.."👩‍💻".len());
+    assert_eq!(ready(&mut cache, &doc, |c| c.row(&doc, 0, 1, 3)).unwrap().display, "👩‍💻".len().."👩‍💻X".len());
+    let _ = Cursor::start(&doc, 0, None).unwrap();
+}
