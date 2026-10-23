@@ -1652,7 +1652,7 @@ containing folder. This work does not speed up a language server's own indexing.
 
 The core now owns indexed immutable current snapshots and a bounded view facade, with explicit
 compatibility Document paths retained for the adapter/analysis migrations. The [measurement report](research/reader-snapshot-migration-performance.md)
-records source/executable identities, raw evidence, the full local gate and the pending performance decision.
+records source/executable identities, raw evidence, the full local gate and the measured performance decision.
 Editing remains disabled at this stage.
 
 Sharing original text removed a duplicate allocation; reusing decoded line-index ranges later removed
@@ -1663,7 +1663,7 @@ shared-target samples are excluded after a real build collision; a concurrent-va
 is also excluded. All failed, intermediate and inconclusive samples remain retained.
 
 Two clean final pairs still measure 6–8 µs extra core first-text time for 50,400 bytes and 24–88 µs for
-945,000 bytes. Tail direction varies; this is not a preservation claim or an approved tradeoff. The final
+945,000 bytes. Tail direction varies; this is not a preservation claim. The user explicitly accepted the documented opening and typical cached-operation costs on 2026-10-23. The final
 180.15-second core stress passed with settled VmRSS 17.02→17.23 MiB, against baseline 17.93→17.96 MiB;
 these are short-run process-memory observations, not leak proof. Ten alternating cached-operation pairs reproduced roughly 14 ms tails
 in both baseline and candidate; their exact cause remains untraced. Typical cached-operation medians

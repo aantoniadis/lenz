@@ -23,7 +23,7 @@ Screenshots: [image probe](images-in-gpui-probe.png) and
 
 ## Later research
 
-- [Reader snapshot migration measurements](reader-snapshot-migration-performance.md) (2026-10-23): isolated release comparisons, optimization experiments, full local gate and the pending performance decision.
+- [Reader snapshot migration measurements](reader-snapshot-migration-performance.md) (2026-10-23): isolated release comparisons, optimization experiments, full local gate and the accepted measured performance costs.
 
 - [Native macOS termination prerequisite](native-macos-termination.md) (2026-10-23): pinned GPUI shutdown boundary, candidate consent integration and required native acceptance; implementation remains unresolved.
 - [Large-workspace LSP practices](large-workspace-lsp.md) (2026-10-21): VS Code, Zed, Neovim and Helix practices, Ruby LSP indexing boundaries, project scope, reuse and server-specific caches.

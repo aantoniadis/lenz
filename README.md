@@ -69,7 +69,7 @@ Diff feature. See the [Reader guide](docs/code/README.md) for controls and limit
 and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
 
 The internal snapshot migration measured core text availability at **0.888 → 0.912–0.976 ms**
-for the 945,000-byte fixture; the performance exception is awaiting agreement. This endpoint
+for the 945,000-byte fixture; the measured performance exception was accepted. This endpoint
 excludes frontend painting and does not enable editing. See the [snapshot measurements](docs/research/reader-snapshot-migration-performance.md)
 for repeated timing, sustained memory, unsuccessful experiments and remaining limits.
 
