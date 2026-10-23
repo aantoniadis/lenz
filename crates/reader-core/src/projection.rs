@@ -176,7 +176,10 @@ impl Cursor {
                         continue;
                     };
                     let start = shown.text.len();
-                    self.guard.push(c, &mut shown.text);
+                    if lenz_content::display::shows_mark(c, &mut self.marks) {
+                        self.guard.push(c, &mut shown.text);
+                    }
+                    self.marks = self.marks.min(lenz_content::display::MAX_MARKS + 1);
                     let end = shown.text.len();
                     let local = self.byte - from.byte;
                     shown.map.resize(local + 1, start);
