@@ -1953,7 +1953,7 @@ fn native_source_row(app: &App, pane: u8, view: &View<'_>, row: &reader_core::la
             reader_core::layout::Query::Pending(work) => { app.source_cache.borrow_mut().layout(pane, view.tab().id(), work); return None; }
         }
     };
-    Some(app.source_cache.borrow_mut().wrapped(pane, view, cursor, row.display.clone(), row.complete.then_some(row.source.end), (width as usize).saturating_sub(row.indent), app.session.projection(pane).map(AsRef::as_ref)))
+    Some(app.source_cache.borrow_mut().wrapped(pane, view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), (width as usize).saturating_sub(row.indent), app.session.projection(pane).map(AsRef::as_ref)))
 }
 
 struct SourceCell<'a> {

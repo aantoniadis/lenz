@@ -756,6 +756,56 @@ fn leading_zero_width_source_keeps_its_first_hit_after_resizing() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 #[test]
+fn suppressed_zero_width_windows_keep_bounded_hits_and_exact_source_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zero-width-tail.txt");
+    let source = "\u{200B}".repeat(200_000);
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(&mut a, 80, 20);
+        let pane = &a.layout.panes[0];
+        assert!(pane.hits.iter().filter(|hit| hit.y == pane.text.y).count() <= lenz_content::display::MAX_MARKS + 2);
+        if pane.hits.iter().any(|hit| hit.byte == source.len()) { break; }
+        assert!(Instant::now() < deadline, "suppressed source tail never finished");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
+    draw(&mut a, 1, 1);
+    draw(&mut a, 80, 20);
+    assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
+    a.dispatch(Command::SelectAll);
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some(source.as_str()));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn wrapped_continuation_whitespace_keeps_the_caret_on_its_clicked_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("row-end.txt");
+    let source = "abcdef ".repeat(20);
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(true));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 28, 10);
+    let pane = &a.layout.panes[0];
+    let end = pane.hits.iter().filter(|hit| hit.y == pane.text.y).last().unwrap();
+    assert!(end.width > 1, "fixture needs whitespace after the continued row");
+    let (x, y) = (end.x + end.width - 1, end.y);
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection().unwrap().head, 20);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn unwrapped_end_then_up_starts_the_caret_at_the_visible_source_tail() {
     for shift in [false, true] {
         let dir = tempfile::tempdir().unwrap();
