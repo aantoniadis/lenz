@@ -84,6 +84,27 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 }
 
 #[test]
+fn rejected_and_noop_edits_do_not_pin_reloadable_sources() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "unchanged.txt", "α-original".as_bytes());
+    let b = write(d.path(), "other.txt", b"other");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(a), "unchanged.txt");
+    s.cache = InactiveCache::new(0);
+    let tab = s.state().active().unwrap().id();
+    let source = s.state().current_source().unwrap();
+    let (weak, expected) = (Arc::downgrade(source), source.key());
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 1..2, text: "x".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..2, text: "α".into() }], kind: EditKind::Replace });
+    assert_eq!(s.state().current_source().unwrap().key(), expected);
+    assert!(!active_view(&s).can_undo());
+    assert!(!active_view(&s).dirty());
+    open(&mut s, Command::OpenRetained(b), "other.txt");
+    assert!(weak.upgrade().is_none(), "no-op/rejection must not install a hidden confirmed-baseline owner");
+}
+
+#[test]
 fn draft_history_retains_changes_without_pinning_every_intermediate_snapshot() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap();

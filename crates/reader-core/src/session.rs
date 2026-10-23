@@ -2758,7 +2758,8 @@ impl Session {
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
             Input::Command(_) | Input::Completion(_) => None,
         };
-        let reveal_selection = (matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
+        let edit_reveal = matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+        let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let mut effect = match input {
             Input::Command(c) => self.command(c),
@@ -2821,7 +2822,9 @@ impl Session {
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
         let draft = entry.draft.get_or_insert_with(|| crate::draft::Draft::new(current.clone()));
-        match draft.edit(&current, version, edits.clone(), tab, kind, self.state.semantics.now()) {
+        let result = draft.edit(&current, version, edits.clone(), tab, kind, self.state.semantics.now());
+        if !draft.can_undo() && !draft.can_redo() && !draft.dirty() { entry.draft = None; }
+        match result {
             Ok(Some(next)) => self.publish_edit(tab, current, Arc::new(next), &edits),
             Ok(None) | Err(_) => Effect::default(),
         }
