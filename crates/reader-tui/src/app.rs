@@ -549,7 +549,8 @@ impl App {
     }
     fn sync_preview_selection(&mut self) {
         let state = self.session.state();
-        self.preview_scroll.retain(|id, (source, _)| state.view(*id).is_some_and(|v| source.matches(&v)));
+        self.preview_scroll.retain(|id, (source, _)| state.tabs().iter().any(|tab| tab.id() == *id
+            && (!tab.loaded() || state.view(*id).is_some_and(|v| source.matches(&v)))));
         if let Some((id, source, _)) = &self.preview_selection {
             let current = state.active().is_some_and(|tab| tab.id() == *id)
                 && state.view(*id).is_some_and(|view| source.matches(&view) && matches!(view.rendering(), Some(Rendering::Preview(_))));
