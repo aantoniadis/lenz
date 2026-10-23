@@ -127,6 +127,11 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     settle(cx, &f, |view| view.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     draw(&mut v);
+    let tab_width = |v: &VisualTestContext, id: TabId| f.view.read_with(v, |view, _| {
+        let (from, to, _) = view.tab_hits.iter().find(|(_, _, tab)| *tab == id).unwrap(); to - from
+    });
+    let id = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    let clean_width = tab_width(&v, id);
     let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| {
         let source = view.session().state().current_source().unwrap();
         source.copy_range(0..source.len_bytes()).unwrap()
@@ -142,7 +147,14 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap()), Selection { anchor: 4, head: 4 });
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |view, _| view.visible_rows()[0].text.clone()), "éλ");
+    let char_w = f.view.read_with(&v, |view, _| view.char_w);
+    assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "dirty tab indicator has its own measured cells");
     assert!(f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    for theme in ["github-light", "darcula"] {
+        f.view.update(&mut v, |view, cx| view.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())), cx));
+        draw(&mut v);
+        assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "dirty indicator remains laid out in {theme}");
+    }
     v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("👩🏽‍💻".into())));
     v.simulate_keystrokes("ctrl-v");
     assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
@@ -154,7 +166,20 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     assert_eq!(text(&v), original);
     assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 5);
     assert!(!f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    draw(&mut v);
+    assert!((tab_width(&v, id) - clean_width).abs() < 0.01, "undo to clean text removes the dirty indicator");
     v.simulate_keystrokes("ctrl-shift-z ctrl-shift-z");
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    let other = f.dir.path().join("other.txt");
+    std::fs::write(&other, "other text\n").unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(other.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|source| source.source() == other));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.session().state().view(id).is_none() && view.session().state().tab_dirty(id)));
+    assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "inactive dirty tab retains its indicator");
+    v.simulate_keystrokes("ctrl-shift-tab");
+    settle(cx, &f, |view| view.session().state().active().is_some_and(|tab| tab.id() == id && tab.loaded()));
+    draw(&mut v);
     assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
     let before_modal = f.view.read_with(&v, |view, _| view.session().state().current_source().unwrap().key());
     v.simulate_keystrokes("f10 x ctrl-v ctrl-z");

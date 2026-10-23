@@ -84,6 +84,91 @@ fn snapshot(s: &State) -> Snapshot {
 }
 
 #[gpui::test]
+fn gated_drafts_share_split_history_and_keep_views_and_sessions_independent(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("draft.txt");
+    let original = "é界\r\nfirst\r\nsecond\r\nthird\r\n";
+    let typed = "éλ\r\nfirst\r\nsecond\r\nthird\r\n";
+    let pasted = "éλ👩🏽‍💻\r\nfirst\r\nsecond\r\nthird\r\n";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let text = |state: &State| { let source = state.current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    draw(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    visual.simulate_keystrokes("right shift-right λ");
+    assert_eq!(text(tui.session.state()), original, "a different Session does not share the GUI draft");
+    for (key, modifiers) in [(KeyCode::Right, KeyModifiers::NONE), (KeyCode::Right, KeyModifiers::SHIFT), (KeyCode::Char('λ'), KeyModifiers::NONE)] {
+        tui.handle(Event::Key(KeyEvent::new(key, modifiers)));
+    }
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("👩🏽‍💻".into())));
+    visual.simulate_keystrokes("ctrl-v ctrl-\\");
+    tui.handle(Event::Paste("👩🏽‍💻".into()));
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::CONTROL)));
+    draw(&mut visual, &mut tui, &mut terminal);
+    for state in [gui.read_with(&visual, |view, _| text(view.session().state())), text(tui.session.state())] { assert_eq!(state, pasted); }
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    for pane in [0, 1] {
+        visual.simulate_keystrokes(if pane == 0 { "ctrl-1" } else { "ctrl-2" });
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Char(if pane == 0 { '1' } else { '2' }), KeyModifiers::CONTROL)));
+        draw(&mut visual, &mut tui, &mut terminal);
+        assert_eq!(gui.read_with(&visual, |view, _| view.visible_rows()[0].text.clone()), "éλ👩🏽‍💻");
+    }
+    visual.simulate_keystrokes("down down pagedown");
+    for key in [KeyCode::Down, KeyCode::Down, KeyCode::PageDown] { tui.handle(Event::Key(KeyEvent::new(key, KeyModifiers::NONE))); }
+    let positions = |state: &State| (0..2).map(|pane| {
+        let tab = state.shown(pane).unwrap();
+        (tab.selection().unwrap(), tab.top_line())
+    }).collect::<Vec<_>>();
+    let before = positions(tui.session.state());
+    assert_eq!(before, gui.read_with(&visual, |view, _| positions(view.session().state())));
+    assert_eq!(before[0].0.head, 19);
+    assert_eq!(before[1].0.head, 33);
+    assert_eq!(before[0].1, 0);
+    assert!(before[1].1 > before[0].1, "only the focused pane scrolls");
+    assert_eq!(tui.session.disabled(CommandId::Undo), None);
+    assert_eq!(tui.session.disabled(CommandId::Redo), Some("Nothing to redo"));
+    visual.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(tui.session.state()), pasted, "undo in another Session leaves this draft alone");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)));
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(text(tui.session.state()), typed);
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    assert_eq!(positions(tui.session.state()), gui.read_with(&visual, |view, _| positions(view.session().state())));
+    assert_eq!(positions(tui.session.state())[0].0.head, 4);
+    assert_eq!(positions(tui.session.state())[1].0.head, 18);
+    assert_eq!(positions(tui.session.state())[0].1, 0);
+    let left = tui.session.state().view(tui.session.state().shown(0).unwrap().id()).unwrap();
+    let right = tui.session.state().view(tui.session.state().shown(1).unwrap().id()).unwrap();
+    assert!(Arc::ptr_eq(left.snapshot(), right.snapshot()), "split views use one current draft");
+    visual.simulate_keystrokes("ctrl-shift-z");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT)));
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(text(tui.session.state()), pasted);
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    assert_eq!(positions(tui.session.state())[0].0.head, 19);
+    assert_eq!(positions(tui.session.state())[1].0.head, 33);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+}
+
+#[gpui::test]
 fn markdown_header_buttons_target_their_own_pane_and_respect_modals(cx: &mut TestAppContext) {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use reader_core::session::{Rendering, Split};

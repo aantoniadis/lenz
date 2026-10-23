@@ -66,8 +66,13 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     assert_eq!(a.session.state().selection().unwrap(), Selection { anchor: 4, head: 4 });
     let typed = draw_screen(&mut a, 100, 20);
     assert!(typed.contains("éλ"));
+    assert!(typed.contains('●'), "dirty source is marked in the tab bar");
     let id = a.session.state().active().unwrap().id();
     assert!(a.session.state().view(id).unwrap().dirty());
+    for theme in ["github-light", "darcula"] {
+        a.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())));
+        assert!(draw_screen(&mut a, 100, 20).contains('●'), "dirty indicator is visible in {theme}");
+    }
     a.handle(Event::Paste("👩🏽‍💻".into()));
     assert_eq!(text(&a), "éλ👩🏽‍💻\r\nline two\r\n");
     assert_eq!(a.session.state().selection().unwrap().head, 19);
@@ -78,8 +83,19 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     assert_eq!(text(&a), original);
     assert_eq!(a.session.state().selection().unwrap().head, 5);
     assert!(!a.session.state().view(id).unwrap().dirty());
+    assert!(!draw_screen(&mut a, 100, 20).contains('●'), "undo to clean text removes the dirty indicator");
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "éλ👩🏽‍💻\r\nline two\r\n");
+    let other = dir.path().join("other.txt");
+    std::fs::write(&other, "other text\n").unwrap();
+    a.dispatch(Command::OpenRetained(other.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|source| source.source() == other));
+    assert!(a.session.state().view(id).is_none() && a.session.state().tab_dirty(id));
+    assert!(draw_screen(&mut a, 100, 20).contains('●'), "inactive dirty tab retains its indicator");
+    key(&mut a, KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.id() == id && tab.loaded()));
+    draw(&mut a, 100, 20);
     assert_eq!(text(&a), "éλ👩🏽‍💻\r\nline two\r\n");
     let before_modal = a.session.state().current_source().unwrap().key();
     key(&mut a, KeyCode::F(1), KeyModifiers::NONE);

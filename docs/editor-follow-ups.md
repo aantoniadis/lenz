@@ -59,3 +59,9 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   not the document. Use the scheduled batch measurements before deciding whether
   mutable group-string capacity is worthwhile; no extra benchmark run is needed
   per ticket.
+
+- **Many-tab dirty indicator cost:** `State::tab_dirty(TabId)` currently locates
+  the tab by scanning the tab collection. Header painting now queries dirty state
+  for each tab; include many-tab counts in the planned batch measurements before
+  deciding whether to expose a borrowed-tab or iterator form. The draft dirty
+  comparison itself is constant time; no text is copied by this lookup.

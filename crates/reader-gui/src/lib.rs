@@ -4248,11 +4248,12 @@ impl Render for ReaderView {
             let state = self.session.state();
             let shown = state.shown(g.pane).map(|t| t.id());
             let mut x = g.bar.0;
-            let mut row: Vec<(String, bool, bool, f32, f32, TabId)> = state.pane_tabs(g.pane).map(|t| {
+            let mut row: Vec<(String, bool, bool, f32, f32, TabId, bool)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
-                let w = (title.chars().count() as f32 + 5.0) * self.char_w + icon_w(state.file_icons());
+                let dirty = state.tab_dirty(t.id());
+                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
                 x += w;
-                (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id())
+                (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id(), dirty)
             }).collect();
             let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
             let shift = row.iter().find(|r| r.2).map_or(0.0, |r| (r.4 - right).min(r.3 - g.bar.0).max(0.0));
@@ -4261,7 +4262,7 @@ impl Render for ReaderView {
                 r.4 -= shift;
             }
             hits.extend(row.iter().map(|r| (r.3, r.4, r.5)));
-            bars.push(row.into_iter().map(|r| (r.0, r.1, r.2, r.3, r.4)).collect());
+            bars.push(row.into_iter().map(|r| (r.0, r.1, r.2, r.3, r.4, r.6)).collect());
         }
         self.tab_hits = hits;
         self.panes = panes.clone();
@@ -4580,7 +4581,7 @@ impl Render for ReaderView {
                             let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
-                                for (title, retained, shown, tx0, tx1) in &f.tabs {
+                                for (title, retained, shown, tx0, tx1, dirty) in &f.tabs {
                                     if *tx1 < bx0 {
                                         continue; // scrolled off the left
                                     }
@@ -4594,7 +4595,9 @@ impl Render for ReaderView {
                                     if file_icons {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
                                     }
-                                    lenz_gpui::text(window, cx, m, x0 + tx0 + char_w + icon_w, y, title, color);
+                                    let title_x = x0 + tx0 + char_w + icon_w;
+                                    if *dirty { lenz_gpui::text(window, cx, m, title_x, y, "●", palette.accent); }
+                                    lenz_gpui::text(window, cx, m, title_x + if *dirty { 2.0 * char_w } else { 0.0 }, y, title, color);
                                     lenz_gpui::text(window, cx, m, x0 + tx1 - char_w * 2.0, y, "×", palette.dim);
                                     lenz_gpui::fill(window, x0 + tx1 - 1.0, y + 3.0, 1.0, tabs_h - 6.0, palette.border);
                                 }
@@ -4913,8 +4916,8 @@ fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
 
 /// A Markdown preview's layout, its scroll and its visible images' textures.
 type PreviewFrame = (Arc<preview::Layout>, f32, Vec<(usize, Arc<gpui::RenderImage>)>, Option<std::ops::Range<usize>>);
-/// A tab in its bar: title, kept, shown, x range.
-type TabCell = (String, bool, bool, f32, f32);
+/// A tab in its bar: title, kept, shown, x range, unsaved draft marker.
+type TabCell = (String, bool, bool, f32, f32, bool);
 
 /// One pane's frame to paint: where it is, its tabs (title, kept, shown, x range), and what it shows.
 /// A piece of a breadcrumb bar to paint.
