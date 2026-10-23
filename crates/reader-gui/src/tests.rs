@@ -384,7 +384,9 @@ fn native_literal_point(f: &Fixture, v: &mut VisualTestContext, literal: &str) -
         let width = f32::from(bounds.size.width) - num_w() - 16.0;
         for row in reader.visible_rows() {
             let Some(at) = row.text.find(literal) else { continue };
-            let parts = reader.source_parts(tab, logical.get(row.y as usize)?, &row, window);
+            let logical_row = logical.get(row.y as usize)?;
+            reader.ready_source_row(tab, logical_row)?;
+            let parts = reader.source_parts(tab, logical_row, &row, window);
             let left = native_x(window, reader.metrics(), &row, &parts, at) - reader.hscroll();
             let right = native_x(window, reader.metrics(), &row, &parts, at + literal.len()) - reader.hscroll();
             if left >= 0.0 && right <= width {
@@ -403,7 +405,11 @@ fn settle_native_literal(cx: &mut TestAppContext, f: &Fixture, v: &mut VisualTes
         if let Some(point) = native_literal_point(f, v, literal) { return point; }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    panic!("native literal {literal:?} remains outside the painted viewport: {}", f.view.read_with(v, |r, _| r.status()));
+    panic!("native literal {literal:?} remains outside the painted viewport: {:?}", f.view.read_with(v, |r, _| {
+        let state=r.session.state();let tab=state.active().unwrap();let view=state.view(tab.id()).unwrap();
+        let logical=view.layout_rows(r.rows,state.wrap_cols(tab)).rows;
+        (r.status(),state.column(),r.session.native_reveal(tab.pane()).map(|g|(g.request,g.source,g.context)),r.visible_rows().iter().map(|row|(row.y,row.text.find(literal),row.text.len())).collect::<Vec<_>>(),logical.iter().map(|row|r.source_row(tab,row).map(|native|(native.skip(),native.pending(),r.ready_source_row(tab,row).is_some()))).collect::<Vec<_>>())
+    }));
 }
 
 #[gpui::test]
@@ -423,7 +429,10 @@ fn source_windows_native_go_to_and_find_reveal_the_source_before_trailing_spaces
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), target..target + 3);
     v.simulate_keystrokes("ctrl-c");
     assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
-    v.simulate_keystrokes("home ctrl-f E N D");
+    v.simulate_keystrokes("home ctrl-f");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query() == "END"));
+    settle(cx, &f, find_settled);
+    v.simulate_keystrokes("enter");
     settle_native_literal(cx, &f, &mut v, "END");
     assert_eq!(std::fs::read(f.dir.path().join("go-to.txt")).unwrap(), source.as_bytes());
 }
@@ -551,6 +560,23 @@ fn source_windows_reject_scroll_geometry_until_repaint(cx: &mut TestAppContext) 
     let hit = v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0));
     assert!(hit.is_some());
     assert_eq!(std::fs::read(f.dir.path().join("stale.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_font_geometry_until_repaint(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("font.txt", b"source coordinates\n")));
+    settle(cx, &f, |r| r.session.state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.font.weight = gpui::FontWeight::BOLD;
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 10.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must reject font changes before the native geometry is repainted");
+    draw(&mut v);
+    assert!(v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0)).is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("font.txt")).unwrap(), b"source coordinates\n");
 }
 
 #[gpui::test]

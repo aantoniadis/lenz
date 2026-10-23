@@ -296,6 +296,7 @@ pub struct ReaderView {
 
 /// Identity of the last painted source viewport; pointers cannot reuse old geometry.
 struct SourceGeometry {
+    font: Font,
     cursor: reader_core::projection::Cursor,
     tab: TabId,
     visible: Arc<reader_core::folds::Visible>,
@@ -320,7 +321,7 @@ impl SourceGeometry {
             || wanted_image(view).is_some() { return None; }
         let state = reader.session.state();
         Some(Self {
-            cursor: view.display_start(0)?, tab: view.tab().id(), visible: view.visible(),
+            font: reader.font.clone(), cursor: view.display_start(0)?, tab: view.tab().id(), visible: view.visible(),
             declarations: view.tab().declarations_handle().cloned(),
             top: (view.tab().top_line(), view.tab().top_row()), column: view.tab().column(),
             cols: state.wrap_cols(view.tab()), size: state.text_size(view.tab().pane()),
@@ -338,7 +339,7 @@ impl SourceGeometry {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
         };
-        self.tab == view.tab().id() && self.cursor.matches(view.snapshot(), view.inlay_hints())
+        self.font == reader.font && self.tab == view.tab().id() && self.cursor.matches(view.snapshot(), view.inlay_hints())
             && Arc::ptr_eq(&self.visible, &view.visible()) && declarations_match
             && self.top == (view.tab().top_line(), view.tab().top_row()) && self.column == view.tab().column()
             && self.cols == state.wrap_cols(view.tab()) && self.size == state.text_size(view.tab().pane())
@@ -2377,22 +2378,36 @@ impl ReaderView {
     /// Include a partial last column so its final glyph can become fully visible.
     fn max_column(&self) -> usize { (self.max_hscroll() / self.char_w).ceil() as usize }
 
-    /// Unknown extents allow further movement; a completed measurement supplies the exact clamp.
-    fn max_hscroll(&self) -> f32 {
+    fn native_max_scroll(&self, pane: u8, count: usize) -> Option<f32> {
         let state = self.session.state();
-        let Some(tab) = state.active() else { return 0.0 };
-        if state.wrap_cols(tab).is_some() { return 0.0; }
-        let Some(view) = state.view(tab.id()) else { return 0.0 };
-        let pane = state.focused_pane();
-        let width = (self.text_bounds.map_or(self.width - self.sidebar_w, |b| f32::from(b.size.width)) - num_w() - 16.0).max(1.0);
-        let mut widest = 0.0_f32;
-        let mut complete = true;
-        for line in view.visible().lines(tab.top_line(), self.rows) {
-            if let Some(extent) = self.source.extent(pane,&view,line) { widest = widest.max(extent); }
-            else { complete = false; }
+        let tab = state.shown(pane)?;
+        let view = state.view(tab.id())?;
+        let g = self.panes.iter().find(|g| g.pane == pane)?;
+        let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
+        let cols = state.wrap_cols(tab);
+        let layout = view.layout_rows(count, cols);
+        if layout.pending.is_some() { return None; }
+        let mut rows = layout.rows;
+        if state.sticky_scroll() {
+            let reader_core::layout::Query::Ready(sticky) = view.layout_sticky(reader_core::tabs::sticky_cap(count), cols) else { return None };
+            for pinned in sticky.iter() {
+                let reader_core::layout::Query::Ready(Some(row)) = view.layout_row(pinned.line, 0, cols) else { return None };
+                rows.push(row);
+            }
         }
-        let known = (widest - width).max(0.0);
-        if complete { known } else { known.max(self.hscroll() + width) }
+        let mut widest = 0.0_f32;
+        for row in rows {
+            let extent = if cols.is_some() {
+                self.source.extent_wrapped(pane, &view, row.line, row.display.start)? + row.indent as f32 * self.char_w + if row.last { 2.0 } else { 0.0 }
+            } else { self.source.extent(pane, &view, row.line)? };
+            widest = widest.max(extent);
+        }
+        Some((widest - width).max(0.0))
+    }
+
+    fn max_hscroll(&self) -> f32 {
+        self.native_max_scroll(self.session.state().focused_pane(), self.rows)
+            .unwrap_or_else(|| self.hscroll() + self.text_bounds.map_or(self.width, |bounds| f32::from(bounds.size.width)).max(1.0))
     }
 
     /// Runs a Git Branches row's action.
@@ -2491,7 +2506,7 @@ impl ReaderView {
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
         let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
         let row = rows.get(at).or_else(|| rows.last())?;
-        let projected = self.source_row(tab, row)?;
+        let projected = self.ready_source_row(tab, row)?;
         let scroll = tab.column() as f32 * self.char_w;
         let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), scroll) + row.indent as f32 * self.char_w;
         let byte = projected.hit(window, self.metrics(), x - tx)?;
@@ -2508,7 +2523,7 @@ impl ReaderView {
         let row = rows.get(at)?;
         let (_, collapsed) = tab.fold_at(row.line)?;
         if row.index == 0 && (num_w() - fold_w()..num_w()).contains(&(x - f32::from(bounds.origin.x))) { return Some(row.line); }
-        let projected = self.source_row(tab, row)?;
+        let projected = self.ready_source_row(tab, row)?;
         if !row.last || !projected.complete() || !collapsed { return None; }
         let tx = lenz_gpui::text_x(self.metrics(), f32::from(bounds.origin.x), tab.column() as f32 * self.char_w) + row.indent as f32 * self.char_w;
         let end = projected.x_for(window, self.metrics(), projected.text.len())?;
@@ -2620,7 +2635,7 @@ impl ReaderView {
         let t = state.shown(g.pane)?;
         let view = state.view(t.id())?;
         let (row, anchor_x) = view.layout_rows(g.rows, state.wrap_cols(t)).rows.iter().enumerate().find_map(|(i, r)| {
-            let native = self.source_row(t, r)?;
+            let native = self.ready_source_row(t, r)?;
             let local = native.caret(at)?;
             let x = native.x_for(window, self.metrics(), local)?;
             Some((i as f32, r.indent as f32 * self.char_w + x))
@@ -3574,26 +3589,32 @@ impl ReaderView {
     fn source_row(&self, tab: &Tab, row: &reader_core::layout::Row) -> Option<&source::Row> {
         let state = self.session.state();
         let view = state.view(tab.id())?;
+        self.source.drawn(tab.pane(), &view, row.line, state.wrap_cols(tab).map(|_| row.display.start))
+    }
+
+    fn ready_source_row(&self, tab: &Tab, row: &reader_core::layout::Row) -> Option<&source::Row> {
+        let state = self.session.state();
+        let view = state.view(tab.id())?;
         let g = self.panes.iter().find(|g| g.pane == tab.pane())?;
         let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
+        let pan = tab.column() as f32 * self.char_w;
         if state.wrap_cols(tab).is_some() {
-            self.source.get_wrapped(g.pane, &view, row.line, row.display.start, (width - row.indent as f32 * self.char_w).max(1.0))
-        } else {
-            self.source.get(g.pane, &view, row.line, tab.column() as f32 * self.char_w, width)
-        }
+            self.source.get_wrapped(g.pane, &view, row.line, row.display.start, pan - row.indent as f32 * self.char_w, width).filter(|row| !row.pending())
+        } else { self.source.get(g.pane, &view, row.line, pan, width).filter(|row| !row.pending()) }
     }
 
     fn source_parts(&self, tab: &Tab, logical: &reader_core::layout::Row, row: &TextRow, window: &Window) -> Vec<(std::ops::Range<usize>, f32)> {
         let Some(native) = self.source_row(tab, logical) else { return Vec::new() };
         let indent = logical.indent;
         let offset = indent as f32 * self.char_w;
+        let correction = tab.column() as f32 * self.char_w - (native.skip() + offset);
         let mut parts = Vec::new();
-        if indent > 0 { parts.push((0..indent, 0.0)); }
-        parts.extend(native.fragments.iter().map(|(r, x)| (r.start + indent..r.end + indent, x + offset)));
+        if indent > 0 { parts.push((0..indent, correction)); }
+        parts.extend(native.fragments.iter().map(|(r, x)| (r.start + indent..r.end + indent, x + offset + correction)));
         if row.text.len() > native.text.len() + indent {
-            parts.push((native.text.len() + indent..row.text.len(), native.x_for(window, self.metrics(), native.text.len()).unwrap_or(0.0) + offset));
+            parts.push((native.text.len() + indent..row.text.len(), native.x_for(window, self.metrics(), native.text.len()).unwrap_or(0.0) + offset + correction));
         }
-        if parts.is_empty() { parts.push((0..0, offset)); }
+        if parts.is_empty() { parts.push((0..0, offset + correction)); }
         parts
     }
 
@@ -3602,17 +3623,46 @@ impl ReaderView {
         let font = self.font.clone();
         let metrics = metrics(&font);
         self.source.begin(metrics);
+        for g in panes {
+            let context = self.source.context(g.pane);
+            if self.session.native_context(g.pane) != Some(context)
+                && self.session.dispatch(Command::SetNativeContext { pane: g.pane, context }).repaint { window.request_animation_frame(); }
+        }
         let mut commands = Vec::new();
         for g in panes {
             let state = self.session.state();
             let Some(tab) = state.shown(g.pane) else { continue };
-            if matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
+            if g.rows == 0 || matches!(tab.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
             let Some(view) = state.view(tab.id()) else { continue };
             if wanted_image(&view).is_some() || unshowable_image(&view).is_some() { continue; }
             let cols = state.wrap_cols(tab);
             let layout = view.layout_rows(g.rows, cols);
             let mut pending = layout.pending;
             let mut rows = layout.rows;
+            let batch = self.session.projection(g.pane).cloned();
+            if let Some(goal) = self.session.native_reveal(g.pane).cloned() {
+                self.source.prioritize(&goal);
+                let wrapped = if cols.is_some() {
+                    match view.layout_position(goal.source, cols) {
+                        Query::Ready(Some(position)) => match view.layout_row(position.line, position.row, cols) {
+                            Query::Ready(Some(row)) => match view.layout_cursor(row.line, row.display.start, cols) {
+                                Query::Ready(Some(cursor)) => Some((row, cursor)),
+                                Query::Ready(None) => None,
+                                Query::Pending(work) => { pending = Some(work); None },
+                            },
+                            Query::Ready(None) => None,
+                            Query::Pending(work) => { pending = Some(work); None },
+                        },
+                        Query::Ready(None) => None,
+                        Query::Pending(work) => { pending = Some(work); None },
+                    }
+                } else { None };
+                if (cols.is_none() || wrapped.is_some())
+                    && let Some(bounds) = self.source.reveal(&view, &goal, wrapped.as_ref().map(|(row, cursor)| (row, cursor.clone())), batch.as_deref(), window, metrics, self.char_w)
+                    && let Some((cols, _)) = state.text_size(g.pane) {
+                    commands.push(Command::MeasuredReveal { goal, cols, bounds });
+                }
+            }
             if state.sticky_scroll() {
                 match view.layout_sticky(reader_core::tabs::sticky_cap(g.rows), cols) {
                     Query::Ready(sticky) => for pinned in sticky.iter() {
@@ -3625,7 +3675,6 @@ impl ReaderView {
                     Query::Pending(work) => { pending = pending.or(Some(work)); },
                 }
             }
-            let batch = self.session.projection(g.pane).cloned();
             let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
             for row in rows {
                 if cols.is_some() {
@@ -3637,20 +3686,21 @@ impl ReaderView {
                         }
                     };
                     if let Some(cursor) = cursor {
-                        self.source.wrapped(g.pane, &view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), (width - row.indent as f32 * self.char_w).max(1.0), batch.as_deref(), window, metrics);
+                        self.source.wrapped(g.pane, &view, cursor, row.display.clone(), row.complete.then(|| row.end_byte()), tab.column() as f32 * self.char_w - row.indent as f32 * self.char_w, width, batch.as_deref(), window, metrics);
                     }
                 } else {
                     self.source.row(g.pane, &view, row.line, tab.column() as f32 * self.char_w, width, batch.as_deref(), window, metrics);
                 }
             }
             if let Some(work) = pending { commands.push(Command::PrepareLayout { pane: g.pane, tab: tab.id(), work }); }
+            if let Some(max) = self.native_max_scroll(g.pane, g.rows)
+                && let Some(viewport) = self.session.native_viewport(g.pane) {
+                commands.push(Command::ClampColumn { viewport, max: (max / self.char_w).ceil() as usize });
+            }
         }
         commands.extend(self.source.finish());
-        for command in commands { self.session.dispatch(command); }
-        let max = self.max_column();
-        if self.session.state().column() > max {
-            self.session.dispatch(Command::ScrollColumn(max));
-            window.request_animation_frame();
+        for command in commands {
+            if self.session.dispatch(command).repaint { window.request_animation_frame(); }
         }
     }
 
@@ -4231,10 +4281,6 @@ impl Render for ReaderView {
         let icon_w = icon_w(file_icons);
         let (sidebar_w, tree_focus) = (self.sidebar_w, self.tree_focus);
         // Clamp owned scroll to the current layout; a tab still loading keeps its position.
-        let max = self.max_column();
-        if self.session.state().active().is_some_and(|t| self.session.state().view(t.id()).is_some()) && self.session.state().column() > max {
-            self.session.dispatch(Command::ScrollColumn(max));
-        }
         self.prepare_source(&panes, window);
         // Each pane's content: an image, a Markdown preview laid out for its width, or its text rows.
         let mut frames = Vec::new();
