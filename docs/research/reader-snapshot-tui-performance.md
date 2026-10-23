@@ -7,9 +7,9 @@ validated scroll feedback stay behind `Session::dispatch`.
 
 This report records the production candidate `ac6222a9dc228ac06b2442bcef0a5eaaea96eb6e`
 against the accepted foundation baseline
-`1d874aee50c620c10201d0695de0e97fe140a83a`. The final integrated gate remains
-the parent integration's responsibility. No additional performance tradeoff was
-approved during this work.
+`1d874aee50c620c10201d0695de0e97fe140a83a`. The
+[integrated batch report](reader-snapshot-batch-08-10.md) records completed checks
+and the user's acceptance of the documented costs.
 
 ## Correctness and ownership
 

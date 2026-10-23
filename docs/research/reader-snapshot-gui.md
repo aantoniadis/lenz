@@ -2,13 +2,13 @@
 
 The GUI reads source text through the current `View` snapshot and the shared resumable
 projection/layout services. Editing remains disabled. This report covers the GUI slice
-of migration 08; the integrated 08–10 local gate is still pending.
+of migration 08; the [integrated 08–10 checks](reader-snapshot-batch-08-10.md) are complete.
 
 The subsequent native Go To gap is fixed in runtime source
 `1094aef84eecf33b869ea519f5d5ad0813b7cd0a`. The same native replay now paints `END`
 after 2,000 family emoji, selects/copies its exact bytes and leaves the file unchanged,
 including 100 trailing spaces in a 600×300 window. The old executable still fails
-that identical replay. The complete 08–10 gate remains pending.
+that identical replay. The integrated report records the subsequent gate repairs.
 
 ## Behavior and bounds
 
@@ -146,5 +146,5 @@ identities are under `target/perf/editor-implementation/08/`:
 - `core-checks/`: shared projection/layout bounds and real Session continuation checks.
 
 Native macOS, physical-display latency, GPU memory, arbitrary-font shaping and
-long-session behavior remain unverified. The complete 08–10 gate and subsequent
-editing/provider work are not claimed complete by this scoped report.
+long-session behavior remain unverified. Subsequent editing/provider work is not
+claimed complete by this scoped report.
