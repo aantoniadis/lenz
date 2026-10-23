@@ -1,11 +1,11 @@
 //! Bounded current-buffer analysis; the generic job pool remains the executor.
-use std::{collections::{HashMap, VecDeque}, sync::{Arc, OnceLock, Weak, atomic::{AtomicBool, Ordering}}};
+use std::{collections::{HashMap, VecDeque}, sync::{Arc, OnceLock, Weak, atomic::{AtomicBool, AtomicU64, Ordering}}};
 use crate::{document::Document, jobs::{Jobs, Priority, MAX_JOBS}, session::Completion, tabs::TabId, text::{BufferId, SnapshotKey, TextSnapshot}};
 
 const BUFFERS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Syntax, Markdown }
+pub(crate) enum Consumer { Find(TabId), Syntax, Markdown, Index }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -20,11 +20,11 @@ fn scope(snapshot: &TextSnapshot, project: u64) -> Scope {
     Scope { key: snapshot.key(), source: Arc::as_ptr(snapshot.source_meta()) as usize, project }
 }
 
-pub(crate) struct Input { snapshot: Arc<TextSnapshot>, loaded: Weak<Document>, scope: Scope }
+pub(crate) struct Input { snapshot: Arc<TextSnapshot>, loaded: Weak<Document>, scope: Scope, live: bool }
 impl Input {
-    pub(crate) fn new(snapshot: Arc<TextSnapshot>, loaded: Weak<Document>, project: u64) -> Self {
+    pub(crate) fn new(snapshot: Arc<TextSnapshot>, loaded: Weak<Document>, project: u64, live: bool) -> Self {
         let scope = scope(&snapshot, project);
-        Self { snapshot, loaded, scope }
+        Self { snapshot, loaded, scope, live }
     }
 }
 
@@ -66,16 +66,18 @@ pub(crate) struct Lease {
     group: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
     done: Arc<AtomicBool>,
+    project: Arc<AtomicU64>,
     tx: async_channel::Sender<Completion>,
 }
 impl Lease {
-    pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) }
+    pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) && self.project.load(Ordering::Acquire) == self.ticket.scope.project }
+    pub(crate) fn ticket(&self) -> Ticket { self.ticket }
     pub(crate) fn send(&self, result: Completion) -> bool {
         self.wanted() && self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket, result: Box::new(result) }).is_ok()
     }
     pub(crate) fn cancellation(&self) -> impl Fn() -> bool + Send + Clone + 'static {
-        let (group, cancel) = (self.group.clone(), self.cancel.clone());
-        move || group.load(Ordering::Acquire) && cancel.load(Ordering::Acquire)
+        let (group, cancel, project, expected) = (self.group.clone(), self.cancel.clone(), self.project.clone(), self.ticket.scope.project);
+        move || group.load(Ordering::Acquire) && cancel.load(Ordering::Acquire) && project.load(Ordering::Acquire) == expected
     }
 }
 impl Drop for Lease {
@@ -95,6 +97,7 @@ pub(crate) struct Analysis {
 impl Analysis {
     pub(crate) fn request(&mut self, input: Input, consumer: Consumer, request: u64, priority: Priority, work: impl FnOnce(Arc<Document>, Lease) + Send + 'static) -> bool {
         let id = input.scope.key.buffer;
+        let live = input.live;
         if !self.entries.contains_key(&id) && self.entries.len() == BUFFERS {
             let discard = self.entries.iter().find(|(_, entry)| !entry.live && !entry.group.running()).map(|(id, _)| *id);
             let Some(discard) = discard else { return false };
@@ -103,7 +106,7 @@ impl Analysis {
         }
         let intent = Intent { request, priority, work: Box::new(work) };
         if let Some(entry) = self.entries.get_mut(&id) {
-            entry.live = true;
+            entry.live = live;
             if entry.group.scope != input.scope || !entry.group.cancel.load(Ordering::Acquire) {
                 entry.group.cancel();
                 if entry.pending.as_ref().is_none_or(|pending| pending.input.scope != input.scope) { entry.pending = Some(Pending { input, intents: HashMap::new() }); }
@@ -118,7 +121,7 @@ impl Analysis {
             let mut group = Group::new(input);
             group.latest.insert(consumer, request);
             group.waiting.insert(consumer, intent);
-            self.entries.insert(id, Entry { group, pending: None, queued: false, live: true });
+            self.entries.insert(id, Entry { group, pending: None, queued: false, live });
         }
         self.enqueue(id);
         true
@@ -160,9 +163,12 @@ impl Analysis {
         self.queue.clear();
     }
 
-    pub(crate) fn pump(&mut self, jobs: &Jobs, tx: &async_channel::Sender<Completion>) {
+    pub(crate) fn pump(&mut self, jobs: &Jobs, tx: &async_channel::Sender<Completion>, project: &Arc<AtomicU64>) {
         let mut retry = Vec::new();
+        let current_project = project.load(Ordering::Acquire);
         self.entries.retain(|id, entry| {
+            if entry.group.scope.project != current_project { entry.group.cancel(); }
+            if entry.pending.as_ref().is_some_and(|pending| pending.input.scope.project != current_project) { entry.pending = None; }
             if entry.group.materializing.as_ref().is_some_and(|task| task.done.load(Ordering::Acquire)) {
                 entry.group.materializing = None;
                 self.running -= 1;
@@ -180,8 +186,9 @@ impl Analysis {
                 }
             }
             if !entry.group.waiting.is_empty() { retry.push(*id); }
-            (entry.live && entry.group.cancel.load(Ordering::Acquire)) || entry.group.running()
+            (entry.group.cancel.load(Ordering::Acquire) && (entry.live || !entry.group.waiting.is_empty())) || entry.group.running()
         });
+        self.queue.retain(|id| self.entries.contains_key(id));
         for id in retry { self.enqueue(id); }
         let mut turns = self.queue.len().saturating_add(MAX_JOBS);
         while self.running < MAX_JOBS && turns > 0 {
@@ -197,7 +204,7 @@ impl Analysis {
             let Some(consumer) = intent else { continue };
             let Some(intent) = group.waiting.remove(&consumer) else { continue };
             let (done, cancel) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(true)));
-            let lease = Lease { ticket: Ticket { scope: group.scope, consumer, request: intent.request }, group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), tx: tx.clone() };
+            let lease = Lease { ticket: Ticket { scope: group.scope, consumer, request: intent.request }, group: group.cancel.clone(), cancel: cancel.clone(), done: done.clone(), project: project.clone(), tx: tx.clone() };
             if let Some(doc) = group.document.get().cloned() {
                 group.inflight.insert(consumer, Task { done, cancel });
                 self.running += 1;

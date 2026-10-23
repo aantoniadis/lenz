@@ -16,6 +16,7 @@ pub mod find;
 pub mod wrap;
 pub mod folds;
 pub mod index;
+mod index_work;
 mod index_cache;
 pub mod jobs;
 pub mod libraries;

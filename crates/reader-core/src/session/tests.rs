@@ -697,6 +697,31 @@ fn finder_perf() {
 }
 
 #[test]
+fn rebuilding_the_index_uses_an_open_buffers_admitted_snapshot() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "draft.rs", b"fn saved() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, |s| s.state().project().is_some_and(|p| matches!(p.coverage(), crate::project::Coverage::Complete(_)))
+        && s.state().index_coverage().complete() && s.state().index_coverage().indexed == 1);
+    open(&mut s, Command::Open(file.clone()), "draft.rs");
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("fn draft_only() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::RebuildIndex);
+    settle(&mut s, |s| !s.index_rebuilding && s.state().index_coverage().complete());
+    s.dispatch(Command::FindDeclarations("draft_only".into()));
+    settle(&mut s, |s| s.state().results().is_some_and(|r| r.done));
+    assert_eq!(s.state().results().unwrap().hits.len(), 1, "current declarations must not come from old saved text");
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+}
+
+#[test]
 fn markdown_syntax_and_find_use_the_same_current_admission() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "draft.md", b"# saved\n");

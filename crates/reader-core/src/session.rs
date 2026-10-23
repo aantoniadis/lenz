@@ -1590,6 +1590,8 @@ pub struct Session {
     index_cache: Option<Arc<std::sync::Mutex<crate::index_cache::Cache>>>,
     index_revision: Arc<AtomicU64>,
     index_rebuilding: bool,
+    index_batch: Option<Arc<crate::index_work::Batch>>,
+    index_batch_seq: u64,
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
     themes: ThemeService,
@@ -1771,6 +1773,8 @@ impl Session {
             index_cache: None,
             index_revision: Arc::new(AtomicU64::new(0)),
             index_rebuilding: false,
+            index_batch: None,
+            index_batch_seq: 0,
             jobs: Jobs::new(),
             analysis: Default::default(),
             themes,
@@ -2464,7 +2468,29 @@ impl Session {
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
             Input::Completion(c) => self.complete(c),
         };
-        self.analysis.pump(&self.jobs, &self.tx);
+        self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
+        if let Some(batch) = self.index_batch.as_ref() && let Some(items) = batch.take() {
+            let (root, generation, revision) = (batch.root.clone(), batch.generation, batch.revision);
+            self.index_batch = None;
+            if self.index_revision.load(Ordering::Relaxed) == revision && self.project_generation.load(Ordering::Relaxed) == generation {
+                let mut files = Vec::new();
+                for item in items {
+                    let path = root.join(item.path.as_ref());
+                    let current = self.state.tabs.iter().find(|tab| tab.source == path || tab.canonical.as_ref() == Some(&path))
+                        .and_then(|tab| tab.buffer).and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref());
+                    let valid = match (item.ticket, current) {
+                        (Some(ticket), Some(snapshot)) => ticket.matches(snapshot, generation),
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    match item.result.filter(|_| valid) {
+                        Some(result) => files.push((item.path, result)),
+                        None => self.state.index.invalidate(&item.path, true),
+                    }
+                }
+                effect.repaint |= self.complete(Completion::Indexed { generation, revision, files }).repaint;
+            }
+        }
         if reveal_selection && effect.repaint {
             self.keep_selection_visible();
         }
@@ -5605,6 +5631,7 @@ impl Session {
         self.state.project = Some(Project::new(root.clone(), generation, self.state.settings.folders_first));
         self.project_generation.store(generation, Ordering::Relaxed);
         self.state.index = DeclIndex::new(index::INDEX_BYTES);
+        self.index_batch = None;
         self.index_revision.fetch_add(1, Ordering::Relaxed);
         self.index_rebuilding = false;
         self.index_cache = self.state.settings.persistent_index.then(|| Arc::new(std::sync::Mutex::new(crate::index_cache::Cache::new(&self.index_cache_dir, &root))));
@@ -5772,7 +5799,7 @@ impl Session {
         let snapshot = view.snapshot().clone();
         let version = snapshot.key().version;
         let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|entry| entry.document.clone()).unwrap_or_default();
-        let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Relaxed));
+        let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Relaxed), true);
         let Some(t) = self.tab_mut(tab) else { return Effect::default() };
         // The last matches stay drawn (and counted) until the new ones arrive, when they are for this text: a new
         // version's lines may be fewer.
@@ -6078,6 +6105,7 @@ impl Session {
         let (root, generation, paths) = (p.root().to_owned(), p.generation(), p.paths());
         let revision = self.index_revision.fetch_add(1, Ordering::Relaxed) + 1;
         self.index_rebuilding = clear;
+        self.index_batch = None;
         self.state.index = DeclIndex::new(index::INDEX_BYTES);
         self.state.index.enqueue(paths, false);
         let cache = Arc::new(std::sync::Mutex::new(crate::index_cache::Cache::new(&self.index_cache_dir, &root)));
@@ -6116,29 +6144,67 @@ impl Session {
 
     /// Start the next indexing chunk in the background, if any is due.
     fn pump_index(&mut self) {
-        if self.index_rebuilding { return; }
+        if self.index_rebuilding || self.index_batch.is_some() { return; }
         let Some(p) = &self.state.project else { return };
         let chunk = self.state.index.next_chunk();
         let settled = matches!(p.coverage(), project::Coverage::Complete(_)) && self.state.index.coverage().pending <= 1;
         if chunk.is_empty() && (!settled || self.index_cache.is_none() || self.state.index.running) { return; }
         let (root, generation, project, tx) = (p.root().to_owned(), p.generation(), self.project_generation.clone(), self.tx.clone());
         let (revision, latest, cache) = (self.index_revision.load(Ordering::Relaxed), self.index_revision.clone(), self.index_cache.clone());
+        if chunk.is_empty() {
+            self.jobs.submit(Priority::Background, move || {
+                let current = || project.load(Ordering::Relaxed) == generation && latest.load(Ordering::Relaxed) == revision;
+                if current() && let Some(cache) = cache { let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner()); cache.load(); cache.flush(current); }
+            });
+            return;
+        }
+        let batch = crate::index_work::Batch::new(root.clone(), generation, revision, chunk.clone(), tx);
+        self.index_batch_seq += 1;
+        let request = self.index_batch_seq;
+        let mut opened = std::collections::HashMap::new();
+        for tab in &self.state.tabs {
+            opened.insert(tab.source.as_path(), tab);
+            if let Some(canonical) = &tab.canonical { opened.entry(canonical.as_path()).or_insert(tab); }
+        }
+        let shown = [self.state.active, self.state.other];
+        let mut groups: std::collections::HashMap<crate::text::BufferId, (crate::analysis::Input, Option<Stamp>, Vec<Arc<str>>)> = Default::default();
+        let mut disk = Vec::new();
+        for rel in chunk {
+            let path = root.join(rel.as_ref());
+            let entry = opened.get(path.as_path()).and_then(|tab| Some((*tab, tab.buffer?, self.state.sources.buffers.get(&tab.buffer?)?)))
+                .and_then(|(tab, buffer, entry)| Some((tab, buffer, entry, entry.snapshot.as_ref()?)));
+            if let Some((tab, buffer, entry, snapshot)) = entry {
+                let live = self.state.tabs.iter().any(|tab| tab.buffer == Some(buffer) && shown.contains(&Some(tab.id)));
+                let saved = entry.document.upgrade().is_some_and(|doc| doc.version() == snapshot.key().version && Arc::ptr_eq(doc.source_meta(), snapshot.source_meta()));
+                groups.entry(buffer).or_insert_with(|| (crate::analysis::Input::new(snapshot.clone(), entry.document.clone(), generation, live), tab.stamp.filter(|_| saved), Vec::new())).2.push(rel);
+            } else { disk.push(rel); }
+        }
+        for (_, (input, stamp, paths)) in groups {
+            let part = batch.part(paths);
+            let latest = latest.clone();
+            self.analysis.request(input, crate::analysis::Consumer::Index, request, Priority::Background, move |doc, lease| {
+                let wanted = lease.cancellation();
+                let current = move || wanted() && latest.load(Ordering::Relaxed) == revision;
+                let result = index::index_document(&doc, stamp, current);
+                if lease.wanted() { part.record_all(lease.ticket(), result); }
+            });
+        }
+        self.index_batch = Some(batch.clone());
+        if !disk.is_empty() {
+            let part = batch.part(disk.clone());
         self.jobs.submit(Priority::Background, move || {
             let current = move || project.load(Ordering::Relaxed) == generation && latest.load(Ordering::Relaxed) == revision;
             if !current() { return; }
             let mut cache = cache.as_ref().map(|c| c.lock().unwrap_or_else(|e| e.into_inner()));
             if let Some(c) = &mut cache { c.load(); }
-            if chunk.is_empty() {
-                if let Some(c) = &mut cache { c.flush(current); }
-                return;
-            }
-            let files = chunk.into_iter().map(|rel| {
+            for rel in disk {
                 let result = index::index_file_cached(&root, &rel, current.clone(), cache.as_deref_mut());
-                (rel, result)
-            }).collect();
+                part.record(&rel, None, result);
+            }
             if settled && let Some(c) = &mut cache { c.flush(current.clone()); }
-            let _ = tx.send_blocking(Completion::Indexed { generation, revision, files });
         });
+        }
+        batch.seal();
     }
 
     /// Show tab `id`, loading its content if it was released; the tab left releases its own.
@@ -6617,7 +6683,7 @@ impl Session {
             None => snapshot.source().parent().map(Path::to_path_buf).unwrap_or_default(),
         };
         let file = snapshot.source().to_path_buf();
-        let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed));
+        let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed), true);
         let (renders, render) = (self.renders.clone(), self.renders.load(Ordering::Relaxed));
         self.analysis.request(input, crate::analysis::Consumer::Markdown, render, Priority::Visible, move |source, lease| {
             let version = source.version();
@@ -6712,7 +6778,7 @@ impl Session {
         let Some(view) = self.state.view(tab) else { return };
         let snapshot = view.snapshot().clone();
         if let Some(lang) = snapshot.language().filter(|_| !snapshot.is_large()) {
-            let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed));
+            let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed), true);
             let declarations = self.state.wants_declarations() && highlight::has_declarations(lang);
             self.analysis.request(input, crate::analysis::Consumer::Syntax, u64::from(declarations), Priority::Background, move |doc, lease| {
                 let version = doc.version();
