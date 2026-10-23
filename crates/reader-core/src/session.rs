@@ -6375,7 +6375,9 @@ impl Session {
     /// The shown tabs whose document is `version`.
     fn shown_mut(&mut self, version: u64) -> impl Iterator<Item = &mut Tab> {
         let (active, other) = (self.state.active, self.state.other);
-        self.state.tabs.iter_mut().filter(move |t| (Some(t.id) == active || Some(t.id) == other) && t.doc.as_ref().is_some_and(|d| d.version() == version))
+        let sources = &self.state.sources.buffers;
+        self.state.tabs.iter_mut().filter(move |t| (Some(t.id) == active || Some(t.id) == other)
+            && t.buffer.and_then(|buffer| sources.get(&buffer)).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| snapshot.key().version == version))
     }
 
     /// Record that shown tab `id` shows `version`, so work on it is wanted.
@@ -6702,19 +6704,17 @@ impl Session {
 
     fn highlight(&mut self, doc: &Arc<Document>) {
         let shown = [self.state.active, self.state.other];
-        if !self.state.tabs.iter().any(|t| shown.contains(&Some(t.id)) && t.highlights.is_none() && t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, doc))) {
-            return;
-        }
-        if let Some(lang) = doc.language().filter(|_| !doc.is_large()) {
-            let (version, text, wanted, tx) = (doc.version(), doc.text().clone(), self.wanted(doc.version()), self.tx.clone());
+        let Some(tab) = self.state.tabs.iter().find(|t| shown.contains(&Some(t.id)) && t.highlights.is_none() && t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, doc))).map(|t| t.id) else { return };
+        let Some(view) = self.state.view(tab) else { return };
+        let snapshot = view.snapshot().clone();
+        if let Some(lang) = snapshot.language().filter(|_| !snapshot.is_large()) {
+            let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed));
             let declarations = self.state.wants_declarations() && highlight::has_declarations(lang);
-            self.jobs.submit(Priority::Background, move || {
-                if !wanted() {
-                    return;
-                }
+            self.analysis.request(input, crate::analysis::Consumer::Syntax, u64::from(declarations), Priority::Background, move |doc, lease| {
+                let version = doc.version();
                 let want = highlight::Want { folds: true, declarations };
-                let (parsed, folds, declarations) = highlight::parse_with(lang, text, want, wanted).map_or((None, None, None), |s| (Some(s.parsed), s.folds, s.declarations));
-                let _ = tx.send_blocking(Completion::Highlighted { version, parsed, folds, declarations });
+                let (parsed, folds, declarations) = highlight::parse_with(lang, doc.text().clone(), want, lease.cancellation()).map_or((None, None, None), |s| (Some(s.parsed), s.folds, s.declarations));
+                lease.send(Completion::Highlighted { version, parsed, folds, declarations });
             });
         }
     }

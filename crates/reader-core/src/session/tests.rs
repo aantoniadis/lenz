@@ -697,6 +697,31 @@ fn finder_perf() {
 }
 
 #[test]
+fn syntax_and_find_share_one_current_materialization_across_split_views() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.rs", b"fn saved() {}\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.rs");
+    settle(&mut s, |s| s.state().highlights().is_some());
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from("fn draft_only() {}\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::SetBreadcrumbs(true));
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::Find("draft_only".into()));
+    settle(&mut s, |s| s.state().shown(0).unwrap().declarations.as_ref().is_some_and(|d| d.items.iter().any(|d| d.name.as_ref() == "draft_only"))
+        && s.state().shown(1).unwrap().declarations.as_ref().is_some_and(|d| d.items.iter().any(|d| d.name.as_ref() == "draft_only"))
+        && s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1, "the admitted version is shared by syntax and Find");
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"fn saved() {}\n");
+}
+
+#[test]
 fn find_materializes_the_current_snapshot_without_replacing_it() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "draft.txt", b"saved\n");

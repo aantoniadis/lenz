@@ -5,7 +5,7 @@ use crate::{document::Document, jobs::{Jobs, Priority, MAX_JOBS}, session::Compl
 const BUFFERS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId) }
+pub(crate) enum Consumer { Find(TabId), Syntax }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -87,7 +87,11 @@ impl Drop for Lease {
 }
 
 #[derive(Default)]
-pub(crate) struct Analysis { entries: HashMap<BufferId, Entry>, queue: VecDeque<BufferId>, running: usize }
+pub(crate) struct Analysis {
+    entries: HashMap<BufferId, Entry>, queue: VecDeque<BufferId>, running: usize,
+    #[cfg(test)]
+    pub(crate) materializations: Arc<std::sync::atomic::AtomicUsize>,
+}
 impl Analysis {
     pub(crate) fn request(&mut self, input: Input, consumer: Consumer, request: u64, priority: Priority, work: impl FnOnce(Arc<Document>, Lease) + Send + 'static) -> bool {
         let id = input.scope.key.buffer;
@@ -187,6 +191,7 @@ impl Analysis {
             entry.queued = false;
             let group = &mut entry.group;
             if !group.cancel.load(Ordering::Acquire) || entry.pending.is_some() { continue; }
+            if group.document.get().is_none() && group.materializing.is_some() { continue; }
             let intent = group.waiting.iter().filter(|(consumer, _)| !group.inflight.contains_key(consumer))
                 .min_by_key(|(_, intent)| match intent.priority { Priority::Visible => 0, Priority::Background => 1 }).map(|(key, _)| *key);
             let Some(consumer) = intent else { continue };
@@ -204,9 +209,13 @@ impl Analysis {
                 group.materializing = Some(Task { done, cancel });
                 self.running += 1;
                 let document = group.document.clone();
+                #[cfg(test)]
+                let materializations = self.materializations.clone();
                 let priority = group.waiting.get(&consumer).map_or(Priority::Background, |intent| intent.priority);
                 jobs.submit(priority, move || {
                     if lease.wanted() {
+                        #[cfg(test)]
+                        materializations.fetch_add(1, Ordering::Relaxed);
                         let doc = Arc::new(snapshot.materialize());
                         if lease.wanted() { let _ = document.set(doc); }
                     }
