@@ -773,6 +773,9 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    /// A bounded analysis consumer's result, fenced by source and request identity.
+    Analyzed { ticket: crate::analysis::Ticket, result: Box<Completion> },
+    AnalysisWake,
     LibraryRead { generation: u64, read: crate::libraries::Read },
     Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
     ServerRuntimes { request: u64, paths: Vec<PathBuf> },
@@ -885,6 +888,8 @@ impl Input {
         match self {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
+                Completion::Analyzed { .. } => "analyzed",
+                Completion::AnalysisWake => "analysis-wake",
                 Completion::PlacesRead { .. } => "places read",
                 Completion::PlacesMerged { .. } => "places merged",
                 Completion::PlacesChecked { .. } => "places checked",
@@ -1586,6 +1591,7 @@ pub struct Session {
     index_revision: Arc<AtomicU64>,
     index_rebuilding: bool,
     jobs: Jobs,
+    analysis: crate::analysis::Analysis,
     themes: ThemeService,
     theme_preview: Option<String>,
     request: u64,
@@ -1766,6 +1772,7 @@ impl Session {
             index_revision: Arc::new(AtomicU64::new(0)),
             index_rebuilding: false,
             jobs: Jobs::new(),
+            analysis: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -2457,6 +2464,7 @@ impl Session {
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
             Input::Completion(c) => self.complete(c),
         };
+        self.analysis.pump(&self.jobs, &self.tx);
         if reveal_selection && effect.repaint {
             self.keep_selection_visible();
         }
@@ -3900,6 +3908,12 @@ impl Session {
 
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
+            Completion::AnalysisWake => Effect::default(),
+            Completion::Analyzed { ticket, result } => {
+                let current = self.state.sources.buffers.get(&ticket.buffer()).and_then(|entry| entry.snapshot.as_ref())
+                    .is_some_and(|snapshot| ticket.matches(snapshot, self.project_generation.load(Ordering::Relaxed)));
+                if current && self.analysis.accepts(ticket) { self.complete(*result) } else { Effect::default() }
+            }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
@@ -5762,12 +5776,15 @@ impl Session {
         }
         t.find = Some(state);
         let latest = t.find_latest.clone();
-        let (query, tx) = (lenz_content::find::Query { text, options: self.find_options }, self.tx.clone());
+        let query = lenz_content::find::Query { text, options: self.find_options };
         latest.store(request, Ordering::Relaxed);
-        self.jobs.submit(Priority::Visible, move || {
+        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        let input = crate::analysis::Input::new(view.snapshot().clone(), Arc::downgrade(&doc), self.project_generation.load(Ordering::Relaxed));
+        self.analysis.request(input, crate::analysis::Consumer::Find(tab), request, Priority::Visible, move |doc, lease| {
             let version = doc.version();
-            let Some(result) = crate::find::find_all(&doc, &query, || latest.load(Ordering::Relaxed) == request) else { return };
-            let _ = tx.send_blocking(Completion::Matched { tab, request, version, result });
+            let current = lease.cancellation();
+            let Some(result) = crate::find::find_all(&doc, &query, || current() && latest.load(Ordering::Relaxed) == request) else { return };
+            lease.send(Completion::Matched { tab, request, version, result });
         });
         Effect { repaint: true, ..Effect::default() }
     }
@@ -6246,6 +6263,9 @@ impl Session {
     }
 
     fn release(&mut self, id: TabId) {
+        if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer)
+            && !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id))
+        { self.analysis.forget(buffer); }
         if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.retrieved.is_none() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(t).then(|| t.location()));
             Arc::make_mut(&mut self.state.places).left_file(&source);
@@ -6716,6 +6736,7 @@ impl Drop for Session {
         self.current.store(0, Ordering::Relaxed);
         self.other_current.store(0, Ordering::Relaxed);
         self.renders.fetch_add(1, Ordering::Relaxed);
+        self.analysis.close();
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);

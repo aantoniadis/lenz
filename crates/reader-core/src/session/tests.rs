@@ -697,6 +697,36 @@ fn finder_perf() {
 }
 
 #[test]
+fn replacing_pending_find_requests_bounds_retained_document_owners() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "find.txt", b"needle\nother\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file), "find.txt");
+    let doc = s.state().document().unwrap().clone();
+    let before = Arc::strong_count(&doc);
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel();
+        let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || {
+            started.send(()).unwrap();
+            let _ = wait.recv_timeout(Duration::from_secs(5));
+        });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    for i in 0..128 { s.dispatch(Command::Find(format!("superseded-{i}"))); }
+    s.dispatch(Command::Find("needle".into()));
+    let retained = Arc::strong_count(&doc);
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    let found = s.state().active().unwrap().find().unwrap();
+    assert_eq!(found.query, "needle");
+    assert_eq!(found.matches.len(), 1);
+    assert!(retained <= before + 8, "superseded queued requests retained {} extra Documents", retained - before);
+}
+
+#[test]
 fn dropping_a_split_session_cancels_its_other_panes_running_parser() {
     let d = tempfile::tempdir().unwrap();
     let mut s = session(d.path());

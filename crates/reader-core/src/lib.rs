@@ -4,6 +4,7 @@
 #![deny(unsafe_code)]
 
 pub mod actions;
+mod analysis;
 pub mod blame;
 pub mod branches;
 pub mod cache;
