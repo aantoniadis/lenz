@@ -1404,6 +1404,45 @@ fn long_single_line_markdown_preview_scrolls_within_block_and_clamps() {
 }
 
 #[test]
+fn markdown_preview_keeps_its_scroll_when_a_retained_tab_is_released_and_reopened() {
+    let dir = tempfile::tempdir().unwrap();
+    let markdown = dir.path().join("cached-preview.md");
+    let other = dir.path().join("other.txt");
+    let source = "word ".repeat(2_000);
+    std::fs::write(&markdown, &source).unwrap();
+    std::fs::write(&other, "other source\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRetained(markdown.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    key(&mut a, KeyCode::Char('v'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    draw(&mut a, 60, 15);
+    key(&mut a, KeyCode::PageDown, KeyModifiers::NONE);
+    draw(&mut a, 60, 15);
+    let id = a.session.state().active().unwrap().id();
+    let pane = a.session.state().focused_pane();
+    let top = a.layout.panes[pane as usize].preview_top;
+    let first_byte = a.layout.panes[pane as usize].hits.first().unwrap().byte;
+    assert!(top > 0 && first_byte > 0, "fixture must be scrolled inside the long Markdown block");
+
+    a.dispatch(Command::OpenRetained(other.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.source() == other && tab.loaded()));
+    draw(&mut a, 60, 15);
+    assert!(a.session.state().tabs().iter().any(|tab| tab.id() == id && !tab.loaded()), "Markdown remains retained as an inactive released tab");
+    assert!(a.session.state().view(id).is_none(), "released text must not be exposed as a loaded view");
+
+    key(&mut a, KeyCode::BackTab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|tab| tab.id() == id && tab.loaded())
+        && matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    draw(&mut a, 60, 15);
+    assert_eq!(a.session.state().focused_pane(), pane);
+    assert_eq!(a.layout.panes[pane as usize].preview_top, top, "cached Markdown resumes the same preview row");
+    assert_eq!(a.layout.panes[pane as usize].hits.first().unwrap().byte, first_byte, "the same rendered source position is visible");
+    assert_eq!(std::fs::read_to_string(markdown).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(other).unwrap(), "other source\n");
+}
+
+#[test]
 fn tree_selection_follows_path_when_streaming_inserts_an_earlier_row() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("z.txt"), "z").unwrap();
