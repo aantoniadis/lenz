@@ -2148,6 +2148,37 @@ fn active_file_search_finishes_after_its_source_view_is_released() {
 }
 
 #[test]
+fn queued_result_validation_rechecks_the_retained_current_target() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "target.txt", b"token\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(file.clone()), "target.txt");
+    s.dispatch(Command::Search { query: "token".into(), scope: SearchIn::ActiveFile });
+    settle(&mut s, |s| s.state().results().is_some_and(|r| r.done()));
+    let tab = s.state.active.unwrap();
+    let old = s.state().view(tab).unwrap().snapshot().clone();
+    let (started, entered) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::OpenResult(0));
+    let current = Arc::new(old.apply_edits(old.key().version + 1,
+        &[crate::text::TextEdit { range: 0..old.len_bytes(), text: Arc::from("changed target\n") }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.tab_mut(tab).unwrap().new_content();
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("current source changed")));
+    assert!(s.state().results().unwrap().is_stale(0));
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    s.dispatch(Command::SelectAll);
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("changed target\n"));
+    assert_eq!(std::fs::read(file).unwrap(), b"token\n");
+}
+
+#[test]
 fn project_search_previews_without_moving_and_opens_validated_results() {
     let d = tempfile::tempdir().unwrap();
     let root = d.path().join("proj");

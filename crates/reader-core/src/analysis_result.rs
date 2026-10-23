@@ -343,6 +343,34 @@ mod tests {
     }
 
     #[test]
+    fn captured_pending_version_survives_newer_current_version_and_releases_after_ack() {
+        let mut analysis = Analysis::default(); let jobs = Jobs::new();
+        let (tx, rx) = async_channel::bounded(64); let project = Arc::new(AtomicU64::new(0));
+        let gates = hold_workers(&jobs);
+        analysis.ensure(Input::new(snapshot(3, 1), Weak::new(), 0, true), Priority::Background);
+        analysis.pump(&jobs, &tx, &project);
+        let captured = snapshot(3, 2);
+        analysis.ensure(Input::new(captured.clone(), Weak::new(), 0, true), Priority::Background);
+        analysis.request_result_document(document_fence(ResultSlot::Search, ResultStage::Search, 1), Priority::Visible, ||
+            (Input::new(captured, Weak::new(), 0, false), |doc: Arc<Document>, lease: Lease| {
+                assert_eq!(doc.version(), 2); assert_eq!(&**doc.text(), "captured source\n");
+                lease.send(Completion::AnalysisWake);
+            })).unwrap();
+        let dependency = pending_source(&analysis, ResultSlot::Search);
+        analysis.ensure(Input::new(snapshot(3, 3), Weak::new(), 0, true), Priority::Background);
+        analysis.release_view(BufferId(3), TabId(1), true); analysis.retain_sources(|_| false);
+        assert!(dependency.upgrade().is_some(), "captured v2 outlives replacement and source release");
+        for gate in gates { gate.send(()).unwrap(); }
+        pump_until(&mut analysis, &jobs, &tx, &project, |a| a.results[&ResultSlot::Search].completed.is_some());
+        let ticket = receive(&rx);
+        assert!(analysis.accepts(&ticket)); assert!(dependency.upgrade().is_some());
+        assert_eq!(analysis.materializations.load(Ordering::Relaxed), 1, "only captured v2 is converted");
+        assert!(analysis.acknowledge_result(ticket.result().unwrap()));
+        analysis.pump(&jobs, &tx, &project);
+        assert!(dependency.upgrade().is_none(), "acknowledgement releases the final captured owner");
+    }
+
+    #[test]
     fn replacing_waiting_document_intents_releases_dependencies_before_work() {
         let mut analysis = Analysis::default(); let mut previous = Weak::new();
         for request in 1..130 {
