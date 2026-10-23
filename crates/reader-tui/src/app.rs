@@ -2068,7 +2068,7 @@ impl App {
                     let view = pane.source_view(self)?;
                     let tab = view.tab();
                     let snapshot = view.snapshot();
-                    if hit.line >= snapshot.line_count() || tab.linkable(hit.line, hit.byte).is_none() {
+                    if hit.line >= snapshot.line_count() || view.linkable(hit.line, hit.byte).is_none() {
                         return None;
                     }
                     Some((

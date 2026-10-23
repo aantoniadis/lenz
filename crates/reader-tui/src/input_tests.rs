@@ -1107,6 +1107,23 @@ fn shifted_selection_head_stays_in_real_terminal_viewport() {
 }
 
 #[test]
+fn hover_identifier_lookup_uses_bounded_current_snapshot_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.rs");
+    let source = format!("{}\n{}target(); // hidden\n{}", "header".repeat(1000), " ".repeat(12_000), "a".repeat(10_000));
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+    let state = a.session.state();
+    let view = state.view(state.active().unwrap().id()).unwrap();
+    assert_eq!(view.linkable(1, 12_002), Some(12_000..12_006));
+    assert_eq!(view.linkable(1, 12_015), None, "comments are not hover targets");
+    assert_eq!(view.linkable(2, 5_000), None, "do not fabricate a truncated long identifier");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project");

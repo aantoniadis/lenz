@@ -1181,6 +1181,26 @@ impl<'a> View<'a> {
 }
 
 impl View<'_> {
+    /// A line-relative hover identifier; names clipped by the 4 KiB inspection window are omitted.
+    pub fn linkable(&self, line: usize, byte: usize) -> Option<std::ops::Range<usize>> {
+        let source = self.snapshot.line_range(line)?;
+        let at = source.start.checked_add(byte)?;
+        if at >= source.end || self.snapshot.floor_char_boundary(at) != at { return None; }
+        let from = self.snapshot.floor_char_boundary(at.saturating_sub(2048).max(source.start));
+        let end = self.snapshot.floor_char_boundary(from.saturating_add(4096).min(source.end));
+        let text = self.snapshot.copy_range(from..end)?;
+        let word = crate::document::identifier(&text, at - from)?;
+        if (word.start == 0 && from > source.start) || (word.end == text.len() && end < source.end) { return None; }
+        let word = from + word.start - source.start..from + word.end - source.start;
+        use lenz_content::highlight::Capture as C;
+        let spans = self.tab.highlights().map(|p| p.spans(line..line + 1)).unwrap_or_default();
+        let quiet = spans.first().is_some_and(|s| s.iter().any(|(r, c)| r.contains(&word.start)
+            && matches!(c, C::Keyword | C::String | C::Escape | C::Comment | C::DocComment | C::Number | C::ConstantBuiltin)));
+        (!quiet).then_some(word)
+    }
+}
+
+impl View<'_> {
     pub fn inlay_hints(&self) -> Option<&Arc<crate::decor::Hints>> {
         let (version, hints) = self.tab.hints.as_ref()?;
         (*version == self.snapshot.key().version).then_some(hints)
