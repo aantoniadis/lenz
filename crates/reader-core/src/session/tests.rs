@@ -697,6 +697,32 @@ fn finder_perf() {
 }
 
 #[test]
+fn markdown_syntax_and_find_use_the_same_current_admission() {
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "draft.md", b"# saved\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(file.clone()), "draft.md");
+    settle(&mut s, |s| s.state().highlights().is_some());
+    let tab = s.state.active.unwrap();
+    let initial = s.state().view(tab).unwrap().snapshot().clone();
+    let text = "# draft-only\n\n```rust\nfn current() {}\n```\n";
+    let current = Arc::new(initial.apply_edits(initial.key().version + 1,
+        &[crate::text::TextEdit { range: 0..initial.len_bytes(), text: Arc::from(text) }]).unwrap());
+    s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
+    s.active_mut().unwrap().new_content();
+    s.dispatch(Command::Split(Split::Columns));
+    s.dispatch(Command::ToggleMarkdownSource);
+    s.dispatch(Command::FocusPane(0));
+    s.dispatch(Command::Find("draft-only".into()));
+    settle(&mut s, |s| s.state().shown(1).unwrap().preview.as_ref().is_some_and(|p| p.as_ref().is_ok_and(|p| p.doc.source.as_ref() == text))
+        && s.state().active().unwrap().find().is_some_and(|f| !f.pending));
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1);
+    assert_eq!(s.state().active().unwrap().find().unwrap().matches.len(), 1);
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
+    assert_eq!(std::fs::read(file).unwrap(), b"# saved\n");
+}
+
+#[test]
 fn syntax_and_find_share_one_current_materialization_across_split_views() {
     let d = tempfile::tempdir().unwrap();
     let file = write(d.path(), "draft.rs", b"fn saved() {}\n");

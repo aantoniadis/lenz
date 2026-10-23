@@ -6608,29 +6608,33 @@ impl Session {
     /// images: files inside the browsing root, or beside the document when it is outside the root.
     fn render(&mut self, doc: &Arc<Document>) {
         let wants = |t: &&Tab| !t.markdown_source && t.preview.is_none() && t.doc.as_ref().is_some_and(|d| Arc::ptr_eq(d, doc));
-        if doc.language() != Some(Language::Markdown) || !self.state.active().into_iter().chain(self.state.shown(1 - self.state.focused)).any(|t| wants(&t)) {
-            return;
-        }
-        let root = match self.state.project.as_ref().map(|p| p.root()).filter(|r| doc.source().starts_with(r)) {
+        let Some(tab) = self.state.active().into_iter().chain(self.state.shown(1 - self.state.focused)).find(wants).map(|tab| tab.id) else { return };
+        let Some(view) = self.state.view(tab) else { return };
+        let snapshot = view.snapshot().clone();
+        if snapshot.language() != Some(Language::Markdown) { return; }
+        let root = match self.state.project.as_ref().map(|p| p.root()).filter(|r| snapshot.source().starts_with(r)) {
             Some(root) => root.to_path_buf(),
-            None => doc.source().parent().map(Path::to_path_buf).unwrap_or_default(),
+            None => snapshot.source().parent().map(Path::to_path_buf).unwrap_or_default(),
         };
-        let (version, text, file, shown, tx) = (doc.version(), doc.text().clone(), doc.source().to_path_buf(), self.wanted(doc.version()), self.tx.clone());
+        let file = snapshot.source().to_path_buf();
+        let input = crate::analysis::Input::new(snapshot, Arc::downgrade(doc), self.project_generation.load(Ordering::Relaxed));
         let (renders, render) = (self.renders.clone(), self.renders.load(Ordering::Relaxed));
-        self.jobs.submit(Priority::Visible, move || {
-            let wanted = move || shown() && renders.load(Ordering::Relaxed) == render;
+        self.analysis.request(input, crate::analysis::Consumer::Markdown, render, Priority::Visible, move |source, lease| {
+            let version = source.version();
+            let current = lease.cancellation();
+            let wanted = move || current() && renders.load(Ordering::Relaxed) == render;
             if !wanted() {
                 return;
             }
-            let preview = crate::markdown::render(text, wanted.clone());
+            let preview = crate::markdown::render(source.text().clone(), wanted.clone());
             let doc = preview.as_ref().ok().map(|p| p.doc.clone());
-            if !wanted() || tx.send_blocking(Completion::Rendered { version, preview }).is_err() {
+            if !wanted() || !lease.send(Completion::Rendered { version, preview }) {
                 return;
             }
             if let Some(doc) = doc {
                 let images = crate::markdown::images(&doc, &file, &root, &wanted);
                 if wanted() {
-                    let _ = tx.send_blocking(Completion::PreviewImages { version, doc, images });
+                    lease.send(Completion::PreviewImages { version, doc, images });
                 }
             }
         });

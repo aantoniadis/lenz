@@ -5,7 +5,7 @@ use crate::{document::Document, jobs::{Jobs, Priority, MAX_JOBS}, session::Compl
 const BUFFERS: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Syntax }
+pub(crate) enum Consumer { Find(TabId), Syntax, Markdown }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -70,8 +70,8 @@ pub(crate) struct Lease {
 }
 impl Lease {
     pub(crate) fn wanted(&self) -> bool { self.group.load(Ordering::Acquire) && self.cancel.load(Ordering::Acquire) }
-    pub(crate) fn send(&self, result: Completion) {
-        if self.wanted() { let _ = self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket, result: Box::new(result) }); }
+    pub(crate) fn send(&self, result: Completion) -> bool {
+        self.wanted() && self.tx.send_blocking(Completion::Analyzed { ticket: self.ticket, result: Box::new(result) }).is_ok()
     }
     pub(crate) fn cancellation(&self) -> impl Fn() -> bool + Send + Clone + 'static {
         let (group, cancel) = (self.group.clone(), self.cancel.clone());
@@ -183,7 +183,7 @@ impl Analysis {
             (entry.live && entry.group.cancel.load(Ordering::Acquire)) || entry.group.running()
         });
         for id in retry { self.enqueue(id); }
-        let mut turns = self.queue.len();
+        let mut turns = self.queue.len().saturating_add(MAX_JOBS);
         while self.running < MAX_JOBS && turns > 0 {
             turns -= 1;
             let Some(id) = self.queue.pop_front() else { break };
