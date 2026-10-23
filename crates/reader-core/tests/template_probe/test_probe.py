@@ -1,10 +1,19 @@
 """Checks the experiment's public projection/source-edit boundary."""
 import unittest
 import os
-from probe import project, apply_edit, apply_provider_edit, markup_project, apply_markup_edit
+import subprocess
+from probe import Projection, project, apply_edit, apply_provider_edit, markup_project, apply_markup_edit
+
+
+try:
+    ERB_AVAILABLE = subprocess.run(['ruby', '-rerb', '-e', ''],
+                                   capture_output=True).returncode == 0
+except FileNotFoundError:
+    ERB_AVAILABLE = False
 
 
 class ProjectionTests(unittest.TestCase):
+    @unittest.skipUnless(ERB_AVAILABLE, 'requires Ruby with the ERB scanner')
     def test_erb_automatic_regions_preserve_unicode_crlf_and_multiline(self):
         source = '<p>😀<%= "😀"; ReadyWidget.gre %></p>\r\n<% x =\r\n  1 %>'
         projection = project(source, 'erb')
@@ -26,7 +35,8 @@ class ProjectionTests(unittest.TestCase):
                          source.replace('#{ReadyWidget.gre}', '#{ReadyWidget.greet}'))
 
     def test_provider_edit_refuses_stale_foreign_and_cross_region_transactions(self):
-        projection = project('<%= ReadyWidget.gre %><%= other %>', 'erb')
+        projection = Projection('<%= ReadyWidget.gre %><%= other %>',
+                                ' ReadyWidget.gre \n other \n', [(3, 20, 0, 17), (25, 32, 18, 25)])
         edit = {'textEdit': {'range': {'start': {'line': 0, 'character': 13},
                                      'end': {'line': 0, 'character': 16}}, 'newText': 'greet'}}
         self.assertEqual(apply_provider_edit(projection, edit, 'utf-32', 1, 'fixture'),
@@ -60,12 +70,14 @@ class ProjectionTests(unittest.TestCase):
             with self.subTest(source=source), self.assertRaises(ValueError):
                 project(source, 'haml')
 
+    @unittest.skipUnless(ERB_AVAILABLE, 'requires Ruby with the ERB scanner')
     def test_erb_scanner_excludes_comments_and_escaped_openers(self):
         projection = project('<%%= outside %><%# ignored %><%= ReadyWidget.gre %>', 'erb')
         self.assertEqual(projection.generated, ' ReadyWidget.gre \n')
 
     def test_provider_edit_refuses_half_surrogate_and_out_of_bounds_positions(self):
-        projection = project('<%= "😀"; ReadyWidget.gre %>', 'erb')
+        projection = Projection('<%= "😀"; ReadyWidget.gre %>',
+                                ' "😀"; ReadyWidget.gre \n', [(3, 25, 0, 22)])
         for line, column in [(0, 3), (100, 0), (0, 100), (-1, 0)]:
             item = {'textEdit': {'range': {'start': {'line': line, 'character': column},
                                           'end': {'line': line, 'character': column}}, 'newText': 'x'}}

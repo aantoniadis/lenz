@@ -39,7 +39,7 @@ cargo test -p reader-core --test editor_template_resolution
 cargo test -p reader-core --test editor_template_resolution template_real_provider_resolution -- --ignored --exact
 ```
 
-Without the private Haml environment, the ordinary contract test explicitly skips its two Haml parser checks. The ignored real-provider test requires the private environment and fails when a prerequisite is missing.
+Without the private Haml environment, the ordinary contract test explicitly skips its two Haml parser checks. Its two ERB recognition checks likewise skip when Ruby or the ERB scanner gem is absent; the three pure mapping/edit contracts still run using fixed projection inputs. The ignored real-provider test requires all prerequisites and fails when one is missing. Automatic recognition acceptance comes from the real-provider runs, never the fixed mapping fixtures.
 
 Local evidence root: `/home/alex/.codex/worktrees/cf8f/lenz/target/perf/editor-implementation/04/`. `verified-1`, `verified-2` and `verified-3` retain equivalent final runs. Each contains `identity.json`, `summary.json`, private provider roots, framed RPC transcripts with timing, initialization capabilities, raw completion/signature/diagnostic payloads, source fixtures, exact accepted edits, generated projections, compiler output and process RSS/HWM. Earlier named runs and `failed-preloads/` retain failures. `python-contract.log`, `cargo-focused.log`, `cargo-provider.log` and `clippy.log` record validation. These ignored artifacts stay local and contain only owned synthetic fixtures.
 
