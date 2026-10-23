@@ -28,3 +28,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   completed layout separately for very long combining-mark runs. The retained
   window leak has a regression check; equivalent native startup measurements for
   that specific input remain a follow-up.
+- **Pinned benchmark helper selection:** fake-provider fixture setup currently
+  invokes Cargo before locating its helper beside the test executable. A future
+  explicit prebuilt-helper option would make immutable benchmark archives easier
+  to replay and prevent accidental compilation inside quiet runs. The current
+  measurements retain the expected directory layout and use `CARGO=/usr/bin/true`.
