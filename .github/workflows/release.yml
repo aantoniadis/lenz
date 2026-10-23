@@ -47,7 +47,10 @@ jobs:
 
       - name: Metal toolchain (gpui compiles shaders at build time)
         if: runner.os == 'macOS'
-        run: xcodebuild -downloadComponent MetalToolchain
+        # Xcode 16 ships the Metal compiler and has no -downloadComponent; Xcode 26 downloads it on demand.
+        run: |
+          xcodebuild -version
+          xcrun metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun metal --version; }
 
       - name: Rust stable
         shell: bash
