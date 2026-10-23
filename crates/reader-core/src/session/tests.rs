@@ -2103,6 +2103,50 @@ fn searched(s: &Session) -> bool {
     s.state().results().is_some_and(|r| r.done())
 }
 
+
+#[test]
+fn active_file_search_finishes_after_its_source_view_is_released() {
+    let d = tempfile::tempdir().unwrap();
+    let a_bytes = b"A-only needle\nsecond needle\n"; let b_bytes = b"B stays current\n";
+    let a = write(d.path(), "A.txt", a_bytes); let b = write(d.path(), "B.txt", b_bytes);
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(a.clone()), "A.txt");
+    let a_tab = s.state().active().unwrap().id();
+    let (entered, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let entered = entered.clone();
+        s.jobs.submit(Priority::Visible, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+        release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::ActiveFile });
+    let result_id = s.state().results().unwrap().id();
+    assert!(!searched(&s));
+    s.dispatch(Command::OpenRetained(b.clone()));
+    let b_tab = s.state().active().unwrap().id();
+    let Ok((stamp, bytes)) = read(&b) else { panic!("stable disposable B") };
+    let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+    // Deliver the pending real filesystem read while the CPU executor remains gated.
+    s.dispatch(Completion::Loaded { request: s.request, tab: b_tab, path: b.clone(),
+        result: Ok((Some(stamp), Arc::new(Document::decode(b.clone(), version, &bytes)), std::fs::canonicalize(&b).ok())) });
+    assert!(s.state().view(a_tab).is_none(), "A's reloadable view was released");
+    assert_eq!(s.state().current_source().unwrap().source(), b.as_path());
+    assert_eq!(s.state().results().unwrap().id(), result_id, "the results remain independently visible");
+    for release in releases { release.send(()).unwrap(); }
+    let until = std::time::Instant::now() + Duration::from_secs(2);
+    while !searched(&s) && std::time::Instant::now() < until {
+        if let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+        else { std::thread::yield_now(); }
+    }
+    assert!(searched(&s), "a retained file search must finish after switching away from its source view");
+    let results = s.state().results().unwrap();
+    assert_eq!(results.id(), result_id);
+    assert_eq!(results.hits().iter().map(|hit| (hit.line, hit.text.as_ref())).collect::<Vec<_>>(), [(0, "A-only needle"), (1, "second needle")]);
+    assert!(results.hits().iter().all(|hit| hit.path.as_ref() == a.to_string_lossy()));
+    assert_eq!(s.state().current_source().unwrap().source(), b.as_path());
+    assert_eq!(source_text(s.state().current_source().unwrap()).as_bytes(), b_bytes);
+    assert_eq!(std::fs::read(a).unwrap(), a_bytes); assert_eq!(std::fs::read(b).unwrap(), b_bytes);
+}
+
 #[test]
 fn project_search_previews_without_moving_and_opens_validated_results() {
     let d = tempfile::tempdir().unwrap();
