@@ -1407,7 +1407,7 @@ impl State {
             let Some((_, at)) = positions.iter().find(|(id, _)| *id == tab.id) else { continue };
             tab.stamp = stamp;
             tab.new_content();
-            tab.restore_to(&at, &snapshot);
+            tab.restore_to(at, &snapshot);
             changed.push(tab.id);
         }
         changed
@@ -5358,9 +5358,8 @@ impl Session {
                         entry.document = Default::default();
                         entry.stamp = stamp;
                     }
-                    if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone() {
-                        if self.cache.contains(&to) && let Some(stamp) = self.cache.stamp(&to) { self.cache.put(stamp, snapshot); }
-                    }
+                    if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone()
+                        && self.cache.contains(&to) && let Some(stamp) = self.cache.stamp(&to) { self.cache.put(stamp, snapshot); }
                 }
                 for t in self.state.tabs.iter_mut().filter(|t| t.buffer == buffer && t.loaded) { t.new_content(); }
                 if self.is_shown(tab) { self.decorate(tab); }
@@ -6798,7 +6797,7 @@ impl Session {
                 .and_then(|(tab, buffer, entry)| Some((tab, buffer, entry, entry.snapshot.as_ref()?)));
             if let Some((tab, buffer, entry, snapshot)) = entry {
                 let live = self.state.tabs.iter().any(|tab| tab.buffer == Some(buffer) && shown.contains(&Some(tab.id)));
-                let saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(&snapshot));
+                let saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(snapshot));
                 groups.entry(buffer).or_insert_with(|| (crate::analysis::Input::new(snapshot.clone(), entry.document.clone(), generation, live), tab.stamp.filter(|_| saved), Vec::new())).2.push(rel);
             } else { disk.push(rel); }
         }

@@ -86,7 +86,8 @@ impl TextSnapshot {
 
     fn indexed(key: SnapshotKey, source: Arc<SourceMeta>, chunks: Vec<Arc<Chunk>>) -> Self {
         let (mut bytes, mut newlines, mut utf16) = (0, 0, 0);
-        let mut owned_bytes = size_of::<Self>() + source.bytes();
+        let arc_header = 2 * size_of::<usize>();
+        let mut owned_bytes = size_of::<Self>() + 2 * arc_header + source.bytes();
         let mut texts = std::collections::HashSet::new();
         let mut newlines_seen = std::collections::HashSet::new();
         let mut chunks_seen = std::collections::HashSet::new();
@@ -96,9 +97,9 @@ impl TextSnapshot {
             newlines += entry.chunk.newline_range.len();
             utf16 += entry.chunk.utf16;
             owned_bytes += size_of::<Entry>();
-            if chunks_seen.insert(Arc::as_ptr(&entry.chunk)) { owned_bytes += size_of::<Chunk>(); }
-            if texts.insert(Arc::as_ptr(&entry.chunk.text)) { owned_bytes += entry.chunk.text.len(); }
-            if newlines_seen.insert(Arc::as_ptr(&entry.chunk.newlines)) { owned_bytes += entry.chunk.newlines.len() * size_of::<usize>(); }
+            if chunks_seen.insert(Arc::as_ptr(&entry.chunk)) { owned_bytes += size_of::<Chunk>() + arc_header; }
+            if texts.insert(Arc::as_ptr(&entry.chunk.text)) { owned_bytes += entry.chunk.text.len() + arc_header; }
+            if newlines_seen.insert(Arc::as_ptr(&entry.chunk.newlines)) { owned_bytes += entry.chunk.newlines.len() * size_of::<usize>() + arc_header; }
             entry
         }).collect();
         let chunks: Arc<[Entry]> = chunks;
@@ -175,6 +176,9 @@ impl TextSnapshot {
         range.end
     }
     pub fn is_large(&self) -> bool {
+        if self.source.loaded_version() == Some(self.key.version) { return self.source.is_large(); }
+        // Changed drafts keep the original restriction and additionally account for their
+        // current normalized text cost. An unchanged loaded source preserves encoded-load policy.
         let nonempty_rows = self.line_count() - usize::from(self.bytes > 0 && self.byte_at(self.bytes - 1) == Some(b'\n'));
         self.source.is_large() || self.bytes > crate::document::LARGE_BYTES || nonempty_rows > crate::document::LARGE_LINES
     }

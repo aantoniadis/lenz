@@ -28,6 +28,18 @@ fn encoded_large_policy_survives_snapshot_and_worker_conversion() {
 }
 
 #[test]
+fn decoded_expansion_keeps_the_loaded_reader_policy_on_rematerialization() {
+    let mut bytes = vec![0xff, 0xfe];
+    bytes.extend(std::iter::repeat_n(0x4e00_u16, 2_500_000).flat_map(u16::to_le_bytes));
+    let document = Document::decode("expanded.rs".into(), 1, &bytes);
+    assert!(!document.is_large(), "encoded load remains below the existing limit");
+    let snapshot = TextSnapshot::from_document(BufferId(84), &document);
+    assert!(!snapshot.is_large(), "normalizing loaded bytes must not change existing reader eligibility");
+    drop(document);
+    assert!(!snapshot.materialize_while(|| true).unwrap().is_large(), "worker reuse must not be required to preserve policy");
+}
+
+#[test]
 fn editor_text_unicode_transactions_preserve_held_snapshots() {
     let document = Document::decode("unicode.txt".into(), 1, "a😀\r\ne\u{301}\n".as_bytes());
     let original = TextSnapshot::from_document(BufferId(7), &document);
