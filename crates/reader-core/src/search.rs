@@ -105,9 +105,20 @@ pub struct CallRow {
     pub more: usize,
 }
 
+/// The decoded source that supplied result coordinates; separate from the index cache's raw-byte key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DiskSource { pub stamp: crate::cache::Stamp, pub digest: [u8; 32] }
+impl DiskSource {
+    pub(crate) fn new(stamp: crate::cache::Stamp, text: &[u8]) -> Self {
+        use sha2::{Digest, Sha256};
+        Self { stamp, digest: Sha256::digest(text).into() }
+    }
+}
+
 /// A batch of results for search `id`.
 #[derive(Debug, Default)]
 pub struct Found {
+    pub(crate) sources: std::collections::HashMap<Arc<str>, DiskSource>,
     pub hits: Vec<Hit>,
     /// Files fully searched so far (for a file search, 1 when done).
     pub searched: usize,
@@ -267,6 +278,7 @@ pub fn search_files(root: &Path, files: &[Arc<str>], query: &Query, id: u64, lat
     };
     let cancelled = || latest.load(Ordering::Relaxed) != id;
     let mut searcher = searcher();
+    let mut sources = std::collections::HashMap::new();
     let (mut batch, mut total, mut searched, mut failed) = (Vec::new(), 0usize, 0usize, 0usize);
     let mut limited = false;
     for rel in files {
@@ -275,11 +287,15 @@ pub fn search_files(root: &Path, files: &[Arc<str>], query: &Query, id: u64, lat
         }
         // Search the text the reader shows: UTF-8 as it is, anything else decoded the way documents are, so
         // ranges and matches agree with the open document (a BOM or a legacy encoding included).
-        let Ok(bytes) = std::fs::read(root.join(&**rel)) else {
+        let path = root.join(&**rel);
+        let stamp = crate::cache::Stamp::of(&path);
+        let Ok(bytes) = std::fs::read(&path) else {
             failed += 1;
             searched += 1;
             continue;
         };
+        if stamp.is_none() || crate::cache::Stamp::of(&path) != stamp { failed += 1; searched += 1; continue; }
+        let before = total;
         let decoded;
         let bom = bytes.starts_with(b"\xEF\xBB\xBF") || bytes.starts_with(b"\xFF\xFE") || bytes.starts_with(b"\xFE\xFF");
         let text: &[u8] = match std::str::from_utf8(&bytes) {
@@ -307,18 +323,19 @@ pub fn search_files(root: &Path, files: &[Arc<str>], query: &Query, id: u64, lat
             let mut sink = Lines { matcher: &matcher, path: rel.clone(), push: &mut push, cancelled: &cancelled };
             let _ = searcher.search_slice(&matcher, text, &mut sink);
         }
+        if total > before && let Some(stamp) = stamp { sources.insert(rel.clone(), DiskSource::new(stamp, text)); }
         searched += 1;
         if limited {
             break;
         }
-        if batch.len() >= SEARCH_BATCH && !send(Found { hits: std::mem::take(&mut batch), searched, failed, ..Found::default() }) {
+        if batch.len() >= SEARCH_BATCH && !send(Found { sources: std::mem::take(&mut sources), hits: std::mem::take(&mut batch), searched, failed, ..Found::default() }) {
             return;
         }
     }
     if cancelled() {
         return;
     }
-    send(Found { hits: batch, searched, done: true, limited, failed, ..Found::default() });
+    send(Found { sources, hits: batch, searched, done: true, limited, failed, ..Found::default() });
 }
 
 /// Whether `hit` still matches `query` in `line` (the current text of its line): the target is valid to open.
@@ -403,6 +420,8 @@ pub struct Results {
     pub(crate) scope: Scope,
     /// The root the paths are relative to (project scope), and its generation when the search ran.
     pub(crate) root: Option<(std::path::PathBuf, u64)>,
+    pub(crate) captured: std::collections::HashMap<std::path::PathBuf, Arc<crate::text::TextSnapshot>>,
+    pub(crate) disk_sources: std::collections::HashMap<Arc<str>, DiskSource>,
     pub(crate) hits: Vec<Hit>,
     pub(crate) searched: usize,
     pub(crate) failed: usize,

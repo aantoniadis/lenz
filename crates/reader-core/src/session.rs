@@ -16,6 +16,8 @@ use lenz_content::{
     theme::{Palette, ThemeCommand, ThemeEntry, ThemeOverrides, ThemePaths, ThemeService, ThemeUpdate},
 };
 
+mod project_search;
+
 use crate::{
     cache::{INACTIVE_BYTES, InactiveCache, Stamp},
     decor::Decor,
@@ -837,6 +839,8 @@ pub enum Completion {
     Refreshed { tab: TabId, token: u64, result: Refresh },
     /// Results for search `id`.
     Found { id: u64, found: search::Found },
+    ProjectListed { id: u64, paths: Result<Vec<Arc<str>>, String> },
+    ProjectFound { id: u64, step: usize, found: search::Found },
     /// Line colours for results of search `id`.
     ResultSpans { id: u64, spans: Vec<(usize, search::LineSpans)> },
     /// Syntax colours of the previewed snapshot `version`.
@@ -932,7 +936,7 @@ impl Input {
                 Completion::Theme(_) => "theme",
                 Completion::Changed(_) => "changed",
                 Completion::Refreshed { .. } => "refreshed",
-                Completion::Found { .. } => "found",
+                Completion::Found { .. } | Completion::ProjectListed { .. } | Completion::ProjectFound { .. } => "found",
                 Completion::Previewed { .. } | Completion::CurrentPreview { .. } => "previewed",
                 Completion::PreviewHighlighted { .. } => "preview highlighted",
                 Completion::ResultSpans { .. } => "result spans",
@@ -1852,6 +1856,7 @@ pub struct Session {
     native: crate::native::Reveals,
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
+    project_query: Option<project_search::ProjectQuery>,
     semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -2045,6 +2050,7 @@ impl Session {
             index_batch_seq: 0,
             jobs: Jobs::new(),
             analysis: Default::default(),
+            project_query: None,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2767,6 +2773,7 @@ impl Session {
             Input::Completion(c) => self.complete(c),
         };
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
+        if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         self.invalidate_result_analysis();
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
@@ -4452,6 +4459,7 @@ impl Session {
         match fence.slot {
             ResultSlot::Search => {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
+                    self.project_query = None;
                     r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None };
                 }
             }
@@ -5124,11 +5132,14 @@ impl Session {
                 let effect = self.themes.apply(*update);
                 self.theme_effect(effect)
             }
+            Completion::ProjectListed { id, paths } => self.project_listed(id, paths),
+            Completion::ProjectFound { id, step, found } => self.project_found(id, step, found),
             Completion::Found { id, found } => {
                 let generation = self.state.project.as_ref().map(|p| p.generation());
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id && r.root.as_ref().is_none_or(|(_, g)| Some(*g) == generation)) else {
                     return Effect::default(); // another search, or results of a replaced root
                 };
+                r.disk_sources.extend(found.sources);
                 r.hits.extend(found.hits);
                 r.rebuild_rows();
                 if let Some(files) = found.files {
@@ -5890,7 +5901,7 @@ impl Session {
         self.search_seq += 1;
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
-        let (latest, tx) = (self.search_latest.clone(), self.tx.clone());
+        let latest = self.search_latest.clone();
         let options = self.find_options;
         let query = lenz_content::find::Query { text, options };
         let base = |s: &Self, scope, root, files, partial| Results { options, ..s.new_results(id, ResultsKind::Text, query.text.clone(), scope, root, files, partial) };
@@ -5901,23 +5912,10 @@ impl Session {
                 let partial = !matches!(p.coverage(), project::Coverage::Complete(_));
                 let root = p.root().to_owned();
                 let generation = p.generation();
-                let mut results = base(self, Scope::Project, Some((root.clone(), generation)), paths.len(), partial);
-                results.pattern = pattern.clone();
-                self.state.results = Some(results);
-                self.jobs.submit(Priority::Visible, move || {
-                    // Picked and put in folder order off the UI thread: the results' tree follows that order.
-                    let paths = match search::select_files(paths, &pattern) {
-                        Ok(paths) => paths,
-                        Err(e) => {
-                            let _ = tx.send_blocking(Completion::Found { id, found: search::Found { done: true, error: Some(e), files: Some(0), ..Default::default() } });
-                            return;
-                        }
-                    };
-                    if !tx.send_blocking(Completion::Found { id, found: search::Found { files: Some(paths.len()), ..Default::default() } }).is_ok() {
-                        return;
-                    }
-                    search::search_files(&root, &paths, &query, id, &latest, &mut |found| tx.send_blocking(Completion::Found { id, found }).is_ok());
-                });
+                let mut results = base(self, Scope::Project, Some((root, generation)), paths.len(), partial);
+                results.pattern = pattern;
+                self.start_project_search(results, paths);
+
             }
             Scope::File(source) => {
                 // The document as the reader holds it (a tab's snapshot, even if its file is gone), else as on disk.
@@ -6054,6 +6052,8 @@ impl Session {
             spans: Default::default(),
             spans_asked: Default::default(),
             matched_files: 0,
+            captured: Default::default(),
+            disk_sources: Default::default(),
         }
     }
 
