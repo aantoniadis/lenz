@@ -74,8 +74,8 @@ pub(crate) enum Prompt {
     BranchMenu { target: reader_core::branches::BranchTarget, label: String, query: String, row: usize },
     /// A new branch's name (`input`), where it starts (`None`: HEAD) and whether to check it out (Tab).
     NewBranch { from: Option<String>, checkout: bool },
-    /// Checkout Tag or Revision (`input`), or Compare with Branch, Tag or Revision when `compare`.
-    Revision { compare: bool },
+    /// Checkout Tag or Revision (`input`).
+    Revision,
 }
 /// What a details prompt is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -610,8 +610,17 @@ impl App {
                 return;
             }
             InterfaceAction::NewBranch => Prompt::NewBranch { from: None, checkout: true },
-            InterfaceAction::CheckoutRevision => Prompt::Revision { compare: false },
-            InterfaceAction::CompareWithRevision => Prompt::Revision { compare: true },
+            InterfaceAction::CheckoutRevision => Prompt::Revision,
+            InterfaceAction::CompareWithBase => return self.git_diff(&reader_core::branches::GitDiff::BaseBranch),
+            InterfaceAction::CompareSelected => {
+                let selected = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
+                let exe = self.exe();
+                match self.session.compare_selected_launch(selected.as_deref(), &exe, true) {
+                    Ok(launch) => self.foreground = Some(launch),
+                    Err(e) => self.dispatch(Command::Notice(e)),
+                }
+                return;
+            }
             InterfaceAction::ShowLocalChanges => return self.git_diff(&reader_core::branches::GitDiff::LocalChanges),
             InterfaceAction::ShowBranchChanges => return self.git_diff(&reader_core::branches::GitDiff::BranchChanges(None)),
             InterfaceAction::ResolveConflicts => {
@@ -1051,14 +1060,14 @@ impl App {
                     return match b.state_text() {
                         Some(state) => format!("{} · {state}", b.heading()),
                         None if b.worktrees_only => format!("{} · type to filter · Enter compares · → more", b.heading()),
+                        None if b.revisions_only => format!("{} · type to filter or a revision · Enter compares", b.heading()),
                         None => format!("{} · type to filter · Enter checks out · → more", b.heading()),
                     };
                 }
                 Prompt::BranchMenu { .. } => "Actions · ← back",
                 Prompt::NewBranch { checkout: true, from } => return format!("New branch from {} · [x] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
                 Prompt::NewBranch { checkout: false, from } => return format!("New branch from {} · [ ] check out (Tab) · Enter", from.as_deref().map_or("HEAD", reader_core::branches::short_ref)),
-                Prompt::Revision { compare: false } => "Checkout tag or revision · Enter",
-                Prompt::Revision { compare: true } => "Compare the working tree with a branch, tag or revision · Enter",
+                Prompt::Revision => "Checkout tag or revision · Enter",
             }
             .to_owned()
         })
@@ -1600,14 +1609,10 @@ impl App {
                 }
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
-            Prompt::Revision { compare } => match self.session.validate_revision(&input) {
+            Prompt::Revision => match self.session.validate_revision(&input) {
                 Ok(_) => {
                     self.close_modal();
-                    let rev = input.trim().to_string();
-                    match compare {
-                        true => self.git_diff(&reader_core::branches::GitDiff::Revision(rev)),
-                        false => self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(rev))),
-                    }
+                    self.dispatch(Command::Checkout(lenz_content::branches::Target::Detached(input.trim().to_string())));
                 }
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
@@ -1766,6 +1771,7 @@ impl App {
             (KeyCode::Char('n' | 'N'), true, true, false)
             | (KeyCode::Char('p'), true, false, false) => Some(CommandId::FindFile),
             (KeyCode::Char('k'), true, false, false) => Some(CommandId::SearchEverywhere),
+            (KeyCode::Char('d'), true, false, false) => Some(CommandId::CompareSelected),
             (KeyCode::Char('f' | 'F'), true, true, _) => Some(CommandId::SearchProject),
             (KeyCode::Char('f'), true, false, _) | (KeyCode::Char('/'), false, _, _) => {
                 Some(CommandId::FindInFile)
@@ -1852,6 +1858,9 @@ impl App {
                 self.dispatch(Command::CloseDocumentation);
             } else if self.session.state().asking().is_some() {
                 self.dispatch(Command::CancelSemantic);
+            } else if self.focus == Focus::Tree && !self.session.state().tree_marks().is_empty() {
+                // First the explorer's marks, as in the GUI; the next Esc leaves the explorer.
+                self.dispatch(Command::ClearTreeMarks);
             } else {
                 self.focus = Focus::Text;
                 self.notice = None;
@@ -1881,10 +1890,13 @@ impl App {
         match self.focus {
             Focus::Tree => {
                 let len = self.session.state().tree_rows().count();
-                if matches!(
-                    key.code,
-                    KeyCode::Enter | KeyCode::Right | KeyCode::Left | KeyCode::Char(' ')
-                ) {
+                // Space marks the entry for Compare Selected (Ctrl+D); Esc forgets the marks.
+                if key.code == KeyCode::Char(' ') {
+                    let path = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
+                    if let Some(path) = path {
+                        self.dispatch(Command::MarkTreeRow { path, selected: None });
+                    }
+                } else if matches!(key.code, KeyCode::Enter | KeyCode::Right | KeyCode::Left) {
                     self.tree_activate(key.code);
                 } else {
                     self.tree_at = stepped(
@@ -2276,7 +2288,16 @@ impl App {
                 let row = self.tree_top + y.saturating_sub(self.layout.tree.y) as usize;
                 if row < self.session.state().tree_rows().count()
                 {
+                    let path = self.session.state().tree_rows().nth(row).map(|r| r.path.clone());
                     self.focus = Focus::Tree;
+                    // Ctrl+click marks it for Compare Selected (with the highlighted entry); a plain click forgets.
+                    if event.modifiers.contains(KeyModifiers::CONTROL) && let Some(path) = path {
+                        let selected = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
+                        self.dispatch(Command::MarkTreeRow { path, selected });
+                        self.tree_at = row;
+                        return;
+                    }
+                    self.dispatch(Command::ClearTreeMarks);
                     self.tree_at = row;
                     self.tree_activate(KeyCode::Enter);
                 }

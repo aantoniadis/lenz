@@ -476,7 +476,8 @@ impl App {
             .skip(self.tree_top)
             .take(area.height.saturating_sub(1) as usize)
         {
-            let bg = if i == self.tree_at && self.focus == Focus::Tree {
+            let marked = self.session.state().tree_marks().contains(&entry.path);
+            let bg = if i == self.tree_at && self.focus == Focus::Tree || marked {
                 p.selected_bg
             } else {
                 p.sidebar_bg
