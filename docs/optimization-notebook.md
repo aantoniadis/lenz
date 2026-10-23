@@ -1699,6 +1699,11 @@ presentation, GPU memory, arbitrary fonts and long sessions remain unverified.
 
 A later owned native GUI/PTY probe found a shared Go To reveal gap: the correct
 Unicode source byte is selected and copied, but its native glyph position is not
-scrolled into view. Scalar columns and native pixels/cells differ, so the final
-adapter acceptance remains pending a shared, identity-validated native reveal goal.
-The native red screenshot/OCR/clipboard evidence is retained under `08/native-goto-red/`.
+scrolled into view. Shared source-byte goals with identity-validated native feedback
+fixed it; a narrow 600×300 replay with 100 trailing spaces paints and copies `END`
+with unchanged source bytes. The identical final oracle rejects the old executable.
+Full-window OCR initially missed visible text beside emoji; version 4 uses a normalized
+source-band crop and was checked against both positive and negative screenshots.
+Raw evidence is under `08/native-goto-oracle-v4/` and `08/native-goto-old-oracle-v4/`.
+The final focused GUI batch passes 44 tests, and strict GUI Clippy passes. The complete
+08–10 gate remains pending.

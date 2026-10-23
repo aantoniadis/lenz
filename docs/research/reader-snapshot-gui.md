@@ -4,12 +4,11 @@ The GUI reads source text through the current `View` snapshot and the shared res
 projection/layout services. Editing remains disabled. This report covers the GUI slice
 of migration 08; the integrated 08–10 local gate is still pending.
 
-A subsequent native Go To check reproduced a shared reveal gap: after 2,000 family
-emoji, Go To 1:14002 places the caret at byte 50,001 and Copy returns `END`, but the
-initial native screenshot does not contain that target. This remains unresolved in
-the measured snapshot; GUI/TUI native reveal integration must pass before 08–09 close.
-The exact executable, screenshot, OCR and unchanged-file/clipboard result are retained
-in `target/perf/editor-implementation/08/native-goto-red/`.
+The subsequent native Go To gap is fixed in runtime source
+`1094aef84eecf33b869ea519f5d5ad0813b7cd0a`. The same native replay now paints `END`
+after 2,000 family emoji, selects/copies its exact bytes and leaves the file unchanged,
+including 100 trailing spaces in a 600×300 window. The old executable still fails
+that identical replay. The complete 08–10 gate remains pending.
 
 ## Behavior and bounds
 
@@ -18,6 +17,12 @@ documentation anchors, folds and sticky lines use absolute source coordinates. N
 fragment origins are shared by paint and hit-testing. Cold horizontal/wrapped seeks
 continue through the existing Jobs service; they do not finish a complete prefix on
 the UI thread. The adapters do not materialize current text for these operations.
+
+A shared source-byte reveal goal is resolved through the same bounded native walker.
+The core validates source, selection, metrics and request identity before choosing
+horizontal movement with a three-column context margin. Native-overwide wrapped rows
+can pan horizontally; ordinary wrapped targets unwind that pan. Exact native extents
+include the drawable EOF caret, and opaque viewport stamps reject stale clamps.
 
 Geometry rejects a changed snapshot or source-metadata identity, hints, folds,
 declarations, viewport, scroll position, pane layout or relevant chrome. In particular,
@@ -43,7 +48,8 @@ Focused GUI constructor/input/render checks exercise long-line horizontal select
 wrapped End/Up and exact clipboard bytes, native emoji boundaries, obsolete reload
 metadata release, stale scroll geometry, suppressed-source caret mapping, hints,
 sticky lines, images/SVG fallback, empty views and narrow layouts. The combined
-focused run passed 32 tests with 125 filtered out. Strict GUI Clippy passed, including
+initial combined run passed 32 tests. The final focused batch passed 44 with 117
+filtered out, including native Go To/Find/copy, wrapped pan and stale font geometry. Strict GUI Clippy passed, including
 `test-support` and `perf-probe`; a subsequent bounded fold-hit change passed the
 20-test fold/sticky group. The final integration gate remains separate.
 
@@ -102,6 +108,21 @@ latency claims. Memory sampling lasted about 60 seconds per executable; settled 
 is the median of the final 60 half-second samples. Fixture hashes were checked again
 after all workloads and were unchanged.
 
+## Native reveal oracle
+
+Owned X11 input enters Go To 1:14002, captures the native source row before further
+caret movement, then selects and copies `END` through the actual X11 clipboard.
+The 600×300 fixture has 100 spaces after the target, so an EOF clamp alone cannot
+satisfy the check. Source bytes are asserted unchanged.
+
+The original full-window OCR missed visible text beside emoji. Oracle version 4 uses
+a fixed right source band, grayscale/inversion/scaling/padding and case-insensitive
+OCR. The retained screenshots were inspected, and the identical version 4 driver was
+replayed against both old and new executables: old reports `painted_END=false`, new
+reports `painted_END=true`; both copy `END`. Failed oracle versions remain retained.
+This is a correctness check, not a timing measurement. Final performance integration
+with analysis 10 remains separate.
+
 ## Native diagnostic and retained artifacts
 
 `READER_PROBE_NATIVE` enables the optional `READER_NATIVE_WIDTH_V1` diagnostic in a
@@ -119,6 +140,8 @@ identities are under `target/perf/editor-implementation/08/`:
 - `paired-baseline/`, `paired-candidate/`: complete startup/memory/scroll collectors.
 - `startup-pairs/`: alternating launches and stderr for every trial.
 - `native-diagnostic/`: exact measured candidate binary, identity and native widths.
+- `native-goto-oracle-v4/`, `native-goto-old-oracle-v4/`: final native positive/negative replay.
+- `native-goto-final/`: immutable final native probe executable.
 - `root-gui/`: focused GUI red/green and lint evidence.
 - `core-checks/`: shared projection/layout bounds and real Session continuation checks.
 
