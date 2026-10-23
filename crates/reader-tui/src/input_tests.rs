@@ -740,6 +740,161 @@ fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
 }
 #[test]
+fn leading_zero_width_source_keeps_its_first_hit_after_resizing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("leading-marks.txt");
+    let source = "\u{301}\u{302}\n";
+    std::fs::write(&path, source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    for width in [80, 70, 80] {
+        draw(&mut a, width, 20);
+        assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn suppressed_zero_width_windows_keep_bounded_hits_and_exact_source_end() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("zero-width-tail.txt");
+    let source = "\u{200B}".repeat(200_000);
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        draw(&mut a, 80, 20);
+        let pane = &a.layout.panes[0];
+        assert!(pane.hits.iter().filter(|hit| hit.y == pane.text.y).count() <= lenz_content::display::MAX_MARKS + 2);
+        if pane.hits.iter().any(|hit| hit.byte == source.len()) { break; }
+        assert!(Instant::now() < deadline, "suppressed source tail never finished");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
+    draw(&mut a, 1, 1);
+    draw(&mut a, 80, 20);
+    assert_eq!(a.layout.panes[0].hits.first().map(|hit| hit.byte), Some(0));
+    a.dispatch(Command::SelectAll);
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some(source.as_str()));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn wrapped_continuation_whitespace_keeps_the_caret_on_its_clicked_row() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("row-end.txt");
+    let source = "abcdef ".repeat(20);
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(true));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 28, 10);
+    let pane = &a.layout.panes[0];
+    let end = pane.hits.iter().filter(|hit| hit.y == pane.text.y).last().unwrap();
+    assert!(end.width > 1, "fixture needs whitespace after the continued row");
+    let (x, y) = (end.x + end.width - 1, end.y);
+    click(&mut a, x, y);
+    assert_eq!(a.session.state().selection().unwrap().head, 20);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn unwrapped_end_then_up_starts_the_caret_at_the_visible_source_tail() {
+    for shift in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("end-up.txt");
+        let source: String = (0..100).map(|line| format!("line{line:03}\n")).collect();
+        std::fs::write(&path, &source).unwrap();
+        let mut a = app(dir.path());
+        a.dispatch(Command::Open(path.clone()));
+        settle(&mut a, |a| a.session.state().document().is_some());
+        a.dispatch(Command::SetSoftWrap(false));
+        draw(&mut a, 80, 20);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        draw(&mut a, 80, 20);
+        key(&mut a, KeyCode::Up, if shift { KeyModifiers::SHIFT } else { KeyModifiers::NONE });
+        draw(&mut a, 80, 20);
+        let state = a.session.state();
+        let view = state.view(state.active().unwrap().id()).unwrap();
+        assert_eq!(view.snapshot().line_of(state.selection().unwrap().head), 99);
+        if shift { assert_eq!(state.selected_text(), Some("line099\n")); }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    }
+}
+#[test]
+fn wrapped_end_then_up_reaches_unicode_tail_and_copies_absolute_source_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wrapped-families.txt");
+    let family = "👨‍👩‍👧‍👦";
+    let source = family.repeat(2_000) + " END";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(true));
+    a.dispatch(Command::SetStickyScroll(false));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(28, 10)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        terminal.draw(|f| a.draw(f)).unwrap();
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 50_001) { break; }
+        assert!(Instant::now() < deadline, "wrapped End never exposed the uncapped source tail");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    let end_row = a.session.state().active().unwrap().top_row();
+    assert!(end_row > 500);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let selection = a.session.state().selection();
+        if a.session.state().active().unwrap().top_row() < end_row && selection.is_some_and(|selection| selection.head > 49_000 && selection.head < 50_001 && selection.head % 25 == 0)
+            && a.layout.panes[0].hits.iter().any(|hit| selection.is_some_and(|selection| hit.byte == selection.head)) { break; }
+        assert!(Instant::now() < deadline, "Up lost the exact wrapped source position");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+    }
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        terminal.draw(|f| a.draw(f)).unwrap();
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 50_001) { break; }
+        assert!(Instant::now() < deadline);
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+    }
+    let pane = &a.layout.panes[0];
+    for hit in &pane.hits {
+        if terminal.backend().buffer()[(hit.x, hit.y)].symbol() == family {
+            assert_eq!(hit.width, 2);
+            assert_eq!(hit.byte % 25, 0);
+        }
+    }
+    let begin = pane.hits.iter().find(|hit| hit.byte == 50_001).unwrap();
+    let end = pane.hits.iter().find(|hit| hit.byte == 50_004).unwrap();
+    let (x, y, end_x, end_y) = (begin.x, begin.y, end.x, end.y);
+    click(&mut a, x, y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: end_x, row: end_y, modifiers: KeyModifiers::NONE }));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("END"));
+    draw(&mut a, 1, 1);
+    key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 1, 1);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn cold_horizontal_seek_completes_every_visible_long_line_without_starving_later_rows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("many-long-lines.txt");
@@ -1386,7 +1541,7 @@ fn folded_source_does_not_accept_hits_from_the_old_projection() {
 
 #[test]
 fn source_hits_wait_for_render_after_scrolling_or_resizing() {
-    for resize in [false, true] {
+    for mode in 0..3 {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lines.txt");
         let source = (0..100).map(|i| format!("line{i:03}\n")).collect::<String>();
@@ -1396,17 +1551,17 @@ fn source_hits_wait_for_render_after_scrolling_or_resizing() {
         settle(&mut a, |a| a.session.state().document().is_some());
         draw(&mut a, 80, 20);
         let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
-        if resize {
-            a.handle(Event::Resize(40, 10));
-        } else {
-            a.dispatch(Command::ScrollRows(3));
+        match mode {
+            0 => a.dispatch(Command::ScrollRows(3)),
+            1 => { a.handle(Event::Resize(40, 10)); }
+            _ => a.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 5 }),
         }
         click(&mut a, x, y);
-        assert_eq!(a.session.state().selection(), None, "resize={resize}");
-        draw(&mut a, if resize { 40 } else { 80 }, if resize { 10 } else { 20 });
+        assert_eq!(a.session.state().selection(), None, "mode={mode}");
+        draw(&mut a, if mode > 0 { 40 } else { 80 }, if mode > 0 { 10 } else { 20 });
         let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
         click(&mut a, x, y);
-        let expected = if resize { 4 } else { 28 };
+        let expected = if mode > 0 { 4 } else { 28 };
         assert_eq!(a.session.state().selection(), Some(Selection { anchor: expected, head: expected }));
         assert_eq!(std::fs::read_to_string(path).unwrap(), source);
     }
