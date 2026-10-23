@@ -408,7 +408,33 @@ mod tests {
         pump_until(&mut analysis, &jobs, &tx, &project, |a| a.results[&ResultSlot::Search].running.is_some());
         let document = entered.recv_timeout(Duration::from_secs(5)).unwrap();
         analysis.close(); assert!(dependency.upgrade().is_none()); assert!(document.upgrade().is_some());
-        release.send(()).unwrap(); drain(&mut analysis, &jobs, &tx, &project); assert!(document.upgrade().is_none());
+        release.send(()).unwrap(); drain(&mut analysis, &jobs, &tx, &project);
+        // The lease can finish just before the worker drops its captured Document.
+        pump_until(&mut analysis, &jobs, &tx, &project, |_| document.upgrade().is_none());
+    }
+
+
+    #[test]
+    fn ready_document_consumers_keep_six_total_and_three_background_credits() {
+        let mut analysis = Analysis::default(); let jobs = Jobs::new();
+        let (tx, rx) = async_channel::bounded(64); let project = Arc::new(AtomicU64::new(0));
+        let document = Arc::new(Document::decode("credits.txt".into(), 1, b"shared loaded source\n"));
+        let source = Arc::new(TextSnapshot::from_document(BufferId(12), &document));
+        let gates = hold_workers(&jobs);
+        let mut requests: Vec<_> = (0..5).map(|server| (fence(server, 1), Priority::Background)).collect();
+        requests.extend([(ResultSlot::Search, ResultStage::Search), (ResultSlot::Preview, ResultStage::Preview), (ResultSlot::Validate, ResultStage::Validate)]
+            .map(|(slot, stage)| (document_fence(slot, stage, 1), Priority::Visible)));
+        for (tag, priority) in requests {
+            let source = source.clone(); let loaded = Arc::downgrade(&document);
+            analysis.request_result_document(tag, priority, || (Input::new(source, loaded, 0, false), |_: Arc<Document>, lease: Lease| { lease.send(Completion::AnalysisWake); })).unwrap();
+        }
+        analysis.pump(&jobs, &tx, &project);
+        assert_eq!(analysis.running, 2 * MAX_JOBS); assert_eq!(analysis.result_background(), MAX_JOBS);
+        assert_eq!(jobs.queued(), 2 * MAX_JOBS); assert_eq!(analysis.results.values().filter(|entry| entry.pending.is_some()).count(), 2);
+        for gate in gates { gate.send(()).unwrap(); }
+        pump_until(&mut analysis, &jobs, &tx, &project, |a| a.results.values().all(|entry| entry.completed.is_some()));
+        assert_eq!(analysis.materializations.load(Ordering::Relaxed), 0, "matching loaded documents stay synchronous");
+        for _ in 0..8 { let ticket = receive(&rx); assert!(analysis.acknowledge_result(ticket.result().unwrap())); }
     }
 
 }
