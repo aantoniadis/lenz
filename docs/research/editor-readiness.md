@@ -4,7 +4,7 @@ Date: 2026-10-23. Execution of the [reviewed readiness plan](../superpowers/plan
 
 ## Status
 
-Baseline and buffer/save experiments completed. Template and SQL probes completed with release blockers. The foundation plan is being written. No production editor behavior has been implemented or validated.
+Baseline and buffer/save experiments completed. Template and SQL probes completed with release blockers. The [foundation implementation plan](../superpowers/plans/2026-10-23-editor-foundation.md) is complete for review. No production editor behavior has been implemented or validated.
 
 ## Baseline
 
@@ -75,7 +75,7 @@ Native macOS, hardware rendering, physical display/input latency, cold OS caches
 
 Ran the real installed Ruby LSP 0.26.11 and VS Code HTML extension 10.0.0 server, using Ruby 3.4.10 and Node 26.10.0. Each case owns its project, HOME, XDG and Bundler state. `bundle lock --local` uses installed gems only; explicit BUNDLE_GEMFILE prevents Ruby LSP's automatic bundle setup. Rails, ruby-lsp-rails and a Haml grammar/provider are absent. No production provider was changed.
 
-Three ordinary tests verify fixture-region mappings across ERB/Haml markup, indentation, interpolation, multiline Ruby, CRLF and non-BMP text; exact completion ranges and surrounding bytes; rejection of scaffolding, malformed positions, foreign files, overlapping edits and stale versions; and whole-transaction refusal. These regions are supplied explicitly. They are not an ERB/Haml parser and do not establish automatic language-region recognition.
+Three ordinary tests verify fixture-region mappings across ERB/Haml markup, indentation, interpolation, multiline Ruby, CRLF and non-BMP text; exact completion ranges and surrounding bytes; rejection of scaffolding, malformed positions, foreign files and stale versions; and whole-transaction refusal. These regions are supplied explicitly. They are not an ERB/Haml parser and do not establish automatic language-region recognition.
 
 | Capability | ERB | Haml |
 | --- | --- | --- |
@@ -121,3 +121,11 @@ A minimal later DuckDB adapter can use only the observed operations: completion 
 Earlier attempts are retained: DuckDB's bare-qualified-name acceptance assertion exposed a real missing completion; the prefix case was added without removing the failure from the matrix. PostgreSQL's temporary initialization server fooled the first readiness check; the final probe waits for PID 1 to become the real server. An initial statement counter matched prefixes inside verification queries; final logs compare complete statements. A missing `/usr/bin/time` was replaced by Python's standard-library child-resource measurement.
 
 Evidence: [source/tool identity](../../target/perf/editor-readiness/sql-final-v2/identity.json), [DuckDB outcomes](../../target/perf/editor-readiness/sql-final-v2/duckdb/summary.json), [DuckDB formatter](../../target/perf/editor-readiness/sql-final-v2/duckdb/format.json), [PostgreSQL outcomes](../../target/perf/editor-readiness/sql-final-v2/postgres/summary.json), [actual server statements](../../target/perf/editor-readiness/sql-final-v2/postgres/server-statements.log), and [final run](../../target/perf/editor-readiness/sql-final-v2-run.log). Per-fixture SQL, CLI echoes, output/errors, elapsed times and resource samples are retained beside each summary.
+
+## Foundation handoff and final gate
+
+The proposed [foundation plan](../superpowers/plans/2026-10-23-editor-foundation.md) defines session-owned buffers, worker-only contiguous Documents, exact save outcomes, transition guards, draft-aware navigation, blame, shared saved comparisons and both input adapters. A read-only advisor checked the document boundary. Source inspection confirmed that the existing long-line display scans the hidden tail and that GPUI's app-quit callback cannot veto shutdown; the plan uses pre-close/pre-quit commands and actual window-close hooks instead of treating cleanup as protection.
+
+The full local `scripts/ci-local.sh` gate passed after all readiness code changes, including workspace/core, actual GUI/TUI/parity suites, strict Clippy, collector tests and separate release builds. The stripped Diff executable remains 68,501,304 bytes, matching baseline. This is evidence that test-only probes did not regress the checked build/tests; production editing and its performance remain unimplemented. [Final local gate log](../../target/perf/editor-readiness/after-ci-local.log).
+
+Readiness is complete once the plan/review documentation checks finish. Foundation can proceed independently of later provider work; the full release remains blocked on the template and SQL gaps above and on the remaining agreed feature plans. No permission to substitute highlighting or generic completion for those requirements is implied.
