@@ -1215,21 +1215,25 @@ fn gui_and_terminal_double_and_triple_clicks_select_the_same_word_and_group(cx: 
     let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
     let mut visual = VisualTestContext::from_window(window.into(), cx);
     let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
-    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+    visual.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    let mut settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             gui.update(visual, |v, cx| v.poll(cx));
             while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            // Completion handling can invalidate source geometry (for example, late declarations).
+            // Replay the event loop's render phase before accepting another click or a settled outcome.
+            visual.update(|w, cx| { let _ = w.draw(cx); });
+            terminal.draw(|f| tui.draw(f)).unwrap();
             if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
-            assert!(Instant::now() < deadline, "adapters did not settle");
+            assert!(Instant::now() < deadline, "adapters did not settle: GUI selection {:?}, TUI selection {:?}",
+                gui.read_with(visual, |v, _| v.session().state().selected_text().map(str::to_owned)),
+                tui.session.state().selected_text());
             std::thread::sleep(Duration::from_millis(2));
         }
     };
     settle(&mut visual, &mut tui, &|s| s.document().is_some());
-    visual.simulate_resize(gpui::size(gpui::px(800.0), gpui::px(400.0)));
-    visual.update(|w, cx| { let _ = w.draw(cx); });
-    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
-    terminal.draw(|f| tui.draw(f)).unwrap();
     let at = src.find("world").unwrap() + 2;
     let (gx, gy) = gui.read_with(&visual, |v, _| v.text_point_of(at)).unwrap();
     let text = tui.layout.panes[0].text;
