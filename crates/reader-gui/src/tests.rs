@@ -373,6 +373,56 @@ fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mu
 }
 
 #[gpui::test]
+fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END tail\r\n";
+    let f = fixture(cx, Some(("wrapped.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(220.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z end");
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End must paint the source tail beyond the old display prefix");
+    v.simulate_keystrokes("up");
+    for _ in 0..100 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().active().unwrap().top_line() == 0) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (head, tail) = f.view.read_with(&v, |r, _| (r.session.state().active().unwrap().top_row(), r.visible_rows().iter().any(|row| row.text.contains("END"))));
+    assert!(head > 500 && tail, "Up must move within the same original long line: row {head}");
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_scroll_geometry_until_repaint(cx: &mut TestAppContext) {
+    let source = "same long source row\n".repeat(50);
+    let f = fixture(cx, Some(("stale.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().document().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    // Both lines are cached: the old viewport must still be rejected after scrolling.
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.session.dispatch(Command::Scroll(1));
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 8.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must not reuse the previous painted viewport");
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0));
+    assert!(hit.is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("stale.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
 fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("closed.txt", b"owned source")));
     settle(cx, &f, |r| r.session().state().document().is_some());
