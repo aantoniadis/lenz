@@ -46,8 +46,10 @@ pub enum InterfaceAction {
     ResolveConflicts,
     /// Start Lenz Diff on the working tree against HEAD (`Session::git_diff_launch`).
     ShowLocalChanges,
-    /// Ask for a branch, tag or revision to compare the working tree with.
-    CompareWithRevision,
+    /// Start Lenz Diff on the working tree against the base branch's tip.
+    CompareWithBase,
+    /// Start Lenz Diff on the two explorer entries marked (with the highlighted one).
+    CompareSelected,
     /// Start Lenz Diff on the current branch's changes since its base.
     ShowBranchChanges,
     NewWindow,
@@ -119,7 +121,9 @@ impl Session {
             CommandId::CheckoutRevision => return CatalogAction::Interface(InterfaceAction::CheckoutRevision),
             CommandId::ResolveConflicts => return CatalogAction::Interface(InterfaceAction::ResolveConflicts),
             CommandId::ShowLocalChanges => return CatalogAction::Interface(InterfaceAction::ShowLocalChanges),
-            CommandId::CompareWithRevision => return CatalogAction::Interface(InterfaceAction::CompareWithRevision),
+            CommandId::CompareWithRevision => Command::OpenRevisions,
+            CommandId::CompareWithBase => return CatalogAction::Interface(InterfaceAction::CompareWithBase),
+            CommandId::CompareSelected => return CatalogAction::Interface(InterfaceAction::CompareSelected),
             CommandId::ShowBranchChanges => return CatalogAction::Interface(InterfaceAction::ShowBranchChanges),
             CommandId::CompareWithWorktree => Command::OpenWorktrees,
             CommandId::GitBranches => Command::OpenBranches,
@@ -279,14 +283,14 @@ impl CommandId {
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
-            | Self::CompareWith => G::File,
+            | Self::CompareWith | Self::CompareSelected => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
-            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision
+            Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision | Self::CompareWithBase
             | Self::ShowBranchChanges | Self::CompareWithWorktree | Self::ResolveConflicts => G::Git,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark
             | Self::SetBookmarkMnemonic | Self::ShowBookmarks | Self::NextBookmark | Self::PreviousBookmark
@@ -322,6 +326,7 @@ impl CommandId {
             Self::SplitDown => Some("Ctrl+Shift+\\"),
             Self::Outline => Some("Ctrl+Shift+O"),
             Self::FindInFile => Some("Ctrl+F"),
+            Self::CompareSelected => Some("Ctrl+D"),
             Self::SearchProject => Some("Ctrl+Shift+F"),
             Self::GoToLine => Some("Ctrl+G"),
             Self::Reload => Some("F5"),

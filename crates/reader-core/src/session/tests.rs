@@ -219,7 +219,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Show Branch Changes", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Compare Selected", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -5381,7 +5381,8 @@ mod git_branches {
         settle(&mut s, |s| s.branch_label().is_some());
         // No commit yet: every file is new.
         assert_eq!(args(&s, &GitDiff::LocalChanges, &exe), Ok(vec!["4b825dc642cb6eb9a060e54bf8d69288fbee4904".to_string()]));
-        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Branch Changes: there is no commit yet".into()));
+        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Changes Since Branch Start: there is no commit yet".into()));
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Err("Compare with Base Branch: there is no commit yet".into()));
     }
 
     #[test]
@@ -5389,7 +5390,7 @@ mod git_branches {
         let (r, _wt, s) = repo_session();
         let (_bin, exe) = exe();
         let split = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
-        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Branch Changes: main is the base branch; Show Local Changes shows its changes".into()));
+        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Changes Since Branch Start: main is the base branch; Show Local Changes shows its changes".into()));
         git(r.path(), &["switch", "-q", "feature/x"]);
         put(r.path(), "a.txt", "x
 ");
@@ -5415,7 +5416,7 @@ mod git_branches {
         let mut s = session(&lone.path().join(".lenz-test"));
         s.dispatch(Command::OpenRoot(lone.path().to_path_buf()));
         settle(&mut s, |s| s.branch_label().is_some());
-        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Branch Changes: no main or master branch to compare with".into()));
+        assert_eq!(args(&s, &GitDiff::BranchChanges(None), &exe), Err("Show Changes Since Branch Start: no main or master branch to compare with".into()));
     }
 
     #[test]
@@ -5511,12 +5512,61 @@ mod git_branches {
     }
 
     #[test]
+    fn compare_with_base_branch_compares_with_its_tip() {
+        let (r, _wt, s) = repo_session();
+        let (_bin, exe) = exe();
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/heads/main".to_string()]), "on main itself: its tip");
+        git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]);
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/heads/main".to_string()]), "the local main first");
+        git(r.path(), &["switch", "-q", "feature/x"]);
+        git(r.path(), &["branch", "-q", "-D", "main"]);
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Ok(vec!["refs/remotes/origin/main".to_string()]), "else the remote's default");
+        let lone = repo();
+        put(lone.path(), "a.txt", "a\n");
+        commit_all(lone.path(), "1");
+        git(lone.path(), &["branch", "-q", "-m", "main", "dev"]);
+        let mut s = session(&lone.path().join(".lenz-test"));
+        s.dispatch(Command::OpenRoot(lone.path().to_path_buf()));
+        settle(&mut s, |s| s.branch_label().is_some());
+        assert_eq!(args(&s, &GitDiff::BaseBranch, &exe), Err("Compare with Base Branch: no main or master branch to compare with".into()));
+    }
+
+    #[test]
+    fn compare_with_a_revision_picks_from_branches_and_tags_or_takes_typed_text() {
+        let (_r, _wt, mut s) = repo_session();
+        s.dispatch(Command::OpenRevisions);
+        settle(&mut s, |s| s.state().branches().is_some_and(|b| !b.loading));
+        assert_eq!(s.state().branches().unwrap().heading(), "Compare with Branch, Tag or Revision");
+        let rows = s.state().branch_rows("");
+        let sections: std::collections::BTreeSet<_> = rows.iter().map(|r| r.section).collect();
+        assert_eq!(sections.into_iter().collect::<Vec<_>>(), ["Local", "Remote", "Tags"], "no commands, Recent or Worktrees");
+        let v1 = rows.iter().find(|r| r.label == "v1").unwrap();
+        assert_eq!(s.branch_enter(&v1.target), Some(BranchAction::CompareWithWorkingTree));
+        assert_eq!(GitDiff::of(&v1.target, BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("refs/tags/v1".into())));
+        // Typed text: a first row offers it as a revision, then the matches.
+        let typed = s.state().branch_rows("HEAD~1");
+        assert_eq!((typed[0].label.as_str(), &typed[0].target), ("Compare with “HEAD~1”", &BranchTarget::Revision("HEAD~1".into())));
+        assert_eq!(s.branch_enter(&typed[0].target), Some(BranchAction::CompareWithWorkingTree));
+        assert_eq!(GitDiff::of(&typed[0].target, BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("HEAD~1".into())));
+        let other = s.state().branch_rows("oth");
+        assert_eq!(other.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Compare with “oth”", "other"]);
+        let exact = s.state().branch_rows("other");
+        assert_eq!(exact.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["other"], "a listed name is picked from the list");
+        assert_eq!(s.branch_actions(&exact[0].target).into_iter().map(|(l, _)| l).collect::<Vec<_>>(), ["Compare with Working Tree", "Show Changes Since Branching from Here"], "the pick list only compares");
+        // The full popup is unchanged next time.
+        s.dispatch(Command::CloseBranches);
+        open_branches(&mut s);
+        assert!(s.state().branch_rows("").iter().any(|r| r.section == "Recent" || r.section.is_empty()) && s.state().branch_rows("HEAD~1").iter().all(|r| !matches!(r.target, BranchTarget::Revision(_))));
+    }
+
+    #[test]
     fn the_comparisons_are_git_commands_and_say_why_outside_git() {
         let d = tempfile::tempdir().unwrap();
         let mut s = session(d.path());
         s.dispatch(Command::Open(write(d.path(), "a.txt", b"x\n")));
         settle(&mut s, |s| opened(s) && s.state().repo_checked());
-        for id in [CommandId::ShowLocalChanges, CommandId::CompareWithRevision, CommandId::ShowBranchChanges, CommandId::CompareWithWorktree] {
+        for id in [CommandId::ShowLocalChanges, CommandId::CompareWithRevision, CommandId::CompareWithBase, CommandId::ShowBranchChanges, CommandId::CompareWithWorktree] {
             assert_eq!(s.disabled(id), Some("Not in a Git repository"), "{id:?}");
             assert_eq!(id.group(), crate::actions::CommandGroup::Git);
         }
@@ -5779,3 +5829,68 @@ mod git_branches {
     }
 }
 
+
+#[test]
+fn two_explorer_entries_compare_with_ctrl_d() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("proj");
+    for sub in ["sub", "other"] {
+        std::fs::create_dir_all(root.join(sub)).unwrap();
+    }
+    let a = write(&root, "a.rs", b"fn a() {}\n");
+    let b = write(&root, "b.rs", b"fn b() {}\n");
+    write(&root, "sub/x.rs", b"x\n");
+    write(&root, "other/x.rs", b"y\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut s, |s| s.state().tree_rows().count() >= 4);
+    let bin = d.path().join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    for name in ["lenz-diff", "lenz-diff-tui"] {
+        std::fs::write(bin.join(name), b"").unwrap();
+    }
+    let exe = bin.join("lenz-code");
+    let mark_two = "Mark two files or folders in the explorer (Ctrl+click, or Space)";
+    assert_eq!(s.disabled(CommandId::CompareSelected), Some(mark_two));
+    // Ctrl+click on b.rs while a.rs is highlighted: both are marked.
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("a.rs".into()) });
+    assert_eq!(s.state().tree_marks(), ["a.rs".into(), "b.rs".into()] as [std::sync::Arc<str>; 2]);
+    assert_eq!(s.disabled(CommandId::CompareSelected), None);
+    let launch = s.compare_selected_launch(&exe, false).unwrap();
+    assert_eq!(launch.args, ["--no-index".to_string(), a.to_string_lossy().into_owned(), b.to_string_lossy().into_owned()]);
+    // Ctrl+click again unmarks: one mark compares nothing.
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("b.rs".into()) });
+    assert_eq!(s.state().tree_marks(), ["a.rs".into()] as [std::sync::Arc<str>; 1]);
+    assert_eq!(s.disabled(CommandId::CompareSelected), Some(mark_two));
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), format!("Compare Selected: {mark_two}"));
+    // A third mark replaces the older; folders compare; a file with a folder is refused in Compare Selected's words.
+    s.dispatch(Command::MarkTreeRow { path: "sub".into(), selected: None });
+    s.dispatch(Command::MarkTreeRow { path: "other".into(), selected: None });
+    assert_eq!(s.state().tree_marks(), ["sub".into(), "other".into()] as [std::sync::Arc<str>; 2]);
+    assert_eq!(s.compare_selected_launch(&exe, true).unwrap().args[1..], [root.join("sub").to_string_lossy().into_owned(), root.join("other").to_string_lossy().into_owned()]);
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::MarkTreeRow { path: "a.rs".into(), selected: Some("sub".into()) });
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), "Compare Selected: pick a file to compare with a file, or a folder with a folder");
+    // A marked entry that is no longer listed (its folder collapsed) is said so at use.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::ToggleDir("sub".into()));
+    settle(&mut s, |s| s.state().tree_rows().any(|r| &*r.path == "sub/x.rs"));
+    s.dispatch(Command::MarkTreeRow { path: "sub/x.rs".into(), selected: Some("a.rs".into()) });
+    s.dispatch(Command::ToggleDir("sub".into()));
+    assert!(s.compare_selected_launch(&exe, false).unwrap_err().ends_with("one marked entry is no longer listed"));
+    // A deleted file: the missing side is named.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: Some("a.rs".into()) });
+    std::fs::remove_file(&a).unwrap();
+    assert_eq!(s.compare_selected_launch(&exe, false).unwrap_err(), format!("Compare Selected: no such file or folder: {}", a.display()));
+    // A library or source URI has no file: never marked.
+    s.dispatch(Command::ClearTreeMarks);
+    s.dispatch(Command::MarkTreeRow { path: "jdt://contents/x".into(), selected: Some("b.rs".into()) });
+    assert!(s.state().tree_marks().is_empty());
+    // Opening another folder forgets the marks.
+    s.dispatch(Command::MarkTreeRow { path: "b.rs".into(), selected: None });
+    s.dispatch(Command::OpenRoot(d.path().to_path_buf()));
+    assert!(s.state().tree_marks().is_empty());
+    assert_eq!(CommandId::CompareSelected.shortcut(), Some("Ctrl+D"));
+    assert_eq!(CommandId::CompareSelected.label(), "Compare Selected");
+}

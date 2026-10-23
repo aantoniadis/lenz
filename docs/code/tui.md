@@ -45,6 +45,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | --- | --- |
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
 | Open file / go to line | Ctrl-O / Ctrl-G |
+| Compare two explorer entries | Space on each (or Ctrl+click where the terminal reports it), then Ctrl+D; Esc forgets them |
 | Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare With… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
@@ -57,7 +58,7 @@ in the palette opens an independent terminal view. Ctrl-Shift-Q quits all views 
 | Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the status bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
-| Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (typed), Show Branch Changes, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |
+| Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (a list of branches and tags; type to filter or for any revision), Compare with Base Branch, Show Changes Since Branch Start, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |
 | Annotate with Git blame | Alt-B (View menu, right-click); click an annotation for its commit (d Show Diff, c Copy Revision); the status line shows the caret line's commit |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |

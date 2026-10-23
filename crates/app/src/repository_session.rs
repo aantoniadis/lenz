@@ -1193,7 +1193,7 @@ pub fn command_label(command: &RepositoryCommand) -> &'static str {
         RepositoryCommand::PrCommit(_) => "Show a PR commit's files",
         RepositoryCommand::Checkout(_) | RepositoryCommand::CheckoutChoice(_) => "Checkout",
         RepositoryCommand::NewBranch { .. } => "New Branch…",
-        RepositoryCommand::BranchChanges => "Show Branch Changes",
+        RepositoryCommand::BranchChanges => "Show Changes Since Branch Start",
         RepositoryCommand::CompareWorktree(_) => "Compare with Working Tree",
         RepositoryCommand::OpenWindow(_) => "Open in New Window",
     }
@@ -2587,12 +2587,12 @@ impl RepositorySession {
                 }
             }
             C::BranchChanges => {
-                // ponytail: two quick git reads on this thread, as Lenz Code's Show Branch Changes
+                // ponytail: two quick git reads on this thread, as Lenz Code's Show Changes Since Branch Start
                 let root = self.picker.root.clone();
                 let since = lenz_content::branches::git_dir(&root).and_then(|gd| lenz_content::branches::changes_since(&root, &gd, None));
                 match since {
                     Ok(sha) => self.load(Spec::Git { cached: false, revs: vec![sha], paths: vec![], untracked: true }),
-                    Err(e) => self.notice = Some(format!("Show Branch Changes: {e}")),
+                    Err(e) => self.notice = Some(format!("Show Changes Since Branch Start: {e}")),
                 }
             }
             C::CompareWorktree(other) => self.load(Spec::Plain { left: self.picker.root.clone(), right: other }),
@@ -3717,7 +3717,7 @@ mod checkout_tests {
         let (r, wt, mut state) = fixture();
         let _ = state.take_change_set();
         state.execute(RepositoryCommand::BranchChanges);
-        assert_eq!(state.notice.as_deref(), Some("Show Branch Changes: main is the base branch; Show Local Changes shows its changes"));
+        assert_eq!(state.notice.as_deref(), Some("Show Changes Since Branch Start: main is the base branch; Show Local Changes shows its changes"));
         checkout(&mut state, Target::Branch("other".into()));
         let _ = state.take_change_set();
         state.execute(RepositoryCommand::BranchChanges);

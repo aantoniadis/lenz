@@ -2285,7 +2285,7 @@ fn a_rows_menu_makes_a_branch_and_the_revision_prompt_checks_out() {
     settle(&mut a, |a| !a.session.state().checking_out());
     assert_eq!(a.session.branch_label().as_deref(), Some("⎇ from-v1"));
     a.run(CommandId::CheckoutRevision);
-    assert_eq!(prompt_kind(&a), Some(Prompt::Revision { compare: false }));
+    assert_eq!(prompt_kind(&a), Some(Prompt::Revision));
     typed(&mut a, "nope");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("No commit named \"nope\""));
@@ -2399,18 +2399,38 @@ fn the_git_menu_compares_the_working_tree_in_this_terminal() {
     assert_eq!(launch.args, ["HEAD"]);
     a.run(CommandId::ShowBranchChanges);
     assert!(a.foreground.is_none());
-    assert!(a.session.status_message().contains("main is the base branch"), "{}", a.session.status_message());
+    assert!(a.session.status_message().contains("Show Changes Since Branch Start: main is the base branch"), "{}", a.session.status_message());
+    a.run(CommandId::CompareWithBase);
+    assert_eq!(foreground_args(&mut a), Some(vec!["refs/heads/main".to_string()]));
+    // Compare with Branch, Tag or Revision…: a pick list, or what is typed.
     a.run(CommandId::CompareWithRevision);
-    assert_eq!(prompt_kind(&a), Some(Prompt::Revision { compare: true }));
-    assert!(a.modal_title().starts_with("Compare the working tree with"), "{}", a.modal_title());
-    typed(&mut a, "nope");
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(&mut a, 100, 20);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Branches));
+    assert!(a.modal_title().starts_with("Compare with Branch, Tag or Revision · type to filter or a revision"), "{}", a.modal_title());
+    assert!(a.choices().iter().any(|c| c.label.ends_with("v1")) && !a.choices().iter().any(|c| c.label.contains("New Branch")));
+    typed(&mut a, "oth");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(a.modal.as_ref().unwrap().error.as_deref(), Some("No commit named \"nope\""));
-    for _ in 0..4 { key(&mut a, KeyCode::Backspace, KeyModifiers::NONE); }
+    assert_eq!(foreground_args(&mut a), Some(vec!["refs/heads/other".to_string()]));
+    a.run(CommandId::CompareWithRevision);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    // A listed name is picked from the list; other text compares as typed.
     typed(&mut a, "v1");
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert_eq!(foreground_args(&mut a), Some(vec!["v1".to_string()]));
+    assert_eq!(foreground_args(&mut a), Some(vec!["refs/tags/v1".to_string()]));
+    a.run(CommandId::CompareWithRevision);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    typed(&mut a, "HEAD");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(foreground_args(&mut a), Some(vec!["HEAD".to_string()]));
     assert!(a.modal.is_none());
+    // A tiny terminal draws the list.
+    a.run(CommandId::CompareWithRevision);
+    settle(&mut a, |a| a.session.state().branches().is_some_and(|b| !b.loading));
+    draw(&mut a, 20, 6);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none() && a.session.state().branches().is_none());
     assert_eq!(a.session.branch_label().as_deref(), Some("⎇ main"), "nothing checked out");
     assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n");
 }
@@ -2449,4 +2469,50 @@ fn rows_compare_and_compare_with_worktree_lists_the_other_worktree() {
     draw(&mut a, 20, 6);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.modal.is_none() && a.session.state().branches().is_none() && a.foreground.is_none());
+}
+
+#[test]
+fn space_or_ctrl_click_marks_two_entries_and_ctrl_d_compares_them() {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+    std::fs::write(dir.path().join("b.txt"), "two\n").unwrap();
+    let state = tempfile::tempdir().unwrap();
+    let mut a = App::new(config(state.path()), Some(dir.path().to_path_buf()));
+    settle(&mut a, |a| a.session.state().tree_rows().any(|r| &*r.path == "b.txt"));
+    let _bin = lenz_diff_beside(&mut a);
+    draw(&mut a, 100, 20);
+    let at = |a: &App, name: &str| a.session.state().tree_rows().position(|r| &*r.path == name).unwrap();
+    // Keyboard: Space marks the highlighted entry, twice.
+    a.focus = Focus::Tree;
+    a.tree_at = at(&a, "a.txt");
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+    a.tree_at = at(&a, "b.txt");
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::NONE);
+    let shown = draw_screen(&mut a, 100, 20);
+    assert_eq!(a.session.state().tree_marks().len(), 2);
+    assert_eq!(shown.matches('✓').count(), 2, "both marked rows show a check");
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL);
+    let launch = a.foreground.take().expect("Lenz Diff in this terminal");
+    assert_eq!(launch.args, ["--no-index".to_string(), dir.path().join("a.txt").to_string_lossy().into_owned(), dir.path().join("b.txt").to_string_lossy().into_owned()]);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.session.state().tree_marks().is_empty(), "Esc forgets the marks");
+    // Mouse: click a.txt, Ctrl+click b.txt.
+    let (x, y) = (a.layout.tree.x + 2, a.layout.tree.y);
+    let row = |a: &App, name: &str| y + (at(a, name) - a.tree_top) as u16;
+    let click = |a: &mut App, row: u16, modifiers| { a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: x, row, modifiers })); };
+    let (ra, rb) = (row(&a, "a.txt"), row(&a, "b.txt"));
+    click(&mut a, ra, KeyModifiers::NONE);
+    click(&mut a, rb, KeyModifiers::CONTROL);
+    assert_eq!(a.session.state().tree_marks(), ["a.txt".into(), "b.txt".into()] as [std::sync::Arc<str>; 2]);
+    click(&mut a, ra, KeyModifiers::NONE);
+    assert!(a.session.state().tree_marks().is_empty(), "a plain click forgets them");
+    draw(&mut a, 20, 6);
+}
+
+/// The screen as text after a draw.
+fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()
 }

@@ -186,6 +186,12 @@ pub enum Command {
     SetAnnotate(bool),
     /// Open the Git Branches popup (its lists load in the background), or close it.
     OpenBranches,
+    /// The popup as a pick list for Compare with Branch, Tag or Revision….
+    OpenRevisions,
+    /// Ctrl+click on explorer entry `path`: mark or unmark it for Compare Selected (`selected`, the highlighted entry,
+    /// is marked first).
+    MarkTreeRow { path: Arc<str>, selected: Option<Arc<str>> },
+    ClearTreeMarks,
     /// The popup with only the other worktrees, for Compare with Worktree….
     OpenWorktrees,
     CloseBranches,
@@ -405,6 +411,8 @@ pub enum CommandId {
     OpenWithDefaultApp,
     /// The active file, or the explorer's folder or file, against another in Lenz Diff.
     CompareWith,
+    /// Lenz Diff on the two entries marked in the explorer.
+    CompareSelected,
     Symbols,
     FileSymbols,
     WorkspaceRoot,
@@ -433,6 +441,8 @@ pub enum CommandId {
     /// Lenz Diff on the working tree as it is against HEAD.
     ShowLocalChanges,
     CompareWithRevision,
+    /// Lenz Diff on the working tree against the base branch's tip.
+    CompareWithBase,
     /// Lenz Diff on everything since the current branch split from its base.
     ShowBranchChanges,
     CompareWithWorktree,
@@ -473,7 +483,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 112] = [
+    pub const ALL: [CommandId; 114] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -517,6 +527,7 @@ impl CommandId {
         Self::OpenInEditor,
         Self::OpenWithDefaultApp,
         Self::CompareWith,
+        Self::CompareSelected,
         Self::Collapse,
         Self::Expand,
         Self::CollapseAll,
@@ -569,6 +580,7 @@ impl CommandId {
         Self::CheckoutRevision,
         Self::ShowLocalChanges,
         Self::CompareWithRevision,
+        Self::CompareWithBase,
         Self::ShowBranchChanges,
         Self::CompareWithWorktree,
         Self::ResolveConflicts,
@@ -659,7 +671,8 @@ impl CommandId {
             Self::CheckoutRevision => "Checkout Tag or Revision…",
             Self::ShowLocalChanges => "Show Local Changes",
             Self::CompareWithRevision => "Compare with Branch, Tag or Revision…",
-            Self::ShowBranchChanges => "Show Branch Changes",
+            Self::CompareWithBase => "Compare with Base Branch",
+            Self::ShowBranchChanges => "Show Changes Since Branch Start",
             Self::CompareWithWorktree => "Compare with Worktree…",
             Self::ResolveConflicts => "Resolve Conflicts in Lenz Diff",
             Self::AnnotateBlame => "Annotate with Git Blame",
@@ -676,6 +689,7 @@ impl CommandId {
             Self::OpenInEditor => "Open in Editor",
             Self::OpenWithDefaultApp => "Open with Default App",
             Self::CompareWith => "Compare With…",
+            Self::CompareSelected => "Compare Selected",
             Self::WorkspaceRoot => "Set Workspace Root…",
             Self::Usages => "Find Usages",
             Self::Symbols => "Find Symbol (language server)…",
@@ -987,6 +1001,8 @@ pub struct State {
     pub(crate) repo_answered: Option<PathBuf>,
     /// The Git Branches popup's lists, while it is open.
     pub(crate) branches: Option<crate::branches::BranchesView>,
+    /// Explorer entries marked for Compare Selected (Ctrl+click), oldest first; at most two.
+    pub(crate) tree_marks: Vec<Arc<str>>,
     /// The running checkout's request, the refused one's dialog, and the files a Smart Checkout left in conflict.
     pub(crate) checkout_running: Option<u64>,
     pub(crate) checkout_problem: Option<crate::branches::CheckoutProblem>,
@@ -1575,6 +1591,9 @@ pub struct Session {
     rx: async_channel::Receiver<Completion>,
 }
 
+/// Why Compare Selected cannot run yet, in words for both frontends.
+const MARK_TWO: &str = "Mark two files or folders in the explorer (Ctrl+click, or Space)";
+
 /// Lenz Diff beside `exe` (the terminal app when `terminal`), or why not, for the command `what`.
 pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String, String> {
     let program = exe.with_file_name(if terminal { "lenz-diff-tui" } else { "lenz-diff" });
@@ -1637,6 +1656,7 @@ impl Session {
                 repo_anchor: None,
                 repo_answered: None,
                 branches: None,
+                tree_marks: Vec::new(),
                 checkout_running: None,
                 checkout_problem: None,
                 stash_conflicts: None,
@@ -1897,7 +1917,7 @@ impl Session {
                 Some(_) => None,
             },
             // Whether there is a base, a commit or another worktree is said when one runs (no git here).
-            CommandId::ShowLocalChanges | CommandId::CompareWithRevision | CommandId::ShowBranchChanges | CommandId::CompareWithWorktree => {
+            CommandId::ShowLocalChanges | CommandId::CompareWithRevision | CommandId::CompareWithBase | CommandId::ShowBranchChanges | CommandId::CompareWithWorktree => {
                 self.state.repo.is_none().then_some("Not in a Git repository")
             }
             CommandId::ResolveConflicts => self.state.stash_conflicts.is_none().then_some("Smart Checkout left no conflicts"),
@@ -1915,6 +1935,7 @@ impl Session {
             },
             // The explorer's selection, which only the adapter knows, is checked when it asks.
             CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
+            CommandId::CompareSelected => (self.state.tree_marks.len() < 2).then_some(MARK_TWO),
             CommandId::CopyPathLine => match self.state.active() {
                 None => Some("No file is open"),
                 Some(t) if t.doc.is_none() => Some("No text to point at"),
@@ -2296,9 +2317,8 @@ impl Session {
     /// app, or the terminal app when `terminal`.
     pub fn compare_launch(&self, left: &Path, right: &Path, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
         let right = std::path::absolute(right).map_err(|e| format!("Compare With: {e}"))?;
-        let (Ok(l), Ok(r)) = (std::fs::metadata(left), std::fs::metadata(&right)) else {
-            return Err(format!("Compare With: no such file or folder: {}", right.display()));
-        };
+        let metadata = |p: &Path| std::fs::metadata(p).map_err(|_| format!("Compare With: no such file or folder: {}", p.display()));
+        let (l, r) = (metadata(left)?, metadata(&right)?);
         if l.is_dir() != r.is_dir() {
             return Err("Compare With: pick a file to compare with a file, or a folder with a folder".into());
         }
@@ -2310,6 +2330,19 @@ impl Session {
         let args = ["--no-index".into(), left.to_string_lossy().into_owned(), right.to_string_lossy().into_owned()];
         let cwd = self.state.project.as_ref().map(|p| p.root().to_path_buf());
         Ok(lenz_content::open::Launch { program, args: args.to_vec(), cwd })
+    }
+
+    /// Compare Selected (Ctrl+D): Lenz Diff on the two explorer entries marked, while both are still listed.
+    pub fn compare_selected_launch(&self, exe: &Path, terminal: bool) -> Result<lenz_content::open::Launch, String> {
+        // Checked now: a marked entry may have been collapsed away, deleted or renamed since.
+        let listed = |m: &Arc<str>| self.state.tree_rows().any(|r| r.path == *m);
+        let [a, b] = self.state.tree_marks.as_slice() else { return Err(format!("Compare Selected: {MARK_TWO}")) };
+        if !listed(a) || !listed(b) {
+            return Err(format!("Compare Selected: {MARK_TWO}; one marked entry is no longer listed"));
+        }
+        let source = |row: &str| self.compare_source(Some(row)).map_err(|e| format!("Compare Selected: {e}"));
+        let (left, right) = (source(a)?, source(b)?);
+        self.compare_launch(&left, &right, exe, terminal).map_err(|e| e.replacen("Compare With:", "Compare Selected:", 1))
     }
 
     pub fn dispatch(&mut self, input: impl Into<Input>) -> Effect {
@@ -2662,6 +2695,7 @@ impl Session {
             Command::SaveWorkspace => { self.checkpoint_workspace(); self.places_saver.flush(); Effect::default() }
             Command::SetExplorer(explorer) => { self.state.explorer = explorer; repaint }
             Command::OpenRoot(root) => {
+                self.state.tree_marks.clear();
                 self.open_root(root);
                 repaint
             }
@@ -2788,13 +2822,14 @@ impl Session {
                 t.approximate = false;
                 Effect { repaint: changed, copy: None }
             }
-            c @ (Command::OpenBranches | Command::OpenWorktrees) => {
-                let worktrees_only = matches!(c, Command::OpenWorktrees);
-                if self.disabled(if worktrees_only { CommandId::CompareWithWorktree } else { CommandId::GitBranches }).is_some() {
+            c @ (Command::OpenBranches | Command::OpenWorktrees | Command::OpenRevisions) => {
+                let (worktrees_only, revisions_only) = (matches!(c, Command::OpenWorktrees), matches!(c, Command::OpenRevisions));
+                let id = match c { Command::OpenWorktrees => CommandId::CompareWithWorktree, Command::OpenRevisions => CommandId::CompareWithRevision, _ => CommandId::GitBranches };
+                if self.disabled(id).is_some() {
                     return Effect::default();
                 }
                 let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
-                self.state.branches = Some(crate::branches::BranchesView { loading: true, worktrees_only, ..Default::default() });
+                self.state.branches = Some(crate::branches::BranchesView { loading: true, worktrees_only, revisions_only, ..Default::default() });
                 self.branches_requests += 1;
                 let (request, tx) = (self.branches_requests, self.tx.clone());
                 self.jobs.submit(Priority::Visible, move || {
@@ -2802,7 +2837,8 @@ impl Session {
                     // Compare with Worktree… shows neither the refs nor the current worktree.
                     let refs = if worktrees_only { Ok(Default::default()) } else { lenz_content::branches::refs(&root) };
                     let result = refs.and_then(|r| {
-                        let mut worktrees = lenz_content::branches::worktree_list(&root)?;
+                        // Compare with Branch, Tag or Revision… lists no worktrees.
+                        let mut worktrees = if revisions_only { Vec::new() } else { lenz_content::branches::worktree_list(&root)? };
                         match worktrees.len() > 1 {
                             true => worktrees.iter_mut().filter(|w| !(worktrees_only && w.current)).for_each(|w| lenz_content::branches::count_changes(std::slice::from_mut(w))),
                             false => worktrees.iter_mut().for_each(|w| w.dirty = None),
@@ -2814,6 +2850,28 @@ impl Session {
                 repaint
             }
             Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
+            Command::MarkTreeRow { path, selected } => {
+                if path.contains("://") {
+                    self.state.messages.push("Compare Selected: this entry has no file on disk".into());
+                    return repaint;
+                }
+                let selected = selected.filter(|s| !s.contains("://"));
+                let marks = &mut self.state.tree_marks;
+                if let Some(at) = marks.iter().position(|m| *m == path) {
+                    marks.remove(at);
+                } else {
+                    // The first Ctrl+click keeps the selected entry too, as a selection would.
+                    if marks.is_empty() && let Some(sel) = selected.filter(|s| *s != path) {
+                        marks.push(sel);
+                    }
+                    marks.push(path);
+                    if marks.len() > 2 {
+                        marks.remove(0);
+                    }
+                }
+                repaint
+            }
+            Command::ClearTreeMarks => Effect { repaint: !std::mem::take(&mut self.state.tree_marks).is_empty(), copy: None },
             Command::Checkout(target) => self.retry(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal),
             Command::CheckoutChoice(choice) => {
                 use crate::branches::CheckoutChoice as C;
