@@ -132,3 +132,23 @@ fn byte_limited_whitespace_rows_support_real_navigation_and_exact_copy() {
     assert!(wait(&mut session, |session| session.state().selection().is_some_and(|selection| selection.head == reader_core::layout::ROW_BYTES)));
     assert_eq!(std::fs::read(path).unwrap(), source.as_bytes());
 }
+
+#[test]
+fn unwrapped_vertical_motion_resumes_unicode_display_columns_past_the_old_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("unicode-columns.txt");
+    let source = "é".repeat(12_000) + "\n" + &"x".repeat(12_005) + "\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut s = session(dir.path());
+    s.dispatch(Command::Open(path.clone()));
+    assert!(wait(&mut s, |s| s.state().active().is_some_and(|tab| tab.loaded())));
+    s.dispatch(Command::SetSoftWrap(false));
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 80, rows: 10 });
+    s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(12_001) }));
+    assert_eq!(s.state().selection().unwrap().head, 24_000);
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    assert!(wait(&mut s, |s| s.state().selection().is_some_and(|selection| selection.head == 36_001)), "down keeps display column12000 across UTF8 byte widths");
+    s.dispatch(Command::MoveCaret(Motion::Up));
+    assert!(wait(&mut s, |s| s.state().selection().is_some_and(|selection| selection.head == 24_000)));
+    assert_eq!(std::fs::read(path).unwrap(), source.as_bytes());
+}

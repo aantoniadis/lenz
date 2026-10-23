@@ -606,11 +606,12 @@ fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAp
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
-    // Control characters and the long line are shown, not altered: U+FFFD on screen, the cut with its count.
+    // Controls are escaped and long lines use bounded viewport excerpts without changing the source.
     let rows = f.view.read_with(&v, |v, _| v.visible_rows());
     assert_eq!(rows[0].text, "fn café() {}");
     assert!(rows[1].text.contains('\u{FFFD}') && rows[1].text.starts_with("    let"));
-    assert!(rows[2].text.ends_with("  … 5 more characters"));
+    assert!(!rows[2].text.is_empty() && rows[2].text.len() < long.len());
+    assert!(rows[2].text.chars().all(|c| c == 'x'), "the viewport contains source text, without the old truncation label");
     // Click at the start of line 1's text, shift-click further on: a source selection on character boundaries.
     let text = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     let x0 = f32::from(text.origin.x) + num_w() + 8.0;
