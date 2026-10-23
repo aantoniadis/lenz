@@ -3,7 +3,7 @@
 use std::{ops::Range, sync::Arc};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::{decor::{HintKind, Hints}, shown::Shown, text::{SnapshotKey, TextSnapshot}};
+use crate::{decor::{HintKind, Hints}, document::SourceMeta, shown::Shown, tabs::TabId, text::{SnapshotKey, TextSnapshot}};
 
 /// Work counts consumed source/hint bytes and emitted display bytes, including suppressed marks.
 pub const WINDOW_WORK: usize = 4096;
@@ -12,7 +12,7 @@ pub const MIN_WORK: usize = 16;
 /// Ordinary graphemes are unchanged; overflowing scalars are shown as `[U+XXXX]`.
 pub const GRAPHEME_BYTES: usize = 256;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Guard {
     tail: String,
 }
@@ -50,6 +50,7 @@ impl Guard {
 #[derive(Clone, Debug)]
 pub struct Cursor {
     key: SnapshotKey,
+    metadata: Arc<SourceMeta>,
     line: usize,
     byte: usize,
     display: usize,
@@ -61,6 +62,46 @@ pub struct Cursor {
     before: usize,
     type_caret: Option<usize>,
     guard: Guard,
+}
+
+impl PartialEq for Cursor {
+    fn eq(&self, other: &Self) -> bool {
+        self.key == other.key && Arc::ptr_eq(&self.metadata, &other.metadata)
+            && (self.line, self.byte, self.display, self.column, self.marks, self.hint, self.hint_byte, self.before, self.type_caret)
+                == (other.line, other.byte, other.display, other.column, other.marks, other.hint, other.hint_byte, other.before, other.type_caret)
+            && self.guard == other.guard && match (&self.hints, &other.hints) {
+                (None, None) => true, (Some(a), Some(b)) => Arc::ptr_eq(a, b), _ => false,
+            }
+    }
+}
+impl Eq for Cursor {}
+
+/// Adapter metric identity is opaque to the core; measurement itself remains in the adapter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Request {
+    pub pane: u8,
+    pub tab: TabId,
+    pub cursor: Cursor,
+    /// Monotonically increasing per pane, including changes of metric context.
+    pub request: u64,
+    pub context: u64,
+}
+
+/// A bounded source-only worker response, consumed with an adapter's own measurement budget.
+#[derive(Debug)]
+pub struct Batch {
+    pub request: Request,
+    pub windows: Vec<Window>,
+    pub next: Cursor,
+    pub complete: bool,
+    pub failed: bool,
+}
+
+/// Opaque worker completion: only the Session's bounded scheduler constructs one.
+pub struct Finished {
+    pub(crate) pane: u8,
+    pub(crate) ticket: u64,
+    pub(crate) batch: Option<Batch>,
 }
 
 /// One bounded piece. Source coordinates are absolute; display ranges index the expanded line.
@@ -83,7 +124,7 @@ pub struct Window {
 impl Cursor {
     pub fn start(snapshot: &TextSnapshot, line: usize, hints: Option<Arc<Hints>>) -> Option<Self> {
         Some(Self {
-            key: snapshot.key(), line, byte: snapshot.line_range(line)?.start,
+            key: snapshot.key(), metadata: snapshot.source_meta().clone(), line, byte: snapshot.line_range(line)?.start,
             display: 0, column: 0, marks: 0, hints, hint: 0, hint_byte: 0,
             before: 0, type_caret: None, guard: Guard::default(),
         })
@@ -97,7 +138,7 @@ impl Cursor {
     pub fn hints(&self) -> Option<&Arc<Hints>> { self.hints.as_ref() }
 
     pub fn matches(&self, snapshot: &TextSnapshot, hints: Option<&Arc<Hints>>) -> bool {
-        self.key == snapshot.key() && match (&self.hints, hints) {
+        self.key == snapshot.key() && Arc::ptr_eq(&self.metadata, snapshot.source_meta()) && match (&self.hints, hints) {
             (None, None) => true,
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
             _ => false,
@@ -106,7 +147,7 @@ impl Cursor {
 
     /// Advance by at most `work_bytes` (16..=4096), pausing even inside a label or hidden mark run.
     pub fn window(&mut self, snapshot: &TextSnapshot, work_bytes: usize) -> Option<Window> {
-        if self.key != snapshot.key() || !(MIN_WORK..=WINDOW_WORK).contains(&work_bytes) { return None; }
+        if self.key != snapshot.key() || !Arc::ptr_eq(&self.metadata, snapshot.source_meta()) || !(MIN_WORK..=WINDOW_WORK).contains(&work_bytes) { return None; }
         let line = snapshot.line_range(self.line)?;
         let from = self.clone();
         let held = self.hints.clone();

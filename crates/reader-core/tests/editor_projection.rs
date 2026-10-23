@@ -68,10 +68,37 @@ fn projection_guard_and_source_mapping_survive_every_budget_and_hint_continuatio
     assert_eq!(selected_a, "a");
     assert_eq!(selected_b, "b");
     assert!(whole.starts_with("aZZZZ") && whole.ends_with('b') && whole.contains("[U+"));
-    assert!(carets.iter().all(|at| *at == 1));
+    assert_eq!(carets, [1]);
     assert_eq!(snapshot.copy_range(0..2).unwrap(), "ab");
     let changed = snapshot.apply_edits(6, &[TextEdit { range: 0..1, text: Arc::from("changed") }]).unwrap();
     let old = cursor.source_byte();
     assert!(cursor.window(&changed, 64).is_none());
     assert_eq!(cursor.source_byte(), old);
+    let same_key = TextSnapshot::from_document(BufferId(3), &Document::decode("renamed.txt".into(), 5, b"ab"));
+    assert_eq!(same_key.key(), snapshot.key());
+    let mut metadata_cursor = Cursor::start(&snapshot, 0, None).unwrap();
+    assert!(!metadata_cursor.matches(&same_key, None));
+    assert!(metadata_cursor.window(&same_key, 64).is_none());
+}
+
+#[test]
+fn later_crlf_line_hints_keep_absolute_source_coordinates() {
+    let snapshot = TextSnapshot::from_document(BufferId(4), &Document::decode("lines.txt".into(), 7, b"header\r\nab\r\n"));
+    let hints = Arc::new(Hints::new(vec![(1, Hint { byte: 1, label: "a long hint".into(), kind: HintKind::Parameter })]));
+    let mut cursor = Cursor::start(&snapshot, 1, Some(hints)).unwrap();
+    let (mut drawn, mut selected) = (String::new(), String::new());
+    loop {
+        let window = cursor.window(&snapshot, 17).unwrap();
+        assert!(window.source.start >= 8 && window.source.end <= 10);
+        for (_, r, _) in &window.shown.hints {
+            for d in r.clone() { assert_eq!(window.source_at(d), 9); }
+        }
+        selected += window.shown.text.get(window.range(9..10)).unwrap();
+        drawn += &window.shown.text;
+        if window.complete { break; }
+    }
+    assert_eq!(drawn, "aa long hintb");
+    assert_eq!(selected, "b");
+    assert_eq!(cursor.source_byte(), 10);
+    assert_eq!(snapshot.copy_range(8..10).unwrap(), "ab");
 }
