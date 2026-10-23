@@ -97,6 +97,10 @@ source Copy now pass the strict row/indent bounds. Work-limit checks compare equ
 one-column rows, visits 6,000 rows, then performs 1,000 forward/backward row
 queries while asserting bounded retention and neighborhood reuse.
 
+The real Session command boundary also exercises byte-limited whitespace rows:
+Down reaches source byte 4,096, Shift+Down reaches 8,192, Copy returns exactly
+4,096 original spaces, and Up returns to byte 4,096. The file remains unchanged.
+
 Relevant pre-existing wrap regressions pass, including hint caret placement,
 selection visibility, short wrapped target rows, resize and navigation reveal.
 Strict core Clippy checks pass. The full integrated gate is run once for the
