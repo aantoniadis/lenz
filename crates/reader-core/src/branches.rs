@@ -225,51 +225,7 @@ fn by_name(root: &std::path::Path, rev: &str, sha: String) -> String {
 
 const COMPARE: (&str, BranchAction) = ("Compare with Working Tree", BranchAction::CompareWithWorkingTree);
 
-/// What the checkout-problem dialog offers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckoutChoice {
-    Smart,
-    /// The first step of Force Checkout: list everything it would discard.
-    Force,
-    /// The second step: discard it and check out.
-    ConfirmForce,
-    Cancel,
-}
-
-/// What a refused checkout runs again once the dialog is answered.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Retry {
-    Checkout(git_branches::Target),
-    /// A new branch `name` at `from` (HEAD when `None`), checked out.
-    NewBranch { name: String, from: Option<String> },
-}
-
-impl Retry {
-    /// How it is named in messages.
-    pub fn label(&self) -> &str {
-        match self {
-            Self::Checkout(t) => target_label(t),
-            Self::NewBranch { name, .. } => name,
-        }
-    }
-}
-
-/// A checkout git refused over files in the way, while the dialog is open.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckoutProblem {
-    pub retry: Retry,
-    pub tracked: Vec<String>,
-    pub untracked: Vec<String>,
-    /// Once Force Checkout is chosen: every uncommitted change it would discard (the confirmation step).
-    pub discards: Option<Vec<String>>,
-}
-
-/// How a checkout target is named in messages: the branch it ends on, or the revision.
-pub fn target_label(t: &git_branches::Target) -> &str {
-    match t {
-        git_branches::Target::Branch(b) | git_branches::Target::Detached(b) | git_branches::Target::Remote(b) => b,
-    }
-}
+pub use lenz_content::branches::{target_label, CheckoutChoice, CheckoutProblem, Retry};
 
 impl State {
     pub fn checkout_problem(&self) -> Option<&CheckoutProblem> {
@@ -284,23 +240,11 @@ impl State {
 impl crate::session::Session {
     /// The checkout-problem dialog's buttons, in order.
     pub fn checkout_choices(&self) -> Vec<(&'static str, CheckoutChoice)> {
-        match self.state().checkout_problem() {
-            None => Vec::new(),
-            Some(p) if !p.untracked.is_empty() => vec![("Cancel", CheckoutChoice::Cancel)],
-            Some(p) if p.discards.is_some() => vec![("Force Checkout", CheckoutChoice::ConfirmForce), ("Cancel", CheckoutChoice::Cancel)],
-            Some(_) => vec![("Smart Checkout", CheckoutChoice::Smart), ("Force Checkout", CheckoutChoice::Force), ("Cancel", CheckoutChoice::Cancel)],
-        }
+        self.state().checkout_problem().map_or_else(Vec::new, CheckoutProblem::choices)
     }
     /// The checkout-problem dialog's text, the same in both frontends.
     pub fn checkout_text(&self) -> Option<String> {
-        let p = self.state().checkout_problem()?;
-        let name = p.retry.label();
-        let list = |files: &[String]| files.iter().map(|f| format!("  {f}")).collect::<Vec<_>>().join("\n");
-        Some(match (&p.discards, p.untracked.is_empty()) {
-            (_, false) => format!("Checking out {name} would overwrite these untracked files:\n\n{}\n\nMove or delete them first, then check out again.", list(&p.untracked)),
-            (Some(d), true) => format!("Force Checkout discards your uncommitted changes to these files:\n\n{}\n\nThey cannot be recovered.", list(d)),
-            (None, true) => format!("Checking out {name} would overwrite your local changes to:\n\n{}\n\nSmart Checkout stashes your changes, checks out {name} and puts them back. Force Checkout discards them.", list(&p.tracked)),
-        })
+        self.state().checkout_problem().map(CheckoutProblem::text)
     }
     /// Whether `name` can be a new branch here.
     pub fn validate_branch_name(&self, name: &str) -> Result<(), String> {
@@ -345,22 +289,7 @@ impl crate::session::Session {
                 let sha = git_branches::verify_commit(root, rev).map_err(fail)?;
                 by_name(root, rev.trim(), sha)
             }
-            GitDiff::BranchChanges(from) => {
-                git_branches::verify_commit(root, "HEAD").map_err(|_| fail("there is no commit yet".into()))?;
-                let base = match from {
-                    Some(from) => from.clone(),
-                    None => {
-                        let base = git_branches::default_base(root).ok_or_else(|| fail("no main or master branch to compare with".into()))?;
-                        // Read now: HEAD may have moved since the last tick.
-                        let branch = git_branches::head(root, &repo.git_dir).and_then(|h| h.branch);
-                        if let Some(b) = branch.filter(|b| base.short == *b || base.short == format!("origin/{b}")) {
-                            return Err(fail(format!("{b} is the base branch; Show Local Changes shows its changes")));
-                        }
-                        base.name
-                    }
-                };
-                git_branches::merge_base(root, &base, "HEAD").map_err(fail)?
-            }
+            GitDiff::BranchChanges(from) => git_branches::changes_since(root, &repo.git_dir, from.as_deref()).map_err(fail)?,
         };
         let program = crate::session::lenz_diff(exe, terminal, what)?;
         Ok(lenz_content::open::Launch { program, args: vec![rev], cwd: Some(root.clone()) })

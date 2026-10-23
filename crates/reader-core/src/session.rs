@@ -2165,10 +2165,7 @@ impl Session {
         self.pending_checkout = Some(retry.clone());
         let tx = self.tx.clone();
         self.jobs.submit(Priority::Visible, move || {
-            let result = match &retry {
-                crate::branches::Retry::Checkout(target) => lenz_content::branches::checkout(&root, target, mode),
-                crate::branches::Retry::NewBranch { name, from } => lenz_content::branches::create_branch(&root, name, from.as_deref(), true, mode),
-            };
+            let result = lenz_content::branches::attempt(&root, &retry, mode);
             let _ = tx.send_blocking(Completion::CheckedOut { request, root, label, made: false, result });
         });
         Effect { repaint: true, copy: None }

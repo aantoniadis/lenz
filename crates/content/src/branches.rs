@@ -438,6 +438,100 @@ pub fn check_branch_name(root: &Path, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// What the checkout-problem dialog offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckoutChoice {
+    Smart,
+    /// The first step of Force Checkout: list everything it would discard.
+    Force,
+    /// The second step: discard it and check out.
+    ConfirmForce,
+    Cancel,
+}
+
+/// What a refused checkout runs again once the dialog is answered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Retry {
+    Checkout(Target),
+    /// A new branch `name` at `from` (HEAD when `None`), checked out.
+    NewBranch { name: String, from: Option<String> },
+}
+
+impl Retry {
+    /// How it is named in messages.
+    pub fn label(&self) -> &str {
+        match self {
+            Self::Checkout(t) => target_label(t),
+            Self::NewBranch { name, .. } => name,
+        }
+    }
+}
+
+/// A checkout git refused over files in the way, while the dialog is open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutProblem {
+    pub retry: Retry,
+    pub tracked: Vec<String>,
+    pub untracked: Vec<String>,
+    /// Once Force Checkout is chosen: every uncommitted change it would discard (the confirmation step).
+    pub discards: Option<Vec<String>>,
+}
+
+/// How a checkout target is named in messages: the branch it ends on, or the revision.
+pub fn target_label(t: &Target) -> &str {
+    match t {
+        Target::Branch(b) | Target::Detached(b) | Target::Remote(b) => b,
+    }
+}
+
+impl CheckoutProblem {
+    /// The dialog's buttons, in order: only Cancel while untracked files are in the way; Force's second step;
+    /// else Smart, Force, Cancel.
+    pub fn choices(&self) -> Vec<(&'static str, CheckoutChoice)> {
+        match () {
+            _ if !self.untracked.is_empty() => vec![("Cancel", CheckoutChoice::Cancel)],
+            _ if self.discards.is_some() => vec![("Force Checkout", CheckoutChoice::ConfirmForce), ("Cancel", CheckoutChoice::Cancel)],
+            _ => vec![("Smart Checkout", CheckoutChoice::Smart), ("Force Checkout", CheckoutChoice::Force), ("Cancel", CheckoutChoice::Cancel)],
+        }
+    }
+    /// The dialog's text, the same in every frontend.
+    pub fn text(&self) -> String {
+        let name = self.retry.label();
+        let list = |files: &[String]| files.iter().map(|f| format!("  {f}")).collect::<Vec<_>>().join("\n");
+        match (&self.discards, self.untracked.is_empty()) {
+            (_, false) => format!("Checking out {name} would overwrite these untracked files:\n\n{}\n\nMove or delete them first, then check out again.", list(&self.untracked)),
+            (Some(d), true) => format!("Force Checkout discards your uncommitted changes to these files:\n\n{}\n\nThey cannot be recovered.", list(d)),
+            (None, true) => format!("Checking out {name} would overwrite your local changes to:\n\n{}\n\nSmart Checkout stashes your changes, checks out {name} and puts them back. Force Checkout discards them.", list(&self.tracked)),
+        }
+    }
+}
+
+/// Runs `retry` in `mode`: the checkout, or the new branch made and checked out.
+pub fn attempt(root: &Path, retry: &Retry, mode: Mode) -> Result<Outcome, CheckoutError> {
+    match retry {
+        Retry::Checkout(target) => checkout(root, target, mode),
+        Retry::NewBranch { name, from } => create_branch(root, name, from.as_deref(), true, mode),
+    }
+}
+
+/// The commit HEAD's changes count from (Show Branch Changes): where HEAD split from `from`, else from the base
+/// branch; refused with no commit yet, with no base, or on the base itself. `git_dir` is `root`'s.
+pub fn changes_since(root: &Path, git_dir: &Path, from: Option<&str>) -> Result<String, String> {
+    verify_commit(root, "HEAD").map_err(|_| "there is no commit yet".to_string())?;
+    let base = match from {
+        Some(from) => from.to_string(),
+        None => {
+            let base = default_base(root).ok_or("no main or master branch to compare with")?;
+            // Read now: HEAD may have moved since anything here last looked.
+            if let Some(b) = head(root, git_dir).and_then(|h| h.branch).filter(|b| base.short == *b || base.short == format!("origin/{b}")) {
+                return Err(format!("{b} is the base branch; Show Local Changes shows its changes"));
+            }
+            base.name
+        }
+    };
+    merge_base(root, &base, "HEAD")
+}
+
 /// The branch a branch's changes are counted from (Show Branch Changes).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Base {
@@ -520,6 +614,37 @@ mod tests {
         assert_eq!(base(r.path()), pair("refs/remotes/origin/main", "origin/main"));
         git(r.path(), &["update-ref", "-d", "refs/remotes/origin/main"]);
         assert_eq!(base(r.path()), None);
+    }
+
+    #[test]
+    fn the_checkout_dialog_offers_what_is_safe() {
+        let p = |untracked: &[&str], discards: Option<&[&str]>| CheckoutProblem {
+            retry: Retry::Checkout(Target::Branch("other".into())),
+            tracked: vec!["a.txt".into()],
+            untracked: untracked.iter().map(|s| s.to_string()).collect(),
+            discards: discards.map(|d| d.iter().map(|s| s.to_string()).collect()),
+        };
+        let labels = |p: &CheckoutProblem| p.choices().into_iter().map(|c| c.0).collect::<Vec<_>>();
+        assert_eq!(labels(&p(&[], None)), ["Smart Checkout", "Force Checkout", "Cancel"]);
+        assert_eq!(labels(&p(&["new.txt"], None)), ["Cancel"], "untracked files are never lost");
+        assert_eq!(labels(&p(&[], Some(&["a.txt", "b.txt"]))), ["Force Checkout", "Cancel"]);
+        assert!(p(&[], None).text().contains("would overwrite your local changes to:\n\n  a.txt"));
+        assert!(p(&["new.txt"], None).text().contains("untracked files:\n\n  new.txt"));
+        assert!(p(&[], Some(&["b.txt"])).text().contains("discards your uncommitted changes to these files:\n\n  b.txt"));
+        assert_eq!(Retry::NewBranch { name: "x".into(), from: None }.label(), "x");
+    }
+
+    #[test]
+    fn changes_count_from_where_head_split_from_its_base() {
+        let r = two_branches();
+        let gd = git_dir(r.path()).unwrap();
+        let main = git(r.path(), &["rev-parse", "main"]).trim().to_string();
+        assert_eq!(changes_since(r.path(), &gd, None), Err("main is the base branch; Show Local Changes shows its changes".into()));
+        git(r.path(), &["switch", "-q", "other"]);
+        assert_eq!(changes_since(r.path(), &gd, None), Ok(main.clone()));
+        assert_eq!(changes_since(r.path(), &gd, Some("refs/heads/main")), Ok(main));
+        let fresh = repo();
+        assert_eq!(changes_since(fresh.path(), &git_dir(fresh.path()).unwrap(), None), Err("there is no commit yet".into()));
     }
 
     #[test]
