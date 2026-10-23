@@ -120,7 +120,7 @@ impl Session {
                 }
             };
         }
-        state.document().map_or_else(
+        state.current_source().map_or_else(
             || "No file open — Ctrl+O file, F10 commands".into(),
             |d| d.source().display().to_string(),
         )
@@ -131,20 +131,19 @@ impl Session {
         let Some(tab) = self.state().active() else {
             return String::new();
         };
-        if let Some(image) = tab
-            .document()
+        if let Some(image) = self.state().view(tab.id()).map(|v| v.snapshot())
             .and_then(|d| d.image())
             .filter(|_| !tab.image_source())
         {
             return format!("{}×{}", image.width, image.height);
         }
-        match tab.selection().zip(tab.document()) {
+        match tab.selection().zip(self.state().view(tab.id()).map(|v| v.snapshot())) {
             Some((selection, document)) => {
                 let line = document.line_of(selection.head);
                 format!(
                     "{}:{}",
                     line + 1,
-                    selection.head - document.line_range(line).start + 1
+                    selection.head - document.reader_line_range(line).start + 1
                 )
             }
             None => format!("Line {}", tab.top_line() + 1),
@@ -154,7 +153,7 @@ impl Session {
     /// Full status snapshot, built only when requested so background samples cannot move a details dialog.
     pub fn status_details(&self) -> String {
         let state = self.state();
-        let name = match (state.loading(), state.document()) {
+        let name = match (state.loading(), state.current_source()) {
             (Some(path), _) => format!("Loading {}…", path.display()),
             (None, Some(document)) => document.source().display().to_string(),
             (None, None) => "No file open — Ctrl+O file, F10 commands".into(),

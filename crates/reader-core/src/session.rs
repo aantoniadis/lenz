@@ -1508,6 +1508,10 @@ impl State {
     pub fn rendering(&self) -> Option<Rendering<'_>> {
         self.active()?.rendering()
     }
+    /// The active view's authoritative source, without requesting analysis.
+    pub fn current_source(&self) -> Option<&Arc<crate::text::TextSnapshot>> {
+        Some(self.view(self.active?)?.snapshot)
+    }
     pub fn loading(&self) -> Option<&Path> {
         self.loading.as_deref()
     }
