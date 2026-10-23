@@ -50,7 +50,8 @@ impl SourceMeta {
     pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, ..self.clone() } }
     pub(crate) fn bytes(&self) -> usize {
         size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity()
-            + self.image.as_ref().map_or(0, |i| size_of::<Image>() + 2 * size_of::<usize>() + i.pixels.as_ref().map_or(0, |p| size_of::<img::Pixels>() + 2 * size_of::<usize>() + p.as_raw().capacity()))
+            + self.image.as_ref().map_or(0, |i| size_of::<Image>() + 2 * size_of::<usize>()
+                + i.pixels.as_ref().map_or_else(|why| why.capacity(), |p| size_of::<img::Pixels>() + 2 * size_of::<usize>() + p.as_raw().capacity()))
     }
     pub fn source(&self) -> &std::path::Path { &self.source }
     pub fn encoding(&self) -> &str { &self.encoding }
