@@ -60,7 +60,7 @@ impl Selection {
     }
 }
 
-pub use crate::native::NativeReveal;
+pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -101,7 +101,7 @@ pub enum Command {
     /// The active tab's horizontal position, in display columns.
     ScrollColumn(usize),
     /// Clamp a pane using its adapter's measured extent, rejecting obsolete source or width identities.
-    ClampColumn { pane: u8, tab: TabId, identity: crate::projection::Cursor, cols: usize, max: usize },
+    ClampColumn { viewport: NativeViewport, max: usize },
     /// Check every open source against the disk (focus regained, or notifications unavailable).
     Recheck,
     /// Search the project or the active document for literal text, case-insensitively.
@@ -1865,6 +1865,7 @@ pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String
 }
 
 impl Session {
+    pub fn native_viewport(&self, pane: u8) -> Option<NativeViewport> { NativeViewport::capture(&self.state, &self.native, pane) }
     pub fn native_context(&self, pane: u8) -> Option<u64> { self.native.context(pane) }
     pub fn native_reveal(&self, pane: u8) -> Option<&NativeReveal> { self.native.goal(pane, &self.state) }
 
@@ -3044,11 +3045,9 @@ impl Session {
             Command::FindDeclarations(query) => self.find_declarations(query),
             Command::SelectResult(i) => self.select_result(i),
             Command::OpenResult(i) => self.validate_result(i),
-            Command::ClampColumn { pane, tab, identity, cols, max } => {
-                let valid = self.state.text_size.get(pane as usize).is_some_and(|size| size.0 == cols)
-                    && self.state.shown(pane).is_some_and(|t| t.id() == tab)
-                    && self.state.view(tab).is_some_and(|view| identity.matches(view.snapshot(), view.inlay_hints()));
-                if !valid { return Effect::default(); }
+            Command::ClampColumn { viewport, max } => {
+                if !viewport.current(&self.state, &self.native) { return Effect::default(); }
+                let tab = viewport.tab;
                 match self.state.tabs.iter_mut().find(|t| t.id == tab) {
                     Some(t) if t.column > max => { t.column = max; repaint }
                     _ => Effect::default(),
