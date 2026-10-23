@@ -95,6 +95,8 @@ pub enum Command {
     Forward,
     /// The active tab's horizontal position, in display columns.
     ScrollColumn(usize),
+    /// Clamp a pane using its adapter's measured extent, rejecting obsolete source or width identities.
+    ClampColumn { pane: u8, tab: TabId, identity: crate::projection::Cursor, cols: usize, max: usize },
     /// Check every open source against the disk (focus regained, or notifications unavailable).
     Recheck,
     /// Search the project or the active document for literal text, case-insensitively.
@@ -2870,6 +2872,17 @@ impl Session {
             Command::FindDeclarations(query) => self.find_declarations(query),
             Command::SelectResult(i) => self.select_result(i),
             Command::OpenResult(i) => self.validate_result(i),
+            Command::ClampColumn { pane, tab, identity, cols, max } => {
+                let valid = self.state.text_size.get(pane as usize).is_some_and(|size| size.0 == cols)
+                    && self.state.shown(pane).is_some_and(|t| t.id() == tab)
+                    && self.state.view(tab).is_some_and(|view| identity.matches(view.snapshot(), view.inlay_hints()));
+                if !valid { return Effect::default(); }
+                let max = if self.state.shown(pane).is_some_and(|t| self.state.wrap_cols(t).is_some()) { 0 } else { max };
+                match self.state.tabs.iter_mut().find(|t| t.id == tab) {
+                    Some(t) if t.column > max => { t.column = max; repaint }
+                    _ => Effect::default(),
+                }
+            }
             Command::ScrollColumn(_) if self.state.active().is_some_and(|t| self.state.wrap_cols(t).is_some()) => Effect::default(),
             Command::ScrollColumn(column) => match self.active_mut() {
                 Some(t) if t.column != column => {

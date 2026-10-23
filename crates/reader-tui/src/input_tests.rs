@@ -665,6 +665,104 @@ fn mouse_selection_keeps_utf8_bytes_and_modal_blocks_underlying_clicks() {
     assert_eq!(std::fs::read_to_string(path).unwrap(), "α界 z\nsecond\n");
 }
 #[test]
+fn horizontal_scroll_is_clamped_to_current_terminal_extents_after_input_and_resize() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wide.txt");
+    let source = "α界 ".repeat(100) + "end\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    draw(&mut a, 40, 10);
+    a.dispatch(Command::ScrollColumn(usize::MAX));
+    draw(&mut a, 40, 10);
+    let width = a.layout.panes[0].text.width as usize;
+    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    draw(&mut a, 80, 10);
+    let width = a.layout.panes[0].text.width as usize;
+    assert_eq!(a.session.state().column(), 403usize.saturating_sub(width));
+    draw(&mut a, 80, 10);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 1, 1);
+    draw(&mut a, 80, 10);
+    key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    draw(&mut a, 1, 1);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn long_unicode_line_uses_exact_grapheme_cells_and_source_hits_across_projection_windows() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("families.txt");
+    let family = "👨‍👩‍👧‍👦";
+    let source = family.repeat(2_000) + " END" + &" ".repeat(100) + "\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let view = a.session.state().view(a.session.state().active().unwrap().id()).unwrap();
+    let mut cursor = view.display_start(0).unwrap();
+    let window = view.display_window(&mut cursor, reader_core::projection::WINDOW_WORK).unwrap();
+    assert_ne!(window.source.end % 25, 0, "fixture must split a family grapheme across chunks");
+    draw(&mut a, 80, 20);
+    a.dispatch(Command::ScrollColumn(3_998));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        terminal.draw(|f| a.draw(f)).unwrap();
+        if a.layout.panes[0].hits.iter().any(|hit| hit.byte == 50_001) { break; }
+        assert!(Instant::now() < deadline, "the tail of the line never became usable");
+        while let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+        std::thread::yield_now();
+    }
+    let pane = &a.layout.panes[0];
+    let (x, y) = (pane.text.x, pane.text.y);
+    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), family);
+    assert_eq!(pane.hits.iter().find(|hit| hit.x == x).map(|hit| (hit.width, hit.byte)), Some((2, 49_975)));
+    assert_eq!(terminal.backend().buffer()[(x + 3, y)].symbol(), "E");
+    click(&mut a, x + 3, y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: x + 6, row: y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(a.session.state().selected_text(), Some("END"));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("END"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
+fn oversized_joined_grapheme_escapes_keep_original_source_hit_and_copy_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("joined.txt");
+    let source = "👩\u{200D}".repeat(1_000) + "💻 END\n";
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    a.dispatch(Command::SetSoftWrap(false));
+    a.dispatch(Command::SetStickyScroll(false));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let pane = &a.layout.panes[0];
+    let escaped = pane.hits.iter().find(|hit| hit.byte == 256).unwrap();
+    let next = pane.hits.iter().find(|hit| hit.byte == 259).unwrap();
+    let (x, y, end) = (escaped.x, escaped.y, next.x);
+    assert_eq!(terminal.backend().buffer()[(x, y)].symbol(), "[");
+    let escape: String = (x..x + 8).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect();
+    assert_eq!(escape, "[U+200D]");
+    click(&mut a, x, y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Drag(MouseButton::Left), column: end, row: y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(a.session.state().selected_text(), Some("\u{200D}"));
+    key(&mut a, KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(a.copy.take().as_deref(), Some("\u{200D}"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+#[test]
 fn double_and_triple_click_select_word_and_group() {
     let dir = tempfile::tempdir().unwrap();
     let src = "fn f() { g(\"hello world\", 1); }\n";

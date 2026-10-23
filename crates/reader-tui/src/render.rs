@@ -240,6 +240,7 @@ fn clamp(at: &mut usize, top: &mut usize, len: usize, height: usize) {
 impl App {
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.show_documentation();
+        self.source_cache.borrow_mut().begin();
         let area = frame.area();
         let palette = **self.session.state().palette();
         let p = &palette;
@@ -247,6 +248,7 @@ impl App {
         fill(frame.buffer_mut(), area, style(p.fg, p.bg));
         if area.is_empty() {
             self.layout = geometry;
+            for command in self.source_cache.borrow_mut().finish() { self.session.dispatch(command); }
             return;
         }
         self.draw_toolbar(frame, &mut geometry, p);
@@ -414,6 +416,7 @@ impl App {
             );
         }
         self.layout = geometry;
+        for command in self.source_cache.borrow_mut().finish() { self.session.dispatch(command); }
     }
 
     fn draw_toolbar(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
@@ -1879,14 +1882,23 @@ fn draw_pane(
     } else {
         std::sync::Arc::from([])
     };
-    let rows = tab.rows(geometry.text.height as usize, cols);
+    let rows = if cols.is_some() { tab.rows(geometry.text.height as usize, cols) } else {
+        view.visible().lines(tab.top_line(), geometry.text.height as usize).into_iter().map(|line| {
+            let len = view.snapshot().line_range(line).map_or(0, |range| range.len());
+            reader_core::wrap::Row { line, index: 0, display: 0..0, source: 0..len, indent: 0 }
+        }).collect()
+    };
+    let mut extent = Some(0usize);
     for (n, r) in rows.iter().enumerate() {
         let y = geometry.text.y + n as u16;
+        let native = cols.is_none().then(|| app.source_cache.borrow_mut().row(pane, &view, r.line, tab.column(), geometry.text.width as usize, app.session.projection(pane).map(AsRef::as_ref)));
+        extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         draw_source_row(
             frame.buffer_mut(),
             state,
             &view,
             r,
+            native,
             geometry.text,
             y,
             area.x,
@@ -1897,10 +1909,16 @@ fn draw_pane(
         geometry.rows.push((y, r.line, r.index));
     }
     for pinned in sticky.iter() {
-        let Some(r) = tab.line_rows(pinned.line, cols).first().cloned() else {
-            continue;
+        let r = if cols.is_some() {
+            let Some(row) = tab.line_rows(pinned.line, cols).first().cloned() else { continue };
+            row
+        } else {
+            let len = view.snapshot().line_range(pinned.line).map_or(0, |range| range.len());
+            reader_core::wrap::Row { line: pinned.line, index: 0, display: 0..0, source: 0..len, indent: 0 }
         };
         let y = geometry.text.y + pinned.row as u16;
+        let native = cols.is_none().then(|| app.source_cache.borrow_mut().row(pane, &view, r.line, tab.column(), geometry.text.width as usize, app.session.projection(pane).map(AsRef::as_ref)));
+        extent = extent.zip(native.as_ref().and_then(|row| row.extent)).map(|(a, b)| a.max(b));
         geometry.hits.retain(|h| h.y != y);
         geometry.rows.retain(|(cy, ..)| *cy != y);
         draw_source_row(
@@ -1908,6 +1926,7 @@ fn draw_pane(
             state,
             &view,
             &r,
+            native,
             geometry.text,
             y,
             area.x,
@@ -1916,6 +1935,9 @@ fn draw_pane(
             p,
         );
         geometry.rows.push((y, r.line, r.index));
+    }
+    if let Some(extent) = extent {
+        app.source_cache.borrow_mut().clamp(pane, &view, geometry.text.width as usize, extent);
     }
     geometry
 }
@@ -1977,6 +1999,7 @@ fn draw_source_row(
     state: &State,
     view: &View<'_>,
     r: &reader_core::wrap::Row,
+    native: Option<crate::source::Row>,
     area: Rect,
     y: u16,
     gutter_x: u16,
@@ -1989,7 +2012,7 @@ fn draw_source_row(
     }
     let tab = view.tab();
     let Some(source_line) = view.snapshot().line_range(r.line) else { return };
-    let shown = tab.shown_line(r.line);
+    let shown = native.is_none().then(|| tab.shown_line(r.line));
     let base = if sticky { p.header_bg } else { p.bg };
     fill(
         buf,
@@ -2045,6 +2068,10 @@ fn draw_source_row(
             p.gutter_bg,
         ),
     );
+    if let Some(native) = native.as_ref().filter(|row| row.failed || (row.pending && row.cells.is_empty())) {
+        line(buf, Rect::new(area.x, y, area.width, 1), if native.failed { "Text layout failed" } else { "Preparing text…" }, style(p.dim, base));
+        return;
+    }
     let start = source_line.start;
     let selection = tab.selection();
     let spans = tab.spans(r.line);
@@ -2058,12 +2085,23 @@ fn draw_source_row(
         tab.column()
     };
     let indent = r.indent.min(area.width as usize);
-    let cells = source_cells(
-        &shown,
-        r.display.clone(),
-        skip,
-        (area.width as usize).saturating_sub(indent),
-    );
+    struct PaintedCell<'a> {
+        x: u16, width: u16, byte: usize, text: &'a str, hint: bool, caret: bool,
+    }
+    let (cells, end): (Vec<PaintedCell>, _) = if let Some(native) = native.as_ref() {
+        (native.cells.iter().map(|cell| PaintedCell {
+            x: cell.column.saturating_sub(skip) as u16, width: cell.width as u16,
+            byte: cell.byte.saturating_sub(start), text: cell.text(),
+            hint: cell.hint, caret: cell.caret,
+        }).collect(), native.end.map(|end| end.saturating_sub(start)))
+    } else {
+        let Some(shown) = shown.as_ref() else { return };
+        (source_cells(shown, r.display.clone(), skip, (area.width as usize).saturating_sub(indent)).into_iter().map(|cell| PaintedCell {
+            x: cell.x, width: cell.width, byte: cell.byte, text: cell.text,
+            hint: shown.hints.iter().any(|(_, range, _)| range.contains(&cell.display)),
+            caret: shown.caret(cell.byte) == cell.display,
+        }).collect(), Some(r.source.end.min(source_line.len())))
+    };
     let mut end_x = area.x + indent as u16;
     for cell in cells {
         let source = start + cell.byte;
@@ -2081,10 +2119,7 @@ fn draw_source_row(
                 st = st.add_modifier(Modifier::CROSSED_OUT);
             }
         }
-        let hint = shown
-            .hints
-            .iter()
-            .any(|(_, range, _)| range.contains(&cell.display));
+        let hint = cell.hint;
         if hint {
             st = style(p.dim, base).add_modifier(Modifier::ITALIC);
         }
@@ -2104,7 +2139,7 @@ fn draw_source_row(
             st = st.bg(color(p.sel_bg));
         }
         if selection.is_some_and(|s| s.anchor == s.head && s.head == source)
-            && shown.caret(cell.byte) == cell.display
+            && cell.caret
         {
             st = st.add_modifier(Modifier::REVERSED);
         }
@@ -2119,15 +2154,15 @@ fn draw_source_row(
         });
         end_x = x + cell.width;
     }
-    if end_x < area.right() {
+    if end_x < area.right() && let Some(end) = end {
         hits.push(TextHit {
             x: end_x,
             y,
             width: area.right() - end_x,
             line: r.line,
-            byte: r.source.end.min(source_line.len()),
+            byte: end,
         });
-        if selection.is_some_and(|s| s.anchor == s.head && s.head == start + r.source.end) {
+        if selection.is_some_and(|s| s.anchor == s.head && s.head == start + end) {
             buf.set_stringn(
                 end_x,
                 y,

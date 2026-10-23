@@ -154,6 +154,7 @@ pub(crate) struct App {
     #[cfg(test)]
     pub exe: Option<PathBuf>,
     pub layout: crate::render::Geometry,
+    pub source_cache: std::cell::RefCell<crate::source::Cache>,
     pub crumb_at: usize,
     drag: Option<(u8, TabId, u64, usize)>,
     /// The last text click (when, where) and how many came in a row there: two take the word, three its group.
@@ -189,6 +190,7 @@ impl App {
             #[cfg(test)]
             exe: None,
             layout: Default::default(),
+            source_cache: Default::default(),
             crumb_at: 0,
             drag: None,
             clicks: None,
