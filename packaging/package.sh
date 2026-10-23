@@ -20,6 +20,11 @@ if [[ $(uname) == Darwin && -z ${DEVELOPER_DIR:-} ]] && ! xcrun -find metal > /d
         && [[ -d /Applications/Xcode.app/Contents/Developer ]]; then
     export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 fi
+# gpui's Metal shader library records the folder it was built in (Cargo's OUT_DIR), which no path map reaches: on
+# macOS build outside the home folder (and its user name), unless told where.
+if [[ $target == *-apple-darwin && -z ${CARGO_TARGET_DIR:-} ]]; then
+    export CARGO_TARGET_DIR=/tmp/lenz-dist
+fi
 artifact_json=$(mktemp)
 trap 'rm -f "$artifact_json"' EXIT
 # Packaging is host-only; Cargo's reported path also respects CARGO_TARGET_DIR. Each package builds on its own so
