@@ -23,6 +23,11 @@ pub struct Row {
     pub(crate) end_caret: usize,
 }
 
+impl Row {
+    /// Exact source boundary for whitespace after this row; a continuation must not enter the next row.
+    pub fn end_byte(&self) -> usize { if self.last { self.source.end } else { self.end_caret } }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
     pub line: usize,

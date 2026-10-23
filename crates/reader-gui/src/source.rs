@@ -85,10 +85,14 @@ impl Row {
     }
 }
 
+#[derive(Clone, PartialEq)]
+struct Target { skip: f32, width: f32, display: Option<Range<usize>>, source_end: Option<usize> }
+
 struct Line {
     tab: TabId,
-    skip: f32,
-    width: f32,
+    target: Target,
+    start: Cursor,
+    started: bool,
     position: Position,
     checkpoints: VecDeque<Position>,
     pieces: Vec<Piece>,
@@ -101,38 +105,66 @@ struct Line {
 }
 
 impl Line {
-    fn new(view: &View<'_>, line: usize, skip: f32, width: f32) -> Option<Self> {
-        Some(Self { tab: view.tab().id(), skip, width,
-            position: Position { cursor: view.display_start(line)?, x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() },
+    fn new(view: &View<'_>, line: usize, target: Target, start: Option<Cursor>) -> Option<Self> {
+        let start = start.or_else(|| view.display_start(line))?;
+        if start.line() != line || !start.matches(view.snapshot(), view.inlay_hints())
+            || target.display.as_ref().is_some_and(|range| start.display_byte() > range.start) { return None; }
+        Some(Self { tab: view.tab().id(), target, start: start.clone(), started: false,
+            position: Position { cursor: start, x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() },
             checkpoints: VecDeque::new(), pieces: Vec::new(), row: Row::default(), extent: None, end: None, ready: false, failed: false, touched: true })
     }
 
-    fn retarget(&mut self, view: &View<'_>, skip: f32, width: f32) {
-        if self.skip == skip && self.width == width { return; }
+    fn retarget(&mut self, target: Target) {
+        if self.target == target { return; }
+        if self.target.display == target.display && self.target.skip == target.skip && self.target.width == target.width {
+            self.target = target;
+            if self.ready { self.finish_row(); }
+            return;
+        }
+        if let Some((old, _)) = self.target.display.as_ref().zip(target.display.as_ref())
+            .filter(|(old, new)| old.start == new.start && old.end < new.end && self.target.width == target.width) {
+            if self.position.x >= target.width {
+                self.target = target;
+                self.extent = None; self.end = None;
+                self.finish_row();
+                return;
+            }
+            if let Some(position) = self.checkpoints.iter().rev().find(|p| p.cursor.display_byte() <= old.end).cloned() {
+                let committed = if position.carry.is_empty() { position.cursor.display_byte() } else { position.carry_display };
+                self.pieces.retain(|piece| piece.display.end <= committed);
+                self.position = position;
+                self.target = target;
+                self.started = false; self.ready = false; self.failed = false; self.extent = None; self.end = None;
+                self.row = Row::default();
+                return;
+            }
+        }
         let best = self.checkpoints.iter().chain(std::iter::once(&self.position))
-            .filter(|p| p.x <= skip).max_by(|a,b| a.x.total_cmp(&b.x)).cloned();
-        let Some(position) = best.or_else(|| Some(Position { cursor: view.display_start(self.position.cursor.line())?, x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() })) else { self.failed = true; return };
-        self.position = position;
-        self.skip = skip;
-        self.width = width;
-        self.pieces.clear();
-        self.row = Row::default();
-        self.ready = false;
-        self.failed = false;
+            .filter(|p| target.skip > 0.0 && p.x <= target.skip).max_by(|a,b| a.x.total_cmp(&b.x)).cloned();
+        self.position = best.unwrap_or_else(|| Position { cursor: self.start.clone(), x: 0.0, carry: String::new(), carry_display: 0, carry_windows: Vec::new() });
+        self.target = target;
+        self.pieces.clear(); self.row = Row::default();
+        self.ready = false; self.failed = false; self.started = false;
+        self.extent = None; self.end = None;
     }
 
     fn consume(&mut self, projected: &Projected, window: &Window, metrics: Metrics<'_>) {
+        self.started = true;
         self.checkpoints.push_back(self.position.clone());
         if self.checkpoints.len() > CHECKPOINTS { self.checkpoints.pop_front(); }
-        let start = if self.position.carry.is_empty() { projected.display.start } else { self.position.carry_display };
+        let from = self.target.display.as_ref().map_or(0, |range| range.start.saturating_sub(projected.display.start).min(projected.shown.text.len()));
+        let to = self.target.display.as_ref().map_or(projected.shown.text.len(), |range| range.end.saturating_sub(projected.display.start).min(projected.shown.text.len()));
+        let Some(body) = projected.shown.text.get(from..to) else { self.failed = true; return };
+        let complete = projected.complete || self.target.display.as_ref().is_some_and(|range| range.end <= projected.display.end);
+        let start = if self.position.carry.is_empty() { projected.display.start + from } else { self.position.carry_display };
         let mut text = std::mem::take(&mut self.position.carry);
-        text.push_str(&projected.shown.text);
+        text.push_str(body);
         let mut windows = std::mem::take(&mut self.position.carry_windows);
         windows.push(Arc::new(projected.clone()));
         let shaped = shape(window, metrics, &text);
-        let commit = if projected.complete { text.len() } else { text.grapheme_indices(true).next_back().map_or(0, |(at,_)| at) };
+        let commit = if complete { text.len() } else { text.grapheme_indices(true).next_back().map_or(0, |(at,_)| at) };
         let right = self.position.x + f32::from(shaped.x_for_index(commit));
-        if !text.is_empty() && right >= self.skip {
+        if !text.is_empty() && right >= self.target.skip {
             self.pieces.push(Piece { display: start..start + commit, origin: self.position.x, text: Arc::new(text.clone()), windows: windows.clone() });
         }
         self.position.x = right;
@@ -140,17 +172,22 @@ impl Line {
         self.position.carry_display = start + commit;
         self.position.carry_windows = windows.into_iter().filter(|w| w.display.end > start + commit).collect();
         self.position.cursor = projected.next().clone();
-        if projected.complete {
+        if complete {
             self.extent = Some(right);
             self.end = Some(self.position.cursor.clone());
         }
-        self.ready = projected.complete || right >= self.skip + self.width;
+        self.ready = complete || right >= self.target.skip + self.target.width;
         if self.ready { self.finish_row(); }
+    }
+
+    fn source_end(&self) -> Option<usize> {
+        if self.end.is_none() { return None; }
+        if self.target.display.is_some() { self.target.source_end } else { self.end.as_ref().map(Cursor::source_byte) }
     }
 
     fn finish_row(&mut self) {
         let Some(first) = self.pieces.first() else {
-            self.row = Row { extent: self.extent, end: self.end.as_ref().map(Cursor::source_byte), ..Default::default() };
+            self.row = Row { extent: self.extent.filter(|_| self.target.display.is_none()), end: self.source_end(), ..Default::default() };
             return;
         };
         let (start, origin) = (first.display.start, first.origin);
@@ -167,7 +204,7 @@ impl Line {
                 if !windows.iter().any(|old: &Arc<Projected>| old.display == window.display) { windows.push(window.clone()); }
             }
         }
-        self.row = Row { text, origin, extent: self.extent, display: start..end, windows, end: self.end.as_ref().map(Cursor::source_byte) };
+        self.row = Row { text, origin, extent: self.extent.filter(|_| self.target.display.is_none()), display: start..end, windows, end: self.source_end() };
     }
 }
 
@@ -175,6 +212,7 @@ impl Line {
 struct Pane {
     lines: VecDeque<Line>,
     pending: Option<Request>,
+    pending_display: Option<usize>,
     serial: u64,
     work: usize,
     seen: bool,
@@ -199,16 +237,27 @@ impl Cache {
 
     #[allow(clippy::too_many_arguments)]
     pub fn row(&mut self, pane: u8, view: &View<'_>, line: usize, skip: f32, width: f32, batch: Option<&Batch>, window: &Window, metrics: Metrics<'_>) -> Row {
+        self.project(pane, view, line, Target { skip, width, display: None, source_end: None }, None, batch, window, metrics)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn wrapped(&mut self, pane: u8, view: &View<'_>, cursor: Cursor, display: Range<usize>, source_end: Option<usize>, width: f32, batch: Option<&Batch>, window: &Window, metrics: Metrics<'_>) -> Row {
+        self.project(pane, view, cursor.line(), Target { skip: 0.0, width, display: Some(display), source_end }, Some(cursor), batch, window, metrics)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn project(&mut self, pane: u8, view: &View<'_>, line: usize, target: Target, start: Option<Cursor>, batch: Option<&Batch>, window: &Window, metrics: Metrics<'_>) -> Row {
+        let display_start = target.display.as_ref().map(|range| range.start);
         let Some(slot) = self.panes.get_mut(pane as usize) else { return Row::default() };
         slot.active = true;
         slot.lines.retain(|line| line.tab == view.tab().id() && line.position.cursor.matches(view.snapshot(), view.inlay_hints()));
         if slot.pending.as_ref().is_some_and(|request| request.tab != view.tab().id() || !request.cursor.matches(view.snapshot(), view.inlay_hints()))
             && let Some(old) = slot.pending.take() { self.commands.push(Command::CancelProjection { pane, request: old.request }); }
-        let at = slot.lines.iter().position(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.position.cursor.matches(view.snapshot(), view.inlay_hints()));
-        let Some(mut entry) = at.and_then(|at| slot.lines.remove(at)).or_else(|| Line::new(view,line,skip,width)) else { return Row::default() };
-        entry.retarget(view,skip,width);
+        let at = slot.lines.iter().position(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.target.display.as_ref().map(|range| range.start) == display_start && l.position.cursor.matches(view.snapshot(), view.inlay_hints()));
+        let Some(mut entry) = at.and_then(|at| slot.lines.remove(at)).or_else(|| Line::new(view,line,target.clone(),start)) else { return Row::default() };
+        entry.retarget(target);
         entry.touched = true;
-        if slot.pending.as_ref().is_some_and(|r| r.tab == entry.tab && r.cursor.line() == line) {
+        if slot.pending.as_ref().is_some_and(|r| r.tab == entry.tab && r.cursor.line() == line && slot.pending_display == display_start) {
             slot.seen = true;
             if let Some(batch) = batch.filter(|b| slot.pending.as_ref() == Some(&b.request)) {
                 if batch.request.cursor == entry.position.cursor {
@@ -224,7 +273,7 @@ impl Cache {
                 && let Some(old) = slot.pending.take() { self.commands.push(Command::CancelProjection { pane, request: old.request }); }
         }
         if !entry.ready && !entry.failed {
-            if entry.position.cursor.display_byte() == 0 && slot.work >= WINDOW_WORK
+            if !entry.started && slot.work >= WINDOW_WORK
                 && let Some(part) = view.display_window(&mut entry.position.cursor.clone(),WINDOW_WORK) {
                 slot.work = slot.work.saturating_sub(part.work);
                 entry.consume(&part,window,metrics);
@@ -234,6 +283,7 @@ impl Cache {
                 let request = Request { pane, tab: entry.tab, cursor: entry.position.cursor.clone(), request: slot.serial, context: slot.serial };
                 self.commands.push(Command::PrepareProjection(request.clone()));
                 slot.pending = Some(request);
+                slot.pending_display = display_start;
                 slot.seen = true;
             }
         }
@@ -243,11 +293,22 @@ impl Cache {
     }
 
     pub fn get(&self, pane: u8, view: &View<'_>, line: usize, skip: f32, width: f32) -> Option<&Row> {
-        Some(&self.panes.get(pane as usize)?.lines.iter().find(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.position.cursor.matches(view.snapshot(), view.inlay_hints()) && l.skip == skip && l.width == width && l.ready)?.row)
+        Some(&self.panes.get(pane as usize)?.lines.iter().find(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.position.cursor.matches(view.snapshot(), view.inlay_hints()) && l.target.display.is_none() && l.target.skip == skip && l.target.width == width && l.ready)?.row)
+    }
+
+    pub fn get_wrapped(&self, pane: u8, view: &View<'_>, line: usize, display_start: usize, width: f32) -> Option<&Row> {
+        Some(&self.panes.get(pane as usize)?.lines.iter().find(|entry| entry.tab == view.tab().id() && entry.position.cursor.line() == line
+            && entry.target.display.as_ref().is_some_and(|range| range.start == display_start) && entry.target.width == width
+            && entry.position.cursor.matches(view.snapshot(), view.inlay_hints()) && entry.ready)?.row)
+    }
+
+    pub fn cursor(&self, pane: u8, view: &View<'_>, line: usize, display_start: usize) -> Option<Cursor> {
+        self.panes.get(pane as usize)?.lines.iter().find(|entry| entry.tab == view.tab().id() && entry.start.line() == line
+            && entry.target.display.as_ref().is_some_and(|range| range.start == display_start) && entry.start.matches(view.snapshot(), view.inlay_hints())).map(|entry| entry.start.clone())
     }
 
     pub fn extent(&self, pane: u8, view: &View<'_>, line: usize) -> Option<f32> {
-        self.panes.get(pane as usize)?.lines.iter().find(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.position.cursor.matches(view.snapshot(), view.inlay_hints()))?.extent
+        self.panes.get(pane as usize)?.lines.iter().find(|l| l.tab == view.tab().id() && l.position.cursor.line() == line && l.target.display.is_none() && l.position.cursor.matches(view.snapshot(), view.inlay_hints()))?.extent
     }
 
     pub fn finish(&mut self) -> Vec<Command> {
