@@ -305,6 +305,12 @@ fn main() {
                 reply(&mut out, json!({ "capabilities": caps, "serverInfo": { "name": "fake" } }));
             }
             "initialized" => {
+                if let Some(release) = env("FAKE_LSP_PAUSE_INPUT") {
+                    let release = PathBuf::from(release);
+                    let _ = std::fs::write(release.with_extension("paused"), b"");
+                    let until = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                    while !release.exists() && std::time::Instant::now() < until { std::thread::sleep(std::time::Duration::from_millis(1)); }
+                }
                 // As rust-analyzer does when asked for `serverStatusNotification`.
                 let quiescent = env("FAKE_LSP_INDEXING").is_none();
                 let _ = write_message(&mut out, &json!({ "jsonrpc": "2.0", "method": "experimental/serverStatus", "params": { "health": "ok", "quiescent": quiescent } }));

@@ -171,6 +171,10 @@ impl Question {
 pub const MAX_STARTING: usize = 2;
 /// Messages queued for a server's input at most; a server that stops reading is reported, never waited for.
 pub const OUTBOX: usize = 1024;
+/// Historical source payload awaiting a completed writer flush, per server. Desired live documents and
+/// the last written snapshots are separate owners; serialization scratch belongs to the writer alone.
+const TEXT_FRAMES: usize = 3;
+const TEXT_BYTES: usize = 3 * crate::document::LARGE_BYTES;
 /// How long a stopping server gets to exit after `shutdown`/`exit` before its process group is killed.
 pub const STOP_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
 /// After initializing, a server without a readiness status (progress reports do not say the workspace is
@@ -327,6 +331,8 @@ pub enum Event {
     /// The answer to decoration request `id` (`failed`: an error), as its bytes: decoded off the UI thread.
     Decoration { session: u64, id: i64, failed: bool, body: Vec<u8> },
     Exited { session: u64, reason: String },
+    /// A complete text frame was flushed before the writer advanced to the following message.
+    Written { session: u64, token: u64 },
     /// [`START_TIMEOUT`] passed since launch.
     StartTimeout { session: u64 },
     /// Time passed: idle servers may stop.
@@ -393,6 +399,19 @@ struct Server {
     initializing: Option<i64>,
     /// Documents the server has open, with the snapshot it was sent.
     open: HashMap<PathBuf, Arc<Document>>,
+    /// Latest live demand, coalesced while the writer has no text credit.
+    desired: HashMap<PathBuf, Arc<Document>>,
+    /// Exact fully written snapshots used to interpret replies.
+    written: HashMap<PathBuf, Arc<Document>>,
+    /// Credits survive close/reopen and rename until their writer acknowledgement arrives.
+    flights: HashMap<u64, TextFlight>,
+    open_epoch: HashMap<PathBuf, u64>,
+    next_text: u64,
+    text_bytes: usize,
+    desired_epoch: u64,
+    deferred: HashMap<Lane, Deferred>,
+    failed: HashMap<Lane, Reply>,
+    refresh: std::collections::HashSet<PathBuf>,
     /// External changes a client-watched server may defer while it holds the document open.
     dirty_open: HashMap<PathBuf, bool>,
     /// The definition request in flight: the session's request id and the protocol id.
@@ -418,6 +437,9 @@ struct Server {
     decor: HashMap<i64, (PathBuf, u64, Decor)>,
 }
 
+struct TextFlight { path: PathBuf, document: Arc<Document>, epoch: u64 }
+struct Deferred { question: Question, params: Value, request: u64, epoch: u64 }
+
 #[derive(Default)]
 struct Progress {
     title: String,
@@ -442,18 +464,18 @@ impl Progress {
 enum Outgoing {
     Message(Value),
     /// `textDocument/didOpen` (with a language) or `didChange` (full text) for `uri` at `version`.
-    Text { uri: String, language: Option<&'static str>, version: u64, text: Arc<str> },
+    Text { token: u64, uri: String, language: Option<&'static str>, version: u64, text: Arc<str> },
 }
 
 impl Outgoing {
     fn write(self, out: &mut impl std::io::Write) -> std::io::Result<()> {
         let message = match self {
             Outgoing::Message(m) => m,
-            Outgoing::Text { uri, language: Some(language), version, text } => json!({
+            Outgoing::Text { uri, language: Some(language), version, text, .. } => json!({
                 "jsonrpc": "2.0", "method": "textDocument/didOpen",
                 "params": { "textDocument": { "uri": uri, "languageId": language, "version": version, "text": &*text } },
             }),
-            Outgoing::Text { uri, language: None, version, text } => json!({
+            Outgoing::Text { uri, language: None, version, text, .. } => json!({
                 "jsonrpc": "2.0", "method": "textDocument/didChange",
                 "params": { "textDocument": { "uri": uri, "version": version }, "contentChanges": [{ "text": &*text }] },
             }),
@@ -688,7 +710,9 @@ impl Semantics {
             process: Arc::default(),
             next_id: 0,
             initializing: None,
-            open: HashMap::new(),
+            open: HashMap::new(), desired: HashMap::new(), written: HashMap::new(),
+            flights: HashMap::new(), open_epoch: HashMap::new(), next_text: 0, text_bytes: 0,
+            desired_epoch: 0, deferred: HashMap::new(), failed: HashMap::new(), refresh: Default::default(),
             dirty_open: HashMap::new(),
             pending: HashMap::new(),
             progress: HashMap::new(),
@@ -818,7 +842,7 @@ impl Semantics {
         if !s.supports(question) {
             return Err(format!("{name} does not provide {}", question.noun()));
         }
-        if !s.open.get(doc.source()).is_some_and(|d| d.version() == doc.version()) {
+        if !s.desired.get(doc.source()).is_some_and(|d| same_document(d, doc)) {
             return Err(format!("{name} has not been sent this version of the file"));
         }
         let mut params = json!({ "textDocument": { "uri": lsp::file_uri(doc.source()) }, "position": lsp::position(doc, offset, s.encoding) });
@@ -874,7 +898,7 @@ impl Semantics {
 
     /// The initialized server holding `doc` at its version: its session.
     pub fn session_of(&self, doc: &Document) -> Option<u64> {
-        self.servers.iter().find(|s| s.initialized() && s.open.get(doc.source()).is_some_and(|d| d.version() == doc.version())).map(|s| s.session)
+        self.servers.iter().find(|s| s.initialized() && s.open.get(doc.source()).is_some_and(|d| same_document(d, doc))).map(|s| s.session)
     }
 
     /// Ask every initialized server under browsing root `browse` (all, without one) for workspace symbols
@@ -922,6 +946,7 @@ impl Semantics {
         }
         let now = (self.clock)();
         for s in &mut self.servers {
+            s.deferred.remove(&lane);
             if let Some((_, id)) = s.pending.remove(&lane) {
                 s.notify("$/cancelRequest", json!({ "id": id }));
             }
@@ -1062,7 +1087,7 @@ impl Semantics {
     }
 
     pub fn event(&mut self, event: Event, events: &async_channel::Sender<Completion>) -> Outcome {
-        let outcome = match event {
+        let mut outcome = match event {
             Event::Resolved { provider, dir, root, serve } => {
                 // One choice per root: a server of the language already there keeps serving it.
                 let serve = root.as_ref().and_then(|r| self.servers.iter().find(|s| provider::primary(s.key.provider) == provider && s.key.root == *r)).map_or(serve, |s| s.key.provider);
@@ -1086,18 +1111,29 @@ impl Semantics {
                     s.status = Status::Failed(reason);
                 }
                 s.initializing = None;
-                s.open.clear();
+                s.open.clear(); s.desired.clear(); s.written.clear(); s.open_epoch.clear();
+                s.flights.clear(); s.text_bytes = 0; s.refresh.clear();
                 s.asked = Default::default();
                 s.decor.clear();
                 s.memory = None;
                 let name = PROVIDERS[s.key.provider].name;
                 // Every request still pending fails, in its own lane.
-                let replies = s
+                let mut replies: Vec<_> = s
                     .pending
                     .drain()
                     .map(|(lane, (request, _))| Reply { lane, request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false })
                     .collect();
+                replies.extend(s.deferred.drain().map(|(lane, d)| Reply { lane, request: d.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false }));
                 Outcome { repaint: true, replies, ready: false, ..Outcome::default() }
+            }
+            Event::Written { session, token } => {
+                let Some(s) = self.servers.iter_mut().find(|s| s.session == session) else { return Outcome::default() };
+                if let Some(frame) = s.flights.remove(&token) {
+                    s.text_bytes -= frame.document.text().len();
+                    if s.open_epoch.get(&frame.path) == Some(&frame.epoch) { s.written.insert(frame.path, frame.document); }
+                    s.pump_text();
+                }
+                Outcome { ready: true, ..Outcome::default() }
             }
             Event::StartTimeout { session } => {
                 let Some(s) = self.servers.iter_mut().find(|s| s.session == session && s.initializing.is_some()) else { return Outcome::default() };
@@ -1128,6 +1164,7 @@ impl Semantics {
                 Outcome { repaint: true, ..Outcome::default() }
             }
         };
+        for s in &mut self.servers { outcome.replies.extend(s.failed.drain().map(|(_, reply)| reply)); }
         self.start_queued(events);
         outcome
     }
@@ -1187,16 +1224,25 @@ impl Semantics {
         self.servers.iter().any(|s| s.session == session)
     }
 
+    pub(crate) fn take_failures(&mut self) -> Vec<Reply> {
+        self.servers.iter_mut().flat_map(|s| s.failed.drain().map(|(_, reply)| reply)).collect()
+    }
+
+    /// The last desired documents, retained while a replacement is being prepared off the UI thread.
+    pub(crate) fn desired(&self) -> HashMap<PathBuf, Arc<Document>> {
+        self.servers.iter().flat_map(|s| s.desired.iter().map(|(p, d)| (p.clone(), d.clone()))).collect()
+    }
+
     /// The snapshots server session `session` has open: what its positions are about.
     pub fn sent(&self, session: u64) -> HashMap<PathBuf, Arc<Document>> {
-        self.servers.iter().find(|s| s.session == session).map(|s| s.open.clone()).unwrap_or_default()
+        self.servers.iter().find(|s| s.session == session).map(|s| s.written.clone()).unwrap_or_default()
     }
 
     /// Ask the servers holding `docs` (at their versions) for the decorations `wanted` they offer and were not
     /// asked about these versions.
     pub fn decorate(&mut self, docs: &[Arc<Document>], wanted: &[Decor]) {
         for doc in docs {
-            let Some(s) = self.servers.iter_mut().find(|s| s.initialized() && s.open.get(doc.source()).is_some_and(|d| d.version() == doc.version())) else { continue };
+            let Some(s) = self.servers.iter_mut().find(|s| s.initialized() && s.open.get(doc.source()).is_some_and(|d| same_document(d, doc))) else { continue };
             for &kind in wanted {
                 s.decorate(doc, kind);
             }
@@ -1236,6 +1282,10 @@ impl Drop for Semantics {
     fn drop(&mut self) {
         self.stop_all();
     }
+}
+
+fn same_document(a: &Document, b: &Document) -> bool {
+    a.version() == b.version() && Arc::ptr_eq(a.source_meta(), b.source_meta())
 }
 
 impl Server {
@@ -1280,7 +1330,7 @@ impl Server {
 
     /// Ask for `kind` about `doc` (open at this version) unless asked already; an older request is cancelled.
     fn decorate(&mut self, doc: &Document, kind: Decor) {
-        if !self.offers(kind) {
+        if !self.offers(kind) || self.text_pending() {
             return;
         }
         match self.asked[kind as usize].get(doc.source()) {
@@ -1305,6 +1355,13 @@ impl Server {
 
     /// Send `question`'s request for session request `request`.
     fn request(&mut self, question: Question, params: Value, request: u64) -> Result<(), String> {
+        // Workspace and hierarchy questions also depend on preceding cross-file updates. Preserve the
+        // old FIFO barrier while coalescing text, with one replaceable intent per existing lane.
+        if self.text_pending() {
+            self.deferred.insert(question.lane(), Deferred { question, params, request, epoch: self.desired_epoch });
+            self.idle_since = None;
+            return Ok(());
+        }
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": question.method(), "params": params }))?;
@@ -1315,7 +1372,7 @@ impl Server {
 
     /// Idle when no tab holds its documents and nothing is pending, from the first moment that is so.
     fn touch(&mut self, now: std::time::Instant) {
-        let idle = !self.held && self.open.is_empty() && self.pending.is_empty() && self.initializing.is_none();
+        let idle = !self.held && self.open.is_empty() && self.pending.is_empty() && self.deferred.is_empty() && self.flights.is_empty() && self.initializing.is_none();
         self.idle_since = if idle { Some(self.idle_since.unwrap_or(now)) } else { None };
     }
 
@@ -1338,6 +1395,7 @@ impl Server {
     fn refresh_index(&mut self, path: &Path) {
         // Ruby LSP indexes open-file changes during document requests; watcher reports alone are ignored.
         if PROVIDERS[self.key.provider].id != "ruby-lsp" || !self.supports(Question::FileSymbols) { return; }
+        if self.text_pending() { self.refresh.insert(path.to_owned()); return; }
         self.next_id += 1;
         // No pending lane: the reply is intentionally discarded and cannot replace a user's navigation.
         if let Err(why) = self.send(json!({ "jsonrpc": "2.0", "id": self.next_id, "method": Question::FileSymbols.method(), "params": { "textDocument": { "uri": lsp::file_uri(path) } } })) {
@@ -1346,39 +1404,71 @@ impl Server {
         }
     }
 
-    /// Open, update or close documents so the server holds exactly `docs`, each as the snapshot shown.
+    /// Open, update or close documents so the server eventually holds exactly the live desired set.
     fn reconcile(&mut self, docs: HashMap<PathBuf, Arc<Document>>) {
+        if docs.len() != self.desired.len() || docs.iter().any(|(p, d)| self.desired.get(p).is_none_or(|old| !same_document(old, d))) {
+            self.desired_epoch += 1;
+            let deferred = std::mem::take(&mut self.deferred);
+            for (lane, d) in deferred { self.failed.insert(lane, self.failed_reply(lane, d.request, "the source changed before the request was sent")); }
+        }
         let gone: Vec<PathBuf> = self.open.keys().filter(|p| !docs.contains_key(*p)).cloned().collect();
         for path in gone {
             self.open.remove(&path);
-            self.asked.iter_mut().for_each(|a| {
-                a.remove(&path);
-            });
+            self.written.remove(&path);
+            self.open_epoch.remove(&path);
+            self.refresh.remove(&path);
+            self.asked.iter_mut().for_each(|a| { a.remove(&path); });
+            self.decor.retain(|_, d| d.0 != path);
+            // The close stays after any in-flight old text and before a future reopen. Its credit
+            // remains outstanding, including when the same URI returns before the acknowledgement.
             self.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::file_uri(&path) } }));
             if let Some(exists) = self.dirty_open.remove(&path) {
                 self.notify("workspace/didChangeWatchedFiles", json!({ "changes": [{ "uri": lsp::file_uri(&path), "type": if exists { 2 } else { 3 } }] }));
             }
         }
-        let language_id = PROVIDERS[self.key.provider].language_id;
-        for (path, doc) in docs {
-            let language = match self.open.get(&path) {
-                Some(sent) if sent.version() == doc.version() => continue,
-                Some(_) => None,
-                None => Some(doc.language().map_or("plaintext", |l| language_id(l, &path))),
-            };
-            if let Err(why) = self.queue(Outgoing::Text { uri: lsp::file_uri(&path), language, version: doc.version(), text: doc.text().clone() }) {
-                // It stopped reading: what it holds is unknown now, so it is unusable until restarted.
+        self.desired = docs;
+        self.refresh.retain(|p| self.desired.contains_key(p));
+        self.pump_text();
+    }
+
+    fn text_pending(&self) -> bool {
+        self.desired.iter().any(|(path, doc)| self.open.get(path).is_none_or(|sent| !same_document(sent, doc)))
+    }
+
+    fn failed_reply(&self, lane: Lane, request: u64, why: &str) -> Reply {
+        Reply { lane, request, session: self.session, encoding: self.encoding, provider: PROVIDERS[self.key.provider].name, result: Err(why.to_owned()), indexing: false }
+    }
+
+    fn pump_text(&mut self) {
+        if !self.initialized() { return; }
+        let wanted: Vec<_> = self.desired.iter().filter(|(path, doc)| self.open.get(*path).is_none_or(|sent| !same_document(sent, doc)))
+            .map(|(path, doc)| (path.clone(), doc.clone())).collect();
+        for (path, doc) in wanted {
+            if self.flights.len() == TEXT_FRAMES { break; }
+            if self.flights.values().any(|f| f.path == path) || doc.text().len() > TEXT_BYTES.saturating_sub(self.text_bytes) { continue; }
+            self.next_text += 1;
+            let token = self.next_text;
+            let language = (!self.open.contains_key(&path)).then(|| doc.language().map_or("plaintext", |l| (PROVIDERS[self.key.provider].language_id)(l, &path)));
+            let epoch = *self.open_epoch.entry(path.clone()).or_insert(token);
+            if let Err(why) = self.queue(Outgoing::Text { token, uri: lsp::file_uri(&path), language, version: doc.version(), text: doc.text().clone() }) {
                 self.status = Status::Failed(why);
-                self.open.clear();
                 self.halt();
                 return;
             }
+            self.text_bytes += doc.text().len();
+            self.flights.insert(token, TextFlight { path: path.clone(), document: doc.clone(), epoch });
+            self.open.insert(path.clone(), doc);
             if language.is_none() && PROVIDERS[self.key.provider].watched_files {
                 self.dirty_open.insert(path.clone(), true);
-                self.refresh_index(&path);
+                self.refresh.insert(path);
             }
-            self.open.insert(path, doc);
         }
+        if self.text_pending() { return; }
+        for (lane, d) in std::mem::take(&mut self.deferred) {
+            if d.epoch != self.desired_epoch { self.failed.insert(lane, self.failed_reply(lane, d.request, "the source changed before the request was sent")); }
+            else if let Err(why) = self.request(d.question, d.params, d.request) { self.failed.insert(lane, self.failed_reply(lane, d.request, &why)); }
+        }
+        for path in std::mem::take(&mut self.refresh) { self.refresh_index(&path); }
     }
 
     fn message(&mut self, m: Value, settings: &Settings, now: std::time::Instant, notices: &mut Vec<String>) -> Outcome {
@@ -1755,11 +1845,19 @@ fn spawn_server(key: Key, provider: &'static Provider, data: Option<(&'static st
             });
         }
         if let Some(mut stdin) = stdin {
+            let send = send.clone();
             let _ = std::thread::Builder::new().name(format!("reader-{}-in", provider.id)).spawn(move || {
                 while let Ok(m) = inbox.recv_blocking() {
-                    if m.write(&mut stdin).is_err() {
+                    let token = match &m { Outgoing::Text { token, .. } => Some(*token), Outgoing::Message(_) => None };
+                    if let Err(error) = m.write(&mut stdin) {
+                        inbox.close();
+                        while inbox.try_recv().is_ok() {}
+                        send(Event::Exited { session, reason: format!("could not write to server: {error}") });
                         return;
                     }
+                    // Publish before advancing: any reply to the following request is enqueued after
+                    // this acknowledgement and therefore sees the exact last-written snapshot.
+                    if let Some(token) = token && !send(Event::Written { session, token }) { return; }
                 }
             });
         }
