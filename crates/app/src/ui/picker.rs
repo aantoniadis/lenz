@@ -300,19 +300,9 @@ impl Viewer {
         if x < pw {
             let row = ((y - toolbar_h()) / line_h() - 1.0 + p.sources.scroll).floor();
             let rows = p.sources.rows(&self.palette, &p.branches);
-            match (row >= 0.0).then(|| rows.get(row as usize)).flatten().and_then(|r| r.action.clone()) {
-                // a click on the branch shows its log
-                Some(SourceAction::Branch(refname, _)) => {
-                    items.push(("Compare with Current".to_string(), MenuAction::CompareBranch(refname),
-                    ));
-                }
-                Some(SourceAction::Worktree(path)) => items.push(("Open in New Window".to_string(), MenuAction::NewWindow(path),
-                )),
-                // the open PR refreshes from its row
-                Some(SourceAction::Pr(_)) => if let Some(r) = self.repo.as_ref() {
-                    items.extend(r.source_menu(row as usize).into_iter().map(|(label, action)| (label.to_string(), MenuAction::Run(action))));
-                },
-                _ => {},
+            // the core lists each row's entries (branches, tags, worktrees, the open PR)
+            if row >= 0.0 && (row as usize) < rows.len() && let Some(r) = self.repo.as_ref() {
+                items.extend(r.source_menu(row as usize).into_iter().map(|(label, entry)| (label.to_string(), MenuAction::Source(entry))));
             }
         } else if y >= toolbar_h() + line_h() && y < toolbar_h() + lh {
             let row = ((y - toolbar_h()) / line_h() - 1.0 + p.scroll).floor();
@@ -364,9 +354,6 @@ impl Viewer {
                     }
                 }
             }
-            MenuAction::CompareBranch(refname) => {
-                self.compare_with_current(refname.clone(), true, cx)
-            }
             MenuAction::CompareWithBranch { row, id } => {
                 let items = self.repo.as_ref().map_or_else(Vec::new, |r| r.branch_targets(*row))
                     .into_iter()
@@ -377,7 +364,6 @@ impl Viewer {
             }
             MenuAction::Browse(url) => self.browse(url, cx),
             MenuAction::Spawn(args) => self.spawn_lenz(args, &root, cx),
-            MenuAction::NewWindow(path) => self.new_window(path, cx),
             _ => {}
         }
         cx.notify();

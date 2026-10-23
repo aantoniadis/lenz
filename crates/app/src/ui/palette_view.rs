@@ -62,7 +62,7 @@ impl Viewer {
             },
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
-                |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::ToggleMessage))=>{
+                |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::ToggleMessage|RepoAction::BranchChanges))=>{
                 let path=self.set.comparisons.get(self.comparison.current).map_or(String::new(),|c|c.repository_path().to_owned());
                 match self.repo.as_ref().map(|r|r.action_command(action,&path)) {
                     Some(Ok(Some(command)))=>self.repository_command(command,cx),
@@ -70,6 +70,8 @@ impl Viewer {
                     Some(Ok(None))|None=>{}
                 }
             }
+            Action::Repository(RepoAction::NewBranch)=>self.git_prompt=Some(super::checkout::GitPrompt::NewBranch{from:None,name:String::new(),checkout:true,error:None}),
+            Action::Repository(RepoAction::CheckoutRevision)=>self.git_prompt=Some(super::checkout::GitPrompt::Revision{input:String::new(),error:None}),
             Action::Repository(RepoAction::Back)=>self.navigate(false,cx),
             Action::Repository(RepoAction::Forward)=>self.navigate(true,cx),
             Action::Pr(PrAction::Details(tab))=>self.pr_command(crate::pr_session::PrCommand::Show(tab),cx),
@@ -220,11 +222,11 @@ impl Availability for Viewer {
                 why.or_else(||self.file_disabled(file,self.comparison.current)).map(Cow::Owned)
             }
             Action::Image(index)=>crate::image_session::image_commands().get(index).zip(self.image_doc()).and_then(|(e,doc)|e.disabled(&doc,self.iview.state())).map(Cow::Borrowed),
-            Action::Repository(RepoAction::Refresh|RepoAction::Branches)=>None,
+            Action::Repository(RepoAction::Refresh|RepoAction::Branches|RepoAction::NewBranch|RepoAction::CheckoutRevision)=>None,
             Action::Repository(RepoAction::Filter)=>None,
             Action::Repository(action @ (RepoAction::StagedChanges|RepoAction::CopyUrl|RepoAction::OpenUrl|RepoAction::LocalChanges|RepoAction::AllBranches
                 |RepoAction::CurrentBranch|RepoAction::CompareBranch{..}|RepoAction::CompareCommit|RepoAction::NextParent|RepoAction::FileHistory
-                |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::OpenWorktree|RepoAction::ToggleMessage))=>{
+                |RepoAction::WriteGraph|RepoAction::CopyHash|RepoAction::CopySubject|RepoAction::CopyDetails|RepoAction::ShowInGraph|RepoAction::OpenWorktree|RepoAction::ToggleMessage|RepoAction::BranchChanges))=>{
                 let path=self.set.comparisons.get(self.comparison.current).map_or("",|c|c.repository_path());
                 self.repo.as_ref().and_then(|r|r.action_command(action,path).err()).map(Cow::Borrowed)
             }

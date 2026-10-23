@@ -1117,6 +1117,28 @@ pub enum RepositoryCommand {
     MessageCursor(usize),
     /// Files changed for one of the PR's commits, or (`None`) for the whole PR.
     PrCommit(Option<String>),
+    /// Check out a branch, remote branch, tag or revision in the window's repository (local changes go along when
+    /// git allows; else the checkout dialog).
+    Checkout(lenz_content::branches::Target),
+    /// Make branch `name` at `from` (HEAD when `None`), and check it out when `checkout`.
+    NewBranch { name: String, from: Option<String>, checkout: bool },
+    /// The checkout dialog's answer.
+    CheckoutChoice(lenz_content::branches::CheckoutChoice),
+    /// The working tree against where HEAD split from its base branch.
+    BranchChanges,
+    /// The shown worktree's folder against another worktree's.
+    CompareWorktree(PathBuf),
+    /// Another worktree's history in a window or view of its own.
+    OpenWindow(PathBuf),
+}
+
+/// A sidebar row's right-click entry.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceEntry {
+    Command(RepositoryCommand),
+    Run(crate::catalog::Action),
+    /// The adapter asks for the new branch's name; it starts at this revision.
+    NewBranchFrom(String),
 }
 
 /// Labels and availability used by repository command menus in both adapters.
@@ -1169,6 +1191,11 @@ pub fn command_label(command: &RepositoryCommand) -> &'static str {
         RepositoryCommand::ToggleMessage(_) => "Show / hide commit message",
         RepositoryCommand::MessageCursor(_) => "Choose commit in message",
         RepositoryCommand::PrCommit(_) => "Show a PR commit's files",
+        RepositoryCommand::Checkout(_) | RepositoryCommand::CheckoutChoice(_) => "Checkout",
+        RepositoryCommand::NewBranch { .. } => "New Branch…",
+        RepositoryCommand::BranchChanges => "Show Branch Changes",
+        RepositoryCommand::CompareWorktree(_) => "Compare with Working Tree",
+        RepositoryCommand::OpenWindow(_) => "Open in New Window",
     }
 }
 
@@ -1181,6 +1208,11 @@ pub(crate) fn submit<T: Send + 'static>(
 ) -> Inbox<T> {
     static WORKER:Worker=Worker::new();
     submit_on(&WORKER,"lenz-repository",token,job)
+}
+/// Checkouts run on a thread of their own, never queued behind a comparison.
+fn submit_checkout<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
+    static WORKER:Worker=Worker::new();
+    submit_on(&WORKER,"lenz-checkout",token,job)
 }
 fn submit_inventory<T:Send+'static>(token:&std::sync::Arc<()>,job:impl FnOnce()->T+Send+'static)->Inbox<T>{
     static WORKER:Worker=Worker::new();
@@ -1368,6 +1400,13 @@ pub struct RepositorySession {
     message_collapsed: bool,
     /// The range commit the keyboard is on.
     message_cursor: usize,
+    /// The repository the window opened on: checkouts write here (the shown worktree may be another).
+    repository: PathBuf,
+    /// The checkout running (what it retries if refused) and its answer.
+    checkout: Option<(lenz_content::branches::Retry, Inbox<Result<lenz_content::branches::Outcome, lenz_content::branches::CheckoutError>>)>,
+    checkout_problem: Option<lenz_content::branches::CheckoutProblem>,
+    /// What the refresh after a checkout says instead of "Repository refreshed".
+    checkout_notice: Option<String>,
 }
 
 /// Keys the focused commit message panel interprets through [`RepositorySession::message_key`].
@@ -1474,7 +1513,8 @@ impl RepositorySession {
         use RepositoryCommand as R;
         let branch = || match self.selected_source() { Some(SourceAction::Branch(name, _)) => Ok(name), _ => Err("Select a branch in the repository sidebar") };
         let command = match action {
-            A::Back | A::Forward | A::Branches | A::Filter => return Ok(None),
+            A::Back | A::Forward | A::Branches | A::Filter | A::NewBranch | A::CheckoutRevision => return Ok(None),
+            A::BranchChanges => R::BranchChanges,
             A::OpenWorktree => return self.selected_worktree().map(|_| None),
             A::Refresh => R::RefreshRepository,
             A::StagedChanges => R::Index,
@@ -1587,13 +1627,97 @@ impl RepositorySession {
     }
 
     /// A sidebar row's right-click entries both frontends list: the open pull request refreshes from its row.
-    pub fn source_menu(&self, row: usize) -> Vec<(&'static str, crate::catalog::Action)> {
+    pub fn source_menu(&self, row: usize) -> Vec<(&'static str, SourceEntry)> {
+        use lenz_content::branches::Target;
+        use RepositoryCommand as C;
         let rows = self.picker.sources.rows_with_palette(&self.picker.branches, SourcePalette::default());
+        let new_branch = |rev: &str| ("New Branch from Here…", SourceEntry::NewBranchFrom(rev.to_string()));
+        let command = |c: RepositoryCommand| (command_label(&c), SourceEntry::Command(c));
         match rows.get(row).and_then(|r| r.action.clone()) {
             Some(SourceAction::Pr(n)) if self.pr.as_ref().is_some_and(|p| p.pr.number == n) =>
-                vec![(command_label(&RepositoryCommand::RefreshPr), crate::catalog::Action::Pr(crate::catalog::PrAction::Refresh))],
+                vec![(command_label(&C::RefreshPr), SourceEntry::Run(crate::catalog::Action::Pr(crate::catalog::PrAction::Refresh)))],
+            Some(SourceAction::Branch(refname, _)) => {
+                let current = refname.strip_prefix("refs/heads/").is_some_and(|b| self.picker.sources.branches.iter().any(|x| x.current && x.name == b));
+                let target = match refname.strip_prefix("refs/heads/") {
+                    Some(b) => Target::Branch(b.to_string()),
+                    None => Target::Remote(refname.strip_prefix("refs/remotes/").unwrap_or(&refname).to_string()),
+                };
+                let compare = ("Compare with Current", SourceEntry::Command(C::Compare { left: "HEAD".into(), right: refname.clone(), merge_base: true }));
+                match current {
+                    true => vec![new_branch(&refname)],
+                    false => vec![command(C::Checkout(target)), new_branch(&refname), compare],
+                }
+            }
+            Some(SourceAction::Tag(commit)) => vec![command(C::Checkout(Target::Detached(commit.clone()))), new_branch(&commit)],
+            Some(SourceAction::Worktree(path)) => match self.picker.sources.worktrees.iter().find(|w| w.path == path) {
+                // A bare repository has no files, and a removed folder nothing to show.
+                Some(w) if w.head.is_none() || !path.is_dir() => Vec::new(),
+                Some(w) if w.current => vec![command(C::OpenWindow(path))],
+                _ => vec![command(C::CompareWorktree(path.clone())), command(C::OpenWindow(path))],
+            },
             _ => Vec::new(),
         }
+    }
+    /// The checkout dialog, while git refuses a checkout over local changes.
+    pub fn checkout_problem(&self) -> Option<&lenz_content::branches::CheckoutProblem> {
+        self.checkout_problem.as_ref()
+    }
+    /// A checkout or new branch is running.
+    pub fn checking_out(&self) -> bool {
+        self.checkout.is_some()
+    }
+    /// Whether `name` can be a new branch here.
+    pub fn validate_branch_name(&self, name: &str) -> Result<(), String> {
+        lenz_content::branches::check_branch_name(&self.repository, name.trim())
+    }
+    /// `rev` as a commit id, or why not.
+    pub fn validate_revision(&self, rev: &str) -> Result<String, String> {
+        lenz_content::branches::verify_commit(&self.repository, rev)
+    }
+    /// Runs `retry` in `mode` on the checkout worker; a refusal opens the dialog to run it again.
+    fn start_checkout(&mut self, retry: lenz_content::branches::Retry, mode: lenz_content::branches::Mode) {
+        self.checkout_problem = None;
+        let root = self.repository.clone();
+        self.notice = Some(match &retry {
+            lenz_content::branches::Retry::Checkout(_) => format!("Checking out {}…", retry.label()),
+            lenz_content::branches::Retry::NewBranch { name, .. } => format!("Creating branch {name}…"),
+        });
+        let job = retry.clone();
+        self.checkout = Some((retry, submit_checkout(&self.token, move || lenz_content::branches::attempt(&root, &job, mode))));
+    }
+    /// A checkout's answer: the window reloads and says what happened, or the dialog opens.
+    fn poll_checkout(&mut self) -> bool {
+        use lenz_content::branches::{CheckoutError, CheckoutProblem};
+        let Some((retry, inbox)) = self.checkout.as_mut() else { return false };
+        let Ok(result) = inbox.try_recv() else {
+            if matches!(inbox.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) { self.checkout = None; }
+            return false;
+        };
+        let retry = retry.clone();
+        self.checkout = None;
+        let label = retry.label().to_string();
+        match result {
+            None => {}
+            Some(Ok(outcome)) => {
+                let mut said = vec![format!("Checked out {label}")];
+                said.extend(outcome.warning.map(|w| format!("Checkout: {w}")));
+                let stash = lenz_content::branches::SMART_STASH;
+                match outcome.stash_kept {
+                    Some(files) if !files.is_empty() => said.push(format!("Smart Checkout: your changes conflict with {label} in {}; they are kept in the stash \"{stash}\"", files.join(", "))),
+                    Some(_) => said.push(format!("Smart Checkout: your changes could not be put back; they are kept in the stash \"{stash}\"")),
+                    None => {}
+                }
+                self.notice = Some(said.join("\n"));
+                self.checkout_notice = self.notice.clone();
+                self.run(RepositoryCommand::RefreshRepository);
+            }
+            Some(Err(CheckoutError::Blocked { tracked, untracked })) => {
+                self.notice = None;
+                self.checkout_problem = Some(CheckoutProblem { retry, tracked, untracked, discards: None });
+            }
+            Some(Err(CheckoutError::Git(e))) => self.notice = Some(e),
+        }
+        true
     }
 
     /// The log context menu's commands for `row`, in both adapters; `file` is the file on screen.
@@ -1645,6 +1769,7 @@ impl RepositorySession {
 
     /// A session over `picker` with no background work started.
     pub fn with_picker(picker: Picker) -> Self {
+        let repository = picker.root.clone();
         Self {
             picker,
             pr: None,
@@ -1694,6 +1819,10 @@ impl RepositorySession {
             message_token: std::sync::Arc::new(()),
             message_collapsed: false,
             message_cursor: 0,
+            repository,
+            checkout: None,
+            checkout_problem: None,
+            checkout_notice: None,
         }
     }
 
@@ -1713,6 +1842,7 @@ impl RepositorySession {
             || self.graph.is_some()
             || self.moved.is_some()
             || self.message_reading.is_some()
+            || self.checkout.is_some()
     }
     pub fn comparisons(&self) -> &[crate::changeset::Comparison] {
         self.set.as_ref().map_or(&[], |set| &set.comparisons)
@@ -1738,6 +1868,10 @@ impl RepositorySession {
                 Some("No pull request is open")
             }
             RepositoryCommand::FileHistory(path) if path.is_empty() => Some("No file is selected"),
+            RepositoryCommand::Checkout(_) | RepositoryCommand::NewBranch { checkout: true, .. }
+            | RepositoryCommand::CheckoutChoice(lenz_content::branches::CheckoutChoice::Smart | lenz_content::branches::CheckoutChoice::ConfirmForce)
+                if self.checkout.is_some() => Some("A checkout is running; wait for it to finish"),
+            RepositoryCommand::CompareWorktree(path) | RepositoryCommand::OpenWindow(path) if !path.is_dir() => Some("The worktree's folder is gone"),
             RepositoryCommand::CopyHash
             | RepositoryCommand::CopySubject
             | RepositoryCommand::CopyDetails
@@ -1884,12 +2018,14 @@ impl RepositorySession {
     /// [`poll`](Self::poll) with the log's visible rows, which set how far ahead history is read.
     pub fn poll_rows(&mut self, log_rows: f32) -> bool {
         let mut changed = false;
+        changed |= self.poll_checkout();
         if let Some((plan,inventory,filters))=receive(&mut self.refreshing)
             && self.picker.refresh_is_current(&plan){
             self.source_details=None;
             self.head=self.picker.apply_repository_inventory(inventory);
             let errors=self.picker.apply_refresh_filters(&plan,filters);
-            self.notice=Some(if errors.is_empty(){"Repository refreshed".into()}else{errors.join("\n")});changed=true;
+            let done=self.checkout_notice.take().unwrap_or_else(||"Repository refreshed".into());
+            self.notice=Some(if errors.is_empty(){done}else{errors.join("\n")});changed=true;
         }
         if let Some(inventory) = receive(&mut self.sources) {
             changed = true;
@@ -2136,11 +2272,11 @@ impl RepositorySession {
     pub fn execute(&mut self, command: RepositoryCommand) {
         use RepositoryCommand as C;
         let step = matches!(&command, C::SelectRow { .. } | C::Move { .. } | C::Select | C::Walk(_) | C::ApplyFilter | C::ClearFilter | C::FileHistory(_)
-                | C::Compare { .. } | C::CompareRows(..) | C::Parent(_) | C::OpenPr(_))
+                | C::Compare { .. } | C::CompareRows(..) | C::Parent(_) | C::OpenPr(_) | C::BranchChanges | C::CompareWorktree(_))
             || matches!(&command, C::Source(a) if !matches!(a, SourceAction::Toggle(_) | SourceAction::ShowAllBranches | SourceAction::MorePrs | SourceAction::MoreRemotes | SourceAction::CopyCommand(_)));
         let is_move = matches!(command, C::Move { .. });
         // a step whose effect arrives later (file history, a deep filter, a pull request) counts at once
-        let later = matches!(command, C::FileHistory(_) | C::ApplyFilter | C::OpenPr(_) | C::Compare { .. });
+        let later = matches!(command, C::FileHistory(_) | C::ApplyFilter | C::OpenPr(_) | C::Compare { .. } | C::BranchChanges | C::CompareWorktree(_));
         let before = (step && !self.navigating && !(is_move && self.moving)).then(|| self.here());
         self.moving = is_move;
         self.run(command);
@@ -2389,6 +2525,49 @@ impl RepositorySession {
                     self.pending_refresh=true;
                 }
             }
+            C::Checkout(target) => self.start_checkout(lenz_content::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal),
+            C::NewBranch { name, from, checkout: true } => {
+                self.start_checkout(lenz_content::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal);
+            }
+            C::NewBranch { name, from, checkout: false } => {
+                let name = name.trim().to_string();
+                match lenz_content::branches::create_branch(&self.repository, &name, from.as_deref(), false, lenz_content::branches::Mode::Normal) {
+                    Ok(_) => {
+                        self.checkout_notice = Some(format!("Created branch {name}"));
+                        self.run(C::RefreshRepository);
+                    }
+                    Err(lenz_content::branches::CheckoutError::Git(e)) => self.notice = Some(e),
+                    Err(lenz_content::branches::CheckoutError::Blocked { .. }) => self.notice = Some("Local changes are in the way".into()),
+                }
+            }
+            C::CheckoutChoice(choice) => {
+                use lenz_content::branches::{CheckoutChoice as K, Mode};
+                let Some(problem) = self.checkout_problem.take() else { return };
+                if !problem.choices().iter().any(|c| c.1 == choice) {
+                    self.checkout_problem = Some(problem);
+                    return;
+                }
+                match choice {
+                    K::Cancel => {}
+                    K::Smart => self.start_checkout(problem.retry, Mode::Smart),
+                    K::ConfirmForce => self.start_checkout(problem.retry, Mode::Force),
+                    K::Force => match lenz_content::branches::discarded_by_force(&self.repository) {
+                        Ok(discards) => self.checkout_problem = Some(lenz_content::branches::CheckoutProblem { discards: Some(discards), ..problem }),
+                        Err(e) => self.notice = Some(e),
+                    },
+                }
+            }
+            C::BranchChanges => {
+                // ponytail: two quick git reads on this thread, as Lenz Code's Show Branch Changes
+                let root = self.picker.root.clone();
+                let since = lenz_content::branches::git_dir(&root).and_then(|gd| lenz_content::branches::changes_since(&root, &gd, None));
+                match since {
+                    Ok(sha) => self.load(Spec::Git { cached: false, revs: vec![sha], paths: vec![], untracked: true }),
+                    Err(e) => self.notice = Some(format!("Show Branch Changes: {e}")),
+                }
+            }
+            C::CompareWorktree(other) => self.load(Spec::Plain { left: self.picker.root.clone(), right: other }),
+            C::OpenWindow(path) => self.effects.push(RepositoryEffect::OpenWorktree(path)),
             C::RefreshPr => {
                 if let Some(pr) = self.pr.as_ref() {
                     self.execute(C::OpenPr(Some(pr.pr.number.to_string())));
@@ -3280,5 +3459,207 @@ mod session_tests {
             "second"
         );
         assert_eq!(state.take_change_set().unwrap().1, local_spec());
+    }
+}
+
+#[cfg(test)]
+mod checkout_tests {
+    use super::*;
+    use crate::git::testing::{commit_all, git, repo, write};
+    use lenz_content::branches::{CheckoutChoice, Target};
+
+    fn settle(state: &mut RepositorySession) {
+        let started = std::time::Instant::now();
+        while state.busy() {
+            state.poll();
+            assert!(started.elapsed().as_secs() < 10, "repository worker did not complete");
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+    /// `main` with a three-line `a.txt`; `other` changes its last line and adds `only-other.txt`; tag `v1`; remote
+    /// branch `origin/topic`; a second worktree on `side`. The window is open on its history.
+    fn fixture() -> (tempfile::TempDir, tempfile::TempDir, RepositorySession) {
+        let r = repo();
+        git(r.path(), &["config", "user.name", "t"]);
+        git(r.path(), &["config", "user.email", "t@t"]);
+        write(r.path(), "a.txt", "1\n2\n3\n");
+        commit_all(r.path(), "main");
+        git(r.path(), &["tag", "v1"]);
+        git(r.path(), &["switch", "-q", "-c", "other"]);
+        write(r.path(), "a.txt", "1\n2\nthree\n");
+        write(r.path(), "only-other.txt", "o\n");
+        commit_all(r.path(), "other");
+        git(r.path(), &["switch", "-q", "main"]);
+        git(r.path(), &["remote", "add", "origin", &r.path().to_string_lossy()]);
+        git(r.path(), &["update-ref", "refs/remotes/origin/topic", "other"]);
+        let wt = tempfile::tempdir().unwrap();
+        git(r.path(), &["worktree", "add", "-q", "-b", "side", &wt.path().join("second").to_string_lossy()]);
+        let request = crate::cli::parse(&["log".into()], r.path()).unwrap();
+        let mut state = RepositorySession::open(&request, r.path().into());
+        settle(&mut state);
+        (r, wt, state)
+    }
+    fn row(state: &RepositorySession, f: impl Fn(&SourceAction) -> bool) -> usize {
+        let rows = state.picker.sources.rows_with_palette(&state.picker.branches, SourcePalette::default());
+        rows.iter().position(|r| r.action.as_ref().is_some_and(&f)).unwrap_or_else(|| panic!("row in {:?}", rows.iter().map(|r| (&r.text, &r.action)).collect::<Vec<_>>()))
+    }
+    fn labels(state: &RepositorySession, row: usize) -> Vec<&'static str> {
+        state.source_menu(row).into_iter().map(|e| e.0).collect()
+    }
+    fn branch(r: &Path) -> String {
+        git(r, &["branch", "--show-current"]).trim().to_string()
+    }
+    fn checkout(state: &mut RepositorySession, target: Target) {
+        state.execute(RepositoryCommand::Checkout(target));
+        settle(state);
+    }
+
+    #[test]
+    fn each_sidebar_row_offers_its_actions_in_the_core() {
+        let (_r, wt, mut state) = fixture();
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Tags".into())));
+        state.execute(RepositoryCommand::Source(SourceAction::Toggle("Remotes".into())));
+        let local = |name: &'static str| move |a: &SourceAction| matches!(a, SourceAction::Branch(n, _) if n == name);
+        assert_eq!(labels(&state, row(&state, local("refs/heads/main"))), ["New Branch from Here…"]);
+        assert_eq!(labels(&state, row(&state, local("refs/heads/other"))), ["Checkout", "New Branch from Here…", "Compare with Current"]);
+        assert_eq!(labels(&state, row(&state, |a| matches!(a, SourceAction::Tag(_)))), ["Checkout", "New Branch from Here…"]);
+        let remote = row(&state, |a| matches!(a, SourceAction::Branch(n, _) if n == "refs/remotes/origin/topic"));
+        assert_eq!(labels(&state, remote), ["Checkout", "New Branch from Here…", "Compare with Current"]);
+        assert!(matches!(&state.source_menu(remote)[0].1, SourceEntry::Command(RepositoryCommand::Checkout(Target::Remote(b))) if b == "origin/topic"));
+        let second = wt.path().join("second");
+        let other_wt = row(&state, |a| matches!(a, SourceAction::Worktree(p) if *p == second));
+        assert_eq!(labels(&state, other_wt), ["Compare with Working Tree", "Open in New Window"]);
+        assert!(matches!(&state.source_menu(other_wt)[0].1, SourceEntry::Command(RepositoryCommand::CompareWorktree(p)) if *p == second));
+        let here = row(&state, |a| matches!(a, SourceAction::Worktree(p) if *p != second));
+        assert_eq!(labels(&state, here), ["Open in New Window"]);
+        let other = row(&state, local("refs/heads/other"));
+        assert!(matches!(&state.source_menu(other)[0].1, SourceEntry::Command(RepositoryCommand::Checkout(Target::Branch(b))) if b == "other"));
+        assert!(matches!(&state.source_menu(other)[1].1, SourceEntry::NewBranchFrom(r) if r == "refs/heads/other"));
+    }
+
+    #[test]
+    fn a_checkout_moves_head_and_the_window_follows() {
+        let (r, _wt, mut state) = fixture();
+        checkout(&mut state, Target::Branch("other".into()));
+        assert_eq!(branch(r.path()), "other");
+        assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "1\n2\nthree\n");
+        assert_eq!(state.picker.title_branch, "other");
+        assert!(state.picker.sources.branches.iter().any(|b| b.current && b.name == "other"), "the sidebar marks it");
+        assert_eq!(state.notice.as_deref(), Some("Checked out other"));
+        checkout(&mut state, Target::Remote("origin/topic".into()));
+        assert_eq!(branch(r.path()), "topic");
+        checkout(&mut state, Target::Detached("v1".into()));
+        assert_eq!(branch(r.path()), "");
+        assert!(state.notice.as_deref().is_some_and(|n| n.starts_with("Checked out ")));
+    }
+
+    #[test]
+    fn local_changes_in_the_way_open_the_dialog_and_smart_checkout_keeps_them() {
+        let (r, _wt, mut state) = fixture();
+        write(r.path(), "a.txt", "mine\n2\n3\n");
+        checkout(&mut state, Target::Branch("other".into()));
+        let p = state.checkout_problem().expect("dialog");
+        assert_eq!(p.tracked, ["a.txt"]);
+        assert_eq!(p.choices().into_iter().map(|c| c.0).collect::<Vec<_>>(), ["Smart Checkout", "Force Checkout", "Cancel"]);
+        assert_eq!(branch(r.path()), "main");
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Smart));
+        settle(&mut state);
+        assert!(state.checkout_problem().is_none());
+        assert_eq!(branch(r.path()), "other");
+        assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "mine\n2\nthree\n");
+    }
+
+    #[test]
+    fn force_checkout_asks_twice_and_untracked_files_only_cancel() {
+        let (r, _wt, mut state) = fixture();
+        write(r.path(), "a.txt", "mine\n2\n3\n");
+        checkout(&mut state, Target::Branch("other".into()));
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Force));
+        settle(&mut state);
+        assert_eq!(state.checkout_problem().and_then(|p| p.discards.clone()), Some(vec!["a.txt".to_string()]));
+        assert_eq!(branch(r.path()), "main", "nothing discarded yet");
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::ConfirmForce));
+        settle(&mut state);
+        assert_eq!(branch(r.path()), "other");
+        assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "1\n2\nthree\n");
+        // Back on main, an untracked file where `other` has one: only Cancel.
+        checkout(&mut state, Target::Branch("main".into()));
+        write(r.path(), "only-other.txt", "mine\n");
+        checkout(&mut state, Target::Branch("other".into()));
+        assert_eq!(state.checkout_problem().unwrap().choices().into_iter().map(|c| c.0).collect::<Vec<_>>(), ["Cancel"]);
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Cancel));
+        assert!(state.checkout_problem().is_none());
+        assert_eq!(std::fs::read_to_string(r.path().join("only-other.txt")).unwrap(), "mine\n");
+    }
+
+    #[test]
+    fn new_branches_and_one_checkout_at_a_time() {
+        let (r, _wt, mut state) = fixture();
+        assert_eq!(state.validate_branch_name("other"), Err("A branch named \"other\" already exists".into()));
+        assert_eq!(state.validate_revision("nope"), Err("No commit named \"nope\"".into()));
+        assert!(state.validate_revision("v1").is_ok());
+        state.execute(RepositoryCommand::NewBranch { name: "kept".into(), from: Some("refs/heads/other".into()), checkout: false });
+        settle(&mut state);
+        assert_eq!(branch(r.path()), "main");
+        assert_eq!(git(r.path(), &["rev-parse", "kept"]), git(r.path(), &["rev-parse", "other"]));
+        state.execute(RepositoryCommand::NewBranch { name: "feat".into(), from: None, checkout: true });
+        settle(&mut state);
+        assert_eq!((branch(r.path()), state.picker.title_branch.as_str()), ("feat".to_string(), "feat"));
+        // Over blocking changes the dialog retries the new branch, not something else.
+        write(r.path(), "a.txt", "mine\n2\n3\n");
+        state.execute(RepositoryCommand::NewBranch { name: "from-other".into(), from: Some("refs/heads/other".into()), checkout: true });
+        settle(&mut state);
+        assert!(matches!(&state.checkout_problem().unwrap().retry, lenz_content::branches::Retry::NewBranch { name, .. } if name == "from-other"));
+        state.execute(RepositoryCommand::CheckoutChoice(CheckoutChoice::Smart));
+        settle(&mut state);
+        assert_eq!(branch(r.path()), "from-other");
+        // A second checkout while one runs is refused.
+        git(r.path(), &["checkout", "-q", "--", "a.txt"]);
+        state.execute(RepositoryCommand::Checkout(Target::Branch("main".into())));
+        state.execute(RepositoryCommand::Checkout(Target::Branch("other".into())));
+        assert_eq!(state.notice.as_deref(), Some("A checkout is running; wait for it to finish"));
+        settle(&mut state);
+        assert_eq!(branch(r.path()), "main");
+    }
+
+    #[test]
+    fn a_checkout_writes_in_the_windows_repository_after_a_worktree_row_was_shown() {
+        let (r, wt, mut state) = fixture();
+        let second = wt.path().join("second");
+        state.execute(RepositoryCommand::Source(SourceAction::Worktree(second.clone())));
+        settle(&mut state);
+        checkout(&mut state, Target::Branch("other".into()));
+        assert_eq!((branch(r.path()), branch(&second)), ("other".to_string(), "side".to_string()));
+    }
+
+    #[test]
+    fn branch_changes_and_a_worktree_load_their_comparisons() {
+        let (r, wt, mut state) = fixture();
+        let _ = state.take_change_set();
+        state.execute(RepositoryCommand::BranchChanges);
+        assert_eq!(state.notice.as_deref(), Some("Show Branch Changes: main is the base branch; Show Local Changes shows its changes"));
+        checkout(&mut state, Target::Branch("other".into()));
+        let _ = state.take_change_set();
+        state.execute(RepositoryCommand::BranchChanges);
+        settle(&mut state);
+        let main = git(r.path(), &["rev-parse", "main"]).trim().to_string();
+        assert_eq!(state.take_change_set().map(|c| c.1), Some(Spec::Git { cached: false, revs: vec![main], paths: vec![], untracked: true }));
+        let second = wt.path().join("second");
+        state.execute(RepositoryCommand::CompareWorktree(second.clone()));
+        settle(&mut state);
+        let (set, spec) = state.take_change_set().unwrap();
+        assert_eq!(spec, Spec::Plain { left: r.path().to_path_buf(), right: second.clone() });
+        assert!(set.comparisons.iter().any(|c| c.path == "a.txt"), "main's a.txt against other's");
+        state.execute(RepositoryCommand::OpenWindow(second.clone()));
+        assert_eq!(state.take_effects(), [RepositoryEffect::OpenWorktree(second)]);
+    }
+
+    #[test]
+    fn the_palette_offers_the_git_commands() {
+        let (_r, _wt, state) = fixture();
+        use crate::catalog::RepoAction as A;
+        assert_eq!(state.action_command(A::NewBranch, ""), Ok(None), "the adapter asks for the name");
+        assert_eq!(state.action_command(A::CheckoutRevision, ""), Ok(None));
+        assert_eq!(state.action_command(A::BranchChanges, ""), Ok(Some(RepositoryCommand::BranchChanges)));
     }
 }

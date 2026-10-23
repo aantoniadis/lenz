@@ -1,5 +1,6 @@
 //! Thin gpui adapter: paints what the view model says and forwards input to it.
 mod context;
+mod checkout;
 mod horizontal;
 mod panes;
 mod pane_search;
@@ -343,6 +344,8 @@ pub struct Viewer {
     diff_options: Option<toolbar::DiffOptions>,
     /// The `ctrl-g` go-to-line prompt.
     goto: Option<String>,
+    /// New Branch… or Checkout Tag or Revision…, drawn in the Go to line box.
+    git_prompt: Option<checkout::GitPrompt>,
     search: Option<SetSearch>,
     /// 'Unable to calculate diff' when the diff gave up.
     /// The generation whose diff is shown.
@@ -402,12 +405,13 @@ pub struct Viewer {
 
 /// The dialog that owns input now, topmost first. Input goes to it before toolbars, menus and documents.
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub(super) enum Modal { Question, Discard, About, Theme, Help, Palette, DiffOptions, Menu, Popup, GoTo, Switcher, Find, SearchEditing, MergeFind, ConflictConfirm }
+pub(super) enum Modal { Question, Discard, Checkout, GitPrompt, About, Theme, Help, Palette, DiffOptions, Menu, Popup, GoTo, Switcher, Find, SearchEditing, MergeFind, ConflictConfirm }
 
 impl Viewer {
     pub(super) fn modal(&self)->Option<Modal>{
         Some(if self.merge.as_ref().is_some_and(|s|s.ask.is_some())||self.picker_v.as_ref().is_some_and(|s|s.ask.is_some()){Modal::Question}
         else if self.discard_modal(){Modal::Discard}
+        else if self.checkout_modal(){Modal::Checkout}
         else if self.about.is_some(){Modal::About}
         else if self.theme_chooser.is_some(){Modal::Theme}
         else if self.help{Modal::Help}
@@ -415,6 +419,7 @@ impl Viewer {
         else if self.diff_options.is_some(){Modal::DiffOptions}
         else if self.menu.is_some(){Modal::Menu}
         else if self.popup.is_some(){Modal::Popup}
+        else if self.git_prompt.is_some(){Modal::GitPrompt}
         else if self.goto.is_some(){Modal::GoTo}
         else if self.switcher.is_some(){Modal::Switcher}
         else if self.comparison.find.is_some(){Modal::Find}
@@ -483,12 +488,12 @@ enum MenuAction {
     /// pick a branch to compare a commit with, compare two revisions, open a URL, clear the filter at a commit,
     /// open a worktree in a new window, show a file's history.
     Walk(crate::history::Branches),
-    CompareBranch(String),
     CompareWithBranch { row: u32, id: String },
+    /// A sidebar row's entry, as the core lists them.
+    Source(crate::repository_session::SourceEntry),
     Browse(String),
     /// A repository command on a log row, for the commit `id` the menu was opened on.
     RepositoryRow { row: u32, id: String, command: crate::repository_session::RepositoryCommand },
-    NewWindow(std::path::PathBuf),
     /// Start `lenz` with these arguments in the repository (a commit or file in a new window).
     Spawn(Vec<String>),
     /// The Conflict List's: stage a Conflicted File, or put a marked one's conflict back.
@@ -773,6 +778,7 @@ impl Viewer {
             command_palette: None,
             diff_options: None,
             goto: None,
+            git_prompt: None,
             search: None,
             drag: (0.0, 0.0, 0.0),
             drag_ticking: false,
@@ -1139,7 +1145,7 @@ impl Viewer {
     /// A toolbar button; dropdowns open a menu under the button at `x`.
     fn tool(&mut self, tool: Tool, x: f32, window: &mut Window, cx: &mut Context<Self>) {
         if let Tool::Merge(act)=tool {self.merge_act(act,cx);return;}
-        if self.modal().is_some_and(|m|matches!(m,Modal::Discard|Modal::About|Modal::Theme)){return;}
+        if self.modal().is_some_and(|m|matches!(m,Modal::Discard|Modal::Checkout|Modal::About|Modal::Theme)){return;}
         if self.help||self.popup.is_some()||self.goto.is_some()||self.switcher.is_some(){return;}
         if (self.merge.as_ref().is_some_and(|s|s.ask.is_some())||self.picker_v.as_ref().is_some_and(|s|s.ask.is_some())) && !matches!(tool,Tool::Pick(version_picker::PickAct::Save|version_picker::PickAct::Done|version_picker::PickAct::Cancel)){return;}
         if self.conflicts.as_ref().is_some_and(|s|s.confirming()){return;}
@@ -2023,6 +2029,9 @@ impl Viewer {
 
     /// The Go to line box's text.
     fn goto_prompt(&self) -> Option<String> {
+        if let Some(text) = self.git_prompt_text() {
+            return Some(text);
+        }
         let q = self.goto.as_ref()?;
         let side = if self.sel.is_some_and(|s| s.side == Side::Left) { "left" } else { "right" };
         Some(format!("Go to line[:column] on the {side} Side: {q}▏"))
@@ -2090,6 +2099,7 @@ impl Viewer {
                         else if let Some(doc)=self.doc(){match commands::copy_text(*command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:*selection,side:*side,path_label:self.name.as_deref()}){Ok(text)=>cx.write_to_clipboard(ClipboardItem::new_string(text)),Err(reason)=>self.toast(reason.into(),cx)}}
                     }
                     (_, MenuAction::Run(action))=>self.run_action(*action,_window,cx),
+                    (_, MenuAction::Source(entry))=>self.source_entry(entry.clone(),_window,cx),
                     (_, MenuAction::PrLine(side))=>{match self.comparison.markdown_inspection_position(*side){Ok(Some(p))=>{if let Some(threads)=self.threads_at(*side,p.line){self.pr_command(crate::pr_session::PrCommand::ShowThreads(threads),cx);}},Err(reason)=>self.toast(reason.into(),cx),Ok(None)=>{}}},
                     (_, MenuAction::RepositoryRefresh)=>self.refresh_repository(cx),
                     (_, MenuAction::ToggleBlame) => self.toggle_blame(cx),
@@ -2523,7 +2533,7 @@ impl Viewer {
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.resize_blocked(){self.panes.drag=None;}
-        if self.modal().is_some_and(|m|matches!(m,Modal::Question|Modal::Discard|Modal::About|Modal::Theme|Modal::Help)){return;}
+        if self.modal().is_some_and(|m|matches!(m,Modal::Question|Modal::Discard|Modal::Checkout|Modal::About|Modal::Theme|Modal::Help)){return;}
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         if let Some(menu) = self.menu.as_mut() {
             let hover = menu.item_at(x, y, self.char_w,self.panes.viewport);
@@ -2851,6 +2861,7 @@ impl Viewer {
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.panes.drag=None;
         if self.discard_modal(){match ev.keystroke.key.as_str(){"escape"=>self.file_actions.cancel(),"enter" if !self.file_actions.busy()=>self.confirm_discard(cx),_=>{}}cx.notify();return;}
+        if self.checkout_key(ev,cx)||self.git_prompt_key(ev,cx){return;}
         if self.theme_key(ev,cx) { return; }
         if let Some(about)=&mut self.about {
             let max=about::About::max_scroll(window.viewport_size(),self.char_w);
@@ -3726,6 +3737,7 @@ impl Render for Viewer {
         if let Some(about)=&mut self.about{about.scroll=about.scroll.min(about::About::max_scroll(window.viewport_size(),self.char_w));}
         let about_palette=palette.clone();
         let discard_overlay=self.discard_overlay(cx);
+        let checkout_overlay=self.checkout_overlay(cx);
         let theme_overlay=self.theme_overlay(window,cx);
         let pr_details=self.pr_details_frame(window,cx);
         let summary_frame=self.summary_frame();
@@ -3982,7 +3994,7 @@ impl Render for Viewer {
                     },
                 )
                 .w_full().flex_1(),
-            ).child(footer).children(resize_handles).children(help_overlay).children(theme_overlay).children(about_overlay).children(discard_overlay)
+            ).child(footer).children(resize_handles).children(help_overlay).children(theme_overlay).children(about_overlay).children(discard_overlay).children(checkout_overlay)
     }
 }
 
