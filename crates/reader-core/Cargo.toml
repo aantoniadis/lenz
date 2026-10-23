@@ -28,6 +28,12 @@ globset = "0.4"
 # Content validation; already in the workspace dependency graph.
 sha2 = "0.10.9"
 
+# Offline PostgreSQL syntax/scopes and source-preserving whitespace formatting.
+sqlparser = { version = "0.63", features = ["visitor"] }
+sqlformat = "0.5"
+# Native PostgreSQL 18 grammar with structured Unicode cursor positions.
+pg_parse = "0.15"
+
 [build-dependencies]
 sha2 = "0.10.9"
 
