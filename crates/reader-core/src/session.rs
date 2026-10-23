@@ -62,6 +62,8 @@ impl Selection {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    PrepareProjection(crate::projection::Request),
+    CancelProjection { pane: u8, request: u64 },
     SearchEverywhere { scope: crate::navigation::Scope, query: String },
     CloseSearchEverywhere,
     /// Forget one recent-file result only if its displayed identity is still current.
@@ -773,6 +775,7 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    Projected(crate::projection::Finished),
     LibraryRead { generation: u64, read: crate::libraries::Read },
     Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
     ServerRuntimes { request: u64, paths: Vec<PathBuf> },
@@ -885,6 +888,7 @@ impl Input {
         match self {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
+                Completion::Projected(_) => "source projection",
                 Completion::PlacesRead { .. } => "places read",
                 Completion::PlacesMerged { .. } => "places merged",
                 Completion::PlacesChecked { .. } => "places checked",
@@ -1601,6 +1605,7 @@ pub struct Session {
     index_cache: Option<Arc<std::sync::Mutex<crate::index_cache::Cache>>>,
     index_revision: Arc<AtomicU64>,
     index_rebuilding: bool,
+    projections: crate::projection_jobs::Scheduler,
     jobs: Jobs,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -1718,6 +1723,9 @@ pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String
 }
 
 impl Session {
+    pub fn projection(&self, pane: u8) -> Option<&Arc<crate::projection::Batch>> {
+        self.projections.ready(pane).filter(|b| projection_current(&self.state, &b.request))
+    }
     pub fn new(config: Config) -> Self {
         let recent = read_recent(&config.recent);
         let settings = read_settings(&config.settings);
@@ -1782,6 +1790,7 @@ impl Session {
             index_revision: Arc::new(AtomicU64::new(0)),
             index_rebuilding: false,
             jobs: Jobs::new(),
+            projections: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -2499,6 +2508,8 @@ impl Session {
         if self.state.documentation.is_some() && self.state.documentation().is_none() {
             self.state.documentation = None;
         }
+        self.projections.invalidate(|r| projection_current(&self.state, r));
+        self.projections.pump(&self.jobs, &self.tx);
         effect
     }
 
@@ -2532,6 +2543,18 @@ impl Session {
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
+            Command::PrepareProjection(request) => {
+                if projection_current(&self.state, &request)
+                    && let Some(snapshot) = self.state.view(request.tab).map(|v| v.snapshot().clone())
+                {
+                    self.projections.prepare(request, snapshot);
+                }
+                Effect::default()
+            }
+            Command::CancelProjection { pane, request } => {
+                self.projections.cancel(pane, request);
+                Effect::default()
+            }
             Command::SearchEverywhere {scope, query} => {
                 if scope == crate::navigation::Scope::Recent && self.state.navigation.as_ref().is_none_or(|n| n.scope != scope) {
                     self.command(Command::CheckPlaces);
@@ -3916,6 +3939,9 @@ impl Session {
 
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
+            Completion::Projected(done) => {
+                Effect { repaint: self.projections.finish(done, |r| projection_current(&self.state, r)), copy: None }
+            }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
@@ -6729,6 +6755,7 @@ impl Drop for Session {
         }
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
+        self.projections.cancel_all();
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
@@ -6904,6 +6931,11 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 /// Where `head` goes by `motion` in `doc`.
+fn projection_current(state: &State, request: &crate::projection::Request) -> bool {
+    state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
+        && state.view(request.tab).is_some_and(|view| request.cursor.matches(view.snapshot(), view.inlay_hints()))
+}
+
 fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize, motion: Motion) -> usize {
     let line = doc.line_of(head);
     let range = doc.reader_line_range(line);
