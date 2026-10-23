@@ -45,12 +45,15 @@ jobs:
           sudo apt-get install -y build-essential pkg-config python3 libxkbcommon-x11-dev libwayland-dev \
             libfontconfig-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libzstd-dev
 
-      - name: Metal toolchain (gpui compiles shaders at build time)
+      - name: macOS build setup (Metal toolchain for gpui's shaders, target folder)
         if: runner.os == 'macOS'
         # Xcode 16 ships the Metal compiler and has no -downloadComponent; Xcode 26 downloads it on demand.
         run: |
           xcodebuild -version
           xcrun metal --version || { xcodebuild -downloadComponent MetalToolchain && xcrun metal --version; }
+          # Outside the runner's home: gpui's shaders record their build folder (package.sh does this itself since
+          # 0.0.5; set here too so a run for the v0.0.5 tag builds).
+          echo "CARGO_TARGET_DIR=/tmp/lenz-dist" >> "$GITHUB_ENV"
 
       - name: Rust stable
         shell: bash

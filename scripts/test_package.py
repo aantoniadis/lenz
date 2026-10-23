@@ -42,7 +42,7 @@ class PackageTests(unittest.TestCase):
         self.fake('cargo', '''import json, os, pathlib, sys
 calls = pathlib.Path(os.environ['LENZ_TEST_CALLS'])
 calls.write_text(json.dumps((json.loads(calls.read_text()) if calls.exists() else []) + [sys.argv[1:]]))
-pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('flags.json').write_text(json.dumps({k: os.environ.get(k) for k in ('RUSTFLAGS', 'CFLAGS', 'CXXFLAGS')}))
+pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('flags.json').write_text(json.dumps({k: os.environ.get(k) for k in ('RUSTFLAGS', 'CFLAGS', 'CXXFLAGS', 'CARGO_TARGET_DIR')}))
 package = sys.argv[sys.argv.index('-p') + 1]
 # Cargo names an executable by its bin target, not its package.
 name = {'reader-gui': 'lenz-reader', 'reader-tui': 'lenz-reader-tui'}.get(package, package)
@@ -141,6 +141,24 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
             self.assertEqual((info['CFBundleName'], info['CFBundleShortVersionString']), ('Lenz', '0.2.0'))
         signed = (self.root / 'codesign.txt').read_text()
         self.assertTrue(signed.startswith('--force --sign -') and signed.endswith('/Lenz.app'), signed)
+
+    def test_macos_builds_outside_the_home_folder_unless_told_where(self):
+        # gpui's shader library records its build folder, and a home folder in it would be refused.
+        def target_dir(host, chosen):
+            self.fake_rustc(host)
+            self.fake('codesign', 'pass')
+            self.artifact = self.root / f'out/{host}/dist/lenz'
+            self.env['LENZ_TEST_ARTIFACT'] = str(self.artifact)
+            if chosen is None:
+                self.env.pop('CARGO_TARGET_DIR', None)
+            else:
+                self.env['CARGO_TARGET_DIR'] = chosen
+            result = self.package('0.2.0')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return json.loads((self.root / 'flags.json').read_text())['CARGO_TARGET_DIR']
+        self.assertEqual(target_dir('aarch64-apple-darwin', None), '/tmp/lenz-dist')
+        self.assertEqual(target_dir('aarch64-apple-darwin', '/elsewhere'), '/elsewhere')
+        self.assertIsNone(target_dir('x86_64-test-linux-gnu', None))
 
     def test_missing_artifact_does_not_package_stale_binary(self):
         self.env['LENZ_TEST_SKIP_ARTIFACT'] = '1'

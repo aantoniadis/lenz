@@ -134,7 +134,7 @@ On Linux, gpui needs: `libxkbcommon-x11-dev libwayland-dev libfontconfig-dev lib
 packaging/package.sh 0.0.5
 ```
 
-The bundle is at `target/package/lenz-0.0.5-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.5-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version.
+The bundle is at `target/package/lenz-0.0.5-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.5-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version. It builds in `/tmp/lenz-dist` (set `CARGO_TARGET_DIR` to choose another folder outside your home): the shaders record their build folder, and no home folder may ship.
 
 ```sh
 open target/package/lenz-0.0.5-aarch64-apple-darwin/Lenz.app                          # the Reader, as from Finder
