@@ -156,7 +156,9 @@ impl Cursor {
         let mut shown = Shown { text: String::new(), map: vec![0], hints: Vec::new() };
         let (mut work, mut last_hint) = (0, None);
         while work_bytes.saturating_sub(work) >= MIN_WORK {
-            let source = snapshot.line_window(self.line, self.byte, work_bytes)?;
+            let source_start = self.byte;
+            let source_end = snapshot.floor_char_boundary(source_start.saturating_add(work_bytes).min(line.end));
+            let source = snapshot.range(source_start..source_end)?;
             loop {
                 if work_bytes.saturating_sub(work) < MIN_WORK { break; }
                 let col = self.byte - line.start;
@@ -194,7 +196,7 @@ impl Cursor {
                     continue;
                 }
                 if self.byte == line.end { break; }
-                let Some(c) = source.text.get(self.byte - source.bytes.start..).and_then(|s| s.chars().next()) else { break };
+                let Some(c) = source.get(self.byte - source_start..).and_then(|s| s.chars().next()) else { break };
                 let start = shown.text.len();
                 let local = self.byte - from.byte;
                 shown.map.resize(local + 1, start);
