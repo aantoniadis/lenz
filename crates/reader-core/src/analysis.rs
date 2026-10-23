@@ -12,7 +12,7 @@ use result::{ResultEntry, ResultTicket};
 enum Owner { Buffer(BufferId), Result(ResultSlot) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
+pub(crate) enum Consumer { Blame(TabId), Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -230,6 +230,7 @@ impl Analysis {
     pub(crate) fn release_view(&mut self, id: BufferId, tab: TabId, last: bool) {
         self.cancel_consumer(id, Consumer::Find(tab));
         self.cancel_consumer(id, Consumer::Selection(tab));
+        self.cancel_consumer(id, Consumer::Blame(tab));
         if !last { return; }
         for consumer in [Consumer::Syntax, Consumer::RootKind, Consumer::Markdown, Consumer::Ready, Consumer::Documentation, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
         if let Some(entry) = self.entries.get_mut(&id) {

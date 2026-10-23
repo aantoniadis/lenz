@@ -111,6 +111,13 @@ impl Session {
         {
             return provider_message(provider);
         }
+        if let Some(status) = state.active().and_then(|tab| tab.blame_status()) {
+            match status {
+                crate::blame::Status::Pending => return "Blame pending…".into(),
+                crate::blame::Status::Failed(error) => return format!("Blame failed: {error}"),
+                crate::blame::Status::Ready => {}
+            }
+        }
         if let Some(a) = self.caret_annotation() {
             return match a.shade {
                 None => a.label,

@@ -2629,6 +2629,8 @@ impl Session {
         }
         let t = self.state.active().ok_or("No file is open")?;
         let b = t.blame.as_ref().ok_or("Annotations are off")?;
+        if b.error.is_some() { return Err("Blame failed"); }
+        if !b.done { return Err("Blame pending"); }
         let line = self.state.source(t.id).zip(t.selection).map(|(d, s)| d.line_of(s.head)).ok_or("No line is selected")?;
         match (b.lines.get(line), &b.root) {
             (Some(Some(c)), _) if !c.is_committed() => Err("This line is not committed"),
@@ -2870,6 +2872,7 @@ impl Session {
         for tab in changed {
             if self.is_shown(tab) { self.mark_shown(tab, next.key().version); self.decorate(tab); }
             if let Some(query) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) { self.find_in(tab, query, false); }
+            self.annotate(tab);
         }
         self.synced = 0;
         Effect { repaint: true, copy: None }
@@ -3536,7 +3539,7 @@ impl Session {
             Command::ShowCommitAt { tab, line } => {
                 let Some(doc) = self.state.source(tab).cloned() else { return Effect::default() };
                 let Some(t) = self.tab_mut(tab) else { return Effect::default() };
-                let Some(b) = t.blame.as_ref() else { return Effect::default() };
+                let Some(b) = t.blame.as_ref().filter(|b| b.done && b.error.is_none() && b.matches(&doc)) else { return Effect::default() };
                 let (Some(Some(commit)), Some(root)) = (b.lines.get(line), b.root.clone()) else { return Effect::default() };
                 if !commit.is_committed() {
                     return Effect::default();
@@ -4876,14 +4879,13 @@ impl Session {
                 None => Effect::default(),
             },
             Completion::Blamed { tab, request, root, hunks, done } => {
-                let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request) else { return Effect::default() };
+                let Some(snapshot) = self.state.source(tab).cloned() else { return Effect::default() };
+                let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request && b.matches(&snapshot) && b.error.is_none()) else { return Effect::default() };
                 b.apply(root, hunks);
                 match done {
                     Some(Ok(())) => b.done = true,
                     Some(Err(e)) => {
-                        if let Some(t) = self.tab_mut(tab) {
-                            t.blame = None;
-                        }
+                        b.fail(e.clone());
                         self.state.messages.push(format!("Annotate with Git Blame: {e}"));
                     }
                     None => {}
@@ -7465,15 +7467,20 @@ impl Session {
     /// Blames tab `id` when its annotations are on and are not of its content as it is (new, changed or reloaded).
     fn annotate(&mut self, id: TabId) {
         self.blame_requests += 1;
-        let (request, tx) = (self.blame_requests, self.tx.clone());
+        let request = self.blame_requests;
         let Some(doc) = self.state.source(id).cloned() else { return };
         let Some(t) = self.tab_mut(id) else { return };
         let Some(b) = t.blame.as_mut() else { return };
-        if b.of(t.stamp) || t.retrieved.is_some() {
+        if b.of(t.stamp, &doc) || t.retrieved.is_some() {
             return;
         }
         let file = t.canonical.clone().unwrap_or_else(|| t.source.clone());
-        b.start(id, file, t.stamp, doc.line_count(), request, tx);
+        let work = b.start(id, file, t.stamp, &doc, request);
+        if self.state.commit.as_ref().is_some_and(|popup| popup.tab == id) { self.state.commit = None; }
+        let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
+        let input = crate::analysis::Input::new(doc, loaded, self.project_generation.load(Ordering::Relaxed), self.is_shown(id));
+        if !self.analysis.request(input, crate::analysis::Consumer::Blame(id), request, Priority::Background, work)
+            && let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) { b.fail("Background work is busy; retry annotations".into()); }
     }
 
     /// Work derived from the active document: syntax spans, and a Markdown file's preview.

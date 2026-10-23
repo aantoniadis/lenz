@@ -6199,6 +6199,49 @@ mod blame {
     }
 
     #[test]
+    fn draft_insert_delete_and_undo_invalidate_blame_before_recomputing_current_bytes() {
+        use crate::text::{EditKind, TextEdit};
+        let r = repo();
+        let original = "one\ntwo\nthree\n";
+        put(r.path(), "a.txt", original);
+        commit_all(r.path(), "original");
+        let sha = git(r.path(), &["rev-parse", "HEAD"]).trim().to_string();
+        let mut s = session(r.path());
+        s.dispatch(Command::Open(r.path().join("a.txt")));
+        settle(&mut s, opened);
+        annotate(&mut s);
+        let tab = s.state().active().unwrap().id();
+        s.dispatch(Command::Select(Selection { anchor: 4, head: 4 }));
+        assert_eq!(s.disabled(CommandId::CopyRevision), None);
+        let edit = |s: &mut Session, range, text: &str| {
+            let expected = s.state().view(tab).unwrap().snapshot().key();
+            s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind: EditKind::Replace });
+            assert!(s.annotation(tab, 0).is_none(), "old attribution disappears synchronously");
+            assert!(s.disabled(CommandId::CopyRevision).is_some(), "no old commit action while pending");
+            assert_eq!(s.status_message(), "Blame pending…");
+            settle(s, blamed);
+        };
+        edit(&mut s, 4..4, "new\n");
+        assert_eq!(source_text(active_view(&s).snapshot()), "one\nnew\ntwo\nthree\n");
+        assert_eq!(s.annotation(tab, 1).unwrap().label, "Not committed");
+        for line in [0, 2, 3] { assert_eq!(s.annotation(tab, line).unwrap().commit.sha, sha); }
+        edit(&mut s, 8..12, "");
+        assert_eq!(source_text(active_view(&s).snapshot()), "one\nnew\nthree\n");
+        assert_eq!(s.annotation(tab, 2).unwrap().commit.sha, sha);
+        s.dispatch(Command::Undo { tab });
+        assert!(s.annotation(tab, 0).is_none());
+        settle(&mut s, blamed);
+        assert_eq!(source_text(active_view(&s).snapshot()), "one\nnew\ntwo\nthree\n");
+        assert_eq!(s.annotation(tab, 2).unwrap().commit.sha, sha);
+        s.dispatch(Command::Undo { tab });
+        assert!(s.annotation(tab, 0).is_none());
+        settle(&mut s, blamed);
+        assert_eq!(source_text(active_view(&s).snapshot()), original);
+        for line in 0..3 { assert_eq!(s.annotation(tab, line).unwrap().commit.sha, sha); }
+        assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), original);
+    }
+
+    #[test]
     fn switching_tabs_keeps_annotations_without_a_new_job() {
         let r = repo();
         put(r.path(), "a.txt", "a\n");
@@ -6256,16 +6299,18 @@ mod blame {
     }
 
     #[test]
-    fn outside_git_turns_off_with_a_notice() {
+    fn outside_git_keeps_a_visible_failure_without_commit_actions() {
         let d = tempfile::tempdir().unwrap();
         let path = write(d.path(), "a.txt", b"x\n");
         let mut s = session(d.path());
         s.dispatch(Command::Open(path));
         settle(&mut s, opened);
         s.dispatch(Command::SetAnnotate(true));
-        settle(&mut s, |s| s.state().active().is_some_and(|t| t.blame.is_none()));
+        settle(&mut s, |s| s.state().active().is_some_and(|t| matches!(t.blame_status(), Some(crate::blame::Status::Failed(_)))));
         assert_eq!(s.status_message(), "Annotate with Git Blame: Not in a Git repository");
-        assert_eq!(s.on(CommandId::AnnotateBlame), Some(false));
+        assert_eq!(s.on(CommandId::AnnotateBlame), Some(true));
+        assert_eq!(s.disabled(CommandId::ShowCommit), Some("Blame failed"));
+        assert!(s.caret_annotation().is_none());
     }
 
     #[test]
