@@ -88,7 +88,9 @@ Completed GoTo increased by 0.085 ms between medians; the median paired differen
 was 0.067 ms, with individual paired differences from −0.937 to +0.602 ms. These
 samples show substantial variation and do not establish a precise stable latency
 cost. The input/stress differences and the single-pair peak RSS increase remain
-reported observations, not an approved tradeoff or a blanket preservation claim.
+reported observations. The user accepted the documented 08–10 batch costs on
+2026-10-24, including startup RSS and completed GoTo, and requested continued
+implementation. This is not a blanket preservation claim or approval of future costs.
 Earlier baseline peak observations were about 40.2 MiB. The earlier candidate's
 roughly 1.5 MiB settled-RSS increase did not recur in the final production run.
 

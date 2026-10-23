@@ -148,10 +148,12 @@ assertions remain active. Gated real parser teardown and pending-result
 replacement also pass in the retained release executable; their whole-test wall
 times, 0.017 and 0.001 s, are not individual cancellation-latency estimates.
 
-**Performance acceptance remains open.** The repeated syntax cost, smaller text
-and definition costs, and higher stress/provider RSS require the batch's explicit
-tradeoff decision. No new tradeoff is claimed accepted, and no additional stress
-or optimization loop is scheduled. Core opening is not native window first
+**The user accepted the documented batch costs on 2026-10-24** and requested
+continued implementation, with full validation and stress measurements once per
+batch of several tickets. Acceptance covers these measured costs, including the
+TUI report's startup-memory and completed-GoTo changes; it does not approve
+future regressions. No additional stress or optimization loop is scheduled for
+this batch. Core opening is not native window first
 paint, and fake-server latency is not real-provider performance.
 
 ## Remaining boundaries

@@ -8,8 +8,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 
 - **TUI overhead:** the final snapshot-window comparison measured startup RSS
   +0.592 MiB and completed Go To median +0.085 ms, with substantial timing
-  variation. Settled RSS decreased. Retain these observations for the batch's
-  performance decision; do not start another optimization investigation now.
+  variation. Settled RSS decreased. The user accepted the documented batch costs
+  on 2026-10-24; retain this as a later optimization opportunity.
   Evidence: `docs/research/reader-snapshot-tui-performance.md` on the TUI branch
   and `target/perf/editor-implementation/09/native-final-summary.json`.
 - **Find before results arrive:** `Session::find_step` currently returns without
