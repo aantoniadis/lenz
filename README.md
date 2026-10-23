@@ -68,6 +68,11 @@ The Reader does not edit the files it displays; only the checkouts and branches 
 Diff feature. See the [Reader guide](docs/code/README.md) for controls and limits,
 and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
 
+The internal snapshot migration measured core text availability at **0.888 → 0.912–0.976 ms**
+for the 945,000-byte fixture; the performance exception is awaiting agreement. This endpoint
+excludes frontend painting and does not enable editing. See the [snapshot measurements](docs/research/reader-snapshot-migration-performance.md)
+for repeated timing, sustained memory, unsuccessful experiments and remaining limits.
+
 ### Diff and merge
 
 - **Compare** files, directories, revisions, the index or the working tree, with word/character/line highlighting, whitespace and case modes, three scroll modes, syntax highlighting, sticky scroll (the enclosing declarations stay pinned at the top of each pane) and blame annotations.

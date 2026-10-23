@@ -1647,3 +1647,26 @@ terminal RSS, with nearly all the remaining increase in mapped executable pages 
 samples remain in `target/perf/library-tree/`. Native macOS/Windows, GPU memory and long sessions are unverified;
 virtual sources can only list visited files, and unfamiliar package layouts fall back to a nearby manifest or
 containing folder. This work does not speed up a language server's own indexing.
+
+## 2026-10-23 Reader snapshot migration
+
+The core now owns indexed immutable current snapshots and a bounded view facade, with explicit
+compatibility Document paths retained for the adapter/analysis migrations. The [measurement report](research/reader-snapshot-migration-performance.md)
+records source/executable identities, raw evidence, the full local gate and the pending performance decision.
+Editing remains disabled at this stage.
+
+Sharing original text removed a duplicate allocation; reusing decoded line-index ranges later removed
+roughly 300 KB of copied offsets and 231 allocations for the larger fixture. Per-dispatch registry scans
+were removed, cache accounting moved to ownership transitions, and prefix/storage accounting was fused.
+The smaller exact-size/prefix cleanup passed stress but did not resolve opening latency. Earlier
+shared-target samples are excluded after a real build collision; a concurrent-validation timing batch
+is also excluded. All failed, intermediate and inconclusive samples remain retained.
+
+Two clean final pairs still measure 6–8 µs extra core first-text time for 50,400 bytes and 24–88 µs for
+945,000 bytes. Tail direction varies; this is not a preservation claim or an approved tradeoff. The final
+180.15-second core stress passed with settled VmRSS 17.02→17.23 MiB, against baseline 17.93→17.96 MiB;
+these are short-run process-memory observations, not leak proof. Ten alternating cached-operation pairs reproduced roughly 14 ms tails
+in both baseline and candidate; their exact cause remains untraced. Typical cached-operation medians
+rose by about 0.2 µs while p95 improved. The full local gate passed at `39a830c`, including actual adapters,
+collectors and release checks. Native macOS, physical display latency, complete rendering/input migration
+and long-session behavior remain unverified by this prerequisite.
