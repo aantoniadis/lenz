@@ -38,6 +38,18 @@ pub enum Query<T> { Ready(T), Pending(Work) }
 pub struct Rows { pub rows: Vec<Row>, pub pending: Option<Work> }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Request { pub pane: u8, pub tab: crate::tabs::TabId, pub work: Work }
+
+/// Opaque result from the shared layout lane; only Session may publish it.
+#[derive(Debug)]
+pub struct Finished {
+    pub(crate) pane: u8,
+    pub(crate) ticket: u64,
+    pub(crate) request: Request,
+    pub(crate) delta: Option<Delta>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Key { seed: Cursor, cols: Option<usize> }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

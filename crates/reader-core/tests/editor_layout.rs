@@ -58,3 +58,47 @@ fn logical_wrap_never_splits_an_ordinary_projected_grapheme() {
     assert_eq!(ready(&mut cache, &doc, |c| c.row(&doc, 0, 1, 3)).unwrap().display, "👩‍💻".len().."👩‍💻X".len());
     let _ = Cursor::start(&doc, 0, None).unwrap();
 }
+
+#[test]
+fn session_resumes_cold_rows_on_the_shared_worker_lane() {
+    use std::{sync::Arc, time::{Duration, Instant}};
+    use reader_core::session::{Command, Completion, Config, Session};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let path = root.join("cold.txt");
+    std::fs::write(&path, "x".repeat(200_000)).unwrap();
+    let mut session = Session::new(Config {
+        themes: lenz_content::theme::ThemePaths::under(&root.join("config"), &root.join("state"), "lenz-reader"),
+        recent: root.join("state/recent.json"), settings: root.join("state/settings.json"),
+        providers: root.join("config/providers.json"), cache: root.join("cache"),
+        idle: reader_core::semantics::IDLE, clock: Arc::new(Instant::now), overrides: Default::default(), dark: true,
+    });
+    let rx = session.completions();
+    session.dispatch(Command::Open(path));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while !session.state().active().is_some_and(|tab| tab.loaded()) && Instant::now() < deadline {
+        while let Ok(completion) = rx.try_recv() { session.dispatch(completion); }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let tab = session.state().active().unwrap().id();
+    session.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 10 });
+    session.dispatch(Command::SetSoftWrap(true));
+    let mut completed = 0;
+    loop {
+        assert!(Instant::now() < deadline, "cold layout must make progress");
+        match session.state().view(tab).unwrap().layout_row(0, 19_000, Some(10)) {
+            Query::Ready(Some(row)) => { assert_eq!(row.source, 190_000..190_010); break; }
+            Query::Ready(None) => panic!("missing current source row"),
+            Query::Pending(work) => session.dispatch(Command::PrepareLayout { pane: 0, tab, work }),
+        };
+        loop {
+            assert!(Instant::now() < deadline);
+            if let Ok(completion) = rx.try_recv() {
+                let layout = matches!(&completion, Completion::LaidOut(_));
+                session.dispatch(completion);
+                if layout { completed += 1; break; }
+            } else { std::thread::sleep(Duration::from_millis(1)); }
+        }
+    }
+    assert!(completed >= 2, "distant rows must resume through bounded batches");
+}

@@ -63,6 +63,7 @@ impl Selection {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
     PrepareProjection(crate::projection::Request),
+    PrepareLayout { pane: u8, tab: TabId, work: crate::layout::Work },
     CancelProjection { pane: u8, request: u64 },
     SearchEverywhere { scope: crate::navigation::Scope, query: String },
     CloseSearchEverywhere,
@@ -778,6 +779,7 @@ pub struct Action {
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
     Projected(crate::projection::Finished),
+    LaidOut(Box<crate::layout::Finished>),
     LibraryRead { generation: u64, read: crate::libraries::Read },
     Navigation { request: u64, files: usize, indexed: usize, found: Option<(Vec<crate::navigation::Row>, usize)> },
     ServerRuntimes { request: u64, paths: Vec<PathBuf> },
@@ -891,6 +893,7 @@ impl Input {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
                 Completion::Projected(_) => "source projection",
+                Completion::LaidOut(_) => "source layout",
                 Completion::PlacesRead { .. } => "places read",
                 Completion::PlacesMerged { .. } => "places merged",
                 Completion::PlacesChecked { .. } => "places checked",
@@ -1269,6 +1272,17 @@ impl View<'_> {
             Query::Ready(())
         });
         Rows { rows: out, pending: match query { Query::Pending(work) => Some(work), Query::Ready(()) => None } }
+    }
+
+    pub fn layout_sticky(&self, max: usize, cols: Option<usize>) -> crate::layout::Query<Arc<[crate::tabs::StickyLine]>> {
+        use crate::layout::Query;
+        let Some(declarations) = self.tab.declarations.as_ref().filter(|_| max > 0) else { return Query::Ready(Arc::from([])) };
+        let shown = self.layout_rows(max.saturating_add(1), cols);
+        if let Some(work) = shown.pending { return Query::Pending(work); }
+        let row_of = |line: u32| shown.rows.iter().position(|row| row.line as u32 >= line).map_or(u32::MAX, |at| at as u32);
+        Query::Ready(declarations.sticky_rows(u32::try_from(self.tab.top_line()).unwrap_or(u32::MAX), self.tab.top_row() > 0, max, row_of)
+            .into_iter().map(|line| crate::tabs::StickyLine { line: line.line as usize, row: line.row as usize })
+            .filter(|line| line.line < self.line_count()).collect())
     }
 
     pub fn layout_step(&self, from: (usize, usize), delta: isize, cols: usize) -> crate::layout::Query<(usize, usize)> {
@@ -1722,6 +1736,7 @@ pub struct Session {
     index_revision: Arc<AtomicU64>,
     index_rebuilding: bool,
     projections: crate::projection_jobs::Scheduler,
+    layouts: crate::layout_jobs::Scheduler,
     jobs: Jobs,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -1907,6 +1922,7 @@ impl Session {
             index_rebuilding: false,
             jobs: Jobs::new(),
             projections: Default::default(),
+            layouts: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -2624,6 +2640,8 @@ impl Session {
         if self.state.documentation.is_some() && self.state.documentation().is_none() {
             self.state.documentation = None;
         }
+        self.layouts.invalidate(|r| layout_current(&self.state, r));
+        self.layouts.pump(&self.jobs, &self.tx);
         self.projections.invalidate(|r| projection_current(&self.state, r));
         self.projections.pump(&self.jobs, &self.tx);
         effect
@@ -2656,9 +2674,19 @@ impl Session {
         self.state.sources.aliases.retain(|_, id| self.state.sources.buffers.contains_key(id));
     }
 
+    fn prepare_layout(&mut self, request: crate::layout::Request) {
+        if layout_current(&self.state, &request) && let Some(snapshot) = self.state.view(request.tab).map(|view| view.snapshot().clone()) {
+            self.layouts.prepare(request, snapshot);
+        }
+    }
+
     fn command(&mut self, command: Command) -> Effect {
         let repaint = Effect { repaint: true, copy: None };
         match command {
+            Command::PrepareLayout { pane, tab, work } => {
+                self.prepare_layout(crate::layout::Request { pane, tab, work });
+                Effect::default()
+            }
             Command::PrepareProjection(request) => {
                 if projection_current(&self.state, &request)
                     && let Some(snapshot) = self.state.view(request.tab).map(|v| v.snapshot().clone())
@@ -4066,6 +4094,12 @@ impl Session {
 
     fn complete(&mut self, completion: Completion) -> Effect {
         match completion {
+            Completion::LaidOut(done) => {
+                let applied = self.layouts.finish(*done, |r| layout_current(&self.state, r)).is_some_and(|(request, delta)| {
+                    self.state.tabs.iter().find(|tab| tab.id == request.tab).is_some_and(|tab| tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(delta))
+                });
+                Effect { repaint: applied, copy: None }
+            }
             Completion::Projected(done) => {
                 Effect { repaint: self.projections.finish(done, |r| projection_current(&self.state, r)), copy: None }
             }
@@ -6882,6 +6916,7 @@ impl Drop for Session {
         }
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
+        self.layouts.cancel_all();
         self.projections.cancel_all();
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
@@ -7058,6 +7093,11 @@ fn normalized(path: &Path) -> PathBuf {
 }
 
 /// Where `head` goes by `motion` in `doc`.
+fn layout_current(state: &State, request: &crate::layout::Request) -> bool {
+    state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
+        && state.view(request.tab).is_some_and(|view| request.work.matches(view.snapshot(), state.wrap_cols(view.tab()), view.inlay_hints()))
+}
+
 fn projection_current(state: &State, request: &crate::projection::Request) -> bool {
     state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
         && state.view(request.tab).is_some_and(|view| request.cursor.matches(view.snapshot(), view.inlay_hints()))
