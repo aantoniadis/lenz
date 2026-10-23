@@ -33,3 +33,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   explicit prebuilt-helper option would make immutable benchmark archives easier
   to replay and prevent accidental compilation inside quiet runs. The current
   measurements retain the expected directory layout and use `CARGO=/usr/bin/true`.
+- **Presentation work during native reveal:** review whether automatically issued
+  commands such as `ColourResults` should supersede a pending native reveal. The
+  cancellation classifier currently exempts a small set of adapter feedback
+  commands. Reproduce semantic-result navigation with fresh result coloring before
+  treating this as a defect; do not start a separate investigation now.
