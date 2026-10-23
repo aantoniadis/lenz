@@ -5349,29 +5349,36 @@ fn gui_the_git_menu_compares_the_working_tree(cx: &mut TestAppContext) {
     assert_eq!(launched_args(&mut v, &f), [vec!["HEAD".to_string()]]);
     // On main, the base branch: it says so and starts nothing.
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ShowBranchChanges, w, cx));
-    assert!(f.view.read_with(&v, |r, _| r.status()).contains("main is the base branch"));
+    assert!(f.view.read_with(&v, |r, _| r.status()).contains("Show Changes Since Branch Start: main is the base branch"));
     assert_eq!(launched_args(&mut v, &f).len(), 1);
-    // Compare with Branch, Tag or Revision…: refused in the prompt, then compared.
+    // Compare with Base Branch: main's tip.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithBase, w, cx));
+    assert_eq!(launched_args(&mut v, &f)[1], ["refs/heads/main"]);
+    // Compare with Branch, Tag or Revision…: a pick list of branches and tags, or what is typed.
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithRevision, w, cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     draw(&mut v);
     let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
-    assert!(rows[1].starts_with("Compare the working tree with a branch, tag or revision"), "{rows:?}");
-    // Narrow: the prompt stays inside the window, its hint wrapped.
+    assert!(rows[1].starts_with("Compare with Branch, Tag or Revision — type to filter or a revision"), "{rows:?}");
+    assert!(rows.iter().any(|r| r.ends_with("other")) && rows.iter().any(|r| r.ends_with("v1")) && !rows.iter().any(|r| r.contains("New Branch")), "{rows:?}");
+    // Narrow: the list stays inside the window.
     v.simulate_resize(size(px(260.0), px(200.0)));
     draw(&mut v);
-    let (bounds, lines) = f.view.read_with(&v, |r, _| r.modal_layout().map(|l| (l.bounds, l.lines.len())).unwrap());
-    assert!(bounds.right() <= px(260.0) && lines > 2, "{bounds:?} {lines}");
+    let bounds = f.view.read_with(&v, |r, _| r.modal_layout().map(|l| l.bounds).unwrap());
+    assert!(bounds.right() <= px(260.0), "{bounds:?}");
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
-    type_text(&mut v, "nope");
-    v.simulate_keystrokes("enter");
-    let refused = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
-    assert!(refused.iter().any(|r| r == "No commit named \"nope\""), "{refused:?}");
-    for _ in 0..4 { v.simulate_keystrokes("backspace"); }
-    type_text(&mut v, "v1");
-    v.simulate_keystrokes("enter");
+    // A listed branch: type to find it, then Down to its row.
+    type_text(&mut v, "oth");
+    v.simulate_keystrokes("down enter");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
-    assert_eq!(launched_args(&mut v, &f)[1], ["v1"]);
+    assert_eq!(launched_args(&mut v, &f)[2], ["refs/heads/other"]);
+    // Typed text: the first row compares with it.
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::CompareWithRevision, w, cx));
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    type_text(&mut v, "HEAD");
+    v.simulate_keystrokes("enter");
+    assert_eq!(launched_args(&mut v, &f)[3], ["HEAD"]);
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ main"), "nothing checked out");
     assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n");
 }
@@ -5422,4 +5429,40 @@ fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppCo
     v.simulate_keystrokes("enter escape");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().branches().is_none()));
     assert_eq!(launched_args(&mut v, &f).len(), 3);
+}
+
+#[gpui::test]
+fn gui_ctrl_click_marks_two_entries_and_ctrl_d_compares_them(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.txt", b"one\n")));
+    std::fs::write(f.dir.path().join("b.txt"), "two\n").unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(f.dir.path().to_path_buf()), cx));
+    settle_for(cx, &f, 10, &|v| v.session().state().tree_rows().any(|r| &*r.path == "b.txt"));
+    let _bin = lenz_diff_beside(cx, &f);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    let row_at = |v: &mut VisualTestContext, name: &str| f.view.read_with(v, |r, _| {
+        let i = r.session().state().tree_rows().position(|row| &*row.path == name).unwrap() - r.tree_scroll;
+        point(px(20.0), px(toolbar_h() + line_h() * (i as f32 + 1.5)))
+    });
+    let a = row_at(&mut v, "a.txt");
+    v.simulate_click(a, Modifiers::default());
+    let b = row_at(&mut v, "b.txt");
+    v.simulate_click(b, Modifiers { control: true, ..Default::default() });
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().to_vec()), ["a.txt".into(), "b.txt".into()] as [std::sync::Arc<str>; 2]);
+    assert!(f.view.read_with(&v, |r, _| r.tree_lines(usize::MAX).iter().filter(|l| l.marked).count()) == 2, "both drawn marked");
+    v.simulate_keystrokes("ctrl-d");
+    let args = f.view.read_with(&v, |r, _| r.launched.last().map(|l| l.args.clone())).unwrap();
+    assert_eq!(args, ["--no-index".to_string(), f.dir.path().join("a.txt").to_string_lossy().into_owned(), f.dir.path().join("b.txt").to_string_lossy().into_owned()]);
+    // Escape in the explorer, or a plain click, forgets the marks.
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().is_empty()));
+    v.simulate_click(b, Modifiers { control: true, ..Default::default() });
+    v.simulate_click(a, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.session().state().tree_marks().is_empty()));
+    // Ctrl+D with nothing marked starts nothing (its menu entry says why).
+    v.simulate_keystrokes("ctrl-d");
+    assert_eq!(f.view.read_with(&v, |r, _| r.launched.len()), 1);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().disabled(CommandId::CompareSelected)), Some("Ctrl+click a second file or folder in the explorer"));
 }
