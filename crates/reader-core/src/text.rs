@@ -127,6 +127,7 @@ impl TextSnapshot {
         let index = self.chunks.partition_point(|entry| entry.byte <= at).saturating_sub(1);
         let mut start = at;
         'before: for entry in self.chunks[..=index].iter().rev() {
+            if entry.byte + entry.chunk.text().len() <= range.start { break; }
             let from = range.start.saturating_sub(entry.byte);
             let to = (at - entry.byte).min(entry.chunk.text().len());
             if from >= to { continue; }
