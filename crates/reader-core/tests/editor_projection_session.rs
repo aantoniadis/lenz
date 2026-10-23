@@ -94,6 +94,8 @@ fn wrapped_end_then_up_reaches_the_real_tail_and_new_input_cancels_cold_motion()
     assert!(wait(&mut s, |s| s.state().active().unwrap().top_row() == 39_999));
     s.dispatch(Command::ScrollRows(-1));
     assert!(wait(&mut s, |s| s.state().active().unwrap().top_row() == 39_998));
+    s.dispatch(Command::MoveCaret(Motion::Up));
+    assert!(wait(&mut s, |s| s.state().selection().is_some_and(|selection| selection.head == 399_970)), "an initial arrow begins at the current visual top, not source zero");
 
     s.dispatch(Command::Scroll(0));
     s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(200_001) }));

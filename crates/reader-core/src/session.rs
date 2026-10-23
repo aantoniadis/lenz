@@ -3312,7 +3312,7 @@ impl Session {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let wrapped = if let Some(cols) = cols.filter(|_| matches!(motion, Motion::Up | Motion::Down)) {
                     let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
-                    match layout_moved(&view, view.tab().selection().map_or(0, |selection| selection.head), motion == Motion::Down, cols) {
+                    match layout_moved(&view, view.tab().selection().map(|selection| selection.head), motion == Motion::Down, cols) {
                         crate::layout::Query::Ready(head) => Some(head),
                         crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::MoveCaret(motion))),
                     }
@@ -3342,7 +3342,7 @@ impl Session {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let wrapped = if let Some(cols) = cols {
                     let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
-                    match layout_moved(&view, view.tab().selection().map_or(0, |selection| selection.head), motion == Motion::Down, cols) {
+                    match layout_moved(&view, Some(view.tab().selection().map_or(0, |selection| selection.head)), motion == Motion::Down, cols) {
                         crate::layout::Query::Ready(head) => Some(head),
                         crate::layout::Query::Pending(work) => return self.defer_layout(view.tab().id(), work, LayoutPurpose::Command(Command::Extend(motion))),
                     }
@@ -7203,11 +7203,19 @@ fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize
 }
 
 /// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).
-fn layout_moved(view: &View<'_>, head: usize, down: bool, cols: usize) -> crate::layout::Query<usize> {
-    use crate::layout::Query;
-    let position = match view.layout_position(head, Some(cols)) {
-        Query::Ready(Some(position)) => position, Query::Ready(None) => return Query::Ready(head), Query::Pending(work) => return Query::Pending(work),
+fn layout_moved(view: &View<'_>, head: Option<usize>, down: bool, cols: usize) -> crate::layout::Query<usize> {
+    use crate::layout::{Position, Query};
+    let position = if let Some(head) = head {
+        match view.layout_position(head, Some(cols)) {
+            Query::Ready(Some(position)) => position, Query::Ready(None) => return Query::Ready(head), Query::Pending(work) => return Query::Pending(work),
+        }
+    } else {
+        match view.layout_row(view.tab().top_line(), view.tab().top_row(), Some(cols)) {
+            Query::Ready(Some(row)) => Position { line: row.line, row: row.index, display: row.display.start, column: row.indent },
+            Query::Ready(None) => return Query::Ready(0), Query::Pending(work) => return Query::Pending(work),
+        }
     };
+    let head = head.unwrap_or_else(|| view.snapshot().reader_line_range(position.line).start);
     let (line, index) = match view.layout_step((position.line, position.row), if down { 1 } else { -1 }, cols) {
         Query::Ready(target) => target, Query::Pending(work) => return Query::Pending(work),
     };
