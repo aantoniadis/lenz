@@ -41,6 +41,35 @@ fn editor_text_metadata_survives_materialization() {
 }
 
 #[test]
+fn editor_text_materialization_observes_cancellation_after_assembly_starts() {
+    let text = "aé😀e\u{301}\n".repeat(10_000);
+    let snapshot = TextSnapshot::from_document(BufferId(71), &Document::decode("cancel.txt".into(), 1, text.as_bytes()));
+    let checks = std::cell::Cell::new(0);
+    let worker = snapshot.materialize_while(|| { let next = checks.get() + 1; checks.set(next); next <= 2 });
+    assert!(worker.is_none(), "cancellation after assembly begins must discard the obsolete conversion");
+    assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), text);
+}
+
+#[test]
+fn editor_text_cancellable_materialization_keeps_unicode_chunk_line_indices_and_metadata() {
+    let text = format!("{}\r\n😀e\u{301}\n{}\r\n", "x".repeat(4095), "y".repeat(4095));
+    let mut bytes = vec![0xff, 0xfe]; bytes.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+    let original = Document::decode("legacy.txt".into(), 1, &bytes);
+    let snapshot = TextSnapshot::from_document(BufferId(72), &original).apply_edits(2, &[TextEdit { range: 0..0, text: Arc::from("Ω\n") }]).unwrap();
+    let worker = snapshot.materialize_while(|| true).unwrap();
+    assert_eq!(worker.text().as_ref(), format!("Ω\n{text}"));
+    assert_eq!(worker.line_count(), 5);
+    assert_eq!(worker.line_range(0), 0..2);
+    assert_eq!(worker.line_range(1), 3..4098);
+    assert_eq!(worker.line_range(2), 4100..4107);
+    assert_eq!(worker.line_range(3), 4108..8203);
+    assert_eq!(worker.line_range(4), 8205..8205);
+    assert_eq!(worker.encoding(), "UTF-16LE BOM");
+    assert!(Arc::ptr_eq(worker.source_meta(), original.source_meta()));
+    assert_eq!(worker.is_large(), snapshot.materialize().is_large());
+}
+
+#[test]
 fn editor_text_long_line_windows_keep_absolute_unicode_coordinates() {
     let text = format!("{}\n", "aé😀e\u{301}".repeat(90_000));
     assert_eq!(text.len(), 900_001);

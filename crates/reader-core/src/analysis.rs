@@ -305,8 +305,7 @@ impl Analysis {
                     if lease.wanted() {
                         #[cfg(test)]
                         materializations.fetch_add(1, Ordering::Relaxed);
-                        let doc = Arc::new(snapshot.materialize());
-                        if lease.wanted() { let _ = document.set(doc); }
+                        if let Some(doc) = snapshot.materialize_while(lease.cancellation()) && lease.wanted() { let _ = document.set(Arc::new(doc)); }
                     }
                 });
                 if let Some(task) = &mut group.materializing { task.job = job; }

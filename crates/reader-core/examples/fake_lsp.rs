@@ -344,6 +344,13 @@ fn main() {
             "textDocument/didOpen" => {
                 let d = &m["params"]["textDocument"];
                 fake.docs.insert(d["uri"].as_str().unwrap_or_default().into(), d["text"].as_str().unwrap_or_default().into());
+                if env("FAKE_LSP_CLOSE_INPUT_AFTER_OPEN").is_some() {
+                    // The provider exits but a helper keeps stdout open: input failure must stop the
+                    // owned group even though the output reader cannot observe EOF yet.
+                    let child = std::process::Command::new("sleep").arg("60").stdin(std::process::Stdio::null()).stdout(std::process::Stdio::inherit()).spawn().unwrap();
+                    fake.log(&json!({ "input_child": child.id() }));
+                    std::process::exit(0);
+                }
             }
             "textDocument/didChange" => {
                 let uri = m["params"]["textDocument"]["uri"].as_str().unwrap_or_default().to_owned();

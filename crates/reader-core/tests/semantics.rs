@@ -800,6 +800,28 @@ fn at_most_two_servers_start_at_once_and_each_workspace_has_its_own() {
 }
 
 #[test]
+fn writer_failure_fails_the_request_and_stops_a_helper_that_keeps_output_open() {
+    let mut f = fixture(&[("FAKE_LSP_CLOSE_INPUT_AFTER_OPEN", "1"), ("FAKE_LSP_NO_DECOR", "1")], &[("src/main.rs", "fn target() {}\n")]);
+    f.open("src/main.rs");
+    let log = f.log.clone(); f.settle_until(move || messages(&log).iter().any(|m| m.get("input_child").is_some()));
+    let child = messages(&f.log).iter().find_map(|m| m["input_child"].as_u64()).unwrap();
+    f.definition("target", false); f.asked();
+    assert!(matches!(f.s.state().provider().unwrap().status, Status::Failed(_)));
+    let until = Instant::now() + Duration::from_secs(8);
+    while alive(child) && Instant::now() < until { if let Ok(c) = recv(&f.s.completions()) { f.s.dispatch(c); } }
+    let stopped = !alive(child);
+    if !stopped {
+        // Clean the deliberately broken provider before reporting a failure; ownership remains with
+        // Session, including signalling its reserved process group and reaping the exited parent.
+        let other = f._dir.path().join("cleanup"); std::fs::create_dir(&other).unwrap(); f.s.dispatch(Command::OpenRoot(other));
+        let until = Instant::now() + Duration::from_secs(8);
+        while alive(child) && Instant::now() < until { std::thread::sleep(Duration::from_millis(10)); }
+    }
+    assert!(!alive(child), "cleanup must release the disposable helper");
+    assert!(stopped, "writer failure must stop the owned group even when its output remains open");
+}
+
+#[test]
 fn closing_the_project_stops_servers_and_their_helpers() {
     for ignore_exit in [false, true] {
         let env: &[(&str, &str)] = if ignore_exit { &[("FAKE_LSP_CHILD", "1"), ("FAKE_LSP_IGNORE_EXIT", "1")] } else { &[("FAKE_LSP_CHILD", "1")] };

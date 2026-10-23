@@ -1112,6 +1112,9 @@ impl Semantics {
                     s.status = Status::Failed(reason);
                 }
                 s.initializing = None;
+                // A failed input writer can leave stdout held by a helper; do not rely on output EOF
+                // to stop and reap the owned group.
+                s.halt();
                 s.open.clear(); s.desired.clear(); s.written.clear(); s.open_epoch.clear();
                 s.flights.clear(); s.text_bytes = 0; s.refresh.clear();
                 s.asked = Default::default();

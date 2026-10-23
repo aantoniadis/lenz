@@ -159,6 +159,12 @@ impl Document {
     /// Construct an explicitly materialized worker document without decoding draft UTF-8 again.
     pub fn from_snapshot_parts(source: Arc<SourceMeta>, version: u64, text: Arc<str>) -> Self {
         let line_starts: Arc<[usize]> = lines::line_starts(&text).into();
+        Self::from_indexed_snapshot_parts(source, version, text, line_starts)
+    }
+
+    /// The snapshot assembler supplies its already indexed newline positions; callers cannot provide
+    /// an unrelated index through the public document boundary.
+    pub(crate) fn from_indexed_snapshot_parts(source: Arc<SourceMeta>, version: u64, text: Arc<str>, line_starts: Arc<[usize]>) -> Self {
         let lines = line_starts.len() - usize::from(text.ends_with('\n'));
         let large = text.len() > LARGE_BYTES || lines > LARGE_LINES;
         Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new() }
