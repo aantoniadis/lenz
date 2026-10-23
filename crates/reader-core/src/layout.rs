@@ -192,7 +192,10 @@ pub struct Delta {
     display: Option<(usize, Cursor, usize)>,
     column: Option<(usize, usize)>,
     target: Target,
+    work: usize,
 }
+
+impl Delta { pub(crate) fn work(&self) -> usize { self.work } }
 
 impl Work {
     pub fn columns(&self) -> Option<usize> { self.inner.key.cols }
@@ -210,7 +213,7 @@ impl WorkState {
     fn run(mut self, snapshot: &TextSnapshot, budget: usize, current: impl Fn() -> bool) -> Option<Delta> {
         let budget = budget.min(16 * WINDOW_WORK);
         if budget < crate::projection::MIN_WORK || !self.key.seed.matches(snapshot, self.key.seed.hints()) { return None; }
-        let mut delta = Delta { key: self.key.clone(), line: self.line, scan: self.scan.clone(), checkpoints: Vec::new(), rows: Vec::new(), byte: None, display: None, column: None, target: self.target.clone() };
+        let mut delta = Delta { key: self.key.clone(), line: self.line, scan: self.scan.clone(), checkpoints: Vec::new(), rows: Vec::new(), byte: None, display: None, column: None, target: self.target.clone(), work: 0 };
         let mut spent = 0;
         let mut first = true;
         while spent < budget && (!self.scan.complete || first) && current() {
@@ -265,6 +268,7 @@ impl WorkState {
         }
         if !current() { return None; }
         delta.scan = self.scan;
+        delta.work = spent;
         Some(delta)
     }
 }
@@ -323,7 +327,10 @@ pub struct Cache {
     key: Option<Key>,
     lines: HashMap<usize, Line>,
     clock: u64,
+    steps: VecDeque<Step>,
 }
+
+struct Step { visible: Arc<crate::folds::Visible>, from: (usize, usize), delta: isize, at: (usize, usize), left: usize }
 
 impl Cache {
     pub fn configure(&mut self, snapshot: &TextSnapshot, cols: Option<usize>, hints: Option<&Arc<Hints>>) {
@@ -332,6 +339,46 @@ impl Cache {
     }
 
     pub fn clear(&mut self) { *self = Self::default(); }
+
+    /// Exact multi-line stepping with bounded metadata work as well as bounded source work.
+    pub fn step(&mut self, snapshot: &TextSnapshot, visible: &Arc<crate::folds::Visible>, from: (usize, usize), delta: isize) -> Query<(usize, usize)> {
+        let old = self.steps.iter().position(|step| step.from == from && step.delta == delta && Arc::ptr_eq(&step.visible, visible)).and_then(|at| self.steps.remove(at));
+        let mut step = old.unwrap_or_else(|| Step { visible: visible.clone(), from, delta, at: from, left: delta.unsigned_abs() });
+        for _ in 0..1024 {
+            if step.left == 0 { return Query::Ready(step.at); }
+            let (line, row) = step.at;
+            let target = if delta > 0 {
+                match self.row(snapshot, line, row.saturating_add(1), 32) {
+                    Query::Ready(Some(_)) => Query::Ready((line, row + 1)),
+                    Query::Ready(None) => { let next = visible.step(line, 1); Query::Ready(if next == line { step.at } else { (next, 0) }) }
+                    Query::Pending(work) => Query::Pending(work),
+                }
+            } else if row > 0 { Query::Ready((line, row - 1)) }
+            else {
+                let previous = visible.step(line, -1);
+                if previous == line { Query::Ready(step.at) }
+                else { match self.last(snapshot, previous) {
+                    Query::Ready(last) => Query::Ready((previous, last.map_or(0, |row| row.index))),
+                    Query::Pending(work) => Query::Pending(work),
+                } }
+            };
+            match target {
+                Query::Ready(at) if at == step.at => return Query::Ready(at),
+                Query::Ready(at) => { step.at = at; step.left -= 1; }
+                Query::Pending(work) => { self.keep_step(step); return Query::Pending(work); }
+            }
+        }
+        if step.left == 0 { return Query::Ready(step.at); }
+        let work = self.work(snapshot, step.at.0, Target::Rows { first: step.at.1, count: 1 });
+        let at = step.at;
+        self.keep_step(step);
+        match work { Some(work) => Query::Pending(work), None => Query::Ready(at) }
+    }
+
+    fn keep_step(&mut self, step: Step) {
+        self.steps.push_back(step);
+        if self.steps.len() > 16 { self.steps.pop_front(); }
+    }
 
     fn line(&mut self, snapshot: &TextSnapshot, line: usize) -> Option<&mut Line> {
         let key = self.key.as_ref()?;

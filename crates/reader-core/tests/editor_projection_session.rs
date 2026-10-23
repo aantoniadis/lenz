@@ -1,5 +1,5 @@
 use std::{path::Path, sync::Arc, time::{Duration, Instant}};
-use reader_core::{projection::Request, session::{Command, Config, Session}};
+use reader_core::{projection::Request, session::{Command, Config, Motion, Session}};
 
 fn session(path: &Path) -> Session {
     Session::new(Config {
@@ -53,4 +53,58 @@ fn session_delivers_bounded_projection_batches_and_cancels_obsolete_requests() {
     }
     assert!(s.projection(0).is_none());
     assert_eq!(std::fs::read(path).unwrap(), vec![b'x'; 120_000]);
+}
+
+#[test]
+fn wrapped_caret_motion_past_the_old_prefix_uses_the_current_source_rows() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("wrapped.txt");
+    std::fs::write(&path, "x".repeat(20_000) + "\n").unwrap();
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path));
+    assert!(wait(&mut s, |s| s.state().active().is_some_and(|t| t.loaded())));
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 10 });
+    s.dispatch(Command::SetSoftWrap(true));
+    s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(12_001) }));
+    assert_eq!(s.state().selection().unwrap().head, 12_000);
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    assert!(wait(&mut s, |s| s.state().selection().is_some_and(|v| v.head == 12_010)), "actual head {:?}", s.state().selection());
+}
+
+#[test]
+fn wrapped_end_then_up_reaches_the_real_tail_and_new_input_cancels_cold_motion() {
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("tail.txt");
+    std::fs::write(&path, "x".repeat(399_997) + "END").unwrap();
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path));
+    assert!(wait(&mut s, |s| s.state().active().is_some_and(|tab| tab.loaded())));
+    s.dispatch(Command::SetTextSize { pane: 0, cols: 10, rows: 10 });
+    s.dispatch(Command::SetSoftWrap(true));
+    s.dispatch(Command::Scroll(usize::MAX));
+    s.dispatch(Command::Scroll(0));
+    let rx = s.completions();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < deadline {
+        while let Ok(completion) = rx.try_recv() { s.dispatch(completion); }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(s.state().active().unwrap().top_row(), 0, "Home supersedes cold End even while the top is still zero");
+    s.dispatch(Command::Scroll(usize::MAX));
+    assert!(wait(&mut s, |s| s.state().active().unwrap().top_row() == 39_999));
+    s.dispatch(Command::ScrollRows(-1));
+    assert!(wait(&mut s, |s| s.state().active().unwrap().top_row() == 39_998));
+
+    s.dispatch(Command::Scroll(0));
+    s.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(200_001) }));
+    s.dispatch(Command::MoveCaret(Motion::Down));
+    s.dispatch(Command::MoveCaret(Motion::Left));
+    let head = s.state().selection().unwrap().head;
+    let rx = s.completions();
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < deadline {
+        while let Ok(completion) = rx.try_recv() { s.dispatch(completion); }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    assert_eq!(s.state().selection().unwrap().head, head, "a stale cold Down must not override later input");
 }
