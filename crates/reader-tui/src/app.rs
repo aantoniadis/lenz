@@ -361,12 +361,12 @@ impl App {
     fn hover_current(&self, hover: Hover) -> bool {
         self.modal.is_none()
             && self.session.state().documentation_on_hover()
-            && (0..=1)
-                .filter_map(|pane| self.session.state().shown(pane))
-                .any(|tab| {
-                    tab.id() == hover.tab
-                        && tab.version() == hover.version
-                        && tab.top_line() == hover.top
+            && self.layout.panes.iter()
+                .filter_map(|pane| pane.source_view(self))
+                .any(|view| {
+                    view.tab().id() == hover.tab
+                        && view.snapshot().key().version == hover.version
+                        && view.tab().top_line() == hover.top
                 })
     }
     pub fn tick(&mut self, now: Instant) -> bool {
@@ -545,7 +545,7 @@ impl App {
         if let Some((id, version, _)) = self.preview_selection {
             let current = self.session.state().active().is_some_and(|tab| {
                 tab.id() == id
-                    && tab.document().is_some_and(|doc| doc.version() == version)
+                    && self.session.state().view(id).is_some_and(|view| view.snapshot().key().version == version)
                     && matches!(tab.rendering(), Some(Rendering::Preview(_)))
             });
             if !current {
@@ -561,11 +561,11 @@ impl App {
         let Some(tab) = self.session.state().active() else {
             return false;
         };
-        let (Some(doc), Some(Rendering::Preview(preview))) = (tab.document(), tab.rendering())
+        let (Some(view), Some(Rendering::Preview(preview))) = (self.session.state().view(tab.id()), tab.rendering())
         else {
             return false;
         };
-        let (id, version) = (tab.id(), doc.version());
+        let (id, version) = (tab.id(), view.snapshot().key().version);
         if matches!(command, Command::SelectAll) {
             self.preview_selection = Some((
                 id,
@@ -1970,7 +1970,7 @@ impl App {
                     key.code,
                     KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down
                 ) && self.session.state().active().is_some_and(|tab| {
-                    tab.document().is_some()
+                    self.session.state().view(tab.id()).is_some()
                         && !matches!(
                             tab.rendering(),
                             Some(Rendering::Preview(_) | Rendering::Pending)
@@ -2372,12 +2372,12 @@ impl App {
                         let Some(tab) = self.session.state().shown(pane_id) else {
                             return;
                         };
-                        let (Some(doc), Some(Rendering::Preview(preview))) =
-                            (tab.document(), tab.rendering())
+                        let (Some(view), Some(Rendering::Preview(preview))) =
+                            (self.session.state().view(tab.id()), tab.rendering())
                         else {
                             return;
                         };
-                        let (id, version, len) = (tab.id(), doc.version(), preview.doc.text.len());
+                        let (id, version, len) = (tab.id(), view.snapshot().key().version, preview.doc.text.len());
                         if drag
                             && self
                                 .drag

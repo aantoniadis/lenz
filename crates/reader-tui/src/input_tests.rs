@@ -1107,6 +1107,30 @@ fn shifted_selection_head_stays_in_real_terminal_viewport() {
 }
 
 #[test]
+fn followed_rename_invalidates_source_context_hits_without_changing_text_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("before.txt");
+    let moved = dir.path().join("after.txt");
+    std::fs::write(&path, "relative-link target\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().document().is_some());
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 4, a.layout.panes[0].text.y);
+    let tab = a.session.state().active().unwrap().id();
+    let key = a.session.state().view(tab).unwrap().snapshot().key();
+    std::fs::rename(&path, &moved).unwrap();
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.source() == moved));
+    assert_eq!(a.session.state().view(tab).unwrap().snapshot().key(), key);
+    a.handle(Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Right), column: x, row: y, modifiers: KeyModifiers::NONE,
+    }));
+    assert!(a.modal.is_none(), "old source context must wait for a new frame");
+    assert_eq!(a.session.state().selection(), None);
+    assert_eq!(std::fs::read_to_string(moved).unwrap(), "relative-link target\n");
+}
+
+#[test]
 fn hover_identifier_lookup_uses_bounded_current_snapshot_windows() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("long.rs");
@@ -1130,7 +1154,7 @@ fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"hint-geometry\"\nversion = \"0.1.0\"\n").unwrap();
     let path = root.join("main.rs");
-    let source = "fn main() { let value = 1; }\n";
+    let source = "fn main() { let value = helper(); }\nfn helper() {}\n";
     std::fs::write(&path, source).unwrap();
     let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
     let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
@@ -1141,10 +1165,17 @@ fn changed_inlay_hints_invalidate_source_hits_until_the_next_frame() {
     let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
     let cfg = config(dir.path());
     std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
-    std::fs::write(&cfg.providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake}}}).to_string()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({"providers":{"rust-analyzer":{"executable":fake,"env":{"FAKE_LSP_SLOW_DECOR":"1"}}}}).to_string()).unwrap();
     let mut a = App::new(cfg, Some(root));
     a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+        && a.session.state().active().is_some_and(|t| t.highlights().is_some()));
+    draw(&mut a, 80, 20);
+    let (x, y) = (a.layout.panes[0].text.x + 25, a.layout.panes[0].text.y);
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column: x, row: y, modifiers: KeyModifiers::NONE }));
+    assert!(a.next_deadline().is_some());
     settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.hints().is_some()));
+    assert!(a.next_deadline().is_none(), "late hint layout invalidates the pending hover target");
     draw(&mut a, 80, 20);
     let (x, y) = (a.layout.panes[0].text.x + 24, a.layout.panes[0].text.y);
     a.dispatch(Command::SetInlayTypes(false));

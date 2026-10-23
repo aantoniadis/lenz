@@ -86,6 +86,7 @@ impl PaneGeometry {
 struct SourceIdentity {
     tab: TabId,
     snapshot: SnapshotKey,
+    metadata: Arc<reader_core::document::SourceMeta>,
     top: (usize, usize),
     column: usize,
     cols: Option<usize>,
@@ -139,6 +140,7 @@ impl SourceIdentity {
         let tab = view.tab();
         Self {
             tab: tab.id(), snapshot: view.snapshot().key(),
+            metadata: view.snapshot().source_meta().clone(),
             top: (tab.top_line(), tab.top_row()), column: tab.column(), cols: state.wrap_cols(tab),
             visible: view.visible(),
             breadcrumbs: state.breadcrumbs(), split: state.split(),
@@ -152,6 +154,7 @@ impl SourceIdentity {
         let state = app.session.state();
         let tab = view.tab();
         self.tab == tab.id() && self.snapshot == view.snapshot().key()
+            && Arc::ptr_eq(&self.metadata, view.snapshot().source_meta())
             && self.top == (tab.top_line(), tab.top_row()) && self.column == tab.column()
             && self.cols == state.wrap_cols(tab)
             && Arc::ptr_eq(&self.visible, &view.visible())
@@ -1511,10 +1514,10 @@ fn number_cells(lines: usize) -> u16 {
 /// leave the text fewer than 8 columns).
 fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
     let Some(t) = state.shown(pane) else { return 0 };
-    let Some(d) = t.document() else { return 0 };
-    let text = (d.image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+    let Some(view) = state.view(t.id()) else { return 0 };
+    let text = (view.snapshot().image().is_none() || t.image_source()) && !matches!(t.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
     let cells = t.annotation_cols() as u16 + 1;
-    let digits = number_cells(d.line_count()) + 3;
+    let digits = number_cells(view.line_count()) + 3;
     if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
 }
 
@@ -1522,8 +1525,8 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let bars = 1 + u16::from(state.breadcrumbs());
     let gutter = state
         .shown(pane)
-        .and_then(|t| t.document())
-        .map_or(3, |d| number_cells(d.line_count()) + 3)
+        .and_then(|t| state.view(t.id()))
+        .map_or(3, |view| number_cells(view.line_count()) + 3)
         .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
     Rect::new(
@@ -1763,8 +1766,7 @@ fn draw_pane(
         );
         return geometry;
     };
-    geometry.source = state.view(tab.id()).map(|view| SourceIdentity::new(&view, app));
-    let Some(doc) = tab.document() else {
+    let Some(view) = state.view(tab.id()) else {
         line(
             frame.buffer_mut(),
             geometry.text,
@@ -1773,7 +1775,8 @@ fn draw_pane(
         );
         return geometry;
     };
-    if let Some(image) = doc.image().filter(|_| !tab.image_source()) {
+    geometry.source = Some(SourceIdentity::new(&view, app));
+    if let Some(image) = view.snapshot().image().filter(|_| !tab.image_source()) {
         match &image.pixels {
             Ok(pixels) => draw_image(frame.buffer_mut(), geometry.text, pixels, p),
             Err(why) => line(
@@ -1811,7 +1814,7 @@ fn draw_pane(
                         std::sync::Arc::new(MarkdownLayout::new(
                             preview.clone(),
                             geometry.text.width,
-                            doc,
+                            view.snapshot(),
                         ))
                     });
                 geometry.preview_total = layout.rows.len();
@@ -1882,7 +1885,7 @@ fn draw_pane(
         draw_source_row(
             frame.buffer_mut(),
             state,
-            tab,
+            &view,
             r,
             geometry.text,
             y,
@@ -1903,7 +1906,7 @@ fn draw_pane(
         draw_source_row(
             frame.buffer_mut(),
             state,
-            tab,
+            &view,
             &r,
             geometry.text,
             y,
@@ -1972,7 +1975,7 @@ fn source_cells(
 fn draw_source_row(
     buf: &mut Buffer,
     state: &State,
-    tab: &Tab,
+    view: &View<'_>,
     r: &reader_core::wrap::Row,
     area: Rect,
     y: u16,
@@ -1984,9 +1987,8 @@ fn draw_source_row(
     if area.width == 0 || y >= area.bottom() {
         return;
     }
-    let Some(doc) = tab.document() else {
-        return;
-    };
+    let tab = view.tab();
+    let Some(source_line) = view.snapshot().line_range(r.line) else { return };
     let shown = tab.shown_line(r.line);
     let base = if sticky { p.header_bg } else { p.bg };
     fill(
@@ -2003,7 +2005,7 @@ fn draw_source_row(
     let mark = if bookmark.is_some() { "●" } else { " " };
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
     // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
-    let digits = number_cells(doc.line_count()) as usize + 3;
+    let digits = number_cells(view.line_count()) as usize + 3;
     let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
     if ann > 0 {
         let a = tab.annotation(r.line).filter(|_| r.index == 0 && !sticky);
@@ -2043,7 +2045,7 @@ fn draw_source_row(
             p.gutter_bg,
         ),
     );
-    let start = doc.line_range(r.line).start;
+    let start = source_line.start;
     let selection = tab.selection();
     let spans = tab.spans(r.line);
     let find = tab.find();
@@ -2123,7 +2125,7 @@ fn draw_source_row(
             y,
             width: area.right() - end_x,
             line: r.line,
-            byte: r.source.end.min(doc.line(r.line).len()),
+            byte: r.source.end.min(source_line.len()),
         });
         if selection.is_some_and(|s| s.anchor == s.head && s.head == start + r.source.end) {
             buf.set_stringn(
@@ -2203,7 +2205,7 @@ impl MarkdownLayout {
     fn new(
         preview: std::sync::Arc<reader_core::markdown::Preview>,
         width: u16,
-        source: &reader_core::document::Document,
+        source: &reader_core::text::TextSnapshot,
     ) -> Self {
         let mut rows = Vec::new();
         let mut lines = Vec::new();
@@ -2211,7 +2213,7 @@ impl MarkdownLayout {
             let mut push = |range: Range<usize>, kind| {
                 let offset =
                     preview_source(&preview.doc, range.start).unwrap_or(block.source.start);
-                let line = source.line_of(offset.min(source.text().len()));
+                let line = source.line_of(offset.min(source.len_bytes()));
                 lines.push(line.max(lines.last().copied().unwrap_or(0)));
                 rows.push(MarkdownRow {
                     block: index,
