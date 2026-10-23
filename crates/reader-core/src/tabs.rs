@@ -28,10 +28,6 @@ pub struct StickyLine {
     pub row: usize,
 }
 
-/// Sticky lines and what they were made for: the declarations (held, so a new set cannot reuse their address), top
-/// line, top row, limit, line count, collapsed generation and wrap width.
-
-
 /// A tab's shown lines and what they were made for: its folds, collapsed generation and line count.
 type VisibleCache = (Option<Arc<lenz_content::highlight::Folds>>, u64, usize, Arc<crate::folds::Visible>);
 
@@ -49,7 +45,7 @@ pub struct Tab {
     pub(crate) canonical: Option<PathBuf>,
     /// Pinned or double-clicked: not replaced by the next preview.
     pub(crate) retained: bool,
-    /// Compatibility worker/layout input; current source reads resolve through State::view.
+    /// Whether this view has admitted content, rather than released cache-only content.
     pub(crate) loaded: bool,
     /// Session-owned source identity, retained when reloadable content is released.
     pub(crate) buffer: Option<crate::text::BufferId>,
@@ -64,9 +60,9 @@ pub struct Tab {
     pub(crate) declarations: Option<Arc<lenz_content::highlight::Declarations>>,
     /// Inlay hints of a document version (shown only while it is the document's).
     pub(crate) hints: Option<(u64, Arc<crate::decor::Hints>)>,
+    pub(crate) decor_source: Option<crate::session::SemanticSource>,
     /// Semantic tokens of a document version.
     pub(crate) tokens: Option<(u64, Arc<crate::decor::Tokens>)>,
-    /// The sticky lines last made, and what they were made for.
     /// Collapsed regions by first line and kind; kept across reloads where a region of that kind still starts there.
     pub(crate) collapsed: crate::folds::Collapsed,
     /// The shown lines last made, with the folds, collapsed generation and line count they were made for (the folds
@@ -83,7 +79,7 @@ pub struct Tab {
     /// While soft-wrapped: the row shown first, and the top line it was set for (any other top line starts at its
     /// first row, so every jump of `top_line` resets it).
     top_row: (usize, usize),
-    /// Soft-wrapped rows made so far (for one document version and width).
+    /// Bounded logical layout derived from the registry snapshot.
     pub(crate) layout: std::sync::Mutex<crate::layout::Cache>,
     /// Horizontal position, in display columns.
     pub(crate) column: usize,
@@ -113,6 +109,7 @@ pub struct Tab {
     pub(crate) markdown_source: bool,
     /// The shown version's Markdown preview, or why it cannot be shown (`None`: not made yet).
     pub(crate) preview: Option<Result<Arc<crate::markdown::Preview>, String>>,
+    pub(crate) preview_source: Option<crate::session::SemanticSource>,
     /// Annotate with Git Blame, while on: kept across releases, made again for new content.
     pub(crate) blame: Option<crate::blame::Blame>,
 }
@@ -135,6 +132,7 @@ impl Tab {
             folds: None,
             declarations: None,
             hints: None,
+            decor_source: None,
             tokens: None,
             collapsed: Default::default(),
             visible: Default::default(),
@@ -158,6 +156,7 @@ impl Tab {
             before_root: false,
             markdown_source: true,
             preview: None,
+            preview_source: None,
             blame: None,
         }
     }
@@ -167,18 +166,6 @@ impl Tab {
     }
     pub fn pane(&self) -> u8 {
         self.pane
-    }
-    /// Syntax spans for its document's version, when ready.
-    pub fn highlights(&self) -> Option<&Parsed> {
-        self.highlights.as_deref()
-    }
-    /// Declarations for its document's version, when asked for and ready.
-    pub fn declarations(&self) -> Option<&lenz_content::highlight::Declarations> {
-        self.declarations.as_deref()
-    }
-    /// Retained identity for adapter geometry; checking it does not compute sticky layout.
-    pub fn declarations_handle(&self) -> Option<&Arc<lenz_content::highlight::Declarations>> {
-        self.declarations.as_ref()
     }
     pub(crate) fn visible_for(&self, source: &TextSnapshot) -> Arc<crate::folds::Visible> {
         let lines = source.line_count();
@@ -200,7 +187,7 @@ impl Tab {
         }
     }
     /// The region starting on `line`, and whether it is collapsed.
-    pub fn fold_at(&self, line: usize) -> Option<(lenz_content::highlight::Fold, bool)> {
+    pub(crate) fn fold_at(&self, line: usize) -> Option<(lenz_content::highlight::Fold, bool)> {
         let f = self.folds.as_ref()?.starting(line)?;
         Some((f, self.collapsed.get(line) == Some(f.kind)))
     }
@@ -251,6 +238,7 @@ impl Tab {
             folds: self.folds.clone(),
             declarations: self.declarations.clone(),
             hints: self.hints.clone(),
+            decor_source: self.decor_source.clone(),
             tokens: self.tokens.clone(),
             collapsed: self.collapsed.clone(),
             visible: Default::default(),
@@ -274,6 +262,7 @@ impl Tab {
             before_root: false,
             markdown_source: self.markdown_source,
             preview: self.preview.clone(),
+            preview_source: self.preview_source.clone(),
             // Its own annotations, blamed for itself once shown.
             blame: self.blame.as_ref().map(|_| crate::blame::Blame::new()),
         }
@@ -306,9 +295,11 @@ impl Tab {
         self.folds = None;
         self.declarations = None;
         self.hints = None;
+        self.decor_source = None;
         self.tokens = None;
         self.expansion = None;
         self.preview = None;
+        self.preview_source = None;
     }
     /// The annotation column's width in cells (0 while Annotate with Git Blame is off).
     pub fn annotation_cols(&self) -> usize {
@@ -587,35 +578,35 @@ mod tests {
 
     #[test]
     fn restoring_finds_the_anchor_after_the_file_changes() {
-        let doc = |text: &str, version| Arc::new(Document::decode(PathBuf::from("a.rs"), version, text.as_bytes()));
+        let doc = |text: &str, version| TextSnapshot::from_document(crate::text::BufferId(1), &crate::document::Document::decode(PathBuf::from("a.rs"), version, text.as_bytes()));
         let mut tab = Tab::new(TabId(1), PathBuf::from("a.rs"), false);
-        tab.doc = Some(doc("one\ntwo\nfn target() {}\nend\n", 1));
+        let current = doc("one\ntwo\nfn target() {}\nend\n", 1);
         tab.selection = Some(Selection { anchor: 8, head: 10 });
         tab.top_line = 2;
-        let here = tab.location();
+        let here = tab.location(Some(&current));
         assert_eq!((here.version, here.range.clone(), &*here.anchor, here.offset), (1, 8..10, "fn target() {}", 0));
         // Same version: exact.
         tab.selection = None;
-        tab.restore_to(&here);
+        tab.restore_to(&here, &current);
         assert_eq!((tab.top_line, tab.selection.map(|s| s.range()), tab.approximate), (2, Some(8..10), false));
         // Lines inserted above: the unique context line is found and the selection keeps its place on it.
-        tab.doc = Some(doc("new\nnew\none\ntwo\nfn target() {}\nend\n", 2));
-        tab.restore_to(&here);
+        let current = doc("new\nnew\none\ntwo\nfn target() {}\nend\n", 2);
+        tab.restore_to(&here, &current);
         assert_eq!((tab.top_line, tab.selection.map(|s| s.range()), tab.approximate), (4, Some(16..18), false));
         // The context line now appears twice: ambiguous, so near the old position and marked approximate.
-        tab.doc = Some(doc("fn target() {}\none\ntwo\nfn target() {}\n", 3));
-        tab.restore_to(&here);
+        let current = doc("fn target() {}\none\ntwo\nfn target() {}\n", 3);
+        tab.restore_to(&here, &current);
         assert_eq!((tab.top_line, tab.selection, tab.approximate), (2, None, true));
         // Gone: clamped, approximate.
-        tab.doc = Some(doc("x\n", 4));
-        tab.restore_to(&here);
+        let current = doc("x\n", 4);
+        tab.restore_to(&here, &current);
         assert_eq!((tab.top_line, tab.selection, tab.approximate), (1, None, true));
         // No selection recorded: none restored.
         let mut plain = Tab::new(TabId(2), PathBuf::from("a.rs"), false);
-        plain.doc = Some(doc("a\nb\nc\n", 5));
+        let current = doc("a\nb\nc\n", 5);
         plain.top_line = 2;
-        let at = plain.location();
-        plain.restore_to(&at);
+        let at = plain.location(Some(&current));
+        plain.restore_to(&at, &current);
         assert_eq!(plain.selection, None);
     }
 }

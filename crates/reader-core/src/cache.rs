@@ -49,7 +49,7 @@ impl InactiveCache {
         Self { limit, used: 0, entries: Vec::new() }
     }
 
-    /// Bytes held, by [`TextSnapshot::bytes`].
+    /// Retained source/index bytes held, by [`TextSnapshot::storage_bytes`].
     pub fn used(&self) -> usize {
         self.used
     }
@@ -68,7 +68,7 @@ impl InactiveCache {
         self.put_current(stamp, doc);
     }
 
-    /// Keep compatibility text and its additional indexed storage in the same budget.
+    /// Keep the current source and all its shared backing in the same budget.
     pub(crate) fn put_current(&mut self, stamp: Stamp, doc: Arc<TextSnapshot>) {
         self.remove(doc.source());
         let bytes = doc.storage_bytes();
@@ -135,23 +135,23 @@ mod tests {
     use std::path::PathBuf;
 
     fn doc(name: &str, len: usize) -> Arc<TextSnapshot> {
-        Arc::new(TextSnapshot::decode(PathBuf::from(name), 1, "a".repeat(len).as_bytes()))
+        Arc::new(TextSnapshot::from_document(crate::text::BufferId(1), &crate::document::Document::decode(PathBuf::from(name), 1, "a".repeat(len).as_bytes())))
     }
     const STAMP: Stamp = Stamp { len: 1, modified: None, file: None };
 
     #[test]
     fn evicts_least_recently_left_within_the_budget() {
         let (a, b, c) = (doc("a", 400), doc("b", 400), doc("c", 400));
-        let limit = a.bytes() * 2;
+        let limit = a.storage_bytes() * 2;
         let mut cache = InactiveCache::new(limit);
         cache.put(STAMP, a.clone());
         cache.put(STAMP, b.clone());
-        assert_eq!(cache.used(), a.bytes() + b.bytes());
+        assert_eq!(cache.used(), a.storage_bytes() + b.storage_bytes());
         cache.put(STAMP, c.clone());
-        assert_eq!((cache.len(), cache.used()), (2, b.bytes() + c.bytes()));
+        assert_eq!((cache.len(), cache.used()), (2, b.storage_bytes() + c.storage_bytes()));
         assert!(cache.take(Path::new("a"), Some(STAMP)).is_none(), "the oldest went first");
         assert!(Arc::ptr_eq(&cache.take(Path::new("b"), Some(STAMP)).unwrap(), &b));
-        assert_eq!(cache.used(), c.bytes(), "taking returns its bytes");
+        assert_eq!(cache.used(), c.storage_bytes(), "taking returns its bytes");
     }
 
     #[test]
@@ -173,6 +173,6 @@ mod tests {
         let mut cache = InactiveCache::new(INACTIVE_BYTES);
         cache.put(STAMP, doc("a", 10));
         cache.put(STAMP, doc("a", 20));
-        assert_eq!((cache.len(), cache.used()), (1, doc("a", 20).bytes()));
+        assert_eq!((cache.len(), cache.used()), (1, doc("a", 20).storage_bytes()));
     }
 }

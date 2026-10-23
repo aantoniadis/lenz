@@ -95,7 +95,7 @@ fn open(app: &mut App, dir: &std::path::Path, name: &str, bytes: &[u8]) {
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
     app.dispatch(Command::Open(path));
-    settle(app, |a| a.session.state().document().is_some());
+    settle(app, |a| a.session.state().current_source().is_some());
 }
 
 #[test]
@@ -432,7 +432,7 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.folds().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some()))
     });
     app.dispatch(Command::ToggleFold(0));
     let buffer = draw(&mut app, 70, 16);
@@ -449,7 +449,7 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.declarations().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.declarations().is_some()))
     });
     app.dispatch(Command::Scroll(1));
     draw(&mut app, 70, 16);
@@ -470,7 +470,7 @@ fn raster_image_and_markdown_preview_use_shared_decoded_content() {
         .unwrap();
     let mut app = app(dir.path(), true);
     app.dispatch(Command::Open(image_path));
-    settle(&mut app, |a| a.session.state().document().is_some());
+    settle(&mut app, |a| a.session.state().current_source().is_some());
     assert!(text(&draw(&mut app, 50, 15)).contains('▀'));
     app.dispatch(Command::Close);
     open(&mut app, dir.path(), "tiny.svg", br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>"##);
@@ -510,7 +510,7 @@ fn raster_image_and_markdown_preview_use_shared_decoded_content() {
     let tab = app.session.state().active().unwrap();
     app.preview_selection = Some((
         tab.id(),
-        tab.version(),
+        app.session.state().view(tab.id()).unwrap().snapshot().key().version,
         reader_core::session::Selection { anchor: 0, head: 7 },
     ));
     let selected = draw(&mut app, 50, 15);
@@ -742,7 +742,7 @@ fn navigation_files_show_distinct_paths_and_disabled_actions_explain_why() {
         ),
     ));
     assert!(a.modal.is_some());
-    assert!(a.session.state().document().is_none());
+    assert!(a.session.state().current_source().is_none());
 }
 
 #[test]

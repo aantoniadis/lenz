@@ -136,7 +136,7 @@ fn index_of(d: &Declarations, decl: &lenz_content::highlight::Declaration) -> u3
 
 /// The list after crumb `i` of `bar`: a folder's entries (project folders only), the entries of a file's folder,
 /// the declarations at a declaration's depth under the same parent.
-pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, project: Option<&Project>) -> Vec<Sibling> {
+pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>) -> Vec<Sibling> {
     let entries = |rel: &str| -> Vec<Sibling> {
         project.map_or_else(Vec::new, |p| {
             p.children(rel)
@@ -156,7 +156,7 @@ pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, project: Option<&Pr
             _ => Vec::new(),
         },
         Some(Crumb::Decl { index, .. }) => {
-            let Some(d) = tab.declarations() else { return Vec::new() };
+            let Some(d) = view.and_then(|v| v.declarations()) else { return Vec::new() };
             let parent = d.items.get(*index as usize).and_then(|x| x.parent);
             d.items
                 .iter()

@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     text::TextSnapshot,
-    tabs::{ANCHOR_CHARS, Location},
+    tabs::Location,
 };
 
 /// Recent files kept.
@@ -30,7 +30,7 @@ const VERSION: u32 = 1;
 /// The largest line or byte offset read from a places file: past any document, and clear of overflow.
 pub const MAX_POSITION: usize = i32::MAX as usize;
 
-/// A place in a file: its line and the line's text (its first [`ANCHOR_CHARS`] characters) to find it again.
+/// A place in a file: its line and the line's text (its first [`crate::tabs::ANCHOR_CHARS`] characters) to find it again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mark {
     pub source: Arc<Path>,
@@ -59,14 +59,6 @@ impl Mark {
     fn key(&self) -> (&Path, usize) {
         (&self.source, self.line)
     }
-}
-
-pub(crate) fn floor(text: &str, mut b: usize) -> usize {
-    b = b.min(text.len());
-    while !text.is_char_boundary(b) {
-        b -= 1;
-    }
-    b
 }
 
 /// Moves `source`'s marks to the line of `doc` whose text is their anchor, nearest the old line (a tie goes up); a
@@ -662,8 +654,8 @@ mod tests {
     use super::*;
     use std::time::Duration;
 
-    fn doc(text: &str) -> Document {
-        Document::decode(PathBuf::from("/p/a.rs"), 1, text.as_bytes())
+    fn doc(text: &str) -> TextSnapshot {
+        TextSnapshot::from_document(crate::text::BufferId(1), &crate::document::Document::decode(PathBuf::from("/p/a.rs"), 1, text.as_bytes()))
     }
     fn a() -> &'static Path {
         Path::new("/p/a.rs")
