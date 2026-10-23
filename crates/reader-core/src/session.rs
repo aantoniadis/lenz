@@ -6761,7 +6761,12 @@ impl Session {
         self.activate(id);
         self.index_visible(id);
         let snapshot = self.state.source(id).cloned();
-        if let (Some(to), Some(snapshot)) = (&restore, snapshot) && let Some(t) = self.tab_mut(id) { t.restore_to(to, &snapshot); }
+        if let Some(to) = &restore && let Some(t) = self.tab_mut(id) {
+            match snapshot {
+                Some(snapshot) => t.restore_to(to, &snapshot),
+                None => { t.restore = Some(to.clone()); t.top_line = to.top_line; }
+            }
+        }
         if record && !same && let Some(to) = self.here() {
             self.visit(from, to);
         }
