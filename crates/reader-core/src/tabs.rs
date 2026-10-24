@@ -578,6 +578,13 @@ impl History {
         for at in self.entries.iter_mut().filter(|at| at.source == from) { at.source = to.to_path_buf(); }
     }
 
+    /// `from` (a file or a folder) was moved to `to`: Back and Forward reach everything inside it at its new path.
+    pub(crate) fn rename_tree(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for at in self.entries.iter_mut() {
+            if let Ok(rest) = at.source.strip_prefix(from) { at.source = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }; }
+        }
+    }
+
     /// A committed navigation from `from` (where the reader was, updated in place) to `to`. Forward entries go.
     pub fn visit(&mut self, from: Option<Location>, to: Location) {
         self.entries.truncate(if self.entries.is_empty() { 0 } else { self.at + 1 });
@@ -734,6 +741,17 @@ mod closed_tabs {
     }
 
     /// a → b → c, c closes (b shows): Back reopens c first, Forward does not overwrite it.
+    #[test]
+    fn a_moved_folder_moves_every_history_entry_inside_it() {
+        let at = |p: &str| Location { source: PathBuf::from(p), version: 1, range: 0..0, selected: false, top_line: 0, anchor: "".into(), line: 0, offset: 0 };
+        let mut h = History::default();
+        h.visit(Some(at("/p/dir/a")), at("/p/dir/sub/b"));
+        h.visit(None, at("/p/dir2/c"));
+        h.rename_tree(std::path::Path::new("/p/dir"), std::path::Path::new("/p/dest/dir"));
+        let sources: Vec<_> = h.entries.iter().map(|at| at.source.clone()).collect();
+        assert_eq!(sources, [PathBuf::from("/p/dest/dir/a"), PathBuf::from("/p/dest/dir/sub/b"), PathBuf::from("/p/dir2/c")]);
+    }
+
     #[test]
     fn back_after_closing_the_active_tab_reopens_it() {
         let mut h = History::default();

@@ -338,6 +338,31 @@ pub fn create_exact(path: &Path, encoding: &str, bom: bool, text: &str) -> Write
     Saved { snapshot, target }
 }
 
+/// Renames `from` (a file or a folder) to `to` in one step that never replaces what is at `to`, even an entry that
+/// appeared after any check (an empty folder or a dangling symlink included). A file system without an atomic
+/// no-replace rename refuses instead of checking and racing.
+pub fn rename_noclobber(from: &Path, to: &Path) -> io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a path holds a NUL byte"));
+        let (from, to) = (c(from)?, c(to)?);
+        // Both pointers live for the call; the kernel copies the paths.
+        #[allow(unsafe_code)]
+        #[cfg(target_os = "linux")]
+        let done = unsafe { libc::renameat2(libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) };
+        #[allow(unsafe_code)]
+        #[cfg(target_os = "macos")]
+        let done = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
+        if done == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (from, to);
+        Err(io::Error::new(io::ErrorKind::Unsupported, "this platform has no rename that refuses to replace"))
+    }
+}
+
 fn hash(bytes: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
     h.write(bytes);
@@ -776,6 +801,26 @@ mod tests {
         assert_eq!(fs::read_link(&link).unwrap(), Path::new("../real/f.txt"));
         assert_eq!(fs::read_to_string(&target).unwrap(), "two\n");
         assert!(no_temps(&dir.path().join("real")) && no_temps(&dir.path().join("links")));
+    }
+
+    #[test]
+    fn a_no_clobber_rename_moves_files_and_folders_but_never_replaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.txt"), dir.path().join("b.txt"));
+        fs::write(&a, b"a").unwrap();
+        fs::write(&b, b"b").unwrap();
+        assert_eq!(rename_noclobber(&a, &b).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!((fs::read(&a).unwrap(), fs::read(&b).unwrap()), (b"a".to_vec(), b"b".to_vec()));
+        let (src, empty) = (dir.path().join("src"), dir.path().join("empty"));
+        fs::create_dir(&src).unwrap();
+        fs::write(src.join("x"), b"x").unwrap();
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(rename_noclobber(&src, &empty).unwrap_err().kind(), io::ErrorKind::AlreadyExists, "an empty folder is not replaced");
+        let moved = dir.path().join("moved");
+        rename_noclobber(&src, &moved).unwrap();
+        assert_eq!(fs::read(moved.join("x")).unwrap(), b"x");
+        rename_noclobber(&a, &dir.path().join("c.txt")).unwrap();
+        assert!(!a.exists());
     }
 
     #[test]

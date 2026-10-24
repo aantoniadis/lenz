@@ -31,6 +31,8 @@ mod external_work;
 mod save_as_work;
 #[path = "session/create.rs"]
 mod create_work;
+#[path = "session/relocate.rs"]
+mod relocate_work;
 #[path = "session/recovery.rs"]
 mod recovery_work;
 #[path = "session/reconcile.rs"]
@@ -144,6 +146,8 @@ pub enum Command {
     NewDocument,
     /// Create `kind` named `name` in folder `dir` (project-relative, `""` the root) and open or select it.
     CreateEntry { kind: crate::create::Kind, dir: Arc<str>, name: String },
+    /// Rename or move project entry `from` (project-relative) for the typed `input`: a name, or a folder.
+    RelocateEntry { kind: crate::relocate::Kind, from: Arc<str>, input: String },
     /// Show the recovered drafts still undecided (a postponed dialog).
     ShowRecoveredDrafts,
     /// Restore, discard or postpone the recovered draft `ticket` names.
@@ -526,6 +530,10 @@ pub enum CommandId {
     NewExplorerFile,
     /// Create a folder in the explorer's highlighted folder (the adapter asks for its name).
     NewExplorerFolder,
+    /// Rename the explorer's highlighted file or folder (the adapter asks for the new name).
+    RenameExplorerEntry,
+    /// Move the explorer's highlighted file or folder to another folder (the adapter asks which).
+    MoveExplorerEntry,
     /// The recovered drafts read at start, one at a time.
     RecoverDrafts,
     RecheckSave,
@@ -705,7 +713,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 165] = [
+    pub const ALL: [CommandId; 167] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -759,6 +767,8 @@ impl CommandId {
         Self::NewDocument,
         Self::NewExplorerFile,
         Self::NewExplorerFolder,
+        Self::RenameExplorerEntry,
+        Self::MoveExplorerEntry,
         Self::RecoverDrafts,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
@@ -949,6 +959,8 @@ impl CommandId {
             Self::NewDocument => "New File",
             Self::NewExplorerFile => "New File in Explorer…",
             Self::NewExplorerFolder => "New Folder in Explorer…",
+            Self::RenameExplorerEntry => "Rename in Explorer…",
+            Self::MoveExplorerEntry => "Move in Explorer…",
             Self::RecoverDrafts => "Recover Unsaved Draft…",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
@@ -2900,6 +2912,8 @@ impl Session {
             },
             CommandId::NewDocument => None,
             CommandId::NewExplorerFile | CommandId::NewExplorerFolder => self.state.project.is_none().then_some("No folder is open"),
+            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry if self.state.project.is_none() => Some("No folder is open"),
+            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry => self.relocate_target().is_none().then_some("Highlight a file or folder in the explorer"),
             CommandId::RecoverDrafts if self.recovery.offers().is_empty() => Some("No recovered drafts are offered"),
             CommandId::RecoverDrafts => self.restore_workspace.then_some(recovery_work::RESTORING),
             CommandId::SaveAs => match self.state.active() {
@@ -3223,9 +3237,11 @@ impl Session {
         entries
     }
 
-    /// The explorer's row menu, shared by both adapters: what can be made in the highlighted folder.
+    /// The explorer's row menu, shared by both adapters: what can be made in the highlighted folder, and what can be
+    /// done with the highlighted entry.
     pub fn tree_menu(&self) -> Vec<MenuEntry> {
-        vec![MenuEntry::Command(CommandId::NewExplorerFile), MenuEntry::Command(CommandId::NewExplorerFolder)]
+        vec![MenuEntry::Command(CommandId::NewExplorerFile), MenuEntry::Command(CommandId::NewExplorerFolder), MenuEntry::Separator,
+            MenuEntry::Command(CommandId::RenameExplorerEntry), MenuEntry::Command(CommandId::MoveExplorerEntry)]
     }
 
     /// Line `line`'s annotation in tab `tab`, while its annotations are on and git has reached it.
@@ -3733,6 +3749,7 @@ impl Session {
             Command::ChooseReplace { ticket, choice } => self.choose_replace(ticket, choice),
             Command::NewDocument => self.new_document(),
             Command::CreateEntry { kind, dir, name } => self.create_entry(kind, dir.to_string(), name),
+            Command::RelocateEntry { kind, from, input } => self.relocate_entry(kind, from.to_string(), input),
             Command::ShowRecoveredDrafts => self.show_recovered_drafts(),
             Command::ChooseRecoveredDraft { ticket, choice } => self.choose_recovered_draft(ticket, choice),
             Command::RecheckSave { tab } => self.recheck_save(tab),
@@ -6468,47 +6485,54 @@ impl Session {
                 Effect { repaint: true, ..effect }
             }
             Completion::Moved { tab, token, to, stamp, canonical } => {
-                let Some(t) = self.tab_mut(tab).filter(|t| t.refresh == token) else { return Effect::default() };
-                t.moving = false;
-                t.vanished = None;
-                let from = std::mem::replace(&mut t.source, to.clone());
-                t.display = to.clone();
-                t.canonical = canonical.clone();
-                if t.loaded { t.stamp = stamp; }
-                t.unavailable = None;
-                let buffer = t.buffer;
-                let identity = t.canonical.clone().unwrap_or_else(|| t.source.clone());
-                let recovered_as = buffer.and_then(|buffer| self.recovery_key(buffer));
-                self.cache.rename(&from, &to);
-                if let Some(id) = buffer {
-                    self.state.sources.aliases.retain(|_, buffer| *buffer != id);
-                    self.state.sources.aliases.insert(identity, id);
-                    if let Some(entry) = self.state.sources.buffers.get_mut(&id) {
-                        if let Some(snapshot) = &entry.snapshot {
-                            let was_saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(snapshot));
-                            let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()).with_canonical(canonical.clone()));
-                            entry.snapshot = Some(Arc::new(snapshot.with_source_meta(metadata)));
-                            if was_saved { entry.saved = entry.snapshot.as_ref().map(|s| SemanticSource::new(s)); }
-                        }
-                        entry.document = Default::default();
-                        entry.stamp = stamp;
-                    }
-                    if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone()
-                        && self.cache.contains(&to) && let Some(stamp) = self.cache.stamp(&to) { self.cache.put(stamp, snapshot); }
-                }
-                for t in self.state.tabs.iter_mut().filter(|t| t.buffer == buffer && t.loaded) { t.new_content(); }
-                if self.is_shown(tab) { self.decorate(tab); }
-                self.release_current();
-                // A draft kept for the old path follows the file to its new one.
-                if let Some(key) = recovered_as { self.recovery.discard(key); }
-                if let Some(buffer) = buffer { self.recovery_changed(buffer); }
-                // Its bookmarks and recent places follow it.
-                if Arc::make_mut(&mut self.state.places).rename(&from, &to) {
-                    self.places_changed();
-                }
+                if !self.state.tabs.iter().any(|t| t.id == tab && t.refresh == token) { return Effect::default(); }
+                self.follow_move(tab, to, stamp, canonical);
                 self.rewatch();
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
+        }
+    }
+
+    /// A tab's file is now at `to`, the same file: its buffer, aliases, cached text, recovery record and places
+    /// follow it. Its confirmed save target is left as it was; the caller decides whether it is still that file.
+    fn follow_move(&mut self, tab: TabId, to: PathBuf, stamp: Option<Stamp>, canonical: Option<PathBuf>) {
+        let Some(t) = self.tab_mut(tab) else { return };
+        t.moving = false;
+        t.vanished = None;
+        let from = std::mem::replace(&mut t.source, to.clone());
+        t.display = to.clone();
+        t.canonical = canonical.clone();
+        if t.loaded { t.stamp = stamp; }
+        t.unavailable = None;
+        let buffer = t.buffer;
+        let identity = t.canonical.clone().unwrap_or_else(|| t.source.clone());
+        let recovered_as = buffer.and_then(|buffer| self.recovery_key(buffer));
+        self.cache.rename(&from, &to);
+        if let Some(id) = buffer {
+            self.state.sources.aliases.retain(|_, buffer| *buffer != id);
+            self.state.sources.aliases.insert(identity, id);
+            if let Some(entry) = self.state.sources.buffers.get_mut(&id) {
+                if let Some(snapshot) = &entry.snapshot {
+                    let was_saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(snapshot));
+                    let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()).with_canonical(canonical.clone()));
+                    entry.snapshot = Some(Arc::new(snapshot.with_source_meta(metadata)));
+                    if was_saved { entry.saved = entry.snapshot.as_ref().map(|s| SemanticSource::new(s)); }
+                }
+                entry.document = Default::default();
+                entry.stamp = stamp;
+            }
+            if let Some(snapshot) = self.state.sources.buffers[&id].snapshot.clone()
+                && self.cache.contains(&to) && let Some(stamp) = self.cache.stamp(&to) { self.cache.put(stamp, snapshot); }
+        }
+        for t in self.state.tabs.iter_mut().filter(|t| t.buffer == buffer && t.loaded) { t.new_content(); }
+        if self.is_shown(tab) { self.decorate(tab); }
+        self.release_current();
+        // A draft kept for the old path follows the file to its new one.
+        if let Some(key) = recovered_as { self.recovery.discard(key); }
+        if let Some(buffer) = buffer { self.recovery_changed(buffer); }
+        // Its bookmarks and recent places follow it.
+        if Arc::make_mut(&mut self.state.places).rename(&from, &to) {
+            self.places_changed();
         }
     }
 

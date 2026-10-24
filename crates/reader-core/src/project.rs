@@ -215,6 +215,33 @@ impl Project {
         }
     }
 
+    /// An entry this session moved from `from` to `to` (project-relative): it and everything inside it are listed
+    /// at once under the new path, and folders open where they were open.
+    pub(crate) fn rename(&mut self, from: &str, to: &str) {
+        let moved = |path: &Arc<str>| crate::relocate::moved(path, from, to).map(Arc::<str>::from);
+        let mut changed: Vec<Arc<str>> = Vec::new();
+        self.sorted.retain(|path| match moved(path) {
+            Some(new) => { changed.push(new); false }
+            None => true,
+        });
+        changed.sort_unstable();
+        self.sorted = merge(std::mem::take(&mut self.sorted), changed);
+        for path in &mut self.pending { if let Some(new) = moved(path) { *path = new; } }
+        for batch in &mut self.entries {
+            if batch.iter().any(|e| moved(&e.path).is_some()) {
+                *batch = batch.iter().map(|e| moved(&e.path).map_or_else(|| e.clone(), |new| Entry::new(&new))).collect();
+            }
+        }
+        self.empty = std::mem::take(&mut self.empty).into_iter().map(|d| moved(&d).unwrap_or(d)).collect();
+        let expanded: Vec<Arc<str>> = std::mem::take(&mut self.expanded).into_iter().map(|d| moved(&d).unwrap_or(d)).collect();
+        self.expanded = expanded.into_iter().collect();
+        if let Some((dir, _)) = to.rsplit_once('/') {
+            for dir in ancestors(dir) { self.expanded.insert(dir.into()); }
+        }
+        if let Some(f) = &mut self.finder { f.ready = false; }
+        self.rebuild();
+    }
+
     /// `path`'s place in the tree: relative to the root, `/`-separated (`None` outside the root).
     pub fn relative(&self, path: &Path) -> Option<Arc<str>> {
         let rel = path.strip_prefix(&self.root).ok()?;

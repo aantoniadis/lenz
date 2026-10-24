@@ -9,6 +9,7 @@ mod draft;
 pub mod save;
 pub mod close;
 pub mod create;
+pub mod relocate;
 pub mod external;
 pub mod blame;
 pub mod branches;
