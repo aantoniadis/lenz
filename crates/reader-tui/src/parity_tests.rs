@@ -2592,3 +2592,81 @@ fn keymap_presets_overrides_and_unsupported_delivery_match_across_adapters(cx: &
     assert_eq!(tui.notice.as_deref(), Some("No language server for this language"));
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
 }
+
+#[gpui::test]
+fn find_and_replace_replay_the_same_text_results_and_undo_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    let original = "Foo foo\nfood foo\n";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let ready = |state: &State| state.loading().is_none() && state.current_source().is_some() && state.active().and_then(|t| t.find()).is_none_or(|f| !f.pending());
+    let settle = |visual: &mut VisualTestContext, tui: &mut App| {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |view, cx| view.poll(cx));
+            while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+            if gui.read_with(visual, |view, _| ready(view.session().state())) && ready(tui.session.state()) { break; }
+            assert!(Instant::now() < until, "adapters did not settle");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let text = |state: &State| { let source = state.current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    let check = |visual: &VisualTestContext, tui: &App, expected: &str| {
+        assert_eq!(text(tui.session.state()), expected);
+        assert_eq!(snapshot(tui.session.state()), gui.read_with(visual, |view, _| snapshot(view.session().state())));
+        assert_eq!(tui.session.replace_text(), gui.read_with(visual, |view, _| view.session().replace_text().to_owned()));
+    };
+    settle(&mut visual, &mut tui);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    draw(&mut visual, &mut tui, &mut terminal);
+    // Ctrl+F and the query in both adapters, then Tab to the replacement field and the replacement text.
+    visual.simulate_keystrokes("ctrl-f");
+    key(&mut tui, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    for c in "foo".chars() { visual.simulate_keystrokes(&c.to_string()); key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    settle(&mut visual, &mut tui);
+    check(&visual, &tui, original);
+    visual.simulate_keystrokes("tab");
+    key(&mut tui, KeyCode::Tab, KeyModifiers::NONE);
+    for c in "bar".chars() { visual.simulate_keystrokes(&c.to_string()); key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    check(&visual, &tui, original);
+    assert_eq!(tui.session.replace_text(), "bar", "typing in the replacement field never edits the text");
+    // Enter replaces the current match in both; the next match is selected and the query is unchanged.
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut visual, &mut tui);
+    check(&visual, &tui, "bar foo\nfood foo\n");
+    assert_eq!(tui.session.state().active().unwrap().find().unwrap().current(), Some(0));
+    // Alt+A replaces every remaining match, and both report the same state afterwards.
+    visual.simulate_keystrokes("alt-a");
+    key(&mut tui, KeyCode::Char('a'), KeyModifiers::ALT);
+    settle(&mut visual, &mut tui);
+    check(&visual, &tui, "bar bar\nbard bar\n");
+    assert_eq!(tui.session.disabled(CommandId::ReplaceAll), Some("No matches to replace"));
+    assert_eq!(gui.read_with(&visual, |view, _| view.session().disabled(CommandId::ReplaceAll)), Some("No matches to replace"));
+    draw(&mut visual, &mut tui, &mut terminal);
+    // Escape closes the box and the prompt through the shared close command.
+    visual.simulate_keystrokes("escape");
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    settle(&mut visual, &mut tui);
+    assert!(tui.session.state().active().unwrap().find().is_none() && tui.modal.is_none());
+    check(&visual, &tui, "bar bar\nbard bar\n");
+    // Replace All is one undo step in both, and the file is untouched.
+    visual.simulate_keystrokes("ctrl-z");
+    key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    settle(&mut visual, &mut tui);
+    check(&visual, &tui, "bar foo\nfood foo\n");
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+}

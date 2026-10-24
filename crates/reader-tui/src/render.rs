@@ -1413,20 +1413,18 @@ impl App {
             0
         } else {
             1 + usize::from(
-                matches!(modal.kind, Prompt::Search)
+                modal.kind == Prompt::Find
+                    || matches!(modal.kind, Prompt::Search)
                     || !modal.secondary.is_empty()
                     || modal.secondary_focus,
             )
         };
-        for (i, text) in std::iter::once(&modal.input)
-            .chain((input_rows > 1).then_some(&modal.secondary))
-            .take(input_rows)
-            .enumerate()
-        {
+        for i in 0..input_rows.min(content.height as usize) {
             let active = (i == 1) == modal.secondary_focus;
             let prefix = if active { "› " } else { "  " };
             let room = content.width.saturating_sub(2) as usize;
-            let tail = tail_columns(text, room);
+            let text = field_text(modal, i == 1);
+            let tail = tail_columns(&text, room);
             line(
                 frame.buffer_mut(),
                 row(content, i as u16),
@@ -1531,9 +1529,17 @@ impl App {
             );
         }
         if reserve > 0 {
+            // The find prompt says which match is current, or why the expression cannot be matched.
+            let find = (modal.kind == Prompt::Find).then(|| self.session.state().active().and_then(|tab| tab.find())).flatten();
+            let finding = find.is_some_and(|find| find.error().is_some());
+            let find_footer = find.map(|find| {
+                let counter = find.counter();
+                if counter.is_empty() { FIND_HINT.to_owned() } else { format!("{counter} · {FIND_HINT}") }
+            });
             let footer = modal
                 .error
                 .as_deref()
+                .or(find_footer.as_deref())
                 .or_else(|| {
                     context
                         .then(|| choices.get(modal.at).and_then(|c| c.disabled))
@@ -1558,7 +1564,7 @@ impl App {
                 row(content, content.height - 1),
                 footer,
                 style(
-                    if modal.error.is_some() {
+                    if modal.error.is_some() || finding {
                         p.error
                     } else {
                         p.dim
@@ -1573,16 +1579,12 @@ impl App {
             && content.height > 0
             && content.width > 2
         {
-            let text = if modal.secondary_focus {
-                &modal.secondary
-            } else {
-                &modal.input
-            };
+            let text = field_text(modal, modal.secondary_focus);
             frame.set_cursor_position((
                 content.x
                     + 2
                     + UnicodeWidthStr::width(tail_columns(
-                        text,
+                        &text,
                         content.width.saturating_sub(3) as usize,
                     ))
                     .min(content.width.saturating_sub(3) as usize) as u16,
@@ -1590,6 +1592,17 @@ impl App {
             ));
         }
     }
+}
+
+/// What the find prompt's footer says under its fields.
+const FIND_HINT: &str = "Enter replaces · Alt+A all · Tab field · Esc closes";
+
+/// A prompt field as drawn: the find prompt's second row is its replacement text, labelled so an empty one is
+/// clear; the caret column follows the same text.
+fn field_text(modal: &crate::app::Modal, second: bool) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+    let text = if second { modal.secondary.as_str() } else { modal.input.as_str() };
+    if second && modal.kind == Prompt::Find { Cow::Owned(format!("{}: {text}", CommandId::ReplaceMatch.label())) } else { Cow::Borrowed(text) }
 }
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
@@ -2673,7 +2686,7 @@ pub(crate) fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
-const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Insert a tab in editable source; cycle controls outside source input mode\nShift+Tab / click  Cycle or choose explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nCtrl+S  Save draft\nCtrl+Z / Ctrl+Shift+Z  Undo / redo\nTyping / bracketed paste  Edit source on supported input backends\nClick or drag  Select source text (double: word, triple: its syntax group)\nAlt+B  Annotate with Git blame (click an annotation for its commit)\nCtrl+`  Git branches (or click the branch in the status bar)\nSpace in the explorer, then Ctrl+D  Compare two entries\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection (VS Code keymap: Alt+Shift+Right / Left)\nAlt+Shift+Down / Up  Add a cursor below / above (VS Code keymap: Ctrl+Alt+Down / Up; the palette has both)\nAlt+J  Select the word, then the next occurrence, at every cursor\nEsc  Back to one cursor, then close a dialog or pending request\nCtrl+Q  Close this view (Ctrl+Shift+Q: all views)\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nThe Application group in F10 holds Keymap… (preset, rebinding, every chord). F10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll, source/preview presentation and the Git comparisons in Lenz Diff.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Alt+Shift with the arrow keys is reported as such only by terminals that send modified arrows, so Add Cursor Below and Add Cursor Above stay in the palette (F10) and the Selection menu. Independent windows retain their own views.\n\nEditing changes an unsaved draft; Ctrl+S writes it. Closing its last view asks Save, Discard or Cancel. Read-only mode blocks editing. Git checkouts and branches also change your repository.\n\nEsc closes this help.";
+const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex · Tab in find: replace, Alt+A: replace all\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Insert a tab in editable source; cycle controls outside source input mode\nShift+Tab / click  Cycle or choose explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nCtrl+S  Save draft\nCtrl+Z / Ctrl+Shift+Z  Undo / redo\nTyping / bracketed paste  Edit source on supported input backends\nClick or drag  Select source text (double: word, triple: its syntax group)\nAlt+B  Annotate with Git blame (click an annotation for its commit)\nCtrl+`  Git branches (or click the branch in the status bar)\nSpace in the explorer, then Ctrl+D  Compare two entries\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection (VS Code keymap: Alt+Shift+Right / Left)\nAlt+Shift+Down / Up  Add a cursor below / above (VS Code keymap: Ctrl+Alt+Down / Up; the palette has both)\nAlt+J  Select the word, then the next occurrence, at every cursor\nEsc  Back to one cursor, then close a dialog or pending request\nCtrl+Q  Close this view (Ctrl+Shift+Q: all views)\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nThe Application group in F10 holds Keymap… (preset, rebinding, every chord). F10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll, source/preview presentation and the Git comparisons in Lenz Diff.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Alt+Shift with the arrow keys is reported as such only by terminals that send modified arrows, so Add Cursor Below and Add Cursor Above stay in the palette (F10) and the Selection menu. Independent windows retain their own views.\n\nEditing changes an unsaved draft; Ctrl+S writes it. Closing its last view asks Save, Discard or Cancel. Read-only mode blocks editing. Git checkouts and branches also change your repository.\n\nEsc closes this help.";
 
 #[cfg(test)]
 #[path = "render_tests.rs"]

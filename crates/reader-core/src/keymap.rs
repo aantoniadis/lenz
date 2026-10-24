@@ -214,7 +214,8 @@ const INTELLIJ: &[Preset] = &[
 
 /// VS Code's chords where VS Code has the same action. Actions VS Code leaves unbound (outline, documentation,
 /// language-server status, collapse all) have no chord there and stay in the menus; Ctrl+H is VS Code's Replace,
-/// which Lenz does not have, and F2 its Rename, so Type Hierarchy and the server status move off them.
+/// which Lenz offers from its find box and menus rather than a global chord (an empty replacement would delete the
+/// current match), and F2 its Rename, so Type Hierarchy and the server status move off them.
 const VS_CODE: &[Preset] = &[
     (CommandId::SearchEverywhere, &["Ctrl+T"]),
     (CommandId::FindFile, &["Ctrl+P"]),

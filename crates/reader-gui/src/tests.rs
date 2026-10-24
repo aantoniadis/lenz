@@ -3983,7 +3983,9 @@ fn the_find_box_fits_narrow_panes_and_keys_go_back_to_the_text_on_click(cx: &mut
     assert!(b.toggles.iter().all(|(_, t)| t.size.width == px(0.0)), "toggles hidden below 200 px");
     assert!(f32::from(b.bounds.size.width) <= 180.0);
     let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
-    v.simulate_click(point(text.origin.x + px(90.0), text.origin.y + px(50.0)), Modifiers::default());
+    // Below the box's two rows (query and replacement).
+    let below = text.origin.y + px(line_h() * 4.0);
+    v.simulate_click(point(text.origin.x + px(90.0), below), Modifiers::default());
     assert_eq!(f.view.read_with(&v, |r, _| r.find_focus), None);
     drop(v);
     settle(cx, &f, find_settled);
@@ -3991,6 +3993,87 @@ fn the_find_box_fits_narrow_panes_and_keys_go_back_to_the_text_on_click(cx: &mut
     v.simulate_keystrokes("f3");
     assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().find().is_some()), "the box stays open");
     assert_eq!(find_counter(&v, &f), "2/2", "F3 still steps");
+}
+
+#[gpui::test]
+fn the_find_box_replaces_current_and_all_from_its_replacement_field(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"Foo foo\nfood foo\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f f o o");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert_eq!(find_counter(&v, &f), "1/4");
+    // Tab gives the keys to the replacement field; typing there changes neither the query nor the text.
+    v.simulate_keystrokes("tab b a r");
+    assert_eq!(find_counter(&v, &f), "1/4");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().find().unwrap().query().to_owned()), "foo");
+    v.simulate_keystrokes("enter");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| r.session().state().current_source().map(|d| d.copy_range(0..d.len_bytes()).unwrap()).unwrap());
+    assert_eq!(text(&v), "bar foo\nfood foo\n", "the current match is replaced, and the next is selected");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "bar");
+    assert_eq!(find_counter(&v, &f), "1/3");
+    // Alt+A replaces every remaining match as one action.
+    v.simulate_keystrokes("alt-a");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    assert_eq!(text(&v), "bar bar\nbard bar\n");
+    assert_eq!(find_counter(&v, &f), "No matches");
+    // One Undo takes the whole Replace All.
+    v.simulate_keystrokes("escape ctrl-z");
+    assert_eq!(text(&v), "bar foo\nfood foo\n");
+    let file = f.dir.path().join("a.rs");
+    assert_eq!(std::fs::read(&file).unwrap(), b"Foo foo\nfood foo\n", "replace never writes the file");
+}
+
+#[gpui::test]
+fn a_click_on_the_replace_row_gives_it_the_keys_and_a_modal_keeps_the_text(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"needle\r\nneedle\r\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f n e e d l e");
+    draw(&mut v);
+    let row = f.view.read_with(&v, |r, _| r.find_box(&r.panes[0]).unwrap().replace_row);
+    assert!(row.size.height > px(0.0), "the replacement row is drawn");
+    v.simulate_click(row.center(), Modifiers::default());
+    v.simulate_keystrokes("x");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "x");
+    // A command menu owns the keys: typing there changes neither the replacement nor the document.
+    v.simulate_keystrokes("f10 a b");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "x");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..14).unwrap()), "needle\r\nneedle");
+    v.simulate_keystrokes("escape escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().active().unwrap().find().is_none()), "Escape closes the box after the menu");
+}
+
+#[gpui::test]
+fn read_only_mode_refuses_replace_and_says_why(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"foo\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    f.view.update(cx, |v, cx| {
+        v.dispatch(Command::SetReadOnly(true), cx);
+        v.dispatch(Command::SetReplaceText("bar".into()), cx);
+    });
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f f o o");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("tab enter");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..4).unwrap()), "foo\n");
+    // The read-only indicator follows it in the status; Details keep both.
+    let details = f.view.read_with(&v, |r, _| r.session().status_details());
+    assert!(details.lines().any(|line| line == "Replace: Read-only mode is on"), "{details}");
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"foo\n");
 }
 
 #[gpui::test]

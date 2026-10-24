@@ -317,6 +317,46 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   below 900 px in the GUI and at small terminal widths. The details dialog remains reachable from the label, the
   palette and the SQL menu; verify the exact cut points if the footer changes.
 
+## Find and replace (ticket 28, 2026-10-24)
+
+- **No preset chord for Replace:** `ReplaceMatch` and `ReplaceAll` are in the Find menu, the command list (F10 /
+  Find Action) and both find UIs, but neither keymap preset binds them. IntelliJ gives Ctrl+R to Replace (Reload
+  here) and Ctrl+H to Type Hierarchy; VS Code's Ctrl+H is `terminal_blocked` (terminals send Backspace) and a global
+  Replace would run with an empty replacement text, deleting the current match. The Keymap dialog only lists
+  commands that have a chord or an override, so giving Replace a chord needs the hand-edited settings file or the
+  "rebinding commands without a chord" follow-up above.
+- **Empty replacement deletes:** the replacement text is literal and may be empty, which deletes each match. This is
+  intended (replacing text with nothing) but a first-time user pressing Replace before typing a replacement removes
+  the current match; the box shows an empty `Replace` row, and Undo takes it back.
+- **Literal replacement only:** regular-expression groups, `$1`, case modifiers and escape sequences are not
+  expanded; the replacement text is inserted byte for byte.
+- **Replace waits for the search:** each edit restarts the find, so the next Replace is refused ("Wait for the search
+  to finish") until the new matches arrive. Repeated replace-current therefore depends on the analysis worker's
+  turnaround rather than being a single synchronous walk; include a repeated-replace walk in the scheduled batch
+  measurements before changing it.
+- **Capped searches:** at 10,000 matches Replace All refuses rather than replacing a prefix; Replace still changes
+  the current one. The list is capped before replace, so a document with more matches needs a narrower query.
+- **Replacement containing the query:** a replacement that contains the searched text is found again, including
+  after wrapping, so repeated Replace can keep matching text it just wrote. This follows the wrapped search the
+  find box already had; no special skip was added.
+- **Line endings:** matches never cross a line break, so replacing a query that only matches a line's text leaves
+  that line's ending behind (deleting "two" leaves the empty line). Matching a trailing newline is not supported.
+- **Session-only state:** the replacement text is remembered like the find options while the reader runs and is not
+  saved to settings or the workspace, so it is empty after a restart. Decide whether it should join the workspace
+  checkpoint.
+- **Suspected cost, unmeasured:** Replace All builds one text edit per listed match (at most 10,000), each carrying
+  the replacement text, in one transaction; a large replacement on a large document therefore allocates edits and
+  the resulting snapshot at once. Measure it before changing the cap or streaming the edits.
+- **Suspected cost, unmeasured:** the GUI's find box is now two rows tall whenever the pane has room, so it covers
+  more text and a click that used to reach the text can land on the replacement row. Both adapters rebuild the box
+  or prompt text each frame; check narrow panes and clicks near the box in the batch measurements.
+- **Several cursors:** Replace All carries every caret through the one transaction (a caret inside a replaced match
+  moves to the end of its replacement). Replace current re-selects the next match and drops the other cursors, as a
+  find step does; if that is unwanted, fanning replace across selections needs its own command.
+- **Unverified:** native macOS and Wayland GUI editing remain gated, so their find-box clicks and key delivery were
+  not exercised. Physical terminals were not driven for this ticket; the TUI paths were replayed with Ratatui events
+  and the cross-adapter parity test, not a real terminal emulator.
+
 ## Several selections (ticket 29, 2026-10-24)
 
 - **Only one range shape can be created:** Add Cursor Above/Below adds carets at the same column of neighbouring

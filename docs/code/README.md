@@ -23,7 +23,7 @@ cargo test --release -p reader-core --test semantics -- --ignored --nocapture   
 Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
 all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse /
 expand, Ctrl+Shift+- / Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll,
-Ctrl+P find file (`name:line`), Ctrl+G go to line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search,
+Ctrl+P find file (`name:line`), Ctrl+G go to line, Ctrl+F find (Tab: replace, Enter replaces, Alt+A replaces all), F3 / Shift+F3 next / previous match, Ctrl+Shift+F search,
 Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs, Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition,
 Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy,
 Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward,
@@ -256,6 +256,16 @@ selected (at most 10,000 are listed); Enter / Shift+Enter or F3 / Shift+F3 step,
 results panel, Escape closes. Alt+C, Alt+W and Alt+R (or the box's Aa, W and .* toggles) match case, whole words or a
 regular expression; the options are shared with project search while the reader runs. A match never spans lines. Go to
 Line (Ctrl+G) takes `line`, `line:column` or `line,column`, and the file finder opens `name:line[:column]` there.
+
+The box's **Replace** row is the replacement text: Tab (or a click on that row) gives it the keys, Shift-Tab goes
+back to the query, Enter replaces the current match and selects the next one, and Alt+A replaces every listed match at
+once. **Replace** and **Replace All**
+are also in the Find menu and the command list. The replacement is literal (a regular expression's `$1` groups are not
+expanded) and an empty one deletes the match; a match never spans lines, so its line ending stays. Each replace is one
+undo step and changes only the current draft: nothing is written until Save. Replace waits for a settled search for the
+text on screen; an invalid expression, a read-only file or a preview says why instead of changing anything. Replace All
+refuses a search capped at 10,000 matches, where it cannot know the rest; Replace still changes the current one.
+
 Soft Wrap (Alt+Z, remembered) wraps long lines at the pane's width; continuation rows are indented like their line and
 carry no number. Large files, images and previews do not wrap.
 
