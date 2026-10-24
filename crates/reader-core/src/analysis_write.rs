@@ -42,15 +42,15 @@ impl Analysis {
                     SourceReady::Ready(doc) => Ok(Some(doc)), SourceReady::Waiting => Err(None), SourceReady::Failed(why) => Err(Some(why)),
                 }
             } else { Ok(None) };
+        let Some(entry) = self.writes.get_mut(&id) else { return };
         match ready {
             Err(None) => { self.queue.push_back(Owner::Write(id)); }
             Err(Some(why)) => {
-                let entry = self.writes.get_mut(&id).expect("reserved write"); entry.pending = None; entry.source = None;
+                entry.pending = None; entry.source = None;
                 *entry.outcome.lock().unwrap_or_else(|e| e.into_inner()) = Some(Outcome::Rejected(why.into()));
                 entry.done.store(true, Ordering::Release);
             }
             Ok(document) => {
-                let entry = self.writes.get_mut(&id).expect("reserved write");
                 let Some(work) = entry.pending.take() else { return };
                 entry.submitted = true; entry.source = None;
                 let (done, outcome, tx) = (entry.done.clone(), entry.outcome.clone(), tx.clone());
