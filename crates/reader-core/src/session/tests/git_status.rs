@@ -56,6 +56,13 @@ fn explorer_and_tabs_show_repository_status_apart_from_drafts_and_save_keeps_it(
     assert_eq!(s.state().tab_status(s.state().active().unwrap().id()), Some(FileStatus::Untracked));
     open(&mut s, Command::OpenRetained(r.path().join("sub/deep.txt")), "deep.txt");
     assert_eq!(s.state().tab_status(s.state().active().unwrap().id()), None);
+    // An untitled document is unsaved with no repository status until Save As gives it a file.
+    s.dispatch(Command::NewDocument);
+    let untitled = s.state().active().unwrap().id();
+    edit(&mut s, "new ");
+    assert!(s.state().tab_dirty(untitled) && s.state().tab_status(untitled).is_none());
+    s.dispatch(Command::SaveAs { tab: untitled, path: r.path().join("saved-as.txt") });
+    settle_ticking(&mut s, |s| !s.state().tab_dirty(untitled) && s.state().tab_status(untitled) == Some(FileStatus::Untracked));
 
     // Save writes the draft: the draft is clean and the file is now modified against HEAD.
     s.dispatch(Command::ActivateTab(clean));

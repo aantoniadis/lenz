@@ -1598,7 +1598,7 @@ impl State {
 impl State {
     /// Tab `id`'s file status against HEAD; none for a saved version or a retrieved source.
     pub fn tab_status(&self, id: TabId) -> Option<lenz_content::branches::FileStatus> {
-        let tab = self.tabs.iter().find(|tab| tab.id == id).filter(|t| !t.is_saved_version() && t.retrieved.is_none())?;
+        let tab = self.tabs.iter().find(|tab| tab.id == id).filter(|t| t.is_file())?;
         self.git_status.as_ref()?.of(tab.canonical.as_deref().unwrap_or(&tab.source))
     }
     /// An explorer row's file status against HEAD (an untracked folder's too).
