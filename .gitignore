@@ -1,5 +1,7 @@
 target/
 # Benchmark and validation evidence; kept out of target/ so `cargo clean` is always safe.
 perf-results/
-.claude/
+.claude/*
+# Shared with cloud sessions: commit and PR attribution.
+!.claude/settings.json
 __pycache__/

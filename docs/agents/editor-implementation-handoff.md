@@ -1,46 +1,68 @@
 # Integrated editor: implementation handoff
 
-Written at the pause of 2026-10-24, after ticket 30 merged. Rewrite or replace this
-file at each pause rather than appending to it; the durable record of every merge and
-decision belongs in the local tracker (see [Read instead of reconstructing](#read-instead-of-reconstructing)),
-not here.
+Written at the pause of 2026-10-24 for resuming in a Claude Code cloud session, after
+ticket 30 merged and the end-of-epic gate fixes landed. Rewrite or replace this file at
+each pause rather than appending to it; the durable record of every merge and decision
+belongs in the tracker (see [The tracker](#the-tracker)), not here.
 
 ## State
 
 - The work is **paused**. Do not start tickets until the user says to resume.
-- Integration checkout: the worktree on `integration/integrated-editor` (`git worktree
-  list` shows where), clean and pushed to origin; no PR. Leave the primary checkout (the
-  repository's main worktree) untouched.
-- Since ticket 30 the branch also carries the dev build profile and the end-of-epic gate
-  fixes listed under [Known issues to carry](#known-issues-to-carry).
-- **36 of 68 tickets resolved.** No agents running; every worktree idle and clean.
-- Ready frontier when resumed: 33, 36, 39, 40, 41, 42, 43, 55, 56, 67. Ticket 03 is
-  `needs-info` (no macOS runner; do not ask again), which blocks 24 and therefore 68.
-- Critical path for the remaining language work: 39 (unblocked by 30) and 40/41/42/43,
-  which together unblock roughly twenty language and SQL tickets.
+- Branch `integration/integrated-editor` on origin is the integration branch; no PR.
+  Leave `main` alone.
+- **36 of 68 tickets resolved:** 01, 02, 04–23, 25–32, 34, 35, 38, 60, 65, 66.
+- Ready frontier: 33, 36, 39, 40, 41, 42, 43, 55, 56, 67. Ticket 03 is `needs-info` (no
+  macOS runner; do not ask again), which blocks 24 and therefore 68.
+- Critical path for the remaining language work: 39–43, which together unblock the
+  language and SQL tickets 44–54, 57–59 and 61–64.
 
-## Read instead of reconstructing
+## The tracker
 
-The tracker lives under `.scratch/integrated-editor/` in the integration checkout. It is
-git-ignored on purpose: never force-add it, never copy it into a worktree, and give
-sub-agents absolute paths into the integration checkout instead of pasting ticket text.
+- `.scratch/integrated-editor/` is committed on this branch: `spec.md`, `map.md` and one
+  `issues/NN-*.md` per ticket. [Tracker conventions](issue-tracker.md) define claim,
+  frontier, resolve and the map's Decisions-so-far.
+- Commit tracker changes together with the work they record, so the pushed branch is
+  always the whole state.
+- The repository is public: tickets, docs and commits carry no machine paths, hostnames,
+  hardware details or session identifiers.
+- The local state file and checkpoint history of the first machine were not published;
+  this file carries what still matters from them.
 
-1. `.scratch/integrated-editor/implementation-state.json` — authoritative:
-   `resolved`, `worktrees`, `verification_cadence`, `concurrency`, `build_cache`,
-   `known_flaky`, `pause_after_current_wip`, past `performance_decisions`.
-2. `.scratch/integrated-editor/current-checkpoint.md` — every merge, decision and pause,
-   latest at the bottom.
-3. `.scratch/integrated-editor/spec.md`, `map.md`, `issues/NN-*.md` — the spec and the
-   tickets; conventions in [issue tracker](issue-tracker.md).
-4. [AGENTS.md](../../AGENTS.md), [terminal guide](../tui.md),
-   [domain rules](domain.md) — GUI/TUI parity, robustness and term rules.
-5. [Editor follow-ups](../editor-follow-ups.md) — deferred items and suspected costs,
-   one section per recent ticket (25–32, 34, 35, 60, 65, 66).
-6. Per-topic research notes: [snippets](../research/reader-snippets.md),
-   [completion](../research/reader-completion.md),
-   [saved comparison](../research/reader-saved-comparison.md),
-   [Unicode composition](../research/reader-unicode-composition.md).
-7. `git log --first-parent integration/integrated-editor` for what each ticket merged.
+## Cloud session setup
+
+What a cloud session gets (Claude Code docs, 2026-10-24): roughly 4 vCPU, 16 GB RAM and a
+30 GB disk on Ubuntu 24.04; the repository's `CLAUDE.md` (which imports
+[AGENTS.md](../../AGENTS.md)) and `.claude/settings.json`; no user-level settings, memory,
+skills or plugins from the first machine.
+
+- **Environment setup script** (the user sets it in the cloud environment's settings; it
+  runs as root): the gpui system packages from the README's Build section, and a stable
+  Rust of at least 1.92 (the dependencies' highest `rust-version`; this branch was built
+  with 1.99.1):
+
+  ```bash
+  apt-get update -qq
+  apt-get install -y -qq pkg-config libxkbcommon-x11-dev libwayland-dev libfontconfig-dev \
+      libx11-xcb-dev libvulkan1 libglib2.0-dev libzstd-dev
+  if command -v rustup > /dev/null; then rustup update stable && rustup default stable
+  else curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal; fi
+  ```
+
+  Check `rustc -V` and the package names in the first session; neither was verified on
+  the cloud image.
+- **Attribution:** the committed `.claude/settings.json` hides the session-link trailer
+  and the pull request attribution line. Check the first cloud commit ends with only the
+  `Co-Authored-By` trailer.
+- **One checkout, one target:** a full `scripts/ci-local.sh` cycle writes about 16 GB
+  uncompressed (dev about 12 GB, release about 4 GB), so a second worktree with its own
+  target does not fit. Run `cargo clean` before the end-of-epic gate if space is short.
+- **Long commands:** foreground commands stop after 10 minutes; run cold builds and gates
+  in the background. Expect builds several times slower than on the 32-thread machine the
+  earlier timings came from.
+- **Pre-push gate:** a fresh clone has no `core.hooksPath`, so pushes skip
+  `scripts/ci-local.sh`. Enabling it (`git config core.hooksPath .githooks`) makes every
+  push run the full gate; ask the user before enabling it or before pushing with
+  `--no-verify`.
 
 ## User decisions in force
 
@@ -58,36 +80,33 @@ sub-agents absolute paths into the integration checkout instead of pasting ticke
 - Never run `cargo fmt` or rustfmt. Commits end with only
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` — no session link, no
   "Generated with" line.
-- `RUSTC_WRAPPER=sccache` per implementer command only, never in a global cargo config;
-  final release and benchmark builds must unset it. The evidence so far is 22 hits out of
-  40 executed requests, with most builds reusing warm per-worktree `target/` directories,
-  so the benefit is unproven — do not claim it helps.
-- Build settings follow [AGENTS.md](../../AGENTS.md#build-output). The
-  `DEBUG0/INCREMENTAL0/JOBS4` environment in older checkpoints is retired.
-- Sub-agents may install missing language tools from official sources for the language
-  tickets.
+- Build settings follow [AGENTS.md](../../AGENTS.md#build-output).
+- Agents may install missing language tools from official sources for the language
+  tickets. The cloud's default network allows GitHub, crates.io, the Rust and Ubuntu
+  archives; a tool hosted elsewhere needs the user to widen the environment's network
+  access.
 - When the user asks to pause after the current ticket: finish and merge it, start
-  nothing new, record the pause in the tracker, and rewrite this file.
+  nothing new, record the pause in `map.md`, and rewrite this file.
 
-## Workflow that worked
+## Workflow
 
-- Claim the ticket (`**Status:** claimed`), record it under `worktrees` in the state
-  JSON, then `git switch -c work/editor-NN-<slug> integration/integrated-editor` in an
-  idle worktree: those `git worktree list` shows on merged `work/editor-*` branches are
-  the reusable ones (merged worktrees with no further use were removed).
-- Launch one background implementer with a pointer-only prompt: the ticket path, the
-  spec, [AGENTS.md](../../AGENTS.md), the policy block above, "call the Skill tool with
-  `tdd`", the filtered gate, "the integration root is read-only for you" (two agents
-  edited it and had to revert), and "merge `integration/integrated-editor` before
-  reporting".
-- Merge with `git merge --no-ff <sha>`, then run both panic-site scripts before
-  resolving. On a conflict, `git merge --abort` and send the implementer back to merge
-  the tip and resolve semantically; that is what cleared tickets 29 and 32.
+- Claim the ticket (`**Status:** claimed`), commit, then
+  `git switch -c work/editor-NN-<slug> integration/integrated-editor` in the checkout.
+- Implement test-first (the `tdd` skill where available), then run the filtered gate.
+- A background implementer subagent can do the work, with a pointer-only prompt: the
+  ticket path, the spec, [AGENTS.md](../../AGENTS.md), the policy block above, the
+  filtered gate, and "merge `integration/integrated-editor` before reporting". It shares
+  the one checkout and target, so run one at a time and leave the checkout to it while
+  it runs.
+- Merge with `git switch integration/integrated-editor && git merge --no-ff <branch>`,
+  then run both panic-site scripts. On a conflict, `git merge --abort`, merge the tip into
+  the work branch and resolve semantically; that is what cleared tickets 29 and 32.
 - Watch these semantic-conflict points on every merge: the `CommandId::ALL` count and
   the `an_empty_session_offers_open_and_explains_the_rest` expected label list (165 at
   this pause), the keymap preset tables, and the menu and shortcut tests.
 - Resolve with `Status: resolved`, ticked boxes, an `## Answer` carrying the merge SHA
-  and the evidence pointer, the `resolved` list in the state JSON, and a checkpoint line.
+  and the evidence, and a Decisions-so-far line in `map.md`; commit and push
+  `integration/integrated-editor`.
 
 ## Known issues to carry
 
@@ -102,8 +121,8 @@ sub-agents absolute paths into the integration checkout instead of pasting ticke
   (gutter marker cells) and 27 (paired delimiters); the full gate caught them (`a6a63b8`).
 - A panicked Git status read can leave `git_status_running` stuck (ticket 65).
 - Some ticket 31 branch merge commits lack the trailer; left alone, no history rewrite.
-- The installed rust-analyzer is not a provider-tested version, so the `real_rust`
-  opt-in provider test fails environmentally.
+- The `real_rust` opt-in provider test needs a provider-tested rust-analyzer; with
+  another version it fails environmentally.
 - User-visible key changes the user has not objected to: `Alt+Shift+Up/Down` duplicates
   and Add Cursor moved to `Ctrl+Alt+Up/Down` in both presets, Tab inserts the resolved
   indent width, and Toggle Comment is `Ctrl+/` and `Alt+/`.
@@ -113,12 +132,10 @@ sub-agents absolute paths into the integration checkout instead of pasting ticke
 
 ## Suggested skills
 
-- `implement-spec` — when the user resumes, continuing the task graph under the
-  constraints above.
-- `tdd` — implementers call it per ticket.
-- `ponytail:ponytail` (full) — the minimal-change style the user has active.
+A cloud session loads the repository's skills and those enabled on the user's claude.ai
+account, not the first machine's. The workflow above does not depend on any of these.
+
+- `tdd` — per ticket.
 - `superpowers:verification-before-completion` — before claiming a merge or resolution.
 - `code-review` — only once every ticket is done.
-- `resolving-merge-conflicts` — only when a real conflict must be resolved on
-  integration.
 - `handoff` — at the next pause, to rewrite this file.
