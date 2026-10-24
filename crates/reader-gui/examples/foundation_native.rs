@@ -122,6 +122,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .expect("production constructor must open the acceptance window");
             handle
                 .update(cx, |view, window, cx| {
+                    view.start_native_updates_for_test(cx);
                     view.enable_draft_input_for_test();
                     window.set_window_title(&format!("Lenz foundation {label}"));
                     view.focus_handle().focus(window, cx);
