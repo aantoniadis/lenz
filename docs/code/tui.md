@@ -55,6 +55,26 @@ the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split re
 without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
 independently. Platform input availability is described below; see the [implementation and verification limits](../research/reader-saved-comparison.md).
 
+**Resolve External Change…** (File menu; enabled while a draft is dirty and the file is known to have changed
+on disk — by the watcher, a rejected Save or a recheck that found another version) reads the file again and shows
+its three sides: **Disk** (the file as read now, with its lines and bytes and how it relates to the baseline),
+**Current draft**, and **Confirmed baseline (last confirmed save)**. It decides nothing. It offers **Compare Disk,
+Draft and Baseline…** (`c`), **Take Disk Version** (`d`), **Save Draft over Disk** (`s`) and **Keep Draft** (Esc);
+keys `c`, `d`, `s` and Esc answer this dialog, so they do not follow the keymap preset. Every choice except Keep
+Draft reads the file once more, off the UI thread, and decides only if it still holds the same identity and content
+the dialog showed; another external change or an unreadable file retains the draft, the history and the bytes and
+refreshes the sides. **Take Disk Version** replaces the draft with one undoable edit and confirms that version, so
+the tab becomes clean and `⟲` is released; the file is not written. **Save Draft over Disk** adopts nothing until
+the write is confirmed: it writes the draft after that one check, and a rejected or uncertain outcome keeps the
+draft, its history and the confirmed baseline. **Keep Draft** keeps the text and the baseline it was edited from —
+the new disk version never becomes a baseline implicitly — and leaves the conflict recorded. **Compare Disk, Draft
+and Baseline…** opens the comparison with the disk version in place of the last saved one and the confirmed
+baseline as its own read-only side beside it; the draft side shares the ordinary buffer and history. Closing that
+comparison returns the dialog for the draft as it stands, so a resolved draft can then be saved over the disk.
+The GUI shows the same dialog with the same labels and greys a choice with the core's reason; the comparison's
+three sides carry the same titles there. A very narrow pane can show only some comparison tab titles; the tab bar
+scrolls rather than changing the labels.
+
 Opening a dirty file in an editor or default app offers **Save and Open** (`s`),
 **Open Saved Version** (`o`) or **Cancel** (Esc). The saved-version choice keeps
 the draft/history and omits dirty caret coordinates. Save and Open launches once

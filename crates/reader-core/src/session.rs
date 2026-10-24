@@ -4,7 +4,7 @@
 
 #[path = "session/saved_comparison.rs"]
 mod saved_comparison;
-pub use saved_comparison::{ComparisonSide, SavedComparison};
+pub use saved_comparison::{ComparisonKind, ComparisonSide, SavedComparison};
 #[path = "session/markers.rs"]
 mod markers_work;
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
@@ -30,6 +30,8 @@ mod save_as_work;
 mod create_work;
 #[path = "session/recovery.rs"]
 mod recovery_work;
+#[path = "session/reconcile.rs"]
+mod reconcile_work;
 #[path = "session/transition.rs"]
 mod transition_work;
 
@@ -142,6 +144,10 @@ pub enum Command {
     ChooseRecoveredDraft { ticket: u64, choice: crate::recovery::Choice },
     RecheckSave { tab: TabId },
     ConfirmRecheckedSave { tab: TabId },
+    /// Read the file on disk and show the conflict's three sides, deciding nothing yet.
+    ResolveExternalChange,
+    /// Compare, take the disk version, save the draft over it, or keep the draft.
+    ChooseReconcile { ticket: u64, choice: crate::reconcile::Choice },
     PrepareProjection(crate::projection::Request),
     SetNativeContext { pane: u8, context: u64 },
     MeasuredReveal { goal: NativeReveal, cols: usize, bounds: std::ops::Range<usize> },
@@ -518,6 +524,8 @@ pub enum CommandId {
     RecoverDrafts,
     RecheckSave,
     ConfirmRecheckedSave,
+    /// Compare a dirty draft with the file that changed on disk, and choose how to reconcile them.
+    ResolveExternalChange,
     /// Fold regions: the innermost at the caret, the one on the caret's line, all of them, comments and imports.
     Collapse,
     Expand,
@@ -691,7 +699,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 164] = [
+    pub const ALL: [CommandId; 165] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -748,6 +756,7 @@ impl CommandId {
         Self::RecoverDrafts,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
+        Self::ResolveExternalChange,
         Self::CopyPath,
         Self::CopyPathLine,
         Self::OpenInEditor,
@@ -937,6 +946,7 @@ impl CommandId {
             Self::RecoverDrafts => "Recover Unsaved Draft…",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
+            Self::ResolveExternalChange => "Resolve External Change…",
             Self::Collapse => "Collapse",
             Self::Expand => "Expand",
             Self::CollapseAll => "Collapse All",
@@ -1182,6 +1192,10 @@ pub enum Completion {
     Branches { request: u64, root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
     /// The details of the commit popup's commit, for request `request`.
     CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
+    /// The file on disk read for external-change dialog `ticket` (or why it cannot be read).
+    ReconcileRead { ticket: u64, result: Result<crate::reconcile::Disk, String> },
+    /// The decision `choice` of dialog `ticket`: the file as re-read for that decision, or why it cannot be read.
+    ReconcileChecked { ticket: u64, choice: crate::reconcile::Choice, result: crate::reconcile::Check },
     /// Blame of `tab`'s request `request`: the repository root first, then runs of lines, then `done`.
     Blamed { tab: TabId, request: u64, root: Option<PathBuf>, hunks: Vec<(std::ops::Range<usize>, Arc<lenz_content::blame::Commit>)>, done: Option<Result<(), String>> },
 }
@@ -1263,6 +1277,7 @@ impl Input {
                 Completion::CheckedOut { .. } => "checked out",
                 Completion::Head { .. } => "head",
                 Completion::Branches { .. } => "branches",
+                Completion::ReconcileRead { .. } | Completion::ReconcileChecked { .. } => "reconcile",
                 Completion::DocumentationReady { .. } => "documentation",
             },
         }
@@ -1545,8 +1560,8 @@ impl<'a> View<'a> {
     pub fn save_status(&self) -> &'a crate::save::Status { &self.save.status }
     fn write_path_changed(&self) -> bool { self.save.read.as_ref().is_some_and(|read| read.snapshot.path != self.snapshot.source()) }
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
-    pub fn can_undo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
-    pub fn can_redo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
+    pub fn can_undo(&self) -> bool { self.tab.read_only_side().is_none() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
+    pub fn can_redo(&self) -> bool { self.tab.read_only_side().is_none() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
     /// Existing confirmed ending preference; typing never normalizes the remaining source.
     pub fn input_newline(&self) -> &'static str {
         if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) { "\r\n" } else { "\n" }
@@ -1554,7 +1569,7 @@ impl<'a> View<'a> {
     pub fn read_only(&self) -> bool { self.read_only }
     pub fn edit_disabled(&self) -> Option<&'static str> { self.intrinsic_edit_disabled().or(self.read_only.then_some("Read-only mode is on")) }
     pub(super) fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
-        if self.tab.is_saved_version() { Some("The last saved version is read-only") }
+        if let Some(side) = self.tab.read_only_side() { side.read_only() }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
         else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
@@ -1774,7 +1789,7 @@ impl State {
     /// Whether an explorer row's file has unsaved changes in a tab.
     pub fn row_dirty(&self, row: &project::TreeRow) -> bool {
         let Some(path) = self.project.as_ref().filter(|_| row.dir.is_none()).map(|p| p.root().join(&*row.path)) else { return false };
-        self.tabs.iter().any(|t| (t.source == path || t.canonical.as_deref() == Some(&path)) && !t.is_saved_version() && self.tab_dirty(t.id))
+        self.tabs.iter().any(|t| (t.source == path || t.canonical.as_deref() == Some(&path)) && t.read_only_side().is_none() && self.tab_dirty(t.id))
     }
     /// Unsaved content is independent of repository status and remains visible for inactive tabs.
     pub fn tab_dirty(&self, id: TabId) -> bool {
@@ -1976,7 +1991,7 @@ impl State {
         });
         let approximate = tab.filter(|t| t.approximate).map(|_| "Approximate position: the surrounding text changed".to_string());
         let changing = tab.filter(|t| t.changing > 0).map(|_| "Changing on disk: showing the last confirmed content".to_string());
-        let conflict = tab.filter(|t| t.stale_on_disk).map(|_| "File changed on disk: the draft and undo history are retained. Reload to decide whether to replace them.".to_string());
+        let conflict = tab.filter(|t| t.stale_on_disk).map(|_| "File changed on disk: the draft and undo history are retained. Resolve External Change… compares the file on disk, your draft and the confirmed baseline; Reload replaces the draft.".to_string());
         // A file outside the browsing root (a definition in a dependency): say where it comes from.
         // Source a language server returned: from where, and whether that server session still runs.
         let retrieved = tab.and_then(|t| t.retrieved.as_ref()).map(|v| match self.semantics.has_session(v.session) {
@@ -1994,10 +2009,13 @@ impl State {
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
-        let comparison = self.comparison.as_ref().map(|c| match c.failure() {
-            Some(why) => format!("Saved comparison failed: {why}"),
-            None if c.pending() => "Comparing with last saved version…".into(),
-            None => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
+        let comparison = self.comparison.as_ref().map(|c| match (c.kind(), c.failure(), c.pending()) {
+            (ComparisonKind::Saved, Some(why), _) => format!("Saved comparison failed: {why}"),
+            (ComparisonKind::Saved, None, true) => "Comparing with last saved version…".into(),
+            (ComparisonKind::Saved, None, false) => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
+            (ComparisonKind::Conflict, Some(why), _) => format!("External change comparison failed: {why}"),
+            (ComparisonKind::Conflict, None, true) => "Comparing the file on disk with your draft…".into(),
+            (ComparisonKind::Conflict, None, false) => format!("External change comparison: {} changed blocks{}; disk and confirmed baseline are read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
         });
         doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(conflict).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(read_only).chain(saving).collect()
     }
@@ -2265,6 +2283,9 @@ pub struct Session {
     id: crate::close::SessionId,
     external_seq: u64,
     external_pending: Option<external_work::Pending>,
+    /// The external-change dialog: its captured identity and the file read behind it.
+    reconcile_seq: u64,
+    reconcile: Option<reconcile_work::Pending>,
     close_seq: u64,
     closing: Option<close_work::Pending>,
     closed: bool,
@@ -2477,7 +2498,7 @@ impl Session {
         Self {
             text_input_enabled,
             comparison_seq: 0,
-            id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
+            id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, reconcile_seq: 0, reconcile: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
                 presentation: None,
                 comparison: None,
@@ -2795,7 +2816,7 @@ impl Session {
             },
             CommandId::FindDeclarations => self.state.project.is_none().then_some("No folder is open"),
             CommandId::RerunSearch | CommandId::CloseResults => self.state.results.is_none().then_some("No search results"),
-            CommandId::Reload if self.state.active().is_some_and(Tab::is_saved_version) => Some("The last saved version is read-only"),
+            CommandId::Reload if self.state.active().and_then(Tab::read_only_side).is_some() => self.state.active().and_then(Tab::read_only_side).and_then(ComparisonSide::read_only),
             CommandId::Reload if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Source a language server returned cannot be reloaded; ask for the definition again"),
             CommandId::Reload if self.state.active().is_some_and(Tab::untitled) => Some(UNTITLED_NO_FILE),
             CommandId::Reload | CommandId::SelectAll => (!open).then_some("No file is open"),
@@ -2833,7 +2854,7 @@ impl Session {
                 None => Some("No file is open"),
                 // Turning annotations off always works, also once the file has gone.
                 Some(t) if t.blame.is_some() => None,
-                Some(t) if t.is_saved_version() => Some("The last saved version has no live Git attribution"),
+                Some(t) if t.read_only_side().is_some() => Some("A comparison side has no live Git attribution"),
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
                 Some(t) if t.untitled() => Some(UNTITLED_NO_FILE),
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
@@ -2845,6 +2866,7 @@ impl Session {
             },
             // The explorer's selection, which only the adapter knows, is checked when it asks.
             CommandId::CompareSaved => self.compare_saved_disabled(),
+            CommandId::ResolveExternalChange => self.resolve_external_disabled(),
             CommandId::CloseSavedComparison => self.state.comparison.is_none().then_some("No saved comparison is open"),
             CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
             CommandId::CompareSelected => (self.state.tree_marks.len() < 2).then_some(MARK_TWO),
@@ -3170,7 +3192,7 @@ impl Session {
                 false => entries.extend([Separator, C(CommandId::AnnotateBlame)]),
             }
         }
-        entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison)]);
+        entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::ResolveExternalChange), C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison)]);
         entries.extend([Separator, C(CommandId::SplitRight), C(CommandId::SplitDown)]);
         if self.state.settings.split.is_some() {
             entries.push(C(CommandId::Unsplit));
@@ -3336,7 +3358,7 @@ impl Session {
     fn external_tab(&self) -> Result<&Tab, &'static str> {
         match self.state.active() {
             None => Err("No file is open"),
-            Some(t) if t.is_saved_version() => Err("The last saved comparison side is an immutable snapshot; open the current side externally"),
+            Some(t) if t.read_only_side().is_some() => Err("A comparison's read-only side is an immutable snapshot; open the current side externally"),
             Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
             Some(t) if t.untitled() => Err(UNTITLED_NO_FILE),
             Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
@@ -3456,6 +3478,10 @@ impl Session {
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         if self.navigation_query.as_ref().is_some_and(|q| self.state.navigation.as_ref().is_none_or(|n| n.request != q.request)) { self.navigation_query = None; }
         effect.repaint |= self.refresh_saved_comparison();
+        // A dialog for a file, project or tab that is gone describes nothing: it is dropped, never applied later.
+        if self.reconcile.as_ref().is_some_and(|pending| !pending.comparing && !self.reconcile_current(pending)) {
+            self.reconcile = None; effect.repaint = true;
+        }
         self.invalidate_result_analysis();
         self.refresh_blame();
         // A shown draft's change markers follow its text: only a version or baseline that changed is compared again.
@@ -3617,7 +3643,7 @@ impl Session {
         // storage, but it cannot replace the source of an already loaded view.
         if self.state.sources.buffers.values().any(|entry| entry.pinned()
             && entry.snapshot.as_ref().is_some_and(|source| source.source() == doc.source())) { return; }
-        if self.state.tabs.iter().any(|tab| !tab.is_saved_version() && tab.loaded && (tab.source == doc.source()
+        if self.state.tabs.iter().any(|tab| tab.read_only_side().is_none() && tab.loaded && (tab.source == doc.source()
             || tab.canonical.as_deref() == Some(doc.source())
             || self.state.source(tab.id).is_some_and(|source| source.source() == doc.source()))) { return; }
         let id = self.state.sources.admit(doc.source(), None, &doc, Some(stamp));
@@ -3670,6 +3696,8 @@ impl Session {
             Command::ChooseRecoveredDraft { ticket, choice } => self.choose_recovered_draft(ticket, choice),
             Command::RecheckSave { tab } => self.recheck_save(tab),
             Command::ConfirmRecheckedSave { tab } => self.confirm_rechecked_save(tab),
+            Command::ResolveExternalChange => self.resolve_external_change(),
+            Command::ChooseReconcile { ticket, choice } => self.choose_reconcile(ticket, choice),
             Command::PrepareLayout { pane, tab, work } => {
                 if self.layout_intents.get(pane as usize).is_some_and(Option::is_some) { return Effect::default(); }
                 self.prepare_layout(crate::layout::Request { pane, tab, work });
@@ -4784,7 +4812,7 @@ impl Session {
     }
 
     fn defer_semantic(&mut self, tab: TabId, request: u64, offset: usize, question: semantics::Question, foreground: Option<Ask>) {
-        if self.state.tabs.iter().any(|t| t.id == tab && t.is_saved_version()) { return; }
+        if self.state.tabs.iter().any(|t| t.id == tab && t.read_only_side().is_some()) { return; }
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return };
         self.state.semantics.cancel_lane(question.lane());
         self.semantic_wait.insert(question.lane(), SemanticWait { tab, key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()),
@@ -4835,7 +4863,7 @@ impl Session {
 
     /// Ask about `offset` of `doc` (a snapshot a tab holds).
     fn ask_at(&mut self, tab: TabId, offset: usize, ask: Ask) -> Effect {
-        if self.state.tabs.iter().any(|t| t.id == tab && t.is_saved_version()) { return Effect::default(); }
+        if self.state.tabs.iter().any(|t| t.id == tab && t.read_only_side().is_some()) { return Effect::default(); }
         self.semantic_seq += 1;
         let request = self.semantic_seq;
         self.semantic_wait.remove(&semantics::Lane::Foreground);
@@ -4877,7 +4905,7 @@ impl Session {
         self.sync_semantics();
         self.forget_semantic_messages();
         let label = Ask::TypeHierarchy(direction).label();
-        let tab = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.source == doc.source());
+        let tab = self.state.tabs.iter().find(|t| t.read_only_side().is_none() && t.source == doc.source());
         let name = if let Some(tab) = tab.filter(|t| self.state.source(t.id).is_some_and(|s| s.key().version == doc.version() && Arc::ptr_eq(s.source_meta(), doc.source_meta()))) {
             self.current_name_at(tab.id, offset, true)
         } else {
@@ -5072,7 +5100,7 @@ impl Session {
     /// holds it).
     fn decode(&mut self, d: semantics::Decoration) {
         if !self.state.semantics.can_ask(d.session) || self.state.semantics.latest(&d.path, d.kind) != Some(d.id) { return; }
-        let Some(tab) = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.source == d.path).map(|t| t.id) else { return };
+        let Some(tab) = self.state.tabs.iter().find(|t| t.read_only_side().is_none() && t.source == d.path).map(|t| t.id) else { return };
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()).filter(|s| s.key().version == d.version) else { return };
         let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
         let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), self.is_shown(tab));
@@ -5594,7 +5622,7 @@ impl Session {
                     Ok((stamp, doc, canonical)) => {
                         // Two spellings of one file (a symlink, `..`) are one document: keep the tab already showing it.
                         let pane = self.state.tabs.iter().find(|t| t.id == tab).map(|t| t.pane);
-                        let duplicate = canonical.as_ref().and_then(|c| self.state.tabs.iter().find(|t| !t.is_saved_version() && t.id != tab && Some(t.pane) == pane && t.canonical.as_ref() == Some(c)).map(|t| t.id));
+                        let duplicate = canonical.as_ref().and_then(|c| self.state.tabs.iter().find(|t| t.read_only_side().is_none() && t.id != tab && Some(t.pane) == pane && t.canonical.as_ref() == Some(c)).map(|t| t.id));
                         match duplicate {
                             Some(other) if !reload => {
                                 let (active, shown_other) = (self.state.active == Some(tab), self.state.other == Some(tab));
@@ -5735,6 +5763,8 @@ impl Session {
                 }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
+            Completion::ReconcileRead { ticket, result } => self.reconcile_read(ticket, result),
+            Completion::ReconcileChecked { ticket, choice, result } => self.reconcile_checked(ticket, choice, result),
             Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
                 Some(v) => {
                     v.loading = false;
@@ -6112,7 +6142,7 @@ impl Session {
                     let root = batch.root.clone();
                     for item in items {
                         let path = root.join(item.path.as_ref());
-                        let current = self.state.tabs.iter().find(|tab| !tab.is_saved_version() && (tab.source == path || tab.canonical.as_ref() == Some(&path)))
+                        let current = self.state.tabs.iter().find(|tab| tab.read_only_side().is_none() && (tab.source == path || tab.canonical.as_ref() == Some(&path)))
                             .and_then(|tab| tab.buffer).and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref());
                         let valid = match (item.ticket, current) {
                             (Some(ticket), Some(snapshot)) => ticket.matches(snapshot, generation),
@@ -7859,7 +7889,7 @@ impl Session {
         let from = self.here();
         // Within the focused pane: the other pane keeps its own tabs, of the same sources too.
         let pane = self.state.focused;
-        let existing = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane == pane && (t.source == path || t.canonical.as_ref() == Some(&path))).map(|t| t.id);
+        let existing = self.state.tabs.iter().find(|t| t.read_only_side().is_none() && t.pane == pane && (t.source == path || t.canonical.as_ref() == Some(&path))).map(|t| t.id);
         let id = match existing {
             Some(id) => id,
             None => {
@@ -8010,7 +8040,7 @@ impl Session {
         self.index_batch_seq += 1;
         let request = self.index_batch_seq;
         let mut opened = std::collections::HashMap::new();
-        for tab in self.state.tabs.iter().filter(|t| !t.is_saved_version()) {
+        for tab in self.state.tabs.iter().filter(|t| t.read_only_side().is_none()) {
             opened.insert(tab.source.as_path(), tab);
             if let Some(canonical) = &tab.canonical { opened.entry(canonical.as_path()).or_insert(tab); }
         }
@@ -8310,7 +8340,7 @@ impl Session {
     /// A new tab for `path` in the focused pane; a source the other pane shows lends it its snapshot (and place).
     fn fresh_tab(&mut self, id: TabId, path: &Path, requested: &Path, retained: bool, markdown_source: bool) -> Tab {
         let pane = self.state.focused;
-        let mut tab = match self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane != pane && t.source == path && t.loaded && t.retrieved.is_none()) {
+        let mut tab = match self.state.tabs.iter().find(|t| t.read_only_side().is_none() && t.pane != pane && t.source == path && t.loaded && t.retrieved.is_none()) {
             Some(twin) => twin.duplicate(id, pane),
             None => {
                 let mut tab = Tab::new(id, path.to_path_buf(), retained);

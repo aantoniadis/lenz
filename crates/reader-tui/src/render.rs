@@ -1338,6 +1338,14 @@ impl App {
                         let disabled=self.session.external_prompt().is_some_and(|prompt|prompt.disabled(choice).is_some());
                         let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(if disabled {p.dim} else {p.fg},p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
                     }
+                } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Reconcile,..}) {
+                    let mut x=content.x;
+                    for choice in reader_core::reconcile::Choice::ALL {
+                        let text=format!("[{} {}]",choice.label(),choice.key());let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
+                        // A narrow terminal keeps every choice reachable: the row fills and the text is clipped, not hidden.
+                        let disabled=self.session.reconcile_prompt().is_some_and(|prompt|prompt.disabled(choice).is_some());
+                        let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(if disabled {p.dim} else {p.fg},p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
+                    }
                 } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Replace,..}) {
                     let mut x=content.x;
                     for (choice,key) in reader_core::save::ReplaceChoice::ALL.into_iter().zip(["r","Esc"]) {
@@ -1387,7 +1395,7 @@ impl App {
                     geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
                     line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
                 }
-                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close | crate::app::Details::External | crate::app::Details::Replace | crate::app::Details::Recovered, .. }) {
+                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close | crate::app::Details::External | crate::app::Details::Reconcile | crate::app::Details::Replace | crate::app::Details::Recovered, .. }) {
                     line(frame.buffer_mut(), geometry.details_close, "[Close Esc]", style(p.fg, p.selected_bg));
                 }
             }

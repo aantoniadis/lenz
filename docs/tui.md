@@ -81,6 +81,7 @@ cargo build --locked --release -p lenz-tui
 | Blame / commit details | b / B; click an annotation |
 | Sticky scroll | command menu “View: Sticky Scroll”, `[view] sticky_scroll` in settings; click a pinned line to jump |
 | Editor / default application / reload | o / O / F5 |
+| Reconcile an external change | File menu **Resolve External Change…** (F10, palette); `c` / `d` / `s` / Esc in its dialog |
 | Independent views | F8 / Shift-F8 switch; q closes the current view |
 
 `lenz diff --tui --about` and **About Lenz** (in ☰ and the palette) show the shared application information. Terminals that support it show the logo as pixels: kitty graphics in kitty and Ghostty, Sixel in foot (detected from `TERM=foot*` or its Linux launcher ancestry), both outside tmux and GNU screen. Other terminals draw a precomputed 24×12 cell logo. `LENZ_IMAGES=cells|kitty|sixel` overrides detection; Sixel applies to About only. The artwork is loaded while About is visible and released when it closes. Esc, Enter or **Close** dismisses it, and the arrows, Page keys and Home/End scroll it at small sizes.
@@ -92,6 +93,8 @@ Apply, hunk revert, Undo and Redo change a pending draft; **Save changes** write
 **Revert current hunk** copies the left version into the right working-tree side. **Discard working-tree changes** is a separate confirmed Git action that restores the indexed bytes and mode, keeps staged changes, handles tracked deletions, binary files and symlinks, and offers **Undo Git discard**. Save or discard the file's draft first. It refuses if the file or index changed after you confirmed, and does not apply to untracked files, submodules or conflicts. Undo is kept for at most 64 records and 64 MiB of original bytes; a larger file is refused.
 
 Writes use the same snapshots, encoding and line-ending preservation, read-only rules and external-change guard as the GUI. If Save finds the file changed on disk, nothing is written and the draft stays available. Files under the system temporary directory are read-only for two-way Apply.
+
+**Resolve External Change…** (File menu, F10 or the palette) shows the file as it is on disk now, the current draft and the confirmed baseline it was edited from, and asks what to do: **Compare Disk, Draft and Baseline…** (`c`), **Take Disk Version** (`d`, one undoable edit that confirms that version), **Save Draft over Disk** (`s`, written only after one more identity and content check) or **Keep Draft** (Esc, which keeps the baseline unchanged). `c`, `d`, `s` and Esc answer this dialog only while it is open; every choice but Keep Draft refuses to act on a version it did not show, keeping the draft and the file bytes. The comparison shows the same three sides as read-only/inspectable tabs; the draft side is the ordinary editable draft.
 
 ### Images
 
