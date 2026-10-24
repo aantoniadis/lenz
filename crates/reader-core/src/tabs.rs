@@ -49,6 +49,7 @@ pub struct Tab {
     pub(crate) loaded: bool,
     /// Session-owned source identity, retained when reloadable content is released.
     pub(crate) buffer: Option<crate::text::BufferId>,
+    pub(crate) comparison_side: Option<crate::session::ComparisonSide>,
     /// Its language as last loaded, kept while its content is released (`None`: never loaded).
     pub(crate) language: Option<Option<lenz_content::highlight::Language>>,
     pub(crate) stamp: Option<Stamp>,
@@ -125,6 +126,7 @@ impl Tab {
             retained,
             loaded: false,
             buffer: None,
+            comparison_side: None,
             language: None,
             stamp: None,
             highlights: None,
@@ -231,6 +233,7 @@ impl Tab {
             retained: true,
             loaded: self.loaded,
             buffer: self.buffer,
+            comparison_side: None,
             language: self.language,
             stamp: self.stamp,
             highlights: self.highlights.clone(),
@@ -276,7 +279,10 @@ impl Tab {
         &self.display
     }
     /// The file name, for the tab bar.
+    pub fn comparison_side(&self) -> Option<crate::session::ComparisonSide> { self.comparison_side }
+    pub fn is_saved_version(&self) -> bool { self.comparison_side == Some(crate::session::ComparisonSide::Saved) }
     pub fn title(&self) -> String {
+        if let Some(side) = self.comparison_side { return side.label().into(); }
         self.display.file_name().map_or_else(|| self.display.display().to_string(), |n| n.to_string_lossy().into_owned())
     }
     /// Whether an SVG shows its source text (else it is rendered).
