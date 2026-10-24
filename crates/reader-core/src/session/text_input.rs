@@ -3,7 +3,9 @@ use super::*;
 use crate::text::{EditKind, TextEdit};
 
 impl Session {
-    /// Existing adapter test opt-ins are the only callers before the validated-target checkpoint.
+    pub fn text_input_enabled(&self) -> bool { self.text_input_enabled }
+
+    /// TestPlatform callbacks can exercise a capability independently of their native backend.
     #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn enable_text_input_for_test(&mut self) { self.text_input_enabled = true; }
@@ -12,7 +14,7 @@ impl Session {
         let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return Some("No loaded file is open") };
         if let Some(why) = view.edit_disabled() { return Some(why); }
         if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Some("Show source to edit text"); }
-        if !self.text_input_enabled { return Some("Text input is gated until the editor safety checkpoint"); }
+        if !self.text_input_enabled { return Some("Text input is gated on this unvalidated platform/backend"); }
         if id == CommandId::Cut && view.selected_range().is_none() { return Some("Select text to cut"); }
         None
     }

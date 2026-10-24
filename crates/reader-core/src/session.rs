@@ -2113,7 +2113,9 @@ impl Session {
     pub fn projection(&self, pane: u8) -> Option<&Arc<crate::projection::Batch>> {
         self.projections.ready(pane).filter(|b| projection_current(&self.state, &b.request))
     }
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Self { Self::with_text_input(config, false) }
+    /// The adapter supplies its validated native input capability once at construction.
+    pub fn with_text_input(config: Config, text_input_enabled: bool) -> Self {
         let recent = read_recent(&config.recent);
         let settings = read_settings(&config.settings);
         let mut themes = ThemeService::new_deferred(config.themes, config.overrides, config.dark);
@@ -2134,7 +2136,7 @@ impl Session {
         });
         let merged = tx.clone();
         Self {
-            text_input_enabled: false,
+            text_input_enabled,
             comparison_seq: 0,
             id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {

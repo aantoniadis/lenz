@@ -182,11 +182,11 @@ fn workspace_transitions_resolve_temporary_comparison_tabs_before_deciding_about
 }
 
 #[test]
-fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enabling_production_input() {
+fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_and_preserve_gated_sessions() {
     let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "input.txt", "e\u{301}👩🏽‍💻\r\n".as_bytes());
     let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "input.txt");
     let first = s.state().active().unwrap().id(); s.dispatch(Command::Split(Split::Columns)); let second = s.state().active().unwrap().id();
-    assert_eq!(s.disabled(CommandId::Paste), Some("Text input is gated until the editor safety checkpoint"));
+    assert_eq!(s.disabled(CommandId::Paste), Some("Text input is gated on this unvalidated platform/backend"));
     s.dispatch(Command::Paste("blocked".into())); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
     s.enable_text_input_for_test(); s.dispatch(Command::SelectAll);
     assert_eq!(s.disabled(CommandId::Cut), None); assert_eq!(s.disabled(CommandId::Paste), None);

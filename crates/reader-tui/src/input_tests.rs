@@ -27,7 +27,8 @@ pub(crate) fn config(dir: &Path) -> Config {
     }
 }
 fn app(dir: &Path) -> App {
-    App::new(config(dir), Some(dir.to_owned()))
+    // Reader-shortcut scenarios explicitly model a backend without validated text input.
+    App::with_text_input(config(dir), Some(dir.to_owned()), false)
 }
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
@@ -43,6 +44,27 @@ pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
             std::thread::yield_now();
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_default_constructor_edits_and_saves_without_test_opt_in() {
+    let dir=tempfile::tempdir().unwrap();let path=dir.path().join("default.txt");
+    std::fs::write(&path,b"saved\r\n").unwrap();
+    let mut a=App::new(config(dir.path()),Some(path.clone()));
+    settle(&mut a,|a|a.session.state().current_source().is_some());draw(&mut a,80,16);
+    assert_eq!(a.session.disabled(CommandId::Paste),None,"Linux ordinary constructor enables validated text input");
+    key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);
+    key(&mut a,KeyCode::Char('q'),KeyModifiers::NONE);
+    a.handle(Event::Paste("λ😀\r\npaste".into()));draw(&mut a,80,16);
+    let source=a.session.state().current_source().unwrap();
+    assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(),"qλ😀\r\npaste");
+    assert!(!a.quit && a.modal.is_none());
+    assert_eq!(std::fs::read(&path).unwrap(),b"saved\r\n");
+    key(&mut a,KeyCode::Char('s'),KeyModifiers::CONTROL);
+    settle(&mut a,|a|!a.session.state().tab_dirty(a.session.state().active().unwrap().id()));
+    assert_eq!(std::fs::read(&path).unwrap(),"qλ😀\r\npaste".as_bytes());
+    assert_eq!(a.session.disabled(CommandId::Undo),None);
 }
 
 #[test]
@@ -374,7 +396,7 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
     draw(&mut a, 100, 20);
     key(&mut a, KeyCode::Char('λ'), KeyModifiers::NONE);
     a.handle(Event::Paste("ignored".into()));
-    assert_eq!(text(&a), original, "ordinary constructors remain read-only");
+    assert_eq!(text(&a), original, "an unsupported input capability keeps its reader shortcuts");
     a.enable_draft_input_for_test();
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
     key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);

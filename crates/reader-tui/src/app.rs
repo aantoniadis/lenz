@@ -19,7 +19,6 @@ use reader_core::{
     },
     tabs::TabId,
 };
-#[cfg(test)]
 use reader_core::text::{EditKind, SnapshotKey, TextEdit};
 use std::{
     collections::HashMap,
@@ -166,9 +165,6 @@ pub(crate) struct App {
     /// For tests: where Lenz Code is, so Lenz Diff is found beside it.
     #[cfg(test)]
     pub exe: Option<PathBuf>,
-    /// Ticket12 input traces opt in; production source input remains read-only.
-    #[cfg(test)]
-    draft_input: bool,
     pub layout: crate::render::Geometry,
     pub source_cache: std::cell::RefCell<crate::source::Cache>,
     pub(crate) source_redraw: bool,
@@ -183,10 +179,13 @@ pub(crate) struct App {
 }
 impl App {
     pub fn new(config: Config, path: Option<PathBuf>) -> Self {
+        Self::with_text_input(config, path, cfg!(target_os = "linux"))
+    }
+    fn with_text_input(config: Config, path: Option<PathBuf>, enabled: bool) -> Self {
         let mut app = Self {
             // Unit tests read plain labels unless they choose glyphs (the default has its own test).
             icons_override: if cfg!(test) { Some(false) } else { std::env::var("LENZ_ICONS").ok().map(|v| v == "nerd") },
-            session: Session::new(config),
+            session: Session::with_text_input(config, enabled),
             modal: None,
             focus: Focus::Text,
             tree_at: 0,
@@ -206,8 +205,6 @@ impl App {
             launched: Vec::new(),
             #[cfg(test)]
             exe: None,
-            #[cfg(test)]
-            draft_input: false,
             layout: Default::default(),
             source_cache: Default::default(),
             source_redraw: false,
@@ -1159,7 +1156,6 @@ impl App {
                     self.double_shift.interrupt();
                     self.edit_prompt(&text, false);
                 } else {
-                    #[cfg(test)]
                     {
                         self.double_shift.interrupt();
                         self.replace_draft_input(&text, EditKind::Paste);
@@ -1763,15 +1759,13 @@ impl App {
         }
     }
     #[cfg(test)]
-    pub(crate) fn enable_draft_input_for_test(&mut self) { self.draft_input = true; self.session.enable_text_input_for_test(); }
+    pub(crate) fn enable_draft_input_for_test(&mut self) { self.session.enable_text_input_for_test(); }
 
-    #[cfg(test)]
     fn draft_context(&self) -> bool {
-        self.draft_input && self.modal.is_none() && self.focus == Focus::Text
+        self.session.text_input_enabled() && self.modal.is_none() && self.focus == Focus::Text
             && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| !matches!(v.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)))
     }
 
-    #[cfg(test)]
     fn draft_target(&self) -> Option<(TabId, SnapshotKey, std::ops::Range<usize>)> {
         if !self.draft_context() { return None; }
         let state = self.session.state();
@@ -1782,7 +1776,6 @@ impl App {
         Some((view.tab().id(), view.snapshot().key(), range))
     }
 
-    #[cfg(test)]
     fn replace_draft_input(&mut self, text: &str, kind: EditKind) -> bool {
         let Some((tab, expected, range)) = self.draft_target() else {
             if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
@@ -1792,7 +1785,6 @@ impl App {
         true
     }
 
-    #[cfg(test)]
     fn draft_key(&mut self, key: KeyEvent) -> bool {
         if !self.draft_context() { return false; }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -1804,7 +1796,7 @@ impl App {
                 true
             }
             KeyCode::Char('x' | 'v') if control && !other => {
-                if !self.draft_input { return false; }
+                if !self.session.text_input_enabled() { return false; }
                 self.run(if key.code == KeyCode::Char('x') { CommandId::Cut } else { CommandId::Paste }); true
             }
             KeyCode::Backspace | KeyCode::Delete if !control && !other => {
@@ -1822,7 +1814,6 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) {
-        #[cfg(test)]
         if self.draft_key(key) { return; }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);

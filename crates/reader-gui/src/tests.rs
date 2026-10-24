@@ -6567,3 +6567,9 @@ fn native_composition_can_begin_again_before_the_next_dead_key_without_reviving_
         assert_eq!(std::fs::read(f.dir.path().join("repeat-ime.txt")).unwrap(), b"base");
     }
 }
+
+#[test]
+fn text_input_default_policy_requires_validated_linux_x11_backend() {
+    assert_eq!(text_input_supported("X11"),cfg!(target_os="linux"));
+    for backend in ["Wayland", "", "Test", "x11"] {assert!(!text_input_supported(backend));}
+}

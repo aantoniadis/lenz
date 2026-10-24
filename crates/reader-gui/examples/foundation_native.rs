@@ -42,7 +42,7 @@ fn snapshot(view: &ReaderView) -> Value {
             "top_line": view.tab().top_line(), "column": view.tab().column()})
     });
     let marked = view.marked_text_for_test().map(|(range, text)| json!({"utf16":[range.start,range.end],"text":text}));
-    json!({"source":source,"marked":marked,"closed":session.closed(),"close_prompt":session.close_prompt().map(|p|json!({
+    json!({"source":source,"marked":marked,"text_input_enabled":session.text_input_enabled(),"closed":session.closed(),"close_prompt":session.close_prompt().map(|p|json!({
         "ticket":p.ticket,"buffer":p.buffer.0,"waiting":p.waiting,
         "save_disabled":p.save_disabled,"discard_disabled":p.discard_disabled}))})
 }
@@ -103,8 +103,9 @@ fn prepare(root: &Path) -> io::Result<()> {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() != 1 {
-        return Err("usage: foundation-native <NEW disposable directory>".into());
+    let default_input = args.len() == 2 && args[1] == "--default-input";
+    if args.len() != 1 && !default_input {
+        return Err("usage: foundation-native <NEW disposable directory> [--default-input]".into());
     }
     let root = PathBuf::from(&args[0]);
     prepare(&root)?;
@@ -123,7 +124,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             handle
                 .update(cx, |view, window, cx| {
                     view.start_native_updates_for_test(cx);
-                    view.enable_draft_input_for_test();
+                    if !default_input { view.enable_draft_input_for_test(); }
                     window.set_window_title(&format!("Lenz foundation {label}"));
                     view.focus_handle().focus(window, cx);
                     cx.notify();

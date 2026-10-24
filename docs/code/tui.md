@@ -33,7 +33,7 @@ confirmed saved version. **Last saved (read-only)** and **Current draft** show c
 background and `▌` gutter marks. The current side shares the ordinary tab’s buffer and undo history;
 the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split restores the original views
 without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
-independently. Production typing remains gated; see the [implementation and verification limits](../research/reader-saved-comparison.md).
+independently. Platform input availability is described below; see the [implementation and verification limits](../research/reader-saved-comparison.md).
 
 Opening a dirty file in an editor or default app offers **Save and Open** (`s`),
 **Open Saved Version** (`o`) or **Cancel** (Esc). The saved-version choice keeps
@@ -43,8 +43,8 @@ nothing. An already requested Save can still finish after Cancel. External
 comparison actions explicitly use saved disk inputs. See the
 [handoff behavior and verification](../research/reader-external-open-decisions.md).
 
-Basic editor input is currently exercised through existing test opt-ins; production writable input stays
-blocked until safety checkpoint23. In that input mode q/j/k/slash/Space type literally, bracketed paste is
+The checkpoint23 candidate enables basic editor input by default on Linux TUI and Linux X11 GUI.
+The GUI uses its actual backend identity; Wayland and native macOS stay gated. q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
 all views of the same buffer and cannot override intrinsic restrictions or enable writing. Terminal Paste
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
@@ -52,8 +52,8 @@ normally comes from the emulator (often Ctrl+Shift+V); the Paste command explain
 
 The terminal emulator owns input-method preedit; Lenz receives committed Unicode text and bracketed paste.
 GUI preedit and both adapters' long-line edits use the bounded source-coordinate path; see the
-[composition verification and limits](../research/reader-unicode-composition.md). Production writable input
-remains gated at checkpoint23.
+[composition verification and limits](../research/reader-unicode-composition.md). The activation candidate
+still awaits the combined correctness gate and performance acceptance.
 
 ## Controls
 
