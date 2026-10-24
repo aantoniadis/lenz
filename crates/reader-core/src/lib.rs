@@ -22,6 +22,7 @@ pub mod index;
 mod index_work;
 mod index_cache;
 pub mod jobs;
+pub mod keymap;
 pub mod libraries;
 pub mod markdown;
 pub mod places;
