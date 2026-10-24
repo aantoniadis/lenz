@@ -200,7 +200,7 @@ pub(crate) struct Recovery {
     /// The user chose Later: the dialog stays closed until they ask for it again.
     postponed: bool,
     /// Released after the saver has written what is pending.
-    _owner: Owner,
+    owner: Option<Owner>,
 }
 
 impl Recovery {
@@ -217,7 +217,7 @@ impl Recovery {
             offers.push(Offer { id: offers.len() as u64 + 1, record, disk });
         }
         let saver = Saver::new(dir, &loaded, Some(owner.token.clone()));
-        Self { offers, saver, postponed: false, _owner: owner }
+        Self { offers, saver, postponed: false, owner: Some(owner) }
     }
 
     /// Whether a document's recovered draft still waits for Restore or Discard. Its record is kept as it is until
@@ -257,6 +257,13 @@ impl Recovery {
     /// Waits for what is pending to reach the disk (tests, and shut-down checks).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn flush(&self) { let _ = self.saver.flush().recv_timeout(Duration::from_secs(5)); }
+
+    /// What a crash does to this session's claim: its records become another session's recovered work.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn end_ownership(&mut self) {
+        self.flush();
+        self.owner = None;
+    }
 }
 
 /// A version to write: its text is materialized off the UI thread.

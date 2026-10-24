@@ -21,6 +21,12 @@ impl Session {
     #[doc(hidden)]
     pub fn flush_recovery_for_test(&self) { self.recovery.flush(); }
 
+    /// Writes what is pending and gives up this session's claim on its records, as an interruption would, while the
+    /// window stays open: a restart replayed beside it offers this session's drafts.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn interrupt_recovery_for_test(&mut self) { self.recovery.end_ownership(); }
+
     /// The recovery dialog's offer: the newest undecided one, unless the user chose Later. It waits while the
     /// project's last tabs are restored, so a restored draft joins them instead of being replaced by them.
     pub fn recovery_prompt(&self) -> Option<Prompt> {

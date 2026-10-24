@@ -602,6 +602,28 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   GUI checks ran on the GPUI test platform under an owned display and the terminal checks in a Ratatui test backend,
   not a physical terminal. No performance measurement, stress run or benchmark was made for this ticket.
 
+## Session restore around recovered work (ticket 33, 2026-10-24)
+
+- **Suspected cost, unmeasured:** the workspace (up to 200 tabs) is rebuilt and compared on every places change and
+  after each tab or layout command, and a changed one rides the debounced places write. Caret moves and scrolling alone
+  do not checkpoint, so an interruption reopens each tab where it was at the last tab, layout or navigation change.
+  Include the places write size and the per-command rebuild in the scheduled batch measurements.
+- **Suspected cost, unmeasured:** each session claims an owner lock under `recovery/owners/` at start, and start checks
+  one lock file per record that names an owner. Locks are `flock`-style advisory locks through `std::fs::File::try_lock`.
+  Network or unusual file systems that do not honour them make every owner look ended, so a second window there would
+  offer the first window's live drafts, as before this ticket.
+- **Undecided drafts block edits:** by the user's decision, a file whose recovered draft is undecided (dialog open, or
+  Later) is not editable until Restore or Discard. Its record is also never replaced or forgotten meanwhile (Reload,
+  Save or undo of the disk version cannot reach it). `RESTORE_DIRTY` stays as a guard but ordinary edits can no longer
+  produce a live draft to conflict with.
+- **Dialog timing:** the recovery dialog waits while a project's last tabs are restored (normally until the first
+  places read finishes), so a restored draft lands in its restored tabs. A New File created before that read keeps its
+  tab and the saved workspace is not applied, as for a file opened first.
+- **Not restored:** New File documents still are not part of the workspace (only through recovery), and a recovered
+  file that is gone is restored into a new tab rather than the place its old tab had.
+- **Unverified:** native macOS and Wayland GUI, physical terminals, and filesystems without advisory locks were not
+  exercised for this ticket.
+
 ## Tests that time out under load (2026-10-24)
 
 - **Seven tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never

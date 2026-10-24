@@ -6987,7 +6987,7 @@ fn a_recovered_draft_is_offered_restored_and_saved_through_real_input(cx: &mut T
     f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
     v.write_to_clipboard(ClipboardItem::new_string("recovered λ\n".into()));
     v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
-    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    f.view.update(&mut v, |v, _| v.session.interrupt_recovery_for_test());
     assert_eq!(std::fs::read(&path).unwrap(), b"saved\n", "recovery never writes the original file");
 
     let (second, mut w) = restart_window(cx, &f);
@@ -7017,7 +7017,7 @@ fn a_recovered_draft_is_offered_restored_and_saved_through_real_input(cx: &mut T
     settle_view(cx, &second, |v| v.session.state().active().is_some_and(|t| !v.session.state().tab_dirty(t.id())));
     assert_eq!(std::fs::read(&path).unwrap(), "recovered λ\n".as_bytes());
     assert!(!second.read_with(&w, |v, _| v.session.state().active().unwrap().recovered()));
-    second.update(&mut w, |v, _| v.session.flush_recovery_for_test());
+    second.update(&mut w, |v, _| v.session.interrupt_recovery_for_test());
     let (third, mut t) = restart_window(cx, &f);
     draw(&mut t);
     assert!(!recovered_dialog(&third, &t), "saved work has nothing to recover");
@@ -7033,7 +7033,7 @@ fn later_keeps_the_offer_and_discard_removes_it_through_real_input(cx: &mut Test
     f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
     v.write_to_clipboard(ClipboardItem::new_string("kept draft\n".into()));
     v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
-    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    f.view.update(&mut v, |v, _| v.session.interrupt_recovery_for_test());
     let (second, mut w) = restart_window(cx, &f);
     draw(&mut w);
     assert!(recovered_dialog(&second, &w));
@@ -7061,12 +7061,107 @@ fn later_keeps_the_offer_and_discard_removes_it_through_real_input(cx: &mut Test
     w.simulate_keystrokes("d"); draw(&mut w);
     assert!(!recovered_dialog(&second, &w));
     assert!(second.read_with(&w, |v, _| v.session.recovered_drafts().is_empty()));
-    second.update(&mut w, |v, _| v.session.flush_recovery_for_test());
+    second.update(&mut w, |v, _| v.session.interrupt_recovery_for_test());
     assert_eq!(std::fs::read(&path).unwrap(), b"saved\n");
     let (third, mut t) = restart_window(cx, &f);
     draw(&mut t);
     assert!(!recovered_dialog(&third, &t), "a discarded draft stays discarded");
     assert!(third.read_with(&t, |v, _| v.session.recovered_drafts().is_empty()));
+}
+
+/// The next start of the reader on a project folder, over the same private state.
+fn restart_project(cx: &mut TestAppContext, f: &Fixture, root: &Path) -> (Entity<ReaderView>, VisualTestContext) {
+    let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), Some(root.to_owned()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let mut v = VisualTestContext::from_window(window.into(), cx);
+    let focus = view.read_with(&v, |view, _| view.focus_handle());
+    v.update(|window, cx| focus.focus(window, cx));
+    (view, v)
+}
+
+/// Each tab's file, pane, selection and top line.
+fn arrangement(view: &Entity<ReaderView>, v: &VisualTestContext) -> Vec<(PathBuf, u8, Option<reader_core::session::Selection>, usize)> {
+    view.read_with(v, |view, _| view.session.state().tabs().iter().map(|t| (t.source().to_owned(), t.pane(), t.selection(), t.top_line())).collect())
+}
+
+#[gpui::test]
+fn an_interrupted_project_reopens_around_its_recovered_draft_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, None, &[], true);
+    let root = f.dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "alpha\n".repeat(60)).unwrap();
+    let saved = "beta λ\n".repeat(60);
+    std::fs::write(root.join("b.txt"), &saved).unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(root.clone()), cx));
+    settle(cx, &f, |v| v.session.state().project().is_some());
+    for file in ["a.txt", "b.txt"] {
+        f.view.update(cx, |v, cx| v.dispatch(Command::OpenRetained(root.join(file)), cx));
+        settle(cx, &f, |v| v.session.state().current_source().is_some_and(|s| s.source().ends_with(file)) && v.session.state().loading().is_none());
+    }
+    f.view.update(cx, |v, cx| v.dispatch(Command::Split(reader_core::session::Split::Columns), cx));
+    settle(cx, &f, |v| v.session.state().shown(1).is_some_and(|t| t.loaded()));
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft ✓\n".into()));
+    v.simulate_keystrokes("ctrl-v"); draw(&mut v);
+    let draft = text_of(&f.view, &v);
+    assert!(draft.starts_with("draft ✓\n"), "{draft:?}");
+    f.view.update(&mut v, |v, cx| v.dispatch(Command::FocusPane(0), cx));
+    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    // Another window while this one runs: the live draft is this window's own, not recovered work.
+    let (other, mut o) = restart_window(cx, &f);
+    draw(&mut o);
+    assert!(!recovered_dialog(&other, &o) && other.read_with(&o, |v, _| v.session.recovered_drafts().is_empty()));
+    let before = arrangement(&f.view, &v);
+    f.view.update(&mut v, |v, _| { v.session.interrupt_recovery_for_test(); let _ = v.session.workspace_saved().recv_timeout(std::time::Duration::from_secs(5)); });
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved, "recovery never writes the file");
+
+    let (second, mut w) = restart_project(cx, &f, &root);
+    draw(&mut w);
+    assert!(!recovered_dialog(&second, &w), "the dialog waits for the project's last tabs");
+    settle_view(cx, &second, |v| matches!(v.modal, Some(Modal::StatusDetails { kind: Details::Recovered, .. })));
+    assert_eq!(arrangement(&second, &w), before, "tabs, panes and places come back first");
+    assert_eq!(second.read_with(&w, |v, _| v.session.state().split()), Some(reader_core::session::Split::Columns));
+    // The dialog owns input in tiny windows too, and nothing behind it is edited.
+    for (width, height) in [(1.0, 1.0), (150.0, 60.0)] {
+        w.simulate_resize(size(px(width), px(height))); draw(&mut w);
+        w.simulate_keystrokes("end up x"); draw(&mut w);
+    }
+    w.simulate_resize(size(px(900.0), px(600.0))); draw(&mut w);
+    assert!(recovered_dialog(&second, &w));
+    // Later: the file shows its saved text and is not edited until the draft is decided.
+    w.simulate_keystrokes("escape"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    second.update(&mut w, |v, cx| v.dispatch(Command::FocusPane(1), cx));
+    second.update(&mut w, |v, _| v.enable_draft_input_for_test());
+    draw(&mut w);
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert_eq!(text_of(&second, &w), saved, "an undecided draft's file is not edited");
+    assert!(second.read_with(&w, |v, _| v.session.disabled(CommandId::Paste).is_some_and(|why| why.starts_with("A recovered draft of this file is undecided"))));
+    w.simulate_keystrokes("f10");
+    let at = second.read_with(&w, |v, _| v.modal_rows().iter().position(|row| row.0 == CommandId::RecoverDrafts.label()).unwrap());
+    for _ in 0..at { w.simulate_keystrokes("down"); }
+    w.simulate_keystrokes("enter"); draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the File command offers it again");
+    w.simulate_keystrokes("r"); draw(&mut w);
+    settle_view(cx, &second, |v| v.session.state().shown(0).is_some_and(|t| t.loaded()) && v.session.state().shown(1).is_some_and(|t| t.loaded()));
+    assert!(!recovered_dialog(&second, &w));
+    assert_eq!(arrangement(&second, &w), before, "restoring keeps every tab where it was");
+    // Both panes show the file: one draft, marked recovered in each.
+    for pane in [0, 1] {
+        let (b, text, recovered) = second.read_with(&w, |v, _| {
+            let state = v.session.state();
+            let tab = state.shown(pane).unwrap();
+            let view = state.view(tab.id()).unwrap();
+            (tab.source().ends_with("b.txt"), view.snapshot().copy_range(0..view.snapshot().len_bytes()).unwrap(), tab.recovered())
+        });
+        assert!(b && recovered, "pane {pane}");
+        assert_eq!(text, draft, "pane {pane} shows the restored draft");
+    }
+    assert!(second.read_with(&w, |v, _| v.session.state().tabs().iter().filter(|t| t.source().ends_with("a.txt")).all(|t| !t.recovered())));
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert!(text_of(&second, &w).contains('x'), "a restored draft is edited normally");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved, "Restore does not write");
 }
 
 #[gpui::test]
