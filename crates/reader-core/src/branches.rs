@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lenz_content::branches::{self as git_branches, Head, Refs, Worktree};
+use lenz_content::branches::{self as git_branches, FileStatus, Head, Refs, Worktree};
 
 use crate::session::{CommandId, State};
 
@@ -15,6 +15,44 @@ pub struct Repo {
     pub head: Head,
     /// What changes when HEAD may have (see `lenz_content::branches::head_signal`).
     pub signal: Option<std::time::SystemTime>,
+}
+
+/// File statuses read at most: beyond it the explorer and tabs show the first ones and the rest have no badge.
+pub const STATUS_LIMIT: usize = 20_000;
+
+/// The repository's file statuses against HEAD, as last read: what the explorer's and tabs' badges show.
+#[derive(Debug, Clone)]
+pub struct Statuses {
+    root: PathBuf,
+    /// The folder the repository was looked up from, and where it is inside the repository.
+    anchor: (PathBuf, PathBuf),
+    files: std::collections::HashMap<String, FileStatus>,
+    untracked_folders: bool,
+    /// More paths changed than [`STATUS_LIMIT`].
+    pub limited: bool,
+}
+
+impl Statuses {
+    pub(crate) fn new(root: PathBuf, anchor: (PathBuf, PathBuf), read: git_branches::Statuses) -> Self {
+        let untracked_folders = read.files.iter().any(|(p, s)| *s == FileStatus::Untracked && p.ends_with('/'));
+        let files = read.files.into_iter().map(|(mut p, s)| { if p.ends_with('/') { p.pop(); } (p, s) }).collect();
+        Self { root, anchor, files, untracked_folders, limited: read.limited }
+    }
+    /// The status of the file or folder at `path`: a file inside an untracked folder is untracked.
+    pub fn of(&self, path: &std::path::Path) -> Option<FileStatus> {
+        let inside = match path.strip_prefix(&self.anchor.0) {
+            Ok(rest) => self.anchor.1.join(rest),
+            Err(_) => path.strip_prefix(&self.root).ok()?.to_path_buf(),
+        };
+        // ponytail: `/`-separated repository paths; Windows separators would need converting here.
+        let inside = inside.to_str()?;
+        if let Some(s) = self.files.get(inside) {
+            return Some(*s);
+        }
+        if !self.untracked_folders { return None; }
+        std::path::Path::new(inside).ancestors().skip(1).filter_map(|a| a.to_str()).filter(|a| !a.is_empty())
+            .find_map(|a| self.files.get(a).copied().filter(|s| *s == FileStatus::Untracked))
+    }
 }
 
 /// The Git Branches popup's lists, while it is open.

@@ -202,6 +202,9 @@ pub struct ReaderView {
     input_state: input_method::InputState,
     #[cfg(test)]
     painted_annotations: Vec<String>,
+    /// The dirty marks and Git status letters painted on tabs, then on explorer rows, in order.
+    #[cfg(test)]
+    painted_badges: Vec<&'static str>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -623,7 +626,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -3456,6 +3459,8 @@ impl ReaderView {
                 selected: i == selected,
                 marked: self.session.state().tree_marks().contains(&r.path),
                 hidden: r.hidden(),
+                status: self.session.state().row_status(r),
+                dirty: self.session.state().row_dirty(r),
             }).collect()
     }
 
@@ -4441,21 +4446,21 @@ impl Render for ReaderView {
             let state = self.session.state();
             let shown = state.presentation_shown(g.pane).map(|t| t.id());
             let mut x = g.bar.0;
-            let mut row: Vec<(String, bool, bool, f32, f32, TabId, bool)> = state.pane_tabs(g.pane).map(|t| {
+            let mut row: Vec<(TabCell, TabId)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
-                let dirty = state.tab_dirty(t.id());
-                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
+                let (dirty, status) = (state.tab_dirty(t.id()), state.tab_status(t.id()));
+                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 } + if status.is_some() { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
                 x += w;
-                (title, t.retained(), Some(t.id()) == shown, x - w, x, t.id(), dirty)
+                ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status), t.id())
             }).collect();
             let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
-            let shift = row.iter().find(|r| r.2).map_or(0.0, |r| (r.4 - right).min(r.3 - g.bar.0).max(0.0));
-            for r in &mut row {
+            let shift = row.iter().find(|r| r.0.2).map_or(0.0, |r| (r.0.4 - right).min(r.0.3 - g.bar.0).max(0.0));
+            for (r, _) in &mut row {
                 r.3 -= shift;
                 r.4 -= shift;
             }
-            hits.extend(row.iter().map(|r| (r.3, r.4, r.5)));
-            bars.push(row.into_iter().map(|r| (r.0, r.1, r.2, r.3, r.4, r.6)).collect());
+            hits.extend(row.iter().map(|(r, id)| (r.3, r.4, *id)));
+            bars.push(row.into_iter().map(|(r, _)| r).collect());
         }
         self.tab_hits = hits;
         self.panes = panes.clone();
@@ -4487,6 +4492,15 @@ impl Render for ReaderView {
         }
         self.tree_scroll = self.tree_scroll.min(tree_len.saturating_sub(self.tree_rows.max(1)));
         let tree = self.tree_lines(tree_at);
+        #[cfg(test)]
+        {
+            self.painted_badges.clear();
+            let tabs = bars.iter().flatten().map(|t| (t.5, t.6));
+            let rows = tree.iter().map(|l| (l.dirty, l.status));
+            for (dirty, status) in tabs.chain(rows) {
+                self.painted_badges.extend(dirty.then_some("●").into_iter().chain(status.map(|s| s.letter())));
+            }
+        }
         if self.icon_font.is_none() {
             self.icon_font = Some(icons::nerd_font(&window.text_system().all_font_names()));
         }
@@ -4793,7 +4807,7 @@ impl Render for ReaderView {
                             let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
-                                for (title, retained, shown, tx0, tx1, dirty) in &f.tabs {
+                                for (title, retained, shown, tx0, tx1, dirty, status) in &f.tabs {
                                     if *tx1 < bx0 {
                                         continue; // scrolled off the left
                                     }
@@ -4809,7 +4823,13 @@ impl Render for ReaderView {
                                     }
                                     let title_x = x0 + tx0 + char_w + icon_w;
                                     if *dirty { lenz_gpui::text(window, cx, m, title_x, y, "●", palette.accent); }
-                                    lenz_gpui::text(window, cx, m, title_x + if *dirty { 2.0 * char_w } else { 0.0 }, y, title, color);
+                                    let name_x = title_x + if *dirty { 2.0 * char_w } else { 0.0 };
+                                    lenz_gpui::text(window, cx, m, name_x, y, title, color);
+                                    // The Git status letter after the name; its color is extra.
+                                    if let Some(s) = status {
+                                        let at = name_x + (lenz_content::wrap::width(title) + 1) as f32 * char_w;
+                                        lenz_gpui::text(window, cx, m, at, y, s.letter(), s.color(&palette));
+                                    }
                                     lenz_gpui::text(window, cx, m, x0 + tx1 - char_w * 2.0, y, "×", palette.dim);
                                     lenz_gpui::fill(window, x0 + tx1 - 1.0, y + 3.0, 1.0, tabs_h - 6.0, palette.border);
                                 }
@@ -4871,11 +4891,15 @@ impl Render for ReaderView {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, body, &palette, line.icon, x + 1.5 * char_w, y);
                                     }
                                     lenz_gpui::text(window, cx, m, x + 1.5 * char_w + icon_w, y, &line.name, if line.hidden { palette.dim } else { palette.fg });
-                                    // Marked for Compare Selected: a check at the row's end, over the name if it is long.
-                                    if line.marked {
-                                        let at = x0 + sidebar_w - 2.0 * char_w;
-                                        lenz_gpui::fill(window, at - char_w * 0.5, y, char_w * 2.0, line_h(), if line.selected && tree_focus { palette.selected_bg } else { palette.fold_bg });
-                                        lenz_gpui::text(window, cx, m, at, y, "✓", palette.fg);
+                                    // At the row's end, right to left: the Compare Selected check, the Git status letter (its
+                                    // color is extra) and the unsaved-draft mark, each over the name if it is long.
+                                    let row_bg = if line.selected { if tree_focus { palette.selected_bg } else { palette.fold_bg } } else if line.marked { palette.fold_bg } else { palette.sidebar_bg };
+                                    let ends = [line.marked.then_some(("✓", palette.fg)), line.status.map(|s| (s.letter(), s.color(&palette))), line.dirty.then_some(("●", palette.accent))];
+                                    let mut at = x0 + sidebar_w - 2.0 * char_w;
+                                    for (symbol, color) in ends.into_iter().flatten() {
+                                        lenz_gpui::fill(window, at - char_w * 0.5, y, char_w * 2.0, line_h(), row_bg);
+                                        lenz_gpui::text(window, cx, m, at, y, symbol, color);
+                                        at -= 2.0 * char_w;
                                     }
                                 }
                             });
@@ -5147,7 +5171,8 @@ fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
 /// A Markdown preview's layout, its scroll and its visible images' textures.
 type PreviewFrame = (Arc<preview::Layout>, f32, Vec<(usize, Arc<gpui::RenderImage>)>, Option<std::ops::Range<usize>>);
 /// A tab in its bar: title, kept, shown, x range, unsaved draft marker.
-type TabCell = (String, bool, bool, f32, f32, bool);
+/// And its Git status letter.
+type TabCell = (String, bool, bool, f32, f32, bool, Option<lenz_content::branches::FileStatus>);
 
 /// One pane's frame to paint: where it is, its tabs (title, kept, shown, x range), and what it shows.
 /// A piece of a breadcrumb bar to paint.
@@ -5282,6 +5307,10 @@ pub struct TreeLine {
     pub marked: bool,
     /// A dotfile, or inside a dot-folder: its name is greyed out.
     pub hidden: bool,
+    /// Its Git status against HEAD, shown as a letter.
+    pub status: Option<lenz_content::branches::FileStatus>,
+    /// Unsaved changes in a tab: a mark independent of the Git status.
+    pub dirty: bool,
 }
 
 /// Space between an icon and the name after it.

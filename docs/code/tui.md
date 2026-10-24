@@ -28,6 +28,14 @@ is open. Ctrl+Shift+E focuses the explorer; arrows expand or collapse folders an
 and expand to refresh a listing. Server-retrieved sources list visited files only. See the
 [Reader guide](README.md) for listing limits and server-session behavior.
 
+Explorer rows and tabs show the file's Git status against HEAD as a letter: **M** modified (staged or not),
+**A** added, **D** deleted from disk, **R** renamed, **U** untracked (a file inside an untracked folder too) and
+**C** conflicted; the color is extra. `●` marks unsaved changes separately, so a draft over a Git-clean file shows
+`●` and no letter, and Save leaves the letter to Git. Both adapters read the status in the background, once per
+change: after the repository is found, on file changes, and when the index or HEAD changes (checked on the
+five-second tick). Refreshing never touches drafts or history. At most 20,000 changed paths are read; folders show
+only their own untracked status.
+
 **Compare saved** (Ctrl+Shift+D, also in the palette) opens an in-window comparison against the last
 confirmed saved version. **Last saved (read-only)** and **Current draft** show changed rows with a blue
 background and `▌` gutter marks. The current side shares the ordinary tab’s buffer and undo history;

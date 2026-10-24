@@ -962,3 +962,41 @@ fn breadcrumbs_separate_crumbs_shrink_outer_ones_and_keep_the_focused_one_in_bot
         assert_eq!(std::fs::read(root.join("crates/reader/src/ui/widgets.rs")).unwrap(), source);
     }
 }
+
+#[test]
+fn explorer_and_tabs_show_git_letters_apart_from_the_dirty_mark() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::branches::FileStatus;
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "clean.txt", "clean\n");
+    put(r.path(), "edited.txt", "base\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "edited.txt", "edited\n");
+    put(r.path(), "new.txt", "new\n");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    let row = |a: &App, p: &str| a.session.state().tree_rows().find(|r| &*r.path == p).cloned();
+    settle(&mut app, |a| row(a, "new.txt").is_some_and(|r| a.session.state().row_status(&r) == Some(FileStatus::Untracked)));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("clean.txt")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    draw(&mut app, 60, 12);
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    let lines = |b: &Buffer| (0..b.area.height).map(|y| (0..b.area.width).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+    let rows = lines(&draw(&mut app, 60, 12));
+    let tree = app.layout.tree;
+    let explorer = |name: &str| rows[usize::from(tree.y)..usize::from(tree.bottom())].iter()
+        .map(|l| l.chars().skip(usize::from(tree.x)).take(usize::from(tree.width)).collect::<String>())
+        .find(|l| l.contains(name)).unwrap().trim_end().to_string();
+    assert!(explorer("clean.txt").ends_with(" ●") && !explorer("clean.txt").contains(" M"), "{rows:#?}");
+    assert!(explorer("edited.txt").ends_with(" M"), "{rows:#?}");
+    assert!(explorer("new.txt").ends_with(" U"), "{rows:#?}");
+    assert!(rows[1].contains(" ● clean.txt  "), "dirty draft over a Git-clean file: the mark, no letter: {:?}", rows[1]);
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    settle(&mut app, |a| a.session.state().active().is_some_and(|t| !a.session.state().tab_dirty(t.id()) && a.session.state().tab_status(t.id()) == Some(FileStatus::Modified)));
+    let rows = lines(&draw(&mut app, 60, 12));
+    assert!(rows[1].contains(" clean.txt M ") && !rows[1].contains("●"), "{:?}", rows[1]);
+    assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
+}
