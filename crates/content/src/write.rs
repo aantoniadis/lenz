@@ -132,6 +132,9 @@ impl Snapshot {
         Ok(())
     }
 
+    pub fn len_bytes(&self) -> u64 { self.size }
+    pub fn modified(&self) -> Option<SystemTime> { self.mtime }
+
     /// The cheap check (for window activation): size, mtime or existence differ from the read.
     pub fn changed(&self) -> bool {
         match fs::metadata(&self.path) {
@@ -209,6 +212,34 @@ pub enum WriteOutcome {
 /// Reads metadata and baseline bytes from the same opened file. Unlike Diff's
 /// content-only snapshot, this identity also rejects same-content substitutions.
 pub fn read_exact(path: &Path, declared: Option<&str>) -> Result<(Snapshot, TargetIdentity, Decoded), WriteError> {
+    let read = read_exact_bytes(path)?;
+    let decoded = decode(read.bytes(), declared);
+    let snapshot = read.snapshot(&decoded.text, decoded.encoding, decoded.had_bom, decoded.lossy);
+    Ok((snapshot, read.target, decoded))
+}
+
+/// Raw bytes and identity from the same opened file, for callers that already own decoding.
+#[derive(Clone, Debug)]
+pub struct ExactRead {
+    bytes: Vec<u8>,
+    metadata: fs::Metadata,
+    path: PathBuf,
+    pub target: TargetIdentity,
+}
+impl ExactRead {
+    pub fn bytes(&self) -> &[u8] { &self.bytes }
+    pub fn metadata(&self) -> &fs::Metadata { &self.metadata }
+    /// Construct the writer baseline from borrowed facts of this exact decoded read.
+    pub fn snapshot(&self, text: &str, encoding: &'static str, bom: bool, lossy: bool) -> Snapshot {
+        let crlf = text.matches("\r\n").count();
+        Snapshot { path: self.path.clone(), hash: Some(hash(&self.bytes)), size: self.metadata.len(),
+            mtime: self.metadata.modified().ok(), encoding: Encoding::for_label(encoding.as_bytes()).unwrap_or(UTF_8),
+            bom, crlf: crlf > text.matches('\n').count() - crlf, lossy, repository_root: None }
+    }
+}
+impl std::ops::Deref for ExactRead { type Target = [u8]; fn deref(&self) -> &[u8] { self.bytes() } }
+
+pub fn read_exact_bytes(path: &Path) -> Result<ExactRead, WriteError> {
     let canonical = fs::canonicalize(path).map_err(io_err("reading", path))?;
     let mut file = File::open(&canonical).map_err(io_err("reading", path))?;
     let meta = file.metadata().map_err(io_err("reading", path))?;
@@ -216,9 +247,7 @@ pub fn read_exact(path: &Path, declared: Option<&str>) -> Result<(Snapshot, Targ
     file.read_to_end(&mut bytes).map_err(io_err("reading", path))?;
     let target = TargetIdentity::from_metadata(canonical, &meta);
     target.verify(path)?;
-    let decoded = decode(&bytes, declared);
-    let snapshot = Snapshot { hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(), ..Snapshot::like(path, &decoded) };
-    Ok((snapshot, target, decoded))
+    Ok(ExactRead { bytes, metadata: meta, path: path.to_owned(), target })
 }
 
 /// Writes exact text endings, preserving encoding/BOM/mode and existing hard links.

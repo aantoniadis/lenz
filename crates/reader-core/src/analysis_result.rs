@@ -40,7 +40,7 @@ impl Analysis {
             if priority == Priority::Visible && let Some(pending) = &mut entry.pending { pending.priority = Priority::Visible; self.dirty = true; }
             return Ok(None);
         }
-        if !self.results.contains_key(&slot) && self.entries.len() + self.results.len() == BUFFERS {
+        if !self.results.contains_key(&slot) && self.entries.len() + self.results.len() + self.writes.len() >= BUFFERS {
             let discard = self.entries.iter().find(|(_, entry)| !entry.live && !entry.group.running(&self.conversions)).map(|(id, _)| *id);
             let Some(discard) = discard else { return Err(()); };
             self.entries.remove(&discard);

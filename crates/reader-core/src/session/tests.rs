@@ -8,6 +8,72 @@ use lenz_content::goto::LineColumn;
 // Exact source assertions may copy a whole fixture; production reads remain windowed.
 fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.len_bytes()).unwrap() }
 fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
+
+#[test]
+fn save_keeps_unicode_history_across_real_cache_eviction_and_undo() {
+    use crate::text::{EditKind, TextEdit};
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "save.txt", b"\xef\xbb\xbf\xce\xb1\xf0\x9f\x98\x80\r\nbeta\n");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
+    let other = write(d.path(), "other.txt", b"other\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "save.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..2, text: "é".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Save { tab });
+    settle(&mut s, |s| !s.state().tab_dirty(tab));
+    assert_eq!(std::fs::read(&path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+    assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o751);
+    s.cache = InactiveCache::new(0);
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    assert!(s.cache.is_empty());
+    open(&mut s, Command::OpenRetained(path.clone()), "save.txt");
+    assert!(active_view(&s).can_undo());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "α😀\r\nbeta\n");
+    assert!(active_view(&s).dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+    s.dispatch(Command::Redo { tab });
+    assert!(!active_view(&s).dirty());
+}
+#[test]
+fn delayed_save_confirms_only_captured_version_and_refreshes_the_next_target() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "delayed.txt", b"original\n");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "delayed.txt");
+    let tab = s.state().active().unwrap().id();
+    let edit = |s: &mut Session, text: &str| {
+        let current = s.state().current_source().unwrap();
+        s.dispatch(Command::Edit { tab, expected: current.key(), edits: vec![TextEdit { range: 0..current.len_bytes(), text: text.into() }], kind: EditKind::Replace });
+    };
+    let (started, entered) = std::sync::mpsc::channel();
+    let gates: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+    }).collect();
+    for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    edit(&mut s, "saved v2\n");
+    s.dispatch(Command::Save { tab });
+    assert!(matches!(active_view(&s).save_status(), crate::save::Status::Saving));
+    edit(&mut s, "newer v3\n");
+    s.dispatch(Command::Save { tab });
+    for gate in gates { gate.send(()).unwrap(); }
+    settle(&mut s, |s| matches!(active_view(s).save_status(), crate::save::Status::Ready));
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved v2\n");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "newer v3\n");
+    assert!(active_view(&s).dirty());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "saved v2\n");
+    assert!(!active_view(&s).dirty());
+    s.dispatch(Command::Redo { tab });
+    s.dispatch(Command::Save { tab });
+    settle(&mut s, |s| !s.state().tab_dirty(tab));
+    assert_eq!(std::fs::read(path).unwrap(), b"newer v3\n");
+    assert!(active_view(&s).can_undo());
+}
+
 fn active_view(s: &Session) -> View<'_> { s.state().view(s.state().active().unwrap().id()).unwrap() }
 fn pane_view(s: &Session, pane: u8) -> View<'_> { s.state().view(s.state().shown(pane).unwrap().id()).unwrap() }
 fn source_rows(view: View<'_>, count: usize, cols: Option<usize>) -> Vec<crate::layout::Row> {

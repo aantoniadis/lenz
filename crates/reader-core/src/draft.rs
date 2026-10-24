@@ -18,6 +18,12 @@ impl Draft {
     pub(crate) fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub(crate) fn can_redo(&self) -> bool { !self.redo.is_empty() }
     pub(crate) fn end_group(&mut self) { self.join = None; }
+    /// Saving establishes a new confirmed baseline while retaining every undo/redo transaction.
+    pub(crate) fn confirm_baseline(&mut self, captured: Arc<TextSnapshot>, current: &TextSnapshot) {
+        self.end_group();
+        self.dirty = !captured.content_eq(current);
+        self.baseline = captured;
+    }
     pub(crate) fn edit(&mut self, current: &TextSnapshot, version: u64, edits: Vec<TextEdit>, tab: TabId, kind: EditKind, now: Instant) -> Result<Option<TextSnapshot>, EditError> {
         let next = current.apply_edits(version, &edits)?;
         if current.content_eq(&next) { return Ok(None); }

@@ -5,11 +5,13 @@ use crate::{document::{Document, SourceMeta}, jobs::{Jobs, Priority, MAX_JOBS}, 
 const BUFFERS: usize = 64;
 #[path = "analysis_result.rs"]
 mod result;
+#[path = "analysis_write.rs"]
+mod write;
 pub(crate) use result::{ResultFence, ResultSlot, ResultStage};
 use result::{ResultEntry, ResultTicket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Owner { Buffer(BufferId), Result(ResultSlot) }
+enum Owner { Buffer(BufferId), Result(ResultSlot), Write(BufferId) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Consumer { Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
@@ -121,7 +123,7 @@ impl Drop for Lease {
 
 #[derive(Default)]
 pub(crate) struct Analysis {
-    entries: HashMap<BufferId, Entry>, conversions: HashMap<Scope, Conversion>, results: HashMap<ResultSlot, ResultEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
+    entries: HashMap<BufferId, Entry>, conversions: HashMap<Scope, Conversion>, results: HashMap<ResultSlot, ResultEntry>, writes: HashMap<BufferId, write::WriteEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
     pub(crate) revision: u64,
     dirty: bool, project: u64,
     #[cfg(test)]
@@ -149,7 +151,7 @@ impl Analysis {
         let id = input.scope.key.buffer;
         self.dirty = true;
         let live = input.live;
-        if !self.entries.contains_key(&id) && self.entries.len() + self.results.len() == BUFFERS {
+        if !self.entries.contains_key(&id) && self.entries.len() + self.results.len() + self.writes.len() >= BUFFERS {
             let discard = self.entries.iter().find(|(_, entry)| !entry.live && !entry.group.running(&self.conversions)).map(|(id, _)| *id);
             let Some(discard) = discard else { return false };
             self.entries.remove(&discard);
@@ -269,6 +271,7 @@ impl Analysis {
     pub(crate) fn close(&mut self) {
         for entry in self.entries.values_mut() { entry.group.cancel(); entry.pending = None; }
         self.close_results();
+        self.close_writes();
         for conversion in self.conversions.values_mut() { if let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); } }
         self.queue.clear();
     }
@@ -358,7 +361,8 @@ impl Analysis {
             (entry.group.cancel.load(Ordering::Acquire) && (entry.live || !entry.group.waiting.is_empty())) || entry.group.running(&self.conversions)
         });
         self.reap_results();
-        self.queue.retain(|id| match id { Owner::Buffer(id) => self.entries.contains_key(id), Owner::Result(slot) => self.results.contains_key(slot) });
+        self.reap_writes();
+        self.queue.retain(|id| match id { Owner::Buffer(id) => self.entries.contains_key(id), Owner::Result(slot) => self.results.contains_key(slot), Owner::Write(id) => self.writes.contains_key(id) });
         for id in retry { self.enqueue(id); }
         // Background work cannot occupy the visible queue's entire admission allowance. The same
         // three workers execute both classes; at most six task closures can be submitted here.
@@ -371,6 +375,7 @@ impl Analysis {
             let Some(owner) = self.queue.pop_front() else { break };
             let id = match owner {
                 Owner::Buffer(id) => id,
+                Owner::Write(id) => { self.submit_write(id, jobs, tx, project, &mut background); continue; }
                 Owner::Result(slot) => { self.submit_result(slot, jobs, tx, project, &mut background); continue; }
             };
             let Some(entry) = self.entries.get_mut(&id) else { continue };
