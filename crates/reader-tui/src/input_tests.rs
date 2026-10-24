@@ -9,6 +9,8 @@ mod find_replace;
 mod save_as;
 #[path = "input_tests/recovery.rs"]
 mod recovery;
+#[path = "input_tests/reconcile.rs"]
+mod reconcile;
 #[path = "input_tests/keymap.rs"]
 mod keymap;
 #[path = "input_tests/sql_dialect.rs"]

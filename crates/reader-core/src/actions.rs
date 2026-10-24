@@ -141,6 +141,7 @@ impl Session {
             CommandId::OpenInEditor => return CatalogAction::Interface(InterfaceAction::OpenInEditor),
             CommandId::OpenWithDefaultApp => return CatalogAction::Interface(InterfaceAction::OpenWithDefaultApp),
             CommandId::CompareSaved => Command::CompareSaved,
+            CommandId::ResolveExternalChange => Command::ResolveExternalChange,
             CommandId::CloseSavedComparison => Command::CloseSavedComparison,
             CommandId::CompareWith => return CatalogAction::Interface(InterfaceAction::CompareWith),
             CommandId::ShowCommitDiff => return CatalogAction::Interface(InterfaceAction::ShowCommitDiff),
@@ -358,7 +359,8 @@ impl CommandId {
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecoverDrafts | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
-            | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
+            | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison
+            | Self::ResolveExternalChange => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::AutoCompletion | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting

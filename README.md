@@ -70,6 +70,12 @@ native macOS validation is pending. The Reader edits existing files on verified 
 - **Declare an SQL dialect** per project or file in the **SQL** menu: PostgreSQL and DuckDB are distinct, an
   unset dialect stays visibly unset (Lenz never assumes PostgreSQL), and the status bar shows which one applies.
   Choosing one writes only the Reader settings, never a document or a database connection.
+- **Reconcile an external change**: when a file changes on disk while you have unsaved text, Save refuses the
+  write instead of overwriting it. **Resolve External Change…** (File menu) reads the file and shows the version on
+  disk, your draft and the confirmed baseline it was edited from, then offers **Compare Disk, Draft and Baseline…**,
+  **Take Disk Version** (one undoable edit), **Save Draft over Disk** (written only after one more identity and
+  content check) or **Keep Draft**, which changes nothing and adopts no new baseline. Each choice is the same command
+  with the same label and disabled reason in the window and the terminal.
 - **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
   with `Ctrl+Shift+V`, soft wrap with `Alt+Z`, and search with `Ctrl+F`.
 - **Share appearance** with Diff: theme selection, custom themes and desktop font

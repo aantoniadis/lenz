@@ -66,7 +66,7 @@ impl Session {
         let names = |o: &Tab| o.source == path || o.canonical.as_ref() == Some(&path)
             || canonical.as_ref().is_some_and(|c| o.source == *c || o.canonical.as_ref() == Some(c));
         if names(t) { return Err("this is the document's current file; use Save".into()); }
-        if let Some(other) = self.state.tabs.iter().find(|o| o.buffer != t.buffer && !o.is_saved_version() && names(o)) {
+        if let Some(other) = self.state.tabs.iter().find(|o| o.buffer != t.buffer && o.read_only_side().is_none() && names(o)) {
             return Err(format!("{} is open in another tab; close it first", other.display.display()));
         }
         if !path.parent().is_some_and(Path::is_dir) { return Err("its folder does not exist".into()); }

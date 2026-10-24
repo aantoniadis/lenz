@@ -92,6 +92,8 @@ pub(crate) enum Details {
     Checkout,
     Close,
     External,
+    /// A dirty draft and a file that changed on disk: compare them, take disk, save over it or keep the draft.
+    Reconcile,
     Replace,
     Recovered,
 }
@@ -910,6 +912,9 @@ impl App {
     fn choose_external(&mut self,choice:reader_core::external::Choice) {
         if let Some(prompt)=self.session.external_prompt() { self.dispatch(Command::ChooseExternal {ticket:prompt.ticket,choice}); }
     }
+    fn choose_reconcile(&mut self,choice:reader_core::reconcile::Choice) {
+        if let Some(prompt)=self.session.reconcile_prompt() { self.dispatch(Command::ChooseReconcile {ticket:prompt.ticket,choice}); }
+    }
     fn choose_replace(&mut self,choice:reader_core::save::ReplaceChoice) {
         if let Some(prompt)=self.session.save_as_prompt() { self.dispatch(Command::ChooseReplace {ticket:prompt.ticket,choice}); }
     }
@@ -926,6 +931,7 @@ impl App {
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
                 Prompt::Details { kind: Details::External, .. } => self.choose_external(reader_core::external::Choice::Cancel),
+                Prompt::Details { kind: Details::Reconcile, .. } => self.choose_reconcile(reader_core::reconcile::Choice::KeepDraft),
                 Prompt::Details { kind: Details::Replace, .. } => self.choose_replace(reader_core::save::ReplaceChoice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(reader_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Recovered, .. } => self.choose_recovery(reader_core::recovery::Choice::Later),
@@ -1408,6 +1414,16 @@ impl App {
                 _=>None,
             };
             if let Some(choice)=choice { self.choose_replace(choice); return; }
+        }
+        if matches!(kind, Prompt::Details {kind:Details::Reconcile,..}) {
+            let choice=match key.code {
+                KeyCode::Char('c'|'C') if !control && !alt => Some(reader_core::reconcile::Choice::Compare),
+                KeyCode::Char('d'|'D') if !control && !alt => Some(reader_core::reconcile::Choice::TakeDisk),
+                KeyCode::Char('s'|'S') if !control && !alt => Some(reader_core::reconcile::Choice::SaveDraft),
+                KeyCode::Esc => Some(reader_core::reconcile::Choice::KeepDraft),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_reconcile(choice); return; }
         }
         if matches!(kind, Prompt::Details {kind:Details::External,..}) {
             let choice=match key.code {
@@ -2469,6 +2485,10 @@ impl App {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::external::Choice::ALL.get(i) { self.choose_external(*choice); }
                 return;
             }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Reconcile,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::reconcile::Choice::ALL.get(i) { self.choose_reconcile(*choice); }
+                return;
+            }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Replace,..})) {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) { self.choose_replace(*choice); }
                 return;
@@ -2895,6 +2915,13 @@ impl App {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Recovered,body,..},..})) => *body=text,
             (Some(body),None) => self.prompt(Prompt::Details {title:"Recovered unsaved work",body,logo:false,kind:Details::Recovered}),
             (None,Some(Modal {kind:Prompt::Details {kind:Details::Recovered,..},..})) => self.modal=None,
+            _=>{}
+        }
+        let reconcile=self.session.reconcile_prompt().map(|p|p.text());
+        match (reconcile,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Reconcile,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"File changed on disk",body,logo:false,kind:Details::Reconcile}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::Reconcile,..},..})) => self.modal=None,
             _=>{}
         }
         let close=self.session.close_prompt().map(|p|p.text());

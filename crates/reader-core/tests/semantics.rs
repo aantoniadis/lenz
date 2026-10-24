@@ -1791,7 +1791,7 @@ fn the_context_menu_lists_navigation_then_copy_and_copies_paths() {
         C(CommandId::Copy), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode),
         C(CommandId::CopyPath), C(CommandId::CopyPathLine), C(CommandId::LocateFile), Separator,
         C(CommandId::AnnotateBlame), Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp),
-        C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison), Separator,
+        C(CommandId::ResolveExternalChange), C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison), Separator,
         C(CommandId::SplitRight), C(CommandId::SplitDown),
     ]);
     for id in [CommandId::Cut, CommandId::Paste, CommandId::Delete] {

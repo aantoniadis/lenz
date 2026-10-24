@@ -31,6 +31,7 @@ pub mod markers;
 pub mod places;
 pub mod preferences;
 pub mod recovery;
+pub mod reconcile;
 pub mod project;
 pub mod postgres_assistance;
 pub mod search;

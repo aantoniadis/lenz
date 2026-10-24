@@ -34,6 +34,7 @@ mod input_method;
 mod external;
 mod save_as;
 mod recovery;
+mod reconcile;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -137,6 +138,8 @@ pub enum Details {
     Checkout,
     Close,
     External,
+    /// A dirty draft and a file that changed on disk: compare them, take disk, save over it or keep the draft.
+    Reconcile,
     Replace,
     Recovered,
 }
@@ -797,6 +800,7 @@ impl ReaderView {
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
             Some(Modal::StatusDetails { kind: Details::External, .. }) => self.choose_external(reader_core::external::Choice::Cancel,cx),
+            Some(Modal::StatusDetails { kind: Details::Reconcile, .. }) => self.choose_reconcile(reader_core::reconcile::Choice::KeepDraft,cx),
             Some(Modal::StatusDetails { kind: Details::Replace, .. }) => self.choose_replace(reader_core::save::ReplaceChoice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Recovered, .. }) => self.choose_recovery(reader_core::recovery::Choice::Later,cx),
@@ -954,6 +958,7 @@ impl ReaderView {
         self.sync_external_prompt();
         self.sync_replace_prompt();
         self.sync_recovery_prompt();
+        self.sync_reconcile_prompt();
         self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
@@ -1730,6 +1735,17 @@ impl ReaderView {
                 _=>None,
             };
             if let Some(choice)=choice {self.choose_external(choice,cx);return;}
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Reconcile,..})) {
+            let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
+            let choice=match key {
+                "c" if plain=>Some(reader_core::reconcile::Choice::Compare),
+                "d" if plain=>Some(reader_core::reconcile::Choice::TakeDisk),
+                "s" if plain=>Some(reader_core::reconcile::Choice::SaveDraft),
+                "escape"=>Some(reader_core::reconcile::Choice::KeepDraft),
+                _=>None,
+            };
+            if let Some(choice)=choice {self.choose_reconcile(choice,cx);return;}
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Replace,..})) {
             let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
@@ -2765,6 +2781,7 @@ impl ReaderView {
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
             Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
+            Details::Reconcile => reader_core::reconcile::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Replace => reader_core::save::ReplaceChoice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Recovered => reader_core::recovery::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|self.session.close_prompt().map_or(c.label(), |p|p.label(c))).collect(),
@@ -3086,6 +3103,7 @@ impl ReaderView {
                         let hit = l.details_buttons(self.char_w, &self.details_labels(kind)).iter().position(|b| b.contains(&ev.position));
                         match (kind, hit) {
                             (Details::External,Some(i)) => {if let Some(choice)=reader_core::external::Choice::ALL.get(i) {self.choose_external(*choice,cx);}}
+                            (Details::Reconcile,Some(i)) => {if let Some(choice)=reader_core::reconcile::Choice::ALL.get(i) {self.choose_reconcile(*choice,cx);}}
                             (Details::Replace,Some(i)) => {if let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) {self.choose_replace(*choice,cx);}}
                             (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
                             (Details::Recovered,Some(i)) => {if let Some(choice)=reader_core::recovery::Choice::ALL.get(i) {self.choose_recovery(*choice,cx);}}
@@ -4941,8 +4959,12 @@ impl Render for ReaderView {
             Some(Modal::StatusDetails { kind, .. }) => self.details_labels(*kind),
             _ => Vec::new(),
         };
-        let external_disabled = matches!(self.modal,Some(Modal::StatusDetails {kind:Details::External,..})).then(|| self.session.external_prompt()).flatten()
-            .map(|prompt| reader_core::external::Choice::ALL.map(|choice|prompt.disabled(choice).is_some()));
+        let details_disabled = match &self.modal {
+            Some(Modal::StatusDetails { kind: Details::External, .. }) => self.session.external_prompt()
+                .map(|prompt| reader_core::external::Choice::ALL.map(|choice| prompt.disabled(choice).is_some()).to_vec()),
+            Some(Modal::StatusDetails { kind: Details::Reconcile, .. }) => self.reconcile_disabled(),
+            _ => None,
+        };
         // The hovered annotation's commit, beside the pointer.
         let ann_tip = self.ann_hovered().zip(self.ann_hover).and_then(|((_, t, line), at)| {
             let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
@@ -5306,7 +5328,7 @@ impl Render for ReaderView {
                                         let clip = Bounds { origin: gpui::point(px(x), px(y)), size: b.size };
                                         window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                             lenz_gpui::fill(window, x, y, f32::from(b.size.width), f32::from(b.size.height), palette.selected_bg);
-                                            lenz_gpui::text(window, cx, m, x + 8.0, y, label, if external_disabled.is_some_and(|disabled|disabled.get(index).copied().unwrap_or(false)) {palette.dim} else {palette.fg});
+                                            lenz_gpui::text(window, cx, m, x + 8.0, y, label, if details_disabled.as_ref().is_some_and(|disabled|disabled.get(index).copied().unwrap_or(false)) {palette.dim} else {palette.fg});
                                         });
                                     }
                                 }

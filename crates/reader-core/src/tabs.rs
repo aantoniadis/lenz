@@ -298,10 +298,12 @@ impl Tab {
     /// The file name, for the tab bar.
     pub fn comparison_side(&self) -> Option<crate::session::ComparisonSide> { self.comparison_side }
     pub fn is_saved_version(&self) -> bool { self.comparison_side == Some(crate::session::ComparisonSide::Saved) }
+    /// A comparison side that shows a version of the file and refuses edits (last saved, disk or baseline).
+    pub fn read_only_side(&self) -> Option<crate::session::ComparisonSide> { self.comparison_side.filter(|side| side.read_only().is_some()) }
     /// A New File document with no path yet: its session buffer is the only copy until Save As succeeds.
     pub fn untitled(&self) -> bool { self.retrieved.is_none() && self.source.to_str().is_some_and(|s| s.starts_with(UNTITLED)) }
-    /// A view of an actual disk file (not a saved side, retrieved source or untitled document).
-    pub(crate) fn is_file(&self) -> bool { !self.is_saved_version() && self.retrieved.is_none() && !self.untitled() }
+    /// A view of an actual disk file (not a read-only comparison side, retrieved source or untitled document).
+    pub(crate) fn is_file(&self) -> bool { self.read_only_side().is_none() && self.retrieved.is_none() && !self.untitled() }
     pub fn title(&self) -> String {
         if let Some(side) = self.comparison_side { return side.label().into(); }
         self.display.file_name().map_or_else(|| self.display.display().to_string(), |n| n.to_string_lossy().into_owned())

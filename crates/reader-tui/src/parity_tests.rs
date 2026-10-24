@@ -2901,3 +2901,90 @@ fn structural_edits_replay_the_same_text_and_selections_in_both_adapters(cx: &mu
     draw(&mut visual, &mut tui, &mut terminal);
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes(), "neither adapter writes the file");
 }
+
+/// Both adapters reach the external-change dialog through their own menus, offer the same sides and decisions,
+/// and taking the disk version leaves the same draft, history and file bytes.
+#[gpui::test]
+fn gui_and_terminal_reconcile_the_same_external_change_through_their_dialogs(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("conflict.txt");
+    std::fs::write(&path, "saved\r\n").unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.current_source().is_some());
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("draft λ\r\n".into())));
+    visual.simulate_keystrokes("ctrl-a ctrl-v");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL)));
+    tui.handle(Event::Paste("draft λ\r\n".into()));
+    std::fs::write(&path, "external replacement\r\n").unwrap();
+    // Save in both: the writer refuses the version that is no longer on disk, which is the recorded conflict.
+    visual.simulate_keystrokes("ctrl-s");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    let rejected = |s: &State| s.active().is_some_and(|t| matches!(s.view(t.id()).unwrap().save_status(), reader_core::save::Status::Rejected(_)));
+    settle(&mut visual, &mut tui, &rejected);
+    // The same menu entry opens the dialog in each adapter.
+    let menu = |visual: &mut VisualTestContext, tui: &mut App| {
+        visual.simulate_keystrokes("f10");
+        let row = gui.read_with(visual, |v, _| v.modal_rows().iter().position(|r| r.0 == CommandId::ResolveExternalChange.label()).unwrap());
+        for _ in 0..row { visual.simulate_keystrokes("down"); }
+        visual.simulate_keystrokes("enter");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE)));
+        let row = tui.choices().iter().position(|row| matches!(&row.target, crate::app::ChoiceTarget::Action(id) if *id == CommandId::ResolveExternalChange)).unwrap();
+        for _ in 0..row { tui.handle(Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE))); }
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    };
+    menu(&mut visual, &mut tui);
+    let ready = |session: &Session| session.reconcile_prompt().is_some_and(|prompt| prompt.disk.is_some());
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        gui.update(&mut visual, |v, cx| v.poll(cx));
+        while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+        if gui.read_with(&visual, |v, _| ready(v.session())) && ready(&tui.session) { break; }
+        assert!(Instant::now() < deadline, "the dialog never read the file");
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let (g, t) = (gui.read_with(&visual, |v, _| v.session().reconcile_prompt().unwrap()), tui.session.reconcile_prompt().unwrap());
+    assert_eq!(g.text(), t.text(), "both adapters present the same three sides");
+    let labels = |prompt: &reader_core::reconcile::Prompt| reader_core::reconcile::Choice::ALL.map(|choice| prompt.disabled(choice)).to_vec();
+    assert_eq!(labels(&g), labels(&t));
+    for word in ["Disk:", "Current draft:", "Confirmed baseline"] { assert!(t.text().contains(word), "{}", t.text()); }
+    // Typing into either dialog changes no draft and no bytes.
+    visual.write_to_clipboard(gpui::ClipboardItem::new_string("must not paste".into()));
+    visual.simulate_keystrokes("ctrl-v x");
+    tui.handle(Event::Paste("must not paste".into()));
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
+    assert_eq!(std::fs::read(&path).unwrap(), "external replacement\r\n".as_bytes());
+    // D takes the disk version in both; the file is not written.
+    visual.simulate_keystrokes("d");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE)));
+    let taken = |s: &State| s.current_source().is_some_and(|text| text.copy_range(0..text.len_bytes()).unwrap() == "external replacement\r\n");
+    settle(&mut visual, &mut tui, &taken);
+    assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
+    assert!(!tui.session.state().view(tui.session.state().active().unwrap().id()).unwrap().dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), "external replacement\r\n".as_bytes());
+    // Undo restores the same dirty draft and its baseline in both.
+    visual.simulate_keystrokes("ctrl-z");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)));
+    let undone = |s: &State| s.current_source().is_some_and(|text| text.copy_range(0..text.len_bytes()).unwrap() == "draft λ\r\n");
+    settle(&mut visual, &mut tui, &undone);
+    assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
+    assert!(tui.session.state().view(tui.session.state().active().unwrap().id()).unwrap().dirty());
+    assert_eq!(std::fs::read(&path).unwrap(), "external replacement\r\n".as_bytes());
+}

@@ -3,6 +3,7 @@
 use super::*;
 mod create;
 mod external;
+mod reconcile;
 mod save_as;
 #[cfg(target_os = "linux")]
 mod composition_probe;

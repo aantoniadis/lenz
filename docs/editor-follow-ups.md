@@ -513,3 +513,44 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Unverified:** native macOS and Wayland GUI editing remain gated; the GUI checks ran on the GPUI test platform and
   the terminal checks in a Ratatui test backend, so physical terminals and real desktops were not exercised. No
   performance measurement or benchmark was run for this ticket (per the current verification policy).
+
+## External change reconciliation (ticket 34, 2026-10-24)
+
+- **A conflict is only known when it was observed:** `Resolve External Change…` needs a recorded conflict — the
+  watcher's change, a rejected Save or a recheck that found another version — so without a watcher the command
+  reports `NO_CONFLICT` while the file differs. Save still refuses that write through the writer's own check. A
+  session-level "Disk changed" state that survives a missing watcher would need its own checked read on every
+  activation; not implemented.
+- **Keeping the draft does not block Save:** `Keep Draft` changes no save state, so Save is still offered and the
+  writer rejects it again (with a message) instead of the command explaining itself first. Whether a kept conflict
+  should disable Save with "Resolve the external change first" is a presentation decision for the next pass.
+- **A take releases the recovery copy:** `Take Disk Version` edits the draft and confirms the taken version, which
+  forgets its recovery record. Undo restores the previous draft and re-registers it, but a crash between the take and
+  the Undo loses the old text; keeping the record while the buffer is clean would restore a draft identical to the
+  file. No change is claimed here.
+- **The dialog's disk side is a captured read:** the comparison and the dialog show the version read when the dialog
+  opened (identified by size and by how it relates to the baseline). A further external change while they are open is
+  only noticed by a decision's own re-read, which then refuses and refreshes the sides. Refreshing the open
+  comparison from disk would need another read and a new request; not implemented.
+- **Three comparison sides in two panes:** the conflict comparison puts the disk version and the confirmed baseline
+  as two tabs in the first pane and the draft in the second. The labels are long (`Confirmed baseline (read-only)`),
+  so a narrow pane or terminal can show only some tab titles; the labels are not shortened because they are also the
+  identity the ticket asks for. Splitting the third side into its own pane would need a three-pane layout.
+- **Suspected cost, unmeasured:** `Take Disk Version` copies the whole disk text once to build its single edit, and the
+  undo record keeps the previous draft text as one inverse edit, so a take on a large file holds two full texts plus
+  the snapshot — the shape of one Save. A decision reads and decodes the file twice (the dialog's read and the
+  decision's check), both off the UI thread; no cache was added. Include a take and a save-over on the readiness
+  corpus in the scheduled batch before optimizing.
+- **Suspected cost, unmeasured:** `reconcile_prompt()` rebuilds the dialog text on each call; the GUI asks for it
+  twice per draw while the dialog is open and the terminal once per frame (`clamp`). The text is a few hundred bytes,
+  but it is new per-frame work; measure with the other dialog costs before changing it.
+- **Matching the shown version:** a decision compares content and the file's device/inode. A bare `touch` (same
+  content, same inode) therefore counts as the same version and the writer's own stamp check decides the write.
+- **Observed integration-tip test failure (not caused by this ticket, corrected here):**
+  `an_empty_session_offers_open_and_explains_the_rest` expected a command-label list that lacked ticket 27's
+  Indent/Outdent/Comment/Move/Duplicate commands at `daefa89`, so it failed before this work. The expected list was
+  brought back in line with `CommandId::ALL`, including the new `Resolve External Change…` entry.
+- **Unverified:** native macOS and Wayland GUI editing remain gated, so their dialog keys, tiny-window wrapping and
+  comparison tab bar were not exercised; the GUI checks ran on the GPUI test platform under an owned display. The
+  terminal checks used a Ratatui test backend, not a physical terminal, so real tab-bar truncation and key delivery
+  are unverified. No performance measurement, stress run or benchmark was made for this ticket.
