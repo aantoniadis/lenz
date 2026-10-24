@@ -54,6 +54,13 @@ Discard decision. Discard leaves disk untouched, including when recheck finds di
 still requires **Confirm Rechecked Save**; a changed disk result cannot be confirmed for Save.
 Tab closure and Close Split keep a draft whenever another accessible tab still owns it.
 
+Reload, changing folders/worktrees and checking out or creating-and-checking-out a branch use the same
+Save/Discard/Cancel decisions. Cancel retains drafts and positions; earlier confirmed Saves remain written.
+Failed or blocked Reload/checkout retains the draft and requires a fresh decision on retry. Watcher,
+focus and index refresh retain drafts and undo history, with a visible notice when disk content changes
+or becomes unavailable. Reload from a saved comparison's Current pane returns to the ordinary draft;
+the Last saved pane remains read-only.
+
 | Operation | Control |
 | --- | --- |
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |

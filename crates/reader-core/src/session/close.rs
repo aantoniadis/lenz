@@ -130,13 +130,39 @@ impl Session {
                 copy: None,
             };
         }
+        // A new explicit decision supersedes any earlier asynchronous replacement consent.
+        self.replacements.clear();
+        self.checkout_sources.clear();
         // Temporary comparison owners must not authorize dropping the ordinary draft's last view.
         if let Intent::Tab(id) = intent
-            && self.state.comparison.as_ref().is_some_and(|c| c.saved_tab() != id && c.current_tab() != id)
-        { self.close_saved_comparison(); }
+            && self
+                .state
+                .comparison
+                .as_ref()
+                .is_some_and(|c| c.saved_tab() != id && c.current_tab() != id)
+        {
+            self.close_saved_comparison();
+        }
         let removed: Vec<_> = match intent {
-            Intent::Tab(id) if self.state.comparison.as_ref().is_some_and(|c| c.saved_tab() == id || c.current_tab() == id) => self.state.comparison.as_ref().map(|c| vec![c.saved_tab(), c.current_tab()]).unwrap_or_default(),
-            Intent::Unsplit if self.state.comparison.is_some() => self.state.comparison.as_ref().map(|c| vec![c.saved_tab(), c.current_tab()]).unwrap_or_default(),
+            Intent::Tab(id)
+                if self
+                    .state
+                    .comparison
+                    .as_ref()
+                    .is_some_and(|c| c.saved_tab() == id || c.current_tab() == id) =>
+            {
+                self.state
+                    .comparison
+                    .as_ref()
+                    .map(|c| vec![c.saved_tab(), c.current_tab()])
+                    .unwrap_or_default()
+            }
+            Intent::Unsplit if self.state.comparison.is_some() => self
+                .state
+                .comparison
+                .as_ref()
+                .map(|c| vec![c.saved_tab(), c.current_tab()])
+                .unwrap_or_default(),
             Intent::Tab(id) => self
                 .state
                 .tabs

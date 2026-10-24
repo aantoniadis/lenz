@@ -1945,6 +1945,7 @@ pub struct Session {
     pending: Option<(TabId, bool)>,
     reload_source: Option<SemanticSource>,
     checkout_sources: Vec<(crate::text::BufferId, SemanticSource)>,
+    replacements: std::collections::HashMap<crate::text::BufferId, SemanticSource>,
     next_tab: u64,
     /// The current root's generation, for scans and rankings to stop when superseded.
     root_generation: Arc<AtomicU64>,
@@ -2142,7 +2143,7 @@ impl Session {
             other_current: Arc::new(AtomicU64::new(0)),
             renders: Arc::new(AtomicU64::new(0)),
             versions: Arc::new(AtomicU64::new(0)),
-            pending: None, reload_source: None, checkout_sources: Vec::new(),
+            pending: None, reload_source: None, checkout_sources: Vec::new(), replacements: Default::default(),
             next_tab: 0,
             root_generation: Arc::new(AtomicU64::new(0)),
             project_generation: Arc::new(AtomicU64::new(0)),
@@ -2843,7 +2844,7 @@ impl Session {
         let input = input.into();
         // Authorized windows are immutable while platform ownership and metadata cleanup finish.
         if self.closed { return match input { Input::Command(Command::SaveWorkspace) => self.command(Command::SaveWorkspace), _ => Effect::default() }; }
-        if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); }
+        if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
         if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
@@ -2962,6 +2963,8 @@ impl Session {
         // A previously clean, evicted buffer may not have had a snapshot fence when close was prepared.
         self.cancel_close();
         let buffer = next.key().buffer;
+        self.replacements.remove(&buffer);
+        self.checkout_sources.retain(|(id, _)| *id != buffer);
         let transform = |byte: usize| {
             let mut delta: isize = 0;
             for edit in edits {
@@ -6367,6 +6370,7 @@ impl Session {
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
+        let replacement = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer).is_some_and(|buffer| self.replacement_current(buffer));
         let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
             .and_then(|buffer| self.state.sources.buffers.get(&buffer))
             .and_then(|entry| entry.draft.as_ref().map(|draft| draft.baseline.clone()).or_else(|| entry.snapshot.clone()));
@@ -6389,7 +6393,14 @@ impl Session {
                     return;
                 }
             }
-            let result = check(&path, stamp, shown.as_ref(), &versions);
+            let result = if replacement {
+                // Approval is not a saved baseline. Return exact read provenance even for equal bytes/stamps.
+                match read(&path) {
+                    Ok((stamp, bytes)) => Refresh::Changed(stamp, Arc::new(decode_read(path.clone(), versions.fetch_add(1, Ordering::Relaxed) + 1, &bytes))),
+                    Err(ReadError::Unstable) => Refresh::Unstable,
+                    Err(ReadError::Failed(why)) => Refresh::Gone(why),
+                }
+            } else { check(&path, stamp, shown.as_ref(), &versions) };
             let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, result });
         });
     }
@@ -6400,6 +6411,19 @@ impl Session {
     }
 
     fn refreshed(&mut self, id: TabId, token: u64, result: Refresh) -> Effect {
+        let Some(tab) = self.state.tabs.iter().find(|t| t.id == id && t.refresh == token) else { return Effect::default(); };
+        let buffer = tab.buffer;
+        let replacement = buffer.is_some_and(|buffer| self.replacement_current(buffer));
+        if let Some(buffer) = buffer {
+            self.replacements.remove(&buffer);
+            if replacement && matches!(result, Refresh::Changed(..))
+                && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
+                entry.draft = None;
+                entry.save.status = crate::save::Status::Ready;
+                entry.save.checked = None;
+                entry.save.revalidated = None;
+            }
+        }
         let shown = self.is_shown(id);
         let snapshot = self.state.source(id).cloned();
         let retained = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)

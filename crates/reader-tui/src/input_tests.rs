@@ -45,20 +45,157 @@ pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
 
 #[test]
 fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence() {
-    let d=tempfile::tempdir().unwrap();let path=d.path().join("refresh.txt");std::fs::write(&path,b"saved\r\n").unwrap();let mut a=app(d.path());a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());a.enable_draft_input_for_test();draw(&mut a,80,12);key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);a.handle(Event::Paste("draft λ\r\n".into()));let position=a.session.state().selection();
-    std::fs::write(&path,b"external\r\n").unwrap();a.handle(Event::FocusGained);settle(&mut a,|a|a.session.state().active().unwrap().stale_on_disk());assert!(draw_screen(&mut a,100,12).contains("changed on disk"));assert_eq!(a.session.state().selection(),position);
-    key(&mut a,KeyCode::F(5),KeyModifiers::NONE);assert!(draw_screen(&mut a,80,12).contains("Unsaved changes"));key(&mut a,KeyCode::Char('s'),KeyModifiers::CONTROL);a.handle(Event::Paste("ignored".into()));key(&mut a,KeyCode::End,KeyModifiers::NONE);key(&mut a,KeyCode::Up,KeyModifiers::NONE);key(&mut a,KeyCode::Esc,KeyModifiers::NONE);assert_eq!(a.session.state().selection(),position);assert_eq!(std::fs::read(&path).unwrap(),b"external\r\n");
-    for (w,h) in [(1,1),(24,6)] {draw(&mut a,w,h);key(&mut a,KeyCode::F(5),KeyModifiers::NONE);key(&mut a,KeyCode::End,KeyModifiers::NONE);key(&mut a,KeyCode::Up,KeyModifiers::NONE);draw(&mut a,w,h);key(&mut a,KeyCode::Esc,KeyModifiers::NONE);}
-    draw(&mut a,80,12);key(&mut a,KeyCode::F(5),KeyModifiers::NONE);key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);settle(&mut a,|a|a.session.state().loading().is_none());key(&mut a,KeyCode::Up,KeyModifiers::NONE);let screen=draw_screen(&mut a,80,12);assert!(screen.contains("external"),"{screen}\nstatus: {}",a.session.status_details());let s=a.session.state().current_source().unwrap();assert_eq!(s.copy_range(0..s.len_bytes()).as_deref(),Some("external\r\n"));assert!(a.modal.is_none());assert_eq!(std::fs::read(path).unwrap(),b"external\r\n");
+    let d = tempfile::tempdir().unwrap();
+    let path = d.path().join("refresh.txt");
+    std::fs::write(&path, b"saved\r\n").unwrap();
+    let mut a = app(d.path());
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    a.enable_draft_input_for_test();
+    draw(&mut a, 80, 12);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("draft λ\r\n".into()));
+    let position = a.session.state().selection();
+    let ordinary = a.session.state().active().unwrap().id();
+    key(
+        &mut a,
+        KeyCode::Char('d'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    settle(&mut a, |a| {
+        a.session
+            .state()
+            .saved_comparison()
+            .is_some_and(|c| !c.pending())
+    });
+    draw(&mut a, 80, 12);
+    key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
+    assert!(a.session.close_prompt().is_some() && a.session.state().saved_comparison().is_none());
+    assert_eq!(a.session.state().active().unwrap().id(), ordinary);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.session.state().selection(), position);
+    std::fs::write(&path, b"external\r\n").unwrap();
+    a.handle(Event::FocusGained);
+    settle(&mut a, |a| {
+        a.session.state().active().unwrap().stale_on_disk()
+    });
+    assert!(draw_screen(&mut a, 100, 12).contains("changed on disk"));
+    assert_eq!(a.session.state().selection(), position);
+    key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
+    assert!(draw_screen(&mut a, 80, 12).contains("Unsaved changes"));
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("ignored".into()));
+    key(&mut a, KeyCode::End, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.session.state().selection(), position);
+    assert_eq!(std::fs::read(&path).unwrap(), b"external\r\n");
+    for (w, h) in [(1, 1), (24, 6)] {
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    }
+    draw(&mut a, 80, 12);
+    key(&mut a, KeyCode::F(5), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.state().loading().is_none());
+    key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+    let screen = draw_screen(&mut a, 80, 12);
+    assert!(
+        screen.contains("external"),
+        "{screen}\nstatus: {}",
+        a.session.status_details()
+    );
+    let s = a.session.state().current_source().unwrap();
+    assert_eq!(
+        s.copy_range(0..s.len_bytes()).as_deref(),
+        Some("external\r\n")
+    );
+    assert!(a.modal.is_none());
+    assert_eq!(std::fs::read(path).unwrap(), b"external\r\n");
 }
 
 #[test]
 fn draft_workspace_changes_use_real_folder_branch_and_new_branch_controls() {
     use lenz_content::git::testing::git;
-    let (r,wt,mut a)=branches_app();let path=r.path().join("a.txt");a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());a.enable_draft_input_for_test();draw(&mut a,100,20);key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);a.handle(Event::Paste("draft λ\r\n".into()));let position=a.session.state().selection();
-    key(&mut a,KeyCode::F(10),KeyModifiers::NONE);draw(&mut a,100,20);let row=a.choices().iter().position(|r|matches!(r.target,ChoiceTarget::Action(CommandId::OpenFolder))).unwrap();for _ in 0..row {key(&mut a,KeyCode::Down,KeyModifiers::NONE);}key(&mut a,KeyCode::Enter,KeyModifiers::NONE);key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);a.handle(Event::Paste(wt.path().join("second").display().to_string()));key(&mut a,KeyCode::Enter,KeyModifiers::NONE);assert!(draw_screen(&mut a,100,20).contains("Unsaved changes"));key(&mut a,KeyCode::Esc,KeyModifiers::NONE);assert_eq!(a.session.state().project().unwrap().root(),r.path());assert_eq!(a.session.state().selection(),position);
-    for new_branch in [false,true] {key(&mut a,KeyCode::Char('`'),KeyModifiers::CONTROL|KeyModifiers::SHIFT);settle(&mut a,|a|a.session.state().branches().is_some_and(|b|!b.loading));draw(&mut a,100,20);if new_branch {typed(&mut a,"new");key(&mut a,KeyCode::Enter,KeyModifiers::NONE);typed(&mut a,"draft-guard");key(&mut a,KeyCode::Enter,KeyModifiers::NONE);}else{typed(&mut a,"other");key(&mut a,KeyCode::Enter,KeyModifiers::NONE);}assert!(draw_screen(&mut a,100,20).contains("Unsaved changes"));assert_eq!(git(r.path(),&["branch","--show-current"]).trim(),"main");key(&mut a,KeyCode::Esc,KeyModifiers::NONE);assert_eq!(a.session.state().selection(),position);assert_eq!(std::fs::read(&path).unwrap(),b"main\n");}
-    key(&mut a,KeyCode::Char('`'),KeyModifiers::CONTROL|KeyModifiers::SHIFT);settle(&mut a,|a|a.session.state().branches().is_some_and(|b|!b.loading));draw(&mut a,100,20);typed(&mut a,"other");key(&mut a,KeyCode::Enter,KeyModifiers::NONE);key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);settle(&mut a,|a|!a.session.state().checking_out() && a.session.state().current_source().is_some_and(|s|s.copy_range(0..s.len_bytes()).as_deref()==Some("other\n")));assert!(draw_screen(&mut a,100,20).contains("other"));assert_eq!(git(r.path(),&["branch","--show-current"]).trim(),"other");assert_eq!(std::fs::read(path).unwrap(),b"other\n");assert!(a.modal.is_none());
+    let (r, wt, mut a) = branches_app();
+    let path = r.path().join("a.txt");
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    a.enable_draft_input_for_test();
+    draw(&mut a, 100, 20);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("draft λ\r\n".into()));
+    let position = a.session.state().selection();
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    draw(&mut a, 100, 20);
+    let row = a
+        .choices()
+        .iter()
+        .position(|r| matches!(r.target, ChoiceTarget::Action(CommandId::OpenFolder)))
+        .unwrap();
+    for _ in 0..row {
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste(wt.path().join("second").display().to_string()));
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(draw_screen(&mut a, 100, 20).contains("Unsaved changes"));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.session.state().project().unwrap().root(), r.path());
+    assert_eq!(a.session.state().selection(), position);
+    for new_branch in [false, true] {
+        key(
+            &mut a,
+            KeyCode::Char('`'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        );
+        settle(&mut a, |a| {
+            a.session.state().branches().is_some_and(|b| !b.loading)
+        });
+        draw(&mut a, 100, 20);
+        if new_branch {
+            typed(&mut a, "new");
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+            typed(&mut a, "draft-guard");
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        } else {
+            typed(&mut a, "other");
+            key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        }
+        assert!(draw_screen(&mut a, 100, 20).contains("Unsaved changes"));
+        assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+        key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(a.session.state().selection(), position);
+        assert_eq!(std::fs::read(&path).unwrap(), b"main\n");
+    }
+    key(
+        &mut a,
+        KeyCode::Char('`'),
+        KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+    );
+    settle(&mut a, |a| {
+        a.session.state().branches().is_some_and(|b| !b.loading)
+    });
+    draw(&mut a, 100, 20);
+    typed(&mut a, "other");
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
+    settle(&mut a, |a| {
+        !a.session.state().checking_out()
+            && a.session
+                .state()
+                .current_source()
+                .is_some_and(|s| s.copy_range(0..s.len_bytes()).as_deref() == Some("other\n"))
+    });
+    assert!(draw_screen(&mut a, 100, 20).contains("other"));
+    assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "other");
+    assert_eq!(std::fs::read(path).unwrap(), b"other\n");
+    assert!(a.modal.is_none());
 }
 
 #[test]

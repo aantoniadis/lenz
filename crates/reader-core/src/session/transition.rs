@@ -8,7 +8,40 @@ pub(super) enum Transition {
     Checkout(crate::branches::Retry, lenz_content::branches::Mode),
 }
 impl Session {
-    pub(super) fn prepare_transition(&mut self, next: Transition) -> Effect {
+    pub(super) fn prepare_transition(&mut self, mut next: Transition) -> Effect {
+        if self.closed || self.has_close_intent() {
+            return Effect {
+                repaint: true,
+                copy: None,
+            };
+        }
+        if self.state.comparison.is_some() {
+            let reload_buffer = match &next {
+                Transition::Reload(tab) => self
+                    .state
+                    .comparison
+                    .as_ref()
+                    .filter(|c| c.saved_tab() == *tab || c.current_tab() == *tab)
+                    .and_then(|c| self.state.source(c.current_tab()))
+                    .map(|s| s.key().buffer),
+                Transition::Root(_) | Transition::Checkout(..) => None,
+            };
+            self.close_saved_comparison();
+            if let Some(buffer) = reload_buffer {
+                let ordinary = self
+                    .state
+                    .active()
+                    .filter(|t| t.buffer == Some(buffer))
+                    .or_else(|| self.state.tabs.iter().find(|t| t.buffer == Some(buffer)));
+                let Some(tab) = ordinary else {
+                    return Effect {
+                        repaint: true,
+                        copy: None,
+                    };
+                };
+                next = Transition::Reload(tab.id);
+            }
+        }
         let intent = match &next {
             Transition::Reload(tab) => Intent::Reload(*tab),
             Transition::Root(_) | Transition::Checkout(..) => Intent::Workspace,
@@ -53,30 +86,37 @@ impl Session {
             copy: None,
         }
     }
+    pub(super) fn replacement_current(&self, buffer: BufferId) -> bool {
+        self.replacements.get(&buffer).is_some_and(|source| {
+            self.state
+                .sources
+                .buffers
+                .get(&buffer)
+                .is_some_and(|entry| {
+                    !entry.save.status.busy()
+                        && entry
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|now| source.matches(now))
+                })
+        })
+    }
     pub(super) fn finish_checkout_sources(&mut self, here: bool) {
         for (buffer, source) in std::mem::take(&mut self.checkout_sources) {
-            if !here {
-                continue;
-            }
-            if let Some(entry) = self.state.sources.buffers.get_mut(&buffer)
-                && entry
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|now| source.matches(now))
-            {
-                entry.draft = None;
-                entry.save.status = crate::save::Status::Ready;
-                entry.save.checked = None;
-                entry.save.revalidated = None;
-                for tab in self
+            if here
+                && self
                     .state
-                    .tabs
-                    .iter_mut()
-                    .filter(|tab| tab.buffer == Some(buffer))
-                {
-                    // Even a checkout whose bytes/stamp stayed equal must resolve the consented draft to disk.
-                    tab.stamp = None;
-                }
+                    .sources
+                    .buffers
+                    .get(&buffer)
+                    .is_some_and(|entry| {
+                        entry
+                            .snapshot
+                            .as_ref()
+                            .is_some_and(|now| source.matches(now))
+                    })
+            {
+                self.replacements.insert(buffer, source);
             }
         }
     }
