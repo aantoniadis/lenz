@@ -31,6 +31,19 @@ def private_environment(original, root, display):
     return env
 
 
+def visible_windows(root, viewable, bad_window):
+    result = {}
+    for window in root.query_tree().children:
+        try:
+            if window.get_attributes().map_state == viewable:
+                name = window.get_wm_name()
+                if name:
+                    result[name] = window
+        except bad_window:
+            continue  # A closing window can disappear after the server enumerates it.
+    return result
+
+
 def states(path):
     if not path.exists():
         return {}
@@ -102,7 +115,7 @@ def main():
     with (root / 'xvfb.log').open('wb') as server_log, (root / 'app.stderr').open('wb') as app_log:
         try:
             # Native dependencies load only inside a released real run, never pure unit self-checks.
-            from Xlib import X, XK, display, protocol
+            from Xlib import X, XK, display, protocol, error
             from Xlib.ext import xtest
             from PIL import Image
             from perf_support import read_display_number
@@ -137,8 +150,7 @@ def main():
                 return states(trace).get(label, {})
             wait_for(lambda: all(state(k).get('source') for k in ('a', 'b')), 'both production windows loaded')
             def windows():
-                return {w.get_wm_name(): w for w in connection.screen().root.query_tree().children
-                        if w.get_attributes().map_state == X.IsViewable and w.get_wm_name()}
+                return visible_windows(connection.screen().root, X.IsViewable, error.BadWindow)
             found = wait_for(lambda: windows() if all('Lenz foundation ' + k in windows() for k in ('a', 'b')) else None,
                              'owned native windows')
             a, b = (found['Lenz foundation ' + k] for k in ('a', 'b'))
