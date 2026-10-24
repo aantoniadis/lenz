@@ -86,5 +86,17 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   currently rank up to 32 adjacent saved-file record sets per turn. Use the
   scheduled batch comparison on a many-file index before changing that batch
   size; preserve independent query cancellation and completed-action timing.
-
-- Ticket14 native delivery acceptance: production Reader windows install a veto and focused tests replay that exact handler plus real keyboard decisions. GPUI TestPlatform has no native close-event simulator; replay one ordinary Linux titlebar close via an owned display at the next adapter batch boundary with disposable, test-support-only draft fixtures. Native macOS termination remains ticket03/24, unverified. No production editing switch was added.
+- **Intermittent GUI declaration tracer timeout:** the final batch GUI run at
+  `bb2f55f4` timed out once in `outline_and_declaration_search_through_keys`.
+  The unchanged test then passed in isolation, in 25 consecutive isolated
+  reproductions, and in a complete GUI confirmation run. No cause or runtime fix
+  is claimed. Add stage-specific failure diagnostics or a controlled scheduler
+  reproduction if it recurs; preserve the keyboard, selection and activation
+  assertions. Original failure and all attempts are retained under
+  `target/perf/editor-implementation/merge-11-18/reader-gui-*.log`.
+- **Ticket14 native delivery acceptance:** production Reader windows install a
+  veto, and focused tests replay that exact handler plus real keyboard decisions.
+  GPUI TestPlatform has no native close-event simulator; replay one ordinary Linux
+  titlebar close via an owned display at the next adapter batch boundary with
+  disposable fixtures using the existing test-support draft gate. Native macOS
+  termination remains ticket03/24, unverified.
