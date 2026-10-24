@@ -155,7 +155,8 @@ The explorer is its own panel left of the files panel (the tabs sit over the tex
 Ctrl+B, shows and hides it; Ctrl+Shift+E focuses it. Its target button selects the opened file, opening the folders
 above it. Opening a folder whose only entry is a folder opens that one too, down to a folder with more. Folders list
 before files; the command menu's "Explorer: All by Name" switches to plain name order ("Explorer: Folders First" back) (bytewise:
-capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`.
+capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`. Explorer rows and tabs show the Git status
+letter (M, A, D, R, U, C) apart from the `●` unsaved mark, as in the [terminal reader](tui.md).
 
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;

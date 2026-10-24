@@ -2269,3 +2269,73 @@ fn gui_and_terminal_choose_and_show_project_editing_preferences_through_find_act
         assert!(Instant::now() < deadline, "{:?} {:?}", saved(&gs), saved(&ts)); std::thread::sleep(Duration::from_millis(2));
     }
 }
+
+#[gpui::test]
+fn gui_and_terminal_show_the_same_git_status_and_dirty_marks_through_edit_and_save(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, git, repo, write};
+    let make = || {
+        let r = repo();
+        write(r.path(), "clean.txt", "clean\n");
+        write(r.path(), "edited.txt", "base\n");
+        write(r.path(), "staged.txt", "base\n");
+        commit_all(r.path(), "base");
+        write(r.path(), "edited.txt", "edited\n");
+        write(r.path(), "staged.txt", "staged\n");
+        git(r.path(), &["add", "staged.txt"]);
+        write(r.path(), "loose/new.txt", "new\n");
+        r
+    };
+    let (gr, tr) = (make(), make());
+    let state = tempfile::tempdir().unwrap();
+    use reader_core::session::Command;
+    use lenz_content::branches::FileStatus;
+    let mut core = Session::new(config(&state.path().join("gui")));
+    core.dispatch(Command::OpenRoot(gr.path().to_path_buf()));
+    let gui = cx.new(|cx| ReaderView::new(core, Some(gr.path().join("clean.txt")), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&state.path().join("tui")), Some(tr.path().to_path_buf()));
+    tui.session.dispatch(Command::OpenRetained(tr.path().join("clean.txt")));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    // Rows and tabs by name, with their Git status and unsaved mark: comparable across the two repositories.
+    let marks = |s: &State| {
+        let rows = s.tree_rows().map(|r| (r.path.to_string(), s.row_status(r), s.row_dirty(r))).collect::<Vec<_>>();
+        let tabs = s.tabs().iter().map(|t| (t.title(), s.tab_status(t.id()), s.tab_dirty(t.id()))).collect::<Vec<_>>();
+        (rows, tabs)
+    };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle: {:?} / {:?}", gui.read_with(visual, |v, _| marks(v.session().state())), marks(tui.session.state()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.tree_rows().any(|r| s.row_status(r) == Some(FileStatus::Untracked)));
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    settle(&mut visual, &mut tui, &|s| s.current_source().is_some());
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    visual.simulate_keystrokes("x");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    let dirty = gui.read_with(&visual, |v, _| marks(v.session().state()));
+    assert_eq!(dirty, marks(tui.session.state()));
+    let m = |p: &str, s: Option<FileStatus>, d: bool| (p.to_string(), s, d);
+    assert_eq!(dirty, (
+        vec![m("loose", Some(FileStatus::Untracked), false), m("clean.txt", None, true), m("edited.txt", Some(FileStatus::Modified), false), m("staged.txt", Some(FileStatus::Modified), false)],
+        vec![("clean.txt".to_string(), None, true)],
+    ));
+    visual.simulate_keystrokes("ctrl-s");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    settle(&mut visual, &mut tui, &|s| s.tabs().iter().all(|t| !s.tab_dirty(t.id()) && s.tab_status(t.id()) == Some(FileStatus::Modified)));
+    assert_eq!(gui.read_with(&visual, |v, _| marks(v.session().state())), marks(tui.session.state()));
+    for r in [&gr, &tr] {
+        assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
+        assert_eq!(git(r.path(), &["diff", "--cached", "--name-only"]), "staged.txt\n", "Save leaves the index alone");
+    }
+}

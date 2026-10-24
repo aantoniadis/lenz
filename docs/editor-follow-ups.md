@@ -162,6 +162,18 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   `indent_size` and `tab_width` are resolved. `end_of_line`, `charset`, `insert_final_newline` and
   `trim_trailing_whitespace` are not shown or applied; the exact-ending writer already preserves existing
   endings. Indentation is not detected from file contents.
+- **Git status refresh cost (ticket65):** one `git status --porcelain=v2 -z --untracked-files=normal` runs per
+  watcher burst under the repository, per index/HEAD-log time change seen on the 5 s tick, and per repository
+  lookup; changes during a read coalesce into one rerun. A superseded read stops git between entries; at most
+  `STATUS_LIMIT` (20,000) entries are kept and git is stopped beyond it. Suspected costs: a large worktree's
+  `git status` on every save burst, and the per-row `row_dirty` tab scan while painting the explorer.
+  Staging/commits from a terminal appear only on the next tick (up to 5 s). Any burst under the repository
+  triggers a read, including the reader's own state/cache writes when the open folder contains them (a home
+  or dotfiles repository). A failed read clears every badge until the next trigger, and a panicking read would
+  leave reads stopped until the repository changes. Not measured for this ticket.
+- **Git status presentation gaps (ticket65):** folders do not aggregate their children's statuses; paths are
+  matched as `/`-separated (Windows separators unhandled); git's stderr is read only after its output ends.
+  Draft recovery has no "recovered" state yet, so only dirty and Git status are shown.
 
 ## New File and Save As (ticket 31, 2026-10-24)
 

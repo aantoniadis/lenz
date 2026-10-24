@@ -662,9 +662,21 @@ impl App {
                     },
                 ),
             );
-            // Marked for Compare Selected: a check in the row's last cell.
-            if marked && r.width > 2 {
-                frame.buffer_mut()[(r.right() - 2, r.y)].set_symbol("✓").set_style(style(p.fg, bg));
+            // At the row's end, right to left: the Compare Selected check, the Git status letter (its color is
+            // extra), and the unsaved-draft mark; each over the name if it is long.
+            let state = self.session.state();
+            let marks = [
+                marked.then_some(("✓", p.fg)),
+                state.row_status(entry).map(|s| (s.letter(), s.color(p))),
+                state.row_dirty(entry).then_some(("●", p.accent)),
+            ];
+            let mut at = r.right().saturating_sub(2);
+            for (symbol, fg) in marks.into_iter().flatten() {
+                if at <= r.x {
+                    break;
+                }
+                frame.buffer_mut()[(at, r.y)].set_symbol(symbol).set_style(style(fg, bg));
+                at -= 2;
             }
             let icon_x = r.x.saturating_add(3 + 2 * entry.depth.min(20) as u16);
             if self.nerd_icons() && icon_x < r.right() {
@@ -1649,6 +1661,7 @@ fn draw_pane(
             (UnicodeWidthStr::width(tab.title().as_str()) as u16
                 + 4
                 + if state.tab_dirty(tab.id()) { 2 } else { 0 }
+                + if state.tab_status(tab.id()).is_some() { 2 } else { 0 }
                 + if app.nerd_icons() { 2 } else { 0 })
             .min(32)
             .min(tab_width)
@@ -1665,10 +1678,16 @@ fn draw_pane(
         used += widths[first];
     }
     for (i, tab) in tabs.iter().enumerate().skip(first) {
-        let text = format!(
-            " {}{}{} ",
+        // The unsaved mark before the name, the Git status letter after it: independent of each other.
+        let status = state.tab_status(tab.id());
+        let named = format!(
+            " {}{}",
             if state.tab_dirty(tab.id()) { "● " } else { "" },
             lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons(), &tab.title()),
+        );
+        let text = format!(
+            "{named}{}{} ",
+            status.map_or(String::new(), |s| format!(" {}", s.letter())),
             if tab.retained() { "" } else { " ◇" }
         );
         let width = widths[i].min(tab_end.saturating_sub(x));
@@ -1712,6 +1731,12 @@ fn draw_pane(
                 p.header_bg
             };
             frame.buffer_mut()[(r.x + 1, r.y)].set_fg(color(icon.color_on(p, bg)));
+        }
+        if let Some(s) = status
+            && let letter = r.x + UnicodeWidthStr::width(named.as_str()) as u16 + 1
+            && letter < r.right()
+        {
+            frame.buffer_mut()[(letter, r.y)].set_fg(color(s.color(p)));
         }
         x += width;
     }

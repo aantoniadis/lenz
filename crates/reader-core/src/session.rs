@@ -1016,6 +1016,9 @@ pub enum Completion {
     Head { root: PathBuf, head: Option<lenz_content::branches::Head> },
     /// The repository holding `anchor` (or why there is none).
     Repo { anchor: PathBuf, result: Result<crate::branches::Repo, String> },
+    /// The file statuses of the repository at `root` for read `request`; `anchor` is where the folder looked up
+    /// from is inside it.
+    GitStatus { request: u64, root: PathBuf, anchor: (PathBuf, PathBuf), result: Result<lenz_content::branches::Statuses, String> },
     /// The Git Branches popup's lists for the repository at `root`.
     Branches { request: u64, root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
     /// The details of the commit popup's commit, for request `request`.
@@ -1096,6 +1099,7 @@ impl Input {
                 Completion::Blamed { .. } => "blamed",
                 Completion::CommitLoaded { .. } => "commit loaded",
                 Completion::Repo { .. } => "repository",
+                Completion::GitStatus { .. } => "file status",
                 Completion::CheckedOut { .. } => "checked out",
                 Completion::Head { .. } => "head",
                 Completion::Branches { .. } => "branches",
@@ -1178,6 +1182,8 @@ pub struct State {
     pub(crate) repo: Option<crate::branches::Repo>,
     pub(crate) repo_anchor: Option<PathBuf>,
     pub(crate) repo_answered: Option<PathBuf>,
+    /// The repository's file statuses against HEAD, as last read (separate from drafts).
+    pub(crate) git_status: Option<crate::branches::Statuses>,
     /// The Git Branches popup's lists, while it is open.
     pub(crate) branches: Option<crate::branches::BranchesView>,
     /// Explorer entries marked for Compare Selected (Ctrl+click), oldest first; at most two.
@@ -1590,6 +1596,20 @@ impl State {
 }
 
 impl State {
+    /// Tab `id`'s file status against HEAD; none for a saved version or a retrieved source.
+    pub fn tab_status(&self, id: TabId) -> Option<lenz_content::branches::FileStatus> {
+        let tab = self.tabs.iter().find(|tab| tab.id == id).filter(|t| !t.is_saved_version() && t.retrieved.is_none())?;
+        self.git_status.as_ref()?.of(tab.canonical.as_deref().unwrap_or(&tab.source))
+    }
+    /// An explorer row's file status against HEAD (an untracked folder's too).
+    pub fn row_status(&self, row: &project::TreeRow) -> Option<lenz_content::branches::FileStatus> {
+        self.git_status.as_ref()?.of(&self.project.as_ref()?.root().join(&*row.path))
+    }
+    /// Whether an explorer row's file has unsaved changes in a tab.
+    pub fn row_dirty(&self, row: &project::TreeRow) -> bool {
+        let Some(path) = self.project.as_ref().filter(|_| row.dir.is_none()).map(|p| p.root().join(&*row.path)) else { return false };
+        self.tabs.iter().any(|t| (t.source == path || t.canonical.as_deref() == Some(&path)) && !t.is_saved_version() && self.tab_dirty(t.id))
+    }
     /// Unsaved content is independent of repository status and remains visible for inactive tabs.
     pub fn tab_dirty(&self, id: TabId) -> bool {
         self.tabs.iter().find(|tab| tab.id == id).and_then(|tab| self.sources.buffers.get(&tab.buffer?))
@@ -2171,6 +2191,13 @@ pub struct Session {
     /// What the running checkout does, to run again from its dialog when git refuses.
     pending_checkout: Option<crate::branches::Retry>,
     branches_requests: u64,
+    /// The last file-status read asked for; a running read stops when it is no longer this one.
+    git_status_requests: Arc<AtomicU64>,
+    git_status_running: bool,
+    /// Something changed while a read ran: read again when it ends.
+    git_status_again: bool,
+    /// What changes when the index or HEAD may have (staging, a commit, a reset): checked on the tick.
+    git_status_signal: Vec<Option<std::time::SystemTime>>,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -2255,6 +2282,7 @@ impl Session {
                 repo: None,
                 repo_anchor: None,
                 repo_answered: None,
+            git_status: None,
                 branches: None,
                 tree_marks: Vec::new(),
                 checkout_running: None,
@@ -2342,6 +2370,10 @@ impl Session {
             repo_git_seen: false,
             pending_checkout: None,
             branches_requests: 0,
+            git_status_requests: Arc::new(AtomicU64::new(0)),
+            git_status_running: false,
+            git_status_again: false,
+            git_status_signal: Vec::new(),
             tx,
             rx,
         }
@@ -2905,6 +2937,9 @@ impl Session {
         }
         self.state.repo_anchor = anchor.clone();
         self.state.repo = None;
+        self.state.git_status = None;
+        self.git_status_requests.fetch_add(1, Ordering::Relaxed);
+        (self.git_status_running, self.git_status_again) = (false, false);
         self.state.branches = None;
         self.state.checkout_problem = None;
         self.state.stash_conflicts = None;
@@ -2917,6 +2952,29 @@ impl Session {
                 Ok(crate::branches::Repo { root, git_dir, head, signal })
             });
             let _ = tx.send_blocking(Completion::Repo { anchor, result });
+        });
+    }
+
+    /// Reads the repository's file statuses again off the UI thread: one read at a time, a change meanwhile reading
+    /// again after it. Drafts, tabs and history are not touched.
+    fn refresh_git_status(&mut self) {
+        let Some(r) = self.state.repo.as_ref() else { return };
+        if self.git_status_running {
+            self.git_status_again = true;
+            return;
+        }
+        self.git_status_running = true;
+        self.git_status_signal = git_status_signal(&r.git_dir);
+        let request = self.git_status_requests.fetch_add(1, Ordering::Relaxed) + 1;
+        let (root, anchor, current, tx) = (r.root.clone(), self.state.repo_anchor.clone(), self.git_status_requests.clone(), self.tx.clone());
+        self.jobs.submit(Priority::Background, move || {
+            // Where the anchor is in the repository, however its path is spelled (git names the real folder).
+            let anchor = anchor.and_then(|a| {
+                let inside = a.canonicalize().ok()?.strip_prefix(&root).ok()?.to_path_buf();
+                Some((a, inside))
+            }).unwrap_or_else(|| (root.clone(), PathBuf::new()));
+            let result = lenz_content::branches::status(&root, crate::branches::STATUS_LIMIT, &|| current.load(Ordering::Relaxed) != request);
+            let _ = tx.send_blocking(Completion::GitStatus { request, root, anchor, result });
         });
     }
 
@@ -4316,6 +4374,12 @@ impl Session {
                 let _ = tx.send_blocking(Completion::Head { root, head });
             });
         }
+        // Staged, committed or reset elsewhere: the index or HEAD's log changed. Only file times are checked here.
+        if let Some(r) = self.state.repo.as_ref()
+            && git_status_signal(&r.git_dir) != self.git_status_signal
+        {
+            self.refresh_git_status();
+        }
         // Symbols wait for every server asked, but not for one that never answers.
         let now = self.state.semantics.now();
         if let Some(a) = self.state.asking.as_ref().filter(|a| a.ask == Ask::Symbols && now.duration_since(a.since) >= SYMBOLS_WAIT) {
@@ -5274,6 +5338,7 @@ impl Session {
                         if let Some(head) = head {
                             r.head = head;
                         }
+                        self.refresh_git_status();
                         Effect { repaint: true, copy: None, ..Effect::default() }
                     }
                     None => Effect::default(),
@@ -5287,6 +5352,18 @@ impl Session {
                 self.repo_git_seen = result.is_err() && anchor.ancestors().any(|d| d.join(".git").exists());
                 self.state.repo_answered = Some(anchor);
                 self.state.repo = result.ok();
+                self.refresh_git_status();
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
+            Completion::GitStatus { request, root, anchor, result } => {
+                if request != self.git_status_requests.load(Ordering::Relaxed) || self.state.repo.as_ref().is_none_or(|r| r.root != root) {
+                    return Effect::default();
+                }
+                self.git_status_running = false;
+                self.state.git_status = result.ok().map(|read| crate::branches::Statuses::new(root, anchor, read));
+                if std::mem::take(&mut self.git_status_again) {
+                    self.refresh_git_status();
+                }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
@@ -6647,6 +6724,9 @@ impl Session {
         let affected: Vec<TabId> = self.state.tabs.iter().filter(|t| change.touches(&t.source) && !moved.contains(&t.id)).map(|t| t.id).collect();
         for id in affected {
             self.refresh(id);
+        }
+        if self.state.repo.as_ref().is_some_and(|r| change.overflow || change.paths.iter().any(|p| p.starts_with(&r.root) || self.state.repo_anchor.as_ref().is_some_and(|a| p.starts_with(a)))) {
+            self.refresh_git_status();
         }
         let structural = change.overflow
             || change.structure
@@ -8564,3 +8644,9 @@ fn root_kind(found: &highlight::Declarations, at: usize) -> Option<highlight::De
 
 #[cfg(test)]
 mod tests;
+
+/// The times of the files that change when the index or HEAD may have.
+fn git_status_signal(git_dir: &Path) -> Vec<Option<std::time::SystemTime>> {
+    ["index", "logs/HEAD"].iter().map(|f| std::fs::metadata(git_dir.join(f)).and_then(|m| m.modified()).ok())
+        .chain([lenz_content::branches::head_signal(git_dir)]).collect()
+}
