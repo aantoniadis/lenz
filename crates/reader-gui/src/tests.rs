@@ -152,6 +152,45 @@ fn draft_workspace_changes_use_real_folder_branch_and_new_branch_controls(cx: &m
 }
 
 #[gpui::test]
+fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &mut TestAppContext) {
+    let original = "α saved\r\nsecond\n";
+    let f = fixture(cx, Some(("comparison.txt", original.as_bytes())));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let ordinary = f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id());
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("α draft\r\nsecond\n".into())));
+    v.simulate_keystrokes("ctrl-a ctrl-v shift-f2 ctrl-shift-d");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()), "modal consumes comparison shortcut");
+    v.simulate_keystrokes("escape ctrl-shift-d");
+    settle(cx, &f, |v| v.session().state().saved_comparison().is_some_and(|c| !c.pending()));
+    v.simulate_keystrokes("ctrl-g 1 enter"); draw(&mut v);
+    let (saved, current) = f.view.read_with(&v, |v, _| { let c = v.session().state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) });
+    assert!(f.view.read_with(&v, |v, _| v.tab_hits.iter().any(|(_, _, id)| *id == saved)));
+    assert!(f.view.read_with(&v, |v, _| v.visible_rows().iter().any(|r| r.bg.iter().any(|(_, color)| *color == v.session().state().palette().block[2]))));
+    for theme in ["github-light", "darcula"] {
+        f.view.update(&mut v, |view, cx| view.dispatch(Command::Theme(ThemeCommand::Select(lenz_content::theme::ThemeSelection::from_id(theme).unwrap())), cx)); draw(&mut v);
+        assert!(f.view.read_with(&v, |view, _| view.visible_rows().iter().any(|r| r.bg.iter().any(|(_, c)| *c == view.session().state().palette().block[2]))));
+    }
+    v.simulate_keystrokes("ctrl-z ctrl-shift-z");
+    let saved_point = f.view.read_with(&v, |view, _| { let (from, to, _) = view.tab_hits.iter().find(|(_, _, id)| *id == saved).unwrap(); let pane = view.panes.iter().find(|pane| pane.pane == 0).unwrap(); point(px((from + to) / 2.0), px(pane.bar.2 + line_h() / 2.0)) });
+    v.simulate_click(saved_point, Modifiers::default());
+    assert!(f.view.read_with(&v, |view, _| view.session().state().saved_comparison().is_some() && view.session().state().active().unwrap().id() == saved));
+    v.simulate_keystrokes("ctrl-a ctrl-v ctrl-z ctrl-s"); draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state().view(saved).unwrap().snapshot(); s.copy_range(0..s.len_bytes()).unwrap() }), original);
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(1), cx));
+    v.simulate_keystrokes("ctrl-s");
+    settle(cx, &f, |v| !v.session().state().view(current).unwrap().dirty() && !v.session().state().saved_comparison().unwrap().pending());
+    assert_eq!(std::fs::read(f.dir.path().join("comparison.txt")).unwrap(), "α draft\r\nsecond\n".as_bytes());
+    v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+    v.simulate_keystrokes("ctrl-f4"); draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()));
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id()), ordinary);
+    v.simulate_keystrokes("ctrl-z");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().tab_dirty(ordinary)));
+}
+
+#[gpui::test]
 fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path,Fault};
     use reader_core::save::{DiskMatch,Status};
