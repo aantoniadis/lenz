@@ -67,6 +67,10 @@ impl Analysis {
             }
         }
     }
+    pub(super) fn visible_write_dependency_waiting(&self, project: u64) -> bool {
+        self.writes.values().any(|entry| entry.pending.is_some() && entry.project.is_none_or(|expected| expected == project)
+            && entry.source.as_ref().is_some_and(|source| source.scope.project == project))
+    }
     pub(super) fn reap_writes(&mut self) {
         for entry in self.writes.values_mut() {
             if entry.submitted && entry.done.load(Ordering::Acquire) { entry.submitted = false; self.running -= 1; }
