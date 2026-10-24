@@ -170,7 +170,7 @@ fn a_changed_file_keeps_save_closed_until_the_current_file_is_rechecked() {
 }
 
 #[test]
-fn restoring_is_refused_while_the_file_has_unsaved_changes() {
+fn a_file_with_an_undecided_draft_gains_no_live_draft_that_restoring_would_conflict_with() {
     let d = tempfile::tempdir().unwrap();
     let path = write(d.path(), "a.txt", b"saved\n");
     {
@@ -182,12 +182,13 @@ fn restoring_is_refused_while_the_file_has_unsaved_changes() {
     let mut s = session(d.path());
     open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
     edit(&mut s, "live draft\n");
+    assert_eq!(text(&s), "saved\n", "the edit would have replaced the recovered draft");
+    assert!(s.state().notices().is_empty() || !s.state().notices().iter().any(|m| m == RESTORE_DIRTY));
     let prompt = s.recovery_prompt().unwrap();
-    assert_eq!(prompt.disabled(Choice::Restore), Some(RESTORE_DIRTY));
+    assert_eq!(prompt.disabled(Choice::Restore), None);
     s.dispatch(Command::ChooseRecoveredDraft { ticket: prompt.ticket, choice: Choice::Restore });
-    assert_eq!(text(&s), "live draft\n", "the live draft is untouched");
-    assert_eq!(s.recovered_drafts().len(), 1, "the offer stays for a later decision");
-    assert!(s.state().notices().iter().any(|m| m == RESTORE_DIRTY));
+    assert_eq!(text(&s), "crashed draft\n");
+    assert!(s.recovered_drafts().is_empty());
 }
 
 #[test]
@@ -280,4 +281,190 @@ fn a_dirty_draft_follows_its_moved_file_and_the_old_path_is_not_offered() {
     assert_eq!((offers[0].record().title(), offers[0].disk()), ("after.txt", Disk::Matches));
     restarted.dispatch(Command::ChooseRecoveredDraft { ticket: offers[0].id(), choice: Choice::Restore });
     assert_eq!(text(&restarted), "moved draft\n");
+}
+
+/// Each tab's file, pane, place and recovered mark: what a restart must bring back.
+fn arrangement(s: &Session) -> Vec<(PathBuf, u8, Option<Selection>, usize, bool)> {
+    s.state.tabs.iter().map(|t| (t.source.clone(), t.pane, t.selection(), t.top_line, t.recovered())).collect()
+}
+
+/// Opens the project's last tabs: the recovery dialog waits until they are back.
+fn reopen(s: &mut Session, root: &Path) {
+    s.dispatch(Command::OpenRoot(root.to_owned()));
+    assert!(s.recovery_prompt().is_none(), "the dialog waits for the project's last tabs");
+    if !s.recovered_drafts().is_empty() { assert_eq!(s.disabled(CommandId::RecoverDrafts), Some(super::super::recovery_work::RESTORING)); }
+    settle(s, |s| !s.restore_workspace && scanned(s) && s.state.shown(0).is_some_and(|t| t.loaded) && s.state.loading().is_none());
+}
+
+#[test]
+fn an_interrupted_project_reopens_its_tabs_split_and_places_around_the_recovered_draft() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.txt", "src/b.txt"]);
+    std::fs::write(root.join("a.txt"), "alpha\n".repeat(80)).unwrap();
+    let saved = "beta λ\n".repeat(80);
+    std::fs::write(root.join("src/b.txt"), &saved).unwrap();
+    let mut one = session(d.path());
+    open_project(&mut one, &root, "a.txt");
+    one.dispatch(Command::Pin(one.state.active.unwrap()));
+    one.dispatch(Command::Scroll(30));
+    one.dispatch(Command::OpenRetained(root.join("src/b.txt")));
+    settle(&mut one, opened);
+    one.dispatch(Command::Split(Split::Columns));
+    settle(&mut one, |s| s.state.shown(1).is_some_and(|t| t.loaded));
+    // The draft is edited in one pane; both panes show the same buffer.
+    let tab = one.state.active().unwrap().id();
+    let expected = one.state.current_source().unwrap().key();
+    one.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "draft ✓\n".into() }], kind: crate::text::EditKind::Replace });
+    one.dispatch(Command::Select(Selection { anchor: 40, head: 45 }));
+    one.dispatch(Command::Scroll(20));
+    one.dispatch(Command::FocusPane(0));
+    let before = arrangement(&one);
+    let draft = text(&one);
+    assert_eq!(one.state.tabs.iter().filter(|t| t.source.ends_with("src/b.txt")).count(), 2, "split shows the file in both panes");
+    one.interrupt_for_test();
+    assert_eq!(std::fs::read_to_string(root.join("src/b.txt")).unwrap(), saved, "recovery never writes the file");
+
+    let mut two = session(d.path());
+    assert_eq!(two.recovered_drafts().len(), 1);
+    reopen(&mut two, &root);
+    assert_eq!(two.state.split(), Some(Split::Columns));
+    assert_eq!(arrangement(&two), before, "tabs, panes and places are those of the interrupted session");
+    let b: Vec<TabId> = two.state.tabs.iter().filter(|t| t.source.ends_with("src/b.txt")).map(|t| t.id).collect();
+    assert!(b.iter().all(|id| two.state.view(*id).is_none_or(|v| v.edit_disabled() == Some(super::super::recovery_work::UNDECIDED))),
+        "the disk version is not edited while its recovered draft is undecided");
+    let prompt = two.recovery_prompt().expect("offered once the tabs are back");
+    assert_eq!(prompt.disk, Disk::Matches);
+    two.dispatch(Command::ChooseRecoveredDraft { ticket: prompt.ticket, choice: Choice::Restore });
+    settle(&mut two, |s| s.state.shown(0).is_some_and(|t| t.loaded) && s.state.shown(1).is_some_and(|t| t.loaded));
+    let restored = arrangement(&two);
+    assert_eq!(restored.iter().map(|(path, pane, selection, top, _)| (path.clone(), *pane, *selection, *top)).collect::<Vec<_>>(),
+        before.iter().map(|(path, pane, selection, top, _)| (path.clone(), *pane, *selection, *top)).collect::<Vec<_>>(), "restoring keeps every tab where it was");
+    assert!(restored.iter().all(|(path, _, _, _, recovered)| *recovered == path.ends_with("src/b.txt")), "{restored:?}");
+    let buffers: std::collections::HashSet<_> = b.iter().map(|id| two.state.tabs.iter().find(|t| t.id == *id).unwrap().buffer).collect();
+    assert_eq!(buffers.len(), 1, "both panes share the restored draft's buffer");
+    for id in &b {
+        let view = two.state.view(*id).unwrap();
+        assert_eq!(source_text(view.snapshot()), draft);
+        assert!(view.dirty() && view.edit_disabled().is_none());
+    }
+    assert_eq!(std::fs::read_to_string(root.join("src/b.txt")).unwrap(), saved);
+}
+
+#[test]
+fn a_clean_shutdown_reopens_the_tabs_and_offers_no_saved_or_discarded_work() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.txt", "b.txt"]);
+    let mut one = session(d.path());
+    open_project(&mut one, &root, "a.txt");
+    one.dispatch(Command::Pin(one.state.active.unwrap()));
+    edit(&mut one, "saved draft\n");
+    let tab = one.state.active().unwrap().id();
+    one.dispatch(Command::Save { tab });
+    settle(&mut one, |s| !s.state().tab_dirty(tab));
+    one.dispatch(Command::OpenRetained(root.join("b.txt")));
+    settle(&mut one, opened);
+    edit(&mut one, "discarded draft\n");
+    one.flush_recovery_for_test();
+    let b = one.state.active().unwrap().id();
+    one.dispatch(Command::CloseTab(b));
+    let prompt = one.close_prompt().unwrap();
+    one.dispatch(Command::ChooseClose { ticket: prompt.ticket, buffer: prompt.buffer, choice: CloseChoice::Discard });
+    settle(&mut one, |s| s.state.tabs.len() == 1);
+    let before = arrangement(&one);
+    one.flush_recovery_for_test();
+    drop(one);
+    let mut two = session(d.path());
+    assert!(two.recovered_drafts().is_empty(), "saved and discarded work is not recovered");
+    reopen(&mut two, &root);
+    assert_eq!(arrangement(&two), before);
+    assert!(two.recovery_prompt().is_none());
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "saved draft\n");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "b.txt");
+}
+
+#[test]
+fn a_postponed_recovered_draft_survives_attempted_edits_reload_and_another_restart() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.txt"]);
+    let mut one = session(d.path());
+    open_project(&mut one, &root, "a.txt");
+    edit(&mut one, "recovered λ\n");
+    one.interrupt_for_test();
+
+    let mut two = session(d.path());
+    reopen(&mut two, &root);
+    let ticket = two.recovery_prompt().unwrap().ticket;
+    two.dispatch(Command::ChooseRecoveredDraft { ticket, choice: Choice::Later });
+    assert!(two.recovery_prompt().is_none(), "Later cancels the dialog");
+    assert_eq!(text(&two), "a.txt", "the tab shows the file until the draft is restored");
+    assert_eq!(active_view(&two).edit_disabled(), Some(super::super::recovery_work::UNDECIDED));
+    assert_eq!(two.disabled(CommandId::Paste), Some(super::super::recovery_work::UNDECIDED));
+    edit(&mut two, "replacement\n");
+    two.dispatch(Command::InsertText { text: "typed".into(), kind: crate::text::EditKind::Typing });
+    two.dispatch(Command::Paste("pasted".into()));
+    assert_eq!(text(&two), "a.txt", "no edit replaces the undecided draft");
+    two.dispatch(Command::Reload);
+    settle(&mut two, opened);
+    two.flush_recovery_for_test();
+    drop(two);
+
+    let mut three = session(d.path());
+    let offers = three.recovered_drafts();
+    assert_eq!(offers.len(), 1, "a postponed draft is offered again");
+    assert_eq!(offers[0].record().draft(), "recovered λ\n");
+    reopen(&mut three, &root);
+    let ticket = three.recovery_prompt().unwrap().ticket;
+    three.dispatch(Command::ChooseRecoveredDraft { ticket, choice: Choice::Discard });
+    assert_eq!(active_view(&three).edit_disabled(), None, "a decided file is editable again");
+    edit(&mut three, "new work\n");
+    assert_eq!(text(&three), "new work\n");
+    assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "a.txt");
+}
+
+#[test]
+fn a_running_session_keeps_its_drafts_to_itself() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "a.txt", b"saved\n");
+    let mut one = session(d.path());
+    open(&mut one, Command::OpenRetained(path.clone()), "a.txt");
+    edit(&mut one, "live draft\n");
+    one.flush_recovery_for_test();
+    let two = session(d.path());
+    assert!(two.recovered_drafts().is_empty(), "another window's live draft is not recovered work");
+    drop(two);
+    one.interrupt_for_test();
+    let three = session(d.path());
+    assert_eq!(three.recovered_drafts().len(), 1, "an interrupted session's draft is offered");
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n");
+}
+
+#[test]
+fn reopening_names_tabs_whose_files_are_gone_and_keeps_a_new_file_opened_first() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    tree(&root, &["a.txt", "gone.txt"]);
+    let mut one = session(d.path());
+    open_project(&mut one, &root, "gone.txt");
+    one.dispatch(Command::Pin(one.state.active.unwrap()));
+    one.dispatch(Command::OpenRetained(root.join("a.txt")));
+    settle(&mut one, opened);
+    drop(one);
+    std::fs::remove_file(root.join("gone.txt")).unwrap();
+    let mut two = session(d.path());
+    reopen(&mut two, &root);
+    assert_eq!(two.state.tabs.len(), 1);
+    assert!(two.state.notices().iter().any(|m| m.contains("Not reopened from the last session") && m.contains("gone.txt")), "{:?}", two.state.notices());
+    drop(two);
+
+    // A New File made before the last tabs arrive is the latest choice: it is not replaced by them.
+    let mut three = session(d.path());
+    three.dispatch(Command::OpenRoot(root.clone()));
+    let completion = loop { let c = three.completions().recv_blocking_timeout().unwrap(); if matches!(c, Completion::PlacesRead { .. }) { break c; } three.dispatch(c); };
+    three.dispatch(Command::NewDocument);
+    three.dispatch(completion);
+    assert_eq!(three.state.tabs.len(), 1);
+    assert!(three.state.active().unwrap().untitled());
 }

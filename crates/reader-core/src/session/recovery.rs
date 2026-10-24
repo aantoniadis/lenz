@@ -5,6 +5,10 @@ use crate::recovery::{Choice, Key, Offer, Prompt, Record, Version};
 
 /// Why a recovered draft cannot be restored now.
 pub(crate) const RESTORE_DIRTY: &str = "The file already has unsaved changes; save or discard them before restoring";
+/// Why a file is not edited while its recovered draft waits for a decision: editing would replace that draft.
+pub(crate) const UNDECIDED: &str = "A recovered draft of this file is undecided: choose Restore Draft or Discard Draft (Recover Unsaved Draft…) before editing";
+/// Why recovered drafts wait: they restore into the project's last tabs once those are back.
+pub(crate) const RESTORING: &str = "The project's last tabs are still being restored";
 /// Why Save stays closed for a draft whose baseline no longer matches the file.
 pub(crate) const DISK_CHANGED: &str = "Recovered draft: the file on disk differs from its confirmed baseline. Recheck the current file before saving";
 
@@ -17,8 +21,16 @@ impl Session {
     #[doc(hidden)]
     pub fn flush_recovery_for_test(&self) { self.recovery.flush(); }
 
-    /// The recovery dialog's offer: the newest undecided one, unless the user chose Later.
+    /// Writes what is pending and gives up this session's claim on its records, as an interruption would, while the
+    /// window stays open: a restart replayed beside it offers this session's drafts.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn interrupt_recovery_for_test(&mut self) { self.recovery.end_ownership(); }
+
+    /// The recovery dialog's offer: the newest undecided one, unless the user chose Later. It waits while the
+    /// project's last tabs are restored, so a restored draft joins them instead of being replaced by them.
     pub fn recovery_prompt(&self) -> Option<Prompt> {
+        if self.restore_workspace { return None; }
         let offer = self.recovery.prompt_offer()?;
         Some(offer.prompt(self.recovery.offers().len(), self.recovery_restore_disabled(offer)))
     }
@@ -33,6 +45,7 @@ impl Session {
 
     pub(super) fn choose_recovered_draft(&mut self, ticket: u64, choice: Choice) -> Effect {
         let repaint = Effect { repaint: true, copy: None, ..Effect::default() };
+        if self.restore_workspace { return Effect::default(); }
         let Some(offer) = self.recovery.offer(ticket) else { return Effect::default() };
         let label = offer.record().title().to_owned();
         match choice {
@@ -40,11 +53,13 @@ impl Session {
             Choice::Discard => {
                 let Some(offer) = self.recovery.take(ticket) else { return repaint };
                 self.recovery.discard(offer.record().key().clone());
+                self.state.undecided_recovery = self.recovery.undecided_paths();
                 self.state.messages.push(format!("Discarded the recovered draft for {label}. It will not be offered again."));
             }
             Choice::Restore => {
                 if let Some(why) = self.recovery_restore_disabled(offer) { self.state.messages.push(why.into()); return repaint; }
                 let Some(offer) = self.recovery.take(ticket) else { return repaint };
+                self.state.undecided_recovery = self.recovery.undecided_paths();
                 return self.restore_recovered(offer);
             }
         }
@@ -111,7 +126,10 @@ impl Session {
             _ => Arc::new(record_document(path.clone(), version, record.baseline(), record.encoding(), record.bom())),
         };
         let draft = Arc::new(Document::from_snapshot_parts(baseline.source_meta().clone(), version, record.draft().into()));
-        let existing = self.state.tabs.iter().find(|t| t.is_file() && (t.source == path || t.canonical.as_deref() == Some(path.as_path()))).map(|t| t.id);
+        // Tabs the project restored for this file keep their pane and place; the shown one (else the first) takes
+        // the draft, and the others share its buffer.
+        let same: Vec<TabId> = self.state.tabs.iter().filter(|t| t.is_file() && (t.source == path || t.canonical.as_deref() == Some(path.as_path()))).map(|t| t.id).collect();
+        let existing = same.iter().copied().find(|id| self.is_shown(*id)).or_else(|| same.first().copied());
         let buffer = existing.and_then(|id| self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer))
             .or_else(|| self.state.sources.aliases.get(&path).copied())
             .unwrap_or_else(|| { self.state.sources.next += 1; crate::text::BufferId(self.state.sources.next) });
@@ -143,8 +161,13 @@ impl Session {
             Some(id) => id,
             None => self.insert_document_tab(path.clone(), path.clone(), Some(language), canonical),
         };
-        let token = self.next_refresh();
-        if let Some(t) = self.tab_mut(tab) {
+        let (len, last) = (draft_snapshot.len_bytes(), draft_snapshot.line_count() - 1);
+        let clamp = |at: usize| draft_snapshot.floor_char_boundary(at.min(len));
+        for id in std::iter::once(tab).chain(same.iter().copied().filter(|id| *id != tab)) {
+            let token = self.next_refresh();
+            let Some(t) = self.tab_mut(id) else { continue };
+            t.recovered = true;
+            if id != tab && !t.loaded { continue; }
             t.loaded = true;
             t.buffer = Some(buffer);
             t.language = Some(language);
@@ -153,15 +176,19 @@ impl Session {
             t.stale_on_disk = false;
             t.unavailable = None;
             t.new_content();
-            t.place_selection(Some(Selection { anchor: 0, head: 0 }));
-            t.top_line = 0;
-            t.recovered = true;
+            // The place it had, within the draft: a restart resumes where the work was.
+            let selection = t.selection().map(|s| Selection { anchor: clamp(s.anchor), head: clamp(s.head) });
+            t.place_selection(selection);
+            let top = t.top_line.min(last);
+            t.set_top(top, t.top_row());
         }
         let from = self.here();
         self.activate(tab);
         if let Some(to) = self.here() { self.visit(from, to); }
         self.analysis.invalidate(&draft_snapshot, self.project_generation.load(Ordering::Relaxed));
-        if self.is_shown(tab) { self.mark_shown(tab, draft_snapshot.key().version); self.decorate(tab); }
+        for id in std::iter::once(tab).chain(same.iter().copied().filter(|id| *id != tab)) {
+            if self.is_shown(id) { self.mark_shown(id, draft_snapshot.key().version); self.decorate(id); }
+        }
         self.synced = 0;
         self.release_current();
         let state = match (matches, disk.is_some()) {

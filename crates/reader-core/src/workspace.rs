@@ -32,6 +32,9 @@ pub(crate) struct Workspace {
     pub soft_wrap: bool,
     pub expanded: Vec<String>,
     pub explorer: Explorer,
+    /// Tabs dropped on reading because their files are gone; never saved.
+    #[serde(skip)]
+    pub missing: Vec<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -64,6 +67,7 @@ impl Workspace {
                 root.join(&t.path)
             };
             if !path.is_file() {
+                self.missing.push(path);
                 return false;
             }
             if self.active == Some(old) {

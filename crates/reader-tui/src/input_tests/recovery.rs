@@ -125,3 +125,116 @@ fn discard_and_its_click_route_keep_discarded_work_from_returning() {
     draw(&mut next, 80, 24);
     assert!(!recovered(&next) && next.session.recovered_drafts().is_empty(), "a discarded draft stays discarded");
 }
+
+/// Each tab's file, pane, selection and top line.
+fn arrangement(a: &App) -> Vec<(std::path::PathBuf, u8, Option<reader_core::session::Selection>, usize)> {
+    a.session.state().tabs().iter().map(|t| (t.source().to_owned(), t.pane(), t.selection(), t.top_line())).collect()
+}
+
+fn pane_text(a: &App, pane: u8) -> String {
+    let state = a.session.state();
+    let view = state.view(state.shown(pane).unwrap().id()).unwrap();
+    view.snapshot().copy_range(0..view.snapshot().len_bytes()).unwrap()
+}
+
+#[test]
+fn an_interrupted_project_reopens_around_its_recovered_draft_through_real_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "alpha\n".repeat(60)).unwrap();
+    let saved = "beta λ\n".repeat(60);
+    std::fs::write(root.join("b.txt"), &saved).unwrap();
+    let mut one = App::with_text_input(config(dir.path()), Some(root.clone()), false);
+    settle(&mut one, |a| a.session.state().project().is_some());
+    for file in ["a.txt", "b.txt"] {
+        one.dispatch(Command::OpenRetained(root.join(file)));
+        settle(&mut one, |a| a.session.state().current_source().is_some_and(|s| s.source().ends_with(file)) && a.session.state().loading().is_none());
+    }
+    one.dispatch(Command::Split(reader_core::session::Split::Columns));
+    settle(&mut one, |a| a.session.state().shown(1).is_some_and(|t| t.loaded()));
+    one.enable_draft_input_for_test();
+    draw(&mut one, 100, 30);
+    one.handle(Event::Paste("draft ✓\n".into()));
+    let draft = active_text(&one);
+    assert!(draft.starts_with("draft ✓\n"));
+    one.dispatch(Command::FocusPane(0));
+    one.session.flush_recovery_for_test();
+    // Another terminal while this one runs: the live draft is not recovered work there.
+    let mut other = App::with_text_input(config(dir.path()), None, false);
+    draw(&mut other, 80, 24);
+    assert!(!recovered(&other) && other.session.recovered_drafts().is_empty());
+    let before = arrangement(&one);
+    one.session.interrupt_recovery_for_test();
+    let _ = one.session.workspace_saved().recv_timeout(Duration::from_secs(5));
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved);
+
+    let mut a = App::with_text_input(config(dir.path()), Some(root.clone()), false);
+    draw(&mut a, 100, 30);
+    assert!(!recovered(&a), "the dialog waits for the project's last tabs");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !recovered(&a) {
+        assert!(Instant::now() < deadline, "the dialog did not open");
+        settle(&mut a, |a| a.session.recovery_prompt().is_some());
+        draw(&mut a, 100, 30);
+    }
+    settle(&mut a, |a| (0..2).all(|pane| a.session.state().shown(pane).is_some_and(|t| t.loaded())) && a.session.state().loading().is_none());
+    assert_eq!(arrangement(&a), before, "tabs, panes and places come back first");
+    assert_eq!(a.session.state().split(), Some(reader_core::session::Split::Columns));
+    a.enable_draft_input_for_test();
+    // Tiny and narrow terminals keep the dialog in charge; nothing behind it is edited.
+    for (w, h) in [(1, 1), (24, 6), (100, 30)] {
+        draw(&mut a, w, h);
+        key(&mut a, KeyCode::End, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Up, KeyModifiers::NONE);
+        key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    }
+    assert!(recovered(&a));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    draw(&mut a, 100, 30);
+    assert!(!recovered(&a), "Later dismisses the dialog");
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    a.handle(Event::Paste("pasted".into()));
+    draw(&mut a, 100, 30);
+    assert_eq!(pane_text(&a, 0), saved, "an undecided draft's file is not edited");
+    assert!(a.session.disabled(CommandId::Paste).is_some_and(|why| why.starts_with("A recovered draft of this file is undecided")));
+    a.run(CommandId::RecoverDrafts);
+    draw(&mut a, 100, 30);
+    assert!(recovered(&a), "the File command offers it again");
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.state().shown(0).is_some_and(|t| t.loaded()) && a.session.state().shown(1).is_some_and(|t| t.loaded()));
+    draw(&mut a, 100, 30);
+    assert!(!recovered(&a));
+    assert_eq!(arrangement(&a), before, "restoring keeps every tab where it was");
+    for pane in [0, 1] {
+        assert!(a.session.state().shown(pane).unwrap().recovered(), "pane {pane}");
+        assert_eq!(pane_text(&a, pane), draft, "pane {pane} shows the restored draft");
+    }
+    let screen = rendered(&mut a, 100, 30);
+    assert!(screen.contains("⟲ ● b.txt"), "the tab says recovered: {screen}");
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert!(pane_text(&a, 0).contains('x'), "a restored draft is edited normally");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved, "Restore does not write");
+    drop(one);
+}
+
+#[test]
+fn an_empty_restart_offers_a_new_file_draft_and_restores_it_into_an_empty_layout() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let mut one = App::with_text_input(config(dir.path()), None, false);
+        one.dispatch(Command::NewDocument);
+        one.enable_draft_input_for_test();
+        one.handle(Event::Paste("new λ\n".into()));
+        one.session.flush_recovery_for_test();
+    }
+    let mut a = App::with_text_input(config(dir.path()), None, false);
+    for (w, h) in [(1, 1), (20, 5)] { draw(&mut a, w, h); }
+    draw(&mut a, 80, 24);
+    assert!(recovered(&a) && a.session.state().tabs().is_empty(), "offered with nothing open");
+    key(&mut a, KeyCode::Char('r'), KeyModifiers::NONE);
+    draw(&mut a, 80, 24);
+    assert!(!recovered(&a));
+    assert!(a.session.state().active().is_some_and(|t| t.untitled() && t.recovered()));
+    assert_eq!(active_text(&a), "new λ\n");
+}

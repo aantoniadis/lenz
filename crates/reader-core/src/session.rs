@@ -1379,6 +1379,8 @@ pub struct State {
     pub(crate) checkout_running: Option<u64>,
     pub(crate) checkout_problem: Option<crate::branches::CheckoutProblem>,
     pub(crate) stash_conflicts: Option<Vec<String>>,
+    /// Files whose recovered drafts wait for Restore or Discard: their disk version is not edited meanwhile.
+    pub(crate) undecided_recovery: Vec<PathBuf>,
 }
 
 /// What asked for documentation: a key or menu (about the caret), or the pointer resting on a name.
@@ -1561,6 +1563,8 @@ pub struct View<'a> {
     draft: Option<&'a crate::draft::Draft>,
     read_only: bool,
     save: &'a crate::save::State,
+    /// A recovered draft of this file is undecided.
+    undecided: bool,
 }
 impl<'a> View<'a> {
     pub fn tab(&self) -> &'a Tab { self.tab }
@@ -1575,7 +1579,9 @@ impl<'a> View<'a> {
         if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) { "\r\n" } else { "\n" }
     }
     pub fn read_only(&self) -> bool { self.read_only }
-    pub fn edit_disabled(&self) -> Option<&'static str> { self.intrinsic_edit_disabled().or(self.read_only.then_some("Read-only mode is on")) }
+    pub fn edit_disabled(&self) -> Option<&'static str> {
+        self.intrinsic_edit_disabled().or(self.undecided.then_some(recovery_work::UNDECIDED)).or(self.read_only.then_some("Read-only mode is on"))
+    }
     pub(super) fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
         if let Some(side) = self.tab.read_only_side() { side.read_only() }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
@@ -1809,7 +1815,9 @@ impl State {
         let buffer = tab.buffer?;
         let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
         if !tab.loaded { return None; }
-        Some(View { snapshot, tab, read_only: self.sources.buffers.get(&buffer)?.read_only, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
+        let undecided = !self.undecided_recovery.is_empty() && tab.is_file()
+            && self.undecided_recovery.iter().any(|path| *path == tab.source || tab.canonical.as_deref() == Some(path.as_path()));
+        Some(View { snapshot, tab, read_only: self.sources.buffers.get(&buffer)?.read_only, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save, undecided })
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
@@ -2369,6 +2377,8 @@ pub struct Session {
     keymap: Keymap,
     runtime_request: u64,
     restore_workspace: bool,
+    /// Ended as an interruption would end it (tests): no clean-exit checkpoint.
+    interrupted: bool,
     watcher: Watcher,
     /// The project's folders to watch, for its root, walk and size (built once per inventory), and the tabs' folders
     /// outside them that were last added.
@@ -2503,6 +2513,7 @@ impl Session {
         let markers_debounce = crate::markers::Debounce::new(move || { let _ = rested.send_blocking(Completion::MarkersDue); });
         // Recovered drafts live in the reader's own cache, outside every checkout.
         let recovery_dir = config.cache.join("recovery");
+        let recovery = crate::recovery::Recovery::open(recovery_dir.clone());
         Self {
             text_input_enabled,
             comparison_seq: 0,
@@ -2550,6 +2561,7 @@ impl Session {
                 checkout_running: None,
                 checkout_problem: None,
                 stash_conflicts: None,
+                undecided_recovery: recovery.undecided_paths(),
             },
             cache: InactiveCache::new(INACTIVE_BYTES),
             index_cache_dir: config.cache,
@@ -2563,7 +2575,7 @@ impl Session {
             project_query: None,
             navigation_query: None,
             save_seq: 0,
-            recovery: crate::recovery::Recovery::open(recovery_dir.clone()),
+            recovery,
             recovery_token: format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
             untitled_seq: 0, replacing: None,
             semantic_wait: Default::default(),
@@ -2600,6 +2612,7 @@ impl Session {
             keymap,
             runtime_request: 0,
             restore_workspace: false,
+            interrupted: false,
             watcher,
             watching: None,
             inventory_folders: None,
@@ -2887,7 +2900,8 @@ impl Session {
             },
             CommandId::NewDocument => None,
             CommandId::NewExplorerFile | CommandId::NewExplorerFolder => self.state.project.is_none().then_some("No folder is open"),
-            CommandId::RecoverDrafts => self.recovery.offers().is_empty().then_some("No recovered drafts are offered"),
+            CommandId::RecoverDrafts if self.recovery.offers().is_empty() => Some("No recovered drafts are offered"),
+            CommandId::RecoverDrafts => self.restore_workspace.then_some(recovery_work::RESTORING),
             CommandId::SaveAs => match self.state.active() {
                 None => Some("No file is open"),
                 Some(tab) => self.save_as_disabled(tab.id),
@@ -3475,11 +3489,16 @@ impl Session {
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let markers_due = matches!(input, Input::Completion(Completion::MarkersDue));
+        // Tabs and layout, not each caret move: what an interrupted session reopens.
+        let arranged = matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_)
+            | Command::Pin(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_)
+            | Command::SetLayout(_) | Command::SetSoftWrap(_) | Command::ChooseRecoveredDraft { .. }));
         let mut effect = match input {
             Input::Command(c) => self.command(c),
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
             Input::Completion(c) => self.complete(c),
         };
+        if arranged { self.checkpoint_workspace(); }
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
         // A popup or request whose tab, version, caret or server is no longer current is gone, not hidden.
         if self.pending_completion.as_ref().is_some_and(|p| !p.current(&self.state)) { self.cancel_completion(); }
@@ -5941,7 +5960,8 @@ impl Session {
                 }
                 match result {
                     Ok(saved) => {
-                        let workspace = self.restore_workspace.then(|| saved.workspace.clone()).flatten();
+                        // A tab opened meanwhile (a New File, say) is the user's latest choice, as an opened file is.
+                        let workspace = (self.restore_workspace && self.state.tabs.is_empty()).then(|| saved.workspace.clone()).flatten();
                         self.apply_places(file, &from, saved);
                         if let Some(workspace) = workspace { self.apply_workspace(*workspace); }
                     }
@@ -8162,9 +8182,15 @@ impl Session {
     }
 
     fn checkpoint_workspace(&mut self) {
-        if self.state.comparison.is_some() { return; }
-        if self.restore_workspace { return; } // A directory closed before its state arrived keeps the saved workspace.
-        let Some(project) = &self.state.project else { return };
+        if self.capture_workspace() { self.places_changed(); }
+    }
+
+    /// The workspace as it is now goes into the places, so the next save keeps it: an interrupted session reopens
+    /// its last tabs, not those of the last clean exit. Returns whether there is a workspace to keep.
+    fn capture_workspace(&mut self) -> bool {
+        if self.state.comparison.is_some() { return false; }
+        if self.restore_workspace { return false; } // A directory closed before its state arrived keeps the saved workspace.
+        let Some(project) = &self.state.project else { return false };
         let tabs: Vec<_> = self.state.tabs.iter().filter(|t| t.is_file()).take(crate::workspace::MAX_TABS).collect();
         let index = |id| tabs.iter().position(|t| Some(t.id) == id);
         let workspace = crate::workspace::Workspace {
@@ -8172,12 +8198,14 @@ impl Session {
             split: self.state.settings.split, layout: self.state.settings.layout, soft_wrap: self.state.settings.soft_wrap,
             expanded: project.expanded(), explorer: self.state.explorer.clone(),
             tabs: tabs.into_iter().map(|t| crate::workspace::SavedTab { path: t.source.clone(), selection: t.selection(), top_line: t.top_line, top_row: t.top_row(), column: t.column, pane: t.pane, retained: t.retained, markdown_source: t.markdown_source, image_source: t.image_source }).collect(),
+            missing: Vec::new(),
         };
-        Arc::make_mut(&mut self.state.places).workspace = Some(Box::new(workspace));
-        self.places_changed();
+        if self.state.places.workspace.as_deref() != Some(&workspace) { Arc::make_mut(&mut self.state.places).workspace = Some(Box::new(workspace)); }
+        true
     }
 
-    fn apply_workspace(&mut self, saved: crate::workspace::Workspace) {
+    fn apply_workspace(&mut self, mut saved: crate::workspace::Workspace) {
+        let missing = std::mem::take(&mut saved.missing);
         self.state.settings.split = saved.split; self.state.settings.layout = saved.layout; self.state.settings.soft_wrap = saved.soft_wrap;
         self.state.explorer = saved.explorer; self.state.workspace_revision += 1;
         if let Some(project) = &mut self.state.project { project.restore_expanded(saved.expanded); }
@@ -8197,12 +8225,20 @@ impl Session {
         if let Some(active) = active { self.activate(active); }
         self.load_other();
         self.rewatch();
+        // After activation, which clears messages.
+        if !missing.is_empty() {
+            let names: Vec<String> = missing.iter().take(3).map(|path| self.state.project.as_ref().and_then(|p| path.strip_prefix(p.root()).ok()).unwrap_or(path).display().to_string()).collect();
+            let more = missing.len() - names.len();
+            let more = if more > 0 { format!(" and {more} more") } else { String::new() };
+            self.state.messages.push(format!("Not reopened from the last session (no longer on disk): {}{more}", names.join(", ")));
+        }
     }
 
     /// An inactive tab's content goes to the inactive cache when it can be read again; positions stay.
     /// Save the places: debounced, then merged with the file and written off the UI thread from a snapshot. Without
     /// a project, or before its file is read, they last for the session.
     fn places_changed(&mut self) {
+        self.capture_workspace();
         if let Some(n) = &mut self.state.navigation
             && n.scope == crate::navigation::Scope::Recent
         {
@@ -8895,8 +8931,18 @@ impl Session {
     }
 }
 
-impl Drop for Session {
-    fn drop(&mut self) {
+impl Session {
+    /// Ends the session as an interruption after the last debounce would: what was already due reaches the disk,
+    /// and nothing a clean exit adds (the final workspace checkpoint, the shown file's last place) is written.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn interrupt_for_test(mut self) {
+        self.recovery.flush();
+        let _ = self.places_saver.flush().recv_timeout(std::time::Duration::from_secs(5));
+        self.interrupted = true;
+    }
+
+    fn save_at_exit(&mut self) {
         // Places made before the project's file was read: read it now and save them over it (here wins). When it
         // cannot be read, nothing is written.
         if let Some(root) = self.state.project.as_ref().filter(|_| self.places_file.is_none()).map(|p| p.root().to_owned()) {
@@ -8911,6 +8957,12 @@ impl Drop for Session {
         if let Some(id) = self.state.active {
             self.release(id);
         }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if !self.interrupted { self.save_at_exit(); }
         // Before the job pool joins its workers: a worker blocked sending into a full channel returns, and running
         // scans and rankings stop.
         self.current.store(0, Ordering::Relaxed);

@@ -68,6 +68,8 @@ pub struct Record {
     bom: bool,
     /// When it was written, in seconds since the epoch, for the dialog.
     recorded: u64,
+    /// The session that wrote it: while that session runs, its drafts are its own and not offered elsewhere.
+    owner: Option<String>,
 }
 
 impl Record {
@@ -89,7 +91,7 @@ impl std::fmt::Debug for Record {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Record").field("key", &self.key).field("seq", &self.seq).field("title", &self.title)
             .field("encoding", &self.encoding).field("bom", &self.bom).field("recorded", &self.recorded)
-            .field("text_bytes", &self.text_bytes()).finish()
+            .field("text_bytes", &self.text_bytes()).field("owner", &self.owner).finish()
     }
 }
 
@@ -197,11 +199,15 @@ pub(crate) struct Recovery {
     saver: Saver,
     /// The user chose Later: the dialog stays closed until they ask for it again.
     postponed: bool,
+    /// Released after the saver has written what is pending.
+    owner: Option<Owner>,
 }
 
 impl Recovery {
     pub(crate) fn open(dir: PathBuf) -> Self {
         let mut loaded = Store::new(dir.clone()).load();
+        // Claimed after reading: this session's own records are never its offers.
+        let owner = Owner::claim(&dir);
         let mut offers: Vec<Offer> = Vec::new();
         for record in std::mem::take(&mut loaded.records).into_iter().rev() {
             let disk = match record.key().path() {
@@ -210,8 +216,16 @@ impl Recovery {
             };
             offers.push(Offer { id: offers.len() as u64 + 1, record, disk });
         }
-        Self { offers, saver: Saver::new(dir, &loaded), postponed: false }
+        let saver = Saver::new(dir, &loaded, Some(owner.token.clone()));
+        Self { offers, saver, postponed: false, owner: Some(owner) }
     }
+
+    /// Whether a document's recovered draft still waits for Restore or Discard. Its record is kept as it is until
+    /// then: other work on the same document neither replaces nor forgets it.
+    pub(crate) fn undecided(&self, key: &Key) -> bool { self.offers.iter().any(|offer| offer.record.key == *key) }
+
+    /// The files whose recovered drafts are undecided.
+    pub(crate) fn undecided_paths(&self) -> Vec<PathBuf> { self.offers.iter().filter_map(|offer| offer.record.key.path().map(Path::to_path_buf)).collect() }
 
     /// The recovered drafts still undecided, newest first.
     pub(crate) fn offers(&self) -> &[Offer] { &self.offers }
@@ -231,14 +245,25 @@ impl Recovery {
     pub(crate) fn resume(&mut self) { self.postponed = false; }
 
     /// Keeps the next version of a document, or forgets it when it holds no unsaved work.
-    pub(crate) fn save(&self, version: Version) { self.saver.save(version); }
+    pub(crate) fn save(&self, version: Version) {
+        if !self.undecided(&version.key) { self.saver.save(version); }
+    }
 
     /// The document's work was saved or discarded: it must not be offered again.
-    pub(crate) fn discard(&self, key: Key) { self.saver.discard(key); }
+    pub(crate) fn discard(&self, key: Key) {
+        if !self.undecided(&key) { self.saver.discard(key); }
+    }
 
     /// Waits for what is pending to reach the disk (tests, and shut-down checks).
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn flush(&self) { let _ = self.saver.flush().recv_timeout(Duration::from_secs(5)); }
+
+    /// What a crash does to this session's claim: its records become another session's recovered work.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn end_ownership(&mut self) {
+        self.flush();
+        self.owner = None;
+    }
 }
 
 /// A version to write: its text is materialized off the UI thread.
@@ -259,12 +284,12 @@ impl std::fmt::Debug for Version {
 
 impl Version {
     /// The record to write, or `None` when the version is no unsaved work or too large to keep.
-    fn record(self, seq: u64) -> Option<Record> {
+    fn record(self, seq: u64, owner: Option<String>) -> Option<Record> {
         let (draft, baseline) = (self.draft.materialize(), self.baseline.materialize());
         if draft.text() == baseline.text() || (draft.text().len() + baseline.text().len()) as u64 > RECORD_BYTES {
             return None;
         }
-        Some(Record { key: self.key, seq, title: self.title, draft: draft.text().clone(), baseline: baseline.text().clone(), encoding: self.encoding, bom: self.bom, recorded: now() })
+        Some(Record { key: self.key, seq, title: self.title, draft: draft.text().clone(), baseline: baseline.text().clone(), encoding: self.encoding, bom: self.bom, recorded: now(), owner })
     }
 }
 
@@ -300,9 +325,12 @@ impl Store {
                     let _ = std::fs::remove_file(&file);
                     continue;
                 }
+                // Another running session's draft is its live work, not recovered work.
+                if record.owner.as_deref().is_some_and(|owner| live(&self.dir, owner)) { continue; }
                 records.push(record);
             }
         }
+        forget_ended_owners(&self.dir);
         records.sort_by_key(|record| (record.recorded, record.seq));
         records.truncate(MAX_RECORDS);
         let mut text = 0;
@@ -348,12 +376,14 @@ struct Saved {
     encoding: String,
     bom: bool,
     recorded: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
 }
 
 impl From<&Record> for Saved {
     fn from(record: &Record) -> Self {
         Self { v: VERSION, seq: record.seq, key: record.key.clone(), title: record.title.clone(), draft: record.draft.to_string(),
-            baseline: record.baseline.to_string(), encoding: record.encoding.into(), bom: record.bom, recorded: record.recorded }
+            baseline: record.baseline.to_string(), encoding: record.encoding.into(), bom: record.bom, recorded: record.recorded, owner: record.owner.clone() }
     }
 }
 
@@ -375,7 +405,7 @@ fn read_record(file: std::fs::File) -> Option<Record> {
     let valid_text = saved.draft.len() + saved.baseline.len() <= RECORD_BYTES as usize && saved.draft != saved.baseline;
     (valid_key(&saved.key) && valid_title && valid_text).then(|| Record {
         key: saved.key, seq: saved.seq, title: saved.title, draft: saved.draft.into(), baseline: saved.baseline.into(),
-        encoding, bom: saved.bom, recorded: saved.recorded,
+        encoding, bom: saved.bom, recorded: saved.recorded, owner: saved.owner.filter(|owner| valid_token(owner)),
     })
 }
 
@@ -441,12 +471,12 @@ enum Job {
 }
 
 impl Saver {
-    pub(crate) fn new(dir: PathBuf, loaded: &Loaded) -> Self {
+    pub(crate) fn new(dir: PathBuf, loaded: &Loaded, owner: Option<String>) -> Self {
         let (tx, rx) = mpsc::channel::<Job>();
         let pending = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()));
         let (tombstones, high) = (loaded.tombstones.clone(), loaded.high);
         let slots = pending.clone();
-        let run = move || run(Store::new(dir), tombstones, high.max(now_millis()), slots, rx);
+        let run = move || run(Store::new(dir), tombstones, high.max(now_millis()), slots, rx, owner);
         let thread = std::thread::Builder::new().name("reader-recovery".into()).spawn(run).ok();
         Self { pending, tx: Some(tx), thread }
     }
@@ -481,14 +511,14 @@ impl Drop for Saver {
     }
 }
 
-fn run(store: Store, mut tombstones: BTreeMap<Key, u64>, mut next: u64, pending: std::sync::Arc<std::sync::Mutex<BTreeMap<Key, Version>>>, rx: mpsc::Receiver<Job>) {
+fn run(store: Store, mut tombstones: BTreeMap<Key, u64>, mut next: u64, pending: std::sync::Arc<std::sync::Mutex<BTreeMap<Key, Version>>>, rx: mpsc::Receiver<Job>, owner: Option<String>) {
     let waiting = |pending: &std::sync::Mutex<BTreeMap<Key, Version>>| !pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty();
     let write = |tombstones: &BTreeMap<Key, u64>, next: &mut u64| {
         let versions: Vec<Version> = std::mem::take(&mut *pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner)).into_values().collect();
         for version in versions {
             *next = (*next).max(now_millis()) + 1;
             let key = version.key.clone();
-            match version.record(*next) {
+            match version.record(*next, owner.clone()) {
                 Some(record) if tombstones.get(&key).is_none_or(|seq| *seq < record.seq) => store.write(&record),
                 // Nothing to recover (clean, or too large): an older record must not stand in for this work.
                 _ => { store.remove(&key); }
@@ -542,6 +572,80 @@ fn write_private(file: &Path, bytes: &[u8]) {
     }
     let ok = opened.open(&temp).and_then(|mut f| std::io::Write::write_all(&mut f, bytes)).is_ok() && std::fs::rename(&temp, file).is_ok();
     if !ok { let _ = std::fs::remove_file(&temp); }
+}
+
+/// A running session's claim on its records: an exclusive lock on its own file under `owners/`, held until the
+/// session ends. A crash releases the lock, so the records of an ended session become recoverable work.
+struct Owner {
+    token: String,
+    file: Option<(PathBuf, std::fs::File)>,
+}
+
+impl Owner {
+    /// The lock file appears already locked (locked under a temporary name, then renamed), so a session cleaning
+    /// up ended owners never removes a live one.
+    fn claim(dir: &Path) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let token = format!("{:x}-{nanos:x}-{:x}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+        let owners = dir.join("owners");
+        let claimed = || -> Option<(PathBuf, std::fs::File)> {
+            std::fs::create_dir_all(&owners).ok()?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+                let _ = std::fs::set_permissions(&owners, std::fs::Permissions::from_mode(0o700));
+            }
+            let (temp, file) = (owners.join(format!(".{token}.claim")), owners.join(format!("{token}.lock")));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let lock = options.open(&temp).ok()?;
+            if lock.try_lock().is_err() || std::fs::rename(&temp, &file).is_err() {
+                let _ = std::fs::remove_file(&temp);
+                return None;
+            }
+            Some((file, lock))
+        };
+        let file = claimed();
+        Self { token, file }
+    }
+}
+
+impl Drop for Owner {
+    fn drop(&mut self) {
+        if let Some((file, _lock)) = self.file.take() { let _ = std::fs::remove_file(file); }
+    }
+}
+
+/// An owner token this reader could have written: it names a file under `owners/` and nothing else.
+fn valid_token(token: &str) -> bool { !token.is_empty() && token.len() <= 64 && token.chars().all(|c| c.is_ascii_hexdigit() || c == '-') }
+
+/// Whether the session that wrote a record still runs: its lock file is held. A missing or unlocked file is an
+/// ended session.
+fn live(dir: &Path, owner: &str) -> bool {
+    if !valid_token(owner) { return false; }
+    let Ok(file) = std::fs::File::open(dir.join("owners").join(format!("{owner}.lock"))) else { return false };
+    match file.try_lock() {
+        Ok(()) => { let _ = file.unlock(); false }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(std::fs::TryLockError::Error(_)) => false,
+    }
+}
+
+/// Lock files of sessions that ended without removing them (a crash).
+fn forget_ended_owners(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir.join("owners")) else { return };
+    for path in entries.flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|e| e == "lock")) {
+        let Some(owner) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        if valid_token(owner) && !live(dir, owner) { let _ = std::fs::remove_file(&path); }
+    }
 }
 
 /// A 16-character hex name for arbitrary bytes (FNV-1a), as places files are named.
@@ -602,7 +706,7 @@ mod tests {
     }
 
     fn saver(dir: &Path) -> Saver {
-        Saver::new(dir.to_owned(), &Store::new(dir.to_owned()).load())
+        Saver::new(dir.to_owned(), &Store::new(dir.to_owned()).load(), None)
     }
 
     fn flush(saver: &Saver) { saver.flush().recv_timeout(Duration::from_secs(5)).expect("the saver answered"); }
@@ -629,6 +733,35 @@ mod tests {
             assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
         }
         drop(saver);
+    }
+
+    #[test]
+    fn a_running_owners_records_wait_and_an_ended_owners_records_are_offered() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("recovery");
+        let running = Owner::claim(&dir);
+        let saver = Saver::new(dir.clone(), &Store::new(dir.clone()).load(), Some(running.token.clone()));
+        saver.save(version("draft\n", "saved\n"));
+        flush(&saver);
+        drop(saver);
+        assert!(Store::new(dir.clone()).load().records.is_empty(), "a running session's draft is its own");
+        // A crash leaves the lock file behind, unlocked.
+        let (file, lock) = running.file.as_ref().map(|(file, lock)| (file.clone(), lock.try_clone().unwrap())).unwrap();
+        std::mem::forget(running);
+        lock.unlock().unwrap();
+        drop(lock);
+        let loaded = Store::new(dir.clone()).load();
+        assert_eq!(loaded.records.len(), 1, "an ended session's draft is recovered work");
+        assert!(!file.exists(), "the ended session's lock file is cleaned up");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(dir.join("owners")).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        let mut saved = saved("draft\n", "saved\n", Key::File { path: PathBuf::from("/p/b.txt") });
+        saved.owner = Some("../escape".into());
+        write_saved(&dir, &saved);
+        assert!(Store::new(dir).load().records.iter().all(|record| record.owner.as_deref().is_none_or(valid_token)), "an impossible owner is not a path");
     }
 
     #[test]
@@ -705,7 +838,7 @@ mod tests {
     fn write_saved(dir: &Path, saved: &Saved) { std::fs::write(dir.join(saved.key.file_name()), serde_json::to_vec(saved).unwrap()).unwrap(); }
 
     fn saved(draft: &str, baseline: &str, key: Key) -> Saved {
-        Saved { v: VERSION, seq: 1, key, title: "a.txt".into(), draft: draft.into(), baseline: baseline.into(), encoding: "UTF-8".into(), bom: false, recorded: 1 }
+        Saved { v: VERSION, seq: 1, key, title: "a.txt".into(), draft: draft.into(), baseline: baseline.into(), encoding: "UTF-8".into(), bom: false, recorded: 1, owner: None }
     }
 
     #[test]
