@@ -1232,13 +1232,16 @@ pub struct View<'a> {
 impl<'a> View<'a> {
     pub fn tab(&self) -> &'a Tab { self.tab }
     pub fn snapshot(&self) -> &'a Arc<crate::text::TextSnapshot> { self.snapshot }
-    pub fn save_status(&self) -> &crate::save::Status { &self.save.status }
+    pub fn save_status(&self) -> &'a crate::save::Status { &self.save.status }
+    fn write_path_changed(&self) -> bool { self.save.read.as_ref().is_some_and(|read| read.snapshot.path != self.snapshot.source()) }
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_redo) }
     pub fn edit_disabled(&self) -> Option<&'static str> {
         if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
+        else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
+        else if self.snapshot.source_meta().is_lossy() { Some("Lossy text is read-only") }
         else { None }
     }
     /// Reader source rows include the logical final empty line.
@@ -2356,7 +2359,7 @@ impl Session {
                     None => Some("No file is open"),
                     Some(view) if view.save_status().busy() => Some("A save operation is running"),
                     Some(view) if id == CommandId::ConfirmRecheckedSave => (!matches!(view.save_status(), crate::save::Status::Checked(crate::save::DiskMatch::Baseline | crate::save::DiskMatch::Attempted))).then_some("Recheck must match the baseline or attempted save first"),
-                    Some(view) => (!matches!(view.save_status(), crate::save::Status::Uncertain(_) | crate::save::Status::Rejected(_) | crate::save::Status::Checked(_))).then_some("No save outcome needs rechecking"),
+                    Some(view) => (!view.write_path_changed() && !matches!(view.save_status(), crate::save::Status::Uncertain(_) | crate::save::Status::Rejected(_) | crate::save::Status::Checked(_))).then_some("No save outcome needs rechecking"),
                 },
             },
             CommandId::Undo | CommandId::Redo => match self.state.active().and_then(|tab| self.state.view(tab.id)) {
@@ -7688,7 +7691,6 @@ impl Drop for Session {
         self.layouts.cancel_all();
         self.projections.cancel_all();
         self.rx.close();
-        self.analysis.finish_submitted_writes();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
         self.query_latest.fetch_add(1, Ordering::Relaxed);
@@ -7697,6 +7699,7 @@ impl Drop for Session {
         self.preview_parse.store(u64::MAX, Ordering::Relaxed);
         self.expand_latest.store(u64::MAX, Ordering::Relaxed);
         self.project_generation.fetch_add(1, Ordering::Relaxed);
+        self.analysis.finish_submitted_writes();
     }
 }
 
@@ -7797,6 +7800,7 @@ fn check(path: &Path, stamp: Option<Stamp>, shown: Option<&Arc<crate::text::Text
 fn decode_read(path: PathBuf, version: u64, read: &lenz_content::write::ExactRead) -> Document {
     let mut doc = Document::decode(path, version, read.bytes());
     let meta = doc.source_meta();
+    if doc.image().is_some() || meta.is_binary() || meta.is_lossy() { return doc; }
     let snapshot = read.snapshot(doc.text(), meta.original_encoding(), meta.had_bom(), meta.is_lossy());
     doc.write_baseline = Some(Arc::new(crate::save::Baseline { snapshot, target: read.target.clone() }));
     doc

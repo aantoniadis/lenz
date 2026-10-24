@@ -54,7 +54,7 @@ struct SourceDependency {
     document: Arc<OnceLock<Arc<Document>>>,
 }
 enum SourceReady { Ready(Arc<Document>), Waiting, Failed(&'static str) }
-struct Conversion { source: Weak<SourceDependency>, materializing: Option<Task>, failure: Option<&'static str> }
+struct Conversion { source: Weak<SourceDependency>, retired: Weak<SourceDependency>, materializing: Option<Task>, failure: Option<&'static str> }
 struct ConversionDone { done: Arc<AtomicBool>, tx: async_channel::Sender<Completion> }
 impl Drop for ConversionDone {
     fn drop(&mut self) { self.done.store(true, Ordering::Release); let _ = self.tx.try_send(Completion::AnalysisWake); }
@@ -132,16 +132,26 @@ pub(crate) struct Analysis {
 impl Analysis {
     /// Called only after a buffer/result owner has been admitted to the combined owner bound.
     fn source_dependency(&mut self, input: Input) -> Arc<SourceDependency> {
-        if let Some(source) = self.conversions.get(&input.scope).and_then(|c| c.source.upgrade()) { return source; }
+        if let Some(conversion) = self.conversions.get_mut(&input.scope)
+            && let Some(previous) = conversion.source.upgrade().or_else(|| conversion.retired.upgrade()) {
+            // The fallback preserves captured-result demand, never old backing for a reopened current group.
+            if previous.snapshot.needs_compaction() && !input.snapshot.needs_compaction() {
+                let source = Arc::new(SourceDependency { scope: input.scope, snapshot: input.snapshot, document: previous.document.clone() });
+                conversion.retired = Arc::downgrade(&previous); conversion.source = Arc::downgrade(&source);
+                return source;
+            }
+            return previous;
+        }
         let document = OnceLock::new();
         if let Some(loaded) = input.loaded.upgrade().filter(|doc| doc.version() == input.scope.key.version && Arc::ptr_eq(doc.source_meta(), input.snapshot.source_meta())) {
             let _ = document.set(loaded);
         }
         let source = Arc::new(SourceDependency { scope: input.scope, snapshot: input.snapshot, document: Arc::new(document) });
-        let conversion = self.conversions.entry(input.scope).or_insert_with(|| Conversion { source: Weak::new(), materializing: None, failure: None });
+        let conversion = self.conversions.entry(input.scope).or_insert_with(|| Conversion { source: Weak::new(), retired: Weak::new(), materializing: None, failure: None });
         // A previous owner expired while its cancelled worker unwinds. Reuse the slot, not its cell.
         if let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); }
         conversion.source = Arc::downgrade(&source);
+        conversion.retired = Weak::new();
         conversion.failure = None;
         self.dirty = true;
         source
@@ -198,6 +208,26 @@ impl Analysis {
         let entry = self.entries.get(&snapshot.key().buffer)?;
         (entry.pending.is_none() && entry.group.scope == scope(snapshot, project) && entry.group.cancel.load(Ordering::Acquire))
             .then(|| entry.group.source.as_ref().and_then(|source| source.document.get().cloned())).flatten()
+    }
+
+    /// Identical immutable bytes with compact backing reuse the same admitted conversion cell.
+    /// Captured result owners keep their original dependency until their own acknowledgement.
+    pub(crate) fn rebind_backing(&mut self, snapshot: Arc<TextSnapshot>, project: u64) {
+        let scope = scope(&snapshot, project);
+        let Some(entry) = self.entries.get_mut(&scope.key.buffer) else { return };
+        let owner = if entry.group.scope == scope && entry.group.source.is_some() { &mut entry.group.source }
+            else if let Some(pending) = entry.pending.as_mut().filter(|p| p.source.scope == scope) {
+                let previous = Arc::downgrade(&pending.source);
+                let source = Arc::new(SourceDependency { scope, snapshot, document: pending.source.document.clone() });
+                pending.source = source.clone();
+                if let Some(conversion) = self.conversions.get_mut(&scope) { conversion.retired = previous; conversion.source = Arc::downgrade(&source); }
+                return;
+            } else { return };
+        let Some(previous) = owner else { return };
+        let retired = Arc::downgrade(previous);
+        let source = Arc::new(SourceDependency { scope, snapshot, document: previous.document.clone() });
+        *owner = Some(source.clone());
+        if let Some(conversion) = self.conversions.get_mut(&scope) { conversion.retired = retired; conversion.source = Arc::downgrade(&source); }
     }
 
     pub(crate) fn source_failure(&self, snapshot: &TextSnapshot, project: u64) -> Option<&'static str> {
@@ -283,7 +313,7 @@ impl Analysis {
 
     fn reap_conversions(&mut self, project: u64) {
         self.conversions.retain(|scope, conversion| {
-            let source = conversion.source.upgrade();
+            let source = conversion.source.upgrade().or_else(|| conversion.retired.upgrade());
             if (source.is_none() || scope.project != project) && let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); }
             if conversion.materializing.as_ref().is_some_and(|task| task.done.load(Ordering::Acquire)) {
                 let task = conversion.materializing.take().expect("completed conversion");

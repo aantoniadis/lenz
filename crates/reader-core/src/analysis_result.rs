@@ -360,6 +360,8 @@ mod tests {
         analysis.ensure(Input::new(snapshot(3, 3), Weak::new(), 0, true), Priority::Background);
         analysis.release_view(BufferId(3), TabId(1), true); analysis.retain_sources(|_| false);
         assert!(dependency.upgrade().is_some(), "captured v2 outlives replacement and source release");
+        // Session dispatch reaps cancelled conversions before releasing its next event.
+        analysis.pump(&jobs, &tx, &project);
         for gate in gates { gate.send(()).unwrap(); }
         pump_until(&mut analysis, &jobs, &tx, &project, |a| a.results[&ResultSlot::Search].completed.is_some());
         let ticket = receive(&rx);

@@ -254,6 +254,8 @@ pub fn read_exact_bytes(path: &Path) -> Result<ExactRead, WriteError> {
 /// Rechecks the named target immediately before mutation. This is not a filesystem
 /// compare-and-swap: another process may still race the final check and rename.
 pub fn write_exact(snapshot: &Snapshot, expected: &TargetIdentity, text: &str) -> WriteOutcome {
+    #[cfg(any(test, feature = "write-testing"))]
+    let _fault = readiness_fault::enter_path(&snapshot.path);
     use WriteOutcome::{Rejected, Saved, Uncertain};
     let prepare = || -> Result<_, WriteError> {
         if snapshot.lossy { return Err(WriteError::Lossy); }
@@ -620,9 +622,25 @@ fn sync_dir(path: &Path) {
 #[cfg(any(test, feature = "write-testing"))]
 pub mod readiness_fault {
     use std::{cell::Cell, fs::File, io::{self, Write}};
+    use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum Fault { BeforeReplace, Write, WriteAndRollback, AfterReplace }
     thread_local! { static ACTIVE: Cell<Option<(Fault, usize)>> = const { Cell::new(None) }; }
+    fn paths() -> &'static Mutex<HashMap<PathBuf, Fault>> { static PATHS: OnceLock<Mutex<HashMap<PathBuf, Fault>>> = OnceLock::new(); PATHS.get_or_init(Default::default) }
+    /// Scoped disposable-file faults also reach background writers, without affecting other paths.
+    pub struct AtPath(PathBuf);
+    pub fn at_path(path: &Path, fault: Fault) -> AtPath {
+        assert!(paths().lock().unwrap().insert(path.to_owned(), fault).is_none());
+        AtPath(path.to_owned())
+    }
+    impl Drop for AtPath { fn drop(&mut self) { paths().lock().unwrap().remove(&self.0); } }
+    pub(super) struct PathScope(Option<(Fault, usize)>);
+    impl Drop for PathScope { fn drop(&mut self) { ACTIVE.set(self.0); } }
+    pub(super) fn enter_path(path: &Path) -> PathScope {
+        let previous = ACTIVE.get();
+        if previous.is_none() && let Some(fault) = paths().lock().unwrap().get(path).copied() { ACTIVE.set(Some((fault, 0))); }
+        PathScope(previous)
+    }
     pub fn during<T>(fault: Fault, action: impl FnOnce() -> T) -> T {
         assert!(ACTIVE.get().is_none());
         ACTIVE.set(Some((fault, 0)));

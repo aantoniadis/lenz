@@ -7,11 +7,10 @@ impl Session {
     pub(super) fn save_disabled(&self, tab: TabId) -> Option<&'static str> {
         let Some(view) = self.state.view(tab) else { return Some("No loaded file is open") };
         if let Some(why) = view.edit_disabled() { return Some(why); }
-        if view.snapshot().source_meta().is_binary() { return Some("Binary files are read-only"); }
-        if view.snapshot().source_meta().is_lossy() { return Some("Lossy text is read-only"); }
         if view.save_status().busy() { return Some("A save operation is running"); }
         if view.save_status().blocked() { return Some("Recheck and confirm the disk outcome before saving again"); }
         if view.save.read.is_none() { return Some("This source has no confirmed write target; reopen the file before saving"); }
+        if view.write_path_changed() { return Some("The saved target path changed; recheck and confirm the current file before saving"); }
         if !view.dirty() { return Some("No unsaved changes"); }
         None
     }
@@ -19,13 +18,13 @@ impl Session {
         if let Some(why) = self.save_disabled(tab) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         let buffer = view.snapshot().key().buffer;
-        let read = view.save.read.clone().expect("eligible save baseline");
-        let captured = view.snapshot().clone();
         let project = self.project_generation.load(Ordering::Acquire);
-        let loaded = self.state.sources.buffers[&buffer].document.clone();
         self.save_seq += 1; let request = self.save_seq;
+        let entry = &self.state.sources.buffers[&buffer];
         if !self.analysis.request_write(buffer, request, project, || {
-            (Some(crate::analysis::Input::new(captured.clone(), loaded, project, false)), move |doc: Option<Arc<Document>>| {
+            let captured = entry.snapshot.as_ref().expect("eligible save source").clone();
+            let read = entry.save.read.clone().expect("eligible save baseline");
+            (Some(crate::analysis::Input::new(captured, entry.document.clone(), project, false)), move |doc: Option<Arc<Document>>| {
                 let doc = doc.expect("write source is ready");
                 Outcome::Written(lenz_content::write::write_exact(&read.snapshot, &read.target, doc.text()))
             })
@@ -33,12 +32,12 @@ impl Session {
         let entry = self.state.sources.buffers.get_mut(&buffer).expect("save buffer");
         if let Some(draft) = &mut entry.draft { draft.end_group(); }
         entry.save.status = Status::Saving; entry.save.checked = None;
-        entry.save.captured = Some(save::Captured { request, text: captured });
+        entry.save.captured = Some(save::Captured { request, text: entry.snapshot.as_ref().expect("captured save source").clone() });
         Effect { repaint: true, copy: None }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
-        if view.save.status.busy() || !matches!(view.save.status, Status::Rejected(_) | Status::Uncertain(_) | Status::Checked(_)) { return Effect::default(); }
+        if view.save.status.busy() || !view.write_path_changed() && !matches!(view.save.status, Status::Rejected(_) | Status::Uncertain(_) | Status::Checked(_)) { return Effect::default(); }
         let buffer = view.snapshot().key().buffer;
         let path = view.snapshot().source().to_owned();
         let project = self.project_generation.load(Ordering::Acquire);
@@ -77,9 +76,28 @@ impl Session {
         for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
             tab.stamp = Some(stamp); tab.stale_on_disk = false; tab.unavailable = None;
         }
+        self.compact_saved_backing(buffer);
         self.synced = 0;
         self.refresh_blame();
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
+    }
+    fn compact_saved_backing(&mut self, buffer: crate::text::BufferId) {
+        let Some(entry) = self.state.sources.buffers.get(&buffer) else { return };
+        let (Some(current), Some(draft)) = (&entry.snapshot, &entry.draft) else { return };
+        if !current.needs_compaction() && !draft.baseline.needs_compaction() { return; }
+        let (current, baseline) = (current.clone(), draft.baseline.clone());
+        self.save_seq += 1; let request = self.save_seq;
+        let captured = current.clone();
+        if self.analysis.request_compaction(buffer, request, || (None, move |_| {
+            let same = Arc::ptr_eq(&current, &baseline);
+            let current = Arc::new(current.compact_backing());
+            let baseline = if same { current.clone() } else { Arc::new(baseline.compact_backing()) };
+            Outcome::Compacted { current, baseline }
+        })) {
+            let entry = self.state.sources.buffers.get_mut(&buffer).expect("saved source");
+            entry.save.status = Status::Saving;
+            entry.save.captured = Some(save::Captured { request, text: captured });
+        }
     }
     pub(super) fn account_saves(&mut self) -> bool {
         let outcomes = self.analysis.take_write_outcomes();
@@ -89,7 +107,26 @@ impl Session {
             if !entry.save.captured.as_ref().is_some_and(|c| c.request == request) { continue; }
             let captured = entry.save.captured.take().expect("matching save request").text;
             match outcome {
-                Outcome::Written(WriteOutcome::Saved { snapshot, target }) => self.saved_baseline(buffer, captured, save::Baseline { snapshot, target }),
+                Outcome::Compacted { current, baseline } => {
+                    if let Some(draft) = &mut entry.draft
+                        && draft.baseline.key() == baseline.key() && Arc::ptr_eq(draft.baseline.source_meta(), baseline.source_meta())
+                        && let Some(snapshot) = &entry.snapshot { draft.confirm_baseline(baseline, snapshot); }
+                    if entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key() == current.key() && Arc::ptr_eq(snapshot.source_meta(), current.source_meta())) {
+                        entry.snapshot = Some(current.clone());
+                        self.analysis.rebind_backing(current, self.project_generation.load(Ordering::Acquire));
+                    }
+                    entry.save.status = Status::Ready;
+                    self.compact_saved_backing(buffer);
+                }
+                Outcome::Written(WriteOutcome::Saved { snapshot, target }) => {
+                    let read = save::Baseline { snapshot, target };
+                    if entry.snapshot.as_ref().is_some_and(|current| Arc::ptr_eq(current.source_meta(), captured.source_meta())) {
+                        self.saved_baseline(buffer, captured, read);
+                    } else {
+                        entry.save.status = Status::Uncertain(format!("Captured Save completed at {}, but the current source identity changed. Recheck the current file before confirming its baseline.", read.snapshot.path.display()));
+                        entry.save.read = Some(read); entry.save.attempted = Some(captured);
+                    }
+                },
                 Outcome::Written(WriteOutcome::Rejected(why)) => entry.save.status = Status::Rejected(format!("Save rejected: {why}. The draft and history are retained.")),
                 Outcome::Written(WriteOutcome::Uncertain(why)) => {
                     entry.save.attempted = Some(captured);

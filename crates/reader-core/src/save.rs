@@ -53,6 +53,7 @@ pub(crate) struct State {
 pub(crate) enum Outcome {
     Written(lenz_content::write::WriteOutcome),
     Rechecked(Result<(Baseline, Arc<TextSnapshot>), String>),
+    Compacted { current: Arc<TextSnapshot>, baseline: Arc<TextSnapshot> },
     Rejected(String),
     Uncertain(String),
 }

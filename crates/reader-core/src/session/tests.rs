@@ -74,6 +74,180 @@ fn delayed_save_confirms_only_captured_version_and_refreshes_the_next_target() {
     assert!(active_view(&s).can_undo());
 }
 
+#[test]
+fn save_faults_retain_draft_history_and_require_explicit_matched_recheck() {
+    use crate::text::{EditKind, TextEdit};
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use crate::save::{Status, DiskMatch};
+    for (fault, linked, disk, matched) in [
+        (Fault::BeforeReplace, false, b"abcdef".as_slice(), DiskMatch::Baseline),
+        (Fault::Write, true, b"abcdef".as_slice(), DiskMatch::Baseline),
+        (Fault::WriteAndRollback, true, b"aVWdef".as_slice(), DiskMatch::Changed),
+        (Fault::AfterReplace, false, b"UVWXYZ".as_slice(), DiskMatch::Attempted),
+    ] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "fault.txt", b"abcdef");
+        if linked { std::fs::hard_link(&path, d.path().join("alias")).unwrap(); }
+        let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "fault.txt");
+        let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..6, text: "UVWXYZ".into() }], kind: EditKind::Replace });
+        let guard = at_path(&path, fault);
+        s.dispatch(Command::Save { tab });
+        settle(&mut s, |s| !matches!(active_view(s).save_status(), Status::Saving));
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+        assert_eq!(source_text(s.state().current_source().unwrap()), "UVWXYZ");
+        if fault == Fault::BeforeReplace { assert!(matches!(active_view(&s).save_status(), Status::Rejected(_))); }
+        else {
+            assert!(matches!(active_view(&s).save_status(), Status::Uncertain(_)));
+            assert!(s.disabled(CommandId::Save).is_some());
+            s.dispatch(Command::Save { tab });
+            assert_eq!(std::fs::read(&path).unwrap(), disk);
+        }
+        drop(guard);
+        s.dispatch(Command::RecheckSave { tab });
+        settle(&mut s, |s| matches!(active_view(s).save_status(), Status::Checked(_)));
+        assert_eq!(active_view(&s).save_status(), &Status::Checked(matched));
+        assert!(active_view(&s).dirty(), "an observation alone never accepts a new baseline");
+        s.dispatch(Command::ConfirmRecheckedSave { tab });
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        if matched == DiskMatch::Changed { assert!(s.disabled(CommandId::Save).is_some()); }
+        else { assert_eq!(active_view(&s).dirty(), matched != DiskMatch::Attempted); }
+        s.dispatch(Command::Undo { tab });
+        assert_eq!(source_text(s.state().current_source().unwrap()), "abcdef");
+        assert_eq!(active_view(&s).dirty(), matched == DiskMatch::Attempted);
+    }
+}
+
+#[test]
+fn save_rejects_same_content_substitution_without_learning_a_new_baseline() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "target.txt", b"original");
+    let substitute = write(d.path(), "substitute.txt", b"original");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "target.txt");
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..8, text: "draft".into() }], kind: EditKind::Replace });
+    std::fs::remove_file(&path).unwrap(); std::fs::hard_link(&substitute, &path).unwrap();
+    s.dispatch(Command::Save { tab });
+    settle(&mut s, |s| matches!(active_view(s).save_status(), crate::save::Status::Rejected(_)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"original");
+    assert_eq!(std::fs::read(substitute).unwrap(), b"original");
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft");
+}
+
+#[test]
+fn saving_a_small_surviving_slice_releases_retired_original_backing_without_losing_undo() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let original = "a".repeat(256 * 1024);
+    let path = write(d.path(), "reclaim.txt", original.as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "reclaim.txt");
+    let tab = s.state().active().unwrap().id(); let baseline = Arc::downgrade(s.state().current_source().unwrap());
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..original.len() - 16384, text: "".into() }], kind: EditKind::Replace });
+    assert!(s.state().current_source().unwrap().storage_bytes() >= original.len());
+    s.dispatch(Command::Save { tab });
+    settle(&mut s, |s| matches!(active_view(s).save_status(), crate::save::Status::Ready));
+    assert_eq!(std::fs::read(&path).unwrap(), vec![b'a'; 16384]);
+    assert!(baseline.upgrade().is_none(), "the original confirmed snapshot retired");
+    assert!(s.state().current_source().unwrap().storage_bytes() < 64 * 1024, "tiny surviving chunks must not pin the retired full text/index allocation");
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), original);
+    assert!(active_view(&s).dirty());
+    assert_eq!(std::fs::read(path).unwrap(), vec![b'a'; 16384]);
+}
+
+#[test]
+fn reader_save_preserves_original_utf16_and_legacy_encoding_and_rejects_lossy_binary_sources() {
+    use crate::text::{EditKind, TextEdit};
+    for (name, old, new) in [
+        ("little.txt", vec![0xff, 0xfe, b'a', 0, 13, 0, 10, 0], vec![0xff, 0xfe, 0xe9, 0, 13, 0, 10, 0]),
+        ("big.txt", vec![0xfe, 0xff, 0, b'a', 0, 13, 0, 10], vec![0xfe, 0xff, 0, 0xe9, 0, 13, 0, 10]),
+        ("legacy.txt", b"caf\xe9\r\n".to_vec(), b"x\xe9\r\n".to_vec()),
+    ] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), name, &old);
+        let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), name);
+        let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+        let (range, text) = if name == "legacy.txt" { (0..3, "x") } else { (0..1, "é") };
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind: EditKind::Replace });
+        s.dispatch(Command::Save { tab }); settle(&mut s, |s| !s.state().tab_dirty(tab));
+        assert_eq!(std::fs::read(path).unwrap(), new);
+    }
+    for (name, bytes) in [("lossy.txt", vec![0xff, 0xfe, 0x00, 0xd8]), ("binary.txt", b"a\0b".to_vec())] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), name, &bytes);
+        let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), name);
+        assert!(active_view(&s).edit_disabled().is_some()); assert!(s.disabled(CommandId::Save).is_some());
+        let tab = s.state().active().unwrap().id(); s.dispatch(Command::Save { tab });
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn saving_newline_dense_text_finishes_without_repacking_its_legitimate_index_forever() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "dense.txt", "a\n".repeat(50000).as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "dense.txt");
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..1, text: "b".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Save { tab });
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while !matches!(active_view(&s).save_status(), crate::save::Status::Ready) {
+        assert!(std::time::Instant::now() < deadline, "legitimate live newline indexes must not trigger endless compaction");
+        if let Ok(c) = s.completions().try_recv() { s.dispatch(c); } else { std::thread::yield_now(); }
+    }
+    assert!(!active_view(&s).dirty()); assert_eq!(std::fs::read(path).unwrap().len(), 100000);
+}
+
+#[test]
+fn save_refuses_a_provenance_less_source_without_reading_a_new_disk_baseline() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "unproven.txt", b"disk");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRetained(path.clone()));
+    let tab = s.state().active().unwrap().id();
+    let version = s.versions.fetch_add(1, Ordering::Relaxed) + 1;
+    s.dispatch(Completion::Loaded { request: s.request, tab, path: path.clone(), result: Ok((Stamp::of(&path), Arc::new(Document::decode(path.clone(), version, b"disk")), Some(path.clone()))) });
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..4, text: "draft".into() }], kind: EditKind::Replace });
+    assert!(s.disabled(CommandId::Save).is_some_and(|why| why.contains("confirmed write target")));
+    s.dispatch(Command::Save { tab });
+    assert_eq!(std::fs::read(path).unwrap(), b"disk"); assert!(active_view(&s).dirty());
+}
+
+#[test]
+fn save_never_confuses_a_renamed_displayed_path_with_its_old_confirmed_target() {
+    use crate::text::{EditKind, TextEdit};
+    use crate::save::Status;
+    for pending in [false, true] {
+        let d = tempfile::tempdir().unwrap(); let old = write(d.path(), "old.txt", b"original"); let new = d.path().join("new.txt");
+        let mut s = session(d.path()); open(&mut s, Command::OpenRetained(old.clone()), "old.txt");
+        let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..8, text: "draft".into() }], kind: EditKind::Replace });
+        let (started, entered) = std::sync::mpsc::channel();
+        let gates: Vec<_> = if pending { (0..crate::jobs::MAX_JOBS).map(|_| {
+            let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+            s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+        }).collect() } else { Vec::new() };
+        for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+        if pending { s.dispatch(Command::Save { tab }); }
+        std::fs::rename(&old, &new).unwrap();
+        let token = s.state().active().unwrap().refresh;
+        s.dispatch(Completion::Moved { tab, token, to: new.clone(), stamp: Stamp::of(&new), canonical: Some(new.clone()) });
+        std::fs::hard_link(&new, &old).unwrap();
+        let replacement = write(d.path(), "replacement", b"original"); std::fs::rename(replacement, &new).unwrap();
+        if !pending { s.dispatch(Command::Save { tab }); }
+        for gate in gates { gate.send(()).unwrap(); }
+        settle(&mut s, |s| !matches!(active_view(s).save_status(), Status::Saving));
+        assert_eq!(std::fs::read(&old).unwrap(), if pending { b"draft".as_slice() } else { b"original".as_slice() });
+        assert_eq!(std::fs::read(&new).unwrap(), b"original");
+        assert!(active_view(&s).dirty(), "a write to the captured old path cannot confirm the new named target");
+        assert!(s.disabled(CommandId::Save).is_some()); assert!(s.disabled(CommandId::RecheckSave).is_none());
+        s.dispatch(Command::RecheckSave { tab }); settle(&mut s, |s| matches!(active_view(s).save_status(), Status::Checked(_)));
+        s.dispatch(Command::ConfirmRecheckedSave { tab });
+        s.dispatch(Command::Save { tab }); settle(&mut s, |s| !s.state().tab_dirty(tab));
+        assert_eq!(std::fs::read(new).unwrap(), b"draft");
+        assert_eq!(std::fs::read(old).unwrap(), if pending { b"draft".as_slice() } else { b"original".as_slice() });
+    }
+}
+
 fn active_view(s: &Session) -> View<'_> { s.state().view(s.state().active().unwrap().id()).unwrap() }
 fn pane_view(s: &Session, pane: u8) -> View<'_> { s.state().view(s.state().shown(pane).unwrap().id()).unwrap() }
 fn source_rows(view: View<'_>, count: usize, cols: Option<usize>) -> Vec<crate::layout::Row> {

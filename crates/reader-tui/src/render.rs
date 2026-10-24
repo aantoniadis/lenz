@@ -479,7 +479,9 @@ impl App {
         let available = area.width.saturating_sub(commands_width);
         let state = self.session.state();
         let lsp = format!(" {} [F2] ", state.language_server_label());
-        let lsp_width = (lsp.width() as u16).min(available / 2);
+        let save_notice = area.width < 60 && state.active().and_then(|tab| state.view(tab.id()))
+            .is_some_and(|view| view.save_status().message().is_some());
+        let lsp_width = if save_notice { 0 } else { (lsp.width() as u16).min(available / 2) };
         let lsp_rect = Rect::new(area.x, area.y, lsp_width, 1);
         let attention = state.provider().is_some_and(|v| {
             matches!(
@@ -507,7 +509,7 @@ impl App {
             None => format!(" {} ", self.session.status_position()),
         };
         let remainder = available.saturating_sub(lsp_width);
-        let position_width = (position.width() as u16).min(remainder / 2);
+        let position_width = if save_notice { 0 } else { (position.width() as u16).min(remainder / 2) };
         let position_rect = Rect::new(commands_rect.x - position_width, area.y, position_width, 1);
         line(
             frame.buffer_mut(),

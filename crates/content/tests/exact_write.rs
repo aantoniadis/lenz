@@ -141,3 +141,16 @@ fn editor_save_distinguishes_rejected_and_uncertain_real_file_outcomes() {
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), if linked { 2 } else { 1 });
     }
 }
+
+#[test]
+fn raw_exact_read_keeps_the_original_descriptor_identity_without_decoding_twice() {
+    use lenz_content::{encoding::decode, write::{read_exact_bytes, WriteError}};
+    let d = tempfile::tempdir().unwrap(); let path = d.path().join("raw.txt"); let other = d.path().join("other.txt");
+    std::fs::write(&path, b"\xef\xbb\xbfold\r\n").unwrap(); std::fs::write(&other, b"\xef\xbb\xbfold\r\n").unwrap();
+    let raw = read_exact_bytes(&path).unwrap(); let decoded = decode(raw.bytes(), None);
+    let snapshot = raw.snapshot(&decoded.text, decoded.encoding, decoded.had_bom, decoded.lossy);
+    assert_eq!(raw.metadata().len(), 8); assert_eq!(snapshot, read_exact(&path, None).unwrap().0);
+    std::fs::remove_file(&path).unwrap(); std::fs::hard_link(&other, &path).unwrap();
+    assert_eq!(write_exact(&snapshot, &raw.target, "new\r\n"), WriteOutcome::Rejected(WriteError::ChangedOnDisk));
+    assert_eq!(std::fs::read(other).unwrap(), b"\xef\xbb\xbfold\r\n");
+}
