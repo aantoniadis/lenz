@@ -209,8 +209,12 @@ impl EntityInputHandler for ReaderView {
             capture.selected = Selection { anchor: caret, head: caret };
             self.input_state.capture = Some(capture); self.commit_input(cx);
         } else if let Some(capture) = self.begin_input(range.clone(), window) {
-            self.dispatch(Command::Edit { tab: capture.tab, expected: capture.base.key(), edits: vec![TextEdit { range: capture.range, text: text.into() }],
-                kind: if range.is_some() { EditKind::Replace } else { EditKind::Typing } }, cx);
+            if range.is_none() {
+                // Plain typing changes every selection of the view; the core makes the whole set one transaction.
+                self.dispatch(Command::InsertText { text: text.to_owned(), kind: EditKind::Typing }, cx);
+            } else {
+                self.dispatch(Command::Edit { tab: capture.tab, expected: capture.base.key(), edits: vec![TextEdit { range: capture.range, text: text.into() }], kind: EditKind::Replace }, cx);
+            }
         }
     }
     fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) {

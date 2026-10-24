@@ -29,7 +29,7 @@ Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F1
 Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward,
 F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks, Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered
 bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
-Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. In the GUI, Close Window
+Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. Alt+Shift+Down / Alt+Shift+Up add a cursor on the next / previous line (VS Code keymap: Ctrl+Alt+Down / Up; also **Add Cursor Below / Above** in the Selection menu), Alt+J selects the word under the caret and then its next occurrence, and Escape, a click or a caret move returns to one cursor; several selections are edited and undone together ([limits](tui.md)). In the GUI, Close Window
 is available through the command menu or native window control; Ctrl+Shift+Q requests Quit All.
 
 The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
@@ -46,6 +46,10 @@ Ctrl+W close, Alt+Shift+Left/Right shrink/extend, Ctrl+F12 implementations, Alt+
 fold/unfold, F5 reload), and actions VS Code leaves unbound keep no chord there (outline, quick documentation,
 language-server status, collapse/expand all) instead of reusing a key VS Code gives another action. The choice and
 every override are remembered outside the project in the Reader's settings file.
+
+Both presets bind Alt+Shift+Down / Up to Add Cursor Below / Above and Alt+J to Select Next Occurrence; the VS Code
+preset adds VS Code's Ctrl+Alt+Down / Up for the cursors, and keeps Alt+J because VS Code's Ctrl+D (select the next
+occurrence) is Compare Selected here.
 
 **Keymap…** lists each command with its chords, the preset origin of each override and any binding an override
 displaced. Enter takes the next key as the selected command's shortcut, Delete restores the preset's chord, Esc

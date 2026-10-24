@@ -51,8 +51,14 @@ impl Draft {
         Ok(Some(next))
     }
     fn merge(&mut self, edits: &[TextEdit], inverse: &[TextEdit], tab: TabId, kind: EditKind, now: Instant) -> bool {
-        let Some(join) = self.join.as_mut().filter(|join| join.tab == tab && join.kind == kind
-            && now.saturating_duration_since(join.at) <= Duration::from_millis(500)) else { return false };
+        let joins = self.join.as_ref().is_some_and(|join| join.tab == tab && join.kind == kind
+            && now.saturating_duration_since(join.at) <= Duration::from_millis(500));
+        if !joins { return false; }
+        if kind == EditKind::Typing && self.merge_carets(edits) {
+            if let Some(join) = self.join.as_mut() { join.at = now; }
+            return true;
+        }
+        let Some(join) = self.join.as_mut() else { return false };
         let (Some(previous), [edit], [removed]) = (self.undo.last_mut(), edits, inverse) else { return false };
         let ([forward], [backward]) = (previous.forward.as_mut_slice(), previous.inverse.as_mut_slice()) else { return false };
         match kind {
@@ -78,6 +84,31 @@ impl Draft {
         join.at = now;
         true
     }
+    /// Several carets typing: the last transaction inserted at each of them, and this keystroke inserts again at each
+    /// caret left behind. Every insertion grows in place and every inverse range shifts by the text added before it,
+    /// so one Undo takes the whole typing group, as one caret's typing does.
+    fn merge_carets(&mut self, edits: &[TextEdit]) -> bool {
+        let Some(previous) = self.undo.last_mut() else { return false };
+        let carets = edits.len();
+        let same_carets = carets > 0 && previous.forward.len() == carets && previous.inverse.len() == carets;
+        let typing = edits.iter().all(|edit| edit.range.is_empty())
+            && previous.forward.iter().all(|forward| forward.range.is_empty());
+        // Each insertion continues the caret the last one left: the end of that caret's inserted text.
+        let at_carets = edits.iter().zip(&previous.inverse).all(|(edit, backward)| edit.range.start == backward.range.end);
+        let ordered = edits.windows(2).all(|pair| pair[0].range.start < pair[1].range.start)
+            && previous.inverse.windows(2).all(|pair| pair[0].range.end <= pair[1].range.start);
+        if !(same_carets && typing && at_carets && ordered) { return false; }
+        let mut shifted = 0;
+        for ((forward, backward), edit) in previous.forward.iter_mut().zip(previous.inverse.iter_mut()).zip(edits) {
+            let added = edit.text.len();
+            backward.range.start += shifted;
+            backward.range.end += shifted + added;
+            forward.text = format!("{}{}", forward.text, edit.text).into();
+            shifted += added;
+        }
+        true
+    }
+
     pub(crate) fn undo(&mut self, current: &TextSnapshot, version: u64, redo: bool) -> Result<Option<(TextSnapshot, Vec<TextEdit>)>, EditError> {
         self.end_group();
         let from = if redo { &mut self.redo } else { &mut self.undo };

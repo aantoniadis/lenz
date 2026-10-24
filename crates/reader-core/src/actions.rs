@@ -221,6 +221,10 @@ impl Session {
             CommandId::CollapseCommentsImports => Command::CollapseCommentsImports,
             CommandId::ExtendSelection => Command::ExtendSelection,
             CommandId::ShrinkSelection => Command::ShrinkSelection,
+            CommandId::AddCursorBelow => Command::AddCursorBelow,
+            CommandId::AddCursorAbove => Command::AddCursorAbove,
+            CommandId::SelectNextOccurrence => Command::SelectNextOccurrence,
+            CommandId::CollapseSelections => Command::CollapseSelections,
             CommandId::Definition => Command::Definition { peek: false },
             CommandId::PeekDefinition => Command::Definition { peek: true },
             CommandId::TypeDefinition => Command::TypeDefinition,
@@ -350,6 +354,7 @@ impl CommandId {
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
             Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection
+            | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections
             | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
@@ -373,6 +378,8 @@ impl CommandId {
             Self::Delete => Some("Delete"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
+            // Escape is an editing key, not a chord: the adapters give it to this before their own meanings.
+            Self::CollapseSelections => Some("Esc"),
             _ => None,
         }
     }

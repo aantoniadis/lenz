@@ -194,6 +194,11 @@ const INTELLIJ: &[Preset] = &[
     (CommandId::Close, &["Ctrl+F4"]),
     (CommandId::ExtendSelection, &["Ctrl+W"]),
     (CommandId::ShrinkSelection, &["Ctrl+Shift+W"]),
+    // Several cursors: IntelliJ's Alt+J selects the next occurrence; IntelliJ has no add-cursor chord, so the two
+    // cursor commands take the arrows their adapters have always used, and stay rebindable.
+    (CommandId::AddCursorBelow, &["Alt+Shift+Down"]),
+    (CommandId::AddCursorAbove, &["Alt+Shift+Up"]),
+    (CommandId::SelectNextOccurrence, &["Alt+J"]),
     (CommandId::FocusBreadcrumbs, &["Ctrl+Shift+."]),
     (CommandId::ToggleBookmark, &["F11"]),
     (CommandId::SetBookmarkMnemonic, &["Ctrl+F11"]),
@@ -241,6 +246,11 @@ const VS_CODE: &[Preset] = &[
     (CommandId::Close, &["Ctrl+W"]),
     (CommandId::ExtendSelection, &["Alt+Shift+Right"]),
     (CommandId::ShrinkSelection, &["Alt+Shift+Left"]),
+    // VS Code's own add-cursor chords; Alt+Shift+Down/Up stay as the arrows both adapters have always delivered.
+    // VS Code's Ctrl+D (select next occurrence) is Compare Selected here, so Alt+J keeps that command.
+    (CommandId::AddCursorBelow, &["Ctrl+Alt+Down", "Alt+Shift+Down"]),
+    (CommandId::AddCursorAbove, &["Ctrl+Alt+Up", "Alt+Shift+Up"]),
+    (CommandId::SelectNextOccurrence, &["Alt+J"]),
     (CommandId::FocusBreadcrumbs, &["Ctrl+Shift+."]),
     (CommandId::ToggleBookmark, &["F11"]),
     (CommandId::SetBookmarkMnemonic, &["Ctrl+F11"]),

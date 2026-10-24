@@ -30,6 +30,7 @@ pub mod preferences;
 pub mod project;
 pub mod postgres_assistance;
 pub mod search;
+pub mod selection;
 pub mod semantics;
 pub mod session;
 pub mod shown;

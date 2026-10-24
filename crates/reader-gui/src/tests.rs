@@ -160,6 +160,74 @@ fn unicode_delete_and_cut_paste_use_shared_transactions(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn several_cursors_edit_together_and_escape_returns_to_one(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("carets.txt", b"aa bb aa\none")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    let carets = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let mut at: Vec<_> = view.session().state().active().unwrap().selections().filter(|s| s.anchor == s.head).map(|s| s.head).collect(); at.sort_unstable(); at });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right");
+    // This line is the file's last one: the menu command adds a cursor there and the shortcut then has nowhere to go.
+    choose_menu_command(&mut v, &f, CommandId::AddCursorBelow);
+    assert_eq!(carets(&v), [1, 10]);
+    v.simulate_keystrokes("alt-shift-down");
+    assert_eq!(carets(&v), [1, 10], "there is no line below the last one");
+    v.simulate_keystrokes("x");
+    assert_eq!(text(&v), "axa bb aa\noxne", "typing replaces every selection");
+    assert_eq!(carets(&v), [2, 12]);
+    // Both carets are shown: each of their rows carries one.
+    let shown = f.view.read_with(&v, |view, _| view.visible_rows().iter().filter(|row| row.caret.is_some() || row.extra.iter().any(|(_, caret)| caret.is_some())).count());
+    assert_eq!(shown, 2);
+    v.simulate_keystrokes("escape");
+    assert_eq!(carets(&v), [12], "Escape keeps the primary cursor");
+    assert_eq!(std::fs::read(f.dir.path().join("carets.txt")).unwrap(), b"aa bb aa\none", "typing never writes the file");
+}
+
+#[gpui::test]
+fn alt_j_selects_the_next_occurrence_and_one_undo_changes_both_back(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("occurrences.txt", b"aa bb aa\n")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    let ranges = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let mut ranges: Vec<_> = view.session().state().active().unwrap().selections().map(|s| s.range()).collect(); ranges.sort_by_key(|r| (r.start, r.end)); ranges });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-g 1 enter");
+    v.simulate_keystrokes("alt-j");
+    assert_eq!(ranges(&v), vec![0..2], "a caret first selects the word under it");
+    v.simulate_keystrokes("alt-j");
+    assert_eq!(ranges(&v), [0..2, 6..8]);
+    // Both selections are drawn: the second one has its own background on the same row.
+    let extra = f.view.read_with(&v, |view, _| view.visible_rows().first().map(|row| row.extra.clone()).unwrap_or_default());
+    assert_eq!(extra, vec![(0..2, None)], "the row carries the other selection");
+    v.simulate_keystrokes("y");
+    assert_eq!(text(&v), "y bb y\n", "the same change in both places");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "aa bb aa\n", "one undo reverses both");
+    assert_eq!(std::fs::read(f.dir.path().join("occurrences.txt")).unwrap(), b"aa bb aa\n");
+}
+
+#[gpui::test]
+fn several_cursor_keys_wait_for_a_closed_modal(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("modal.txt", b"one\ntwo\n")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right");
+    v.simulate_keystrokes("f10");
+    v.simulate_keystrokes("alt-shift-down x");
+    let (carets, text) = f.view.read_with(&v, |view, _| {
+        (view.session().state().active().unwrap().selections().count(), view.session().state().current_source().unwrap().copy_range(0..6).unwrap())
+    });
+    assert_eq!((carets, text.as_str()), (1, "one\ntw"), "the open menu takes the keys and the text stays as it was");
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |view, _| view.session().state().active().unwrap().selections().count()) == 1);
+}
+
+#[gpui::test]
 fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence(
     cx: &mut TestAppContext,
 ) {
