@@ -84,6 +84,130 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 }
 
 #[test]
+fn declaration_disk_identity_uses_extracted_decoded_text_with_or_without_cache() {
+    let before = "// before\nfn café_target() {}\r\n";
+    let after = "// change\nfn café_target() {}\r\n";
+    for case in 0..4 {
+        let encode = |text: &str| -> Vec<u8> { match case {
+            0 => text.as_bytes().to_vec(),
+            1 => [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(),
+            2 => std::iter::once(0xfeff).chain(text.encode_utf16()).flat_map(u16::to_le_bytes).collect(),
+            _ => text.chars().map(|ch| u8::try_from(ch as u32).unwrap()).collect(),
+        }};
+        let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+        let a = write(&root, "a.rs", &encode(before)); let other = write(&root, "other.txt", b"stay here\n");
+        let mut s = session(d.path()); s.dispatch(Command::SetPersistentIndex(case % 2 != 0));
+        s.dispatch(Command::OpenRoot(root)); settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+        open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+        s.dispatch(Command::FindDeclarations("café_target".into()));
+        let completion = loop {
+            let completion = s.completions().recv_blocking_timeout().unwrap();
+            if matches!(&completion, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::ProjectRanked { .. })) { break completion; }
+            s.dispatch(completion);
+        };
+        let stamp = Stamp::of(&a).unwrap();
+        std::fs::write(&a, encode(after)).unwrap();
+        std::fs::File::options().write(true).open(&a).unwrap().set_modified(stamp.modified.unwrap()).unwrap();
+        assert_eq!(Stamp::of(&a), Some(stamp), "fixture bypasses stamp-only detection, case {case}");
+        s.dispatch(completion);
+        settle(&mut s, |s| s.state().results().is_some_and(|r| r.is_stale(0) || r.preview().is_some()));
+        let results = s.state().results().unwrap();
+        assert_eq!((results.hits()[0].line, results.hits()[0].range.clone(), results.hits()[0].text.as_ref()), (1, 3..15, "café_target"));
+        assert!(results.is_stale(0), "changed decoded source must not bless old positions, case {case}");
+        assert!(results.preview().is_none());
+        s.dispatch(Command::OpenResult(0));
+        settle(&mut s, |s| s.state().notices().iter().any(|message| message.starts_with("This result")));
+        assert_eq!(s.state().current_source().unwrap().source(), other.as_path());
+        assert_eq!(std::fs::read(&a).unwrap(), encode(after));
+    }
+}
+
+#[test]
+fn project_results_preview_the_captured_draft_and_refuse_changed_target_activation() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let a = write(&root, "a.txt", b"saved a\n");
+    write(&root, "b.txt", b"needle disk\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let replace = |s: &mut Session, text: &str| {
+        let source = s.state().current_source().unwrap(); let (expected, len) = (source.key(), source.len_bytes());
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: text.into() }], kind: EditKind::Replace });
+    };
+    replace(&mut s, "\nneedle captured\n");
+    s.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }); settle(&mut s, searched);
+    let results = s.state().results().unwrap();
+    let first = results.hits().iter().position(|hit| &*hit.path == "a.txt").unwrap();
+    let other = results.hits().iter().position(|hit| &*hit.path == "b.txt").unwrap();
+    replace(&mut s, "\n\nneedle newer\n");
+    s.dispatch(Command::SelectResult(other)); settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|p| p.index == other));
+    s.dispatch(Command::SelectResult(first)); settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|p| p.index == first));
+    assert_eq!(s.state().results().unwrap().preview().unwrap().doc.text().as_ref(), "\nneedle captured\n");
+    s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+    let key = s.state().current_source().unwrap().key();
+    s.dispatch(Command::OpenResult(first));
+    settle(&mut s, |s| s.state().results().unwrap().is_stale(first) || s.state().selection().is_some_and(|p| p.head != 0));
+    assert!(s.state().results().unwrap().is_stale(first));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 0, head: 0 }));
+    assert_eq!(s.state().current_source().unwrap().key(), key);
+    assert_eq!(std::fs::read(a).unwrap(), b"saved a\n");
+}
+
+#[test]
+fn project_declarations_overlay_two_shifted_drafts_without_persisting_them() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir_all(root.join("nested")).unwrap();
+    let a = write(&root, "a.rs", b"fn RemovedSavedA() {}\n");
+    let b = write(&root, "nested/b.rs", b"fn RemovedSavedB() {}\n");
+    let disk = write(&root, "nested/c.rs", b"fn UnopenedDraftOnly() {}\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+    for (path, name, text) in [(a.clone(), "a.rs", "\nfn DraftOnlyA() {}\n"), (b.clone(), "b.rs", "\n\nfn DraftOnlyB() {}\n")] {
+        open(&mut s, Command::OpenRetained(path), name);
+        let source = s.state().current_source().unwrap(); let (expected, len) = (source.key(), source.len_bytes());
+        let tab = s.state().active().unwrap().id();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: text.into() }], kind: EditKind::Replace });
+    }
+    s.dispatch(Command::FindDeclarations("DraftOnly".into())); settle(&mut s, searched);
+    let mut hits: Vec<_> = s.state().results().unwrap().hits().iter().map(|hit| (hit.path.to_string(), hit.line, hit.text.to_string())).collect(); hits.sort();
+    assert_eq!(hits, [("a.rs".into(), 1, "DraftOnlyA".into()), ("nested/b.rs".into(), 2, "DraftOnlyB".into()), ("nested/c.rs".into(), 0, "UnopenedDraftOnly".into())]);
+    s.dispatch(Command::FindDeclarations("RemovedSaved".into())); settle(&mut s, searched);
+    assert!(s.state().results().unwrap().hits().is_empty());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn RemovedSavedA() {}\n");
+    assert_eq!(std::fs::read(b).unwrap(), b"fn RemovedSavedB() {}\n");
+    assert_eq!(std::fs::read(disk).unwrap(), b"fn UnopenedDraftOnly() {}\n");
+}
+
+#[test]
+fn project_text_search_overlays_current_drafts_and_leaves_unopened_files_on_disk() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let a = write(&root, "open.rs", b"fn removed_saved() {}\n");
+    let b = write(&root, "unopened.rs", b"fn unopened_draft_only() {}\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(a.clone()), "open.rs");
+    let source = s.state().current_source().unwrap();
+    let (expected, len) = (source.key(), source.len_bytes());
+    let tab = s.state().active().unwrap().id();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: "\n\nfn draft_only() {}\n".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Search { query: "draft_only".into(), scope: SearchIn::Project });
+    settle(&mut s, searched);
+    let mut hits: Vec<_> = s.state().results().unwrap().hits().iter().map(|hit| (hit.path.to_string(), hit.line)).collect(); hits.sort();
+    assert_eq!(hits, [("open.rs".into(), 2), ("unopened.rs".into(), 0)]);
+    s.dispatch(Command::Search { query: "removed_saved".into(), scope: SearchIn::Project });
+    settle(&mut s, searched);
+    assert!(s.state().results().unwrap().hits().is_empty(), "saved matches removed from an open draft must disappear");
+    assert_eq!(std::fs::read(a).unwrap(), b"fn removed_saved() {}\n");
+    assert_eq!(std::fs::read(b).unwrap(), b"fn unopened_draft_only() {}\n");
+}
+
+#[test]
 fn rejected_and_noop_edits_do_not_pin_reloadable_sources() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap();

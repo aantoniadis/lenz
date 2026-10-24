@@ -5,7 +5,7 @@ use crate::{semantics::Lane, session::SemanticSource};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum ResultSlot { Semantic { server: u64, lane: Lane }, Search, Preview, Validate }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Preview, Validate }
+pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Declarations, Preview, Validate }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResultFence {
     pub slot: ResultSlot,

@@ -16,6 +16,8 @@ use lenz_content::{
     theme::{Palette, ThemeCommand, ThemeEntry, ThemeOverrides, ThemePaths, ThemeService, ThemeUpdate},
 };
 
+mod project_search;
+
 use crate::{
     cache::{INACTIVE_BYTES, InactiveCache, Stamp},
     decor::Decor,
@@ -837,6 +839,9 @@ pub enum Completion {
     Refreshed { tab: TabId, token: u64, result: Refresh },
     /// Results for search `id`.
     Found { id: u64, found: search::Found },
+    ProjectListed { id: u64, paths: Result<Vec<Arc<str>>, String> },
+    ProjectFound { id: u64, step: usize, found: search::Found },
+    ProjectRanked { id: u64, step: usize, best: index::Ranked, found: search::Found },
     /// Line colours for results of search `id`.
     ResultSpans { id: u64, spans: Vec<(usize, search::LineSpans)> },
     /// Syntax colours of the previewed snapshot `version`.
@@ -932,7 +937,7 @@ impl Input {
                 Completion::Theme(_) => "theme",
                 Completion::Changed(_) => "changed",
                 Completion::Refreshed { .. } => "refreshed",
-                Completion::Found { .. } => "found",
+                Completion::Found { .. } | Completion::ProjectListed { .. } | Completion::ProjectFound { .. } | Completion::ProjectRanked { .. } => "found",
                 Completion::Previewed { .. } | Completion::CurrentPreview { .. } => "previewed",
                 Completion::PreviewHighlighted { .. } => "preview highlighted",
                 Completion::ResultSpans { .. } => "result spans",
@@ -1852,6 +1857,7 @@ pub struct Session {
     native: crate::native::Reveals,
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
+    project_query: Option<project_search::ProjectQuery>,
     semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -2045,6 +2051,7 @@ impl Session {
             index_batch_seq: 0,
             jobs: Jobs::new(),
             analysis: Default::default(),
+            project_query: None,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2769,6 +2776,7 @@ impl Session {
             Input::Completion(c) => self.complete(c),
         };
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
+        if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         self.invalidate_result_analysis();
         self.refresh_blame();
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
@@ -2871,6 +2879,7 @@ impl Session {
             if tab.id == edited { tab.retained = true; }
             changed.push(tab.id);
         }
+        self.mark_draft_results_stale(&next);
         self.analysis.invalidate(&next, self.project_generation.load(Ordering::Relaxed));
         for tab in changed {
             if self.is_shown(tab) { self.mark_shown(tab, next.key().version); self.decorate(tab); }
@@ -4431,7 +4440,7 @@ impl Session {
         use crate::analysis::{ResultSlot, ResultStage};
         match fence.slot {
             ResultSlot::Search => fence.project == project && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.id == fence.request
-                && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline))),
+                && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline) | (ResultStage::Declarations, ResultsKind::Declarations))),
             ResultSlot::Preview => fence.project == project && fence.request == preview && fence.stage == ResultStage::Preview
                 && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.selected == fence.node),
             ResultSlot::Validate => fence.project == project && fence.request == open && fence.stage == ResultStage::Validate
@@ -4448,6 +4457,14 @@ impl Session {
         }
     }
 
+    fn captured_result_current(state: &State, source: &crate::text::TextSnapshot, path: &Path) -> bool {
+        let buffer = source.key().buffer;
+        state.sources.buffers.get(&buffer).and_then(|entry| entry.snapshot.as_ref())
+            .is_some_and(|current| SemanticSource::new(source).matches(current))
+            && (source.source() == path || state.sources.aliases.get(path) == Some(&buffer)
+                || state.tabs.iter().any(|tab| tab.buffer == Some(buffer) && (tab.source == path || tab.canonical.as_deref() == Some(path))))
+    }
+
     fn invalidate_result_analysis(&mut self) {
         let state = &self.state;
         let (project, open, preview) = (self.project_generation.load(Ordering::Acquire), self.open_seq, self.preview_latest.load(Ordering::Acquire));
@@ -4459,6 +4476,7 @@ impl Session {
         match fence.slot {
             ResultSlot::Search => {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
+                    self.project_query = None;
                     r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None };
                 }
             }
@@ -5130,11 +5148,15 @@ impl Session {
                 let effect = self.themes.apply(*update);
                 self.theme_effect(effect)
             }
+            Completion::ProjectListed { id, paths } => self.project_listed(id, paths),
+            Completion::ProjectFound { id, step, found } => self.project_found(id, step, found),
+            Completion::ProjectRanked { id, step, best, found } => self.project_ranked(id, step, best, found),
             Completion::Found { id, found } => {
                 let generation = self.state.project.as_ref().map(|p| p.generation());
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id && r.root.as_ref().is_none_or(|(_, g)| Some(*g) == generation)) else {
                     return Effect::default(); // another search, or results of a replaced root
                 };
+                r.disk_sources.extend(found.sources);
                 r.hits.extend(found.hits);
                 r.rebuild_rows();
                 if let Some(files) = found.files {
@@ -5188,6 +5210,7 @@ impl Session {
                     }
                     Err(e) => {
                         r.preview = None;
+                        if let Some(hit) = r.hits.get(index) { r.stale.insert(hit.path.clone()); }
                         self.state.messages.push(format!("Cannot preview: {e}"));
                         self.highlight_preview();
                     }
@@ -5198,9 +5221,12 @@ impl Session {
                 if open != self.open_seq {
                     return Effect::default(); // the reader moved elsewhere meanwhile
                 }
-                let Some(r) = self.state.results.as_mut().filter(|r| r.id == id) else { return Effect::default() };
+                let Some(r) = self.state.results.as_ref().filter(|r| r.id == id) else { return Effect::default() };
                 let (Some(hit), Some(path)) = (r.hits.get(index).cloned(), r.target(index)) else { return Effect::default() };
+                let captured = r.captured.get(&path).cloned();
+                let captured_changed = captured.as_ref().is_some_and(|source| !Self::captured_result_current(&self.state, source, &path));
                 let result = result.and_then(|(stamp, doc)| {
+                    if captured_changed { return Err("the captured draft changed".into()); }
                     let changed = self.state.sources.buffers.iter().filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
                         let captured = buffer == Some(id);
                         let target = captured || source.source() == path || self.state.tabs.iter().any(|tab| tab.buffer == Some(id) && (tab.source == path || tab.canonical.as_ref() == Some(&path)));
@@ -5212,7 +5238,7 @@ impl Session {
                     // Opening is committed: the main area moved, the results stay for the next one.
                     Ok((stamp, doc)) => self.open_at(path, &hit, stamp, doc),
                     Err(e) => {
-                        r.stale.insert(hit.path.clone());
+                        if let Some(r) = self.state.results.as_mut().filter(|r| r.id == id) { r.stale.insert(hit.path.clone()); }
                         self.state.messages.retain(|m| !m.starts_with("This result"));
                         self.state.messages.push(format!("This result no longer matches ({e}); rerun the search to update it"));
                         Effect { repaint: true, copy: None }
@@ -5896,7 +5922,7 @@ impl Session {
         self.search_seq += 1;
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
-        let (latest, tx) = (self.search_latest.clone(), self.tx.clone());
+        let latest = self.search_latest.clone();
         let options = self.find_options;
         let query = lenz_content::find::Query { text, options };
         let base = |s: &Self, scope, root, files, partial| Results { options, ..s.new_results(id, ResultsKind::Text, query.text.clone(), scope, root, files, partial) };
@@ -5907,23 +5933,10 @@ impl Session {
                 let partial = !matches!(p.coverage(), project::Coverage::Complete(_));
                 let root = p.root().to_owned();
                 let generation = p.generation();
-                let mut results = base(self, Scope::Project, Some((root.clone(), generation)), paths.len(), partial);
-                results.pattern = pattern.clone();
-                self.state.results = Some(results);
-                self.jobs.submit(Priority::Visible, move || {
-                    // Picked and put in folder order off the UI thread: the results' tree follows that order.
-                    let paths = match search::select_files(paths, &pattern) {
-                        Ok(paths) => paths,
-                        Err(e) => {
-                            let _ = tx.send_blocking(Completion::Found { id, found: search::Found { done: true, error: Some(e), files: Some(0), ..Default::default() } });
-                            return;
-                        }
-                    };
-                    if !tx.send_blocking(Completion::Found { id, found: search::Found { files: Some(paths.len()), ..Default::default() } }).is_ok() {
-                        return;
-                    }
-                    search::search_files(&root, &paths, &query, id, &latest, &mut |found| tx.send_blocking(Completion::Found { id, found }).is_ok());
-                });
+                let mut results = base(self, Scope::Project, Some((root, generation)), paths.len(), partial);
+                results.pattern = pattern;
+                self.start_project_search(results, paths);
+
             }
             Scope::File(source) => {
                 // The document as the reader holds it (a tab's snapshot, even if its file is gone), else as on disk.
@@ -5932,6 +5945,7 @@ impl Session {
                 self.state.results = Some(base(self, Scope::File(source.clone()), None, 1, false));
                 let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Search, id, id, None, held.as_deref());
                 if let Some(snapshot) = held {
+                    if let Some(results) = self.state.results.as_mut() { results.captured.insert(source.clone(), snapshot.clone()); }
                     let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
                     let project = fence.project;
                     if self.analysis.request_result_document(fence.clone(), Priority::Visible, || {
@@ -5968,6 +5982,7 @@ impl Session {
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
         self.state.results = Some(self.new_results(id, ResultsKind::Outline, String::new(), Scope::File(doc.source().to_owned()), None, 1, false));
+        if let Some(results) = self.state.results.as_mut() { results.captured.insert(doc.source().to_path_buf(), doc.clone()); }
         let latest = self.search_latest.clone();
         let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
         let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Outline, id, id, None, Some(&doc));
@@ -6006,24 +6021,8 @@ impl Session {
         let scanning = !matches!(p.coverage(), project::Coverage::Complete(_));
         let mut results = self.new_results(id, ResultsKind::Declarations, query.clone(), Scope::Project, Some((root, generation)), coverage.indexed, scanning);
         results.coverage = Some(coverage);
-        self.state.results = Some(results);
-        let (files, latest, tx) = (self.state.index.snapshot(), self.search_latest.clone(), self.tx.clone());
-        self.jobs.submit(Priority::Visible, move || {
-            let found = match index::rank(&files, &query, || latest.load(Ordering::Relaxed) == id) {
-                Some((hits, matched)) => search::Found {
-                    hits: hits
-                        .into_iter()
-                        .map(|(path, i)| search::Hit::declaration(path, i.line as usize, i.line_start as usize, &i.decl))
-                        .collect(),
-                    searched: files.len(),
-                    done: true,
-                    limited: matched > index::DECL_LIMIT,
-                    ..Default::default()
-                },
-                None => return,
-            };
-            let _ = tx.send_blocking(Completion::Found { id, found });
-        });
+        let paths = p.paths();
+        self.start_project_search(results, paths);
         Effect { repaint: true, copy: None }
     }
 
@@ -6060,6 +6059,8 @@ impl Session {
             spans: Default::default(),
             spans_asked: Default::default(),
             matched_files: 0,
+            captured: Default::default(),
+            disk_sources: Default::default(),
         }
     }
 
@@ -6070,11 +6071,15 @@ impl Session {
         let Some(path) = r.target(i) else { return Effect::default() };
         r.selected = Some(i);
         let id = r.id;
+        let captured = r.captured.get(&path).cloned();
+        let disk_source = r.hits.get(i).and_then(|hit| r.disk_sources.get(&hit.path)).cloned();
         let stale = r.is_stale(i);
-        // The same file as the current preview: reuse its snapshot and colours (no read per arrow press) unless it
-        // changed; else a tab's, with its colours, or the cache's.
-        let current = r.preview.as_ref().filter(|p| !stale && p.doc.source() == path).map(|p| (p.doc.clone(), p.highlights.clone()));
-        let held = self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned()).or_else(|| (!stale).then(|| self.cache.peek(&path)).flatten());
+        let current = r.preview.as_ref().filter(|p| match &captured {
+            Some(source) => p.doc.version() == source.key().version && Arc::ptr_eq(p.doc.source_meta(), source.source_meta()),
+            None => !stale && p.doc.source() == path,
+        }).map(|p| (p.doc.clone(), p.highlights.clone()));
+        let held = captured.or_else(|| disk_source.is_none().then(|| self.state.tabs.iter().find(|t| t.source == path)
+            .and_then(|t| self.state.source(t.id).cloned()).or_else(|| (!stale).then(|| self.cache.peek(&path)).flatten())).flatten());
         let shared = current;
         let preview = self.preview_latest.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(r) = self.state.results.as_mut() else { return Effect::default() };
@@ -6104,7 +6109,10 @@ impl Session {
                     let doc = match read(&path) {
                         Ok((stamp, bytes)) => {
                             let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                            Ok((stamp, Arc::new(Document::decode(path, version, &bytes))))
+                            let doc = Arc::new(Document::decode(path, version, &bytes));
+                            if disk_source.as_ref().is_some_and(|source| source.stamp != stamp || source.digest != search::decoded_digest(doc.text().as_bytes())) {
+                                Err("the search source changed; rerun the search".into())
+                            } else { Ok((stamp, doc)) }
                         }
                         Err(ReadError::Unstable) => Err("it is changing on disk".to_string()),
                         Err(ReadError::Failed(e)) => Err(e),
@@ -6124,9 +6132,14 @@ impl Session {
         let query = lenz_content::find::Query { text: r.query.clone(), options: r.options };
         // A file search is checked against the document the reader holds (its file may be gone); a project search
         // against the file as it is now.
-        let held = file_scope.then(|| self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned())).flatten();
+        let captured = r.captured.get(&path).cloned();
+        let disk_source = r.disk_sources.get(&hit.path).cloned();
+        let held = captured.clone().or_else(|| file_scope.then(|| self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned())).flatten());
         self.open_seq += 1;
         let (open, versions) = (self.open_seq, self.versions.clone());
+        if captured.as_ref().is_some_and(|source| !Self::captured_result_current(&self.state, source, &path)) {
+            return self.complete_source(Completion::Validated { id, open, index: i, result: Err("the captured draft changed".into()) }, None);
+        }
         let fence = self.local_result_fence(crate::analysis::ResultSlot::Validate, crate::analysis::ResultStage::Validate, open, id, Some(i), held.as_deref());
         if let Some(snapshot) = held {
             let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
@@ -6147,6 +6160,9 @@ impl Session {
                     Err(ReadError::Failed(e)) => Err(e),
             };
             let result = checked.and_then(|(stamp, doc)| {
+                if disk_source.as_ref().is_some_and(|source| stamp != Some(source.stamp) || source.digest != search::decoded_digest(doc.text().as_bytes())) {
+                    return Err("the search source changed".into());
+                }
                 let line = (hit.line < doc.line_count()).then(|| doc.line(hit.line));
                 match line {
                     Some(line) if search::still_matches(&hit, kind, &query, line) => Ok((stamp, doc)),
