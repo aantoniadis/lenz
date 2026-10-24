@@ -369,6 +369,16 @@ impl SourceGeometry {
 pub fn open_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool) -> Config>, path: Option<PathBuf>) -> Result<(), String> {
     open_reader_window(cx,make_config,path).map(|_|())
 }
+/// Native acceptance tools use the installed production constructor; opening does not opt into editing.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn open_acceptance_window_for_test(
+    cx: &mut App,
+    make_config: std::rc::Rc<dyn Fn(bool) -> Config>,
+    path: Option<PathBuf>,
+) -> Result<gpui::WindowHandle<ReaderView>, String> {
+    open_reader_window(cx, make_config, path)
+}
 fn open_reader_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool)->Config>,path:Option<PathBuf>)->Result<gpui::WindowHandle<ReaderView>,String> {
     let options = WindowOptions {
         app_id: Some("lenz-reader".into()),

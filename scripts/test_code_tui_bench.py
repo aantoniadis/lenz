@@ -39,6 +39,19 @@ class CollectorTests(unittest.TestCase):
                 result = bench.identity(Path(sys.executable))
             self.assertEqual(len(result['source_sha256']), 64)
 
+    def test_isolated_environment_preserves_home(self):
+        with patch.dict(bench.os.environ, {'HOME': '/owned-user-home'}):
+            env = bench.isolated_environment(Path('/private-fixture'))
+            self.assertNotIn('HOME', env)
+            self.assertEqual(dict(bench.os.environ, **env)['HOME'], '/owned-user-home')
+            self.assertEqual(env['XDG_CONFIG_HOME'], '/private-fixture/config')
+
+    def test_palette_is_dismissed_before_reader_quit(self):
+        from unittest.mock import Mock, call
+        probe = Mock()
+        bench.finish_from_palette(probe)
+        self.assertEqual(probe.mock_calls, [call.send(b'\x1b'), call.quiet(), call.finish()])
+
     def probe(self, mode='ok'):
         p = bench.TerminalProbe([sys.executable, '-c', CHILD, mode], Path(tempfile.gettempdir()))
         self.addCleanup(p.close)
