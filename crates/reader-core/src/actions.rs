@@ -63,6 +63,7 @@ pub enum InterfaceAction {
     ServerDetails,
     ServerRuntime,
     StatusDetails,
+    EditingPreferences,
 }
 
 impl Session {
@@ -109,6 +110,7 @@ impl Session {
         let state = self.state();
         let command = match id {
             CommandId::StatusDetails => return CatalogAction::Interface(InterfaceAction::StatusDetails),
+            CommandId::EditingPreferences => return CatalogAction::Interface(InterfaceAction::EditingPreferences),
             CommandId::SearchEverywhere => return CatalogAction::Interface(InterfaceAction::SearchEverywhere),
             CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
             CommandId::FindSymbol => return CatalogAction::Interface(InterfaceAction::FindSymbol),
@@ -237,6 +239,11 @@ impl Session {
             CommandId::RestartServer => Command::RestartServer,
             CommandId::ExcludeRubyTooling => Command::SetRubyToolingExclusions(!state.setting(id).unwrap_or(false)),
             CommandId::PersistentIndex => Command::SetPersistentIndex(!state.setting(id).unwrap_or(false)),
+            CommandId::IndentTabs => Command::SetProjectIndent(Some(crate::preferences::Indent::Tabs)),
+            CommandId::IndentTwoSpaces => Command::SetProjectIndent(Some(crate::preferences::Indent::Spaces(2))),
+            CommandId::IndentFourSpaces => Command::SetProjectIndent(Some(crate::preferences::Indent::Spaces(4))),
+            CommandId::IndentInherit => Command::SetProjectIndent(None),
+            CommandId::FormatOnSave => Command::SetFormatOnSave(!state.setting(id).unwrap_or(false)),
             CommandId::RebuildIndex => Command::RebuildIndex,
             CommandId::ResetProjectServerSettings => Command::ResetProjectServerSettings,
             CommandId::DisableServer => Command::SetServerEnabled(false),
@@ -327,7 +334,8 @@ impl CommandId {
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
-            Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
+            Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection
+            | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
