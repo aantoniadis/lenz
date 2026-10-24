@@ -189,6 +189,36 @@ mod tests {
     }
 
     #[test]
+    fn a_temporary_visible_reservation_restores_all_background_workers_even_after_a_panic() {
+        use std::{sync::mpsc, time::Duration};
+        let jobs = Jobs::new();
+        let (entered, started) = mpsc::channel();
+        let gates = |jobs: &Jobs| (0..MAX_JOBS).map(|_| {
+            let (release, wait) = mpsc::channel(); let entered = entered.clone();
+            jobs.submit(Priority::Background, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); });
+            release
+        }).collect::<Vec<_>>();
+        let before = gates(&jobs);
+        for _ in &before { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        for gate in before { gate.send(()).unwrap(); }
+        let reservation = jobs.reserve_visible();
+        let during = gates(&jobs);
+        for _ in 0..MAX_JOBS - 1 { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        assert!(started.recv_timeout(Duration::from_millis(30)).is_err(), "background work must leave capacity for the next visible stage");
+        jobs.submit(Priority::Visible, || panic!("visible stage failed"));
+        let (sent, received) = mpsc::channel();
+        jobs.submit(Priority::Visible, move || sent.send(()).unwrap());
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(started.try_recv().is_err(), "panic cleanup must keep the live reservation");
+        drop(reservation);
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        for gate in during { gate.send(()).unwrap(); }
+        let after = gates(&jobs);
+        for _ in &after { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        for gate in after { gate.send(()).unwrap(); }
+    }
+
+    #[test]
     fn a_panicking_job_keeps_its_worker() {
         let jobs = Jobs::new();
         let (tx, rx) = std::sync::mpsc::channel();

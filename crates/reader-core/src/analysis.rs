@@ -453,3 +453,94 @@ impl Analysis {
             || self.visible_result_dependency_waiting(project) || self.visible_write_dependency_waiting(project)
     }
 }
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+    use std::{sync::mpsc, time::Duration};
+
+    #[test]
+    fn visible_result_and_write_dependencies_keep_capacity_until_their_consumers_are_submitted() {
+        for writing in [false, true] {
+            let jobs = Jobs::new(); let (tx, rx) = async_channel::bounded(64); let project = Arc::new(AtomicU64::new(0));
+            let (entered, started) = mpsc::channel();
+            let gates: Vec<_> = (0..MAX_JOBS).map(|_| {
+                let (release, wait) = mpsc::channel(); let entered = entered.clone();
+                jobs.submit(Priority::Visible, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+            }).collect();
+            for _ in &gates { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+            let background: Vec<_> = (0..MAX_JOBS).map(|_| { let (release, wait) = mpsc::channel(); jobs.submit(Priority::Background, move || { let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+            let mut analysis = Analysis::default();
+            let snapshot = Arc::new(TextSnapshot::from_document(BufferId(1), &Document::decode("captured.txt".into(), 1, b"captured\n")));
+            let input = Input::new(snapshot, Weak::new(), 0, false);
+            if writing {
+                assert!(analysis.request_write(BufferId(1), 1, 0, || (Some(input), |doc: Option<Arc<Document>>| {
+                    assert_eq!(&**doc.unwrap().text(), "captured\n"); crate::save::Outcome::Rejected("observed captured source".into())
+                })));
+            } else {
+                analysis.request_result_document(ResultFence { slot: ResultSlot::Search, project: 0, request: 1, stage: ResultStage::Search, result_set: Some(1), node: None, source: None }, Priority::Visible, || (input, |doc, lease| {
+                    assert_eq!(&**doc.text(), "captured\n"); lease.send(Completion::AnalysisWake);
+                })).unwrap();
+            }
+            analysis.pump(&jobs, &tx, &project); gates[0].send(()).unwrap();
+            let until = std::time::Instant::now() + Duration::from_secs(2);
+            loop {
+                analysis.pump(&jobs, &tx, &project);
+                if writing {
+                    if let Some((buffer, request, crate::save::Outcome::Rejected(why))) = analysis.take_write_outcomes().pop() {
+                        assert_eq!((buffer, request, why.as_str()), (BufferId(1), 1, "observed captured source")); break;
+                    }
+                } else if let Ok(Completion::Analyzed { ticket, .. }) = rx.try_recv() {
+                    assert!(analysis.acknowledge_result(ticket.result().unwrap())); break;
+                }
+                assert!(std::time::Instant::now() < until, "background work occupied the conversion-to-consumer gap; writing={writing}");
+                std::thread::yield_now();
+            }
+            for gate in gates.into_iter().skip(1).chain(background) { gate.send(()).unwrap(); }
+        }
+    }
+
+    #[test]
+    fn cancelled_replaced_closed_and_dropped_dependency_demand_restores_background_capacity() {
+        for mode in 0..7 {
+            let jobs = Jobs::new(); let (tx, _rx) = async_channel::bounded(64);
+            let project = Arc::new(AtomicU64::new(0));
+            let (entered, started) = mpsc::channel();
+            let gates: Vec<_> = (0..MAX_JOBS).map(|_| {
+                let (release, wait) = mpsc::channel(); let entered = entered.clone();
+                jobs.submit(Priority::Visible, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+            }).collect();
+            for _ in &gates { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+            let snapshot = Arc::new(TextSnapshot::from_document(BufferId(1), &Document::decode("draft.txt".into(), 1, b"draft\n")));
+            let mut analysis = Some(Analysis::default()); let a = analysis.as_mut().unwrap();
+            let input = || Input::new(snapshot.clone(), Weak::new(), 0, false);
+            if mode == 5 {
+                a.request_result_document(ResultFence { slot: ResultSlot::Search, project: 0, request: 1, stage: ResultStage::Search, result_set: Some(1), node: None, source: None }, Priority::Visible, || (input(), |_, _| {})).unwrap();
+            } else if mode == 6 {
+                a.request_write(BufferId(1), 1, 0, || (Some(input()), |_| crate::save::Outcome::Rejected("not written".into())));
+            } else { a.request(input(), Consumer::Find(TabId(1)), 1, Priority::Visible, |_, _| {}); }
+            a.pump(&jobs, &tx, &project);
+            match mode {
+                0 => a.cancel_consumer(BufferId(1), Consumer::Find(TabId(1))),
+                1 => {
+                    let newer = Arc::new(snapshot.apply_edits(2, &[crate::text::TextEdit { range: 0..0, text: "new ".into() }]).unwrap());
+                    a.request(Input::new(newer, Weak::new(), 0, false), Consumer::Syntax, 2, Priority::Background, |_, _| {});
+                }
+                2 => { project.store(1, Ordering::Release); }
+                3 | 6 => a.close(),
+                4 => { analysis = None; }
+                5 => a.invalidate_results(|_| false),
+                _ => unreachable!(),
+            }
+            if let Some(a) = &mut analysis { a.pump(&jobs, &tx, &project); }
+            let (entered, started) = mpsc::channel();
+            let background: Vec<_> = (0..MAX_JOBS).map(|_| {
+                let (release, wait) = mpsc::channel(); let entered = entered.clone();
+                jobs.submit(Priority::Background, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+            }).collect();
+            for gate in gates { gate.send(()).unwrap(); }
+            for _ in &background { started.recv_timeout(Duration::from_secs(2)).unwrap_or_else(|e| panic!("mode {mode} retained obsolete capacity: {e}")); }
+            for gate in background { gate.send(()).unwrap(); }
+        }
+    }
+}

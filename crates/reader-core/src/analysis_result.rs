@@ -242,6 +242,41 @@ mod tests {
     }
 
     #[test]
+    fn a_visible_replacement_waiting_for_its_background_predecessor_does_not_reserve_capacity() {
+        let mut analysis = Analysis::default(); let jobs = Jobs::new(); let (tx, rx) = async_channel::bounded(64);
+        let project = Arc::new(AtomicU64::new(0)); let (entered, started) = mpsc::channel();
+        let gates: Vec<_> = (0..MAX_JOBS).map(|_| {
+            let (release, wait) = mpsc::channel(); let entered = entered.clone();
+            jobs.submit(Priority::Visible, move || { entered.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+        }).collect();
+        for _ in &gates { started.recv_timeout(Duration::from_secs(2)).unwrap(); }
+        // Two earlier background jobs must be allowed to run beside the cancelled predecessor.
+        let background: Vec<_> = (0..2).map(|_| { let (release, wait) = mpsc::channel(); jobs.submit(Priority::Background, move || { let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+        analysis.request_result(fence(1, 1), Priority::Background, || |_| panic!("the replaced predecessor must be cancelled")).unwrap();
+        analysis.pump(&jobs, &tx, &project);
+        let snapshot = Arc::new(TextSnapshot::from_document(BufferId(9), &Document::decode("target.txt".into(), 1, b"captured target\n")));
+        analysis.request_result_document(fence(1, 2), Priority::Visible, || (Input::new(snapshot.clone(), Weak::new(), 0, false), |doc, lease| {
+            assert_eq!(&**doc.text(), "captured target\n"); lease.send(Completion::AnalysisWake);
+        })).unwrap();
+        // A separate cold visible dependency acquires the reservation, then is cancelled.
+        analysis.request(Input::new(snapshot, Weak::new(), 0, false), Consumer::Find(TabId(1)), 1, Priority::Visible, |_, _| {});
+        analysis.pump(&jobs, &tx, &project);
+        analysis.cancel_consumer(BufferId(9), Consumer::Find(TabId(1)));
+        analysis.pump(&jobs, &tx, &project);
+        for gate in gates { gate.send(()).unwrap(); }
+        let until = Instant::now() + Duration::from_secs(2);
+        let ticket = loop {
+            analysis.pump(&jobs, &tx, &project);
+            if let Ok(Completion::Analyzed { ticket, .. }) = rx.try_recv() { break ticket; }
+            assert!(Instant::now() < until, "a stale reservation blocked the background predecessor");
+            std::thread::yield_now();
+        };
+        assert_eq!(ticket.result().unwrap().fence.request, 2);
+        assert!(analysis.acknowledge_result(ticket.result().unwrap()));
+        for gate in background { gate.send(()).unwrap(); }
+    }
+
+    #[test]
     fn saturated_result_admission_does_not_build_payloads() {
         let mut analysis = Analysis::default();
         for server in 0..BUFFERS as u64 { analysis.request_result(fence(server, 1), Priority::Visible, || |_| {}).unwrap(); }
