@@ -27,6 +27,9 @@ fn fixture_with(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, server: &P
 /// A window whose providers `(id, executable, PATH, settings JSON)` are these; every other provider is pointed
 /// nowhere.
 fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, servers: &[(&str, &Path, Option<&str>, Option<&str>)]) -> Fixture {
+    fixture_setup(cx,file,servers,false)
+}
+fn fixture_setup(cx: &mut TestAppContext,file:Option<(&str,&[u8])>,servers:&[(&str,&Path,Option<&str>,Option<&str>)],production:bool)->Fixture {
     let dir = tempfile::tempdir().unwrap();
     let path = file.map(|(name, bytes)| {
         let p = dir.path().join(name);
@@ -78,8 +81,13 @@ fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, serve
         overrides: Default::default(),
         dark,
     });
-    let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make));
-    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let (view,window)=if production {
+        let window=cx.update(|cx|open_reader_window(cx,make,path)).unwrap();
+        let view=window.root(cx).unwrap();(view,window)
+    } else {
+        let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make));
+        let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();(view,window)
+    };
     Fixture { dir, view, window }
 }
 
@@ -121,6 +129,90 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    use reader_core::save::{DiskMatch,Status};
+    for changed in [false,true] {
+        let f=fixture_setup(cx,Some(("close.txt",b"saved")),&[],true);let path=f.dir.path().join("close.txt");settle(cx,&f,|v|v.session.state().current_source().is_some());let mut v=visual(cx,&f);draw(&mut v);f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v");let tab=f.view.read_with(&v,|v,_|v.session.state().active().unwrap().id());let guard=at_path(&path,Fault::AfterReplace);v.simulate_keystrokes("ctrl-s");settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Uncertain(_)));
+        v.simulate_keystrokes("ctrl-f4 d");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.discard_disabled.is_some())));v.simulate_keystrokes("escape");drop(guard);
+        if changed {std::fs::write(&path,b"external content").unwrap();}let disk=std::fs::read(&path).unwrap();
+        v.simulate_keystrokes("f10");let row=f.view.read_with(&v,|v,_|v.modal_rows().iter().position(|r|r.0==CommandId::RecheckSave.label()).unwrap());for _ in 0..row {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
+        settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(f.view.read_with(&v,|v,_|v.session.state().view(tab).unwrap().save_status().clone()),Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(f.view.read_with(&v,|v,_|v.session.state().tab_dirty(tab)));
+        v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_none())));draw(&mut v);v.simulate_keystrokes("d");assert!(f.view.read_with(&v,|v,_|v.session.state().active().is_none() && v.modal.is_none()));assert_eq!(std::fs::read(path).unwrap(),disk);
+        v.simulate_keystrokes("ctrl-q");cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn production_empty_close_and_dirty_tab_decisions_remain_modal_safe_at_tiny_sizes(cx:&mut TestAppContext) {
+    let empty=fixture_setup(cx,None,&[],true);let mut e=visual(cx,&empty);e.simulate_keystrokes("ctrl-z f5 f10 end up");
+    for (w,h) in [(1.0,1.0),(120.0,40.0)] {e.simulate_resize(size(px(w),px(h)));draw(&mut e);}
+    e.simulate_keystrokes("ctrl-q");assert!(empty.view.read_with(cx,|v,_|v.modal.is_some()));e.simulate_keystrokes("escape");
+    assert!(!empty.view.update(cx,|v,cx|v.window_should_close(cx)));cx.run_until_parked();assert!(cx.update(|cx|cx.windows().is_empty()));
+    let f=fixture_setup(cx,Some(("dirty.txt",b"saved")),&[],true);settle(cx,&f,|v|v.session.state().current_source().is_some());let mut v=visual(cx,&f);draw(&mut v);
+    f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v ctrl-\\ f10");
+    let unsplit=f.view.read_with(&v,|view,_|view.modal_rows().iter().position(|row|row.0==CommandId::Unsplit.label()).unwrap());
+    for _ in 0..unsplit {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v,|view,_|view.session.state().split().is_none() && view.session.state().tabs().len()==1 && view.session.state().tab_dirty(view.session.state().active().unwrap().id())));
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(cx,|v,_|v.session.close_prompt().is_some()));
+    for (w,h) in [(1.0,1.0),(120.0,40.0)] {v.simulate_resize(size(px(w),px(h)));v.simulate_keystrokes("end up");draw(&mut v);}
+    v.simulate_keystrokes("ctrl-s ctrl-q escape");assert!(f.view.read_with(cx,|v,_|v.modal.is_none() && v.session.state().active().is_some()));
+    assert_eq!(std::fs::read(f.dir.path().join("dirty.txt")).unwrap(),b"saved");v.simulate_keystrokes("ctrl-f4 d");
+    assert!(f.view.read_with(cx,|v,_|v.session.state().active().is_none()));assert_eq!(std::fs::read(f.dir.path().join("dirty.txt")).unwrap(),b"saved");
+}
+
+#[gpui::test]
+fn production_quit_all_prepares_both_windows_before_discard_or_explicit_save(cx:&mut TestAppContext) {
+    for first in ["d","s"] {
+        let a=fixture_setup(cx,Some(("a.txt",b"saved\r\n")),&[],true);
+        let b=fixture_setup(cx,Some(("b.txt",b"saved\r\n")),&[],true);
+        for f in [&a,&b] {
+            settle(cx,f,|v|v.session.state().current_source().is_some());
+            let mut visual=visual(cx,f);draw(&mut visual);
+            f.view.update(&mut visual,|v,_|v.enable_draft_input_for_test());
+            visual.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));visual.simulate_keystrokes("ctrl-a ctrl-v");
+            draw(&mut visual);
+        }
+        let positions:Vec<_>=[&a,&b].into_iter().map(|f|f.view.read_with(cx,|v,_|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line()))).collect();
+        let mut av=visual(cx,&a);av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();
+        assert_eq!(cx.update(|cx|cx.windows().len()),2);
+        assert!(a.view.read_with(cx,|v,_|v.modal_rows().iter().any(|r|r.0.contains("Unsaved changes") || r.0.contains("Choose Save"))));
+        av.simulate_keystrokes("ctrl-shift-q ctrl-s");av.write_to_clipboard(ClipboardItem::new_string("ignored".into()));av.simulate_keystrokes("ctrl-v");
+        assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),b"saved\r\n");
+        av.simulate_keystrokes(first);cx.run_until_parked();
+        settle(cx,&b,|v|matches!(v.modal,Some(Modal::StatusDetails {kind:Details::Close,..})));
+        assert_eq!(cx.update(|cx|cx.windows().len()),2,"early consent cannot remove its window");
+        let mut bv=visual(cx,&b);bv.simulate_keystrokes("end up escape");cx.run_until_parked();
+        for (i,f) in [&a,&b].into_iter().enumerate() {
+            assert_eq!(f.view.read_with(cx,|v,_|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line())),positions[i]);
+            assert_eq!(f.view.read_with(cx,|v,_| {let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).unwrap()}),"draft λ\r\n");
+            assert!(f.view.read_with(cx,|v,_|v.modal.is_none() && !v.session.closed()));
+        }
+        assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),if first=="s" {"draft λ\r\n".as_bytes()} else {b"saved\r\n"});
+        assert_eq!(std::fs::read(b.dir.path().join("b.txt")).unwrap(),b"saved\r\n");
+        if first=="d" {
+            // A prepared clean window remains editable while the other window asks. New work cancels the batch.
+            bv.simulate_keystrokes("ctrl-z");assert!(b.view.read_with(cx,|v,_|!v.session.state().tab_dirty(v.session.state().active().unwrap().id())));
+            av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();assert!(b.view.read_with(cx,|v,_|v.modal.is_none()));
+            bv.write_to_clipboard(ClipboardItem::new_string("new work in prepared window".into()));bv.simulate_keystrokes("ctrl-a ctrl-v");cx.run_until_parked();
+            assert_eq!(cx.update(|cx|cx.windows().len()),2);assert!(a.view.read_with(cx,|v,_|v.modal.is_none() && !v.session.closed()));
+            assert_eq!(b.view.read_with(cx,|v,_|{let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).unwrap()}),"new work in prepared window");
+            assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),b"saved\r\n");assert_eq!(std::fs::read(b.dir.path().join("b.txt")).unwrap(),b"saved\r\n");
+        }
+        // Call the exact callback installed by production setup: it vetoes before asynchronous preparation.
+        assert!(!b.view.update(cx,|v,cx|v.window_should_close(cx)));cx.run_until_parked();
+        assert_eq!(cx.update(|cx|cx.windows().len()),2);
+        bv.simulate_keystrokes("escape");cx.run_until_parked();
+        // Authorize the final batch; effects occur only after both shared commits.
+        av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();
+        if a.view.read_with(cx,|v,_|v.session.close_prompt().is_some()) {av.simulate_keystrokes("d");cx.run_until_parked();}
+        bv.simulate_keystrokes("d");cx.run_until_parked();
+        assert!(cx.update(|cx|cx.windows().is_empty()));
+    }
+}
+
+#[gpui::test]
 fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx: &mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path, Fault};
     use reader_core::save::{Status, DiskMatch};
@@ -141,6 +233,11 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx
         v.simulate_keystrokes("shift-f2");
         assert!(f.view.read_with(&v, |view, _| view.modal.is_some()));
         v.simulate_keystrokes("ctrl-s escape"); assert_eq!(std::fs::read(&path).unwrap(), disk);
+        if fault==Fault::AfterReplace {
+            let before=f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key());v.simulate_keystrokes("ctrl-f4 d s");
+            assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_some())));
+            assert_eq!(f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key()),before);v.simulate_keystrokes("escape");
+        }
         drop(guard);
         f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::RecheckSave, window, cx));
         settle(cx, &f, |view| matches!(view.session().state().view(tab).unwrap().save_status(), Status::Checked(_)));
@@ -148,9 +245,13 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx
         assert_eq!(f.view.read_with(&v, |view, _| view.session().state().view(tab).unwrap().save_status().clone()), Status::Checked(expected));
         assert!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)));
         v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+        if fault==Fault::AfterReplace {
+            v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.discard_disabled.is_none())));v.simulate_keystrokes("escape");
+        }
         f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::ConfirmRecheckedSave, window, cx));
         assert_eq!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)), fault != Fault::AfterReplace);
         assert_eq!(std::fs::read(path).unwrap(), disk);
+        if fault==Fault::AfterReplace {v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|view,_|view.session.state().active().is_none()));}
     }
 }
 

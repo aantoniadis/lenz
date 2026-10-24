@@ -359,9 +359,17 @@ raw samples, fixture details, reproduction and limits.
 
 The bounded-source GUI migration measured **142.45→142.39 ms** startup in eight
 alternating release pairs, **172.50→172.03 MiB** settled RSS for ten kept tabs, and
-matching 15-second wrapped/unwrapped scroll intervals. These use a separate generated
+matching 15-second wrapped/unwrapped repaint intervals. These use a separate generated
 fixture and owned software display; see the [migration measurements](docs/research/reader-snapshot-gui.md)
 for endpoints and limits, and the [completed batch checks](docs/research/reader-snapshot-batch-08-10.md).
+
+The 11–18 editor batch measured core first-text increases of **35 µs / 405 µs** for 50 KB / 945 KB,
+TUI first content **7.90→12.07 ms**, and about **20% fewer mixed-stress iterations**. TUI post-workflow
+RSS reached **46.42 MiB versus 37.73 MiB**, with a lower candidate band also observed. These new costs
+await an explicit performance decision. GUI startup/cadence remain similar in these software-display samples;
+actual scrolling is now checked with changing source crops. See the
+[batch performance report](docs/research/reader-editor-batch-11-18-performance.md) for all distributions,
+RSS/ownership limits, the retained baseline failure and new Save/history measurements.
 
 The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
 (seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a

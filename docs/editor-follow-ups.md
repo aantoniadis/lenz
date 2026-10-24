@@ -86,3 +86,33 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   currently rank up to 32 adjacent saved-file record sets per turn. Use the
   scheduled batch comparison on a many-file index before changing that batch
   size; preserve independent query cancellation and completed-action timing.
+- **Intermittent GUI declaration tracer timeout:** the final batch GUI run at
+  `bb2f55f4` timed out once in `outline_and_declaration_search_through_keys`.
+  The unchanged test then passed in isolation, in 25 consecutive isolated
+  reproductions, and in a complete GUI confirmation run. No cause or runtime fix
+  is claimed. Add stage-specific failure diagnostics or a controlled scheduler
+  reproduction if it recurs; preserve the keyboard, selection and activation
+  assertions. Original failure and all attempts are retained under
+  `target/perf/editor-implementation/merge-11-18/reader-gui-*.log`.
+- **Ticket14 native delivery acceptance:** production Reader windows install a
+  veto, and focused tests replay that exact handler plus real keyboard decisions.
+  GPUI TestPlatform has no native close-event simulator; replay one ordinary Linux
+  titlebar close via an owned display at the next adapter batch boundary with
+  disposable fixtures using the existing test-support draft gate. Native macOS
+  termination remains ticket03/24, unverified.
+
+
+## Reader batch performance attribution (2026-10-24)
+
+- Distinguish live admitted backing from anonymous allocator residency after large-file Find/reload. The 11–18
+  campaign retains candidate TUI 37.59/46.10–46.42MiB residency bands; phase samples put most of the upper-band
+  difference in anonymous memory. Current source admission invalidates old analysis scope, and no leak or
+  exclusive allocator cause has been proved. Do not average away the upper-band cost. Evidence and attribution
+  limits are in the [batch performance report](research/reader-editor-batch-11-18-performance.md).
+
+- Deferred optimization candidate, not implemented: unchanged snapshots created by `Chunk::shared` retain the
+  original full text/index Arcs behind their chunk ranges. Investigate sharing that backing during admitted
+  `materialize_while` conversion instead of String→Arc flattening when complete contiguous coverage is verified.
+  Large originals span several ranges; do not assume a single full-range chunk or apply this to arbitrary edited
+  snapshots. Preserve source/version fences, worker admission, cancellation and edited/chunked fallback behavior.
+  This may reduce conversion allocation; it is not a measured explanation or guaranteed remedy for the RSS bands.

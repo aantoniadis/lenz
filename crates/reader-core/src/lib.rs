@@ -7,6 +7,7 @@ pub mod actions;
 mod analysis;
 mod draft;
 pub mod save;
+pub mod close;
 pub mod blame;
 pub mod branches;
 pub mod cache;
