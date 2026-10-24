@@ -2,9 +2,9 @@
 
 Candidate `fce466ff805d490d4d0e411ed00e0c0f3c9c0c12` passes the phased local correctness gate,
 native default-input acceptance and the complete release measurement campaign. Its runtime is
-`2ca23dd`; the final commit changes only a parity-test capability fixture. **Measured costs await the
-user’s decision before activation is merged.** The comparison baseline `bb2f55f4` and its earlier
-11–18 costs were explicitly accepted on 2026-10-24. That approval does not cover this batch.
+`2ca23dd`; the final commit changes only a parity-test capability fixture. **The user explicitly accepted
+these measured costs on 2026-10-24 (“Accept, merge, pause”), and activation merged.** The comparison
+baseline `bb2f55f4` and its earlier 11–18 costs were accepted separately the same day.
 
 ## Delivered scope
 
@@ -133,8 +133,8 @@ paint and native display; the baseline has no equivalent composition feature.
 
 ## Decision and evidence
 
-**Pending explicit acceptance:** the repeated TUI startup RSS cost and consistent matched-window edit
-costs above. Small GUI RSS differences and editing RSS phase differences remain visible with their
+**Accepted by the user on 2026-10-24** (“Accept, merge, pause”): the repeated TUI startup RSS cost and
+consistent matched-window edit costs above. Small GUI RSS differences and editing RSS phase differences remain visible with their
 sampling limits. Passing a loose ceiling is not treated as baseline preservation. A decision accepting
 these measurements applies only to this cohort.
 
@@ -147,4 +147,4 @@ identity files. All campaign cases passed; none was rerun.
 Native macOS/Dock termination, Wayland GUI input, physical display latency, GPU memory, real language
 provider performance, native composition cancellation and longer soaks remain unverified. Native
 macOS editing stays disabled. Completion, the remaining editing/language features and the rest of the
-68-ticket specification remain separate work. After this WIP merges, work pauses at the user’s request.
+68-ticket specification remain separate work. With this WIP merged, work is paused at the user’s request.

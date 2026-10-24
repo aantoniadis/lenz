@@ -31,7 +31,7 @@ One `lenz` command opens both, each a separate executable:
 
 **Status:** beta (0.0.6). Diff is tested on Linux and macOS (Apple Silicon), with automated
 GUI interaction coverage on Linux. The Code Reader and the launcher are verified on Linux;
-native macOS validation is pending. The Reader never edits files (Git checkouts you choose aside), with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
+native macOS validation is pending. The Reader edits existing files on verified Linux input (X11 desktop and terminal); Wayland desktop and macOS editing stay disabled. It has desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
@@ -374,7 +374,7 @@ RSS/ownership limits, the retained baseline failure and new Save/history measure
 The 14–23 foundation candidate passes the phased local gate and native Linux input/close checks.
 Its paired runs preserve startup/navigation and core-stress throughput, while sustained editing completes
 **5.8% fewer cycles**, with **0.048–0.319 ms** higher matched-history edit medians and **0.676 MiB**
-more TUI startup RSS. These costs await an explicit decision before activation merges; see the
+more TUI startup RSS. These costs were explicitly accepted on 2026-10-24 and activation merged; see the
 [foundation batch report](docs/research/reader-editor-foundation-batch-14-23.md) for memory phases,
 retained-history proof, source identities and unverified targets.
 

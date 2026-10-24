@@ -1753,7 +1753,7 @@ One quiet campaign used prebuilt artifacts and identical fixtures. Startup/navig
 three-minute core-stress throughput remain similar. One 180-second growing-history edit workload per
 build, followed by complete independent Undo/Redo, passed: candidate cycles fell 5.8%, and every
 matched cycle window showed higher edit medians (+0.048–0.319 ms). Eight TUI launches show +0.676 MiB
-median startup RSS. These costs await explicit acceptance; no optimization is claimed.
+median startup RSS. The user explicitly accepted these costs on 2026-10-24 and activation merged; no optimization is claimed.
 
 Editing and GUI RSS changes are mixed and allocator/history dependent. Lower peak editing RSS and
 lower terminal post-workflow RSS do not establish an efficiency improvement. Candidate-only preedit
