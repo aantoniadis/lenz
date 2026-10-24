@@ -15,6 +15,8 @@ pub use presentation::PresentationSource;
 mod text_input;
 #[path = "session/close.rs"]
 mod close_work;
+#[path = "session/external.rs"]
+mod external_work;
 #[path = "session/transition.rs"]
 mod transition_work;
 
@@ -85,6 +87,8 @@ pub enum Command {
     /// A transient input-method display, validated against the captured authoritative source.
     PresentText { tab: TabId, base: PresentationSource, base_selection: Option<Selection>, edit: crate::text::TextEdit, selected: Selection },
     ClearPresentation,
+    BeginExternal(Box<crate::external::Request>),
+    ChooseExternal { ticket: u64, choice: crate::external::Choice },
     Cut,
     Paste(String),
     Delete { backward: bool },
@@ -773,10 +777,10 @@ impl CommandId {
             Self::CopyPathLine => "Copy Path:Line",
             Self::OpenInEditor => "Open in Editor",
             Self::OpenWithDefaultApp => "Open with Default App",
-            Self::CompareWith => "Compare With…",
+            Self::CompareWith => "Compare Saved Disk Inputs…",
             Self::CompareSaved => "Compare with Last Saved Version",
             Self::CloseSavedComparison => "Close Saved Comparison",
-            Self::CompareSelected => "Compare Selected",
+            Self::CompareSelected => "Compare Selected Saved Disk Inputs",
             Self::WorkspaceRoot => "Set Workspace Root…",
             Self::Usages => "Find Usages",
             Self::Symbols => "Find Symbol (language server)…",
@@ -1055,6 +1059,8 @@ pub struct Effect {
     pub repaint: bool,
     /// Text for the clipboard.
     pub copy: Option<String>,
+    /// One accounted disk-file handoff; adapters launch it once.
+    pub external: Option<lenz_content::open::Plan>,
 }
 
 /// The state adapters present.
@@ -1954,6 +1960,8 @@ pub struct Session {
     text_input_enabled: bool,
     comparison_seq: u64,
     id: crate::close::SessionId,
+    external_seq: u64,
+    external_pending: Option<external_work::Pending>,
     close_seq: u64,
     closing: Option<close_work::Pending>,
     closed: bool,
@@ -2127,7 +2135,7 @@ impl Session {
         Self {
             text_input_enabled: false,
             comparison_seq: 0,
-            id: crate::close::SessionId::allocate(), close_seq: 0, closing: None, closed: false, last_close: None,
+            id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
                 presentation: None,
                 comparison: None,
@@ -2720,7 +2728,7 @@ impl Session {
 
     /// Runs a checkout or a new branch (checked out) in `mode`; a refusal opens the dialog to run it again.
     fn retry(&mut self, retry: crate::branches::Retry, mode: lenz_content::branches::Mode) -> Effect {
-        let Some(root) = self.writable_repo() else { return Effect { repaint: true, copy: None } };
+        let Some(root) = self.writable_repo() else { return Effect { repaint: true, copy: None, ..Effect::default() } };
         let request = self.begin_checkout();
         let label = retry.label().to_string();
         self.state.messages.push(match &retry {
@@ -2733,7 +2741,7 @@ impl Session {
             let result = lenz_content::branches::attempt(&root, &retry, mode);
             let _ = tx.send_blocking(Completion::CheckedOut { request, root, label, made: false, result });
         });
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// After a checkout: every tab checked against the disk, the folder rescanned, annotations blamed again (the
@@ -2829,6 +2837,11 @@ impl Session {
     /// Open in Editor (`default_app` false: the user's editor at the caret, from the environment, else `configured`,
     /// the settings file's) or Open with Default App; the adapter spawns the launch and shows its toast.
     pub fn editor_plan(&self, host: &lenz_content::open::Host, configured: Option<&str>, default_app: bool) -> Result<lenz_content::open::Plan, &'static str> {
+        if self.state.active().is_some_and(|tab| self.state.tab_dirty(tab.id)) { return Err("Choose Save and Open or Open Saved Version first"); }
+        self.editor_plan_at(host, configured, default_app, false)
+    }
+
+    fn editor_plan_at(&self, host: &lenz_content::open::Host, configured: Option<&str>, default_app: bool, saved: bool) -> Result<lenz_content::open::Plan, &'static str> {
         let t = self.external_tab()?;
         let at = self.state.source(t.id).zip(t.selection).map(|(d, s)| {
             let line = d.line_of(s.head);
@@ -2838,8 +2851,8 @@ impl Session {
             file: &t.source,
             // Images and other files without text go to the system.
             binary: !t.loaded,
-            line: Some(at.map_or(1, |a| a.0)),
-            column: at.map(|a| a.1),
+            line: (!saved).then_some(at.map_or(1, |a| a.0)),
+            column: (!saved).then_some(at).flatten().map(|a| a.1),
             cwd: self.state.project.as_ref().map(|p| p.root()),
         };
         Ok(lenz_content::open::plan_with(host, &target, configured, default_app))
@@ -2982,6 +2995,9 @@ impl Session {
         self.layouts.pump(&self.jobs, &self.tx);
         self.projections.invalidate(|r| projection_current(&self.state, r));
         self.projections.pump(&self.jobs, &self.tx);
+        let external_pending = self.external_pending.is_some();
+        effect.external = self.advance_external();
+        effect.repaint |= external_pending && self.external_pending.is_none();
         effect
     }
 
@@ -3046,7 +3062,7 @@ impl Session {
             self.annotate(tab);
         }
         self.synced = 0;
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) {
@@ -3116,10 +3132,10 @@ impl Session {
                 || matches!(&command, Command::ActivateTab(id) if self.state.tabs.iter().any(|t| t.id == *id && t.comparison_side.is_none())))
         { self.close_saved_comparison(); }
 
-        let repaint = Effect { repaint: true, copy: None };
+        let repaint = Effect { repaint: true, copy: None, ..Effect::default() };
         match command {
             Command::PresentText { tab, base, base_selection, edit, selected } => self.present_text(tab, base, base_selection, edit, selected),
-            Command::ClearPresentation => Effect { repaint: self.state.presentation.take().is_some(), copy: None },
+            Command::ClearPresentation => Effect { repaint: self.state.presentation.take().is_some(), ..Effect::default() },
             Command::CompareSaved => self.compare_saved(),
             Command::ToggleMarkdownSource if self.state.comparison.is_some() => Effect::default(),
             Command::CloseSavedComparison => match self.state.comparison.as_ref() {
@@ -3138,7 +3154,7 @@ impl Session {
                 Effect::default()
             }
             Command::SetNativeContext { pane, context } => {
-                Effect { repaint: self.native.set_context(&self.state, pane, context), copy: None }
+                Effect { repaint: self.native.set_context(&self.state, pane, context), copy: None, ..Effect::default() }
             }
             Command::MeasuredReveal { goal, cols, bounds } => {
                 let Some(column) = self.native.measured(&self.state, &goal, cols, bounds) else { return Effect::default() };
@@ -3170,7 +3186,7 @@ impl Session {
             }
             Command::CloseSearchEverywhere => {
                 self.navigation_latest.fetch_add(1, Ordering::Relaxed);
-                Effect {repaint: self.state.navigation.take().is_some(), copy: None}
+                Effect {repaint: self.state.navigation.take().is_some(), copy: None, ..Effect::default() }
             }
             Command::ForgetNavigation { revision, index } => {
                 let Some(search) = self.state.navigation.as_ref().filter(|s| s.scope == crate::navigation::Scope::Recent && s.revision == revision) else { return Effect::default() };
@@ -3184,7 +3200,7 @@ impl Session {
                 let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else { return Effect::default() };
                 let focused = self.focus_pane(pane);
                 if self.state.active == Some(id) {
-                    return Effect { repaint: focused, copy: None };
+                    return Effect { repaint: focused, copy: None, ..Effect::default() };
                 }
                 self.open_seq += 1;
                 let from = self.here();
@@ -3260,6 +3276,8 @@ impl Session {
                 });
                 Effect::default()
             }
+            Command::BeginExternal(request) => self.begin_external(*request),
+            Command::ChooseExternal { ticket, choice } => self.choose_external(ticket, choice),
             Command::ChooseClose { ticket, buffer, choice } => self.choose_close(ticket, buffer, choice),
             Command::PrepareClose { batch, intent } => self.prepare_close(intent,Some(batch)),
             Command::CancelClose { ticket } => { if self.close_ticket()==ticket {self.cancel_close();} repaint }
@@ -3383,11 +3401,11 @@ impl Session {
                         t.column = 0;
                     }
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::RevealInTree(rel) => {
                 let changed = self.state.project.as_mut().is_some_and(|p| p.reveal(&rel) || p.reveal_folder(&rel));
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::SetStickyScroll(on) => {
                 self.state.settings.sticky_scroll = on;
@@ -3427,7 +3445,7 @@ impl Session {
                     // Wrapped rows change with the width: the top line stays, from its first row.
                     self.state.tabs.iter_mut().filter(|t| t.pane == pane).for_each(|t| t.set_top(t.top_line, 0));
                 }
-                let mut effect = Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None };
+                let mut effect = Effect { repaint: rewrap && self.state.settings.soft_wrap, copy: None, ..Effect::default() };
                 if changed {
                     self.native.regenerate(&self.state, pane);
                     if let Some(intent) = intent {
@@ -3465,7 +3483,7 @@ impl Session {
                         (Some(doc), Some((_, offset))) => self.ask_at(doc, offset, ask),
                         _ => {
                             self.state.messages.push(format!("{}: open the file it was asked in to ask again", ask.label()));
-                            Effect { repaint: true, copy: None }
+                            Effect { repaint: true, copy: None, ..Effect::default() }
                         }
                     }
                 }
@@ -3475,7 +3493,7 @@ impl Session {
                 let open = self.state.results.take().is_some();
                 self.search_latest.fetch_add(1, Ordering::Relaxed); // stops a running search
                 self.highlight_preview(); // and colouring its preview
-                Effect { repaint: open, copy: None }
+                Effect { repaint: open, copy: None, ..Effect::default() }
             }
             Command::Outline => self.outline(),
             Command::FindDeclarations(query) => self.find_declarations(query),
@@ -3507,7 +3525,7 @@ impl Session {
                     return repaint;
                 }
                 let changed = self.state.project.as_mut().is_some_and(|p| p.toggle(&dir));
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::Locate => {
                 if let Some(path) = self.state.active().map(|t| t.source.clone()) && self.state.libraries.contains(&path) {
@@ -3517,7 +3535,7 @@ impl Session {
                 }
                 let rel = self.state.active_in_tree();
                 let changed = rel.zip(self.state.project.as_mut()).is_some_and(|(rel, p)| p.reveal(&rel));
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::SetFoldersFirst(on) => {
                 if self.state.settings.folders_first == on {
@@ -3529,7 +3547,7 @@ impl Session {
                     p.set_folders_first(on);
                 }
                 self.save_settings();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::Split(split) => {
                 let was = self.state.settings.split.replace(split);
@@ -3549,7 +3567,7 @@ impl Session {
                 repaint
             }
             Command::Unsplit => self.prepare_close(crate::close::Intent::Unsplit, None),
-            Command::FocusPane(pane) => Effect { repaint: self.focus_pane(pane), copy: None },
+            Command::FocusPane(pane) => Effect { repaint: self.focus_pane(pane), copy: None, ..Effect::default() },
             Command::MoveTab { tab, pane, index } => self.move_tab(tab, pane, index),
             Command::SetLayout(layout) => {
                 if self.state.settings.layout != layout {
@@ -3571,7 +3589,7 @@ impl Session {
                 let Some(p) = &mut self.state.project else { return Effect::default() };
                 let open = p.finder.take().is_some();
                 self.query_latest.fetch_add(1, Ordering::Relaxed); // stops a running ranking
-                Effect { repaint: open, copy: None }
+                Effect { repaint: open, copy: None, ..Effect::default() }
             }
             Command::Reload if self.disabled(CommandId::Reload).is_some() => Effect::default(),
             Command::Reload => match self.state.active.filter(|_| self.state.current_source().is_some()) {
@@ -3586,7 +3604,7 @@ impl Session {
                 let changed = t.selection != Some(s);
                 t.selection = Some(s);
                 t.approximate = false;
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             c @ (Command::OpenBranches | Command::OpenWorktrees | Command::OpenRevisions) => {
                 let (worktrees_only, revisions_only) = (matches!(c, Command::OpenWorktrees), matches!(c, Command::OpenRevisions));
@@ -3615,7 +3633,7 @@ impl Session {
                 });
                 repaint
             }
-            Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None },
+            Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None, ..Effect::default() },
             Command::MarkTreeRow { path, selected } => {
                 if path.contains("://") {
                     self.state.messages.push("Compare Selected: this entry has no file on disk".into());
@@ -3637,7 +3655,7 @@ impl Session {
                 }
                 repaint
             }
-            Command::ClearTreeMarks => Effect { repaint: !std::mem::take(&mut self.state.tree_marks).is_empty(), copy: None },
+            Command::ClearTreeMarks => Effect { repaint: !std::mem::take(&mut self.state.tree_marks).is_empty(), copy: None, ..Effect::default() },
             Command::Checkout(target) => self.prepare_transition(transition_work::Transition::Checkout(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal)),
             Command::CheckoutChoice(choice) => {
                 use crate::branches::CheckoutChoice as C;
@@ -3714,11 +3732,11 @@ impl Session {
                 });
                 repaint
             }
-            Command::CloseCommit => Effect { repaint: self.state.commit.take().is_some(), copy: None },
+            Command::CloseCommit => Effect { repaint: self.state.commit.take().is_some(), copy: None, ..Effect::default() },
             Command::CopyRevision => match self.commit_target() {
                 Ok((sha, _)) => {
                     self.state.messages.push(format!("Copied {}", sha.get(..7).unwrap_or(&sha)));
-                    Effect { repaint: true, copy: Some(sha) }
+                    Effect { repaint: true, copy: Some(sha), ..Effect::default() }
                 }
                 Err(_) => Effect::default(),
             },
@@ -3737,7 +3755,7 @@ impl Session {
                     0..=2 => effect,
                     _ => {
                         self.click_extend = true;
-                        Effect { repaint: effect.repaint | self.command(Command::ExtendSelection).repaint, copy: None }
+                        Effect { repaint: effect.repaint | self.command(Command::ExtendSelection).repaint, copy: None, ..Effect::default() }
                     }
                 }
             }
@@ -3858,12 +3876,12 @@ impl Session {
                     None => t.source.to_string_lossy().into_owned(),
                 };
                 let at = self.state.view(t.id).map_or(0, |view| t.selection.map_or(0, |s| view.snapshot().line_of(s.head)) + 1);
-                Effect { repaint: false, copy: Some(if line { format!("{path}:{at}") } else { path }) }
+                Effect { repaint: false, copy: Some(if line { format!("{path}:{at}") } else { path }), ..Effect::default() }
             }
-            Command::CopyText(text) => Effect { repaint: false, copy: (!text.is_empty()).then_some(text) },
+            Command::CopyText(text) => Effect { repaint: false, copy: (!text.is_empty()).then_some(text), ..Effect::default() },
             Command::Notice(text) => {
                 self.state.messages.push(text);
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::Cut => self.cut(),
             Command::Paste(text) => self.paste(text),
@@ -3875,7 +3893,7 @@ impl Session {
                 let doc = view.snapshot();
                 // No selection: the caret's visible line with its original ending.
                 let range = if s.range().is_empty() { doc.line_with_ending(doc.line_of(s.head)).unwrap_or(0..0) } else { s.range() };
-                Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten() }
+                Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten(), ..Effect::default() }
             }
             Command::Scroll(top) => {
                 let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
@@ -3889,7 +3907,7 @@ impl Session {
                 let Some(tab) = self.active_mut() else { return Effect::default() };
                 let changed = (tab.top_line(), tab.top_row()) != (line, row) || tab.approximate;
                 tab.set_top(line, row); tab.approximate = false;
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::ScrollRows(rows) => {
                 let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
@@ -3904,7 +3922,7 @@ impl Session {
                 let changed = (t.top_line, t.top_row()) != (top, row) || t.approximate;
                 t.set_top(top, row);
                 t.approximate = false;
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::Collapse | Command::Expand | Command::CollapseAll | Command::ExpandAll | Command::CollapseCommentsImports | Command::ToggleFold(_)
                 if self.fold_unavailable().is_some() =>
@@ -3928,7 +3946,7 @@ impl Session {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 let line = t.visible_for(&doc).shown(t.selection.map_or(t.top_line, |s| doc.line_of(s.head)));
-                Effect { repaint: t.collapsed.remove(line), copy: None }
+                Effect { repaint: t.collapsed.remove(line), copy: None, ..Effect::default() }
             }
             Command::CollapseAll | Command::CollapseCommentsImports => {
                 let only_runs = command == Command::CollapseCommentsImports;
@@ -3943,7 +3961,7 @@ impl Session {
             }
             Command::ExpandAll => {
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                Effect { repaint: t.collapsed.clear(), copy: None }
+                Effect { repaint: t.collapsed.clear(), copy: None, ..Effect::default() }
             }
             Command::ToggleFold(line) => {
                 let Some(doc) = self.state.current() else { return Effect::default() };
@@ -3984,17 +4002,17 @@ impl Session {
             Command::CloseDocumentation => {
                 self.cancel_documentation();
                 self.state.semantics.cancel_lane(semantics::Lane::Hover);
-                Effect { repaint: self.state.documentation.take().is_some(), copy: None }
+                Effect { repaint: self.state.documentation.take().is_some(), copy: None, ..Effect::default() }
             }
             Command::SetDocumentationOnHover(on) => {
                 self.state.settings.documentation_on_hover = on;
                 self.save_settings();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::SetFileIcons(on) => {
                 self.state.settings.file_icons = on;
                 self.save_settings();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::CallHierarchy(direction) => self.ask(Ask::CallHierarchy(direction)),
             Command::TypeHierarchy(direction) => self.ask(Ask::TypeHierarchy(direction)),
@@ -4088,7 +4106,7 @@ impl Session {
             Command::CancelSemantic => {
                 let asked = self.state.asking.take().is_some();
                 self.state.semantics.cancel();
-                Effect { repaint: asked, copy: None }
+                Effect { repaint: asked, copy: None, ..Effect::default() }
             }
             Command::SetWorkspaceRoot(root) => {
                 if self.state.runtime_saving.is_some() || self.state.provider_saves > 0 { return Effect::default(); }
@@ -4166,7 +4184,7 @@ impl Session {
                 let _ = tx.send_blocking(Completion::Semantic(semantics::Event::Memory(samples)));
             });
         }
-        Effect { repaint, copy: None }
+        Effect { repaint, copy: None, ..Effect::default() }
     }
 
     fn current_name_at(&self, tab: TabId, offset: usize, trailing: bool) -> Option<std::ops::Range<usize>> {
@@ -4261,7 +4279,7 @@ impl Session {
         self.state.asking = Some(Asking { request, ask, at: Some((snapshot.source().to_owned(), offset, snapshot.key().version)), source: Some(SemanticSource::new(&snapshot)), project, remaining: 1,
             since: self.state.semantics.now(), retrieving: None, root: None });
         self.defer_semantic(tab, request, offset, ask.question(), Some(ask));
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn ask_ready(&mut self, doc: Arc<Document>, offset: usize, ask: Ask, request: u64) -> Effect {
@@ -4283,7 +4301,7 @@ impl Session {
                 self.state.messages.push(format!("{}: {why}", ask.label()));
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// A type hierarchy built from usages and syntax (the server offers none): the name at `offset` is the root.
@@ -4302,12 +4320,12 @@ impl Session {
         let held = tab.and_then(|t| self.state.view(t.id)?.declarations_handle().cloned());
         let Some(name) = name else {
             self.state.messages.push(format!("{label}: Place the caret on a name first"));
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         };
         let Some(session) = self.state.semantics.session_of(&doc) else {
             let server = self.state.semantics.view(&doc).map_or("The language server", |v| v.name);
             self.state.messages.push(format!("{label}: {server} is not ready yet"));
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         };
         let encoding = self.state.semantics.encoding(session);
         let uri = semantics::lsp::file_uri(doc.source());
@@ -4389,7 +4407,7 @@ impl Session {
                 self.cancel_documentation();
                 if trigger == DocTrigger::Caret {
                     self.state.messages.push(format!("Quick documentation: {why}"));
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
             }
         }
@@ -4408,7 +4426,7 @@ impl Session {
             self.cancel_documentation();
             if trigger == DocTrigger::Caret && current {
                 self.state.messages.push("Quick documentation: No documentation here".into());
-                return Effect { repaint: true, copy: None };
+                return Effect { repaint: true, copy: None, ..Effect::default() };
             }
             return Effect::default();
         };
@@ -4445,7 +4463,7 @@ impl Session {
             })
             .collect();
         self.state.occurrences = Some(Occurrences { source, session: reply.session, path, version, ranges });
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// Ask the folder's language servers for workspace symbols matching `query`; results list as they arrive.
@@ -4469,7 +4487,7 @@ impl Session {
                 self.state.messages.push(format!("Symbols: {why}"));
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn forget_semantic_messages(&mut self) {
@@ -4538,7 +4556,7 @@ impl Session {
                 else { semantics::provider::set_ruby_tooling_excluded(&file, &root, excluded == Some(true)) };
             let _ = tx.send_blocking(Completion::ProjectProviderSaved { provider, root, reset, result });
         });
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn sync_documents(&mut self) {
@@ -4687,7 +4705,7 @@ impl Session {
             ResultSlot::Search => {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
                     self.project_query = None;
-                    r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None };
+                    r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
             }
             ResultSlot::Navigation => {
@@ -4698,7 +4716,7 @@ impl Session {
             }
             ResultSlot::Preview => {
                 if fence.request == self.preview_latest.load(Ordering::Acquire) && let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.selected == fence.node) {
-                    r.preview = None; self.state.messages.push(format!("Cannot preview: {why}")); return Effect { repaint: true, copy: None };
+                    r.preview = None; self.state.messages.push(format!("Cannot preview: {why}")); return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
             }
             ResultSlot::Validate => {
@@ -4719,7 +4737,7 @@ impl Session {
                     if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set)
                         && let Some(h) = r.hierarchy.as_mut().filter(|h| h.session == server)
                         && let Some(node) = h.loading(fence.request).filter(|node| Some(*node) == fence.node)
-                    { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None }; }
+                    { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None, ..Effect::default() }; }
                 }
                 semantics::Lane::Hover | semantics::Lane::Highlight => {}
             },
@@ -4749,7 +4767,7 @@ impl Session {
         if !current {
             self.state.asking = None;
             self.state.messages.push(format!("{}: the file changed while the language server answered; ask again", ask.label()));
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         let mut value = match reply.result {
             Ok(v) => v,
@@ -4765,7 +4783,7 @@ impl Session {
                 self.state.asking = None;
                 let none = if matches!(ask, Ask::TypeHierarchy(_)) { "Not a type" } else { "No call hierarchy here" };
                 self.state.messages.push(format!("{}: {none}", ask.label()));
-                return Effect { repaint: true, copy: None };
+                return Effect { repaint: true, copy: None, ..Effect::default() };
             };
             root.source = root.item["uri"].as_str().and_then(semantics::lsp::uri_path).and_then(|path| reply.sources.get(&path)).cloned();
             value = serde_json::json!([root.at.clone()]);
@@ -4779,7 +4797,7 @@ impl Session {
             let serde_json::Value::String(text) = value else {
                 self.state.asking = None;
                 self.state.messages.push(format!("{}: {} returned no source for {}", ask.label(), reply.provider, target.source.uri));
-                return Effect { repaint: true, copy: None };
+                return Effect { repaint: true, copy: None, ..Effect::default() };
             };
             let versions = self.versions.clone();
             let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot::Semantic { server: reply.session, lane: reply.lane }, project, request, stage: crate::analysis::ResultStage::Retrieved, result_set: None, node: None, source: asking.source.clone() };
@@ -4842,7 +4860,7 @@ impl Session {
                 r.done = true;
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn resume_layout(&mut self, intent: LayoutIntent) -> Effect {
@@ -4865,7 +4883,7 @@ impl Session {
         match completion {
             Completion::SavedCompared { request, changes, line_endings_differ } => {
                 if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == request) { comparison.changes = changes; comparison.line_endings_differ = line_endings_differ; comparison.pending = false; }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::AnalysisWake => Effect::default(),
             Completion::Analyzed { ticket, result } => {
@@ -4891,7 +4909,7 @@ impl Session {
                 let applied = result.and_then(|(request, delta)| delta.map(|delta| (request, delta))).is_some_and(|(request, delta)| {
                     self.state.layout_view(&request).is_some_and(|view| view.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(delta))
                 });
-                let mut effect = Effect { repaint: applied || failed, copy: None };
+                let mut effect = Effect { repaint: applied || failed, copy: None, ..Effect::default() };
                 if applied && let Some(intent) = self.layout_intents.get_mut(pane).and_then(Option::take).filter(|intent| layout_intent_current(&self.state, intent)) {
                     let resumed = self.resume_layout(intent);
                     effect.repaint |= resumed.repaint; effect.copy = resumed.copy;
@@ -4899,12 +4917,12 @@ impl Session {
                 effect
             }
             Completion::Projected(done) => {
-                Effect { repaint: self.projections.finish(done, |r| projection_current(&self.state, r)), copy: None }
+                Effect { repaint: self.projections.finish(done, |r| projection_current(&self.state, r)), copy: None, ..Effect::default() }
             }
             Completion::ProviderSettingsSaved { ok } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
                 if !ok { self.state.messages.push("Could not save language server settings".into()); }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ProjectProviderSaved { provider, root, reset, result } => {
                 self.state.provider_saves = self.state.provider_saves.saturating_sub(1);
@@ -4927,12 +4945,12 @@ impl Session {
                     }
                     Err(why) => self.state.messages.push(format!("Project language server settings were not changed: {why}")),
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ServerRuntimes { request, paths } => {
                 if request != self.runtime_request { return Effect::default(); }
                 if let Some(model) = &mut self.state.server_runtime { model.candidates = paths; model.message = format!("Enter {}, or choose an installed runtime below", model.kind.input_label()); }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ServerRuntimeSaved { request, kind, result } => {
                 if self.state.runtime_saving != Some(request) { return Effect::default(); }
@@ -4950,7 +4968,7 @@ impl Session {
                 };
                 if let Some(model) = &mut self.state.server_runtime { model.message = message.clone(); }
                 self.state.messages.push(message);
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
 
             Completion::Checked { request, tab, path, stamp } => {
@@ -4966,7 +4984,7 @@ impl Session {
                     None => self.load(tab, false),
                 }
                 self.load_other();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::LibraryRead { generation, read } => {
                 if generation != self.project_generation.load(Ordering::Relaxed) { return Effect::default(); }
@@ -4974,7 +4992,7 @@ impl Session {
                 self.read_libraries(requests);
                 if let Some(message) = message { self.state.messages.push(message); }
                 if revealed.as_ref().is_some_and(|p| self.state.active().is_some_and(|t| t.source == *p)) { self.state.tree_revision += 1; }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Loaded { request, tab, path, result } => {
                 if request != self.request {
@@ -4986,7 +5004,7 @@ impl Session {
                 if reload && !authorized.as_ref().is_some_and(|source| self.state.source(tab).is_some_and(|now| source.matches(now))) {
                     self.state.messages.push("Reload cancelled: the source changed while it was being read. The draft is retained.".into());
                     self.load_other();
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
                 match result {
                     Ok((stamp, doc, canonical)) => {
@@ -5038,7 +5056,7 @@ impl Session {
                     },
                 }
                 self.load_other();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             // For each shown tab of that version (both panes may show one snapshot).
             Completion::CheckedOut { request, root, label, made, result } => {
@@ -5091,7 +5109,7 @@ impl Session {
                     Err(lenz_content::branches::CheckoutError::Blocked { .. }) => self.state.messages.push(format!("Checking out {label}{place} was refused: local changes would be overwritten")),
                     Err(lenz_content::branches::CheckoutError::Git(e)) => self.state.messages.push(format!("{e}{}", if here { String::new() } else { format!(" ({})", root.display()) })),
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Head { root, head } => {
                 match self.state.repo.as_mut().filter(|r| r.root == root && Some(&r.head) != head.as_ref()) {
@@ -5099,7 +5117,7 @@ impl Session {
                         if let Some(head) = head {
                             r.head = head;
                         }
-                        Effect { repaint: true, copy: None }
+                        Effect { repaint: true, copy: None, ..Effect::default() }
                     }
                     None => Effect::default(),
                 }
@@ -5112,7 +5130,7 @@ impl Session {
                 self.repo_git_seen = result.is_err() && anchor.ancestors().any(|d| d.join(".git").exists());
                 self.state.repo_answered = Some(anchor);
                 self.state.repo = result.ok();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
                 Some(v) => {
@@ -5125,14 +5143,14 @@ impl Session {
                     if let Some(v) = self.state.branches.as_mut().filter(|_| none) {
                         v.error = Some("No other worktree".into());
                     }
-                    Effect { repaint: true, copy: None }
+                    Effect { repaint: true, copy: None, ..Effect::default() }
                 }
                 None => Effect::default(),
             },
             Completion::CommitLoaded { request, result } => match self.state.commit.as_mut().filter(|c| c.request == request) {
                 Some(c) => {
                     c.details = Some(result);
-                    Effect { repaint: true, copy: None }
+                    Effect { repaint: true, copy: None, ..Effect::default() }
                 }
                 None => Effect::default(),
             },
@@ -5148,7 +5166,7 @@ impl Session {
                     }
                     None => {}
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::SelectionSteps { request, steps } => {
                 let Some((id, version, from, _, reveal)) = self.expanding.take_if(|e| e.3 == request) else { return Effect::default() };
@@ -5156,7 +5174,7 @@ impl Session {
                 let current = self.state.active().is_some_and(|t| t.id == id && t.selection.unwrap_or(Selection { anchor: 0, head: 0 }) == from)
                     && self.state.source(id).is_some_and(|s| s.key().version == version);
                 if !current { return Effect::default(); }
-                let Some(steps) = steps else { self.state.messages.push("Selection expansion unavailable; try again".into()); return Effect { repaint: true, copy: None }; };
+                let Some(steps) = steps else { self.state.messages.push("Selection expansion unavailable; try again".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; };
                 self.start_expansion(id, version, from, steps, reveal)
             }
             Completion::Matched { tab, request, version, result } => {
@@ -5204,7 +5222,7 @@ impl Session {
                     if let Some(snapshot) = &snapshot { t.reveal_view(snapshot); }
                     repaint |= parsed.is_some();
                 }
-                Effect { repaint, copy: None }
+                Effect { repaint, copy: None, ..Effect::default() }
             }
             Completion::Decorated { session, version, generation, request, data } => {
                 if !self.state.semantics.can_ask(session) { return Effect::default(); }
@@ -5230,7 +5248,7 @@ impl Session {
                     }
                     repaint = true;
                 }
-                Effect { repaint, copy: None }
+                Effect { repaint, copy: None, ..Effect::default() }
             }
             Completion::Rendered { version, preview } => {
                 // Superseded: another version, tab or presentation.
@@ -5242,7 +5260,7 @@ impl Session {
                     t.preview_source = source.clone();
                     repaint = true;
                 }
-                Effect { repaint, copy: None }
+                Effect { repaint, copy: None, ..Effect::default() }
             }
             Completion::PreviewImages { version, doc, images } => {
                 let mut repaint = false;
@@ -5253,14 +5271,14 @@ impl Session {
                     t.preview = Some(Ok(Arc::new(p)));
                     repaint = true;
                 }
-                Effect { repaint, copy: None }
+                Effect { repaint, copy: None, ..Effect::default() }
             }
             Completion::PlacesChecked { generation, missing } => {
                 if self.project_generation.load(Ordering::Relaxed) != generation {
                     return Effect::default(); // a replaced root's
                 }
                 self.state.missing = missing;
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::PlacesRead { generation, file, from, result } => {
                 if self.project_generation.load(Ordering::Relaxed) != generation {
@@ -5291,7 +5309,7 @@ impl Session {
                     }
                 }
                 self.places_changed();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::PlacesMerged { generation, seq, places } => {
                 // Taken only for this project's latest save: a change made since sends a save that merges again.
@@ -5309,7 +5327,7 @@ impl Session {
                 if moved {
                     self.places_changed();
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Scanned { generation, batch } => {
                 let Some(p) = self.state.project.as_mut().filter(|p| p.walk == generation) else {
@@ -5352,7 +5370,7 @@ impl Session {
                     && (matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Files)
                         || rescan && done && n.scope == crate::navigation::Scope::Symbols)
                 { n.dirty = true; if !n.pending { self.rank_navigation(); } }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Navigation {request, files, indexed, found} => {
                 let Some(n) = self.state.navigation.as_mut().filter(|n| n.request == request) else { return Effect::default() };
@@ -5361,7 +5379,7 @@ impl Session {
                 if let Some((rows, matched)) = found { n.rows = rows; n.matched = matched; n.revision = request; }
                 self.navigation_ready(request);
                 if dirty || self.state.project.as_ref().map_or(0, |p| p.files()) != files || self.state.index.coverage().indexed != indexed { self.rank_navigation(); }
-                Effect {repaint: true, copy: None}
+                Effect {repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Ranked { generation, seq, searched, hits } => {
                 let Some(p) = self.state.project.as_mut().filter(|p| p.generation() == generation) else { return Effect::default() };
@@ -5379,7 +5397,7 @@ impl Session {
                 if searched < files {
                     self.rank(); // files arrived while it ran
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Theme(update) => {
                 let effect = self.themes.apply(*update);
@@ -5411,12 +5429,12 @@ impl Session {
                     // The first result is selected for preview as soon as it arrives.
                     return self.select_result(0);
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::ResultSpans { id, spans } => match self.state.results.as_mut().filter(|r| r.id == id) {
                 Some(r) => {
                     r.spans.extend(spans.into_iter().filter(|(i, _)| r.spans_asked.contains(i)));
-                    Effect { repaint: true, copy: None }
+                    Effect { repaint: true, copy: None, ..Effect::default() }
                 }
                 None => Effect::default(),
             },
@@ -5427,7 +5445,7 @@ impl Session {
                 match self.state.results.as_mut().and_then(|r| r.preview.as_mut()).filter(|p| p.doc.version() == version && p.highlights.is_none()) {
                     Some(p) => {
                         p.highlights = parsed.map(Arc::new);
-                        Effect { repaint: p.highlights.is_some(), copy: None }
+                        Effect { repaint: p.highlights.is_some(), copy: None, ..Effect::default() }
                     }
                     None => Effect::default(),
                 }
@@ -5436,7 +5454,7 @@ impl Session {
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id && r.selected == Some(index)) else { return Effect::default() };
                 r.preview = Some(search::Preview { index, doc, highlights: None });
                 self.highlight_preview();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Previewed { id, index, doc } => {
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id && r.selected == Some(index)) else { return Effect::default() };
@@ -5454,7 +5472,7 @@ impl Session {
                         self.highlight_preview();
                     }
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Validated { id, open, index, result } => {
                 if open != self.open_seq {
@@ -5476,7 +5494,7 @@ impl Session {
                         if let Some(r) = self.state.results.as_mut().filter(|r| r.id == id) { r.stale.insert(hit.path.clone()); }
                         self.state.messages.retain(|m| !m.starts_with("This result"));
                         self.state.messages.push(format!("This result no longer matches ({e}); rerun the search to update it"));
-                        Effect { repaint: true, copy: None }
+                        Effect { repaint: true, copy: None, ..Effect::default() }
                     }
                 }
             }
@@ -5533,7 +5551,7 @@ impl Session {
                     && matches!(n.scope, crate::navigation::Scope::All | crate::navigation::Scope::Symbols)
                 { n.dirty = true; if !n.pending { self.rank_navigation(); } }
                 self.pump_index();
-                Effect { repaint: self.state.results.as_ref().is_some_and(|r| r.kind == ResultsKind::Declarations), copy: None }
+                Effect { repaint: self.state.results.as_ref().is_some_and(|r| r.kind == ResultsKind::Declarations), copy: None, ..Effect::default() }
             }
             Completion::IndexReset { generation, revision, result } => {
                 if self.project_generation.load(Ordering::Relaxed) != generation || self.index_revision.load(Ordering::Relaxed) != revision { return Effect::default(); }
@@ -5551,7 +5569,7 @@ impl Session {
                 }
                 self.cancel_for_index_rebuild(); self.synced = 0;
                 self.changed(Change { overflow: true, ..Change::default() }); self.pump_index();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Changed(mut change) => {
                 // Changed files' declaration records go and are rebuilt.
@@ -5649,7 +5667,7 @@ impl Session {
                 for d in std::mem::take(&mut outcome.decorations) {
                     self.decode(d);
                 }
-                let mut effect = Effect { repaint: outcome.repaint || !self.state.semantics.notices.is_empty(), copy: None };
+                let mut effect = Effect { repaint: outcome.repaint || !self.state.semantics.notices.is_empty(), copy: None, ..Effect::default() };
                 self.state.messages.append(&mut self.state.semantics.notices);
                 if outcome.ready {
                     // Documents open in the server before a waiting request is sent about them.
@@ -5702,7 +5720,7 @@ impl Session {
                     Err(why) if trigger == DocTrigger::Caret => self.state.messages.push(format!("Quick documentation: cannot be shown: {why}")),
                     Err(_) => {}
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::HierarchyLevel { request, level, limited, indexing, error } => {
                 let stale = level.iter().any(|(call, target)| !Self::hierarchy_item_current(&self.state, call)
@@ -5712,7 +5730,7 @@ impl Session {
                 if let Some(error) = error.or_else(|| stale.then(|| "Hierarchy target source changed; ask for its hierarchy again".into())) {
                     h.failed(node, request, error);
                     if let Some(results) = &mut self.state.results { results.rebuild_hierarchy(); }
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
                 if limited {
                     self.state.messages.push(format!("Type hierarchy: only the first {} usages of {} were read; this level may be incomplete", semantics::TYPE_LEVEL_LIMIT, h.nodes[node].call.name));
@@ -5726,7 +5744,7 @@ impl Session {
                     r.rebuild_hierarchy();
                 }
                 self.keep_previews(found);
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::HierarchyRootKind { id, kind } => {
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id) else { return Effect::default() };
@@ -5734,7 +5752,7 @@ impl Session {
                 h.nodes[0].call.decl = Some(kind);
                 // The root's row shows its kind once rebuilt.
                 r.rebuild_hierarchy();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::Targets { request, session, provider, origin, indexing, targets } => {
                 if !self.state.semantics.can_ask(session) {
@@ -5743,11 +5761,11 @@ impl Session {
                 self.targets_found(request, session, provider, origin, indexing, targets)
             }
             Completion::Retrieved { request, target, doc } => {
-                if self.state.asking.as_ref().is_some_and(|a| a.request == request && !self.asking_current(a)) { self.state.asking = None; return Effect { repaint: true, copy: None }; }
+                if self.state.asking.as_ref().is_some_and(|a| a.request == request && !self.asking_current(a)) { self.state.asking = None; return Effect { repaint: true, copy: None, ..Effect::default() }; }
                 let Some(asked) = self.state.asking.take_if(|a| a.request == request) else { return Effect::default() };
                 if !self.state.semantics.has_session(target.source.session) {
                     self.state.messages.push(format!("{}: the {} session that named it has ended; ask again", asked.ask.label(), target.source.provider));
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
                 if asked.ask == Ask::Peek {
                     self.state.messages.push("Peek: retrieved source opens in a tab; use Go to Definition".into());
@@ -5809,7 +5827,7 @@ impl Session {
                     self.places_changed();
                 }
                 self.rewatch();
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
         }
     }
@@ -5825,7 +5843,7 @@ impl Session {
             let label = asked.ask.label();
             self.state.asking = None;
             self.state.messages.push(format!("{label}: the file changed while its targets were resolved; ask again"));
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         targets.found.retain(|target| {
             let current = self.semantic_target_current(target) && (asked.ask != Ask::Symbols || self.result_target_compatible(target));
@@ -5851,7 +5869,7 @@ impl Session {
                     self.state.messages.push(format!("{label}: source unavailable: {why}"));
                 }
             }
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         let retrievable = targets.unavailable.iter().filter(|v| v.source.retrievable()).count();
         if retrievable > 0 {
@@ -5928,7 +5946,7 @@ impl Session {
                 };
                 self.state.messages.push(format!("{label}: {provider} found {what}{note}{limits}"));
             }
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         if found.len() == 1 && matches!(ask, Ask::Definition | Ask::Implementation | Ask::TypeDefinition) {
             let Some(t) = found.pop() else { return Effect::default() };
@@ -5973,14 +5991,14 @@ impl Session {
             hierarchy::Children::Loaded { .. } => {
                 n.open = !n.open;
                 r.rebuild_hierarchy();
-                return Effect { repaint: true, copy: None };
+                return Effect { repaint: true, copy: None, ..Effect::default() };
             }
             _ => {}
         }
         if !item_current {
             n.state = hierarchy::Children::Failed("Hierarchy target source changed; ask for its hierarchy again".into());
             r.rebuild_hierarchy();
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         for other in &mut h.nodes {
             if matches!(other.state, hierarchy::Children::Loading(_)) {
@@ -6009,7 +6027,7 @@ impl Session {
             Err(why) => hierarchy::Children::Failed(why),
         };
         r.rebuild_hierarchy();
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// Show the hierarchy the other way from its root; without one of that kind (calls or types), ask at the caret.
@@ -6036,7 +6054,7 @@ impl Session {
                 if let Some(r) = self.state.results.as_mut() {
                     r.rebuild_hierarchy();
                 }
-                return Effect { repaint: true, copy: None };
+                return Effect { repaint: true, copy: None, ..Effect::default() };
             }
         };
         let parent = h.nodes[node].call.item["uri"].as_str().unwrap_or_default().to_owned();
@@ -6124,7 +6142,7 @@ impl Session {
         });
         if Self::changed_result_source(&self.state, &path, &doc, None) {
             self.state.messages.push("This result's current source changed; rerun the search".into());
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         let dependency = semantics::provider::origin(&path, doc.language()) != semantics::provider::OUTSIDE;
         let outside = self.state.project.as_ref().map_or_else(|| self.state.provider().and_then(|p| p.root).is_some_and(|root| !path.starts_with(root)), |p| !path.starts_with(p.root()));
@@ -6181,7 +6199,7 @@ impl Session {
                 Ok(()) => self.state.asking = Some(Asking { request, ask: Ask::Definition, at: None, source: None, project: self.project_generation.load(Ordering::Relaxed), remaining: 1, since: std::time::Instant::now(), retrieving: Some(target), root: None }),
                 Err(why) => { self.state.asking = None; self.state.messages.push(format!("Library source unavailable: {why}")); }
             }
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         let file = if Path::new(path.as_ref()).is_absolute() || is_virtual(Path::new(path.as_ref())) {
             PathBuf::from(path.as_ref())
@@ -6238,7 +6256,7 @@ impl Session {
                             if latest.load(Ordering::Relaxed) == id { lease.send(Completion::Found { id, found: search::search_text(&query, &path, doc.text()) }); }
                         })
                     }).is_err() { return self.result_failed(&fence, "Search analysis capacity is full".into()); }
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
                 if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
                     if latest.load(Ordering::Relaxed) != id {
@@ -6253,7 +6271,7 @@ impl Session {
                 }).is_err() { return self.result_failed(&fence, "Search analysis capacity is full".into()); }
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// The active document's declarations, as results: extracted off the UI thread from the shown snapshot.
@@ -6292,7 +6310,7 @@ impl Session {
             };
             lease.send(Completion::Found { id, found });
         })).is_err() { return self.result_failed(&fence, "Outline analysis capacity is full".into()); }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// Declarations across the project matching `query`, ranked off the UI thread over the index as it is now.
@@ -6308,7 +6326,7 @@ impl Session {
         results.coverage = Some(coverage);
         let paths = p.paths();
         self.start_project_search(results, paths);
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6385,7 +6403,7 @@ impl Session {
                     if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
                         if latest.load(Ordering::Relaxed) == preview { lease.send(Completion::CurrentPreview { id, index: i, doc }); }
                     })).is_err() { return self.result_failed(&fence, "Preview analysis capacity is full".into()); }
-                    return Effect { repaint: true, copy: None };
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
                 }
                 let (versions, latest) = (self.versions.clone(), self.preview_latest.clone());
                 if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
@@ -6407,7 +6425,7 @@ impl Session {
                 }).is_err() { return self.result_failed(&fence, "Preview analysis capacity is full".into()); }
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// Check result `i` against the file as it is now, off the UI thread; opening follows if it still matches.
@@ -6567,7 +6585,7 @@ impl Session {
             Refresh::Same(stamp) => {
                 let changed = t.unavailable.take().is_some() || std::mem::take(&mut t.stale_on_disk);
                 t.stamp = Some(stamp);
-                Effect { repaint: changed, copy: None }
+                Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Refresh::Released => {
                 t.stale_on_disk = true;
@@ -6577,7 +6595,7 @@ impl Session {
                 // The disk reply describes another version, never replacement authority for a draft/history.
                 t.stale_on_disk = true;
                 t.unavailable = None;
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Refresh::Changed(stamp, doc) => {
                 let here = t.location(snapshot.as_deref());
@@ -6595,7 +6613,7 @@ impl Session {
                 if self.state.places.has_marks(&source) && Arc::make_mut(&mut self.state.places).relocate(&source, &current) { self.places_changed(); }
                 if let Some(text) = self.tab_mut(id).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) { self.find_in(id, text, false); }
                 self.annotate(id);
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Refresh::Gone(e) => {
                 // Keep (or take back from the cache) the last content; it is no longer reloadable, so it is never
@@ -6607,7 +6625,7 @@ impl Session {
                 let Some(t) = self.tab_mut(id) else { return Effect::default() };
                 t.stamp = None;
                 t.unavailable = Some(e);
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Refresh::Unstable => {
                 // The reads raced a writer every time: the shown content stays the last confirmed one. Retry shortly,
@@ -6622,7 +6640,7 @@ impl Session {
                         let _ = tx.send_blocking(Completion::Changed(Change { paths: [path].into(), ..Change::default() }));
                     });
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
         }
     }
@@ -6892,7 +6910,7 @@ impl Session {
         let repaint = effect.repaint || *self.state.palette != *palette;
         self.state.palette = palette;
         self.state.messages.extend(effect.notice);
-        Effect { repaint, copy: None }
+        Effect { repaint, copy: None, ..Effect::default() }
     }
 
     fn next_request(&mut self) -> u64 {
@@ -7154,7 +7172,7 @@ impl Session {
         let virtual_source = is_virtual(&requested);
         if virtual_source && retrieved.is_none() && !self.state.tabs.iter().any(|t| t.source == requested) {
             self.state.messages.push(format!("{} was retrieved from a language server and is no longer held; ask for its definition again", requested.display()));
-            return Effect { repaint: true, copy: None };
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         // Identity is the absolute, normalized path (and the resolved path once loaded); the requested spelling is
         // what the tab shows.
@@ -7227,7 +7245,7 @@ impl Session {
             self.visit(from, to);
         }
         self.rewatch();
-        Effect { repaint: !same || restore.is_some() || retain, copy: None }
+        Effect { repaint: !same || restore.is_some() || retain, copy: None, ..Effect::default() }
     }
 
     /// Index the shown document's declarations before the rest of the project.
@@ -7559,7 +7577,7 @@ impl Session {
         }
         self.save_settings();
         self.rewatch();
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
 
     }
 
@@ -7579,7 +7597,7 @@ impl Session {
             return self.unsplit();
         }
         self.rewatch();
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// Remove a tab; when it was active, the nearest remaining tab becomes active (not a history step). `keep_messages`
@@ -7746,7 +7764,7 @@ impl Session {
             self.show_other();
             return self.left_pane(from);
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     /// A decoration setting changed: what tabs hold of `kind` goes (a hint kind turned off or on: all hints are asked
@@ -7770,7 +7788,7 @@ impl Session {
                 Decor::Tokens => format!("No semantic tokens from {name}"),
             });
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn save_settings(&mut self) {
@@ -7968,7 +7986,7 @@ impl Session {
                 if reveal {
                     t.show_head(&doc);
                 }
-                Effect { repaint: true, copy: None }
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             None => Effect::default(),
         }
@@ -7984,7 +8002,7 @@ impl Session {
                 .filter(|t| self.state.source(t.id).is_some_and(|s| s.language().is_some_and(highlight::has_declarations))).map(|t| t.id).collect();
             for id in tabs { if let Some(t) = self.tab_mut(id) { t.highlights = None; } self.highlight(id); }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn highlight(&mut self, tab: TabId) {

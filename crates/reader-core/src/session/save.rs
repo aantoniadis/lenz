@@ -23,12 +23,12 @@ impl Session {
         None
     }
     pub(super) fn save(&mut self, tab: TabId) -> Effect {
-        if let Some(why) = self.save_disabled(tab) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
+        if let Some(why) = self.save_disabled(tab) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         let Some(buffer) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.buffer) else { return Effect::default() };
         self.save_buffer(buffer)
     }
     pub(super) fn save_buffer(&mut self, buffer: crate::text::BufferId) -> Effect {
-        if let Some(why) = self.save_buffer_disabled(buffer) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
+        if let Some(why) = self.save_buffer_disabled(buffer) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         let project = self.project_generation.load(Ordering::Acquire);
         self.save_seq += 1; let request = self.save_seq;
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
@@ -40,11 +40,11 @@ impl Session {
                 let Some(doc) = doc else { return Outcome::Rejected("Save source is unavailable; nothing was written".into()) };
                 Outcome::Written(lenz_content::write::write_exact(&read.snapshot, &read.target, doc.text()))
             })
-        }) { self.state.messages.push("Save admission is full; the draft is retained. Try Save explicitly later.".into()); return Effect { repaint: true, copy: None }; }
+        }) { self.state.messages.push("Save admission is full; the draft is retained. Try Save explicitly later.".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         if let Some(draft) = &mut entry.draft { draft.end_group(); }
         entry.save.status = Status::Saving; entry.save.checked = None; entry.save.revalidated = None;
         entry.save.captured = Some(save::Captured { request, text: snapshot.clone(), compacting: false });
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
@@ -65,10 +65,10 @@ impl Session {
                     Ok((baseline, Arc::new(crate::text::TextSnapshot::from_document(buffer, &doc))))
                 });
             Outcome::Rechecked(result)
-        })) { self.state.messages.push("Recheck admission is full; try explicitly later".into()); return Effect { repaint: true, copy: None }; }
+        })) { self.state.messages.push("Recheck admission is full; try explicitly later".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         entry.save.captured = Some(save::Captured { request, text: text.clone(), compacting: false });
         entry.save.checked = None; entry.save.revalidated = None; entry.save.status = Status::Rechecking;
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn confirm_rechecked_save(&mut self, tab: TabId) -> Effect {
         if self.state.view(tab).is_some_and(|view| view.edit_disabled().is_some()) { return Effect::default(); }
@@ -77,7 +77,7 @@ impl Session {
         if !matches!(entry.save.status, Status::Checked(DiskMatch::Baseline | DiskMatch::Attempted)) { return Effect::default(); }
         let Some(checked) = entry.save.checked.take() else { return Effect::default() };
         self.saved_baseline(buffer, checked.text, checked.read);
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
     fn saved_baseline(&mut self, buffer: crate::text::BufferId, captured: Arc<crate::text::TextSnapshot>, read: save::Baseline) {
         let stamp = read.stamp();

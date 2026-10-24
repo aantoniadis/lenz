@@ -55,6 +55,6 @@ impl Session {
         shown.top_line = shown.top_line.min(snapshot.line_count() - 1);
         self.state.presentation = Some(Box::new(Presentation { base: base.0, selection: base_selection, tab: shown, snapshot: Arc::new(snapshot) }));
         self.keep_selection_visible();
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, ..Effect::default() }
     }
 }

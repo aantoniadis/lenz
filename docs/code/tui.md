@@ -35,6 +35,14 @@ the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split re
 without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
 independently. Production typing remains gated; see the [implementation and verification limits](../research/reader-saved-comparison.md).
 
+Opening a dirty file in an editor or default app offers **Save and Open** (`s`),
+**Open Saved Version** (`o`) or **Cancel** (Esc). The saved-version choice keeps
+the draft/history and omits dirty caret coordinates. Save and Open launches once
+after confirmed Save; Cancel, stale decisions and failed/uncertain Save launch
+nothing. An already requested Save can still finish after Cancel. External
+comparison actions explicitly use saved disk inputs. See the
+[handoff behavior and verification](../research/reader-external-open-decisions.md).
+
 Basic editor input is currently exercised through existing test opt-ins; production writable input stays
 blocked until safety checkpoint23. In that input mode q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
@@ -73,7 +81,7 @@ the Last saved pane remains read-only.
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
 | Open file / go to line | Ctrl-O / Ctrl-G |
 | Compare two explorer entries | Space on each (or Ctrl+click where the terminal reports it), then Ctrl+D; Esc forgets them |
-| Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare With… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
+| Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare Saved Disk Inputs… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
