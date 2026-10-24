@@ -7610,17 +7610,20 @@ impl Session {
 
     fn show_snapshot(&mut self, id: TabId, snapshot: Arc<crate::text::TextSnapshot>, stamp: Option<Stamp>, reload: bool) {
         let buffer = snapshot.key().buffer;
+        let retained = !reload && self.state.sources.buffers.get(&buffer).is_some_and(CurrentSource::pinned);
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) { entry.snapshot = Some(snapshot.clone()); }
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.loaded = true;
         t.buffer = Some(buffer);
         t.refresh = token;
-        t.stale_on_disk = false;
-        t.changing = 0;
+        if !retained {
+            t.stale_on_disk = false;
+            t.changing = 0;
+            t.stamp = stamp;
+            t.unavailable = None;
+        }
         t.language = Some(snapshot.language());
-        t.stamp = stamp;
-        t.unavailable = None;
         t.new_content();
         t.selection = t.selection.map(|s| Selection { anchor: snapshot.floor_char_boundary(s.anchor), head: snapshot.floor_char_boundary(s.head) });
         t.top_line = t.top_line.min(snapshot.line_count() - 1);

@@ -29,6 +29,7 @@ pub(super) struct Pending {
     project: u64,
     buffers: Vec<Fence>,
     next: Option<super::transition_work::Transition>,
+    repository: Option<Option<crate::branches::Repo>>,
 }
 fn current_recheck(entry: &CurrentSource) -> Option<&crate::save::Revalidated> {
     if !matches!(entry.save.status, crate::save::Status::Checked(_)) {
@@ -117,7 +118,12 @@ impl Session {
     pub(crate) fn prepare_close(&mut self, intent: Intent, batch: Option<u64>) -> Effect {
         self.prepare_close_with(intent, batch, None)
     }
-    pub(super) fn prepare_close_with(&mut self, intent: Intent, batch: Option<u64>, next: Option<super::transition_work::Transition>) -> Effect {
+    pub(super) fn prepare_close_with(
+        &mut self,
+        intent: Intent,
+        batch: Option<u64>,
+        next: Option<super::transition_work::Transition>,
+    ) -> Effect {
         if self.closed || self.closing.is_some() {
             return Effect {
                 repaint: true,
@@ -134,9 +140,19 @@ impl Session {
                 .collect(),
             Intent::Session | Intent::Workspace => self.state.tabs.iter().map(|t| t.id).collect(),
             Intent::Reload(id) => {
-                let buffer = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer);
-                self.state.tabs.iter().filter(|t| t.id == id || buffer.is_some() && t.buffer == buffer).map(|t| t.id).collect()
-            },
+                let buffer = self
+                    .state
+                    .tabs
+                    .iter()
+                    .find(|t| t.id == id)
+                    .and_then(|t| t.buffer);
+                self.state
+                    .tabs
+                    .iter()
+                    .filter(|t| t.id == id || buffer.is_some() && t.buffer == buffer)
+                    .map(|t| t.id)
+                    .collect()
+            }
             Intent::Unsplit => self
                 .state
                 .tabs
@@ -203,6 +219,10 @@ impl Session {
             split: self.state.settings.split,
             project: self.project_generation.load(Ordering::Acquire),
             buffers,
+            repository: next
+                .as_ref()
+                .filter(|next| matches!(next, super::transition_work::Transition::Checkout(..)))
+                .map(|_| self.state.repo.clone()),
             next,
         });
         self.advance_close();
@@ -217,6 +237,9 @@ impl Session {
     pub(crate) fn close_valid(&self, ticket: u64) -> bool {
         self.closing.as_ref().is_some_and(|p| {
             p.ticket == ticket
+                && p.repository
+                    .as_ref()
+                    .is_none_or(|repo| repo == &self.state.repo)
                 && p.owners == self.close_owners()
                 && p.project == self.project_generation.load(Ordering::Acquire)
                 && (!matches!(p.intent, Intent::Unsplit)
@@ -367,6 +390,14 @@ impl Session {
         let Some(pending) = self.closing.take() else {
             return Effect::default();
         };
+        if let Some(next) = pending.next {
+            let sources = pending
+                .buffers
+                .into_iter()
+                .map(|f| (f.buffer, f.source))
+                .collect();
+            return self.commit_transition(next, sources);
+        }
         self.last_close = Some(crate::close::Committed {
             ticket: pending.ticket,
             intent: pending.intent,
@@ -377,10 +408,6 @@ impl Session {
                 .map(|f| f.buffer)
                 .collect(),
         });
-        if let Some(next) = pending.next {
-            let sources = pending.buffers.into_iter().map(|f| (f.buffer, f.source)).collect();
-            return self.commit_transition(next, sources);
-        }
         match pending.intent {
             Intent::Reload(_) | Intent::Workspace => return Effect::default(),
             Intent::Tab(id) => {

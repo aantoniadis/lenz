@@ -15,10 +15,16 @@ impl Session {
         };
         self.prepare_close_with(intent, None, Some(next))
     }
-    pub(super) fn commit_transition(&mut self, next: Transition, sources: Vec<(BufferId, SemanticSource)>) -> Effect {
+    pub(super) fn commit_transition(
+        &mut self,
+        next: Transition,
+        sources: Vec<(BufferId, SemanticSource)>,
+    ) -> Effect {
         match next {
             Transition::Reload(tab) => {
-                if let Some(blame) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()) { blame.stamp = None; }
+                if let Some(blame) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()) {
+                    blame.stamp = None;
+                }
                 // The read may fail or an edit may supersede it. Consent is consumed only by a matched successful reply.
                 self.load(tab, true);
             }
@@ -27,7 +33,11 @@ impl Session {
                 self.open_root(root);
                 for (buffer, _) in sources {
                     if !self.state.tabs.iter().any(|t| t.buffer == Some(buffer)) {
-                        if let Some(entry) = self.state.sources.buffers.remove(&buffer) && let Some(source) = entry.snapshot { self.cache.take_any(source.source()); }
+                        if let Some(entry) = self.state.sources.buffers.remove(&buffer)
+                            && let Some(source) = entry.snapshot
+                        {
+                            self.cache.take_any(source.source());
+                        }
                         self.state.sources.aliases.retain(|_, id| *id != buffer);
                     }
                 }
@@ -38,14 +48,35 @@ impl Session {
                 return self.retry(retry, mode);
             }
         }
-        Effect { repaint: true, copy: None }
+        Effect {
+            repaint: true,
+            copy: None,
+        }
     }
     pub(super) fn finish_checkout_sources(&mut self, here: bool) {
         for (buffer, source) in std::mem::take(&mut self.checkout_sources) {
-            if !here { continue; }
+            if !here {
+                continue;
+            }
             if let Some(entry) = self.state.sources.buffers.get_mut(&buffer)
-                && entry.snapshot.as_ref().is_some_and(|now| source.matches(now)) {
+                && entry
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|now| source.matches(now))
+            {
                 entry.draft = None;
+                entry.save.status = crate::save::Status::Ready;
+                entry.save.checked = None;
+                entry.save.revalidated = None;
+                for tab in self
+                    .state
+                    .tabs
+                    .iter_mut()
+                    .filter(|tab| tab.buffer == Some(buffer))
+                {
+                    // Even a checkout whose bytes/stamp stayed equal must resolve the consented draft to disk.
+                    tab.stamp = None;
+                }
             }
         }
     }

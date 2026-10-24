@@ -129,6 +129,29 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence(cx: &mut TestAppContext) {
+    let f=fixture_setup(cx,Some(("refresh.txt",b"saved\r\n")),&[],true);settle(cx,&f,|v|v.session.state().current_source().is_some());let path=f.dir.path().join("refresh.txt");let mut v=visual(cx,&f);draw(&mut v);f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));v.simulate_keystrokes("ctrl-a ctrl-v");let position=f.view.read_with(&v,|v,_|v.session.state().selection());
+    v.deactivate_window();std::fs::write(&path,b"external\r\n").unwrap();v.update(|w,_|w.activate_window());settle(cx,&f,|v|v.session.state().active().unwrap().stale_on_disk());draw(&mut v);assert!(f.view.read_with(&v,|v,_|v.status().contains("changed on disk")));assert_eq!(f.view.read_with(&v,|v,_|v.session.state().selection()),position);
+    v.simulate_keystrokes("f5");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some()));draw(&mut v);assert!(f.view.read_with(&v,|v,_|v.modal_rows().iter().any(|row|row.0.contains("Choose Save"))));v.simulate_keystrokes("ctrl-s ctrl-v end up escape");assert_eq!(std::fs::read(&path).unwrap(),b"external\r\n");assert_eq!(f.view.read_with(&v,|v,_|v.session.state().selection()),position);assert!(f.view.read_with(&v,|v,_|{let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).as_deref()==Some("draft λ\r\n")}));
+    for (w,h) in [(1.0,1.0),(220.0,100.0)] {v.simulate_resize(size(px(w),px(h)));v.simulate_keystrokes("f5 end up");draw(&mut v);v.simulate_keystrokes("escape");}
+    v.simulate_resize(size(px(800.0),px(400.0)));v.simulate_keystrokes("f5 d");settle(cx,&f,|v|v.session.state().loading().is_none());draw(&mut v);assert!(f.view.read_with(&v,|v,_|{let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).as_deref()==Some("external\r\n")}));assert!(f.view.read_with(&v,|v,_|v.modal.is_none() && !v.session.state().tab_dirty(v.session.state().active().unwrap().id())));assert_eq!(std::fs::read(path).unwrap(),b"external\r\n");
+    v.simulate_keystrokes("ctrl-q");cx.run_until_parked();
+}
+
+#[gpui::test]
+fn draft_workspace_changes_use_real_folder_branch_and_new_branch_controls(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::git;
+    let (f,wt)=branches_fixture(cx);let path=f.dir.path().join("a.txt");let mut v=visual(cx,&f);v.simulate_resize(size(px(900.0),px(400.0)));draw(&mut v);f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));v.simulate_keystrokes("ctrl-a ctrl-v");let position=f.view.read_with(&v,|v,_|v.session.state().selection());
+    v.simulate_keystrokes("f10");let row=f.view.read_with(&v,|v,_|v.modal_rows().iter().position(|r|r.0==CommandId::OpenFolder.label()).unwrap());for _ in 0..row {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");assert!(cx.did_prompt_for_paths());cx.simulate_path_prompt_response(|options|{assert!(options.directories && !options.files);Some(vec![wt.path().join("second")])});settle(cx,&f,|v|v.session.close_prompt().is_some());draw(&mut v);v.simulate_keystrokes("escape");assert_eq!(f.view.read_with(&v,|v,_|v.session.state().project().unwrap().root().to_owned()),f.dir.path());assert_eq!(f.view.read_with(&v,|v,_|v.session.state().selection()),position);
+    for new_branch in [false,true] {
+        v.simulate_keystrokes("ctrl-shift-`");settle(cx,&f,|v|v.session.state().branches().is_some_and(|b|!b.loading));draw(&mut v);
+        if new_branch {type_text(&mut v,"new");v.simulate_keystrokes("enter");assert!(f.view.read_with(&v,|v,_|matches!(v.modal,Some(Modal::NewBranch {..}))));type_text(&mut v,"draft-guard");v.simulate_keystrokes("enter");} else {type_text(&mut v,"other");v.simulate_keystrokes("enter");}
+        assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some()),"new_branch={new_branch}, modal={:?}",f.view.read_with(&v,|v,_|v.modal.clone()));draw(&mut v);assert_eq!(git(f.dir.path(),&["branch","--show-current"]).trim(),"main");v.simulate_keystrokes("escape");assert_eq!(f.view.read_with(&v,|v,_|v.session.state().selection()),position);assert_eq!(std::fs::read(&path).unwrap(),b"main\n");
+    }
+    v.simulate_keystrokes("ctrl-shift-`");settle(cx,&f,|v|v.session.state().branches().is_some_and(|b|!b.loading));draw(&mut v);type_text(&mut v,"other");v.simulate_keystrokes("enter d");settle(cx,&f,|v|!v.session.state().checking_out() && v.session.state().current_source().is_some_and(|s|s.copy_range(0..s.len_bytes()).as_deref()==Some("other\n")));draw(&mut v);assert_eq!(git(f.dir.path(),&["branch","--show-current"]).trim(),"other");assert_eq!(std::fs::read(path).unwrap(),b"other\n");assert!(f.view.read_with(&v,|v,_|v.modal.is_none()));
+}
+
+#[gpui::test]
 fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path,Fault};
     use reader_core::save::{DiskMatch,Status};
