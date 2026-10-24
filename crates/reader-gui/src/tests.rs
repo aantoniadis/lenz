@@ -125,6 +125,13 @@ fn visual(cx: &mut TestAppContext, f: &Fixture) -> VisualTestContext {
     v
 }
 
+fn choose_menu_command(v: &mut VisualTestContext, f: &Fixture, id: CommandId) {
+    v.simulate_keystrokes("f10");
+    let at = f.view.read_with(v, |view, _| view.modal_rows().iter().position(|row| row.0 == id.label()).unwrap());
+    for _ in 0..at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+}
+
 fn draw(v: &mut VisualTestContext) {
     v.update(|w, cx| {
         let _ = w.draw(cx);
@@ -246,7 +253,7 @@ fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence(
                 .tab_dirty(v.session.state().active().unwrap().id())
     }));
     assert_eq!(std::fs::read(path).unwrap(), b"external\r\n");
-    v.simulate_keystrokes("ctrl-q");
+    choose_menu_command(&mut v, &f, CommandId::CloseWindow);
     cx.run_until_parked();
 }
 
@@ -427,7 +434,7 @@ fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket(cx
         v.simulate_keystrokes("d");
         assert!(f.view.read_with(&v, |v, _| v.session.state().active().is_none() && v.modal.is_none()));
         assert_eq!(std::fs::read(&path).unwrap(), disk);
-        v.simulate_keystrokes("ctrl-q"); cx.run_until_parked();
+        choose_menu_command(&mut v, &f, CommandId::CloseWindow); cx.run_until_parked();
     }
 }
 
@@ -442,7 +449,7 @@ fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk
         v.simulate_keystrokes("f10");let row=f.view.read_with(&v,|v,_|v.modal_rows().iter().position(|r|r.0==CommandId::RecheckSave.label()).unwrap());for _ in 0..row {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
         settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(f.view.read_with(&v,|v,_|v.session.state().view(tab).unwrap().save_status().clone()),Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(f.view.read_with(&v,|v,_|v.session.state().tab_dirty(tab)));
         v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_none())));draw(&mut v);v.simulate_keystrokes("d");assert!(f.view.read_with(&v,|v,_|v.session.state().active().is_none() && v.modal.is_none()));assert_eq!(std::fs::read(path).unwrap(),disk);
-        v.simulate_keystrokes("ctrl-q");cx.run_until_parked();
+        choose_menu_command(&mut v, &f, CommandId::CloseWindow);cx.run_until_parked();
     }
 }
 
@@ -457,6 +464,11 @@ fn production_empty_close_and_dirty_tab_decisions_remain_modal_safe_at_tiny_size
     let unsplit=f.view.read_with(&v,|view,_|view.modal_rows().iter().position(|row|row.0==CommandId::Unsplit.label()).unwrap());
     for _ in 0..unsplit {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
     assert!(f.view.read_with(&v,|view,_|view.session.state().split().is_none() && view.session.state().tabs().len()==1 && view.session.state().tab_dirty(view.session.state().active().unwrap().id())));
+    let before=f.view.read_with(&v,|view,_|(view.session.state().current_source().unwrap().key(),view.session.state().selection()));
+    choose_menu_command(&mut v,&f,CommandId::CloseWindow);cx.run_until_parked();
+    assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some() && !view.session.closed()));
+    v.simulate_keystrokes("escape");cx.run_until_parked();
+    assert_eq!(f.view.read_with(&v,|view,_|(view.session.state().current_source().unwrap().key(),view.session.state().selection())),before);
     v.simulate_keystrokes("ctrl-f4");
     assert!(f.view.read_with(cx,|v,_|v.session.close_prompt().is_some()));
     for (w,h) in [(1.0,1.0),(120.0,40.0)] {v.simulate_resize(size(px(w),px(h)));v.simulate_keystrokes("end up");draw(&mut v);}
@@ -3512,11 +3524,24 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
     let char_w = f.view.read_with(&v, |r, _| r.char_w);
     let at = |col: f32| point(px(f32::from(tb.origin.x) + num_w() + 8.0 + col * char_w), tb.origin.y + px(line_h() / 2.0));
     let shown = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().state().documentation().is_some());
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    assert_eq!(key_hint(CommandId::Documentation), Some("Ctrl+Q"));
+    assert_eq!(key_hint(CommandId::CloseWindow), None);
+    assert_eq!(key_hint(CommandId::QuitAll), Some("Ctrl+Shift+Q"));
+    let unchanged = |r: &ReaderView| {
+        let state=r.session.state();let view=state.view(state.active().unwrap().id()).unwrap();
+        (view.snapshot().key(), view.copy_selection(), view.tab().selection(), view.dirty(), view.can_undo(), view.can_redo())
+    };
     // Ctrl+Q at the caret: a popup below the name.
     v.simulate_click(at(14.5), Modifiers::default());
+    let before = f.view.read_with(&v, |r, _| unchanged(r));
     v.simulate_keystrokes("ctrl-q");
     settle(cx, &f, |r| r.session().state().documentation().is_some());
     draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| unchanged(r)), before);
+    assert!(f.view.read_with(&v, |r, _| !r.session.closed() && r.session.close_prompt().is_none()));
+    assert_eq!(std::fs::read(pkg.join("src/main.rs")).unwrap(), text.as_bytes());
     let b = f.view.read_with(&v, |r, _| r.doc_popup_bounds()).expect("a popup is drawn");
     assert!(b.origin.y >= tb.origin.y + px(line_h()), "below the name: {b:?}");
     v.simulate_keystrokes("escape");
@@ -3560,6 +3585,12 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| r.doc_popup_bounds().is_none() && r.doc_popup.is_none()));
     }
+    v.simulate_keystrokes("ctrl-shift-a");type_text(&mut v,"CloseWindow");
+    settle(cx,&f,|r|r.session.state().navigation().is_some_and(|n|!n.pending && n.rows.iter().any(|row|row.action()==Some(CommandId::CloseWindow))));
+    draw(&mut v);
+    assert!(f.view.read_with(&v,|r,_|r.modal_rows().iter().any(|row|row.0.starts_with("Close Window") && !row.0.contains("Ctrl+Q"))));
+    assert_eq!(CommandId::CloseWindow.shortcut(),Some("Ctrl+Q"),"the terminal binding is unchanged");
+    v.simulate_keystrokes("escape");
     // Another tab closes it too.
     v.simulate_keystrokes("ctrl-q");
     settle(cx, &f, |r| r.session().state().documentation().is_some());
@@ -6602,4 +6633,10 @@ fn native_composition_can_begin_again_before_the_next_dead_key_without_reviving_
         v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), if accept { "ébase" } else { "base" });
         assert_eq!(std::fs::read(f.dir.path().join("repeat-ime.txt")).unwrap(), b"base");
     }
+}
+
+#[test]
+fn text_input_default_policy_requires_validated_linux_x11_backend() {
+    assert_eq!(text_input_supported("X11"),cfg!(target_os="linux"));
+    for backend in ["Wayland", "", "Test", "x11"] {assert!(!text_input_supported(backend));}
 }

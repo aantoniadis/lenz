@@ -51,7 +51,6 @@ fn text(s: &State) -> String {
 #[derive(Debug, PartialEq, Eq)]
 struct Observed {
     text: String,
-    version: u64,
     dirty: bool,
     undo: bool,
     redo: bool,
@@ -61,7 +60,6 @@ fn observe(s: &State) -> Observed {
     let view = s.view(s.active().unwrap().id()).unwrap();
     Observed {
         text: text(s),
-        version: view.snapshot().key().version,
         dirty: view.dirty(),
         undo: view.can_undo(),
         redo: view.can_redo(),
@@ -187,6 +185,15 @@ impl Replay {
             |r, _| r.session().state().current_source().unwrap().source() == path
         ));
     }
+    fn keys(&self, v: &VisualTestContext) -> [reader_core::text::SnapshotKey; 2] {
+        // Worker reads reserve versions independently; fence identity within each Session.
+        [
+            self.tui.session.state().current_source().unwrap().key(),
+            self.gui.read_with(v, |r, _| {
+                r.session().state().current_source().unwrap().key()
+            }),
+        ]
+    }
     fn check(&self, v: &VisualTestContext, expected: &str) -> Observed {
         let t = observe(self.tui.session.state());
         assert_eq!(t.text, expected);
@@ -271,6 +278,7 @@ fn gui_and_tui_foundation_whole_chain_keeps_saved_history_and_independent_views(
     );
     independent.paste(&mut other, "independent λ\r\n");
     let held = independent.check(&other, "independent λ\r\n");
+    let held_keys = independent.keys(&other);
     primary.open(cx, &mut v, &path, &tui_path);
     primary.key(&mut v, "ctrl-a", KeyCode::Char('a'), KeyModifiers::CONTROL);
     primary.key(&mut v, "λ", KeyCode::Char('λ'), KeyModifiers::NONE);
@@ -325,6 +333,7 @@ fn gui_and_tui_foundation_whole_chain_keeps_saved_history_and_independent_views(
     primary.key(&mut v, "ctrl-s", KeyCode::Char('s'), KeyModifiers::CONTROL);
     primary.settle(&mut v, |s| s.active().is_some_and(|t| !s.tab_dirty(t.id())));
     let saved = primary.check(&v, final_text);
+    let saved_keys = primary.keys(&v);
     assert!(!saved.dirty && saved.undo && !saved.redo);
     assert_eq!(primary.tui.session.disabled(CommandId::Undo), None);
     assert_eq!(
@@ -344,6 +353,7 @@ fn gui_and_tui_foundation_whole_chain_keeps_saved_history_and_independent_views(
     primary.key(&mut v, "ctrl-s", KeyCode::Char('s'), KeyModifiers::CONTROL);
     primary.key(&mut v, "escape", KeyCode::Esc, KeyModifiers::NONE);
     assert_eq!(primary.check(&v, final_text), saved);
+    assert_eq!(primary.keys(&v), saved_keys);
     let clean = gui_files.join("clean.txt");
     let pressure = gui_files.join("pressure.txt");
     let tui_clean = tui_files.join("clean.txt");
@@ -370,6 +380,7 @@ fn gui_and_tui_foundation_whole_chain_keeps_saved_history_and_independent_views(
         saved,
         "saved buffer/history/independent positions survive cache pressure"
     );
+    assert_eq!(primary.keys(&v), saved_keys);
     primary.key(&mut v, "ctrl-z", KeyCode::Char('z'), KeyModifiers::CONTROL);
     let undone = primary.check(&v, before_right);
     assert!(undone.dirty && undone.undo && undone.redo);
@@ -378,6 +389,7 @@ fn gui_and_tui_foundation_whole_chain_keeps_saved_history_and_independent_views(
         assert_eq!(std::fs::read(p).unwrap(), final_text.as_bytes());
     }
     independent.settle(&mut other, |s| s.current_source().is_some());
+    assert_eq!(independent.keys(&other), held_keys);
     assert_eq!(
         independent.check(&other, "independent λ\r\n"),
         held,

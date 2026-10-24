@@ -33,7 +33,7 @@ confirmed saved version. **Last saved (read-only)** and **Current draft** show c
 background and `▌` gutter marks. The current side shares the ordinary tab’s buffer and undo history;
 the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split restores the original views
 without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
-independently. Production typing remains gated; see the [implementation and verification limits](../research/reader-saved-comparison.md).
+independently. Platform input availability is described below; see the [implementation and verification limits](../research/reader-saved-comparison.md).
 
 Opening a dirty file in an editor or default app offers **Save and Open** (`s`),
 **Open Saved Version** (`o`) or **Cancel** (Esc). The saved-version choice keeps
@@ -43,8 +43,8 @@ nothing. An already requested Save can still finish after Cancel. External
 comparison actions explicitly use saved disk inputs. See the
 [handoff behavior and verification](../research/reader-external-open-decisions.md).
 
-Basic editor input is currently exercised through existing test opt-ins; production writable input stays
-blocked until safety checkpoint23. In that input mode q/j/k/slash/Space type literally, bracketed paste is
+The checkpoint23 candidate enables basic editor input by default on Linux TUI and Linux X11 GUI.
+The GUI uses its actual backend identity; Wayland and native macOS stay gated. q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
 all views of the same buffer and cannot override intrinsic restrictions or enable writing. Terminal Paste
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
@@ -52,12 +52,12 @@ normally comes from the emulator (often Ctrl+Shift+V); the Paste command explain
 
 The terminal emulator owns input-method preedit; Lenz receives committed Unicode text and bracketed paste.
 GUI preedit and both adapters' long-line edits use the bounded source-coordinate path; see the
-[composition verification and limits](../research/reader-unicode-composition.md). Production writable input
-remains gated at checkpoint23.
+[composition verification and limits](../research/reader-unicode-composition.md). The activation candidate
+still awaits the combined correctness gate and performance acceptance.
 
 ## Controls
 
-F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared
+F10 opens the command palette; `:` is an alias outside source input mode. Type to filter, use the arrows and Enter to run. It includes all shared
 commands, their setting states and disabled reasons, including provider controls and features without a terminal
 shortcut. F1 opens wrapped, scrollable help; F2 opens language-server status and recovery.
 A dedicated toolbar above the tabs exposes Menu and frequent navigation/file/search actions.
@@ -96,10 +96,10 @@ the Last saved pane remains read-only.
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
 | Reload / close tab | F5 or Ctrl-R / Ctrl-F4 |
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
-| Focus tree, reading area and results | Tab / Shift-Tab; click a pane |
+| Focus tree, reading area and results | Shift-Tab; click a pane (Tab cycles outside source input mode; in editable source it inserts a tab) |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
-| Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
+| Scroll text | PageUp/PageDown, Home/End; wheel (j/k only while text input is gated) |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the status bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
 | Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (a list of branches and tags; type to filter or for any revision), Compare with Base Branch, Show Changes Since Branch Start, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |

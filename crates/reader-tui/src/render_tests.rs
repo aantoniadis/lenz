@@ -304,6 +304,9 @@ fn actual_empty_constructor_renders_dark_light_narrow_and_zero_and_closes_scroll
             draw(&mut app, width, height);
         }
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(matches!(app.modal.as_ref().unwrap().kind, Prompt::Help));
+        let help = text(&draw(&mut app, 100, 40));
+        assert!(help.contains("Ctrl+S") && help.contains("Ctrl+Z") && help.contains("bracketed paste"));
         draw(&mut app, 24, 9);
         app.handle(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
         draw(&mut app, 24, 9);

@@ -1,7 +1,9 @@
 # Lenz Reader (working name)
 
-A fast code reader (it never edits files; only the Git checkouts and branches you choose change your repository) that shares decoding, syntax highlighting, themes and single-pane text
-presentation with Lenz through local workspace crates `lenz-content` and `lenz-gpui`.
+A fast code reader and editor for existing files, with draft editing on Linux X11 GUI and Linux TUI.
+Wayland GUI and native macOS input remain gated pending platform verification. Decoding, syntax highlighting,
+themes and single-pane text presentation are shared with Lenz through local workspace crates
+`lenz-content` and `lenz-gpui`.
 
 This is the imported Reader documentation. The proposed product name is **Lenz Code**;
 [the command-family trial](../launcher-trial.md) explains how to launch it as `lenz [file-or-folder]`.
@@ -25,7 +27,8 @@ line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search, Alt
 Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition, Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B
 implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy, Ctrl+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward, F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks,
 Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
-Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition.
+Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition. In the GUI, Close Window
+is available through the command menu or native window control; Ctrl+Shift+Q requests Quit All.
 
 The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
 existing commands with setting values and disabled reasons; scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go

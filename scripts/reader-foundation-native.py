@@ -95,6 +95,7 @@ def main():
     parser.add_argument('--out', type=Path, required=True, help='NEW directory; never reused')
     parser.add_argument('--source', required=True, help='cohort source identity, paired with executable hash')
     parser.add_argument('--scenario', choices=('close', 'compose', 'both'), default='both')
+    parser.add_argument('--default-input', action='store_true', help='verify actual production capability without the explicit test opt-in')
     args = parser.parse_args()
     binary = args.binary.resolve(strict=True)
     args.out.mkdir()  # Refuse to overwrite prior evidence or fixtures.
@@ -102,8 +103,8 @@ def main():
     (root / 'runtime-dir').mkdir(mode=0o700)
     (root / 'Compose').write_text('include "%L"\n<dead_acute> <e> : "é"\n')
     report = {'schema': 1, 'source_claim': args.source, 'binary': str(binary), 'binary_sha256': sha(binary),
-              'driver_sha256': sha(Path(__file__)), 'scenario': args.scenario,
-              'scope': 'owned Xvfb/X11 native protocol and XTest delivery with test-support opt-in; no physical display/Wayland/Mac or production latency claim',
+              'driver_sha256': sha(Path(__file__)), 'scenario': args.scenario, 'explicit_test_opt_in': not args.default_input,
+              'scope': 'owned Xvfb/X11 native protocol and XTest delivery with test-support observation; input policy recorded separately; no physical display/Wayland/Mac or production latency claim',
               'checks': [], 'status': 'running'}
     output = root / 'result.json'
     def save():
@@ -140,7 +141,7 @@ def main():
             connection.change_keyboard_mapping(compose_code, [(0xfe51, 0xfe51)])  # dead_acute has a visible native preedit prefix
             connection.sync()
             env = private_environment(os.environ, root, name)
-            app = subprocess.Popen([str(binary), str(root / 'app')], cwd=root, env=env,
+            app = subprocess.Popen([str(binary), str(root / 'app'), *(['--default-input'] if args.default_input else [])], cwd=root, env=env,
                                    stdout=subprocess.DEVNULL, stderr=app_log)
             report['app_pid'] = app.pid
             trace = root / 'app/state.jsonl'
@@ -149,6 +150,8 @@ def main():
                     raise RuntimeError('acceptance app exited before approval: ' + str(app.returncode))
                 return states(trace).get(label, {})
             wait_for(lambda: all(state(k).get('source') for k in ('a', 'b')), 'both production windows loaded')
+            if args.default_input:
+                assert all(state(k).get('text_input_enabled') is True for k in ('a', 'b')), 'ordinary X11 constructor must enable input'
             def windows():
                 return visible_windows(connection.screen().root, X.IsViewable, error.BadWindow)
             found = wait_for(lambda: windows() if all('Lenz foundation ' + k in windows() for k in ('a', 'b')) else None,
@@ -233,6 +236,13 @@ def main():
                 report['compose'] = {'marked_phases': marked_phases, 'commit': 'éé', 'undos': ['é', 'draft-a'],
                                      'native_cancel': 'not exercised; platform Cancelled can commit a dead-key prefix'}
                 report['checks'].append('two consecutive native preedits preserve authoritative draft/history; exact éé commits undo independently; disk untouched')
+            if args.default_input:
+                focus(a); key('s', 'Control_L')
+                wait_for(lambda: (root / 'app/a.txt').read_bytes() == b'draft-a' and not state('a')['source']['dirty'],
+                         'ordinary GUI Ctrl-S saves the exact draft')
+                key('a', 'Control_L'); key('x')
+                wait_for(lambda: exact_text(state('a')) == 'x' and state('a')['source']['dirty'], 'ordinary GUI remains writable after Save')
+                report['checks'].append('actual default GUI Ctrl-S saves exact draft; later typing stays dirty until explicit close decision')
             if args.scenario in ('close', 'both'):
                 focus(a); request_close()
                 wait_for(lambda: state('a').get('close_prompt'), 'fresh close decision')
@@ -248,6 +258,8 @@ def main():
                     key('d')
                     wait_for(lambda: 'Lenz foundation ' + label not in windows(), 'approved fixture window closes ' + label)
             wait_for(lambda: app.poll() == 0, 'normal last-window process exit')
+            assert (root / 'app/a.txt').read_bytes() == (b'draft-a' if args.default_input else originals['a'])
+            assert (root / 'app/b.txt').read_bytes() == originals['b']
             report['normal_exit'] = app.returncode
             report['status'] = 'passed'
             connection.change_keyboard_mapping(compose_code, old_mapping)

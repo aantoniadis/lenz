@@ -119,6 +119,7 @@ impl ReaderView {
     }
     /// Positive native-input oracle; bounded and absent after cancellation or source invalidation.
     #[doc(hidden)]
+    #[cfg(feature = "test-support")]
     pub fn marked_text_for_test(&self) -> Option<(Range<usize>, String)> {
         let capture = self.input_state.capture.as_ref().filter(|capture| self.capture_source_current(capture))?;
         let source = self.session.state().presentation_view(capture.tab)?.snapshot();
