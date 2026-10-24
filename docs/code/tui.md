@@ -85,6 +85,17 @@ Save for This Project** is off by default and only remembered for now: Lenz does
 choices are saved in the Reader settings file, never in the project. EditorConfig `{n..m}` ranges are not
 matched, and indentation commands that use these preferences are not available yet.
 
+**SQL Dialect** (F10 → SQL, in both adapters) declares which SQL dialect an `.sql` file is written for.
+**Project SQL Dialect: PostgreSQL / DuckDB / Not Set** is the project default; **SQL Dialect for This File:
+PostgreSQL / DuckDB / Follow Project Default** overrides it for one file, including a file outside the open
+folder. The footer keeps the active choice visible next to the LSP status — `SQL: PostgreSQL (this file)`,
+`SQL: DuckDB (project)` or `SQL: not set` — and clicking it, or **SQL Dialect…**, shows the effective
+choice, the project default and what offline assistance this build has. An unset dialect stays unset: Lenz
+never assumes PostgreSQL. Choosing a dialect only writes the Reader settings file (project choices under
+`projects`, file choices under `sql_dialects`), never the document or the project, and opens no database,
+DuckDB file or process. Offline assistance is not wired into the editor yet, and the details say so; the
+next dialect or edit invalidates an earlier request identity, so a stale reply cannot publish.
+
 The terminal emulator owns input-method preedit; Lenz receives committed Unicode text and bracketed paste.
 GUI preedit and both adapters' long-line edits use the bounded source-coordinate path; see the
 [composition verification and limits](../research/reader-unicode-composition.md). The activation candidate
@@ -160,6 +171,7 @@ the Last saved pane remains read-only.
 | Recent files / locations | Ctrl-E / Ctrl-Alt-E |
 | Outline / declarations | Ctrl-Shift-O / Ctrl-T |
 | Keymap preset, rebinding, every chord | F10 → Application: Keymap…, Keymap: IntelliJ (Default), Keymap: VS Code, Reset All Keybindings |
+| SQL dialect default / this file / details | F10 → SQL; click the `SQL:` status label |
 | Definition / peek / usages | F12 / Alt-F12 / Shift-F12 |
 | Type definition / implementations | Ctrl-Shift-B / Ctrl-Alt-B |
 | Call / type hierarchy | Ctrl-Alt-H / Ctrl-H or Alt-H (many terminals send Ctrl-H as Backspace) |

@@ -375,6 +375,10 @@ pub enum Command {
     ResetKeymap,
     /// Whether Save formats the open project's files first (off: formatting is explicit); remembered outside it.
     SetFormatOnSave(bool),
+    /// The active file's SQL dialect (`None`: follow the project default); remembered outside the file.
+    SetSqlDialect(Option<crate::sql_dialect::Dialect>),
+    /// The open project's SQL dialect default (`None`: unset); remembered outside it.
+    SetProjectSqlDialect(Option<crate::sql_dialect::Dialect>),
     /// An SVG: switch between its rendering and its source text.
     ToggleImageSource,
     /// A Markdown file: switch between its preview and its source, at the same place.
@@ -576,6 +580,16 @@ pub enum CommandId {
     IndentInherit,
     /// Format on Save for the open project; off by default.
     FormatOnSave,
+    /// The active file's effective SQL dialect, its project default and what can assist it, with where each comes from.
+    SqlDialect,
+    /// This file's own SQL dialect choice, above the project default.
+    SqlDialectPostgreSql,
+    SqlDialectDuckDb,
+    SqlDialectFollowProject,
+    /// The open project's SQL dialect default.
+    ProjectSqlDialectPostgreSql,
+    ProjectSqlDialectDuckDb,
+    ProjectSqlDialectUnset,
     /// Every command's chord, its preset origin and any binding an override displaced.
     Keymap,
     /// Follow IntelliJ's chords, the default.
@@ -606,7 +620,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 141] = [
+    pub const ALL: [CommandId; 148] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -744,6 +758,13 @@ impl CommandId {
         Self::IndentFourSpaces,
         Self::IndentInherit,
         Self::FormatOnSave,
+        Self::SqlDialect,
+        Self::SqlDialectPostgreSql,
+        Self::SqlDialectDuckDb,
+        Self::SqlDialectFollowProject,
+        Self::ProjectSqlDialectPostgreSql,
+        Self::ProjectSqlDialectDuckDb,
+        Self::ProjectSqlDialectUnset,
         Self::Keymap,
         Self::KeymapIntelliJ,
         Self::KeymapVsCode,
@@ -762,6 +783,13 @@ impl CommandId {
             Self::IndentFourSpaces => "Project Indentation: 4 Spaces",
             Self::IndentInherit => "Project Indentation: EditorConfig and Language Defaults",
             Self::FormatOnSave => "Format on Save for This Project",
+            Self::SqlDialect => "SQL Dialect…",
+            Self::SqlDialectPostgreSql => "SQL Dialect for This File: PostgreSQL",
+            Self::SqlDialectDuckDb => "SQL Dialect for This File: DuckDB",
+            Self::SqlDialectFollowProject => "SQL Dialect for This File: Follow Project Default",
+            Self::ProjectSqlDialectPostgreSql => "Project SQL Dialect: PostgreSQL",
+            Self::ProjectSqlDialectDuckDb => "Project SQL Dialect: DuckDB",
+            Self::ProjectSqlDialectUnset => "Project SQL Dialect: Not Set",
             Self::Keymap => "Keymap…",
             Self::KeymapIntelliJ => "Keymap: IntelliJ (Default)",
             Self::KeymapVsCode => "Keymap: VS Code",
@@ -1872,6 +1900,24 @@ impl State {
         let root = self.project.as_ref()?.root();
         Some(self.settings.projects.get(root).copied().unwrap_or_default())
     }
+    /// The active file's SQL dialect: its own choice, then its open project's default, else unset (`None`: no file
+    /// is open). Taken from the settings file only; never from the document's text or a database.
+    pub fn sql_dialect(&self) -> Option<crate::sql_dialect::Selection> {
+        let tab = self.active()?;
+        let file = if tab.is_file() { self.settings.sql_dialects.get(&tab.source).copied() } else { None };
+        let project = self.project.as_ref().filter(|p| tab.source.starts_with(p.root())).and(self.project_preferences());
+        Some(crate::sql_dialect::Selection::resolve(file, project.and_then(|p| p.sql_dialect)))
+    }
+    /// The active SQL file's dialect for a status bar (`None`: the file is not SQL). An unset dialect stays visible.
+    pub fn sql_dialect_label(&self) -> Option<String> {
+        if self.current_source()?.language() != Some(Language::Sql) { return None; }
+        self.sql_dialect().map(|s| format!("SQL: {}", s.status()))
+    }
+    /// This file's own choice (`None`: it follows the project default).
+    pub(crate) fn sql_dialect_override(&self) -> Option<crate::sql_dialect::Dialect> {
+        let tab = self.active()?;
+        if tab.is_file() { self.settings.sql_dialects.get(&tab.source).copied() } else { None }
+    }
     fn project_provider(&self) -> Option<(usize, PathBuf)> {
         let (provider, Some(Some(root))) = self.semantics.resolved_source(self.current_source()?.source_meta())? else { return None };
         Some((provider, root))
@@ -1940,6 +1986,23 @@ impl State {
                 Some(indent == match id { CommandId::IndentTabs => Some(Indent::Tabs), CommandId::IndentTwoSpaces => Some(Indent::Spaces(2)), CommandId::IndentFourSpaces => Some(Indent::Spaces(4)), _ => None })
             }
             CommandId::FormatOnSave => Some(self.project_preferences()?.format_on_save),
+            CommandId::SqlDialectFollowProject | CommandId::SqlDialectPostgreSql | CommandId::SqlDialectDuckDb => {
+                self.active().filter(|t| t.is_file())?;
+                let file = self.sql_dialect_override();
+                Some(match id {
+                    CommandId::SqlDialectPostgreSql => file == Some(crate::sql_dialect::Dialect::PostgreSql),
+                    CommandId::SqlDialectDuckDb => file == Some(crate::sql_dialect::Dialect::DuckDb),
+                    _ => file.is_none(),
+                })
+            }
+            CommandId::ProjectSqlDialectPostgreSql | CommandId::ProjectSqlDialectDuckDb | CommandId::ProjectSqlDialectUnset => {
+                let dialect = self.project_preferences()?.sql_dialect;
+                Some(match id {
+                    CommandId::ProjectSqlDialectPostgreSql => dialect == Some(crate::sql_dialect::Dialect::PostgreSql),
+                    CommandId::ProjectSqlDialectDuckDb => dialect == Some(crate::sql_dialect::Dialect::DuckDb),
+                    _ => dialect.is_none(),
+                })
+            }
             _ => None,
         }
     }
@@ -2113,6 +2176,9 @@ pub struct Session {
     themes: ThemeService,
     theme_preview: Option<String>,
     request: u64,
+    /// Bumped whenever the active file's SQL dialect choice changes, so an earlier dialect request or result can be
+    /// rejected by identity (see [`Session::sql_identity`]).
+    sql_generation: u64,
     /// `request`, for jobs to skip work a later open or reload superseded.
     latest: Arc<AtomicU64>,
     /// The current document's version, read by syntax work to stop when superseded; and the other pane's.
@@ -2335,6 +2401,7 @@ impl Session {
             themes,
             theme_preview: None,
             request: 0,
+            sql_generation: 0,
             latest: Arc::new(AtomicU64::new(0)),
             current: Arc::new(AtomicU64::new(0)),
             other_current: Arc::new(AtomicU64::new(0)),
@@ -2554,7 +2621,16 @@ impl Session {
             CommandId::IndentTabs | CommandId::IndentTwoSpaces | CommandId::IndentFourSpaces | CommandId::IndentInherit | CommandId::FormatOnSave => {
                 self.state.project.is_none().then_some("Open a folder to choose its editing preferences")
             }
-            CommandId::EditingPreferences => self.state.current_source().is_none().then_some("No file is open"),
+            CommandId::EditingPreferences | CommandId::SqlDialect => self.state.current_source().is_none().then_some("No file is open"),
+            CommandId::SqlDialectPostgreSql | CommandId::SqlDialectDuckDb | CommandId::SqlDialectFollowProject => match self.state.active() {
+                None => Some("No file is open"),
+                Some(t) if t.untitled() => Some("Save this document as a file first"),
+                Some(t) if !t.is_file() => Some("Only an opened file has a SQL dialect"),
+                Some(_) => None,
+            },
+            CommandId::ProjectSqlDialectPostgreSql | CommandId::ProjectSqlDialectDuckDb | CommandId::ProjectSqlDialectUnset => {
+                self.state.project.is_none().then_some("Open a folder to choose its SQL dialect")
+            }
             CommandId::RebuildIndex => if self.state.project.is_none() { Some("Open a project folder first") } else if self.index_rebuilding { Some("The project index is being cleared") } else { None },
             CommandId::FocusBreadcrumbs if !self.state.settings.breadcrumbs => Some("Breadcrumbs are off"),
             CommandId::FocusBreadcrumbs => self.state.active().is_none().then_some("No file is open"),
@@ -2804,6 +2880,49 @@ impl Session {
                 f.executable.map_or_else(|| "not found in the project or on PATH. Lenz never installs or upgrades formatters.".into(), |e| format!("executable {}", e.display()))),
         });
         rows.join("\n")
+    }
+
+    /// The active SQL file's dialect for a status bar (`None`: the file is not SQL). An unset dialect stays visible.
+    pub fn sql_dialect_label(&self) -> Option<String> { self.state.sql_dialect_label() }
+
+    /// The active file's SQL dialect, its project default and what can assist it, each with its source, for either
+    /// adapter. Settings and paths only: never document contents, credentials or a connection.
+    pub fn sql_dialect_details(&self) -> String {
+        let Some(file) = self.state.current_source().map(|d| d.source().to_owned()) else { return "No file is open.".into() };
+        let selection = self.state.sql_dialect().unwrap_or_else(crate::sql_dialect::Selection::unset);
+        let root = self.state.project.as_ref().map(|p| p.root().to_owned()).filter(|r| file.starts_with(r));
+        let project = root.as_ref().and(self.state.project_preferences());
+        let project_row = match (&root, self.state.project.is_some()) {
+            (Some(_), _) => format!("Project default: {}", project.and_then(|p| p.sql_dialect).map_or("not set".into(), |d| d.label().to_string())),
+            (None, true) => "Project default: this file is outside the open folder".into(),
+            (None, false) => "Project default: no folder is open".into(),
+        };
+        let mut rows = vec![
+            format!("SQL dialect for {}", file.display()),
+            format!("Dialect: {}", selection.label()),
+            project_row,
+            crate::sql_dialect::assistance_note(selection),
+        ];
+        if self.state.current_source().and_then(|d| d.language()) != Some(Language::Sql) {
+            rows.push("This file is not detected as SQL; the choice is recorded and no SQL assistance runs for its language.".into());
+        }
+        if self.state.sql_dialect_override().is_some() {
+            rows.push(format!("This file's choice is saved by Lenz in {}, never in the file or the project", self.settings_file.display()));
+        }
+        rows.join("\n")
+    }
+
+    /// The identity an SQL assistance request for the active file carries. Capture it before the request; publish a
+    /// result only while [`Session::sql_identity_current`] still accepts it, so a dialect switch, an edit or another
+    /// file cannot let an earlier reply change the document.
+    pub fn sql_identity(&self) -> Option<crate::sql_dialect::Identity> {
+        let dialect = self.state.sql_dialect()?.dialect?;
+        Some(crate::sql_dialect::Identity { dialect, generation: self.sql_generation, key: self.state.current_source()?.key() })
+    }
+
+    /// Whether `identity` still describes the active file: same dialect, same dialect generation, same version.
+    pub fn sql_identity_current(&self, identity: crate::sql_dialect::Identity) -> bool {
+        self.sql_identity() == Some(identity)
     }
 
     /// Full, unwrapped diagnostic snapshot for display and copying in either adapter.
@@ -4380,6 +4499,8 @@ impl Session {
             }
             Command::SetProjectIndent(indent) => self.set_project_preferences(|p| p.indent = indent),
             Command::SetFormatOnSave(on) => self.set_project_preferences(|p| p.format_on_save = on),
+            Command::SetSqlDialect(dialect) => self.set_sql_dialect(dialect),
+            Command::SetProjectSqlDialect(dialect) => self.set_project_sql_dialect(dialect),
             Command::SetKeymapPreset(preset) => self.set_keymap_preset(preset),
             Command::SetKeybinding { command, chord } => self.set_keybinding(command, &chord),
             Command::ResetKeybinding(command) => self.reset_keybinding(command),
@@ -8169,6 +8290,40 @@ impl Session {
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
+    /// Record this file's SQL dialect (`None`: follow the project default). Choosing one only writes the settings
+    /// file; it opens no database and starts no process.
+    fn set_sql_dialect(&mut self, dialect: Option<crate::sql_dialect::Dialect>) -> Effect {
+        use crate::sql_dialect::Dialect;
+        let Some(tab) = self.state.active().filter(|t| t.is_file()) else { return Effect::default() };
+        let (path, name) = (tab.source.clone(), tab.title());
+        let before = self.state.settings.sql_dialects.get(&path).copied();
+        if before == dialect { return Effect::default(); }
+        match dialect {
+            Some(dialect) => { self.state.settings.sql_dialects.insert(path, dialect); }
+            None => { self.state.settings.sql_dialects.remove(&path); }
+        }
+        self.sql_generation += 1;
+        self.save_settings();
+        let said = match dialect {
+            Some(Dialect::PostgreSql) => "PostgreSQL",
+            Some(Dialect::DuckDb) => "DuckDB",
+            None => "follows the project default",
+        };
+        self.state.messages.push(format!("SQL dialect for {name}: {said}"));
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    /// Record the open project's SQL dialect default (`None`: unset).
+    fn set_project_sql_dialect(&mut self, dialect: Option<crate::sql_dialect::Dialect>) -> Effect {
+        let Some(before) = self.state.project_preferences().map(|p| p.sql_dialect) else { return Effect::default() };
+        if before == dialect { return Effect::default(); }
+        let effect = self.set_project_preferences(|p| p.sql_dialect = dialect);
+        self.sql_generation += 1;
+        let said = dialect.map_or("not set: Lenz does not assume PostgreSQL", |d| d.label());
+        self.state.messages.push(format!("SQL dialect for this project: {said}"));
+        effect
+    }
+
     fn save_settings(&mut self) {
         let (mut settings, file) = (self.state.settings.clone(), self.settings_file.clone());
         if let Some(comparison) = &self.state.comparison { settings.split = comparison.before.split; }
@@ -8493,6 +8648,9 @@ struct Settings {
     /// Project root → its own editing preferences (kept here, never in the project).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     projects: std::collections::BTreeMap<PathBuf, ProjectPreferences>,
+    /// File → the SQL dialect chosen for that file, above its project's default (never in the file).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    sql_dialects: std::collections::BTreeMap<PathBuf, crate::sql_dialect::Dialect>,
     /// The keyboard language menus and bare keys follow.
     keymap: KeymapPreset,
     /// Per-command chords that override the preset, by command slug (`none` leaves a command without one).
@@ -8502,7 +8660,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), sql_dialects: Default::default(), keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
     }
 }
 

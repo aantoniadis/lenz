@@ -520,6 +520,7 @@ impl App {
         let available = area.width.saturating_sub(commands_width);
         let state = self.session.state();
         let lsp = format!(" {} [F2] ", state.language_server_label());
+        let sql = self.session.sql_dialect_label().map(|label| format!(" {label} ")).unwrap_or_default();
         let save_notice = area.width < 60 && state.active().and_then(|tab| state.view(tab.id()))
             .is_some_and(|view| view.save_status().message().is_some());
         let lsp_width = if save_notice { 0 } else { (lsp.width() as u16).min(available / 2) };
@@ -542,6 +543,18 @@ impl App {
         geometry
             .controls
             .push((CommandId::LanguageServer, lsp_rect));
+        // The SQL dialect the file is written for, including "not set": never assumed, always visible.
+        let sql_width = if save_notice { 0 } else { (sql.width() as u16).min(available.saturating_sub(lsp_width) / 2) };
+        let sql_rect = Rect::new(lsp_rect.right(), area.y, sql_width, 1);
+        if sql_width > 0 {
+            line(
+                frame.buffer_mut(),
+                sql_rect,
+                &reader_core::chrome::ellipsize(&sql, sql_width as usize),
+                style(p.accent, p.status_bg).add_modifier(Modifier::UNDERLINED),
+            );
+            geometry.controls.push((CommandId::SqlDialect, sql_rect));
+        }
         let position = match self.independent_view {
             Some((index, count)) => format!(
                 " View {index}/{count} · {} ",
@@ -549,7 +562,7 @@ impl App {
             ),
             None => format!(" {} ", self.session.status_position()),
         };
-        let remainder = available.saturating_sub(lsp_width);
+        let remainder = available.saturating_sub(lsp_width + sql_width);
         let position_width = if save_notice { 0 } else { (position.width() as u16).min(remainder / 2) };
         let position_rect = Rect::new(commands_rect.x - position_width, area.y, position_width, 1);
         line(
@@ -572,9 +585,9 @@ impl App {
             geometry.controls.push((CommandId::GitBranches, branch_rect));
         }
         let message_rect = Rect::new(
-            lsp_rect.right(),
+            sql_rect.right(),
             area.y,
-            branch_rect.x.saturating_sub(lsp_rect.right()),
+            branch_rect.x.saturating_sub(sql_rect.right()),
             1,
         );
         let message = self

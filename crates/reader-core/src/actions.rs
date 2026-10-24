@@ -66,6 +66,8 @@ pub enum InterfaceAction {
     ServerRuntime,
     StatusDetails,
     EditingPreferences,
+    /// The active file's SQL dialect, its project default and what can assist it.
+    SqlDialect,
     /// Every command's chord, its preset and any displaced binding: rebinding captures the next key.
     Keymap,
 }
@@ -120,6 +122,13 @@ impl Session {
             CommandId::KeymapVsCode => Command::SetKeymapPreset(crate::keymap::KeymapPreset::VsCode),
             CommandId::ResetKeymap => Command::ResetKeymap,
             CommandId::EditingPreferences => return CatalogAction::Interface(InterfaceAction::EditingPreferences),
+            CommandId::SqlDialect => return CatalogAction::Interface(InterfaceAction::SqlDialect),
+            CommandId::SqlDialectPostgreSql => Command::SetSqlDialect(Some(crate::sql_dialect::Dialect::PostgreSql)),
+            CommandId::SqlDialectDuckDb => Command::SetSqlDialect(Some(crate::sql_dialect::Dialect::DuckDb)),
+            CommandId::SqlDialectFollowProject => Command::SetSqlDialect(None),
+            CommandId::ProjectSqlDialectPostgreSql => Command::SetProjectSqlDialect(Some(crate::sql_dialect::Dialect::PostgreSql)),
+            CommandId::ProjectSqlDialectDuckDb => Command::SetProjectSqlDialect(Some(crate::sql_dialect::Dialect::DuckDb)),
+            CommandId::ProjectSqlDialectUnset => Command::SetProjectSqlDialect(None),
             CommandId::SearchEverywhere => return CatalogAction::Interface(InterfaceAction::SearchEverywhere),
             CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
             CommandId::FindSymbol => return CatalogAction::Interface(InterfaceAction::FindSymbol),
@@ -303,11 +312,12 @@ pub enum CommandGroup {
     Selection,
     Git,
     LanguageServers,
+    Sql,
     Application,
 }
 
 impl CommandGroup {
-    pub const ALL: [Self; 8] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Application];
+    pub const ALL: [Self; 9] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Sql, Self::Application];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -318,6 +328,7 @@ impl CommandGroup {
             Self::Selection => "Selection",
             Self::Git => "Git",
             Self::LanguageServers => "Language Servers",
+            Self::Sql => "SQL",
             Self::Application => "Application",
         }
     }
@@ -354,6 +365,8 @@ impl CommandId {
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
+            Self::SqlDialect | Self::SqlDialectPostgreSql | Self::SqlDialectDuckDb | Self::SqlDialectFollowProject
+            | Self::ProjectSqlDialectPostgreSql | Self::ProjectSqlDialectDuckDb | Self::ProjectSqlDialectUnset => G::Sql,
             Self::ChooseTheme | Self::About | Self::CloseWindow | Self::QuitAll
             | Self::Keymap | Self::KeymapIntelliJ | Self::KeymapVsCode | Self::ResetKeymap => G::Application,
         }

@@ -5,6 +5,8 @@ mod external;
 mod save_as;
 #[path = "input_tests/keymap.rs"]
 mod keymap;
+#[path = "input_tests/sql_dialect.rs"]
+mod sql_dialect;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{

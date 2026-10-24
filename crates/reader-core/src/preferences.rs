@@ -19,6 +19,9 @@ pub struct ProjectPreferences {
     pub indent: Option<Indent>,
     /// Off by default: formatting is explicit.
     pub format_on_save: bool,
+    /// The project's SQL dialect default (`None`: unset; a file may still override it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sql_dialect: Option<crate::sql_dialect::Dialect>,
 }
 
 /// Where a resolved value came from, highest precedence first.

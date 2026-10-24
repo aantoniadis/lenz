@@ -2271,6 +2271,112 @@ fn gui_and_terminal_choose_and_show_project_editing_preferences_through_find_act
 }
 
 #[gpui::test]
+fn gui_and_terminal_choose_and_show_the_sql_dialect_through_find_action_and_its_status_label(cx: &mut TestAppContext) {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("q.sql");
+    std::fs::write(&path, "select 1;\n").unwrap();
+    let (gc, tc) = (config(&scratch.path().join("gui")), config(&scratch.path().join("tui")));
+    let (gs, ts) = (gc.settings.clone(), tc.settings.clone());
+    let mut core = Session::new(gc);
+    core.dispatch(Command::OpenRoot(root.clone()));
+    let gui = cx.new(|cx| ReaderView::new(core, Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(tc, Some(root.clone()));
+    tui.session.dispatch(Command::Open(path.clone()));
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            let ready = |s: &State| s.current_source().is_some_and(|d| d.source() == path) && s.navigation().is_none_or(|n| !n.pending);
+            if gui.read_with(visual, |v, _| ready(v.session().state())) && ready(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let find_action = |visual: &mut VisualTestContext, tui: &mut App, query: &str| {
+        let typed: Vec<String> = query.chars().map(|c| if c == ' ' { "space".into() } else { c.to_string() }).collect();
+        visual.simulate_keystrokes(&format!("ctrl-shift-a {}", typed.join(" ")));
+        key(tui, KeyCode::Char('a'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        tui.handle(Event::Paste(query.into()));
+        settle(visual, tui);
+        visual.update(|w, cx| { let _ = w.draw(cx); });
+        visual.simulate_keystrokes("enter");
+        key(tui, KeyCode::Enter, KeyModifiers::NONE);
+        settle(visual, tui);
+    };
+    let on = |s: &Session, id| s.actions().iter().find(|a| a.id == id).and_then(|a| a.on);
+    let screen = |tui: &mut App| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+        terminal.draw(|f| tui.draw(f)).unwrap();
+        terminal.backend().buffer().content().chunks(200).map(|r| r.iter().map(|c| c.symbol()).collect::<String>() + "\n").collect::<String>()
+    };
+    visual.simulate_resize(gpui::size(gpui::px(900.0), gpui::px(400.0)));
+    visual.update(|w, cx| { let _ = w.draw(cx); });
+    let sql_text = |visual: &mut VisualTestContext| gui.read_with(visual, |v, _| v.status_sql().1);
+    settle(&mut visual, &mut tui);
+    // Neither adapter assumes PostgreSQL.
+    assert_eq!(sql_text(&mut visual), "SQL: not set");
+    assert!(screen(&mut tui).contains("SQL: not set"));
+
+    find_action(&mut visual, &mut tui, "file: duckdb");
+    assert_eq!(gui.read_with(&visual, |v, _| on(v.session(), CommandId::SqlDialectDuckDb)), Some(true));
+    assert_eq!(on(&tui.session, CommandId::SqlDialectDuckDb), Some(true), "the terminal chose the same dialect");
+    assert_eq!(sql_text(&mut visual), "SQL: DuckDB (this file)");
+    assert!(screen(&mut tui).contains("SQL: DuckDB (this file)"));
+
+    // The project default applies again once the file follows it, in both adapters.
+    find_action(&mut visual, &mut tui, "project sql dialect: postgresql");
+    find_action(&mut visual, &mut tui, "file: follow project default");
+    for id in [CommandId::ProjectSqlDialectPostgreSql, CommandId::SqlDialectFollowProject] {
+        assert_eq!(gui.read_with(&visual, |v, _| on(v.session(), id)), Some(true), "GUI {id:?}");
+        assert_eq!(on(&tui.session, id), Some(true), "terminal {id:?}");
+    }
+    assert_eq!(sql_text(&mut visual), "SQL: PostgreSQL (project)");
+    assert!(screen(&mut tui).contains("SQL: PostgreSQL (project)"));
+
+    // Each status label is a control: clicking it shows the same details in both adapters.
+    let cell = gui.read_with(&visual, |v, _| v.status_sql().0);
+    visual.simulate_click(gpui::point(cell.origin.x + gpui::px(4.0), cell.origin.y + cell.size.height / 2.0), gpui::Modifiers::default());
+    let shown: Vec<String> = gui.read_with(&visual, |v, _| v.modal_rows()).into_iter().map(|(row, _)| row).collect();
+    assert_eq!(shown[0], "SQL dialect");
+    assert!(shown.iter().any(|r| r == "Dialect: PostgreSQL (project default)"), "{shown:?}");
+    assert!(shown.iter().any(|r| r == "Project default: PostgreSQL"), "{shown:?}");
+    assert!(shown.iter().any(|r| r.starts_with("Assistance: PostgreSQL offline assistance — query-local completion")), "{shown:?}");
+    visual.simulate_keystrokes("escape");
+
+    let control = tui.layout.controls.iter().find(|(id, _)| *id == CommandId::SqlDialect).map(|(_, rect)| *rect).expect("the terminal draws the SQL status control");
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: control.x + 1, row: control.y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(tui.modal_title(), "SQL dialect");
+    let Some(crate::app::Prompt::Details { body, .. }) = tui.modal.as_ref().map(|m| &m.kind) else { panic!("no terminal details") };
+    assert_eq!(body.lines().next(), Some(format!("SQL dialect for {}", path.display()).as_str()));
+    assert!(body.contains("Dialect: PostgreSQL (project default)\n"), "{body}");
+    let body = body.clone();
+    let gui_body = gui.read_with(&visual, |v, _| v.session().sql_dialect_details());
+    // Each adapter names its own settings file; every other row is the same.
+    assert_eq!(gui_body.replace(&gs.display().to_string(), "<settings>"), body.replace(&ts.display().to_string(), "<settings>"), "both adapters show the same details");
+    // Tiny layouts and dismissal leave the documents and settings as they were.
+    for (w, h) in [(1u16, 1u16), (26, 8)] { ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap().draw(|f| tui.draw(f)).unwrap(); }
+    for (w, h) in [(1., 1.), (180., 90.), (800., 400.)] { visual.simulate_resize(gpui::size(gpui::px(w), gpui::px(h))); visual.update(|w, cx| { let _ = w.draw(cx); }); }
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(tui.modal_title().is_empty() && gui.read_with(&visual, |v, _| v.modal_rows()).is_empty());
+    assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "select 1;\n");
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1, "nothing was written into the project");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let saved = |p: &std::path::PathBuf| std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).map(|v| v["projects"].clone());
+    while saved(&gs) != Some(serde_json::json!({ root.to_str().unwrap(): { "format_on_save": false, "sql_dialect": "PostgreSql" } })) || saved(&gs) != saved(&ts) {
+        assert!(Instant::now() < deadline, "{:?} {:?}", saved(&gs), saved(&ts)); std::thread::sleep(Duration::from_millis(2));
+    }
+}
+
+#[gpui::test]
 fn gui_and_terminal_show_the_same_git_status_and_dirty_marks_through_edit_and_save(cx: &mut TestAppContext) {
     use lenz_content::git::testing::{commit_all, git, repo, write};
     let make = || {

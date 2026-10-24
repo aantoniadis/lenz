@@ -253,3 +253,33 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Keymap overrides on another platform:** VS Code's macOS chords (for example Cmd-based ones) are reported through
   the same logical Ctrl chords the adapters already normalize; native macOS and Wayland GUI editing remain gated and
   unverified.
+
+## SQL dialect (ticket 60, 2026-10-24)
+
+- **No assistance is wired yet:** the core already compiles the offline PostgreSQL and DuckDB modules
+  (`postgres_assistance`, `duckdb_assistance`), and the SQL Dialect details say the editor does not run them yet.
+  Tickets 61/62 must capture `Session::sql_identity()` before a request and publish only while
+  `sql_identity_current` accepts it; this ticket tests the fence (dialect switch, project change, file switch and
+  edit all reject an earlier identity) but no real provider reply exercises it, so SQL dialect-switch cancellation
+  remains unverified. Update the details wording when assistance lands.
+- **"No metadata connection" is structural, not yet observed:** choosing a dialect only writes the Reader settings
+  file and no metadata path exists, so the focused tests assert no document/project write, no project-directory
+  change and no assistance run. There is no server/CLI trace to observe because nothing connects; ticket 63 must
+  add the real boundary observation.
+- **Suspected cost, unmeasured:** each settings save serializes the `sql_dialects` path→dialect map. Every file with
+  its own choice adds an entry, and there is no eviction or pruning, so the map can grow across years of standalone
+  files. Measure settings write size and load time only if it becomes visible; no benchmark run was done for this
+  ticket.
+- **Rename/move leaves stale entries:** file overrides are keyed by the tab's absolute source path. A rename or move
+  (ticket 36) does not yet carry or drop the old path's entry, so the moved file falls back to the project default
+  and the old key lingers in settings.
+- **Untitled and non-file views:** an untitled document cannot hold a per-file dialect until Save As gives it a path;
+  comparison sides and server-retrieved sources report "Only an opened file has a SQL dialect". A file whose
+  extension is not detected as SQL (for example `.ddl`) can still be given a dialect, but the status bar hides the
+  label for it; the details dialog and menus still show it. Decide whether status should follow the recorded choice
+  rather than the detected language.
+- **No preset chords:** the SQL commands are menu/Find Action/palette only. Adding IntelliJ or VS Code chords needs
+  conflict decisions (most Ctrl/Alt letters are taken) and a terminal-deliverability check.
+- **Narrow layouts:** the SQL label shares the footer with the LSP label, position and branch and can be ellipsized
+  below 900 px in the GUI and at small terminal widths. The details dialog remains reachable from the label, the
+  palette and the SQL menu; verify the exact cut points if the footer changes.
