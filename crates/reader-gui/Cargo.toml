@@ -40,3 +40,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "foundation-native"
+path = "examples/foundation_native.rs"
+required-features = ["test-support"]
