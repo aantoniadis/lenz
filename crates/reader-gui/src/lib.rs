@@ -1274,7 +1274,7 @@ impl ReaderView {
             cx.notify();
             return;
         }
-        if key=="q" && ctrl && !k.modifiers.alt { return self.run(if shift {CommandId::QuitAll} else {CommandId::CloseWindow},window,cx); }
+        if key=="q" && ctrl && shift && !k.modifiers.alt { return self.run(CommandId::QuitAll,window,cx); }
         if key == "f2" && shift && !ctrl && !k.modifiers.alt {
             return self.run(CommandId::StatusDetails, window, cx);
         }
@@ -5256,7 +5256,7 @@ type MenuRow = (f32, f32, MenuEntry);
 fn context_row_height(entry: MenuEntry) -> f32 { if matches!(entry, MenuEntry::Separator) { line_h() / 2.0 } else { line_h() } }
 
 /// The key that runs `id`, as the context menu shows it.
-fn key_hint(id: CommandId) -> Option<&'static str> { id.shortcut() }
+fn key_hint(id: CommandId) -> Option<&'static str> { if id == CommandId::CloseWindow { None } else { id.shortcut() } }
 
 /// The word (letters, digits, `_`) around byte `at` of `text`, as (start, end); the byte itself when none.
 fn word_around(text: &str, at: usize) -> (usize, usize) {

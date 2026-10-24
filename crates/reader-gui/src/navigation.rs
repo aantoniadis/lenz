@@ -4,6 +4,10 @@ use reader_core::navigation::{Chosen, Kind, Scope};
 
 const HEADER: f32 = 3.0;
 
+fn navigation_shortcut(row: &reader_core::navigation::Row) -> Option<&'static str> {
+    if row.action() == Some(CommandId::CloseWindow) { None } else { row.shortcut }
+}
+
 pub(super) struct Frame {
     bounds: Bounds<Pixels>,
     pub(super) first: usize,
@@ -154,7 +158,7 @@ impl ReaderView {
         let Some(search) = self.session.state().navigation() else { return Vec::new() };
         let heading = if search.scope == Scope::Recent { search.scope.label().to_string() } else { Scope::ALL.iter().map(|s| if *s == search.scope { format!("[{}]", s.label()) } else { s.label().to_string() }).collect::<Vec<_>>().join("  ") };
         let mut rows = vec![(heading, None), (format!("Search › {}", search.query), None), (self.session.navigation_status(), None)];
-        rows.extend(search.rows.iter().map(|r| (format!("{}{} — {}{}", r.label, match r.on { Some(true) => " (on)", Some(false) => " (off)", None => "" }, r.detail, r.shortcut.map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
+        rows.extend(search.rows.iter().map(|r| (format!("{}{} — {}{}", r.label, match r.on { Some(true) => " (on)", Some(false) => " (off)", None => "" }, r.detail, navigation_shortcut(r).map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
         rows
     }
 }
@@ -195,7 +199,7 @@ impl Frame {
                 lenz_gpui::colored_text(window, cx, m, color, x + 34.0, top, &label, &matched, &[]);
                 let detail = match row.disabled { Some(why) => format!("{} · {why}", row.detail), None => row.detail.clone() };
                 lenz_gpui::text(window, cx, m, x + 34.0, top + line_h(), &detail, p.dim);
-                if let Some(shortcut) = row.shortcut {
+                if let Some(shortcut) = navigation_shortcut(row) {
                     let width = shortcut.chars().count() as f32 * self.char_w + 16.0;
                     if w > 320.0 {
                         lenz_gpui::fill(window, x + w - width - 8.0, top, width + 8.0, line_h(), if self.first + i == self.at { p.selected_bg } else { bg });

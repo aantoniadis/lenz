@@ -27,6 +27,10 @@ pub struct Row {
     pub shortcut: Option<&'static str>,
     pub(crate) target: Target,
 }
+impl Row {
+    /// Action identity for adapter-specific shortcut presentation.
+    pub fn action(&self) -> Option<CommandId> { match &self.target { Target::Action(id) => Some(*id), _ => None } }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Target { Open {path: PathBuf, at: Option<LineColumn>}, Recent {path: PathBuf, at: Option<LineColumn>}, Action(CommandId) }
 #[derive(Debug)]
@@ -164,6 +168,7 @@ mod tests {
         assert_eq!(count, 2);
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].label, "NetworkParserEngine.rs");
+        assert_eq!(rows[0].action(), None);
         assert_ne!(rows[0].detail, rows[1].detail);
         assert!(matches!(rows[0].target, Target::Open {at: Some(LineColumn {line:12,column:Some(3)}),..}));
     }
@@ -171,6 +176,7 @@ mod tests {
     fn actions_are_fuzzy_and_empty_all_prefers_recent_files() {
         let (rows, _) = rank(snapshot(), Scope::Actions, "sftwrp", || true).unwrap();
         assert_eq!(rows[0].label, "Soft Wrap");
+        assert_eq!(rows[0].action(), Some(CommandId::SoftWrap));
         assert_eq!(rows[0].on, Some(false));
         let (rows, _) = rank(snapshot(), Scope::All, "", || true).unwrap();
         assert_eq!(rows[0].label, "Other.rs");

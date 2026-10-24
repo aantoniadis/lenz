@@ -136,3 +136,11 @@ exact SnapshotKeys within each Session across modal/cache and independent-sessio
 compares semantic outcomes across adapters, since background reads reserve version integers separately.
 The combined cohort gate and release performance campaign remain pending. No native macOS, Wayland,
 physical-display or native-cancellation acceptance is claimed.
+
+The combined GUI gate caught a close-key compatibility regression: an early Ctrl-Q Close Window route
+shadowed Quick Documentation. Ctrl-Q again opens documentation, Ctrl-Shift-Q still requests Quit All,
+and GUI Close Window uses its existing menu/native controls without claiming a Ctrl-Q shortcut.
+The terminal binding is unchanged. Focused writable-input documentation, close-menu/fault/Cancel,
+ordinary-input and metadata tests pass. Existing help copy now describes draft editing, Save, Undo and
+paste, including literal source Tab/colon behavior. These scoped repairs do not rerun or replace native
+acceptance, the remaining combined gate phases or performance measurements.

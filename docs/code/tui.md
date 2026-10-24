@@ -57,7 +57,7 @@ still awaits the combined correctness gate and performance acceptance.
 
 ## Controls
 
-F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared
+F10 opens the command palette; `:` is an alias outside source input mode. Type to filter, use the arrows and Enter to run. It includes all shared
 commands, their setting states and disabled reasons, including provider controls and features without a terminal
 shortcut. F1 opens wrapped, scrollable help; F2 opens language-server status and recovery.
 A dedicated toolbar above the tabs exposes Menu and frequent navigation/file/search actions.
@@ -96,7 +96,7 @@ the Last saved pane remains read-only.
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
 | Reload / close tab | F5 or Ctrl-R / Ctrl-F4 |
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
-| Focus tree, reading area and results | Tab / Shift-Tab; click a pane |
+| Focus tree, reading area and results | Shift-Tab; click a pane (Tab cycles outside source input mode; in editable source it inserts a tab) |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
 | Scroll text | PageUp/PageDown, Home/End; wheel (j/k only while text input is gated) |
