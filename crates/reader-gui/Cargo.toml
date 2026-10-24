@@ -11,7 +11,7 @@ name = "lenz-reader"
 path = "src/main.rs"
 
 [features]
-test-support = ["gpui/test-support"]
+test-support = ["gpui/test-support", "reader-core/test-support"]
 # Benchmark markers on stderr; never in release builds that ship.
 perf-probe = []
 

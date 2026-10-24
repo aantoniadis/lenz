@@ -37,6 +37,7 @@ pub enum InterfaceAction {
     OpenInEditor,
     OpenWithDefaultApp,
     CompareWith,
+    Paste,
     ShowCommitDiff,
     /// Ask for a new branch's name (from HEAD).
     NewBranch,
@@ -185,6 +186,10 @@ impl Session {
             CommandId::Close => Command::Close,
             CommandId::SelectAll => Command::SelectAll,
             CommandId::Copy => Command::Copy,
+            CommandId::Cut => Command::Cut,
+            CommandId::Paste => return CatalogAction::Interface(InterfaceAction::Paste),
+            CommandId::Delete => Command::Delete { backward: false },
+            CommandId::ReadOnlyMode => Command::SetReadOnly(!state.active().and_then(|t| state.view(t.id())).is_some_and(|view| view.read_only())),
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
                 None => return CatalogAction::Disabled("No file is open"),
@@ -302,7 +307,7 @@ impl CommandId {
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
-            | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
+            | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
@@ -322,7 +327,7 @@ impl CommandId {
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
-            Self::SelectAll | Self::Copy | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
+            Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
@@ -363,6 +368,9 @@ impl CommandId {
             Self::TypeHierarchy => Some("Ctrl+H"),
             Self::Documentation => Some("Ctrl+Q"),
             Self::Copy => Some("Ctrl+C"),
+            Self::Cut => Some("Ctrl+X"),
+            Self::Paste => Some("Ctrl+V"),
+            Self::Delete => Some("Delete"),
             Self::Save => Some("Ctrl+S"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),

@@ -12,6 +12,7 @@ impl Session {
     pub(super) fn save_buffer_disabled(&self, buffer: crate::text::BufferId) -> Option<&'static str> {
         let Some(entry) = self.state.sources.buffers.get(&buffer) else { return Some("No file is open") };
         let Some(source) = entry.snapshot.as_ref() else { return Some("Current source is unavailable") };
+        if entry.read_only { return Some("Read-only mode is on"); }
         if source.image().is_some() || source.source_meta().is_binary() || source.source_meta().is_lossy()
             || self.state.tabs.iter().any(|t| t.buffer == Some(buffer) && t.retrieved.is_some()) { return Some("This source is read-only"); }
         if entry.save.status.busy() { return Some("A save operation is running"); }
