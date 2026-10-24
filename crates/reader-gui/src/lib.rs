@@ -30,6 +30,8 @@ mod navigation;
 mod search;
 mod source;
 mod close;
+#[cfg(feature = "test-support")]
+mod input_method;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -199,6 +201,8 @@ pub struct ReaderView {
     /// Ticket12 traces explicitly opt in; normal builds expose no writable input.
     #[cfg(feature = "test-support")]
     draft_input: bool,
+    #[cfg(feature = "test-support")]
+    input_state: input_method::InputState,
     #[cfg(test)]
     painted_annotations: Vec<String>,
     /// The font's advance, measured at each paint.
@@ -576,7 +580,7 @@ struct Shown {
 impl ReaderView {
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, #[cfg(feature = "test-support")] draft_input: false, #[cfg(test)] painted_annotations: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, #[cfg(feature = "test-support")] draft_input: false, #[cfg(feature = "test-support")] input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -880,6 +884,8 @@ impl ReaderView {
             }
         }
         self.sync_close_prompt();
+        #[cfg(feature = "test-support")]
+        self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
             cx.notify();
@@ -1300,7 +1306,7 @@ impl ReaderView {
             _ => {}
         }
         #[cfg(feature = "test-support")]
-        if self.draft_key(ev, window, cx) { return; }
+        if self.input_key(ev, window, cx) || self.draft_key(ev, window, cx) { return; }
         // The preview scrolls in pixels; it has no caret to move.
         if !ctrl && self.focused_markdown().is_some_and(|m| m.layout.is_some()) {
             let view = self.rows as f32 * line_h();
@@ -2479,8 +2485,8 @@ impl ReaderView {
 
     fn native_max_scroll(&self, pane: u8, count: usize) -> Option<f32> {
         let state = self.session.state();
-        let tab = state.shown(pane)?;
-        let view = state.view(tab.id())?;
+        let tab = state.presentation_shown(pane)?;
+        let view = state.presentation_view(tab.id())?;
         let g = self.panes.iter().find(|g| g.pane == pane)?;
         let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
         let cols = state.wrap_cols(tab);
@@ -2581,13 +2587,13 @@ impl ReaderView {
             return Some((g.pane, tab.id(), line));
         }
         let row = ((f32::from(at.y) - f32::from(g.text.origin.y)) / line_h()).floor() as usize;
-        let rows = state.view(tab.id())?.layout_rows(row + 1, state.wrap_cols(tab)).rows;
+        let rows = state.presentation_view(tab.id())?.layout_rows(row + 1, state.wrap_cols(tab)).rows;
         let r = rows.get(row).filter(|r| r.index == 0)?;
         Some((g.pane, tab.id(), r.line))
     }
 
     fn current_source_geometry(&self, tab: &Tab) -> bool {
-        self.session.state().view(tab.id()).is_some_and(|view| {
+        self.session.state().presentation_view(tab.id()).is_some_and(|view| {
             self.source_geometry.get(tab.pane() as usize).and_then(Option::as_ref).is_some_and(|g| g.matches(&view, self))
         })
     }
@@ -2596,13 +2602,14 @@ impl ReaderView {
     fn byte_at(&self, window: &Window, x: f32, y: f32) -> Option<usize> {
         let tab = self.session.state().active()?;
         let (line, byte) = self.byte_in(window, tab, self.text_bounds?, x, y)?;
-        Some(self.session.state().view(tab.id())?.snapshot().line_range(line)?.start + byte)
+        Some(self.session.state().presentation_view(tab.id())?.snapshot().line_range(line)?.start + byte)
     }
 
     fn byte_in(&self, window: &Window, tab: &Tab, bounds: Bounds<Pixels>, x: f32, y: f32) -> Option<(usize, usize)> {
         if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
         let state = self.session.state();
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
         let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
         let row = rows.get(at).or_else(|| rows.last())?;
@@ -2617,7 +2624,8 @@ impl ReaderView {
         let (tab, bounds) = (self.session.state().active()?, self.text_bounds?);
         if !self.current_source_geometry(tab) || window.viewport_size() != gpui::size(px(self.width), px(self.height)) || y < f32::from(bounds.origin.y) { return None; }
         let state = self.session.state();
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         let at = ((y - f32::from(bounds.origin.y)) / line_h()).floor() as usize;
         let rows = view.layout_rows(at + 1, state.wrap_cols(tab)).rows;
         let row = rows.get(at)?;
@@ -2641,11 +2649,11 @@ impl ReaderView {
     }
 
     fn bookmark_rows(state: &reader_core::session::State, tab: &Tab, rows: usize) -> Vec<(usize, Option<char>)> {
-        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| state.places().bookmark(tab.source(), r.line).map(|m| (i, m.mnemonic))).collect())
+        state.presentation_view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| state.places().bookmark(tab.source(), r.line).map(|m| (i, m.mnemonic))).collect())
     }
 
     fn marks(state: &reader_core::session::State, tab: &Tab, rows: usize) -> Vec<(usize, bool)> {
-        state.view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| view.fold_at(r.line).map(|(_, c)| (i, c))).collect())
+        state.presentation_view(tab.id()).map_or_else(Vec::new, |view| view.layout_rows(rows, state.wrap_cols(tab)).rows.iter().enumerate().filter(|(_, r)| r.index == 0).filter_map(|(i, r)| view.fold_at(r.line).map(|(_, c)| (i, c))).collect())
     }
 
     /// The identifier a Ctrl-click at a window point would follow, when `held` and the pane shows text there.
@@ -2655,16 +2663,16 @@ impl ReaderView {
         }
         let g = self.panes.iter().find(|g| g.text.contains(&gpui::point(px(x), px(y))))?;
         let state = self.session.state();
-        let tab = state.shown(g.pane)?;
+        let tab = state.presentation_shown(g.pane)?;
         if g.pane == state.focused_pane() && self.session.disabled(CommandId::Definition).is_some() {
             return None;
         }
-        if matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) || state.view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
+        if matches!(self.session.state().presentation_view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) || state.presentation_view(tab.id()).is_some_and(|view| wanted_image(&view).is_some() || unshowable_image(&view).is_some()) {
             return None; // no text drawn
         }
         // The character under the pointer: the boundary nearest half a cell to its left starts it.
         let (line, col) = self.byte_in(window, tab, g.text, x - self.char_w / 2.0, y)?;
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
         let word = view.linkable(line, col)?;
         let start = view.snapshot().line_range(line)?.start;
         Some((g.pane, start + word.start..start + word.end))
@@ -2686,7 +2694,7 @@ impl ReaderView {
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let quiet = ev.modifiers.control || ev.modifiers.platform || ev.pressed_button.is_some() || self.modal.is_some() || !self.session.state().documentation_on_hover();
         let state = self.session.state();
-        let name = (!quiet).then(|| self.link_at(window, x, y, true)).flatten().and_then(|(pane, r)| Some((state.shown(pane)?.id(), r)));
+        let name = (!quiet).then(|| self.link_at(window, x, y, true)).flatten().and_then(|(pane, r)| Some((state.presentation_shown(pane)?.id(), r)));
         if name != self.doc_rest.0 {
             let task = name.clone().map(|(tab, r)| {
                 cx.spawn(async move |this, cx| {
@@ -2728,12 +2736,12 @@ impl ReaderView {
         };
         let (tab, preview) = (d.tab, d.preview.clone());
         let at = d.at.start;
-        let Some(g) = self.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == tab)).copied() else {
+        let Some(g) = self.panes.iter().find(|g| state.presentation_shown(g.pane).is_some_and(|t| t.id() == tab)).copied() else {
             self.doc_popup = None;
             return None;
         };
-        let t = state.shown(g.pane)?;
-        let view = state.view(t.id())?;
+        let t = state.presentation_shown(g.pane)?;
+        let view = state.presentation_view(t.id())?;
         let (row, anchor_x) = view.layout_rows(g.rows, state.wrap_cols(t)).rows.iter().enumerate().find_map(|(i, r)| {
             let native = self.ready_source_row(t, r)?;
             let local = native.caret(at)?;
@@ -2774,6 +2782,8 @@ impl ReaderView {
     }
 
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "test-support")]
+        if self.modal.is_none() && self.input_state.capture.is_some() { self.cancel_input(true, cx); cx.stop_propagation(); return; }
         self.double_shift.interrupt();
         window.focus(&self.focus, cx);
         if matches!(self.modal, Some(Modal::Navigation { .. })) {
@@ -2876,7 +2886,7 @@ impl ReaderView {
         }
         self.crumb_focus = None;
         // A sticky line: its pane gets the keys and the caret goes to the line (Back returns).
-        if let Some(&(_, pane, line)) = self.sticky_hits.iter().find(|h| h.0.contains(&ev.position) && self.session.state().shown(h.1).is_some_and(|tab| self.current_source_geometry(tab))) {
+        if let Some(&(_, pane, line)) = self.sticky_hits.iter().find(|h| h.0.contains(&ev.position) && self.session.state().presentation_shown(h.1).is_some_and(|tab| self.current_source_geometry(tab))) {
             if pane != self.session.state().focused_pane() {
                 self.dispatch(Command::FocusPane(pane), cx);
             }
@@ -3039,6 +3049,8 @@ impl ReaderView {
     /// A right-click in a pane's text: that pane takes focus, the caret moves to the pointer unless it is inside
     /// the selection, and the context menu opens there.
     fn on_right_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "test-support")]
+        if self.modal.is_none() && self.input_state.capture.is_some() { self.cancel_input(true, cx); cx.stop_propagation(); return; }
         self.double_shift.interrupt();
         // A Git Branches row: its actions.
         if let Some(Modal::Branches { query, .. }) = self.modal.clone()
@@ -3068,7 +3080,7 @@ impl ReaderView {
             if pane != self.session.state().focused_pane() {
                 self.dispatch(Command::FocusPane(pane), cx);
             }
-            let start = self.session.state().view(tab).and_then(|view| view.snapshot().line_range(line)).map(|r| r.start);
+            let start = self.session.state().presentation_view(tab).and_then(|view| view.snapshot().line_range(line)).map(|r| r.start);
             if let Some(start) = start {
                 self.dispatch(Command::Select(Selection { anchor: start, head: start }), cx);
             }
@@ -3448,7 +3460,7 @@ impl ReaderView {
     /// For tests: the window point over byte `at` of the focused text, on the first shown line, unwrapped, ASCII.
     pub fn text_point_of(&self, at: usize) -> Option<(f32, f32)> {
         let b = self.text_bounds?;
-        let line = self.session.state().view(self.session.state().active()?.id())?.snapshot().line_range(0)?;
+        let line = self.session.state().presentation_view(self.session.state().active()?.id())?.snapshot().line_range(0)?;
         let x = f32::from(b.origin.x) + num_w() + 8.0 + (at.checked_sub(line.start)? as f32 + 0.5) * self.char_w;
         Some((x, f32::from(b.origin.y) + line_h() / 2.0))
     }
@@ -3486,8 +3498,8 @@ impl ReaderView {
     fn preview_frame(&mut self, pane: u8, window: &Window, width: f32, rows: usize, cx: &mut Context<Self>) -> Option<PreviewFrame> {
         let state = self.session.state();
         let i = pane as usize;
-        let shown = state.shown(pane);
-        let source = shown.and_then(|tab| state.view(tab.id()));
+        let shown = state.presentation_shown(pane);
+        let source = shown.and_then(|tab| state.presentation_view(tab.id()));
         let (Some(Rendering::Preview(p)), Some(tab), Some(doc)) = (source.as_ref().and_then(|v| v.rendering()), shown, source.as_ref().map(|v| v.snapshot())) else {
             self.markdown[i] = None; // its layout and textures go with it
             return None;
@@ -3690,13 +3702,15 @@ impl ReaderView {
 
     fn source_row(&self, tab: &Tab, row: &reader_core::layout::Row) -> Option<&source::Row> {
         let state = self.session.state();
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         self.source.drawn(tab.pane(), &view, row.line, state.wrap_cols(tab).map(|_| row.display.start))
     }
 
     fn ready_source_row(&self, tab: &Tab, row: &reader_core::layout::Row) -> Option<&source::Row> {
         let state = self.session.state();
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         let g = self.panes.iter().find(|g| g.pane == tab.pane())?;
         let width = (f32::from(g.text.size.width) - num_w() - 16.0).max(1.0);
         let pan = tab.column() as f32 * self.char_w;
@@ -3733,9 +3747,9 @@ impl ReaderView {
         let mut commands = Vec::new();
         for g in panes {
             let state = self.session.state();
-            let Some(tab) = state.shown(g.pane) else { continue };
-            if g.rows == 0 || matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
-            let Some(view) = state.view(tab.id()) else { continue };
+            let Some(tab) = state.presentation_shown(g.pane) else { continue };
+            if g.rows == 0 || matches!(self.session.state().presentation_view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { continue; }
+            let Some(view) = state.presentation_view(tab.id()) else { continue };
             if wanted_image(&view).is_some() || unshowable_image(&view).is_some() { continue; }
             let cols = state.wrap_cols(tab);
             let layout = view.layout_rows(g.rows, cols);
@@ -3809,12 +3823,14 @@ impl ReaderView {
     #[allow(clippy::type_complexity)]
     fn projected_row(&self, tab: &Tab, r: &reader_core::layout::Row, y: f32, sticky: bool) -> Option<(TextRow, Vec<(f32, std::ops::Range<usize>, u32, u8)>)> {
         let state = self.session.state();
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         let projected = self.source_row(tab, r)?;
         let range = view.snapshot().line_range(r.line)?;
         let palette = state.palette();
         let selection = (!sticky).then(|| tab.selection()).flatten();
-        let occurrences = state.occurrences().filter(|_| !sticky && state.active().is_some_and(|a| a.id() == tab.id()));
+        let transient = state.view(tab.id()).is_some_and(|base| base.snapshot().key() != view.snapshot().key());
+        let occurrences = state.occurrences().filter(|_| !transient && !sticky && state.active().is_some_and(|a| a.id() == tab.id()));
         let (read, write) = (lenz_content::theme::mix(palette.bg, palette.accent, 0.18), lenz_content::theme::mix(palette.bg, palette.accent, 0.32));
         let mut fg: Vec<_> = projected.hints().into_iter().map(|r| (r, palette.num_fg)).collect();
         let mut decor = Vec::new();
@@ -3832,11 +3848,17 @@ impl ReaderView {
             if capture.is_some() { fg.push((range.clone(), color)); }
             if mods != 0 { decor.push((y, range, color, mods)); }
         }
+        #[cfg(feature = "test-support")]
+        if !sticky && self.input_state.capture.as_ref().is_some_and(|capture| capture.tab == tab.id())
+            && let Some(marked) = self.marked_bytes() {
+            let marked = projected.range(marked);
+            if !marked.is_empty() { decor.push((y, marked, palette.accent, reader_core::decor::MUTABLE)); }
+        }
         let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
         let caret = selection.and_then(|sel| projected.caret(sel.head));
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
-        if self.session.state().comparison_changed_line(tab.id(), r.line) { bg.insert(0, (0..projected.text.len(), palette.block[2])); }
+        if !transient && self.session.state().comparison_changed_line(tab.id(), r.line) { bg.insert(0, (0..projected.text.len(), palette.block[2])); }
         let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
         if let Some((fold, true)) = view.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
@@ -3864,7 +3886,7 @@ impl ReaderView {
     fn sticky_rows(&self, tab: &Tab, max: usize) -> (Vec<(usize, TextRow)>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
         use reader_core::layout::Query;
         let state = self.session.state();
-        let Some(view) = state.view(tab.id()) else { return Default::default() };
+        let Some(view) = state.presentation_view(tab.id()) else { return Default::default() };
         let cols = state.wrap_cols(tab);
         let Query::Ready(sticky) = view.layout_sticky(max, cols) else { return Default::default() };
         let mut rows = Vec::new();
@@ -3882,9 +3904,9 @@ impl ReaderView {
     /// Current snapshot windows paired with authoritative logical rows.
     #[allow(clippy::type_complexity)]
     fn tab_rows(&self, tab: &Tab, rows: usize) -> (Vec<TextRow>, Vec<(f32, std::ops::Range<usize>, u32, u8)>) {
-        if matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
+        if matches!(self.session.state().presentation_view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending)) { return Default::default(); }
         let state = self.session.state();
-        let Some(view) = state.view(tab.id()) else { return Default::default() };
+        let Some(view) = state.presentation_view(tab.id()) else { return Default::default() };
         let mut out = Vec::new();
         let mut decor = Vec::new();
         for (i, r) in view.layout_rows(rows.max(1), state.wrap_cols(tab)).rows.iter().enumerate() {
@@ -3902,7 +3924,7 @@ impl ReaderView {
     /// nothing is drawn.
     fn shown_image(&mut self, pane: u8, cx: &mut Context<Self>) -> Option<(Arc<gpui::RenderImage>, (u32, u32))> {
         let i = pane as usize;
-        let wanted = self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| wanted_image(&view));
+        let wanted = self.session.state().presentation_shown(pane).and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| wanted_image(&view));
         let Some(pixels) = wanted else {
             self.image[i] = None; // its texture's CPU pixels go too, not only its atlas entry
             return None;
@@ -3927,7 +3949,7 @@ impl ReaderView {
 
     /// Why the active raster image cannot be shown, when it cannot.
     pub fn unshowable_image(&self) -> Option<String> {
-        self.session.state().active().and_then(|tab| self.session.state().view(tab.id())).and_then(|view| unshowable_image(&view))
+        self.session.state().active().and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| unshowable_image(&view))
     }
 
     /// The focused pane's image drawn now: its size in pixels, for tests.
@@ -4167,6 +4189,8 @@ impl ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(feature = "test-support")]
+        self.synchronize_input(window, cx);
         #[cfg(feature = "perf-probe")]
         let render_started = std::time::Instant::now();
         #[cfg(test)]
@@ -4265,7 +4289,7 @@ impl Render for ReaderView {
         let mut crumb_rows: Vec<(u8, f32, f32, f32)> = Vec::new();
         if self.session.state().breadcrumbs() {
             for g in &mut panes {
-                if g.rows >= 2 && self.session.state().shown(g.pane).is_some() {
+                if g.rows >= 2 && self.session.state().presentation_shown(g.pane).is_some() {
                     crumb_rows.push((g.pane, f32::from(g.text.origin.x), f32::from(g.text.origin.y), f32::from(g.text.size.width)));
                     g.text.origin.y += px(line_h());
                     g.text.size.height -= px(line_h());
@@ -4277,8 +4301,8 @@ impl Render for ReaderView {
         // it would leave the text less than 40 px.
         for g in &mut panes {
             let state = self.session.state();
-            let Some(t) = state.shown(g.pane) else { continue };
-            let text = state.view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(state.view(t.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
+            let Some(t) = state.presentation_shown(g.pane) else { continue };
+            let text = state.presentation_view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()) && !matches!(state.presentation_view(t.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
             let w = t.annotation_cols() as f32 * self.char_w + 12.0;
             if text && w > 12.0 && f32::from(g.text.size.width) - w - num_w() - 16.0 >= 40.0 {
                 g.ann = w;
@@ -4308,7 +4332,7 @@ impl Render for ReaderView {
         let mut bars: Vec<Vec<TabCell>> = Vec::new();
         for g in &panes {
             let state = self.session.state();
-            let shown = state.shown(g.pane).map(|t| t.id());
+            let shown = state.presentation_shown(g.pane).map(|t| t.id());
             let mut x = g.bar.0;
             let mut row: Vec<(String, bool, bool, f32, f32, TabId, bool)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
@@ -4399,9 +4423,9 @@ impl Render for ReaderView {
             let picture = self.shown_image(g.pane, cx);
             let markdown = self.preview_frame(g.pane, window, f32::from(g.text.size.width), g.rows, cx);
             let state = self.session.state();
-            let tab = state.shown(g.pane);
-            let pending = matches!(tab.and_then(|tab| state.view(tab.id())).and_then(|v| v.rendering()), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
-            let unshowable = tab.and_then(|tab| state.view(tab.id())).and_then(|view| unshowable_image(&view));
+            let tab = state.presentation_shown(g.pane);
+            let pending = matches!(tab.and_then(|tab| state.presentation_view(tab.id())).and_then(|v| v.rendering()), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
+            let unshowable = tab.and_then(|tab| state.presentation_view(tab.id())).and_then(|view| unshowable_image(&view));
             let (mut rows, decor) = match tab {
                 Some(t) if picture.is_none() && unshowable.is_none() => self.tab_rows(t, g.rows),
                 _ => Default::default(),
@@ -4409,7 +4433,7 @@ impl Render for ReaderView {
             // The Ctrl-hovered identifier, in the link colour and underlined.
             let link = self.link.clone().filter(|l| l.0 == g.pane).and_then(|(_, range)| {
                 let tab = tab?;
-                let view = state.view(tab.id())?;
+                let view = state.presentation_view(tab.id())?;
                 let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
                 let (at, r) = logical.iter().enumerate().find(|(_, r)| r.source.start <= range.start && range.start < r.source.end)?;
                 let native = self.source_row(tab, r)?;
@@ -4421,14 +4445,14 @@ impl Render for ReaderView {
                 Some((row.y, shown))
             });
             let hint = match tab {
-                Some(t) if state.view(t.id()).is_some() || state.loading().is_some() => None,
+                Some(t) if state.presentation_view(t.id()).is_some() || state.loading().is_some() => None,
                 None if split.is_some() => Some("Open a file here, or drag a tab to this pane"),
                 _ if state.project().is_some() => Some("Pick a file in the tree, or find one with Ctrl+P"),
                 _ => Some("Open a file to read it (Ctrl+O)"),
             };
             let hscroll = tab.map_or(0.0, |t| t.column() as f32 * self.char_w);
             // Fold marks, bright on the caret's row or while the pointer is over this gutter.
-            let caret_line = tab.and_then(|t| Some(state.view(t.id())?.snapshot().line_of(t.selection()?.head)));
+            let caret_line = tab.and_then(|t| Some(state.presentation_view(t.id())?.snapshot().line_of(t.selection()?.head)));
             let mut marks = match tab {
                 Some(t) if !rows.is_empty() => Self::marks(state, t, g.rows).into_iter().map(|(i, c)| (i, c, self.gutter_hover == Some(g.pane) || rows.get(i).is_some_and(|r| r.number > 0 && Some(r.number as usize - 1) == caret_line))).collect(),
                 _ => Vec::new(),
@@ -4455,9 +4479,11 @@ impl Render for ReaderView {
             // Rows under the sticky band are hidden by it; its own marks are painted over it.
             let band = sticky.iter().map(|(_, r)| r.y + 1.0).reduce(f32::max).unwrap_or(0.0);
             // Annotations of the rows below the band (a line's first row): row, label, age shade, of the hovered commit.
+            let transient = tab.and_then(|tab| state.view(tab.id()).zip(state.presentation_view(tab.id())))
+                .is_some_and(|(base, shown)| base.snapshot().key() != shown.snapshot().key());
             let hovered = self.ann_hovered().and_then(|(_, t, line)| Some(self.session.annotation(t, line)?.commit.sha.clone()));
             let ann: Vec<(f32, String, Option<f32>, bool)> = match tab {
-                Some(t) if g.ann > 0.0 => rows.iter().filter(|r| r.number > 0 && r.y >= band).filter_map(|r| {
+                Some(t) if g.ann > 0.0 && !transient => rows.iter().filter(|r| r.number > 0 && r.y >= band).filter_map(|r| {
                     if let Some(label) = t.blame_status().and_then(reader_core::blame::Status::label) {
                         return Some((r.y, label.into(), None, false));
                     }
@@ -4472,23 +4498,23 @@ impl Render for ReaderView {
             bookmarks.retain(|(y, _)| *y >= band);
             marks.retain(|&(i, ..)| i as f32 >= band);
             let sticky_parts = tab.map_or_else(Vec::new, |tab| sticky.iter().map(|(line, row)| {
-                state.view(tab.id()).and_then(|view| match view.layout_row(*line, 0, state.wrap_cols(tab)) {
+                state.presentation_view(tab.id()).and_then(|view| match view.layout_row(*line, 0, state.wrap_cols(tab)) {
                     reader_core::layout::Query::Ready(Some(logical)) => Some(self.source_parts(tab, &logical, row, window)),
                     _ => None,
                 }).unwrap_or_default()
             }).collect());
-            let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| state.view(t.id())).and_then(|v| v.fold_at(line)).map(|(_, c)| c))).collect();
+            let sticky: Vec<_> = sticky.into_iter().map(|(line, row)| (row, tab.and_then(|t| state.presentation_view(t.id())).and_then(|v| v.fold_at(line)).map(|(_, c)| c))).collect();
             if g.pane == state.focused_pane() {
                 marks_drawn = decor.clone();
                 folds_drawn.extend(marks.iter().map(|&(i, c, _)| (i as f32, c)).chain(sticky.iter().filter_map(|(r, fold)| fold.map(|c| (r.y, c)))));
             }
-            let row_parts = tab.and_then(|tab| state.view(tab.id()).map(|view| (tab, view))).map_or_else(Vec::new, |(tab, view)| {
+            let row_parts = tab.and_then(|tab| state.presentation_view(tab.id()).map(|view| (tab, view))).map_or_else(Vec::new, |(tab, view)| {
                 let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
                 rows.iter().map(|row| logical.get(row.y as usize).map(|r| self.source_parts(tab, r, row, window)).unwrap_or_default()).collect()
             });
             frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
-        self.source_geometry = [0, 1].map(|pane| self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
+        self.source_geometry = [0, 1].map(|pane| self.session.state().presentation_shown(pane).and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
         self.fold_marks_drawn = folds_drawn;
@@ -4537,7 +4563,7 @@ impl Render for ReaderView {
         #[cfg(feature = "perf-probe")]
         if let Some(seconds) = probe::scroll_seconds()
             && frames.iter().any(|f| !f.rows.is_empty())
-            && (!probe::decor() || self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.inlay_hints().is_some_and(|h| !h.is_empty()) && v.tokens().is_some_and(|k| !k.is_empty())))
+            && (!probe::decor() || self.session.state().active().and_then(|t| self.session.state().presentation_view(t.id())).is_some_and(|v| v.inlay_hints().is_some_and(|h| !h.is_empty()) && v.tokens().is_some_and(|k| !k.is_empty())))
         {
             if probe::decor() && !probe::DECORATED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                 eprintln!("lenz-reader: decorated {:.1} ms", probe::START.get().map_or(0.0, |s| s.elapsed().as_secs_f64() * 1000.0));
@@ -4545,11 +4571,11 @@ impl Render for ReaderView {
             if probe::frame(seconds) {
                 cx.quit();
             } else {
-                if probe::fold() && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| v.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                if probe::fold() && self.session.state().active().and_then(|t| self.session.state().presentation_view(t.id())).is_some_and(|v| v.folds().is_some()) && !probe::FOLDED.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     self.session.dispatch(Command::CollapseAll);
                 }
                 // One row further each frame (over collapsed regions), wrapping at the end.
-                let at_end = self.session.state().active().is_none_or(|t| { let Some(view) = self.session.state().view(t.id()) else { return true }; let v = view.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
+                let at_end = self.session.state().active().is_none_or(|t| { let Some(view) = self.session.state().presentation_view(t.id()) else { return true }; let v = view.visible(); v.rows_between(t.top_line(), v.last()) < self.rows });
                 self.session.dispatch(if at_end { Command::Scroll(0) } else { Command::ScrollRows(1) });
                 window.request_animation_frame();
             }
@@ -4558,7 +4584,7 @@ impl Render for ReaderView {
         let probe = {
             let state = self.session.state();
             let wanted = probe::files();
-            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.active().is_some_and(|t| state.view(t.id()).is_some()) && state.tabs().len() >= wanted.len())
+            (frames.iter().any(|f| !f.rows.is_empty() || f.markdown.is_some() || f.picture.is_some()), !wanted.is_empty() && state.loading().is_none() && state.active().is_some_and(|t| state.presentation_view(t.id()).is_some()) && state.tabs().len() >= wanted.len())
         };
         #[cfg(feature = "perf-probe")]
         if render_started.elapsed().as_millis() >= 30 {
@@ -4588,6 +4614,11 @@ impl Render for ReaderView {
         let app_menu_active = self.app_menu_hover || matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
         let commands_button = self.commands_button();
         let commands_hover = self.commands_hover;
+        #[cfg(feature = "test-support")]
+        let text_input = {
+            self.input_state.registered.set(false);
+            (self.draft_target().is_some() && self.focus.is_focused(window)).then(|| (self.focus.clone(), cx.entity().clone(), self.input_state.registered.clone()))
+        };
         div()
             .id("reader")
             .size_full()
@@ -4607,6 +4638,11 @@ impl Render for ReaderView {
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, cx| {
+                        #[cfg(feature = "test-support")]
+                        if let Some((focus, entity, registered)) = &text_input {
+                            window.handle_input(focus, gpui::ElementInputHandler::new(bounds, entity.clone()), cx);
+                            registered.set(true);
+                        }
                         #[cfg(feature = "perf-probe")]
                         let paint_started = std::time::Instant::now();
                         let m = metrics(&font);

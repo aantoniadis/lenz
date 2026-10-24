@@ -6368,3 +6368,172 @@ fn gui_ctrl_click_marks_two_entries_and_ctrl_d_compares_them(cx: &mut TestAppCon
     assert_eq!(f.view.read_with(&v, |r, _| r.launched.len()), 1);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().disabled(CommandId::CompareSelected)), Some("Mark two files or folders in the explorer (Ctrl+click, or Space)"));
 }
+
+
+fn ime_handler(f: &Fixture, v: &mut VisualTestContext) -> gpui::PlatformInputHandler {
+    let view = f.view.clone(); let bounds = f.view.read_with(v, |view, _| view.text_bounds.unwrap());
+    v.update(|window, cx| gpui::PlatformInputHandler::new(window.to_async(cx), Box::new(gpui::ElementInputHandler::new(bounds, view))))
+}
+
+#[gpui::test]
+fn native_composition_projects_unicode_without_mutating_the_buffer_then_unmark_accepts_once(cx: &mut TestAppContext) {
+    for wrapped in [false, true] {
+    let original = format!("{}😀suffix\r\nlast\r\n", "a".repeat(12_000));
+    let f = fixture(cx, Some(("composition.txt", original.as_bytes())));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    if wrapped { v.simulate_keystrokes("alt-z"); }
+    v.simulate_keystrokes("ctrl-g 1 : 1 2 0 0 1 enter ctrl-\\ shift-right"); draw(&mut v);
+    let (tab, base, selected) = f.view.read_with(&v, |r, _| (r.session.state().active().unwrap().id(), r.session.state().current_source().unwrap().clone(), r.session.state().selection()));
+    let mut input = ime_handler(&f, &mut v);
+    let conversions = reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    input.replace_and_mark_text_in_range(None, "界😀\nβ", Some(0..1));
+    assert_eq!(input.marked_text_range(), Some(12_000..12_005));
+    assert_eq!(input.selected_text_range(false).unwrap().range, 12_000..12_001);
+    f.view.read_with(&v, |r, _| {
+        assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base));
+        assert_eq!(r.session.state().selection(), selected);
+        assert!(!r.session.state().view(tab).unwrap().can_undo());
+        assert!(Arc::ptr_eq(r.session.state().presentation_view(r.session.state().shown(0).unwrap().id()).unwrap().snapshot(), &base));
+    });
+    let mut adjusted = None;
+    let length = input.text_length_utf16().unwrap();
+    let around = input.text_for_range(0..length, &mut adjusted).unwrap();
+    assert!(around.len() <= 4096); assert!(around.contains("界😀\nβ")); assert!(adjusted.unwrap().start > 9_000);
+    let mut unchanged = None;
+    assert!(input.text_for_range(12_002..12_003, &mut unchanged).is_none(), "a surrogate interior must be rejected before clipping");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let caret = loop {
+        cx.run_until_parked(); f.view.update(&mut v, |r, cx| r.poll(cx)); draw(&mut v);
+        if let Some(caret) = input.bounds_for_range(12_000..12_000) { break caret; }
+        assert!(std::time::Instant::now() < deadline, "candidate geometry must use the projected row, wrapped={wrapped}: {:?}", f.view.read_with(&v, |r, _| {
+            let state=r.session.state();let tab=state.active().unwrap();let shown=state.presentation_view(tab.id()).unwrap();
+            (shown.tab().top_line(),shown.tab().top_row(),shown.tab().column(),state.text_size(tab.pane()),r.session.native_reveal(tab.pane()).map(|goal|(goal.source,goal.context)),r.visible_rows().iter().map(|row|(row.y,row.text.find('界'))).collect::<Vec<_>>())
+        }));
+        std::thread::yield_now();
+    };
+    assert_eq!(input.character_index_for_point(caret.origin), Some(12_000));
+    assert_eq!(reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
+    input.unmark_text(); input.unmark_text();
+    let expected = format!("{}界😀\nβsuffix\r\nlast\r\n", "a".repeat(12_000));
+    f.view.read_with(&v, |r, _| {
+        let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), expected);
+        assert!(r.session.state().view(tab).unwrap().can_undo());
+    });
+    v.simulate_keystrokes("ctrl-1 ctrl-z");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("composition.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_partial_replacement_cancel_and_painted_commits_use_one_coordinate_frame(cx: &mut TestAppContext) {
+    let original = "a😀suffix\r\n";
+    let f = fixture(cx, Some(("partial.txt", original.as_bytes()))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
+    v.simulate_keystrokes("right shift-right"); draw(&mut v);
+    let base = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone());
+    let mut input = ime_handler(&f, &mut v);
+    input.replace_and_mark_text_in_range(None, "界😀tail", None);
+    let relative = 1..3;
+    #[cfg(target_os = "macos")] let replacement = relative;
+    #[cfg(not(target_os = "macos"))] let replacement = relative.start + 1..relative.end + 1;
+    input.replace_and_mark_text_in_range(Some(replacement), "β", Some(1..1));
+    assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().unwrap().1), "界βtail");
+    assert_eq!(input.selected_text_range(false).unwrap().range, 3..3);
+    // Invalid selected surrogate endpoints and unsupported replacement expansion are atomic refusals.
+    input.replace_and_mark_text_in_range(None, "😀", Some(1..1));
+    input.replace_and_mark_text_in_range(Some(100..101), "bad", None);
+    assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().unwrap().1), "界βtail");
+    // Native XKB emits this non-character event after setMarkedText; it must preserve preedit.
+    let mut dead = gpui::Keystroke::parse("a").unwrap(); dead.key = "dead_acute".into(); dead.key_char = None;
+    v.simulate_event(gpui::KeyDownEvent { keystroke: dead, is_held: false, prefer_character_input: false });
+    assert!(input.marked_text_range().is_some());
+    v.simulate_keystrokes("escape");
+    assert!(input.marked_text_range().is_none()); assert!(f.view.read_with(&v, |r, _| r.marked_text_for_test().is_none()));
+    input.replace_text_in_range(None, "late",); // an old terminal callback cannot become ordinary typing
+    f.view.read_with(&v, |r, _| { assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base)); assert!(!r.session.state().view(r.session.state().active().unwrap().id()).unwrap().can_undo()); });
+    // A fresh real key establishes a new input boundary. After paint, use the platform fallback,
+    // proving registration rather than only constructing the callback wrapper above.
+    draw(&mut v); v.simulate_input("é");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "aésuffix\r\n"); });
+    v.simulate_keystrokes("ctrl-z");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("partial.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn native_composition_rejects_delayed_commit_after_source_selection_permission_modal_or_resize_changes(cx: &mut TestAppContext) {
+    for change in [0, 1, 2, 3, 4] {
+        let original = "a😀suffix\r\n"; let f = fixture(cx, Some(("stale-ime.txt", original.as_bytes())));
+        settle(cx, &f, |r| r.session.state().current_source().is_some()); let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); v.simulate_keystrokes("right shift-right"); draw(&mut v);
+        let tab = f.view.read_with(&v, |r, _| r.session.state().active().unwrap().id()); let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "pending", None);
+        match change {
+            0 => f.view.update(&mut v, |r, cx| {
+                let expected = r.session.state().current_source().unwrap().key();
+                r.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range: 0..0, text: "changed ".into() }], kind: reader_core::text::EditKind::Paste }, cx);
+                r.dispatch(Command::Undo { tab }, cx);
+            }),
+            1 => f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: 0, head: 0 }), cx)),
+            2 => f.view.update(&mut v, |r, cx| r.dispatch(Command::SetReadOnly(true), cx)),
+            3 => { v.simulate_keystrokes("f10"); },
+            4 => { v.simulate_resize(size(px(500.0), px(200.0))); draw(&mut v); },
+            _ => unreachable!(),
+        }
+        let before = f.view.read_with(&v, |r, _| (r.session.state().current_source().unwrap().clone(), r.session.state().selection()));
+        input.replace_text_in_range(None, "obsolete"); input.unmark_text();
+        f.view.read_with(&v, |r, _| {
+            assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &before.0), "stale composition case {change}");
+            assert_eq!(r.session.state().selection(), before.1); assert!(r.marked_text_for_test().is_none());
+        });
+        assert_eq!(std::fs::read(f.dir.path().join("stale-ime.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_explicit_partial_commit_and_linux_cancel_preserve_the_pending_splice(cx: &mut TestAppContext) {
+    for cancel in [false, true] {
+        let original = "a😀suffix\r\n"; let f = fixture(cx, Some(("terminal-ime.txt", original.as_bytes())));
+        settle(cx, &f, |r| r.session.state().current_source().is_some()); let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); v.simulate_keystrokes("right shift-right"); draw(&mut v);
+        let base = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone()); let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "界😀tail", None);
+        if cancel {
+            #[cfg(not(target_os = "macos"))] { let range = input.marked_text_range().unwrap(); input.replace_text_in_range(Some(range), ""); }
+            #[cfg(target_os = "macos")] v.simulate_keystrokes("escape");
+            input.unmark_text(); input.replace_text_in_range(None, "late");
+            f.view.read_with(&v, |r, _| { assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base)); assert!(!r.session.state().view(r.session.state().active().unwrap().id()).unwrap().can_undo()); });
+        } else {
+            #[cfg(not(target_os = "macos"))] let range = 2..4;
+            #[cfg(target_os = "macos")] let range = 1..3;
+            input.replace_text_in_range(Some(range), "終😀"); input.unmark_text();
+            #[cfg(not(target_os = "macos"))] let expected = "a界終😀tailsuffix\r\n";
+            #[cfg(target_os = "macos")] let expected = "a終😀suffix\r\n";
+            f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), expected); });
+            v.simulate_keystrokes("ctrl-z");
+            f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+        }
+        assert_eq!(std::fs::read(f.dir.path().join("terminal-ime.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_surrounding_text_rejects_surrogates_before_clipping_a_distant_query(cx: &mut TestAppContext) {
+    let original = "😀".to_owned() + &"a".repeat(20_000);
+    let f = fixture(cx, Some(("surrounding.txt", original.as_bytes()))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-g 1 : 2 0 0 0 2 enter"); draw(&mut v);
+    let mut input = ime_handler(&f, &mut v); let length = input.text_length_utf16().unwrap();
+    let conversions = reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    let mut actual = None; let text = input.text_for_range(0..length, &mut actual).unwrap();
+    assert!(text.len() <= 4096); assert!(actual.unwrap().start > 16_000);
+    let mut rejected = None; assert!(input.text_for_range(1..length, &mut rejected).is_none()); assert!(rejected.is_none());
+    input.replace_and_mark_text_in_range(Some(1..2), "invalid", None);
+    assert!(input.marked_text_range().is_none());
+    assert_eq!(reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("surrounding.txt")).unwrap(), original.as_bytes());
+}
