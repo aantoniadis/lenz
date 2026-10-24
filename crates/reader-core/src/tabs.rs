@@ -56,6 +56,9 @@ pub struct Tab {
     /// Its language as last loaded, kept while its content is released (`None`: never loaded).
     pub(crate) language: Option<Option<lenz_content::highlight::Language>>,
     pub(crate) stamp: Option<Stamp>,
+    /// The file's identity when a check last found it gone: a rename the watcher reports after that check is still
+    /// followed by identity.
+    pub(crate) vanished: Option<Stamp>,
     pub(crate) highlights: Option<Arc<Parsed>>,
     pub(crate) parsed_source: Option<crate::session::SemanticSource>,
     /// Fold regions of its document's version (they arrive with the highlights).
@@ -139,6 +142,7 @@ impl Tab {
             comparison_side: None,
             language: None,
             stamp: None,
+            vanished: None,
             highlights: None,
             parsed_source: None,
             folds: None,
@@ -251,6 +255,7 @@ impl Tab {
             comparison_side: None,
             language: self.language,
             stamp: self.stamp,
+            vanished: self.vanished,
             highlights: self.highlights.clone(),
             parsed_source: self.parsed_source.clone(),
             folds: self.folds.clone(),

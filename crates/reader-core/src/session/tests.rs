@@ -9867,6 +9867,24 @@ fn current_cached_rename_reactivation_updates_path_and_preserves_held_snapshot()
 }
 
 #[test]
+fn a_rename_reported_after_a_check_found_the_file_gone_is_still_followed() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "before.txt", b"original\n");
+    let moved = d.path().join("after.txt");
+    let other = write(d.path(), "other.txt", b"other\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "before.txt");
+    let tab = s.state().active().unwrap().id();
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    std::fs::rename(&path, &moved).unwrap();
+    // A check (here the watch registration's) runs between the rename and the watcher's report of it.
+    s.dispatch(Completion::Changed(Change { registered: [d.path().to_path_buf()].into(), ..Default::default() }));
+    settle_without_watch(&mut s, |s| s.state().tabs().iter().any(|t| t.id() == tab && t.unavailable().is_some()));
+    s.dispatch(Completion::Changed(Change { paths: [path.clone(), moved.clone()].into(), moves: vec![(path, moved.clone())], structure: true, ..Default::default() }));
+    settle_without_watch(&mut s, |s| s.state().tabs().iter().any(|t| t.id() == tab && t.source() == moved && t.unavailable().is_none()));
+}
+
+#[test]
 fn input_presentation_is_not_a_draft_and_cannot_outlive_its_captured_source() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap(); let original = "a😀\r\nsuffix\n";

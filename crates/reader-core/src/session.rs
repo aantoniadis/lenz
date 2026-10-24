@@ -6450,6 +6450,7 @@ impl Session {
             Completion::Moved { tab, token, to, stamp, canonical } => {
                 let Some(t) = self.tab_mut(tab).filter(|t| t.refresh == token) else { return Effect::default() };
                 t.moving = false;
+                t.vanished = None;
                 let from = std::mem::replace(&mut t.source, to.clone());
                 t.display = to.clone();
                 t.canonical = canonical.clone();
@@ -7188,9 +7189,9 @@ impl Session {
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token;
         t.moving = moved_to.is_some();
-        let (path, stamp, shown, versions, tx) = (t.source.clone(), t.stamp, snapshot, self.versions.clone(), self.tx.clone());
+        let (path, stamp, vanished, shown, versions, tx) = (t.source.clone(), t.stamp, t.vanished, snapshot, self.versions.clone(), self.tx.clone());
         // A released tab's file identity is kept with its snapshot in the cache (gone once evicted).
-        let identity = stamp.or_else(|| self.cache.stamp(&path));
+        let identity = stamp.or_else(|| self.cache.stamp(&path)).or(vanished);
         self.jobs.submit(Priority::Visible, move || {
             if let Some(to) = moved_to {
                 let same_file = identity.and_then(|s| s.file).is_some_and(|f| Stamp::of(&to).and_then(|s| s.file) == Some(f));
@@ -7245,6 +7246,9 @@ impl Session {
         if !matches!(result, Refresh::Unstable) {
             t.changing = 0;
         }
+        if !matches!(result, Refresh::Gone(_) | Refresh::Unstable) {
+            t.vanished = None;
+        }
         match result {
             Refresh::Same(stamp) => {
                 let changed = t.unavailable.take().is_some() || std::mem::take(&mut t.stale_on_disk);
@@ -7280,14 +7284,15 @@ impl Session {
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Refresh::Gone(e) => {
+                let (path, loaded, stamp) = (t.source.clone(), t.loaded, t.stamp);
+                // A check can run after a rename and before the watcher reports it: keep the identity to follow it.
+                let vanished = stamp.or_else(|| self.cache.stamp(&path));
                 // Keep (or take back from the cache) the last content; it is no longer reloadable, so it is never
                 // released again until the tab closes.
-                if !t.loaded {
-                    let path = t.source.clone();
-                    if let Some(snapshot) = self.cache.take_any(&path) { self.show_snapshot(id, snapshot, None, false); }
-                }
+                if !loaded && let Some(snapshot) = self.cache.take_any(&path) { self.show_snapshot(id, snapshot, None, false); }
                 let Some(t) = self.tab_mut(id) else { return Effect::default() };
                 t.stamp = None;
+                t.vanished = vanished.or(t.vanished);
                 t.unavailable = Some(e);
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
