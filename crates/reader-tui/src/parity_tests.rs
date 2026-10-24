@@ -112,8 +112,9 @@ fn editor_input_printables_paste_read_only_and_modal_precedence_match(cx: &mut T
     visual.simulate_keystrokes("ctrl-shift-z"); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT); check(&visual, &tui, pasted);
     visual.simulate_keystrokes("q j k / space"); for c in ['q', 'j', 'k', '/', ' '] { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
     let typed = "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ "; check(&visual, &tui, typed); assert!(!tui.quit && tui.modal.is_none());
-    visual.simulate_keystrokes("enter tab"); key(&mut tui, KeyCode::Enter, KeyModifiers::NONE); key(&mut tui, KeyCode::Tab, KeyModifiers::NONE); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n\t");
-    visual.simulate_keystrokes("backspace ctrl-z"); key(&mut tui, KeyCode::Backspace, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n\t");
+    // Tab indents with the file's step (a plain text file's default is four spaces), not a bare tab.
+    visual.simulate_keystrokes("enter tab"); key(&mut tui, KeyCode::Enter, KeyModifiers::NONE); key(&mut tui, KeyCode::Tab, KeyModifiers::NONE); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n    ");
+    visual.simulate_keystrokes("backspace ctrl-z"); key(&mut tui, KeyCode::Backspace, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n    ");
     // Real command menus toggle the same per-buffer permission in both adapters.
     visual.simulate_keystrokes("f10"); let at = gui.read_with(&visual, |v, _| v.modal_rows().iter().position(|row| row.0.starts_with(CommandId::ReadOnlyMode.label())).unwrap()); for _ in 0..at { visual.simulate_keystrokes("down"); } visual.simulate_keystrokes("enter");
     key(&mut tui, KeyCode::F(10), KeyModifiers::NONE); let at = tui.choices().iter().position(|choice| matches!(choice.target, crate::app::ChoiceTarget::Action(CommandId::ReadOnlyMode))).unwrap(); for _ in 0..at { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); } key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
@@ -156,9 +157,9 @@ fn several_cursors_replay_the_same_text_and_selections_in_both_adapters(cx: &mut
     draw(&mut visual, &mut tui, &mut terminal);
     gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
     tui.enable_draft_input_for_test();
-    visual.simulate_keystrokes("right alt-shift-down");
+    visual.simulate_keystrokes("right ctrl-alt-down");
     key(&mut tui, KeyCode::Right, KeyModifiers::NONE);
-    key(&mut tui, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    key(&mut tui, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::ALT);
     check(&visual, &tui, original);
     assert_eq!(snapshot(tui.session.state()).selections.len(), 2, "both adapters hold two cursors");
     visual.simulate_keystrokes("x y ctrl-z");
@@ -2825,4 +2826,78 @@ fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_und
     assert_eq!(gui.read_with(&visual, |v, _| markers(v.session().state())), markers(tui.session.state()));
     assert_eq!(gui.read_with(&visual, |v, _| v.marker_letters()), Vec::<(char, u32)>::new());
     for r in [&gr, &tr] { assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "xone\ntwo\nthree\n", "undo changes no disk bytes"); }
+}
+
+#[gpui::test]
+fn structural_edits_replay_the_same_text_and_selections_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit.rs");
+    let original = "é😀\r\nλ two\n三 three\r\nfour";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 20)).unwrap();
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let check = |visual: &VisualTestContext, tui: &App, expected: &str| {
+        let state = snapshot(tui.session.state());
+        assert_eq!(state.text.as_deref(), Some(expected));
+        assert_eq!(state, gui.read_with(visual, |view, _| snapshot(view.session().state())));
+    };
+    draw(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    // Tab indents with the file's step at the caret in both adapters; Shift+Tab takes it back.
+    visual.simulate_keystrokes("tab");
+    key(&mut tui, KeyCode::Tab, KeyModifiers::NONE);
+    check(&visual, &tui, "    é😀\r\nλ two\n三 three\r\nfour");
+    visual.simulate_keystrokes("shift-tab");
+    key(&mut tui, KeyCode::BackTab, KeyModifiers::SHIFT);
+    check(&visual, &tui, original);
+    // Ctrl+Shift+Down moves the caret's line over the next one, keeping every ending where it stands.
+    visual.simulate_keystrokes("ctrl-shift-down");
+    key(&mut tui, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    check(&visual, &tui, "λ two\r\né😀\n三 three\r\nfour");
+    // A whole-line selection comments, then Alt+Shift+Down duplicates it.
+    visual.simulate_keystrokes("home ctrl-a");
+    for key_press in [KeyCode::Home, KeyCode::Char('a')] { key(&mut tui, key_press, if key_press == KeyCode::Home { KeyModifiers::NONE } else { KeyModifiers::CONTROL }); }
+    visual.simulate_keystrokes("alt-/");
+    key(&mut tui, KeyCode::Char('/'), KeyModifiers::ALT);
+    check(&visual, &tui, "// λ two\r\n// é😀\n// 三 three\r\n// four");
+    visual.simulate_keystrokes("alt-shift-down");
+    key(&mut tui, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    let duplicated = gui.read_with(&visual, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    check(&visual, &tui, &duplicated);
+    // Undo takes every action back in both adapters.
+    for expected in ["// λ two\r\n// é😀\n// 三 three\r\n// four", "λ two\r\né😀\n三 three\r\nfour", original] {
+        visual.simulate_keystrokes("ctrl-z");
+        key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        check(&visual, &tui, expected);
+    }
+    // A multiline selection over Unicode lines moves as one block, with the same selection in both adapters.
+    visual.simulate_keystrokes("down shift-down");
+    for key_press in [(KeyCode::Down, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::SHIFT)] { key(&mut tui, key_press.0, key_press.1); }
+    visual.simulate_keystrokes("ctrl-g 1 enter down shift-down");
+    for key_press in [(KeyCode::Char('g'), KeyModifiers::CONTROL), (KeyCode::Char('1'), KeyModifiers::NONE), (KeyCode::Enter, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::SHIFT)] {
+        key(&mut tui, key_press.0, key_press.1);
+    }
+    visual.simulate_keystrokes("ctrl-shift-down");
+    key(&mut tui, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    check(&visual, &tui, "é😀\r\n三 three\nλ two\r\nfour");
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes(), "neither adapter writes the file");
 }

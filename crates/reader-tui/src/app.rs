@@ -1993,7 +1993,14 @@ impl App {
                 let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
                 self.replace_draft_input(newline, EditKind::Typing)
             }
-            KeyCode::Tab if !control && !other => self.replace_draft_input("\t", EditKind::Typing),
+            // Tab indents what is selected (or inserts the file's step); Shift+Tab, sent as BackTab or Tab+Shift,
+            // takes a step back. A completion popup took the key before this.
+            KeyCode::Tab | KeyCode::BackTab if !control && !key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META) => {
+                if self.draft_target().is_none() { return false; }
+                let outdent = key.code == KeyCode::BackTab || key.modifiers.contains(KeyModifiers::SHIFT);
+                self.run(if outdent { CommandId::OutdentSelection } else { CommandId::IndentSelection });
+                true
+            }
             KeyCode::Char(character) if !control && !other && !character.is_control() => self.replace_draft_input(&character.to_string(), EditKind::Typing),
             _ => false,
         }

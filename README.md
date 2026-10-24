@@ -60,6 +60,10 @@ native macOS validation is pending. The Reader edits existing files on verified 
 - **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
   step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
+- **Edit structure** with the file's conventions: Tab / Shift+Tab indent and outdent selected lines (EditorConfig,
+  then the project's choice), Ctrl+/ toggles comments, Ctrl+Shift+Down/Up move lines (VS Code keymap: Alt+Down/Up)
+  and Alt+Shift+Down/Up duplicate them—each action one Undo step, with line endings kept exactly. Typing a bracket or
+  quote wraps a selection or opens the pair, and the closer already there is stepped over.
 - **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
   **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the
   terminal. A shortcut a terminal cannot deliver leaves its command in the command menu.

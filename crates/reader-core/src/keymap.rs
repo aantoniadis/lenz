@@ -195,10 +195,18 @@ const INTELLIJ: &[Preset] = &[
     (CommandId::ExtendSelection, &["Ctrl+W"]),
     (CommandId::ShrinkSelection, &["Ctrl+Shift+W"]),
     // Several cursors: IntelliJ's Alt+J selects the next occurrence; IntelliJ has no add-cursor chord, so the two
-    // cursor commands take the arrows their adapters have always used, and stay rebindable.
-    (CommandId::AddCursorBelow, &["Alt+Shift+Down"]),
-    (CommandId::AddCursorAbove, &["Alt+Shift+Up"]),
+    // cursor commands take VS Code's Ctrl+Alt+arrows, and stay rebindable.
+    (CommandId::AddCursorBelow, &["Ctrl+Alt+Down"]),
+    (CommandId::AddCursorAbove, &["Ctrl+Alt+Up"]),
     (CommandId::SelectNextOccurrence, &["Alt+J"]),
+    // Structural edits: IntelliJ's Move Statement arrows move lines, and Alt+Shift+arrows duplicate them as they do
+    // in VS Code, because IntelliJ's own Ctrl+D (duplicate line) is Compare Selected here.
+    (CommandId::MoveLinesUp, &["Ctrl+Shift+Up"]),
+    (CommandId::MoveLinesDown, &["Ctrl+Shift+Down"]),
+    (CommandId::DuplicateLinesUp, &["Alt+Shift+Up"]),
+    (CommandId::DuplicateLinesDown, &["Alt+Shift+Down"]),
+    // Terminals often deliver Ctrl+/ as Ctrl+_ (or swallow it), so Alt+/ is the route that always arrives.
+    (CommandId::ToggleComment, &["Ctrl+/", "Alt+/"]),
     (CommandId::FocusBreadcrumbs, &["Ctrl+Shift+."]),
     (CommandId::ToggleBookmark, &["F11"]),
     (CommandId::SetBookmarkMnemonic, &["Ctrl+F11"]),
@@ -247,11 +255,16 @@ const VS_CODE: &[Preset] = &[
     (CommandId::Close, &["Ctrl+W"]),
     (CommandId::ExtendSelection, &["Alt+Shift+Right"]),
     (CommandId::ShrinkSelection, &["Alt+Shift+Left"]),
-    // VS Code's own add-cursor chords; Alt+Shift+Down/Up stay as the arrows both adapters have always delivered.
-    // VS Code's Ctrl+D (select next occurrence) is Compare Selected here, so Alt+J keeps that command.
-    (CommandId::AddCursorBelow, &["Ctrl+Alt+Down", "Alt+Shift+Down"]),
-    (CommandId::AddCursorAbove, &["Ctrl+Alt+Up", "Alt+Shift+Up"]),
+    // VS Code's own add-cursor chords. VS Code's Ctrl+D (select next occurrence) is Compare Selected here, so Alt+J
+    // keeps that command; Alt+Shift+arrows duplicate lines, as they do in VS Code.
+    (CommandId::AddCursorBelow, &["Ctrl+Alt+Down"]),
+    (CommandId::AddCursorAbove, &["Ctrl+Alt+Up"]),
     (CommandId::SelectNextOccurrence, &["Alt+J"]),
+    (CommandId::MoveLinesUp, &["Alt+Up"]),
+    (CommandId::MoveLinesDown, &["Alt+Down"]),
+    (CommandId::DuplicateLinesUp, &["Alt+Shift+Up"]),
+    (CommandId::DuplicateLinesDown, &["Alt+Shift+Down"]),
+    (CommandId::ToggleComment, &["Ctrl+/", "Alt+/"]),
     (CommandId::FocusBreadcrumbs, &["Ctrl+Shift+."]),
     (CommandId::ToggleBookmark, &["F11"]),
     (CommandId::SetBookmarkMnemonic, &["Ctrl+F11"]),

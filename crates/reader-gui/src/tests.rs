@@ -188,7 +188,7 @@ fn several_cursors_edit_together_and_escape_returns_to_one(cx: &mut TestAppConte
     // This line is the file's last one: the menu command adds a cursor there and the shortcut then has nowhere to go.
     choose_menu_command(&mut v, &f, CommandId::AddCursorBelow);
     assert_eq!(carets(&v), [1, 10]);
-    v.simulate_keystrokes("alt-shift-down");
+    v.simulate_keystrokes("ctrl-alt-down");
     assert_eq!(carets(&v), [1, 10], "there is no line below the last one");
     v.simulate_keystrokes("x");
     assert_eq!(text(&v), "axa bb aa\noxne", "typing replaces every selection");
@@ -6896,9 +6896,11 @@ fn completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys(cx: &
     assert_eq!(current(&mut v), text.replacen("{  }", "{ hello }", 1));
     type_text(&mut v, ".he");
     settle(cx, &f, |r| r.session().state().completion().is_some());
-    type_text(&mut v, "(");
+    // Punctuation is not accepted as a suggestion. (A bracket would also open its pair, so a comma keeps this
+    // test about completion.)
+    type_text(&mut v, ",");
     assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none()));
-    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.he( }", 1));
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.he, }", 1));
     // Off: typing opens nothing; Ctrl+Space still asks. A modal takes the keys first and leaves the draft as it is.
     f.view.update(&mut v, |r, cx| r.dispatch(Command::SetAutoCompletion(false), cx));
     v.simulate_keystrokes("backspace");
@@ -7175,4 +7177,75 @@ fn gutter_paints_change_letters_in_their_own_colours_against_head(cx: &mut TestA
     assert!(!f.view.read_with(&v, |view, _| view.painted_annotations.clone()).is_empty(), "the blame column is painted");
     assert_eq!(f.view.read_with(&v, |view, _| view.marker_letters()).iter().map(|(glyph, _)| *glyph).collect::<Vec<_>>(), vec!['M'], "the change letter stays painted beside both");
     assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+}
+
+#[gpui::test]
+fn structural_keys_and_menus_indent_comment_move_and_duplicate_in_the_window(cx: &mut TestAppContext) {
+    let original = "one\r\ntwo\r\nthree\r\n";
+    let f = fixture(cx, Some(("edit.rs", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    // Tab inserts the file's indentation step at a caret; Shift+Tab takes it back.
+    v.simulate_keystrokes("tab");
+    assert_eq!(text(&v), "    one\r\ntwo\r\nthree\r\n");
+    v.simulate_keystrokes("shift-tab");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    // Ctrl+Shift+Down moves the first line over the second, and Alt+Shift+Down duplicates it.
+    v.simulate_keystrokes("ctrl-shift-down");
+    assert_eq!(text(&v), "two\r\none\r\nthree\r\n");
+    v.simulate_keystrokes("alt-shift-down");
+    assert_eq!(text(&v), "two\r\none\r\none\r\nthree\r\n");
+    v.simulate_keystrokes("ctrl-z ctrl-z");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n", "each action was its own undo step");
+    // Alt+/ comments the line (Ctrl+/ is the same chord; terminals may not deliver it).
+    v.simulate_keystrokes("ctrl-g 1 enter home");
+    v.simulate_keystrokes("alt-/");
+    assert_eq!(text(&v), "// one\r\ntwo\r\nthree\r\n");
+    v.simulate_keystrokes("alt-/");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    // The same actions are in the Selection menu both adapters show, with their labels.
+    v.simulate_keystrokes("ctrl-a");
+    choose_menu_command(&mut v, &f, CommandId::IndentSelection);
+    assert_eq!(text(&v), "    one\r\n    two\r\n    three\r\n");
+    choose_menu_command(&mut v, &f, CommandId::OutdentSelection);
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    choose_menu_command(&mut v, &f, CommandId::ToggleComment);
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n");
+    choose_menu_command(&mut v, &f, CommandId::DuplicateLinesDown);
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n// one\r\n// two\r\n// three\r\n");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n");
+    // A dialog takes the keys first and leaves the draft alone.
+    v.simulate_keystrokes("f10");
+    let before = text(&v);
+    v.simulate_keystrokes("tab alt-shift-down ctrl-shift-down alt-/");
+    assert_eq!(text(&v), before, "an open menu keeps every structural key away from the text");
+    v.simulate_keystrokes("escape");
+    // Read-only mode refuses them too, with the shared reason.
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::SetReadOnly(true), cx));
+    v.simulate_keystrokes("ctrl-z");
+    let frozen = text(&v);
+    v.simulate_keystrokes("tab alt-shift-down ctrl-shift-down alt-/");
+    assert_eq!(text(&v), frozen);
+    let disabled = f.view.read_with(&v, |view, _| [CommandId::IndentSelection, CommandId::ToggleComment, CommandId::MoveLinesDown, CommandId::DuplicateLinesDown].map(|id| view.session().disabled(id)));
+    assert_eq!(disabled, [Some("Read-only mode is on"); 4]);
+    assert_eq!(std::fs::read(f.dir.path().join("edit.rs")).unwrap(), original.as_bytes(), "the keys never write the file");
+    // An empty file: indenting writes the step, and the commands with nothing to do say why and change nothing.
+    let empty = f.dir.path().join("empty.rs");
+    std::fs::write(&empty, b"").unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(empty), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|d| d.source().ends_with("empty.rs")));
+    draw(&mut v);
+    // The empty document says what it cannot do before the first step writes anything.
+    let reasons = f.view.read_with(&v, |view, _| [CommandId::ToggleComment, CommandId::MoveLinesDown, CommandId::DuplicateLinesDown].map(|id| view.session().disabled(id)));
+    assert_eq!(reasons, [Some("There is no text to comment"), Some("Already on the last line"), Some("Nothing to duplicate")]);
+    v.simulate_keystrokes("alt-/ ctrl-shift-down alt-shift-down");
+    assert_eq!(text(&v), "", "an empty document has nothing to comment, move or duplicate");
+    v.simulate_keystrokes("tab");
+    assert_eq!(text(&v), "    ", "indenting an empty document writes the file's step");
+    v.simulate_keystrokes("shift-tab");
+    assert_eq!(text(&v), "");
 }

@@ -476,3 +476,40 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   on the GPUI test platform and the terminal checks in a test backend. The marker look with exotic fonts, at very
   narrow widths and in physical terminals is unverified, and the marker column's cost per frame was not measured
   (the lookup is a binary search per drawn line).
+
+## Structural edits (ticket 27, 2026-10-24)
+
+- **Line endings stay at their position, not with the line:** moving a line rotates only line *contents*, so every
+  terminator stays where it was written. That keeps CRLF, LF, mixed endings and a missing final newline byte-exact
+  and never invents a separator, but in a mixed-ending file the moved line takes the terminator of the position it
+  lands in instead of carrying its own. Duplicating a block that ends the file without a newline takes the previous
+  line's terminator as the separator. Decide whether a per-line terminator model (with an explicit last-line rule)
+  is worth the extra cases if mixed-ending moves are reported as surprising.
+- **Comments do not parse strings or nesting:** comment toggling uses the language's prefix or block pair and the
+  lines' own indentation only, so a selection inside a multi-line string is commented like code, an existing
+  `/* … */` is not nested, and a line already commented with a different prefix (`#` in a `//` language) is
+  completed rather than recognized. Using the tab's parsed syntax to skip strings would need the parse to be
+  current for the edited version.
+- **Pairs are character rules, not syntax:** `(`, `[`, `{` and the three quotes pair before whitespace, a closer,
+  `;`, `,`, `.` or `:`; a quote after a word stays an apostrophe; Markdown, YAML, TOML and plain text never pair.
+  No string/comment context is consulted, so typing `(` inside a comment also opens its pair, and an already
+  balanced line can gain a pair when the caret sits before a closer of another kind. Escape does not "unpair" a
+  pair typed together.
+- **Ctrl+/ in terminals:** many terminals send Ctrl+/ as `0x1F`, which Lenz reads as Ctrl+Shift+- (Collapse All).
+  Toggle Comment also has Alt+/ in both presets and stays in the Selection menu and F10; no terminal test could
+  make a real emulator deliver Ctrl+/ (see the "unverified" note).
+- **Structural edits create no new selection shapes:** a block is the union of the lines the existing selections
+  touch, so several blocks move or duplicate only when several non-adjacent selections already exist (adjacent ones
+  merge). The ticket-29 limits on creating selections still apply.
+- **Suspected cost, unmeasured:** indentation resolves `.editorconfig` files to the filesystem root on every Tab,
+  Shift+Tab and indent command (ticket 25's note). That is an explicit action rather than a keystroke, and typing
+  delimiters never resolves it, so no cache was added—changing `.editorconfig` applies at once. Comment toggling
+  copies each touched line and move/duplicate build one span string per block; neither materializes the document.
+  Include a repeated-Tab walk in an editor batch if it becomes visible.
+- **Anchors inside a moved block collapse:** bookmarks, history entries and find matches are transformed by the
+  buffer's edit transform, which maps a byte inside a replaced span to the end of its replacement. A bookmark inside
+  a moved line therefore lands at the block's new end rather than on its line. Transforming anchors per line would
+  need the move to publish a line mapping through `publish_edit`.
+- **Unverified:** native macOS and Wayland GUI editing remain gated; the GUI checks ran on the GPUI test platform and
+  the terminal checks in a Ratatui test backend, so physical terminals and real desktops were not exercised. No
+  performance measurement or benchmark was run for this ticket (per the current verification policy).

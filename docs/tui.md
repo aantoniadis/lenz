@@ -4,9 +4,12 @@ For the code reader, see the [terminal reader guide](code/tui.md).
 
 Reader draft editing and Undo/Redo input are enabled by default in the Linux terminal and the Linux X11 GUI. The GUI checks its actual backend; Wayland and native macOS remain gated pending platform verification. Checkpoint23 activation remains a private candidate until the combined gate and performance acceptance. See the [Unicode composition limits](research/reader-unicode-composition.md). Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
 
-Reader editing also covers several selections: Alt+Shift+Down / Up and **Select Next Occurrence** (Alt+J) add
-cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. The
-[terminal reader guide](code/tui.md) lists the keys and the terminal's modifier-key limits.
+Reader editing also covers several selections: Ctrl+Alt+Down / Up and **Select Next Occurrence** (Alt+J) add
+cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. Tab indents and
+Shift+Tab outdents with the file's EditorConfig or project step; Ctrl+/ (or Alt+/) comments, Ctrl+Shift+Down/Up moves
+lines, and Alt+Shift+Down/Up duplicates them—each one Undo step, with CRLF, mixed line endings and a missing final
+newline kept in place. The [terminal reader guide](code/tui.md) lists the keys and the terminal's modifier-key
+limits.
 
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.

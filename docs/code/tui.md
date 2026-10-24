@@ -122,11 +122,12 @@ persist with any overrides in the Reader's settings file, never in the project. 
 the view: a command rebound to it is warned about here and stays in F10. Flow control (XOFF) can also swallow Ctrl-S
 in some terminals, so Save is in F10 too. The [Reader guide](README.md#keymaps) lists both presets.
 
-**Several selections** (Alt+Shift+Down/Up, which both presets keep, or Ctrl+Alt+Down/Up in the VS Code keymap; also
-**Add Cursor Below** / **Add Cursor Above** in the menus and the palette) put a caret on the next or previous shown
-line at the caret's column and keep the earlier ones. These are ordinary keymap chords, so **Keymap…** can move them;
-terminals that do not report modified arrow keys deliver them as other keys, which is why both commands also sit in
-the palette (F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
+**Several selections** (Ctrl+Alt+Down/Up in both presets—IntelliJ has no chord of its own for this, so it takes
+VS Code's; Alt+Shift+Down/Up duplicate lines since the structural edits below; also **Add Cursor Below** /
+**Add Cursor Above** in the menus and the palette) put a caret on the next or previous shown line at the caret's
+column and keep the earlier ones. These are ordinary keymap chords, so **Keymap…** can move them; terminals that
+do not report modified arrow keys deliver them as other keys, which is why both commands also sit in the palette
+(F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
 literal occurrence outside the selections already made; overlapping and repeated matches are skipped, and a press
 with none left says so and changes nothing. Typing, Enter, Tab, bracketed paste, Delete, Cut and Paste then change
 every selection as one transaction against the displayed version, and each caret follows its own edit. One Undo
@@ -140,6 +141,35 @@ the same reasons as typing, and an open dialog takes the keys first. Several sel
 or overlapping are merged into their union; a caret inside a selection is dropped. Only the primary selection is
 composed through an input method, and folding moves a hidden caret to its region's first line.
 
+**Indentation, comments, moving and duplicating** work on every selection of the focused view and are one Undo step
+each (**Selection** menu, F10 and the palette in both adapters; the GUI has the same keys):
+
+- **Tab** indents every line a selection touches by one step, keeps the selection on its text, and inserts that step
+  at a caret; **Shift+Tab** removes one step from the touched lines (a tab, or up to the indent size in spaces) and
+  never takes text back. The step comes from the file's EditorConfig, then the project's choice, then the language
+  default, resolved when the key is pressed, so a changed `.editorconfig` applies at once. Outside editable source,
+  Tab keeps cycling the controls as before.
+- **Ctrl+/** (or **Alt+/**, because terminals often send Ctrl+/ as Ctrl+_) comments or uncomments the touched lines
+  after their own indentation with the language's prefix (`//`, `#`, `--`), leaving blank lines alone and completing
+  a partly commented run instead of removing it; markup without a line comment (`HTML`, `Markdown`, `CSS`) gets one
+  block pair around the selection instead. A file type with no comment syntax (JSON, plain text) says so.
+- **Ctrl+Shift+Down/Up** (VS Code keymap: **Alt+Down/Up**) moves the lines a selection touches one line down or up;
+  **Alt+Shift+Down/Up** duplicates them directly below or above. A multi-line selection moves or repeats as a block,
+  several selections move one block each in the same transaction, and the caret or selection stays on its own lines
+  (a duplicate leaves the original selected). Each line keeps the newline written at its position—CRLF, LF, mixed
+  endings and a missing final newline are preserved byte for byte—so the last line of a file has no line below it
+  and the commands say "Already on the last line" / "Already on the first line" there.
+- Typing an opening delimiter wraps a selection (`(` around `x` gives `(x)` with `x` still selected) or opens a pair
+  with the caret between (`{}`, `[]`, `""`, `''` or a backtick pair); the closing delimiter already in front of the caret is
+  stepped over rather than doubled, a quote after a word stays an apostrophe, and no pair is opened in front of a
+  word or in Markdown, YAML or TOML. Pasting is always literal. Comment toggling and pairs read the language and the
+  characters around the caret only; they do not parse strings, so a selection inside a multi-line string is
+  commented like any other line.
+
+Read-only mode, an image, a preview, a retrieved or binary source, or a gated input backend disable all of these with
+the same reasons as typing, and an open dialog takes the keys first; the empty document has nothing to comment,
+move or duplicate and says so, while Tab still writes the indentation step.
+
 **Editing Preferences…** (Find Action or the Selection menu, in both adapters) shows the active file's
 indent style, indent size and tab width, each with its source: EditorConfig first, then the open project's
 choice (**Project Indentation: Tabs / 2 Spaces / 4 Spaces / EditorConfig and Language Defaults**), then the
@@ -147,7 +177,7 @@ language default. It also names the formatter a project configures and where its
 resolution only reads files and never installs, upgrades or runs tools or environment files. **Format on
 Save for This Project** is off by default and only remembered for now: Lenz does not format yet. Project
 choices are saved in the Reader settings file, never in the project. EditorConfig `{n..m}` ranges are not
-matched, and indentation commands that use these preferences are not available yet.
+matched. The indentation commands above use these preferences; indentation is not detected from the file's text.
 
 **SQL Dialect** (F10 → SQL, in both adapters) declares which SQL dialect an `.sql` file is written for.
 **Project SQL Dialect: PostgreSQL / DuckDB / Not Set** is the project default; **SQL Dialect for This File:
@@ -217,7 +247,7 @@ the Last saved pane remains read-only.
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
 | Reload / close tab | Ctrl-R or F5 / Ctrl-F4 (VS Code keymap: Ctrl-W closes) |
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
-| Focus tree, reading area and results | Shift-Tab; click a pane (Tab cycles outside source input mode; in editable source it inserts a tab) |
+| Focus tree, reading area and results | Shift-Tab; click a pane (outside source input mode Tab / Shift-Tab cycle; in editable source they indent and outdent) |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
 | Scroll text | PageUp/PageDown, Home/End; wheel (j/k only while text input is gated) |
@@ -226,6 +256,10 @@ the Last saved pane remains read-only.
 | Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (a list of branches and tags; type to filter or for any revision), Compare with Base Branch, Show Changes Since Branch Start, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |
 | Annotate with Git blame | Alt-B (View menu, right-click); click an annotation for its commit (d Show Diff, c Copy Revision); the status line shows the caret line's commit |
 | Extend / shrink syntax selection | Ctrl-W / Ctrl-Shift-W |
+| Indent / outdent the selection | Tab / Shift-Tab |
+| Comment / uncomment | Ctrl-/ or Alt-/ (F10 → Selection when the terminal swallows it) |
+| Move lines down / up | Ctrl-Shift-Down / Ctrl-Shift-Up (VS Code keymap: Alt-Down / Alt-Up) |
+| Duplicate lines below / above | Alt-Shift-Down / Alt-Shift-Up |
 | Next / previous tab | Ctrl-Tab / Ctrl-Shift-Tab |
 | Split right / down; focus pane | Ctrl-\ / Ctrl-Shift-\; Ctrl-1 / Ctrl-2 |
 | Back / forward | Alt-Left / Alt-Right |

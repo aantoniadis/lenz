@@ -1358,8 +1358,12 @@ impl ReaderView {
         } else if !control && !key.modifiers.alt && !key.modifiers.shift && key.key == "enter" {
             let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
             self.replace_draft_input(newline, reader_core::text::EditKind::Typing, cx)
-        } else if !control && !key.modifiers.alt && !key.modifiers.shift && key.key == "tab" {
-            self.replace_draft_input("\t", reader_core::text::EditKind::Typing, cx)
+        } else if !control && !key.modifiers.alt && key.key == "tab" {
+            // Tab indents what is selected (or inserts the file's step) and Shift+Tab takes a step back; a completion
+            // popup took the key before this.
+            if self.draft_target().is_none() { return false; }
+            self.run(if key.modifiers.shift { CommandId::OutdentSelection } else { CommandId::IndentSelection }, window, cx);
+            true
         } else if !control && !key.modifiers.alt {
             key.key_char.as_deref().filter(|text| !text.chars().any(char::is_control))
                 .is_some_and(|text| self.replace_draft_input(text, reader_core::text::EditKind::Typing, cx))
