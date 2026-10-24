@@ -7120,6 +7120,7 @@ fn an_interrupted_project_reopens_around_its_recovered_draft_through_real_input(
     draw(&mut w);
     assert!(!recovered_dialog(&second, &w), "the dialog waits for the project's last tabs");
     settle_view(cx, &second, |v| matches!(v.modal, Some(Modal::StatusDetails { kind: Details::Recovered, .. })));
+    settle_view(cx, &second, |v| (0..2).all(|pane| v.session.state().shown(pane).is_some_and(|t| t.loaded())) && v.session.state().loading().is_none());
     assert_eq!(arrangement(&second, &w), before, "tabs, panes and places come back first");
     assert_eq!(second.read_with(&w, |v, _| v.session.state().split()), Some(reader_core::session::Split::Columns));
     // The dialog owns input in tiny windows too, and nothing behind it is edited.

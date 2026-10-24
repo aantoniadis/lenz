@@ -178,6 +178,7 @@ fn an_interrupted_project_reopens_around_its_recovered_draft_through_real_keys()
         settle(&mut a, |a| a.session.recovery_prompt().is_some());
         draw(&mut a, 100, 30);
     }
+    settle(&mut a, |a| (0..2).all(|pane| a.session.state().shown(pane).is_some_and(|t| t.loaded())) && a.session.state().loading().is_none());
     assert_eq!(arrangement(&a), before, "tabs, panes and places come back first");
     assert_eq!(a.session.state().split(), Some(reader_core::session::Split::Columns));
     a.enable_draft_input_for_test();
