@@ -48,7 +48,7 @@ impl Prompt {
         }
     }
     pub fn text(&self) -> String {
-        let mut text = format!("{} has unsaved changes.\n\nExternal tools open the file on disk. Open Saved Version keeps your draft and history in Lenz.\n", self.path.display());
+        let mut text = format!("Open {} outside Lenz.\n\nExternal tools open the file on disk. Open Saved Version keeps your draft and history in Lenz.\n", self.path.display());
         text.push_str(&format!("\n{} (S)\n{} (O)\n{} (Esc)\n",Choice::SaveAndOpen.label(),Choice::OpenSavedVersion.label(),Choice::Cancel.label()));
         if self.waiting { text.push_str("\nWaiting for the submitted Save to finish.\n"); }
         if let Some(why) = self.save_disabled { text.push_str(&format!("\nSave and Open: {why}\n")); }

@@ -347,7 +347,12 @@ impl App {
         }
         let workspace = self.session.state().workspace_revision();
         let tree_revision = self.session.state().tree_revision();
-        let effect = self.session.dispatch(command);
+        let mut effect = self.session.dispatch(command);
+        if let Some(ticket) = self.session.external_ready() {
+            let delivery = self.session.dispatch(Command::TakeExternal { ticket });
+            effect.repaint |= delivery.repaint;
+            effect.external = delivery.external.or(effect.external);
+        }
         self.sync_workspace(workspace);
         if self.session.state().tree_revision() != tree_revision {
             self.pending_explorer = None;
@@ -419,7 +424,12 @@ impl App {
         let results_id = self.session.state().results().map(|r| r.id());
         let preview_positions = self.preview_positions();
         let workspace = self.session.state().workspace_revision();
-        let effect = self.session.dispatch(completion);
+        let mut effect = self.session.dispatch(completion);
+        if let Some(ticket) = self.session.external_ready() {
+            let delivery = self.session.dispatch(Command::TakeExternal { ticket });
+            effect.repaint |= delivery.repaint;
+            effect.external = delivery.external.or(effect.external);
+        }
         if let Some(id) = theme {
             self.select_theme_row(&id);
         }

@@ -825,7 +825,12 @@ impl ReaderView {
         let workspace = self.session.state().workspace_revision();
         let tree_revision = self.session.state().tree_revision();
         let library_read = matches!(&input, reader_core::session::Input::Completion(Completion::LibraryRead { .. }));
-        let effect = self.session.dispatch(input);
+        let mut effect = self.session.dispatch(input);
+        if let Some(ticket) = self.session.external_ready() {
+            let delivery = self.session.dispatch(Command::TakeExternal { ticket });
+            effect.repaint |= delivery.repaint;
+            effect.external = delivery.external.or(effect.external);
+        }
         if matches!(self.modal, Some(Modal::Navigation { .. })) && self.session.state().navigation().is_none() {
             self.modal = None;
             self.navigation_drawn = None;
