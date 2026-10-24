@@ -87,7 +87,9 @@ impl Chord {
                 _ => return None,
             }
         }
-        if key.len() > 1 && !(key.starts_with('f') && key[1..].bytes().all(|b| b.is_ascii_digit())) && !matches!(key.as_str(), "space" | "tab" | "enter" | "escape" | "esc" | "backspace" | "delete" | "left" | "right" | "up" | "down" | "home" | "end" | "pageup" | "pagedown") {
+        // `F1`–`F99`: an `f` followed only by digits. `strip_prefix` keeps this off the slicing path.
+        let function_key = key.strip_prefix('f').is_some_and(|digits| !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()));
+        if key.len() > 1 && !function_key && !matches!(key.as_str(), "space" | "tab" | "enter" | "escape" | "esc" | "backspace" | "delete" | "left" | "right" | "up" | "down" | "home" | "end" | "pageup" | "pagedown") {
             return None;
         }
         // A bare letter or symbol would run its command while the user types; Ctrl, Alt or a function key is required.

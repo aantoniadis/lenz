@@ -1513,7 +1513,9 @@ impl App {
                 self.clamp();
             }
             KeyCode::Delete if kind == Prompt::Keymap => {
-                let command = self.choices().get(self.modal.as_ref().unwrap().at).and_then(|c| match c.target {
+                let at = self.modal.as_ref().map(|m| m.at);
+                let choices = self.choices();
+                let command = at.and_then(|at| choices.get(at)).and_then(|c| match c.target {
                     ChoiceTarget::Keymap(command) => Some(command),
                     _ => None,
                 });
