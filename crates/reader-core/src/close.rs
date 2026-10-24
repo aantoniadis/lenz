@@ -22,6 +22,11 @@ pub enum Intent {
     Reload(TabId),
     Workspace,
 }
+impl Intent {
+    pub(crate) fn closes_views(self) -> bool {
+        matches!(self, Self::Tab(_) | Self::Unsplit | Self::Session)
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
     Save,
@@ -45,13 +50,20 @@ pub struct Prompt {
     pub waiting: bool,
     pub save_disabled: Option<&'static str>,
     pub discard_disabled: Option<&'static str>,
+    pub discard_label: &'static str,
 }
 impl Prompt {
+    pub fn label(&self, choice: Choice) -> &'static str {
+        match choice { Choice::Discard => self.discard_label, _ => choice.label() }
+    }
     pub fn text(&self) -> String {
         let mut text = format!(
             "Unsaved changes in {}\n\nChoose Save, Discard or Cancel.\nDiscard is applied only after every affected buffer approves.\n",
             self.path.display()
         );
+        if self.discard_label == "Discard Draft and Close" {
+            text.push_str("\nDiscard Draft and Close abandons the in-memory draft and undo history. Disk is left as it stands; the unconfirmed Save is not retried.\n");
+        }
         if self.waiting {
             text.push_str("\nWaiting for the submitted operation to finish.\n");
         }

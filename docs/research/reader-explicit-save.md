@@ -48,7 +48,9 @@ confirmed baseline, the attempted Save, or neither; observing alone never change
 the baseline. Confirm Rechecked Save accepts only a matched observation, refreshes
 its exact target identity and retains the draft/history. Unrelated or unreadable
 disk content remains blocked for explicit reconciliation. There is no silent
-retry or acceptance of a new baseline during Save. Existing writer behavior for
+retry or acceptance of a new baseline during Save. A fresh actual view-close decision may instead choose
+**Discard Draft and Close** without rechecking: it abandons in-memory draft/history, leaves disk as it stands,
+and never revives the failed Save/close. Replacement transitions and external opens retain their recheck guards. Existing writer behavior for
 encoding/BOM/mixed endings/mode, symlinks and in-place hard links is reused.
 
 ## Backing retirement
@@ -112,3 +114,17 @@ Implementation readiness is separate from final acceptance: no standalone full
 workspace gate, release comparison or sustained stress is claimed. Those run once
 for the agreed 11/12/13/16/18 batch against the retained 08–10 baseline and raw
 executables. No deliberate performance tradeoff is accepted by these focused tests.
+
+## Fresh close decision after an unconfirmed Save (2026-10-24)
+
+The explicitly approved exception is limited to actual Tab, Unsplit and Session close intents, including
+all-view preparation. Save failure still cancels its original close ticket. A fresh current-identity decision
+may abandon draft/history without rechecking or writing disk; submitted writes/rechecks must finish first.
+Reload, workspace/Git transitions and external opening retain their existing guards.
+
+Focused shared tests cover pre-replacement rejection, post-replacement uncertainty, stale tickets,
+all-view closure and exact disk bytes (including an intervening external write). Actual GUI/TUI controls
+show **Discard Draft and Close**, preserve dirty/history before consent and leave disk unchanged.
+Existing recheck/confirmation and replacement-transition checks pass, as does affected strict Clippy.
+Evidence is retained under `target/perf/editor-implementation/14-fresh-uncertain-discard/`. No native
+campaign, full suite, timing or stress was repeated for this policy-only change.

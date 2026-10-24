@@ -10,6 +10,9 @@ buffer/source/owner fences and Save/Discard/Cancel decisions. Checkout preparati
 observed repository context. No load, project replacement or Git checkout starts before preparation
 completes. Decisions are consumed once; edits, replacement sources, changed owners/context and
 failed or uncertain Save cannot revive an old continuation. An earlier confirmed Save stays on disk.
+After uncertainty, these replacement transitions still require a successful current recheck before Discard.
+The separately approved fresh **Discard Draft and Close** exception applies only to actual tab/split/window/all-view
+closure, leaves disk untouched and does not authorize Reload, workspace/Git replacement or external opening.
 
 Discard is consent until replacement succeeds. A failed Reload or blocked/failed checkout retains
 the draft/history; retries require fresh preparation. A successful asynchronous reply may replace

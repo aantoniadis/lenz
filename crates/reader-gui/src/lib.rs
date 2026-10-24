@@ -2608,7 +2608,7 @@ impl ReaderView {
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
             Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
-            Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|c.label()).collect(),
+            Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|self.session.close_prompt().map_or(c.label(), |p|p.label(c))).collect(),
         }
     }
 
