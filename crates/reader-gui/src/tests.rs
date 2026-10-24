@@ -2,6 +2,8 @@
 //! commands, and the file on disk never changes.
 use super::*;
 mod external;
+#[cfg(target_os = "linux")]
+mod composition_probe;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, point, size};
 use reader_core::session::Config;
 use std::path::Path;
