@@ -62,6 +62,9 @@ native macOS validation is pending. The Reader edits existing files on verified 
 - **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
   **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the
   terminal. A shortcut a terminal cannot deliver leaves its command in the command menu.
+- **Declare an SQL dialect** per project or file in the **SQL** menu: PostgreSQL and DuckDB are distinct, an
+  unset dialect stays visibly unset (Lenz never assumes PostgreSQL), and the status bar shows which one applies.
+  Choosing one writes only the Reader settings, never a document or a database connection.
 - **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
   with `Ctrl+Shift+V`, soft wrap with `Alt+Z`, and search with `Ctrl+F`.
 - **Share appearance** with Diff: theme selection, custom themes and desktop font

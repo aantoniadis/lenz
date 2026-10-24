@@ -1029,12 +1029,13 @@ impl ReaderView {
                     self.modal = Some(Modal::Keymap { at: 0, capture: false });
                     cx.notify();
                 }
-                InterfaceAction::ServerDetails | InterfaceAction::StatusDetails | InterfaceAction::EditingPreferences => {
+                InterfaceAction::ServerDetails | InterfaceAction::StatusDetails | InterfaceAction::EditingPreferences | InterfaceAction::SqlDialect => {
                     self.dispatch(Command::CloseDocumentation, cx);
                     self.modal_scroll.set(0);
                     let (title, text) = match action {
                         InterfaceAction::ServerDetails => ("Server details", self.session.language_server_details()),
                         InterfaceAction::EditingPreferences => ("Editing preferences", self.session.editing_preferences_details()),
+                        InterfaceAction::SqlDialect => ("SQL dialect", self.session.sql_dialect_details()),
                         _ => ("Status details", self.session.status_details()),
                     };
                     self.modal = Some(Modal::StatusDetails { title, text, logo: None, kind: Details::Text });
@@ -3027,8 +3028,8 @@ impl ReaderView {
                 self.open_navigation(reader_core::navigation::Scope::Actions, cx);
                 return;
             }
-            let (server, _, branch, _) = self.status_segments();
-            let id = if server.0.contains(&ev.position) { CommandId::LanguageServer } else if branch.0.contains(&ev.position) { CommandId::GitBranches } else { CommandId::StatusDetails };
+            let (server, _, branch, _, sql) = self.status_segments();
+            let id = if server.0.contains(&ev.position) { CommandId::LanguageServer } else if sql.0.contains(&ev.position) { CommandId::SqlDialect } else if branch.0.contains(&ev.position) { CommandId::GitBranches } else { CommandId::StatusDetails };
             self.run(id, window, cx);
             return;
         }
@@ -3358,8 +3359,9 @@ impl ReaderView {
         let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
             .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
                 if self.modal.is_none() && y >= self.body_bottom() && self.status_h() > 0.0 {
-                    let (server, message, branch, _) = self.status_segments();
+                    let (server, message, branch, _, sql) = self.status_segments();
                     if server.0.contains(&ev.position) { Some(CommandId::LanguageServer) }
+                    else if sql.0.contains(&ev.position) { Some(CommandId::SqlDialect) }
                     else if branch.0.contains(&ev.position) { Some(CommandId::GitBranches) }
                     else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
@@ -3527,12 +3529,15 @@ impl ReaderView {
     }
 
     /// Independent footer cells; narrow windows keep recovery and message targets accessible.
-    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell) {
+    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, StatusCell) {
         let left = STATUS_PAD.min(self.width / 2.0);
         let right = self.commands_button().map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
         let label = self.session.state().language_server_label();
         let server_w = ((lenz_content::wrap::width(&label) as f32 + 2.0) * self.char_w).min(room * 0.4);
+        // The SQL dialect (or "not set") beside the server status, never assumed.
+        let sql = self.session.sql_dialect_label().unwrap_or_default();
+        let sql_w = if sql.is_empty() { 0.0 } else { ((lenz_content::wrap::width(&sql) as f32 + 2.0) * self.char_w).min(room * 0.35) };
         let position = self.session.status_position();
         let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
         let cell = |x: f32, w: f32, text: &str| {
@@ -3542,8 +3547,8 @@ impl ReaderView {
         // The branch, before the position, when there is room for both.
         let branch = self.session.branch_label().filter(|_| self.width >= 480.0).unwrap_or_default();
         let branch_w = if branch.is_empty() { 0.0 } else { ((lenz_content::wrap::width(&branch) as f32 + 2.0) * self.char_w).min(room * 0.25) };
-        let message_w = (room - server_w - position_w - branch_w).max(0.0);
-        (cell(left, server_w, &label), cell(left + server_w, message_w, &self.session.status_message()), cell(right - position_w - branch_w, branch_w, &branch), cell(right - position_w, position_w, &position))
+        let message_w = (room - server_w - sql_w - position_w - branch_w).max(0.0);
+        (cell(left, server_w, &label), cell(left + server_w + sql_w, message_w, &self.session.status_message()), cell(right - position_w - branch_w, branch_w, &branch), cell(right - position_w, position_w, &position), cell(left + server_w, sql_w, &sql))
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
@@ -4145,6 +4150,7 @@ impl ReaderView {
     pub fn status_line(&self) -> String { self.status_segments().1.1 }
     /// For tests: the status bar's branch cell.
     pub fn status_branch(&self) -> StatusCell { self.status_segments().2 }
+    pub fn status_sql(&self) -> StatusCell { self.status_segments().4 }
 
     /// The status bar's height: none in a window too short for it and the toolbar.
     fn status_h(&self) -> f32 {
@@ -4416,7 +4422,7 @@ impl Render for ReaderView {
         let narrow = self.width < 320.0;
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
         self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
-        let (server_cell, message_cell, branch_cell, position_cell) = self.status_segments();
+        let (server_cell, message_cell, branch_cell, position_cell, sql_cell) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
@@ -4930,7 +4936,7 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&branch_cell, palette.fg, Some(CommandId::GitBranches)), (&position_cell, palette.dim, None)] {
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&branch_cell, palette.fg, Some(CommandId::GitBranches)), (&position_cell, palette.dim, None)] {
                                 let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
                                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                     if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }

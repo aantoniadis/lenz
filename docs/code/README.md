@@ -60,6 +60,18 @@ and the language status (F2, with Shift+F2 for the full details) keep separate c
 own answers are not chords: the recovered-draft dialog keeps `r`, `d` and Esc in both presets, and its
 **Recover Unsaved Draft…** command stays in the File menu without a preset chord, like Close Window.
 
+### SQL dialect
+
+**Project SQL Dialect: PostgreSQL / DuckDB / Not Set** in the SQL menu sets the open project's default;
+**SQL Dialect for This File: PostgreSQL / DuckDB / Follow Project Default** overrides it for one file, and is
+the only source for a file outside the open folder. Both adapters show the active choice in the status bar
+for SQL files — `SQL: PostgreSQL (this file)`, `SQL: DuckDB (project)` or `SQL: not set` — and
+**SQL Dialect…** (or clicking that label) shows the effective choice, its source, the project default and
+the offline assistance this build provides. An unset dialect stays visibly unset; Lenz never assumes
+PostgreSQL. Choices persist in the Reader settings file outside the checkout, and opening a file or choosing
+a dialect writes no document, starts no process and connects to no database, DuckDB file or metadata source.
+Editor assistance for either dialect is not wired in yet, so the details say so rather than implying it works.
+
 **Search Everywhere** follows [IntelliJ's name-navigation pattern](https://www.jetbrains.com/help/idea/searching-everywhere.html):
 one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details.
 Double-tap bare **Shift** in the GUI, or press **Ctrl+K**, to search all three categories. Direct shortcuts are:

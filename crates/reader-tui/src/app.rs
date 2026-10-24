@@ -711,6 +711,7 @@ impl App {
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
             InterfaceAction::EditingPreferences => Prompt::Details { title: "Editing preferences", body: self.session.editing_preferences_details(), logo: false, kind: Details::Text },
+            InterfaceAction::SqlDialect => Prompt::Details { title: "SQL dialect", body: self.session.sql_dialect_details(), logo: false, kind: Details::Text },
             InterfaceAction::Keymap => Prompt::Keymap,
             InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
                 let (title, mut details) = if action == InterfaceAction::ServerDetails {

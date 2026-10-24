@@ -5879,10 +5879,10 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, g, c) = r.status_segments();
-                assert!(a.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
+                let (a, b, g, c, sql) = r.status_segments();
+                assert!(a.0.right() <= sql.0.left() && sql.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
                 assert!(c.0.right() <= px(w));
-                for (bounds, text) in [a, b, g, c] {
+                for (bounds, text) in [a, b, g, c, sql] {
                     assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
                 }
                 assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
