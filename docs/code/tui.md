@@ -42,7 +42,9 @@ controls can receive input. Reader modals also consume view-switching and quit k
 in the palette opens an independent terminal view. Ctrl-Shift-Q requests closure of all views in terminals that report it.
 Before removing the last view of an unsaved draft, choose **Save** (`s`), **Discard** (`d`) or **Cancel** (Esc).
 All-view closure prepares every session before removing any; Cancel keeps every view and draft. An earlier
-explicit Save remains on disk even if another view cancels. Failed or uncertain Save cancels the pending close.
+explicit Save remains on disk even if another view cancels. Failed or uncertain Save cancels the pending close. After an uncertain result, **Recheck Saved File** must finish for the current draft before a fresh
+Discard decision. Discard leaves disk untouched, including when recheck finds different disk content. Another Save
+still requires **Confirm Rechecked Save**; a changed disk result cannot be confirmed for Save.
 Tab closure and Close Split keep a draft whenever another accessible tab still owns it.
 
 | Operation | Control |

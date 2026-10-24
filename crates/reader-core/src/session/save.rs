@@ -41,8 +41,8 @@ impl Session {
             })
         }) { self.state.messages.push("Save admission is full; the draft is retained. Try Save explicitly later.".into()); return Effect { repaint: true, copy: None }; }
         if let Some(draft) = &mut entry.draft { draft.end_group(); }
-        entry.save.status = Status::Saving; entry.save.checked = None;
-        entry.save.captured = Some(save::Captured { request, text: snapshot.clone() });
+        entry.save.status = Status::Saving; entry.save.checked = None; entry.save.revalidated = None;
+        entry.save.captured = Some(save::Captured { request, text: snapshot.clone(), compacting: false });
         Effect { repaint: true, copy: None }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
@@ -64,8 +64,8 @@ impl Session {
                 });
             Outcome::Rechecked(result)
         })) { self.state.messages.push("Recheck admission is full; try explicitly later".into()); return Effect { repaint: true, copy: None }; }
-        entry.save.captured = Some(save::Captured { request, text: text.clone() });
-        entry.save.checked = None; entry.save.status = Status::Rechecking;
+        entry.save.captured = Some(save::Captured { request, text: text.clone(), compacting: false });
+        entry.save.checked = None; entry.save.revalidated = None; entry.save.status = Status::Rechecking;
         Effect { repaint: true, copy: None }
     }
     pub(super) fn confirm_rechecked_save(&mut self, tab: TabId) -> Effect {
@@ -82,7 +82,7 @@ impl Session {
         if let (Some(draft), Some(current)) = (&mut entry.draft, &entry.snapshot) { draft.confirm_baseline(captured.clone(), current); }
         entry.saved = Some(SemanticSource::new(&captured));
         entry.stamp = Some(stamp); entry.save.read = Some(read); entry.save.status = Status::Ready;
-        entry.save.attempted = None; entry.save.checked = None;
+        entry.save.attempted = None; entry.save.checked = None; entry.save.revalidated = None;
         for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
             tab.stamp = Some(stamp); tab.stale_on_disk = false; tab.unavailable = None;
         }
@@ -105,7 +105,7 @@ impl Session {
             Outcome::Compacted { current, baseline }
         })) {
             entry.save.status = Status::Saving;
-            entry.save.captured = Some(save::Captured { request, text: captured });
+            entry.save.captured = Some(save::Captured { request, text: captured, compacting: true });
         }
     }
     pub(super) fn account_saves(&mut self) -> bool {
@@ -146,6 +146,7 @@ impl Session {
                 Outcome::Uncertain(why) => { entry.save.attempted = Some(captured); entry.save.status = Status::Uncertain(why); }
                 Outcome::Rechecked(Err(why)) => entry.save.status = Status::Uncertain(format!("Disk recheck failed: {why}. The confirmed baseline and draft are retained.")),
                 Outcome::Rechecked(Ok((read, observed))) => {
+                    entry.save.revalidated = (read.snapshot.path == captured.source()).then(|| save::Revalidated { request, source: SemanticSource::new(&captured) });
                     let baseline = entry.draft.as_ref().map(|d| d.baseline.clone()).or_else(|| entry.snapshot.clone());
                     let matched = if let Some(text) = entry.save.attempted.as_ref().filter(|text| text.content_eq(&observed)) {
                         Some((DiskMatch::Attempted, text.clone()))

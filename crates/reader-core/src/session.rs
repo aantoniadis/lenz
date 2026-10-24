@@ -2922,6 +2922,8 @@ impl Session {
     }
 
     fn publish_edit(&mut self, edited: TabId, previous: Arc<crate::text::TextSnapshot>, next: Arc<crate::text::TextSnapshot>, edits: &[crate::text::TextEdit]) -> Effect {
+        // A previously clean, evicted buffer may not have had a snapshot fence when close was prepared.
+        self.cancel_close();
         let buffer = next.key().buffer;
         let transform = |byte: usize| {
             let mut delta: isize = 0;

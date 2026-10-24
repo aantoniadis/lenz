@@ -18,6 +18,66 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn close_during_saved_backing_compaction_waits_without_demanding_another_save() {
+    use crate::save::Status;
+    let d=tempfile::tempdir().unwrap();let original="a".repeat(128*1024);let path=write(d.path(),"compact-close.txt",original.as_bytes());let mut s=session(d.path());open(&mut s,Command::OpenRetained(path.clone()),"compact-close.txt");let tab=s.state().active().unwrap().id();let expected=s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {tab,expected,edits:vec![crate::text::TextEdit {range:0..original.len()-16384,text:"".into()}],kind:crate::text::EditKind::Replace});let _ready=analysis_document(&mut s);
+    let (entered,wait_entered)=std::sync::mpsc::channel();let mut gates:Vec<_>=(0..crate::jobs::MAX_JOBS).map(|_|{let (release,wait)=std::sync::mpsc::channel();let entered=entered.clone();s.jobs.submit(Priority::Visible,move||{entered.send(()).unwrap();let _=wait.recv_timeout(Duration::from_secs(5));});release}).collect();for _ in &gates {wait_entered.recv_timeout(Duration::from_secs(5)).unwrap();}
+    s.dispatch(Command::Save {tab});
+    let (after_write,write_held)=std::sync::mpsc::channel();let (release,wait)=std::sync::mpsc::channel();s.jobs.submit(Priority::Visible,move||{after_write.send(()).unwrap();let _=wait.recv_timeout(Duration::from_secs(5));});gates.remove(0).send(()).unwrap();write_held.recv_timeout(Duration::from_secs(5)).unwrap();
+    s.dispatch(Completion::AnalysisWake);assert!(!active_view(&s).dirty());assert_eq!(active_view(&s).save_status(),&Status::Saving,"real saved-baseline compaction is held in the existing worker pool");assert_eq!(std::fs::read(&path).unwrap(),vec![b'a';16384]);
+    s.dispatch(Command::CloseTab(tab));assert!(s.close_prompt().unwrap().waiting);assert!(s.state().active().is_some());
+    for gate in gates {gate.send(()).unwrap();}release.send(()).unwrap();settle(&mut s,|s|s.state().active().is_none() || *active_view(s).save_status()==Status::Ready);
+    assert!(s.state().active().is_none(),"compaction completion is not an unconfirmed Save failure");assert_eq!(std::fs::read(path).unwrap(),vec![b'a';16384]);
+}
+
+#[test]
+fn close_discard_recheck_receipt_cannot_authorize_a_later_draft_version() {
+    use crate::close::Choice;use crate::save::Status;use lenz_content::write::readiness_fault::{at_path,Fault};
+    let d=tempfile::tempdir().unwrap();let (mut s,path,tab)=close_fixture(d.path(),"a.txt");let guard=at_path(&path,Fault::AfterReplace);s.dispatch(Command::Save {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Uncertain(_)));drop(guard);
+    s.dispatch(Command::RecheckSave {tab});let expected=s.state().current_source().unwrap().key();s.dispatch(Command::Edit {tab,expected,edits:vec![crate::text::TextEdit {range:0..0,text:"newer ".into()}],kind:crate::text::EditKind::Paste});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));
+    s.dispatch(Command::CloseTab(tab));let stale=s.close_prompt().unwrap();assert!(stale.discard_disabled.is_some(),"a recheck captured before the edit is not current consent");s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Discard});assert!(s.state().active().is_some());s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Cancel});
+    s.dispatch(Command::RecheckSave {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));s.dispatch(Command::CloseTab(tab));let fresh=s.close_prompt().unwrap();assert!(fresh.discard_disabled.is_none());assert!(fresh.ticket>stale.ticket);s.dispatch(Command::ChooseClose {ticket:fresh.ticket,buffer:fresh.buffer,choice:Choice::Discard});assert!(s.state().active().is_none());assert_eq!(std::fs::read(path).unwrap(),"draft λ\r\n".as_bytes());
+}
+
+#[test]
+fn close_batch_rejects_new_draft_in_an_initially_evicted_clean_buffer() {
+    use crate::close::{Choice,CloseCoordinator,Progress};
+    let d=tempfile::tempdir().unwrap();let (mut a,ap,_)=close_fixture(d.path(),"a.txt");let mut b=session(&d.path().join("b-state"));
+    let dormant=write(d.path(),"dormant.txt",b"dormant saved");let shown=write(d.path(),"shown.txt",b"shown saved");
+    b.cache=InactiveCache::new(0);open(&mut b,Command::OpenRetained(dormant.clone()),"dormant.txt");let tab=b.state().active().unwrap().id();open(&mut b,Command::OpenRetained(shown.clone()),"shown.txt");assert!(b.cache.is_empty());
+    b.cache=InactiveCache::new(crate::cache::INACTIVE_BYTES);
+    let mut c=CloseCoordinator::default();c.register(a.id());c.register(b.id());c.begin(&mut [&mut a,&mut b]);let p=a.close_prompt().unwrap();a.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});
+    b.dispatch(Command::ActivateTab(tab));settle(&mut b,|s|s.state().current_source().is_some_and(|s|s.source()==dormant));let expected=b.state().current_source().unwrap().key();
+    b.dispatch(Command::Edit {tab,expected,edits:vec![crate::text::TextEdit {range:0..0,text:"new draft ".into()}],kind:crate::text::EditKind::Paste});
+    assert_eq!(c.progress(&mut [&mut a,&mut b]),Progress::Cancelled,"new edits invalidate preparation even when the clean buffer had no retained snapshot at prepare time");
+    assert!(!a.closed() && !b.closed());assert_eq!(source_text(b.state().current_source().unwrap()),"new draft dormant saved");assert_eq!(std::fs::read(ap).unwrap(),b"saved\r\n");assert_eq!(std::fs::read(dormant).unwrap(),b"dormant saved");assert_eq!(std::fs::read(shown).unwrap(),b"shown saved");
+}
+
+#[test]
+fn close_after_uncertain_save_requires_recheck_then_fresh_discard_without_accepting_a_baseline() {
+    use crate::close::Choice;
+    use crate::save::{DiskMatch,Status};
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    for changed in [false,true] {
+        let d=tempfile::tempdir().unwrap();let (mut s,path,tab)=close_fixture(d.path(),"a.txt");
+        let guard=at_path(&path,Fault::AfterReplace);s.dispatch(Command::CloseTab(tab));let old=s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {ticket:old.ticket,buffer:old.buffer,choice:Choice::Save});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Uncertain(_)));
+        assert!(s.close_prompt().is_none(),"uncertain Save cancels the old close continuation");drop(guard);
+        s.dispatch(Command::CloseTab(tab));let before=s.close_prompt().unwrap();assert!(before.save_disabled.is_some() && before.discard_disabled.is_some());
+        s.dispatch(Command::ChooseClose {ticket:before.ticket,buffer:before.buffer,choice:Choice::Discard});assert_eq!(s.close_prompt().unwrap().ticket,before.ticket);
+        s.dispatch(Command::ChooseClose {ticket:before.ticket,buffer:before.buffer,choice:Choice::Cancel});
+        if changed {std::fs::write(&path,b"external disk content").unwrap();}
+        let disk=std::fs::read(&path).unwrap();s.dispatch(Command::RecheckSave {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));
+        let status=Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted});assert_eq!(active_view(&s).save_status(),&status);assert!(active_view(&s).dirty());
+        s.dispatch(Command::CloseTab(tab));let fresh=s.close_prompt().unwrap();assert!(fresh.ticket>old.ticket);assert!(fresh.save_disabled.is_some());assert!(fresh.discard_disabled.is_none(),"a successful current recheck permits a new explicit Discard, including Changed");
+        s.dispatch(Command::ChooseClose {ticket:old.ticket,buffer:old.buffer,choice:Choice::Discard});assert_eq!(s.close_prompt().unwrap().ticket,fresh.ticket,"the failed close never resumes");
+        assert_eq!(active_view(&s).save_status(),&status);assert!(active_view(&s).dirty());assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n");
+        s.dispatch(Command::ChooseClose {ticket:fresh.ticket,buffer:fresh.buffer,choice:Choice::Discard});assert!(s.state().active().is_none());assert!(s.close_prompt().is_none());assert_eq!(std::fs::read(path).unwrap(),disk);
+    }
+}
+
+#[test]
 fn closed_sessions_reject_new_user_mutations_and_old_close_permits() {
     use crate::close::{Choice,CloseCoordinator,Progress};
     let d=tempfile::tempdir().unwrap();let (mut s,path,tab)=close_fixture(d.path(),"a.txt");let mut c=CloseCoordinator::default();c.register(s.id());c.begin(&mut [&mut s]);let p=s.close_prompt().unwrap();

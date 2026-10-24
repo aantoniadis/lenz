@@ -242,18 +242,17 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
                 let event = event?;
                 if let Event::Key(k) = event
                     && k.kind == KeyEventKind::Press
+                    && k.code == KeyCode::F(8) && views[active].modal.is_none()
                 {
-                    if k.code == KeyCode::F(8) && views[active].modal.is_none() {
-                        views[active].handle(Event::FocusLost);
-                        active = if k.modifiers.contains(KeyModifiers::SHIFT) {
-                            (active + views.len() - 1) % views.len()
-                        } else {
-                            (active + 1) % views.len()
-                        };
-                        views[active].dispatch(reader_core::session::Command::Recheck);
-                        dirty = true;
-                        continue;
-                    }
+                    views[active].handle(Event::FocusLost);
+                    active = if k.modifiers.contains(KeyModifiers::SHIFT) {
+                        (active + views.len() - 1) % views.len()
+                    } else {
+                        (active + 1) % views.len()
+                    };
+                    views[active].dispatch(reader_core::session::Command::Recheck);
+                    dirty = true;
+                    continue;
                 }
                 dirty |= dispatch_input(&mut views, &mut active, &mut coordinator, event);
                 if views.is_empty() { return Ok(()); }
@@ -331,7 +330,16 @@ mod tests {
                 app.dispatch(Command::OpenRetained(path)); crate::app::tests::settle(&mut app,|a|a.session.state().current_source().is_some());
                 app.enable_draft_input_for_test();crate::app::tests::draw(&mut app,80,12);
                 app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Char('a'),KeyModifiers::CONTROL)));
-                app.handle(crossterm::event::Event::Paste("draft λ\r\n".into()));views.push(app);
+                app.handle(crossterm::event::Event::Paste("draft λ\r\n".into()));
+                if name=="a.txt" {
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Char('\\'),KeyModifiers::CONTROL)));
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::F(10),KeyModifiers::NONE)));
+                    let at=app.choices().iter().position(|row|matches!(&row.target,crate::app::ChoiceTarget::Action(reader_core::session::CommandId::Unsplit))).unwrap();
+                    for _ in 0..at {app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Down,KeyModifiers::NONE)));}
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Enter,KeyModifiers::NONE)));
+                    assert!(app.session.state().split().is_none());assert_eq!(app.session.state().tabs().len(),1);assert!(app.session.state().tab_dirty(app.session.state().active().unwrap().id()));assert!(app.modal.is_none());
+                }
+                views.push(app);
             }
             let positions:Vec<_>=views.iter().map(|v|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line())).collect();
             let mut active=0; let mut coordinator=reader_core::close::CloseCoordinator::default();

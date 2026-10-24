@@ -17,6 +17,7 @@ struct Fence {
     source: SemanticSource,
     consent: Option<Choice>,
     save_request: Option<u64>,
+    rechecked: Option<crate::save::Revalidated>,
 }
 pub(super) struct Pending {
     ticket: u64,
@@ -27,6 +28,17 @@ pub(super) struct Pending {
     split: Option<Split>,
     project: u64,
     buffers: Vec<Fence>,
+}
+fn current_recheck(entry: &CurrentSource) -> Option<&crate::save::Revalidated> {
+    if !matches!(entry.save.status, crate::save::Status::Checked(_)) {
+        return None;
+    }
+    entry.save.revalidated.as_ref().filter(|proof| {
+        entry
+            .snapshot
+            .as_ref()
+            .is_some_and(|source| proof.source.matches(source))
+    })
 }
 impl Session {
     pub fn id(&self) -> SessionId {
@@ -87,8 +99,16 @@ impl Session {
                 path: source.source().to_owned(),
                 waiting,
                 save_disabled: self.save_buffer_disabled(fence.buffer),
-                discard_disabled: (waiting || entry.save.status.blocked())
-                    .then_some("Wait for a confirmed disk outcome before another close decision"),
+                discard_disabled: if waiting {
+                    Some("Wait for the submitted operation before another close decision")
+                } else if matches!(entry.save.status, crate::save::Status::Uncertain(_))
+                    || matches!(entry.save.status, crate::save::Status::Checked(_))
+                        && current_recheck(entry).is_none()
+                {
+                    Some("Recheck the current file before discarding this draft")
+                } else {
+                    None
+                },
             });
         }
         None
@@ -146,6 +166,13 @@ impl Session {
                 buffers.push(Fence {
                     buffer,
                     source: SemanticSource::new(source),
+                    rechecked: self
+                        .state
+                        .sources
+                        .buffers
+                        .get(&buffer)
+                        .and_then(current_recheck)
+                        .cloned(),
                     consent: None,
                     save_request: self
                         .state
@@ -153,7 +180,7 @@ impl Session {
                         .buffers
                         .get(&buffer)
                         .filter(|e| e.save.status.busy())
-                        .and_then(|e| e.save.captured.as_ref())
+                        .and_then(|e| e.save.captured.as_ref().filter(|c| !c.compacting))
                         .map(|c| c.request),
                 });
             }
@@ -190,8 +217,12 @@ impl Session {
                         .sources
                         .buffers
                         .get(&f.buffer)
-                        .and_then(|e| e.snapshot.as_ref())
-                        .is_some_and(|s| f.source.matches(s))
+                        .is_some_and(|entry| {
+                            entry.snapshot.as_ref().is_some_and(|s| f.source.matches(s))
+                                && f.rechecked
+                                    .as_ref()
+                                    .is_none_or(|proof| current_recheck(entry) == Some(proof))
+                        })
                 })
         })
     }
@@ -300,7 +331,7 @@ impl Session {
                     .sources
                     .buffers
                     .get(&buffer)
-                    .and_then(|e| e.save.captured.as_ref())
+                    .and_then(|e| e.save.captured.as_ref().filter(|c| !c.compacting))
                     .map(|c| c.request);
                 if let Some(request) = request {
                     if let Some(p) = self.closing.as_mut()

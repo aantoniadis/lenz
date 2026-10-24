@@ -38,8 +38,11 @@ impl Status {
     pub(crate) fn blocked(&self) -> bool { matches!(self, Self::Uncertain(_) | Self::Checked(_)) }
 }
 
-pub(crate) struct Captured { pub request: u64, pub text: Arc<TextSnapshot> }
+pub(crate) struct Captured { pub request: u64, pub text: Arc<TextSnapshot>, pub compacting: bool }
 pub(crate) struct Checked { pub read: Baseline, pub text: Arc<TextSnapshot> }
+/// Successful recheck identity, including Changed, without retaining another text snapshot.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Revalidated { pub request: u64, pub source: crate::session::SemanticSource }
 #[derive(Default)]
 pub(crate) struct State {
     pub read: Option<Baseline>,
@@ -49,6 +52,7 @@ pub(crate) struct State {
     pub written: Option<(u64, crate::session::SemanticSource)>,
     pub attempted: Option<Arc<TextSnapshot>>,
     pub checked: Option<Checked>,
+    pub revalidated: Option<Revalidated>,
 }
 
 /// Request-owned outcomes are polled exactly once; channel messages only wake dispatch.
