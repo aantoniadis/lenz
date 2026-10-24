@@ -260,6 +260,8 @@ pub struct ReaderView {
     pub link: Option<(u8, std::ops::Range<usize>)>,
     /// The documentation popup: its layout (kept while the same documentation shows), scroll, and box when drawn.
     pub doc_popup: Option<DocPopup>,
+    /// The completion popup as last drawn: its box, first shown row and row count, for clicks and tests.
+    completion_drawn: Option<(Bounds<Pixels>, usize, usize)>,
     /// The name the pointer rests on (tab and range) and the timer that asks for its documentation; the timer
     /// that closes a pointer's popup once the pointer has left it and its name.
     doc_rest: (Option<NameAt>, Option<gpui::Task<()>>),
@@ -550,6 +552,9 @@ pub const DOC_GRACE: std::time::Duration = std::time::Duration::from_millis(300)
 type NameAt = (TabId, std::ops::Range<usize>);
 
 /// The documentation popup's layout for one preview, its scroll, and where it was drawn.
+/// The most suggestions the completion popup shows at once (Page Up/Down moves by this many).
+pub const COMPLETION_ROWS: usize = 8;
+
 pub struct DocPopup {
     layout: Arc<preview::Layout>,
     top: f32,
@@ -616,7 +621,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1237,6 +1242,26 @@ impl ReaderView {
         true
     }
 
+    /// Ctrl+Space asks for completion; while its popup shows, it takes Up/Down/Page keys, Tab/Enter (accept) and
+    /// Escape. Every other key, punctuation included, types as usual.
+    fn completion_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let k = &ev.keystroke;
+        let (control, other) = (k.modifiers.control || k.modifiers.platform, k.modifiers.alt || k.modifiers.shift);
+        if k.key == "space" && k.modifiers.control && !other { self.run(CommandId::Completion, window, cx); return true; }
+        if control || other || self.session.state().completion().is_none() { return false; }
+        let command = match k.key.as_str() {
+            "up" => Command::MoveCompletion(-1),
+            "down" => Command::MoveCompletion(1),
+            "pageup" => Command::MoveCompletion(-(COMPLETION_ROWS as isize)),
+            "pagedown" => Command::MoveCompletion(COMPLETION_ROWS as isize),
+            "enter" | "tab" => Command::AcceptCompletion,
+            "escape" => Command::CloseCompletion,
+            _ => return false,
+        };
+        self.dispatch(command, cx);
+        true
+    }
+
     fn draft_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
         if !self.draft_context() { return false; }
         let key = &ev.keystroke;
@@ -1328,6 +1353,7 @@ impl ReaderView {
         }
         {
             if self.input_key(ev, window, cx) { return; }
+            if self.input_state.capture.is_none() && self.completion_key(ev, window, cx) { cx.stop_propagation(); return; }
             if self.draft_key(ev, window, cx) { cx.stop_propagation(); return; }
         }
         // The preview scrolls in pixels; it has no caret to move.
@@ -2800,6 +2826,41 @@ impl ReaderView {
         Some((popup.bounds, popup.layout.clone(), popup.top))
     }
 
+    /// The completion popup for this frame: under the name being completed (above it without room), clamped to
+    /// the window, at most [`COMPLETION_ROWS`] rows scrolled to the selection. Per row: label, detail, selected,
+    /// unavailable.
+    fn completion_frame(&mut self, window: &Window) -> Option<(Bounds<Pixels>, Vec<(String, String, bool, bool)>)> {
+        let state = self.session.state();
+        let Some(c) = state.completion() else { self.completion_drawn = None; return None };
+        let Some(g) = self.panes.iter().find(|g| state.presentation_shown(g.pane).is_some_and(|t| t.id() == c.tab)).copied() else { self.completion_drawn = None; return None };
+        let t = state.presentation_shown(g.pane)?;
+        let view = state.presentation_view(t.id())?;
+        let (row, anchor_x) = view.layout_rows(g.rows, state.wrap_cols(t)).rows.iter().enumerate().find_map(|(i, r)| {
+            let native = self.ready_source_row(t, r)?;
+            let x = native.x_for(window, self.metrics(), native.caret(c.word())?)?;
+            Some((i as f32, r.indent as f32 * self.char_w + x))
+        }).unwrap_or((0.0, 0.0));
+        let n = c.rows().len();
+        let shown = n.min(COMPLETION_ROWS).min(((self.height - 8.0) / line_h()).max(1.0) as usize);
+        let first = c.selected().saturating_sub(shown - 1).min(n - shown);
+        let rows: Vec<_> = c.rows().enumerate().skip(first).take(shown).map(|(i, r)| (r.label.clone(), r.detail.clone().unwrap_or_default(), i == c.selected(), r.unavailable.is_some())).collect();
+        let chars = rows.iter().map(|r| r.0.chars().count() + r.1.chars().count() + 3).max().unwrap_or(0);
+        let w = ((chars as f32 + 2.0) * self.char_w).clamp(120.0_f32.min(self.width), self.width.clamp(1.0, 480.0));
+        let h = shown as f32 * line_h() + 4.0;
+        let (tx, ty) = (f32::from(g.text.origin.x), f32::from(g.text.origin.y));
+        let x = (lenz_gpui::text_x(metrics(&self.font), tx, t.column() as f32 * self.char_w) + anchor_x).clamp(0.0, (self.width - w).max(0.0));
+        let below = ty + (row + 1.0) * line_h() + 2.0;
+        let y = if below + h > self.height { (ty + row * line_h() - h - 2.0).max(0.0) } else { below };
+        let bounds = Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px(w), px(h)) };
+        self.completion_drawn = Some((bounds, first, rows.len()));
+        Some((bounds, rows))
+    }
+
+    /// The completion popup's box, while one is drawn.
+    pub fn completion_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.completion_drawn.filter(|_| self.session.state().completion().is_some()).map(|d| d.0)
+    }
+
     /// The documentation popup's box, while one is drawn.
     pub fn doc_popup_bounds(&self) -> Option<Bounds<Pixels>> {
         self.doc_popup.as_ref().map(|d| d.bounds)
@@ -2841,6 +2902,18 @@ impl ReaderView {
         }
         // A click elsewhere gives the keys back to the text; the box stays open.
         self.find_focus = None;
+        // A click on a suggestion accepts it; one elsewhere closes the popup (and goes on).
+        if let Some((b, first, n)) = self.completion_drawn.filter(|_| self.session.state().completion().is_some()) {
+            if b.contains(&ev.position) {
+                let row = first + ((f32::from(ev.position.y - b.origin.y) - 2.0).max(0.0) / line_h()) as usize;
+                if row < first + n && ev.button == MouseButton::Left {
+                    self.dispatch(Command::SelectCompletion(row), cx);
+                    self.dispatch(Command::AcceptCompletion, cx);
+                }
+                return;
+            }
+            self.dispatch(Command::CloseCompletion, cx);
+        }
         // The documentation popup keeps a click inside it; one elsewhere closes it (and goes on).
         if self.doc_popup.as_ref().is_some_and(|d| d.bounds.contains(&ev.position)) {
             return;
@@ -4557,6 +4630,7 @@ impl Render for ReaderView {
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
+        let completion_frame = self.completion_frame(window);
         self.clamp_context();
         let context = self.context_layout().map(|(b, rows)| {
             let at = self.modal.as_ref().map_or(0, Modal::at);
@@ -5001,6 +5075,23 @@ impl Render for ReaderView {
                             lenz_gpui::fill(window, bx, by, bw, bh, palette.sidebar_bg);
                             let area = Bounds { origin: gpui::point(px(bx), px(by)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: area }), |window| layout.paint(window, cx, area, *top, None, |_, _, _| {}));
+                        }
+                        if let Some((b, rows)) = &completion_frame {
+                            let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
+                            let (bg, border) = palette.raised();
+                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
+                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            let clip = Bounds { origin: gpui::point(px(mx), px(my)), size: b.size };
+                            window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
+                                for (i, (label, detail, selected, unavailable)) in rows.iter().enumerate() {
+                                    let y = my + 2.0 + i as f32 * line_h();
+                                    if *selected { lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg); }
+                                    lenz_gpui::text(window, cx, m, mx + char_w, y, label, if *unavailable { palette.dim } else { palette.fg });
+                                    if !detail.is_empty() {
+                                        lenz_gpui::text(window, cx, m, mx + (label.chars().count() as f32 + 3.0) * char_w, y, detail, palette.dim);
+                                    }
+                                }
+                            });
                         }
                         if let Some((b, rows)) = &context {
                             let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
