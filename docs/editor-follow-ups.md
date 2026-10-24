@@ -218,3 +218,30 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
 - **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
   the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.
+
+## Draft recovery (ticket 32, 2026-10-24)
+
+- **Suspected cost, unmeasured:** every change burst materializes the draft and its confirmed baseline on the recovery
+  worker and writes them as JSON (up to 8 MiB per record). Replacements release their snapshots at once (one pending
+  version per document), so a burst holds at most one extra snapshot per open draft; include the copy and the write
+  size in the scheduled batch measurements before changing the 500 ms debounce (`recovery::DEBOUNCE`).
+- **Suspected cost, unmeasured:** start reads up to 20 records and 32 MiB of text synchronously in `Session::new` and
+  compares each with its file (up to 64 MiB per file) to say whether the disk still matches. Many or large records delay
+  the first window. Move the comparison off the UI thread and say so in the dialog if this shows up in startup samples.
+- **Size limit:** a draft and baseline together over 8 MiB (roughly a 4 MiB document) are not kept, and the previous
+  record for that file is removed rather than offered as older work. Recovering large documents needs a cheaper
+  representation than two full texts.
+- **One record per path:** two windows editing the same file write the same record; the last writer wins, so only one
+  window's draft is recovered. Keying file records by session instead would recover both at the price of duplicates.
+- **Write order:** tombstones and records are ordered by wall-clock milliseconds so a tombstone outranks records from an
+  earlier run. A clock set backwards could let a record written later have a lower number; a restart after such a change
+  should be exercised before relying on this for adversarial cases.
+- **Cache lifetime:** records live under `$XDG_CACHE_HOME/lenz-reader/recovery`, so a system cache clean removes them.
+  They are not durable storage and no UI claims otherwise.
+- **Prompt delivery:** the GUI syncs the recovery dialog on construction and on every dispatch; `ReaderView::poll` does
+  not sync prompts, so a prompt created while another modal is open appears when that modal closes or the next command
+  runs. The TUI syncs it in `clamp()` each frame.
+- **Unverified:** native macOS and Wayland editing remain gated; their termination route and the recovery dialog were not
+  run there. Wayland GUI and physical terminals were not exercised for this ticket.
+- **No content in diagnostics:** records and prompts never carry source text; `Record`/`Version` `Debug` show identity and
+  sizes only. Keep it that way when adding fields (for example a diff summary) to the dialog.

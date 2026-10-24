@@ -61,6 +61,26 @@ and exact line endings (UTF-8 without BOM when untitled). Only a confirmed write
 path; a rejected or uncertain write leaves the document, its original file and its Save state unchanged.
 The original file and its bookmarks stay where they were.
 
+**Recovered unsaved work** is offered when a session starts. While a draft differs from its last confirmed saved
+version, Lenz keeps a private copy of it and of that confirmed baseline under `$XDG_CACHE_HOME/lenz-reader/recovery`
+(directory mode 0700, files 0600), never in the project and never in logs. The record goes when Save confirms, or
+when the draft is explicitly Discarded, Reloaded or replaced from disk; Discard also leaves a tombstone, so a copy
+left behind by an interrupted write cannot be offered again. Nothing here writes the file it shows.
+
+At start the dialog names the recovered file (or the New File document), when it was recorded, and whether the file
+on disk still matches the draft's confirmed baseline. **Restore Draft** (`r`) reopens it as the ordinary draft, with
+its own undo history, and marks the tab `⟲`; the file on disk is not changed. If the file still matches, Save works
+as usual; if it changed, Save stays closed until **Recheck Saved File** compares the current file, and the retained
+draft can still be written elsewhere with Save As. A missing file restores the draft only. **Discard Draft** (`d`)
+deletes the private copy. **Later** (Esc) keeps it for this session; **Recover Unsaved Draft…** in the File menu
+offers it again. The GUI uses the same dialog, keys and labels.
+
+Records are one per document path, so two windows editing the same file keep only the last record each writes. A
+draft and baseline together over 8 MiB (about a 4 MiB document) are not kept, and an older record is removed rather
+than offered as older work. At most 20 records and 32 MiB of text are read at start, and each is compared with its
+file there. Recovery copies live in the cache: the operating system may clear them, and they are not a substitute
+for Save. Native macOS and Wayland editing remain gated as before.
+
 The checkpoint23 candidate enables basic editor input by default on Linux TUI and Linux X11 GUI.
 The GUI uses its actual backend identity; Wayland and native macOS stay gated. q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to

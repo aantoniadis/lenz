@@ -26,6 +26,7 @@ pub mod libraries;
 pub mod markdown;
 pub mod places;
 pub mod preferences;
+pub mod recovery;
 pub mod project;
 pub mod postgres_assistance;
 pub mod search;

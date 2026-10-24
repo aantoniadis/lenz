@@ -123,6 +123,12 @@ reader CPU (+0.1 ms per frame) and the reader holds +5 MiB with `session.rs` and
 (rust-analyzer sends about 6.5 MB of hints for it, decoded straight from the bytes); 100 rounds of toggling and tab
 switching settle at the same memory.
 
+Drafts that were not saved before the reader stopped are offered again at the next start: **Recover Unsaved
+Draft…** in the File menu, or the dialog that opens by itself, names the file or New File document, says whether
+the file on disk still matches the last confirmed save, and offers **Restore Draft** (`r`), **Discard Draft**
+(`d`) or **Later** (Esc). Restored tabs are marked `⟲`; recovery copies stay private, outside the project. See the
+[terminal reader's recovery notes](tui.md) for where they live and their limits.
+
 Code folds like IntelliJ's: a gutter mark (▾ open, ▸ collapsed) on every block, comment run and import run spanning
 lines; a collapsed one shows a boxed `…` and its closing brace, and a click on either opens it. Each pane folds on its
 own; a jump into a collapsed block opens it, and a reload keeps the folds that still match. Folds come from the same

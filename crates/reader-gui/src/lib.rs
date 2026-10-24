@@ -33,6 +33,7 @@ mod close;
 mod input_method;
 mod external;
 mod save_as;
+mod recovery;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -132,6 +133,7 @@ pub enum Details {
     Close,
     External,
     Replace,
+    Recovered,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -658,6 +660,8 @@ impl ReaderView {
                 view.dispatch(Command::OpenRetained(file), cx);
             }
         }
+        // Recovered work asks before anything else can replace it.
+        view.sync_recovery_prompt();
         view
     }
 
@@ -781,6 +785,7 @@ impl ReaderView {
             Some(Modal::StatusDetails { kind: Details::External, .. }) => self.choose_external(reader_core::external::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Replace, .. }) => self.choose_replace(reader_core::save::ReplaceChoice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
+            Some(Modal::StatusDetails { kind: Details::Recovered, .. }) => self.choose_recovery(reader_core::recovery::Choice::Later,cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
             Some(Modal::StatusDetails { kind: Details::Checkout, .. }) => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel), cx),
@@ -923,6 +928,7 @@ impl ReaderView {
         self.sync_close_prompt();
         self.sync_external_prompt();
         self.sync_replace_prompt();
+        self.sync_recovery_prompt();
         self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
@@ -1646,6 +1652,11 @@ impl ReaderView {
             let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
             let choice=match key {"r" if plain=>Some(reader_core::save::ReplaceChoice::Replace),"escape"=>Some(reader_core::save::ReplaceChoice::Cancel),_=>None};
             if let Some(choice)=choice {self.choose_replace(choice,cx);return;}
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Recovered,..})) {
+            let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
+            let choice=match key {"r" if plain=>Some(reader_core::recovery::Choice::Restore),"d" if plain=>Some(reader_core::recovery::Choice::Discard),"escape"=>Some(reader_core::recovery::Choice::Later),_=>None};
+            if let Some(choice)=choice {self.choose_recovery(choice,cx);return;}
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Close,..})) {
             let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
@@ -2642,6 +2653,7 @@ impl ReaderView {
             Details::Text => vec!["Copy", "Close"],
             Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Replace => reader_core::save::ReplaceChoice::ALL.into_iter().map(|choice|choice.label()).collect(),
+            Details::Recovered => reader_core::recovery::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|self.session.close_prompt().map_or(c.label(), |p|p.label(c))).collect(),
         }
     }
@@ -2961,6 +2973,7 @@ impl ReaderView {
                             (Details::External,Some(i)) => {if let Some(choice)=reader_core::external::Choice::ALL.get(i) {self.choose_external(*choice,cx);}}
                             (Details::Replace,Some(i)) => {if let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) {self.choose_replace(*choice,cx);}}
                             (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
+                            (Details::Recovered,Some(i)) => {if let Some(choice)=reader_core::recovery::Choice::ALL.get(i) {self.choose_recovery(*choice,cx);}}
                             (Details::Checkout, Some(i)) => {
                                 if let Some(&(_, c)) = self.session.checkout_choices().get(i) {
                                     self.dispatch(Command::CheckoutChoice(c), cx);
@@ -4463,9 +4476,10 @@ impl Render for ReaderView {
             let mut row: Vec<(TabCell, TabId)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
                 let (dirty, status) = (state.tab_dirty(t.id()), state.tab_status(t.id()));
-                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 } + if status.is_some() { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
+                let recovered = t.recovered();
+                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 } + if recovered { 2.0 } else { 0.0 } + if status.is_some() { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
                 x += w;
-                ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status), t.id())
+                ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status, recovered), t.id())
             }).collect();
             let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
             let shift = row.iter().find(|r| r.0.2).map_or(0.0, |r| (r.0.4 - right).min(r.0.3 - g.bar.0).max(0.0));
@@ -4821,7 +4835,7 @@ impl Render for ReaderView {
                             let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
-                                for (title, retained, shown, tx0, tx1, dirty, status) in &f.tabs {
+                                for (title, retained, shown, tx0, tx1, dirty, status, recovered) in &f.tabs {
                                     if *tx1 < bx0 {
                                         continue; // scrolled off the left
                                     }
@@ -4836,6 +4850,9 @@ impl Render for ReaderView {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
                                     }
                                     let title_x = x0 + tx0 + char_w + icon_w;
+                                    // A recovered draft says so beside its unsaved mark.
+                                    if *recovered { lenz_gpui::text(window, cx, m, title_x, y, "⟲", palette.dim); }
+                                    let title_x = title_x + if *recovered { 2.0 * char_w } else { 0.0 };
                                     if *dirty { lenz_gpui::text(window, cx, m, title_x, y, "●", palette.accent); }
                                     let name_x = title_x + if *dirty { 2.0 * char_w } else { 0.0 };
                                     lenz_gpui::text(window, cx, m, name_x, y, title, color);
@@ -5186,7 +5203,7 @@ fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
 type PreviewFrame = (Arc<preview::Layout>, f32, Vec<(usize, Arc<gpui::RenderImage>)>, Option<std::ops::Range<usize>>);
 /// A tab in its bar: title, kept, shown, x range, unsaved draft marker.
 /// And its Git status letter.
-type TabCell = (String, bool, bool, f32, f32, bool, Option<lenz_content::branches::FileStatus>);
+type TabCell = (String, bool, bool, f32, f32, bool, Option<lenz_content::branches::FileStatus>, bool);
 
 /// One pane's frame to paint: where it is, its tabs (title, kept, shown, x range), and what it shows.
 /// A piece of a breadcrumb bar to paint.

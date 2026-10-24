@@ -3,6 +3,8 @@ use super::*;
 mod external;
 #[path = "input_tests/save_as.rs"]
 mod save_as;
+#[path = "input_tests/recovery.rs"]
+mod recovery;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{
