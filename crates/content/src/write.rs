@@ -347,12 +347,13 @@ pub fn rename_noclobber(from: &Path, to: &Path) -> io::Result<()> {
         use std::os::unix::ffi::OsStrExt;
         let c = |p: &Path| std::ffi::CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a path holds a NUL byte"));
         let (from, to) = (c(from)?, c(to)?);
-        // Both pointers live for the call; the kernel copies the paths.
         #[allow(unsafe_code)]
         #[cfg(target_os = "linux")]
+        // SAFETY: both paths are NUL-terminated strings that outlive the call; the kernel copies them.
         let done = unsafe { libc::renameat2(libc::AT_FDCWD, from.as_ptr(), libc::AT_FDCWD, to.as_ptr(), libc::RENAME_NOREPLACE) };
         #[allow(unsafe_code)]
         #[cfg(target_os = "macos")]
+        // SAFETY: both paths are NUL-terminated strings that outlive the call; the kernel copies them.
         let done = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
         if done == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
     }
