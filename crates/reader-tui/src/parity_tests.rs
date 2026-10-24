@@ -291,12 +291,16 @@ fn replay_draft_project_query(cx: &mut TestAppContext, mode: DraftQuery) {
             gui.update(&mut visual, |view, cx| view.poll(cx));
             while let Ok(completion) = tui.session.completions().try_recv() { tui.apply(completion); }
             draw(&mut visual, &mut tui, &mut terminal);
-            if gui.read_with(&visual, |view, _| view.session().status_message().contains("rerun")) && tui.session.status_message().contains("rerun") { break; }
+            if gui.read_with(&visual, |view, _| view.session().navigation_status().contains("rerun")) && tui.session.navigation_status().contains("rerun") { break; }
             assert!(Instant::now() < deadline, "stale symbol did not report its refusal");
         }
         assert_eq!(snapshot(tui.session.state()), before, "a changed disk symbol must not open its old line");
         assert_eq!(gui.read_with(&visual, |view, _| snapshot(view.session().state())), before);
         assert!(tui.modal.is_some(), "a refused activation keeps navigation open");
+        let labels = gui.read_with(&visual, |view, _| view.modal_rows().into_iter().map(|row| row.0).collect::<Vec<_>>().join("\n"));
+        assert!(labels.contains("rerun"), "{labels}");
+        let shown: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+        assert!(shown.contains("rerun"), "{shown}");
         visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(std::fs::read(root.join("a.rs")).unwrap(), saved_a.as_bytes());
         assert_eq!(std::fs::read(root.join("b.rs")).unwrap(), saved_b.as_bytes());
