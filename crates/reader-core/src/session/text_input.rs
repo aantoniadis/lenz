@@ -53,6 +53,6 @@ impl Session {
         if self.disabled(CommandId::ReadOnlyMode).is_some() { return Effect::default(); }
         let Some(buffer) = self.state.active().and_then(|t| t.buffer) else { return Effect::default() };
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) { entry.read_only = on; if let Some(draft) = &mut entry.draft { draft.end_group(); } }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 }
