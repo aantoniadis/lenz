@@ -9,6 +9,7 @@
 //! request with `ContentModified` (`FAKE_LSP_EMPTY_DECOR`: answers it empty, as rust-analyzer does while loading), then
 //! finishes indexing. `FAKE_LSP_STALE_DECOR` holds its first hint answer (labels `: old`), asks for a refresh, and
 //! sends it after the first answer made after that refresh.
+//! Completion offers declared names after the word before the caret (`slow_*` late; `FAKE_LSP_NO_COMPLETION`: none).
 //! `FAKE_LSP_TYPE_HIERARCHY` offers type hierarchy: `struct`/`trait`/`class` names; supertypes from `impl T for X` and
 //! `trait X: T`, subtypes the other way.
 
@@ -211,6 +212,41 @@ impl Fake {
         }
         found
     }
+
+    /// Completion at `pos`: every `fn`/`struct`/`let` name in the open documents and root files starting with the
+    /// word before it (case-insensitive), replacing that word. `with_import` adds an import edit and
+    /// `snippet_call` is snippet text, so the client's refusals see real payload shapes.
+    fn completion(&self, uri: &str, pos: &Value) -> Option<Value> {
+        let text = self.text(uri)?;
+        let l = pos["line"].as_u64()? as usize;
+        let line = text.split('\n').nth(l)?.trim_end_matches('\r');
+        let at = self.byte(line, pos["character"].as_u64()? as usize);
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let start = line[..at].rfind(|c: char| !word(c)).map_or(0, |i| i + line[i..].chars().next().map_or(1, char::len_utf8));
+        let prefix = line[start..at].to_lowercase();
+        if prefix.starts_with("slow_") { std::thread::sleep(std::time::Duration::from_millis(400)); }
+        let range = json!({ "start": { "line": l, "character": self.units(&line[..start]) }, "end": { "line": l, "character": self.units(&line[..at]) } });
+        let mut names = std::collections::BTreeMap::new();
+        for (_, text) in self.files() {
+            for line in text.split('\n') {
+                for (kw, kind) in [("fn ", 3), ("struct ", 22), ("let ", 6)] {
+                    let mut rest = line;
+                    while let Some(i) = rest.find(kw) {
+                        rest = &rest[i + kw.len()..];
+                        let rest = rest.strip_prefix("mut ").unwrap_or(rest);
+                        let name: String = rest.chars().take_while(|c| word(*c)).collect();
+                        if !name.is_empty() { names.entry(name).or_insert(kind); }
+                    }
+                }
+            }
+        }
+        let mut items: Vec<Value> = names.into_iter().map(|(name, kind)| json!({ "label": name, "kind": kind, "detail": format!("fake {kind}"), "textEdit": { "range": range, "newText": name } })).collect();
+        items.push(json!({ "label": "with_import", "kind": 3, "textEdit": { "range": range, "newText": "with_import" },
+            "additionalTextEdits": [{ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } }, "newText": "use extra::with_import;\n" }] }));
+        items.push(json!({ "label": "snippet_call", "kind": 15, "insertTextFormat": 2, "insertText": "snippet_call(${1:x})" }));
+        items.retain(|i| i["label"].as_str().is_some_and(|label| label.to_lowercase().starts_with(&prefix)));
+        Some(json!({ "isIncomplete": false, "items": items }))
+    }
 }
 
 fn main() {
@@ -297,6 +333,9 @@ fn main() {
                     && e != "none"
                 {
                     caps["positionEncoding"] = json!(e);
+                }
+                if env("FAKE_LSP_NO_COMPLETION").is_none() {
+                    caps["completionProvider"] = json!({ "triggerCharacters": ["."] });
                 }
                 if env("FAKE_LSP_TYPE_HIERARCHY").is_some() {
                     caps["typeHierarchyProvider"] = json!(true);
@@ -435,6 +474,11 @@ fn main() {
                     }
                 }
                 reply(&mut out, Value::Array(found));
+            }
+            "textDocument/completion" => {
+                let p = &m["params"];
+                let found = fake.completion(p["textDocument"]["uri"].as_str().unwrap_or_default(), &p["position"]);
+                reply(&mut out, found.unwrap_or(Value::Null));
             }
             // A name with a definition is documented; anything else has nothing to say.
             "textDocument/hover" => {

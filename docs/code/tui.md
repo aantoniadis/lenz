@@ -74,6 +74,14 @@ GUI preedit and both adapters' long-line edits use the bounded source-coordinate
 [composition verification and limits](../research/reader-unicode-composition.md). The activation candidate
 still awaits the combined correctness gate and performance acceptance.
 
+**Code Completion** shows the language server's suggestions for the name at the caret. Typing a name (or a
+server trigger character such as `.`) opens it unless **Completion While Typing** is off; Ctrl+Space asks
+manually. Many terminals cannot deliver Ctrl+Space (some send NUL, which also works); **Code Completion** in the
+F10 palette is the equivalent route. While the popup shows, Up/Down/Page Up/Page Down choose, Tab or Enter accept,
+Esc dismisses and a click accepts a row; any other key, punctuation included, types normally and never accepts.
+Acceptance is one undoable draft edit; suggestions carrying imports, snippets or server commands are listed but
+refused whole. See the [completion behavior and limits](../research/reader-completion.md).
+
 ## Controls
 
 F10 opens the command palette; `:` is an alias outside source input mode. Type to filter, use the arrows and Enter to run. It includes all shared

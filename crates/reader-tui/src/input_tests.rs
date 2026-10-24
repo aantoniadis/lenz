@@ -3693,3 +3693,95 @@ pub(crate) fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
     terminal.draw(|f| a.draw(f)).unwrap();
     terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()
 }
+
+#[test]
+fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"completion\"\nversion = \"0.1.0\"\n").unwrap();
+    let path = root.join("main.rs");
+    let source = "fn main() {  }\nfn helper() {}\nfn hello() {}\n";
+    std::fs::write(&path, source).unwrap();
+    let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
+    let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+    if profile.ends_with("release") { build.arg("--release"); }
+    assert!(build.status().unwrap().success());
+    let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
+    let mut cfg = config(dir.path());
+    cfg.idle = reader_core::semantics::IDLE;
+    std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } } }).to_string()).unwrap();
+    let mut a = App::new(cfg, Some(root));
+    a.enable_draft_input_for_test();
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+        && a.session.state().view(a.session.state().active().unwrap().id()).unwrap().highlights().is_some());
+    let text = |a: &App| { let s = a.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() };
+    let labels = |a: &App| a.session.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect::<Vec<_>>());
+    let typed = |a: &mut App, s: &str| for c in s.chars() { key(a, KeyCode::Char(c), KeyModifiers::NONE) };
+    let at = source.find("{  }").unwrap() + 2;
+    a.dispatch(Command::Select(reader_core::session::Selection { anchor: at, head: at }));
+    draw(&mut a, 100, 30);
+    // Typing opens it under the name; Down and Enter accept the second suggestion as one Undo step.
+    typed(&mut a, "he");
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    assert_eq!(labels(&a).unwrap(), ["hello", "helper"]);
+    draw(&mut a, 100, 30);
+    let popup = a.layout.completion;
+    let caret_row = a.layout.panes[0].hits.iter().find(|h| h.byte == at).unwrap().y;
+    assert_eq!((popup.y, popup.height), (caret_row + 1, 2), "{popup:?}");
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    assert_eq!(a.session.state().completion().unwrap().selected(), 1);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(text(&a), source.replacen("{  }", "{ helper }", 1));
+    assert!(a.session.state().completion().is_none());
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), source.replacen("{  }", "{ he }", 1));
+    // Esc dismisses without editing; Tab accepts; punctuation types and closes it.
+    typed(&mut a, "l");
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.session.state().completion().is_none());
+    assert_eq!(text(&a), source.replacen("{  }", "{ hel }", 1));
+    typed(&mut a, "l");
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), source.replacen("{  }", "{ hello }", 1));
+    typed(&mut a, ".he");
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    typed(&mut a, "(");
+    assert!(a.session.state().completion().is_none());
+    assert_eq!(text(&a), source.replacen("{  }", "{ hello.he( }", 1));
+    // Off: typing opens nothing; Ctrl+Space (or its NUL) still asks.
+    a.run(CommandId::AutoCompletion);
+    assert!(!a.session.state().auto_completion());
+    key(&mut a, KeyCode::Backspace, KeyModifiers::NONE);
+    typed(&mut a, "l");
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until { if let Ok(c) = a.session.completions().try_recv() { a.apply(c); } }
+    assert!(a.session.state().completion().is_none());
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    // A modal takes every key first and leaves the draft unchanged.
+    let before = text(&a);
+    a.run(CommandId::FindAction);
+    assert!(a.modal.is_some());
+    typed(&mut a, "zz");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    assert_eq!(text(&a), before);
+    if a.session.state().completion().is_none() {
+        key(&mut a, KeyCode::Null, KeyModifiers::NONE);
+        settle(&mut a, |a| a.session.state().completion().is_some());
+    }
+    // A tiny terminal keeps it inside; a click on a row accepts it.
+    draw(&mut a, 30, 6);
+    let popup = a.layout.completion;
+    assert!(popup.width > 0 && popup.right() <= 30 && popup.bottom() <= 6, "{popup:?}");
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(crossterm::event::MouseButton::Left), column: popup.x + 1, row: popup.y + 1, modifiers: KeyModifiers::NONE }));
+    assert_eq!(text(&a), source.replacen("{  }", "{ hello.helper }", 1));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}

@@ -2121,6 +2121,78 @@ fn new_file_save_as_and_replace_decisions_match_in_both_adapters(cx: &mut TestAp
 }
 
 #[gpui::test]
+fn completion_typing_acceptance_and_dismissal_match_in_both_adapters(cx: &mut TestAppContext) {
+    let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
+    assert!(std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()))
+        .args(["build", "-q", "--locked", "-p", "reader-core", "--example", "fake_lsp"])
+        .current_dir(env!("CARGO_MANIFEST_DIR")).status().unwrap().success());
+    let fake = profile.join("examples/fake_lsp");
+    let dir = tempfile::tempdir().unwrap(); let root = dir.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let path = root.join("main.rs");
+    let text = "fn main() {  }\nfn helper() {}\nfn hello() {}\n";
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname='completion'\nversion='0.1.0'\n").unwrap(); std::fs::write(&path, text).unwrap();
+    let make = |name| {
+        let c = config(&dir.path().join(name));
+        let mut settings: serde_json::Value = serde_json::from_slice(&std::fs::read(&c.providers).unwrap()).unwrap();
+        settings["providers"]["rust-analyzer"] = serde_json::json!({"executable":fake,"env":{"FAKE_LSP_NO_DECOR":"1"}});
+        std::fs::write(&c.providers, settings.to_string()).unwrap(); c
+    };
+    let gui = cx.new(|cx| ReaderView::new(Session::new(make("gui")), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle()); visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(make("tui"), Some(root.clone())); tui.session.dispatch(Command::Open(path.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    let wait = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>, done: &dyn Fn(&State) -> bool| {
+        let until = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |view, cx| view.poll(cx)); while let Ok(completion) = tui.session.completions().try_recv() { tui.apply(completion); }
+            visual.update(|window, cx| { let _ = window.draw(cx); }); terminal.draw(|frame| tui.draw(frame)).unwrap();
+            if gui.read_with(visual, |view, _| done(view.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < until, "GUI {:?}; TUI {:?}", gui.read_with(visual, |view, _| view.session().state().notices()), tui.session.state().notices());
+            std::thread::yield_now();
+        }
+    };
+    let ready = |state: &State| state.provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready) && state.view(state.active().unwrap().id()).is_some_and(|v| v.highlights().is_some());
+    wait(&mut visual, &mut tui, &mut terminal, &ready);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test()); tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code| { tui.handle(Event::Key(KeyEvent::new(code, KeyModifiers::NONE))); };
+    // Inside the braces, by a click in each.
+    let at = text.find("{  }").unwrap() + 2;
+    let (x, y) = gui.read_with(&visual, |view, _| view.text_point_of(at)).unwrap(); visual.simulate_click(gpui::point(gpui::px(x), gpui::px(y)), gpui::Modifiers::default());
+    let hit = tui.layout.panes[0].hits.iter().find(|h| h.byte == at).unwrap().clone();
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: hit.x, row: hit.y, modifiers: KeyModifiers::NONE }));
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left), column: hit.x, row: hit.y, modifiers: KeyModifiers::NONE }));
+    assert_eq!(tui.session.state().selection().map(|s| s.head), Some(at));
+    assert_eq!(gui.read_with(&visual, |view, _| view.session().state().selection().map(|s| s.head)), Some(at));
+    let labels = |state: &State| state.completion().map(|c| (c.rows().map(|r| r.label.clone()).collect::<Vec<_>>(), c.selected()));
+    let same = |visual: &mut VisualTestContext, tui: &App| {
+        let gui_state = gui.read_with(visual, |view, _| (snapshot(view.session().state()), labels(view.session().state())));
+        assert_eq!((snapshot(tui.session.state()), labels(tui.session.state())), gui_state);
+    };
+    // Typing opens the same suggestions; Down and Enter accept the same one.
+    visual.simulate_keystrokes("h e"); key(&mut tui, KeyCode::Char('h')); key(&mut tui, KeyCode::Char('e'));
+    wait(&mut visual, &mut tui, &mut terminal, &|state| state.completion().is_some());
+    same(&mut visual, &tui);
+    visual.simulate_keystrokes("down enter"); key(&mut tui, KeyCode::Down); key(&mut tui, KeyCode::Enter);
+    same(&mut visual, &tui);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper }", 1).as_str()));
+    // A trigger character opens it in both; Escape dismisses alike; punctuation types without accepting.
+    visual.simulate_keystrokes("."); key(&mut tui, KeyCode::Char('.'));
+    wait(&mut visual, &mut tui, &mut terminal, &|state| state.completion().is_some());
+    same(&mut visual, &tui);
+    visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc);
+    same(&mut visual, &tui);
+    assert!(tui.session.state().completion().is_none());
+    visual.simulate_keystrokes("h"); key(&mut tui, KeyCode::Char('h'));
+    wait(&mut visual, &mut tui, &mut terminal, &|state| state.completion().is_some());
+    visual.simulate_keystrokes("("); key(&mut tui, KeyCode::Char('('));
+    same(&mut visual, &tui);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper.h( }", 1).as_str()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
+}
+
+#[gpui::test]
 fn gui_and_terminal_choose_and_show_project_editing_preferences_through_find_action(cx: &mut TestAppContext) {
     let scratch = tempfile::tempdir().unwrap();
     let root = scratch.path().join("project"); std::fs::create_dir(&root).unwrap();
