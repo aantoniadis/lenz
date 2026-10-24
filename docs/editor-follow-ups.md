@@ -82,3 +82,7 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   save-state badge or actionable session notification, using the same core
   state rather than frontend-owned errors. This is presentation followup;
   draft/history retention and Save blocking remain enforced while inactive.
+- **Compact-index query batching:** declaration and modal symbol continuations
+  currently rank up to 32 adjacent saved-file record sets per turn. Use the
+  scheduled batch comparison on a many-file index before changing that batch
+  size; preserve independent query cancellation and completed-action timing.

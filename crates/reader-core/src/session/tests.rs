@@ -10,6 +10,32 @@ fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.le
 fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
 
 #[test]
+fn promoted_panel_and_symbol_targets_keep_exact_save_provenance() {
+    use crate::navigation::{Chosen, Scope as NavigationScope};
+    use crate::text::{EditKind, TextEdit};
+    for navigation in [false, true] {
+        let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+        let original = b"\xef\xbb\xbffn UniquePromoted() {}\r\n";
+        let file = write(&root, "a.rs", original); let other = write(&root, "other.txt", b"stay here\n");
+        let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+        open(&mut s, Command::OpenRetained(other), "other.txt"); s.cache = InactiveCache::new(0);
+        if navigation {
+            s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "UniquePromoted".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+            let revision = s.state().navigation().unwrap().revision;
+            let Some(Chosen::Command(command)) = s.navigation_choice(revision, 0) else { panic!("captured disk symbol") }; s.dispatch(command);
+        } else {
+            s.dispatch(Command::FindDeclarations("UniquePromoted".into())); settle(&mut s, searched); s.dispatch(Command::OpenResult(0));
+        }
+        settle(&mut s, |s| s.state().current_source().is_some_and(|source| source.source() == file) && s.state().loading().is_none());
+        assert_eq!(active_view(&s).save_status(), &crate::save::Status::Ready, "checked payload must retain opened-file provenance");
+        let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..0, text: "// edited\r\n".into() }], kind: EditKind::Paste });
+        s.dispatch(Command::Save { tab }); settle(&mut s, |s| !active_view(s).dirty() && *active_view(s).save_status() == crate::save::Status::Ready);
+        assert_eq!(std::fs::read(file).unwrap(), b"\xef\xbb\xbf// edited\r\nfn UniquePromoted() {}\r\n");
+    }
+}
+
+#[test]
 fn save_keeps_unicode_history_across_real_cache_eviction_and_undo() {
     use crate::text::{EditKind, TextEdit};
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
