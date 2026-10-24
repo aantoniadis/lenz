@@ -7250,3 +7250,68 @@ fn structural_keys_and_menus_indent_comment_move_and_duplicate_in_the_window(cx:
     v.simulate_keystrokes("shift-tab");
     assert_eq!(text(&v), "");
 }
+
+#[gpui::test]
+fn a_snippet_completion_expands_in_order_and_tab_visits_its_placeholders(cx: &mut TestAppContext) {
+    let text = "fn main() {  }\n";
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    let current = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    let selected = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state(); let doc = s.current_source().unwrap(); s.selection().map(|sel| doc.copy_range(sel.range()).unwrap()).unwrap_or_default() });
+    let status = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().status_message());
+    let hint_painted = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.status_segments().1.1.clone());
+    let at = text.find("{  }").unwrap() + 2;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
+    type_text(&mut v, "snippet");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    draw(&mut v);
+    let labels = f.view.read_with(&v, |r, _| r.session.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect::<Vec<_>>()));
+    assert_eq!(labels.unwrap(), ["snippet_block", "snippet_call", "snippet_nested", "snippet_repeat"]);
+    // Tab accepts the suggestion: the body replaces the typed name, its tab the file's four spaces.
+    v.simulate_keystrokes("tab");
+    draw(&mut v);
+    assert_eq!(current(&mut v), "fn main() { if cond {\n    body();\n} }\n");
+    assert_eq!(selected(&mut v), "body", "the first numbered placeholder is selected, not the one written first");
+    assert_eq!(status(&mut v), "Snippet: placeholder 1 of 3 · Tab next · Esc done");
+    assert!(hint_painted(&mut v).contains("Snippet: placeholder 1 of 3"), "the status bar paints it: {:?}", hint_painted(&mut v));
+    // Tab now visits the placeholders instead of indenting.
+    v.simulate_keystrokes("tab");
+    assert_eq!(selected(&mut v), "cond");
+    assert!(status(&mut v).contains("placeholder 2 of 3"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), 35..35, "then the final caret");
+    assert!(status(&mut v).contains("Tab ends"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { if cond {\n    body();\n} }\n", "the last Tab only ends the snippet");
+    assert!(!status(&mut v).starts_with("Snippet:"), "{:?}", status(&mut v));
+    // One Undo takes the whole expansion back and nothing is written.
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), "fn main() { snippet }\n");
+    assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), text);
+
+    // A repeated placeholder: accepting it selects every occurrence, and typing changes them in one step.
+    v.simulate_keystrokes("ctrl-space");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("down down down");
+    draw(&mut v);
+    let repeat = f.view.read_with(&v, |r, _| r.session.state().completion().map(|c| c.rows().nth(c.selected()).map(|r| r.label.clone())));
+    assert_eq!(repeat.flatten().as_deref(), Some("snippet_repeat"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { sum + sum = sum }\n");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().selections().count()), 3, "one stop selects all three");
+    v.simulate_keystrokes("x");
+    assert_eq!(current(&mut v), "fn main() { x + x = x }\n", "one typing transaction changes every occurrence");
+    // Escape ends the snippet and leaves the text alone; Tab indents again afterwards.
+    v.simulate_keystrokes("escape");
+    assert!(!status(&mut v).starts_with("Snippet:"), "Escape ends it: {:?}", status(&mut v));
+    assert_eq!(current(&mut v), "fn main() { x + x = x }\n");
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { x     + x = x }\n", "Tab at the caret inserts the step it would insert");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), text, "the file is never written");
+}

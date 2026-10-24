@@ -19,9 +19,11 @@ Completion is a shared Session behavior; the GUI and terminal translate keys and
 - Tab/Enter (or a click) accepts: one `EditKind::Replace` transaction against the current snapshot replacing
   the provider's range, extended to the caret, with plain text (`textEdit.newText`, else `insertText`, else the
   label). The core edit path rejects stale versions; one Undo restores the name as typed.
-- Items with `additionalTextEdits`, snippet text (`insertTextFormat` 2), a server command (other than the
-  client-only parameter-hint/suggest hints, which are not run), or a range that does not contain the caret on
-  its line are listed dim with an explanation and refused whole. The client declares no snippet support.
+- Items with `additionalTextEdits`, a server command (other than the client-only parameter-hint/suggest hints,
+  which are not run), or a range that does not contain the caret on its line are listed dim with an explanation
+  and refused whole. Snippet text (`insertTextFormat` 2) is expanded since ticket 30: the client declares
+  `snippetSupport: true`, and a body this editor will not expand is listed with its own reason. See the
+  [snippet behavior](reader-snippets.md).
 - Manual requests report why completion is unavailable (no provider, missing/stopped/disabled server, a server
   without `completionProvider`, gated input, read-only, preview) or that there are no suggestions; automatic
   requests stay quiet. Ordinary editing never waits for a reply; an unadmitted version defers the request.
@@ -30,8 +32,9 @@ Completion is a shared Session behavior; the GUI and terminal translate keys and
 
 - Core, fake provider (`crates/reader-core/tests/semantics.rs`): manual acceptance and single Undo with disk
   bytes unchanged; Escape, tab switch and caret move before a slow reply; typing open/filter/punctuation,
-  trigger character, Backspace, setting off and persisted; refused import/snippet items; no provider and a
-  server without completion.
+  trigger character, Backspace, setting off and persisted; refused import and unexpandable snippet items;
+  snippet expansion with Tab through its placeholders ([reader-snippets.md](reader-snippets.md)); no provider
+  and a server without completion.
 - GUI (`reader-gui` `completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys`): real
   keystrokes for typing, Down/Enter, Undo, Escape, Tab, punctuation, Ctrl+Space with the setting off, a modal
   taking keys first, a 160×120 window and a click on a row, repeated open/close.
@@ -47,6 +50,7 @@ Completion is a shared Session behavior; the GUI and terminal translate keys and
 
 ## Not covered here
 
-Imports/additional edits, snippets and `completionItem/resolve` (ticket 39); documentation and signature help
+Imports/additional edits and `completionItem/resolve` (ticket 39); snippet bodies and their placeholder
+navigation are in [reader-snippets.md](reader-snippets.md) (ticket 30). Documentation and signature help
 (ticket 40); multi-cursor completion; native macOS and Wayland input; performance measurements, which are
 deferred to the end of the epic.

@@ -3804,6 +3804,71 @@ fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
 }
 
 #[test]
+fn snippet_placeholders_are_tabbed_through_and_escape_ends_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"snippets\"\nversion = \"0.1.0\"\n").unwrap();
+    let path = root.join("main.rs");
+    let source = "fn main() {  }\n";
+    std::fs::write(&path, source).unwrap();
+    let profile = std::env::current_exe().unwrap().parent().unwrap().parent().unwrap().to_owned();
+    let mut build = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
+    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+    if profile.ends_with("release") { build.arg("--release"); }
+    assert!(build.status().unwrap().success());
+    let fake = profile.join(format!("examples/fake_lsp{}", std::env::consts::EXE_SUFFIX));
+    let cfg = config(dir.path());
+    std::fs::create_dir_all(cfg.providers.parent().unwrap()).unwrap();
+    std::fs::write(&cfg.providers, serde_json::json!({ "providers": { "rust-analyzer": { "executable": fake, "env": { "FAKE_LSP_NO_DECOR": "1" } } } }).to_string()).unwrap();
+    let mut a = App::new(cfg, Some(root));
+    a.enable_draft_input_for_test();
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+        && a.session.state().view(a.session.state().active().unwrap().id()).unwrap().highlights().is_some());
+    let text = |a: &App| { let s = a.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() };
+    let selected = |a: &App| { let s = a.session.state(); let doc = s.current_source().unwrap(); s.selection().map(|sel| doc.copy_range(sel.range()).unwrap()).unwrap_or_default() };
+    let typed = |a: &mut App, t: &str| for c in t.chars() { key(a, KeyCode::Char(c), KeyModifiers::NONE) };
+    let at = source.find("{  }").unwrap() + 2;
+    a.dispatch(Command::Select(reader_core::session::Selection { anchor: at, head: at }));
+    draw(&mut a, 100, 30);
+    typed(&mut a, "snippet");
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    // Tab accepts the suggestion; the terminal draws the snippet's first placeholder in its status bar.
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "fn main() { if cond {\n    body();\n} }\n");
+    assert_eq!(selected(&a), "body");
+    draw(&mut a, 100, 30);
+    let screen = draw_screen(&mut a, 100, 30);
+    assert!(screen.contains("Snippet: placeholder 1 of 3"), "{screen}");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(selected(&a), "cond", "Tab visits the next placeholder instead of indenting");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(a.session.state().selection().unwrap().range(), 35..35, "then the final caret");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "fn main() { if cond {\n    body();\n} }\n", "the last Tab only ends the snippet");
+    assert_eq!(a.session.snippet_hint(), None);
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), "fn main() { snippet }\n", "one Undo takes the whole expansion back");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    // One placeholder written three times: Escape ends the snippet and Tab indents again.
+    key(&mut a, KeyCode::Char(' '), KeyModifiers::CONTROL);
+    settle(&mut a, |a| a.session.state().completion().is_some());
+    for _ in 0..3 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "fn main() { sum + sum = sum }\n");
+    assert_eq!(a.session.state().active().unwrap().selections().count(), 3, "one stop selects every occurrence");
+    typed(&mut a, "x");
+    assert_eq!(text(&a), "fn main() { x + x = x }\n", "typing changes every occurrence in one transaction");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.session.snippet_hint(), None, "Escape ends the snippet");
+    assert_eq!(text(&a), "fn main() { x + x = x }\n", "and edits nothing");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "fn main() { x     + x = x }\n", "Tab indents again at the caret");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source, "no file is written");
+}
+
+#[test]
 fn ctrl_alt_down_adds_a_caret_and_typing_changes_every_selection() {
     let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("carets.txt"); std::fs::write(&path, "aa bb aa\none").unwrap();
     let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone())); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);

@@ -20,6 +20,9 @@ mod structural;
 #[path = "session/completion.rs"]
 mod completion;
 pub use completion::{CompletionTrigger, Suggestion, Suggestions};
+#[path = "session/snippet.rs"]
+mod snippet;
+pub use snippet::LiveSnippet;
 #[path = "session/close.rs"]
 mod close_work;
 #[path = "session/external.rs"]
@@ -128,6 +131,9 @@ pub enum Command {
     CommitClose(crate::close::Permit),
     /// Apply one atomic UTF-8 transaction to this exact current version.
     Edit { tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind },
+    /// Insert snippet `body` in place of `range` of `tab`'s `expected` version and select its first placeholder:
+    /// one transaction, inserted lines in the file's indentation, Tab then visiting the placeholders.
+    InsertSnippet { tab: TabId, expected: crate::text::SnapshotKey, range: std::ops::Range<usize>, body: String },
     Undo { tab: TabId },
     Redo { tab: TabId },
     Save { tab: TabId },
@@ -1353,6 +1359,8 @@ pub struct State {
     documentation: Option<Documentation>,
     /// The completion popup.
     completion: Option<Suggestions>,
+    /// The snippet whose placeholders Tab visits, while it is still about the text it was inserted into.
+    snippet: Option<LiveSnippet>,
     /// The commit an annotation opened, while shown.
     commit: Option<crate::blame::CommitPopup>,
     /// The repository of what is shown, the path it was looked up for, and the last path answered.
@@ -2530,6 +2538,7 @@ impl Session {
                 occurrences: None,
                 documentation: None,
                 completion: None,
+                snippet: None,
                 commit: None,
                 repo: None,
                 repo_anchor: None,
@@ -3462,7 +3471,7 @@ impl Session {
             Input::Command(_) | Input::Completion(_) => None,
         };
         let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. } | Command::InsertText { .. } | Command::AddCursorBelow | Command::AddCursorAbove
-            | Command::Indent { .. } | Command::ToggleComment | Command::MoveLines { .. } | Command::DuplicateLines { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+            | Command::Indent { .. } | Command::ToggleComment | Command::MoveLines { .. } | Command::DuplicateLines { .. } | Command::InsertSnippet { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let markers_due = matches!(input, Input::Completion(Completion::MarkersDue));
@@ -3475,6 +3484,9 @@ impl Session {
         // A popup or request whose tab, version, caret or server is no longer current is gone, not hidden.
         if self.pending_completion.as_ref().is_some_and(|p| !p.current(&self.state)) { self.cancel_completion(); }
         if self.state.completion.is_some() && self.state.completion().is_none() { self.state.completion = None; effect.repaint = true; }
+        // A snippet's placeholders belong to the text they were inserted into and to the view showing it: once that
+        // is no longer true (a move, an undo, another tab, a reload) it is over, never left stale.
+        if self.state.snippet.is_some() && self.state.snippet().is_none() { self.state.snippet = None; effect.repaint = true; }
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         if self.navigation_query.as_ref().is_some_and(|q| self.state.navigation.as_ref().is_none_or(|n| n.request != q.request)) { self.navigation_query = None; }
         effect.repaint |= self.refresh_saved_comparison();
@@ -3552,12 +3564,21 @@ impl Session {
         let result = draft.edit(&current, version, edits.clone(), tab, kind, self.state.semantics.now());
         if !draft.can_undo() && !draft.can_redo() && !draft.dirty() { entry.draft = None; }
         match result {
-            Ok(Some(next)) => { let effect = self.publish_edit(tab, current, Arc::new(next), &edits); self.completion_edited(tab, &edits, kind); effect }
+            Ok(Some(next)) => {
+                let key = next.key();
+                let effect = self.publish_edit(tab, current, Arc::new(next), &edits);
+                self.completion_edited(tab, &edits, kind);
+                self.snippet_edited(tab, key, &edits);
+                effect
+            }
             Ok(None) | Err(_) => Effect::default(),
         }
     }
 
     fn undo(&mut self, tab: TabId, redo: bool) -> Effect {
+        // Undo moves text back past the snippet's positions: the snippet is over rather than mapped into the reverted
+        // text, so Tab indents again.
+        self.end_snippet();
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
@@ -3685,6 +3706,7 @@ impl Session {
                 None => Effect::default(),
             },
             Command::Edit { tab, expected, edits, kind } => self.edit(tab, expected, edits, kind),
+            Command::InsertSnippet { tab, expected, range, body } => self.insert_snippet_body(tab, expected, range, &body),
             Command::Undo { tab } => self.undo(tab, false),
             Command::Redo { tab } => self.undo(tab, true),
             Command::Save { tab } => self.save(tab),

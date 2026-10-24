@@ -4,6 +4,7 @@ mod external;
 mod find_replace;
 mod multi_selection;
 mod structural_edits;
+mod snippet;
 mod save_as;
 mod preferences;
 mod keymap;

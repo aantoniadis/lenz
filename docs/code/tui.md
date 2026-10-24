@@ -167,7 +167,8 @@ each (**Selection** menu, F10 and the palette in both adapters; the GUI has the 
 - **Tab** indents every line a selection touches by one step, keeps the selection on its text, and inserts that step
   at a caret; **Shift+Tab** removes one step from the touched lines (a tab, or up to the indent size in spaces) and
   never takes text back. The step comes from the file's EditorConfig, then the project's choice, then the language
-  default, resolved when the key is pressed, so a changed `.editorconfig` applies at once. Outside editable source,
+  default, resolved when the key is pressed, so a changed `.editorconfig` applies at once. While a snippet is live
+  (below), Tab visits its placeholders instead; once it has ended, Tab indents again. Outside editable source,
   Tab keeps cycling the controls as before.
 - **Ctrl+/** (or **Alt+/**, because terminals often send Ctrl+/ as Ctrl+_) comments or uncomments the touched lines
   after their own indentation with the language's prefix (`//`, `#`, `--`), leaving blank lines alone and completing
@@ -220,8 +221,15 @@ server trigger character such as `.`) opens it unless **Completion While Typing*
 manually. Many terminals cannot deliver Ctrl+Space (some send NUL, which also works); **Code Completion** in the
 F10 palette is the equivalent route. While the popup shows, Up/Down/Page Up/Page Down choose, Tab or Enter accept,
 Esc dismisses and a click accepts a row; any other key, punctuation included, types normally and never accepts.
-Acceptance is one undoable draft edit; suggestions carrying imports, snippets or server commands are listed but
-refused whole. See the [completion behavior and limits](../research/reader-completion.md).
+Acceptance is one undoable draft edit; suggestions carrying imports or server commands are listed but refused
+whole. A snippet suggestion (`insertTextFormat: 2`) is expanded instead: its placeholders are visited by Tab,
+`$0` last, and the status bar says which one is selected (`Snippet: placeholder 2 of 3 · Tab next · Esc done`).
+Inserted lines take the file's indentation and line ending, a placeholder written more than once is one stop that
+selects every occurrence, and Escape, a caret move, another tab or Undo ends it without editing text. A body this
+editor will not expand (a placeholder inside a placeholder, a snippet variable or transform) is refused with its
+reason. Inserting with several cursors is refused, since one Tab cannot visit two snippets. See the
+[completion behavior and limits](../research/reader-completion.md) and
+[snippets and placeholder navigation](../research/reader-snippets.md).
 
 ## Controls
 

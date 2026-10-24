@@ -2,6 +2,7 @@
 //! exact draft version, tab and server session that produced them. Typing that continues the name re-filters
 //! the popup against the new version; anything else closes it, and a reply nobody is waiting for is dropped.
 use super::*;
+use crate::snippet::Snippet;
 use crate::text::{EditKind, TextEdit};
 use std::ops::Range;
 
@@ -22,6 +23,8 @@ pub struct Suggestion {
     filter: String,
     text: Arc<str>,
     replace: Range<usize>,
+    /// A snippet body (a plain suggestion inserts `text` as written).
+    snippet: Option<Snippet>,
 }
 
 /// The open completion popup.
@@ -175,7 +178,8 @@ impl Session {
         Effect { repaint: true, ..Effect::default() }
     }
 
-    /// Replace the name with the selected suggestion: one transaction against the version shown.
+    /// Replace the name with the selected suggestion: one transaction against the version shown. A snippet body is
+    /// expanded there instead, with the file's indentation and its first placeholder selected.
     pub(super) fn accept_completion(&mut self) -> Effect {
         let Some(c) = self.state.completion() else { return Effect::default() };
         let Some(item) = c.shown.get(c.selected).map(|i| &c.items[*i]) else { return Effect::default() };
@@ -184,9 +188,18 @@ impl Session {
             return Effect { repaint: true, ..Effect::default() };
         }
         let (tab, expected) = (c.tab, c.source.key);
-        let edit = TextEdit { range: item.replace.start..item.replace.end.max(c.caret), text: item.text.clone() };
+        let range = item.replace.start..item.replace.end.max(c.caret);
+        let (text, snippet) = (item.text.clone(), item.snippet.clone());
+        // A live snippet's placeholders belong to one caret; with several there is no set Tab could visit.
+        if snippet.is_some() && self.state.view(tab).is_some_and(|view| !view.tab().extra_selections().is_empty()) {
+            self.state.messages.push("Code completion: a snippet needs one caret; Escape collapses several selections".into());
+            return Effect { repaint: true, ..Effect::default() };
+        }
         self.close_completion();
-        self.edit(tab, expected, vec![edit], EditKind::Replace)
+        match snippet {
+            Some(snippet) => self.insert_snippet(tab, expected, range, &snippet),
+            None => self.edit(tab, expected, vec![TextEdit { range, text }], EditKind::Replace),
+        }
     }
 
     /// After a typing edit of `tab`: keep the popup when the edit continues the name at its caret (re-filtered,
@@ -243,13 +256,21 @@ fn suggestion(item: &serde_json::Value, doc: &Document, encoding: semantics::lsp
     };
     let text: Arc<str> = edit["newText"].as_str().or(item["insertText"].as_str()).unwrap_or(&label).into();
     let client_hint = |c: &serde_json::Value| matches!(c["command"].as_str(), Some("editor.action.triggerParameterHints" | "editor.action.triggerSuggest"));
+    // A snippet body is parsed now, so the list can say why one will not be inserted.
+    let (snippet, snippet_why) = match item["insertTextFormat"].as_u64() {
+        Some(2) => match Snippet::parse(&text) {
+            Ok(snippet) => (Some(snippet), None),
+            Err(why) => (None, Some(why)),
+        },
+        _ => (None, None),
+    };
     let unavailable = match &replace {
         Some(r) if r.start <= caret && caret <= r.end && semantics::lsp::line_of(doc, r.start) == semantics::lsp::line_of(doc, caret) => None,
         _ => Some("The language server's replacement range does not contain the caret"),
     }.or_else(|| item["additionalTextEdits"].as_array().is_some_and(|e| !e.is_empty()).then_some("Suggestions with import or other extra edits are not supported yet"))
-        .or_else(|| (item["insertTextFormat"].as_u64() == Some(2)).then_some("Snippet suggestions are not supported yet"))
+        .or(snippet_why)
         .or_else(|| (item["command"].is_object() && !client_hint(&item["command"])).then_some("Suggestions that run a language-server command are not supported yet"));
     let filter = item["filterText"].as_str().unwrap_or(&label).to_lowercase();
     let sort = item["sortText"].as_str().unwrap_or(&label).to_owned();
-    Some((sort, Suggestion { label, detail: item["detail"].as_str().map(str::to_owned), unavailable, filter, text, replace: replace.unwrap_or(caret..caret) }))
+    Some((sort, Suggestion { label, detail: item["detail"].as_str().map(str::to_owned), unavailable, filter, text, replace: replace.unwrap_or(caret..caret), snippet }))
 }

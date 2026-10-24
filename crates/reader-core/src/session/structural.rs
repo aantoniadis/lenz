@@ -66,7 +66,7 @@ impl Session {
     /// The active file's indentation step: EditorConfig, then the project's choice, then the language default.
     /// Resolved for the action itself, so a changed `.editorconfig` or project choice applies at once; this runs on
     /// an explicit indent, never per typed character (see the ticket-25 cost note in `docs/editor-follow-ups.md`).
-    fn indent_unit(&self) -> IndentUnit {
+    pub(super) fn indent_unit(&self) -> IndentUnit {
         let Some(source) = self.state.current_source() else { return IndentUnit::new(crate::preferences::Style::Space, 4, 4) };
         let file = source.source();
         let language = source.language();
@@ -79,6 +79,8 @@ impl Session {
     /// Indent (`outdent`: unindent) every line the selections touch by one step of the file's indentation; a caret
     /// alone inserts that step at the caret.
     pub(super) fn indent_selection(&mut self, outdent: bool) -> Effect {
+        // A live snippet owns Tab: the key visits its placeholders, and indents only once the snippet is over.
+        if let Some(effect) = self.step_snippet(outdent) { return effect; }
         let id = if outdent { CommandId::OutdentSelection } else { CommandId::IndentSelection };
         if self.disabled(id).is_some() { return Effect::default(); }
         let unit = self.indent_unit();

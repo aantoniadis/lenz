@@ -37,6 +37,7 @@ pub mod postgres_assistance;
 pub mod search;
 pub mod selection;
 pub mod semantics;
+mod snippet;
 pub mod session;
 pub mod shown;
 pub mod breadcrumbs;

@@ -42,7 +42,8 @@ impl Session {
                 let range = primary.range();
                 (range.is_empty() && snapshot.word_at(primary.head).is_empty()).then_some("Place the caret on a word or select text")
             }
-            CommandId::CollapseSelections => (tab.extra_selections().is_empty()).then_some("One selection is active"),
+            // A live snippet has its own state to drop even with one selection, so Escape stays its key.
+            CommandId::CollapseSelections => (tab.extra_selections().is_empty() && self.state.snippet().is_none()).then_some("One selection is active"),
             _ => None,
         }
     }
@@ -169,9 +170,10 @@ impl Session {
 
     /// Keep only the primary selection: a click or a move does the same, but Escape can drop several at once.
     pub(super) fn collapse_selections(&mut self) -> Effect {
-        if self.disabled(CommandId::CollapseSelections).is_some() { return Effect::default(); }
-        let Some(tab) = self.active_mut() else { return Effect::default() };
-        tab.collapse_selections();
+        // Escape ends a live snippet first, whether or not it also has several selections to collapse.
+        let live = self.end_snippet();
+        if !live && self.disabled(CommandId::CollapseSelections).is_some() { return Effect::default(); }
+        if let Some(tab) = self.active_mut() { tab.collapse_selections(); }
         Effect { repaint: true, ..Effect::default() }
     }
 

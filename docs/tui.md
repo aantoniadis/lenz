@@ -8,8 +8,10 @@ Reader editing also covers several selections: Ctrl+Alt+Down / Up and **Select N
 cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. Tab indents and
 Shift+Tab outdents with the file's EditorConfig or project step; Ctrl+/ (or Alt+/) comments, Ctrl+Shift+Down/Up moves
 lines, and Alt+Shift+Down/Up duplicates them—each one Undo step, with CRLF, mixed line endings and a missing final
-newline kept in place. The [terminal reader guide](code/tui.md) lists the keys and the terminal's modifier-key
-limits.
+newline kept in place. A snippet suggestion from completion expands with the file's indentation and line ending,
+and Tab then visits its placeholders until Escape, a caret move, another tab or Undo ends it; the status bar says
+which placeholder is selected. The [terminal reader guide](code/tui.md) lists the keys, the snippet behavior and
+the terminal's modifier-key limits.
 
 The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
 line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.
