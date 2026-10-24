@@ -834,7 +834,7 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
-    SavedCompared { request: u64, changes: Vec<lenz_engine::ChangeBlock> },
+    SavedCompared { request: u64, changes: Vec<lenz_engine::ChangeBlock>, line_endings_differ: bool },
     /// A bounded analysis consumer's result, fenced by source and request identity.
     Analyzed { ticket: crate::analysis::Ticket, result: Box<Completion> },
     AnalysisWake,
@@ -1686,7 +1686,7 @@ impl State {
         let comparison = self.comparison.as_ref().map(|c| match c.failure() {
             Some(why) => format!("Saved comparison failed: {why}"),
             None if c.pending() => "Comparing with last saved version…".into(),
-            None => format!("Saved comparison: {} changed blocks; last saved is read-only", c.changes().len()),
+            None => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
         });
         doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
     }
@@ -3053,9 +3053,10 @@ impl Session {
     }
 
     fn command(&mut self, command: Command) -> Effect {
-        if self.state.comparison.is_some() {
-            if matches!(&command, Command::Split(_) | Command::OpenRoot(_) | Command::MoveTab { .. } | Command::SetLayout(_) | Command::ActivateTab(_) | Command::Back | Command::Forward) { self.close_saved_comparison(); }
-        }
+        if self.state.comparison.is_some()
+            && (matches!(&command, Command::Split(_) | Command::OpenRoot(_) | Command::MoveTab { .. } | Command::SetLayout(_) | Command::Back | Command::Forward)
+                || matches!(&command, Command::ActivateTab(id) if self.state.tabs.iter().any(|t| t.id == *id && t.comparison_side.is_none())))
+        { self.close_saved_comparison(); }
 
         let repaint = Effect { repaint: true, copy: None };
         match command {
@@ -4770,8 +4771,8 @@ impl Session {
 
     fn complete_source(&mut self, completion: Completion, buffer: Option<crate::text::BufferId>) -> Effect {
         match completion {
-            Completion::SavedCompared { request, changes } => {
-                if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == request) { comparison.changes = changes; comparison.pending = false; }
+            Completion::SavedCompared { request, changes, line_endings_differ } => {
+                if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == request) { comparison.changes = changes; comparison.line_endings_differ = line_endings_differ; comparison.pending = false; }
                 Effect { repaint: true, copy: None }
             }
             Completion::AnalysisWake => Effect::default(),
@@ -7441,7 +7442,7 @@ impl Session {
     /// A new tab for `path` in the focused pane; a source the other pane shows lends it its snapshot (and place).
     fn fresh_tab(&mut self, id: TabId, path: &Path, requested: &Path, retained: bool, markdown_source: bool) -> Tab {
         let pane = self.state.focused;
-        let mut tab = match self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane != pane && t.source == path && t.loaded && !t.is_saved_version() && t.retrieved.is_none()) {
+        let mut tab = match self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane != pane && t.source == path && t.loaded && t.retrieved.is_none()) {
             Some(twin) => twin.duplicate(id, pane),
             None => {
                 let mut tab = Tab::new(id, path.to_path_buf(), retained);

@@ -20,6 +20,7 @@ pub struct SavedComparison {
     pub(super) pending: bool,
     submitted: bool,
     pub(super) changes: Vec<lenz_engine::ChangeBlock>,
+    pub(super) line_endings_differ: bool,
     pub(super) failure: Option<String>,
 }
 impl SavedComparison {
@@ -27,6 +28,7 @@ impl SavedComparison {
     pub fn current_tab(&self) -> TabId { self.current }
     pub fn pending(&self) -> bool { self.pending }
     pub fn changes(&self) -> &[lenz_engine::ChangeBlock] { &self.changes }
+    pub fn line_endings_differ(&self) -> bool { self.line_endings_differ }
     pub fn failure(&self) -> Option<&str> { self.failure.as_deref() }
     pub(super) fn matches(&self, state: &State) -> bool {
         let Some(current) = state.source(self.current) else { return false };
@@ -48,8 +50,10 @@ impl State {
         entry.draft.as_ref().map(|d| &d.baseline).or(entry.snapshot.as_ref())
     }
     pub fn comparison_changed_line(&self, tab: TabId, line: usize) -> bool {
-        self.tabs.iter().find(|t| t.id == tab).and_then(|t| t.comparison_side).zip(self.comparison.as_ref())
-            .is_some_and(|(side, comparison)| comparison.changed_line(side, line))
+        let Some(comparison) = self.comparison.as_ref() else { return false };
+        let side = if tab == comparison.saved { ComparisonSide::Saved }
+            else if tab == comparison.current { ComparisonSide::Current } else { return false };
+        comparison.changed_line(side, line)
     }
 }
 impl Session {
@@ -67,6 +71,10 @@ impl Session {
         self.next_tab += 1; let current_id = TabId(self.next_tab);
         let mut left = tab.duplicate(saved, 0);
         let mut right = tab.duplicate(current_id, 1);
+        self.open_seq += 1;
+        self.pending_goto = None;
+        if self.state.asking.take().is_some() { self.state.semantics.cancel(); }
+        self.cancel_documentation();
         self.state.sources.next += 1; let buffer = BufferId(self.state.sources.next);
         left.buffer = Some(buffer); left.comparison_side = Some(ComparisonSide::Saved);
         left.stamp = None; left.blame = None; left.markdown_source = true; left.new_content();
@@ -76,7 +84,7 @@ impl Session {
         let before = Before { active: self.state.active, other: self.state.other, focused: self.state.focused, split: self.state.settings.split };
         self.state.sources.buffers.insert(buffer, CurrentSource { document: Default::default(), snapshot: Some(Arc::new(baseline.with_buffer(buffer))), stamp: None, saved: None, draft: None, save: Default::default() });
         self.comparison_seq += 1;
-        self.state.comparison = Some(SavedComparison { saved, current: current_id, buffer, before, baseline: SemanticSource::new(&baseline), baseline_backing: Arc::downgrade(&baseline), text: SemanticSource::new(&current), request: self.comparison_seq, pending: true, submitted: false, changes: Vec::new(), failure: None });
+        self.state.comparison = Some(SavedComparison { saved, current: current_id, buffer, before, baseline: SemanticSource::new(&baseline), baseline_backing: Arc::downgrade(&baseline), text: SemanticSource::new(&current), request: self.comparison_seq, pending: true, submitted: false, changes: Vec::new(), line_endings_differ: false, failure: None });
         self.state.tabs.extend([left, right]);
         self.state.settings.split = Some(Split::Columns); self.state.focused = 1;
         self.state.active = Some(current_id); self.state.other = Some(saved);
@@ -114,7 +122,7 @@ impl Session {
             }
             if changed {
                 self.comparison_seq += 1;
-                if let Some(c) = &mut self.state.comparison { c.request = self.comparison_seq; c.baseline = SemanticSource::new(&baseline); c.text = SemanticSource::new(&current); c.pending = true; c.submitted = false; c.changes.clear(); c.failure = None; }
+                if let Some(c) = &mut self.state.comparison { c.request = self.comparison_seq; c.baseline = SemanticSource::new(&baseline); c.text = SemanticSource::new(&current); c.pending = true; c.submitted = false; c.changes.clear(); c.line_endings_differ = false; c.failure = None; }
                 if baseline_changed && let Some(t) = self.tab_mut(saved_id) { t.new_content(); t.top_line = t.top_line.min(baseline.line_count() - 1); t.selection = t.selection.map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) }); }
                 if baseline_changed { self.decorate(saved_id); }
             }
@@ -143,7 +151,7 @@ impl Session {
         let admitted = self.analysis.request_result(fence, Priority::Visible, || move |lease| {
             if !lease.wanted() { return; }
             let changes = lenz_engine::compare_lines(&lenz_engine::split_lines(left.text()), &lenz_engine::split_lines(right.text()), &lenz_engine::Options::default());
-            if lease.wanted() { lease.send(Completion::SavedCompared { request, changes }); }
+            if lease.wanted() { lease.send(Completion::SavedCompared { request, changes, line_endings_differ: lenz_engine::line_ending(left.text()) != lenz_engine::line_ending(right.text()) }); }
         });
         if let Some(c) = &mut self.state.comparison { match admitted {
             Ok(_) => c.submitted = true,

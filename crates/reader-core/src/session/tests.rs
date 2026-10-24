@@ -18,6 +18,56 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn a_pending_reload_cannot_replace_the_ordinary_owner_with_a_temporary_comparison_tab() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "reload.txt", b"saved\n");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "reload.txt");
+    s.dispatch(Command::Split(Split::Columns)); let ordinary = s.state().active().unwrap().id();
+    let (started, entered) = std::sync::mpsc::channel();
+    let gates: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| { let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release }).collect();
+    for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Reload); s.dispatch(Command::CompareSaved);
+    for gate in gates { gate.send(()).unwrap(); }
+    settle(&mut s, |s| s.state.loading.is_none() && s.state().saved_comparison().is_some_and(|c| !c.pending()));
+    assert!(s.state().tabs().iter().any(|t| t.id() == ordinary));
+    s.dispatch(Command::CloseSavedComparison);
+    assert_eq!(s.state().active().unwrap().id(), ordinary);
+    assert_eq!(source_text(s.state().current_source().unwrap()), "saved\n");
+    assert_eq!(std::fs::read(path).unwrap(), b"saved\n");
+}
+
+#[test]
+fn saved_comparison_reports_line_ending_only_changes() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "endings.txt", b"same\r\n");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "endings.txt");
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..6, text: "same\n".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::CompareSaved); settle(&mut s, |s| !s.state().saved_comparison().unwrap().pending());
+    assert!(s.state().saved_comparison().unwrap().changes().is_empty());
+    assert!(s.state().saved_comparison().unwrap().line_endings_differ());
+    assert!(s.status_details().contains("line endings differ"));
+    assert_eq!(std::fs::read(path).unwrap(), b"same\r\n");
+}
+
+#[test]
+fn closing_the_ordinary_owner_during_comparison_still_requires_its_dirty_decision() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "owner.txt", b"saved");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "owner.txt");
+    let ordinary = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab: ordinary, expected, edits: vec![TextEdit { range: 0..5, text: "draft".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::CompareSaved);
+    s.dispatch(Command::CloseTab(ordinary));
+    assert!(s.state().saved_comparison().is_none());
+    let prompt = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose { ticket: prompt.ticket, buffer: prompt.buffer, choice: crate::close::Choice::Cancel });
+    assert_eq!(s.state().active().unwrap().id(), ordinary);
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft");
+    assert_eq!(std::fs::read(path).unwrap(), b"saved");
+}
+
+#[test]
 fn close_during_saved_backing_compaction_waits_without_demanding_another_save() {
     use crate::save::Status;
     let d=tempfile::tempdir().unwrap();let original="a".repeat(128*1024);let path=write(d.path(),"compact-close.txt",original.as_bytes());let mut s=session(d.path());open(&mut s,Command::OpenRetained(path.clone()),"compact-close.txt");let tab=s.state().active().unwrap().id();let expected=s.state().current_source().unwrap().key();
@@ -309,7 +359,9 @@ fn saved_comparison_finds_both_versions_without_becoming_current_file_authority(
     let synthetic = s.state().view(saved).unwrap().snapshot().key().buffer;
     let current_buffer = s.state().view(current).unwrap().snapshot().key().buffer;
     assert_ne!(synthetic, current_buffer);
-    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::Find("saved".into()));
+    s.dispatch(Command::ActivateTab(saved));
+    assert!(s.state().saved_comparison().is_some(), "selecting a comparison tab focuses its side");
+    s.dispatch(Command::Find("saved".into()));
     for gate in gates { gate.send(()).unwrap(); }
     settle(&mut s, |s| [saved, ordinary].iter().all(|id| s.state.tabs.iter().find(|t| t.id == *id).unwrap().find().is_some_and(|find| !find.pending())));
     assert_eq!(s.state.tabs.iter().find(|t| t.id == saved).unwrap().find().unwrap().matches().len(), 1);

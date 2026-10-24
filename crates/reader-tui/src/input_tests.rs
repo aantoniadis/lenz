@@ -64,7 +64,10 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering() {
         assert!(draw_screen(&mut a, 100, 16).contains('▌'));
     }
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-    a.dispatch(Command::FocusPane(0)); key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("forbidden".into())); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let rect = a.layout.panes.iter().flat_map(|pane| pane.tabs.iter()).find(|(id, _)| *id == saved).unwrap().1;
+    click(&mut a, rect.x + rect.width / 2, rect.y);
+    assert!(a.session.state().saved_comparison().is_some() && a.session.state().active().unwrap().id() == saved);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("forbidden".into())); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
     let snapshot = a.session.state().view(saved).unwrap().snapshot(); assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), original);
     a.dispatch(Command::FocusPane(1)); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
     settle(&mut a, |a| !a.session.state().view(current).unwrap().dirty() && !a.session.state().saved_comparison().unwrap().pending()); assert_eq!(std::fs::read(&path).unwrap(), "α draft\r\nsecond\n".as_bytes());

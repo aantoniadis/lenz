@@ -150,7 +150,9 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &m
         assert!(f.view.read_with(&v, |view, _| view.visible_rows().iter().any(|r| r.bg.iter().any(|(_, c)| *c == view.session().state().palette().block[2]))));
     }
     v.simulate_keystrokes("ctrl-z ctrl-shift-z");
-    f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(0), cx));
+    let saved_point = f.view.read_with(&v, |view, _| { let (from, to, _) = view.tab_hits.iter().find(|(_, _, id)| *id == saved).unwrap(); let pane = view.panes.iter().find(|pane| pane.pane == 0).unwrap(); point(px((from + to) / 2.0), px(pane.bar.2 + line_h() / 2.0)) });
+    v.simulate_click(saved_point, Modifiers::default());
+    assert!(f.view.read_with(&v, |view, _| view.session().state().saved_comparison().is_some() && view.session().state().active().unwrap().id() == saved));
     v.simulate_keystrokes("ctrl-a ctrl-v ctrl-z ctrl-s"); draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state().view(saved).unwrap().snapshot(); s.copy_range(0..s.len_bytes()).unwrap() }), original);
     f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(1), cx));
