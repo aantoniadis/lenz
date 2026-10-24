@@ -24,8 +24,9 @@ fn explorer_new_file_and_folder_use_real_keys_and_the_core_rules() {
     tree_right_click(&mut app, "src");
     assert!(matches!(app.modal.as_ref().map(|m| &m.kind), Some(Prompt::Context { .. })), "{:?}", app.modal.as_ref().map(|m| &m.kind));
     let labels: Vec<String> = app.choices().into_iter().map(|c| c.label).collect();
-    assert_eq!(labels, ["New File in Explorer…", "New Folder in Explorer…", "Rename in Explorer…", "Move in Explorer…"]);
-    assert!(app.choices().iter().all(|c| c.disabled.is_none()));
+    assert_eq!(labels, ["New File in Explorer…", "New Folder in Explorer…", "Rename in Explorer…", "Move in Explorer…", "Delete in Explorer…", "Delete Permanently in Explorer…", "Restore Last Deleted Entry"]);
+    // Everything acts on the row except Restore, which waits until something went to the trash.
+    assert!(app.choices().iter().all(|c| c.disabled.is_none() == (c.label != "Restore Last Deleted Entry")));
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(matches!(app.modal.as_ref().map(|m| &m.kind), Some(Prompt::Create { kind: reader_core::create::Kind::File, dir }) if dir == "src"));
     assert_eq!(app.modal_title(), "New file in src · Enter creates · Esc cancels");

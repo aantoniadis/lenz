@@ -242,6 +242,23 @@ impl Project {
         self.rebuild();
     }
 
+    /// An entry this session deleted (`rel`, project-relative): it and everything inside it leave the tree at once.
+    pub(crate) fn remove(&mut self, rel: &str) {
+        let gone = |path: &str| crate::relocate::moved(path, rel, "").is_some();
+        let before = self.sorted.len();
+        self.sorted.retain(|path| !gone(path));
+        self.files -= before - self.sorted.len();
+        self.pending.retain(|path| !gone(path));
+        for batch in &mut self.entries {
+            if batch.iter().any(|e| gone(&e.path)) { *batch = batch.iter().filter(|e| !gone(&e.path)).cloned().collect(); }
+        }
+        self.entries.retain(|batch| !batch.is_empty());
+        self.empty.retain(|d| !gone(d));
+        self.expanded.retain(|d| !gone(d));
+        if let Some(f) = &mut self.finder { f.ready = false; }
+        self.rebuild();
+    }
+
     /// `path`'s place in the tree: relative to the root, `/`-separated (`None` outside the root).
     pub fn relative(&self, path: &Path) -> Option<Arc<str>> {
         let rel = path.strip_prefix(&self.root).ok()?;

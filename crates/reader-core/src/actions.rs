@@ -26,6 +26,8 @@ pub enum InterfaceAction {
     Create(crate::create::Kind),
     /// Ask for a new name or folder for the explorer's entry, then dispatch [`crate::session::Command::RelocateEntry`].
     Relocate(crate::relocate::Kind),
+    /// Confirm deleting the explorer's entry, then dispatch [`crate::session::Command::DeleteEntry`].
+    ConfirmDelete(crate::trash::Removal),
     OpenFolder,
     OpenRecent,
     FindFile,
@@ -221,10 +223,13 @@ impl Session {
             // An untitled document has no file yet: Save chooses one.
             CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
             CommandId::NewDocument => Command::NewDocument,
+            CommandId::RestoreDeleted => Command::RestoreDeleted,
             CommandId::NewExplorerFile => return CatalogAction::Interface(InterfaceAction::Create(crate::create::Kind::File)),
             CommandId::NewExplorerFolder => return CatalogAction::Interface(InterfaceAction::Create(crate::create::Kind::Folder)),
             CommandId::RenameExplorerEntry => return CatalogAction::Interface(InterfaceAction::Relocate(crate::relocate::Kind::Rename)),
             CommandId::MoveExplorerEntry => return CatalogAction::Interface(InterfaceAction::Relocate(crate::relocate::Kind::Move)),
+            CommandId::DeleteExplorerEntry => return CatalogAction::Interface(InterfaceAction::ConfirmDelete(crate::trash::Removal::Trash)),
+            CommandId::DeleteExplorerPermanently => return CatalogAction::Interface(InterfaceAction::ConfirmDelete(crate::trash::Removal::Permanent)),
             CommandId::RecoverDrafts => Command::ShowRecoveredDrafts,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
@@ -369,7 +374,7 @@ impl CommandId {
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::AutoCompletion | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile | Self::NewExplorerFile | Self::NewExplorerFolder
-            | Self::RenameExplorerEntry | Self::MoveExplorerEntry
+            | Self::RenameExplorerEntry | Self::MoveExplorerEntry | Self::DeleteExplorerEntry | Self::DeleteExplorerPermanently | Self::RestoreDeleted
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
             Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision | Self::CompareWithBase

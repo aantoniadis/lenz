@@ -2870,6 +2870,111 @@ fn explorer_rename_and_move_carry_the_draft_identically_in_both_adapters(cx: &mu
 }
 
 #[gpui::test]
+fn explorer_delete_refuses_drafts_trashes_restores_and_deletes_permanently_alike(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = [dir.path().join("gui"), dir.path().join("tui")];
+    let trashes = [dir.path().join("gui-trash"), dir.path().join("tui-trash")];
+    for root in &roots {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("src/a.txt"), b"saved\n").unwrap();
+        std::fs::write(root.join("lib/keep.txt"), b"keep\n").unwrap();
+    }
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui-state"))), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    gui.update(&mut visual, |v, cx| { v.set_trash_home_for_test(trashes[0].clone()); v.open_root(roots[0].clone(), cx); });
+    let mut tui = App::new(config(&dir.path().join("tui-state")), Some(roots[1].clone()));
+    tui.session.set_trash_home_for_test(trashes[1].clone());
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle_until = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !gui.read_with(visual, |v, _| done(v.session().state())) || !done(tui.session.state()) {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::yield_now();
+        }
+    };
+    let scanned = |s: &State| s.project().is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_)) && !p.refreshing());
+    settle_until(&mut visual, &mut tui, &scanned);
+    for (i, root) in roots.iter().enumerate() {
+        let open = Command::OpenRetained(root.join("src/a.txt"));
+        if i == 0 { gui.update(&mut visual, |v, cx| v.dispatch_for_test(open, cx)); } else { tui.dispatch(open); }
+    }
+    settle_until(&mut visual, &mut tui, &|s: &State| s.current_source().is_some_and(|d| d.source().ends_with("src/a.txt")));
+    visual.simulate_keystrokes("x");
+    key(&mut tui, KeyCode::Char('x'), KeyModifiers::NONE);
+    let highlight = |visual: &mut VisualTestContext, tui: &mut App, row: &str| {
+        gui.update(visual, |v, cx| { v.dispatch_for_test(Command::RevealInTree(row.into()), cx); v.tree_sel = Some(row.into()); });
+        tui.dispatch(Command::RevealInTree(row.into()));
+        tui.tree_at = tui.session.state().tree_rows().position(|r| &*r.path == row).expect("the row is listed");
+    };
+    let run = |visual: &mut VisualTestContext, tui: &mut App, id: CommandId| {
+        gui.update_in(visual, |v, w, cx| v.run(id, w, cx));
+        tui.run(id);
+    };
+    let errors = |visual: &VisualTestContext, tui: &App| {
+        let gui_error = gui.read_with(visual, |v, _| match &v.modal { Some(reader_gui::Modal::ConfirmDelete { error, .. }) => error.clone(), _ => None });
+        (gui_error, tui.modal.as_ref().and_then(|m| m.error.clone()))
+    };
+    // A draft refuses the delete in both dialogs; Enter and typing do nothing, Escape closes.
+    highlight(&mut visual, &mut tui, "src/a.txt");
+    run(&mut visual, &mut tui, CommandId::DeleteExplorerEntry);
+    let refused = Some("a.txt has unsaved changes: save or discard them first".to_string());
+    assert_eq!(errors(&visual, &tui), (refused.clone(), refused));
+    visual.simulate_keystrokes("enter y");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    key(&mut tui, KeyCode::Char('y'), KeyModifiers::NONE);
+    visual.simulate_keystrokes("escape");
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(tui.modal.is_none() && gui.read_with(&visual, |v, _| v.modal.is_none()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    for root in &roots { assert_eq!(std::fs::read(root.join("src/a.txt")).unwrap(), b"saved\n"); }
+    // Undone to the saved text, the file goes to each trash and its tab closes.
+    visual.simulate_keystrokes("ctrl-z");
+    key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.active().is_some_and(|t| !s.tab_dirty(t.id())));
+    highlight(&mut visual, &mut tui, "src/a.txt");
+    run(&mut visual, &mut tui, CommandId::DeleteExplorerEntry);
+    assert_eq!(errors(&visual, &tui), (None, None));
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.tabs().is_empty());
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    for (root, trash) in roots.iter().zip(&trashes) {
+        assert!(!root.join("src/a.txt").exists());
+        assert_eq!(std::fs::read(trash.join("files/a.txt")).unwrap(), b"saved\n");
+    }
+    // Restore puts it back in both.
+    run(&mut visual, &mut tui, CommandId::RestoreDeleted);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.project().is_some_and(|p| p.rows().iter().any(|r| &*r.path == "src/a.txt")));
+    for (root, trash) in roots.iter().zip(&trashes) {
+        assert_eq!(std::fs::read(root.join("src/a.txt")).unwrap(), b"saved\n");
+        assert!(!trash.join("info/a.txt.trashinfo").exists());
+    }
+    // Permanent deletion is its own command and dialog; Escape keeps the folder, Enter removes it with no trash entry.
+    highlight(&mut visual, &mut tui, "lib");
+    run(&mut visual, &mut tui, CommandId::DeleteExplorerPermanently);
+    assert!(tui.modal_title().contains("cannot be restored"), "{}", tui.modal_title());
+    visual.simulate_keystrokes("escape");
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    for root in &roots { assert!(root.join("lib/keep.txt").exists()); }
+    run(&mut visual, &mut tui, CommandId::DeleteExplorerPermanently);
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    for (root, trash) in roots.iter().zip(&trashes) {
+        assert!(!root.join("lib").exists());
+        assert!(!trash.join("files/lib").exists());
+    }
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+}
+
+#[gpui::test]
 fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_undo(cx: &mut TestAppContext) {
     use lenz_content::git::testing::{commit_all, repo, write};
     let make = || {

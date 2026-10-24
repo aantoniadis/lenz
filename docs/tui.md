@@ -38,6 +38,14 @@ with their reason. The move never replaces another entry; open tabs, unsaved dra
 Forward, bookmarks and the explorer follow it, and Save then writes the file at its new path. References to the entry in
 other files are not changed. There is no default shortcut; the menus are the route in both adapters.
 
+**Delete in Explorer…** moves the highlighted file or folder to the freedesktop trash of its file system (the home
+trash, or the mount's own `.Trash` folder), after a confirmation that says what goes and how many open tabs close;
+**Restore Last Deleted Entry** puts this session's latest deletion back without replacing anything (the desktop's trash
+can restore it too). **Delete Permanently in Explorer…** is a separate command and confirmation. Where no trash can be
+used (another platform, a file system without one) Delete says so and removes nothing. A document with unsaved changes,
+a running or unconfirmed save, or an undecided recovered draft refuses both, so unsaved work is never deleted with its
+file, and deleted work is not offered back by draft recovery.
+
 The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
 in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
 See the [Reader controls](code/tui.md) and [focused verification limits](research/reader-saved-comparison.md).
