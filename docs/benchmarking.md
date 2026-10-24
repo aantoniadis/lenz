@@ -236,3 +236,18 @@ can terminate Xvfb while it writes the newline. The helper has a deadline and re
 invalid messages. This setup fix leaves application timing endpoints and workload version unchanged.
 
 The runner's `WORKLOAD_VERSION` is currently **6**. `--compare` refuses results saved with a different workload version; save a new baseline instead of comparing across versions. Version 3 requires the commit inspection modal's author/email line before reporting readiness, and uses the outside-Git merge fixture described above. Version 4 cycles all four Scroll Modes in the GUI diff scenario, so its find phases run in Shared again (version 3 left them in Independent). Version 5 reports the physical footprint instead of the `ps` resident size on macOS, and samples the terminal independent-views `initial` memory before its 4K fixtures are encoded; Linux metrics are unchanged except that `initial`. Version 6 runs the `syntax/*` and `decode/*` workloads from the `lenz-content` test binary, which on macOS uses the system allocator rather than the binaries' `LargeBlocks`; Linux workloads are unchanged.
+
+
+### Reader editor batch: actual-scroll workload v2
+
+The 11–18 batch retains the existing probe's native frame-interval endpoint, but distinguishes workload inputs.
+A single logical line reaches the probe's logical-end branch and requests `Scroll(0)`, even with soft wrap;
+those historical intervals are repaint-only. Actual-scroll workload v2 uses 2,000 distinct source lines,
+checks repeated changes in the owned native source crop, and preserves exact fixture bytes. Crop observation
+is a correctness assertion, not input/display latency. Its frame cadence still comes from the existing probe.
+
+The batch's separate new-action release harness calls Session commands: 200 edits, Undo/Redo and one Save
+through confirmation/backing compaction. It is candidate-only; production typing remains gated. Its Save endpoint
+includes 100 µs completion polling, and it does not measure physical storage durability latency. See the
+[batch measurement report](research/reader-editor-batch-11-18-performance.md) for exact identities, raw phases,
+actual durations, retained failures and unverified endpoints. Collector self-checks run after the quiet window.

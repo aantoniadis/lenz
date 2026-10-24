@@ -1719,3 +1719,24 @@ and inconclusive experiments, exact sources and raw evidence are linked from the
 [batch report](research/reader-snapshot-batch-08-10.md). Measurements precede the final
 narrow caret repair. Native macOS and physical-display/GPU claims remain unverified.
 Full validation and stress will run once after each batch of several tickets.
+
+
+## Reader drafts, Save and captured queries — batch 11/12/13/16/18 (2026-10-24)
+
+The [detailed performance report](research/reader-editor-batch-11-18-performance.md) compares exact
+`bb162738`/`bb2f55f4` release binaries. Correctness is recorded separately in the
+[batch report](research/reader-editor-batch-11-18.md). **New measured costs await an explicit decision.**
+
+| Approach or experiment | Outcome and evidence | Limit or next step |
+|---|---|---|
+| Snapshot-only current ownership, exact-read Save provenance and captured query continuations | Required behavior is implemented. Core first text adds 35/405 µs at 50,400/945,000 bytes; TUI content 7.900→12.075ms, cached switches 5.020→6.362µs. Load provenance adds raw hashing/ending and identity work; exclusive attribution is unproven. | Do not infer preservation from unchanged syntax readiness or GUI cadence. |
+| Mixed three-minute core campaign | Candidate passes guards but completes 992,200 iterations versus 1,239,150 in the passing baseline repeat, with settled/peak RSS 20.39/34.61→22.07/36.31MiB. | Throughput reduction and CPU cost remain part of the pending decision. |
+| Original baseline memory-trend failure | Retained: 18.86→21.24MiB and late close-together samples all above earlier maximum. Only that failed workload was repeated; the repeat passes unchanged assertions with similar throughput. | Neither allocator retention nor a leak is proved; no threshold relaxation. |
+| Treat single-line native probe as scrolling | Rejected. Logical-end handling issues `Scroll(0)`; retained intervals describe repaint. Workload-v2 uses 2,000 lines and 30 distinct source crops per mode/build. Actual native intervals remain near 48 ms on the software display. | Physical frame pacing and CPU headroom remain unverified. |
+| Average TUI residency bands into one preservation claim | Rejected. Original settled 37.73→46.42MiB; short zero-stress replays retain candidate 37.59 and 46.10–46.41MiB bands. Phase rows put most of the difference in anonymous residency after Find/reload. | Live owners versus allocator residency remains a follow-up; do not label RSS a leak. |
+| Infer frontend editing performance from new command timings | Rejected. Candidate-only Session harness records 200 edits (median 15.65 µs), Undo/Redo 25.36/24.36 µs and one 0.807 ms Save, with exact disk/history/weak-release assertions. | Production typing/IME remains gated; one tmpfs Save is not storage-throughput evidence. |
+| Initial auxiliary harness/parser errors | Preserved and corrected: one missing Arc conversion blocked compilation; an empty kernel-status field suppressed first diagnostic phase rows. Canonical PTY checks and the corrected parser self-check pass. | No passed stress was repeated for either correction. |
+
+Timing ended before documentation work and other builds resumed. All sources, executables, commands, durations,
+raw samples and failed attempts remain under `target/perf/editor-implementation/merge-11-18/performance/`.
+Native macOS/Windows, physical presentation, GPU allocations, real providers and long sessions remain unverified.
