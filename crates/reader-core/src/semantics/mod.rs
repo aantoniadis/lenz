@@ -826,8 +826,9 @@ impl Semantics {
                             "synchronization": { "dynamicRegistration": false },
                             "definition": { "linkSupport": true },
                             "references": {},
-                            // Plain insert text only: snippets and resolved edits are not applied yet.
-                            "completion": { "dynamicRegistration": false, "contextSupport": true, "completionItem": { "snippetSupport": false } },
+                            // Snippet bodies are expanded (their placeholders visited by Tab); resolved additional
+                            // edits are still refused (ticket 39).
+                            "completion": { "dynamicRegistration": false, "contextSupport": true, "completionItem": { "snippetSupport": true } },
                             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                             "typeHierarchy": { "dynamicRegistration": false },
                             // typescript-language-server offers call hierarchy only to a client that declares it.

@@ -15,13 +15,17 @@ pub(crate) struct IndentUnit {
     pub(crate) text: String,
     /// What one step removes at most: a tab counts `tab_width` columns, spaces one each.
     pub(crate) width: usize,
+    /// The style and size themselves, for text that carries its own indentation (a snippet's inserted lines).
+    pub(crate) style: crate::preferences::Style,
+    pub(crate) size: usize,
 }
 
 impl IndentUnit {
     pub(crate) fn new(style: crate::preferences::Style, size: u8, tab_width: u8) -> Self {
+        let size = usize::from(size.max(1));
         match style {
-            crate::preferences::Style::Tab => Self { text: "\t".into(), width: usize::from(tab_width.max(1)) },
-            crate::preferences::Style::Space => Self { text: " ".repeat(usize::from(size.max(1))), width: usize::from(size.max(1)) },
+            crate::preferences::Style::Tab => Self { text: "\t".into(), width: usize::from(tab_width.max(1)), style, size },
+            crate::preferences::Style::Space => Self { text: " ".repeat(size), width: size, style, size },
         }
     }
 }

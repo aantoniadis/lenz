@@ -216,7 +216,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   subsequence match) and the GUI/TUI clone the shown labels per frame. Lists are provider-bounded, not capped
   by the reader; check large lists (for example rust-analyzer flyimport) in the batch measurements.
 - **Server commands on items:** the parameter-hint/suggest client commands are ignored rather than run; other
-  commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
+  commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits). Snippet
+  bodies are expanded since ticket 30 ([snippets](research/reader-snippets.md)); imports and resolve remain refused.
 - **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
   the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.
 
@@ -554,3 +555,49 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   comparison tab bar were not exercised; the GUI checks ran on the GPUI test platform under an owned display. The
   terminal checks used a Ratatui test backend, not a physical terminal, so real tab-bar truncation and key delivery
   are unverified. No performance measurement, stress run or benchmark was made for this ticket.
+
+## Snippets (ticket 30, 2026-10-24)
+
+- **Only completion items supply bodies:** the client now declares `snippetSupport: true`, so language servers send
+  snippet text for their own triggers. There is no snippet library, trigger-word expansion or user-defined snippet,
+  and `Command::InsertSnippet` (the shared entry point) is dispatched only by tests today; a menu that offers named
+  snippets would need a source for the bodies and a decision about where they live (settings, project file).
+- **What is refused rather than approximated:** snippet variables (`${TM_FILENAME}` and any all-capitals name),
+  transforms (`${1/re/format/}`), nested placeholders, an unterminated placeholder or choice, an empty `${}`, and
+  `$0` with text. Each is listed with its reason and inserts nothing. Nested defaults are common in a few servers'
+  refactor snippets; supporting them needs a nested stop model where visiting the outer stop leaves the inner one
+  still to visit.
+- **`${1|one,two|}` picks the first choice silently:** there is no chooser, and the remaining choices are lost. A
+  chooser would be a popup or a status-bar toggle with its own modal rules.
+- **Mirroring is only at stop boundaries:** a repeated placeholder inserts the same text at every occurrence (the
+  first default written for its key) and one stop selects all occurrences, so typing replaces them in one
+  transaction. Typing in one occurrence *before* Tab does not mirror to the others, unlike VS Code's linked mode;
+  that needs per-occurrence link state through the edit transform and history.
+- **A placeholder typed over collapses:** after typing inside a stop, the stop's range follows the edit exactly as
+  the selection does, so it becomes a caret after the typed text; Shift+Tab back to it selects nothing. Keeping the
+  typed text selected on return would need the stop to remember the text it now holds, separate from the selection.
+- **Undo ends the snippet instead of remapping it:** placeholder positions are mapped through the edits of the live
+  tab (the same transform the selections take), and Undo/Redo, Reload, another tab, a caret move, read-only mode or a
+  preview simply end it. That is why stale positions cannot be visited, but it also means Undo of a typing step does
+  not return to the placeholder it was typed in.
+- **One snippet at a time:** inserting a body with several carets is refused with a reason, because one Tab cannot
+  visit two sets of placeholders. Fanning one body across selections with independent stops would need a stop per
+  insertion and a way to say which Tab moves.
+- **Suspected cost, unmeasured:** every snippet suggestion is parsed once when the reply arrives (so the list can
+  say whether it is expandable), and that parsed body is kept in the suggestion until it is accepted or replaced;
+  acceptance expands it into one `String` plus its stops. A large `isIncomplete` list therefore holds one small node
+  tree per item until the next reply. Include a completion reply with many snippet items in the scheduled batch
+  measurements before changing that lifetime or streaming the expansion.
+- **Terminal delivery of Tab is the terminal's:** Tab is a fixed editing key in both adapters (not a keymap chord),
+  so the snippet path is reachable wherever Tab reaches Lenz; a terminal that sends Tab only as focus movement
+  never gets here, and Ctrl+Space for completion is often NUL. The palette's **Code Completion** and the Tab key in
+  source input are the routes; there is no separate "next placeholder" command in the menus.
+- **Observed test flake (not attributed):** the `semantics` completion filter reported one failure twice while the
+  GUI and terminal suites and their nested `fake_lsp` build were running concurrently (16.6 s for the filter rather
+  than ~2.3 s), but the failing test's name was not captured. It passed 6 of 6 runs alone or with four `semantics`
+  filters in parallel. A likely suspect is one of the tests that waits 700 ms for a late reply
+  (`dismissed_or_left_completion_is_not_reopened_by_its_late_reply`), which was not confirmed. No cause or fix is
+  claimed and the test was not changed.
+- **Unverified:** native macOS and Wayland GUI editing remain gated, so their key delivery was not exercised; the
+  GUI checks ran on the GPUI test platform under an owned display and the terminal checks in a Ratatui test backend,
+  not a physical terminal. No performance measurement, stress run or benchmark was made for this ticket.

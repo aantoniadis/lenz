@@ -244,6 +244,13 @@ impl Fake {
         items.push(json!({ "label": "with_import", "kind": 3, "textEdit": { "range": range, "newText": "with_import" },
             "additionalTextEdits": [{ "range": { "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 0 } }, "newText": "use extra::with_import;\n" }] }));
         items.push(json!({ "label": "snippet_call", "kind": 15, "insertTextFormat": 2, "insertText": "snippet_call(${1:x})" }));
+        // Placeholders out of numeric order, a final caret and an indented continuation line, as a refactor would.
+        items.push(json!({ "label": "snippet_block", "kind": 15, "insertTextFormat": 2,
+            "textEdit": { "range": range, "newText": "if ${2:cond} {\n\t${1:body}();\n}$0" } }));
+        // One placeholder written three times: every occurrence is one stop.
+        items.push(json!({ "label": "snippet_repeat", "kind": 15, "insertTextFormat": 2, "insertText": "$1 + $1 = ${1:sum}" }));
+        // A body this client will not expand: the list says why and accepting it changes nothing.
+        items.push(json!({ "label": "snippet_nested", "kind": 15, "insertTextFormat": 2, "insertText": "${1:outer ${2:inner}}" }));
         items.retain(|i| i["label"].as_str().is_some_and(|label| label.to_lowercase().starts_with(&prefix)));
         Some(json!({ "isIncomplete": false, "items": items }))
     }

@@ -64,6 +64,11 @@ native macOS validation is pending. The Reader edits existing files on verified 
   then the project's choice), Ctrl+/ toggles comments, Ctrl+Shift+Down/Up move lines (VS Code keymap: Alt+Down/Up)
   and Alt+Shift+Down/Up duplicate them—each action one Undo step, with line endings kept exactly. Typing a bracket or
   quote wraps a selection or opens the pair, and the closer already there is stepped over.
+- **Complete and expand snippets**: the language server's completion popup opens as you type or on Ctrl+Space, Tab
+  or Enter accepts and Esc dismisses. A snippet suggestion expands with the file's indentation, and Tab then visits
+  its placeholders (`$1`, `$2`, …, `$0` last; a placeholder written twice is selected in both places at once) until
+  Escape, a caret move, another tab or Undo ends it; the status bar names the placeholder and the keys. Bodies with
+  snippet variables, transforms or nested placeholders are refused with their reason instead of inserting half.
 - **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
   **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the
   terminal. A shortcut a terminal cannot deliver leaves its command in the command menu.

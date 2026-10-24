@@ -107,6 +107,10 @@ impl Session {
         if let Some(notice) = state.notices().last() {
             return notice.clone();
         }
+        // A live snippet says which placeholder Tab is on, in both adapters, until it ends.
+        if let Some(snippet) = self.snippet_hint() {
+            return snippet;
+        }
         if let Some(provider) = state
             .provider()
             .filter(|p| matches!(p.status, Status::Missing(_) | Status::Failed(_)))
@@ -138,6 +142,18 @@ impl Session {
             || "No file open — Ctrl+O file, F10 commands".into(),
             |d| shown_name(state, d),
         )
+    }
+
+    /// The live snippet's placeholder and what the keys do now, while Tab visits its placeholders rather than
+    /// indenting (`None`: no snippet is live).
+    pub fn snippet_hint(&self) -> Option<String> {
+        let live = self.state().snippet()?;
+        let (stop, count) = (live.stop(), live.stop_count());
+        Some(if live.at_end() {
+            format!("Snippet: placeholder {stop} of {count} · Tab ends · Esc done")
+        } else {
+            format!("Snippet: placeholder {stop} of {count} · Tab next · Esc done")
+        })
     }
 
     /// The caret line's change marker in words (`Modified from HEAD (main · 1a2b3c4)`), when it has one.

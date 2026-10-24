@@ -2795,13 +2795,15 @@ fn unavailable_completion_says_why_and_never_applies_part_of_a_suggestion() {
     assert!(f.notice("import or other extra edits"));
     assert_eq!(current_text(f.s.state()), text, "neither the name nor the import is applied");
     f.s.dispatch(Command::CloseCompletion);
-    // A snippet is refused the same way.
-    f.type_text(" snip");
+    // A snippet body this client cannot expand is listed with its reason and changes nothing.
+    f.type_text(" snippet_n");
     f.settle(|s| s.state().completion().is_some());
-    assert_eq!(f.labels(), ["snippet_call"]);
+    assert_eq!(f.labels(), ["snippet_nested"]);
+    let row = f.s.state().completion().unwrap().rows().next().unwrap().clone();
+    assert_eq!(row.unavailable, Some("Snippet placeholders cannot contain another placeholder"));
     let before = current_text(f.s.state());
     f.s.dispatch(Command::AcceptCompletion);
-    assert!(f.notice("Snippet suggestions are not supported yet"));
+    assert!(f.notice("cannot contain another placeholder"));
     assert_eq!(current_text(f.s.state()), before);
     // No provider for the language: the command is unavailable and says so.
     f.s.dispatch(Command::Open(f.root.join("notes.txt")));
@@ -2811,6 +2813,65 @@ fn unavailable_completion_says_why_and_never_applies_part_of_a_suggestion() {
     f.s.dispatch(Command::Complete);
     assert!(f.notice("Code completion: No language server for this language"));
 }
+
+#[test]
+fn a_snippet_suggestion_expands_in_placeholder_order_and_tab_visits_its_stops() {
+    let text = "fn main() {  }\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text)]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("{  }").unwrap() + 2;
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.type_text("snippet_bl");
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["snippet_block"]);
+    assert_eq!(f.s.state().completion().unwrap().rows().next().unwrap().unavailable, None, "a supported body is offered");
+    f.s.dispatch(Command::AcceptCompletion);
+    assert!(f.s.state().completion().is_none());
+    assert_eq!(current_text(f.s.state()), "fn main() { if cond {\n    body();\n} }\n",
+        "the body replaces the typed word, its tab becoming Rust's four spaces and its name kept on the line");
+    assert_eq!(f.selected_text(), "body", "the first placeholder (number 1) is selected, not the one written first");
+    assert_eq!(f.s.snippet_hint().as_deref(), Some("Snippet: placeholder 1 of 3 · Tab next · Esc done"));
+    f.s.dispatch(Command::Indent { outdent: false });
+    assert_eq!(f.selected_text(), "cond", "Tab visits the next numbered placeholder");
+    f.s.dispatch(Command::Indent { outdent: false });
+    assert_eq!(f.s.state().selection().unwrap().range(), 35..35, "then the final caret, at $0");
+    f.s.dispatch(Command::Indent { outdent: false });
+    assert_eq!(f.s.snippet_hint(), None, "and the last Tab ends the snippet");
+    assert_eq!(current_text(f.s.state()), "fn main() { if cond {\n    body();\n} }\n");
+    let tab = f.s.state().active().unwrap().id();
+    f.s.dispatch(Command::Undo { tab });
+    assert_eq!(current_text(f.s.state()), "fn main() { snippet_bl }\n", "one Undo takes the whole expansion back");
+    assert_eq!(text_of(&f, "src/main.rs"), text, "the file is never written");
+}
+
+#[test]
+fn a_repeated_snippet_placeholder_is_one_stop_and_typing_changes_every_occurrence() {
+    let text = "fn main() {  }\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text)]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("{  }").unwrap() + 2;
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.type_text("snippet_re");
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["snippet_repeat"]);
+    f.s.dispatch(Command::AcceptCompletion);
+    assert_eq!(current_text(f.s.state()), "fn main() { sum + sum = sum }\n");
+    let ranges = |s: &Session| { let doc = s.state().current_source().unwrap(); let mut r: Vec<_> = s.state().active().unwrap().selections().map(|s| s.range()).collect(); r.sort_by_key(|r| r.start); r.into_iter().map(|r| (r.start, doc.copy_range(r).unwrap())).collect::<Vec<_>>() };
+    assert_eq!(ranges(&f.s), [(12, "sum".into()), (18, "sum".into()), (24, "sum".into())], "one stop selects every occurrence");
+    // Typed text goes where every selection is, as the adapters send it (one transaction).
+    f.s.dispatch(Command::InsertText { text: "t".into(), kind: reader_core::text::EditKind::Typing });
+    assert_eq!(current_text(f.s.state()), "fn main() { t + t = t }\n", "typing replaces every occurrence in one transaction");
+    f.s.dispatch(Command::Indent { outdent: false });
+    assert_eq!(f.s.state().selection().unwrap().range(), 21..21, "the final caret follows the shortened text");
+    let tab = f.s.state().active().unwrap().id();
+    f.s.dispatch(Command::Undo { tab });
+    assert_eq!(current_text(f.s.state()), "fn main() { sum + sum = sum }\n", "one Undo takes the typing back");
+    assert_eq!(f.s.snippet_hint(), None, "an undo ends the snippet rather than keeping old positions");
+}
+
+fn text_of(f: &Fixture, name: &str) -> String { std::fs::read_to_string(f.root.join(name)).unwrap() }
 
 #[test]
 fn a_server_without_completion_is_reported_as_unavailable() {

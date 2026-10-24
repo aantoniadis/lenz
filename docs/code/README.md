@@ -138,7 +138,9 @@ repository; its first query of a session takes seconds); launch and memory are u
 documentation in a popup (Documentation on Hover in the command menu turns that off), and the other occurrences of the
 name at the caret are tinted. While editing, typing a name opens the server's completion popup (Ctrl+Space or
 **Code Completion** asks; **Completion While Typing** turns the automatic popup off): Tab or Enter accepts, Escape
-dismisses, punctuation just types ([limits](../research/reader-completion.md)). Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
+dismisses, punctuation just types ([limits](../research/reader-completion.md)). A snippet suggestion expands with the
+file's indentation and Tab then visits its placeholders until Escape, a caret move, another tab or Undo ends it
+([snippets](../research/reader-snippets.md)). Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
 provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. The toolbar keeps navigation and frequent file/search actions above the tabs, with a visible app menu.
 The footer separates language-server status, the current message, cursor position and Commands.
 Long messages end with an ellipsis; click the message or use **Status details…** (Shift+F2)
