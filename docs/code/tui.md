@@ -160,7 +160,7 @@ each (**Selection** menu, F10 and the palette in both adapters; the GUI has the 
   endings and a missing final newline are preserved byte for byte—so the last line of a file has no line below it
   and the commands say "Already on the last line" / "Already on the first line" there.
 - Typing an opening delimiter wraps a selection (`(` around `x` gives `(x)` with `x` still selected) or opens a pair
-  with the caret between (`{}`, `[]`, `""`, `''`, ` `` `); the closing delimiter already in front of the caret is
+  with the caret between (`{}`, `[]`, `""`, `''` or a backtick pair); the closing delimiter already in front of the caret is
   stepped over rather than doubled, a quote after a word stays an apostrophe, and no pair is opened in front of a
   word or in Markdown, YAML or TOML. Pasting is always literal. Comment toggling and pairs read the language and the
   characters around the caret only; they do not parse strings, so a selection inside a multi-line string is
