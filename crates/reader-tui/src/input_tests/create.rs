@@ -24,7 +24,7 @@ fn explorer_new_file_and_folder_use_real_keys_and_the_core_rules() {
     tree_right_click(&mut app, "src");
     assert!(matches!(app.modal.as_ref().map(|m| &m.kind), Some(Prompt::Context { .. })), "{:?}", app.modal.as_ref().map(|m| &m.kind));
     let labels: Vec<String> = app.choices().into_iter().map(|c| c.label).collect();
-    assert_eq!(labels, ["New File in Explorer…", "New Folder in Explorer…"]);
+    assert_eq!(labels, ["New File in Explorer…", "New Folder in Explorer…", "Rename in Explorer…", "Move in Explorer…"]);
     assert!(app.choices().iter().all(|c| c.disabled.is_none()));
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     assert!(matches!(app.modal.as_ref().map(|m| &m.kind), Some(Prompt::Create { kind: reader_core::create::Kind::File, dir }) if dir == "src"));
@@ -81,3 +81,43 @@ fn explorer_new_file_and_folder_use_real_keys_and_the_core_rules() {
 }
 
 fn p_or_dir(row: &reader_core::project::TreeRow) -> (String, Option<bool>) { (row.path.to_string(), row.dir) }
+
+#[test]
+fn explorer_rename_and_move_use_the_row_menu_and_survive_tiny_terminals() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("src/a.txt"), b"keep\n").unwrap();
+    let mut app = App::new(config(dir.path()), Some(dir.path().to_owned()));
+    app.enable_draft_input_for_test();
+    settle(&mut app, |a| a.session.state().project().is_some_and(|p| !p.refreshing() && p.rows().iter().any(|r| &*r.name == "src")));
+    app.dispatch(Command::OpenRetained(dir.path().join("src/a.txt")));
+    app.dispatch(Command::RevealInTree("src/a.txt".into()));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    draw(&mut app, 100, 20);
+    // The file's row menu: Rename is its third entry.
+    tree_right_click(&mut app, "src/a.txt");
+    let at = app.choices().iter().position(|c| c.label == "Rename in Explorer…").unwrap();
+    for _ in 0..at { key(&mut app, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(app.modal.as_ref().map(|m| &m.kind), Some(Prompt::Relocate { kind: reader_core::relocate::Kind::Rename, from }) if from == "src/a.txt"));
+    assert_eq!(app.modal.as_ref().unwrap().input, "a.txt");
+    for (w, h) in [(1, 1), (12, 4), (100, 20)] {
+        draw(&mut app, w, h);
+        key(&mut app, KeyCode::End, KeyModifiers::NONE);
+        key(&mut app, KeyCode::Up, KeyModifiers::NONE);
+    }
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(app.modal.is_none(), "Escape dismisses the prompt");
+    assert_eq!(std::fs::read(dir.path().join("src/a.txt")).unwrap(), b"keep\n");
+    assert_eq!(text(&app), "keep\n", "nothing behind the prompt changed");
+    // Typed for real: the file and its tab move together.
+    app.run(CommandId::RenameExplorerEntry);
+    for _ in 0..5 { key(&mut app, KeyCode::Backspace, KeyModifiers::NONE); }
+    for c in "b.txt".chars() { key(&mut app, KeyCode::Char(c), KeyModifiers::NONE); }
+    key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+    draw(&mut app, 100, 20);
+    assert!(app.modal.is_none());
+    assert_eq!(app.session.state().active().unwrap().source(), dir.path().join("src/b.txt"));
+    assert_eq!(std::fs::read(dir.path().join("src/b.txt")).unwrap(), b"keep\n");
+    assert!(!dir.path().join("src/a.txt").exists());
+}

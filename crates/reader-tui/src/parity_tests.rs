@@ -2753,6 +2753,123 @@ fn explorer_creation_of_a_file_and_a_folder_matches_in_both_adapters(cx: &mut Te
 }
 
 #[gpui::test]
+fn explorer_rename_and_move_carry_the_draft_identically_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = [dir.path().join("gui"), dir.path().join("tui")];
+    for root in &roots {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("lib")).unwrap();
+        std::fs::write(root.join("src/a.txt"), b"saved\n").unwrap();
+        std::fs::write(root.join("src/b.txt"), b"other\n").unwrap();
+        std::fs::write(root.join("lib/keep.txt"), b"keep\n").unwrap();
+    }
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui-state"))), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    gui.update(&mut visual, |v, cx| v.open_root(roots[0].clone(), cx));
+    let mut tui = App::new(config(&dir.path().join("tui-state")), Some(roots[1].clone()));
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle_until = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !gui.read_with(visual, |v, _| done(v.session().state())) || !done(tui.session.state()) {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::yield_now();
+        }
+    };
+    let scanned = |s: &State| s.project().is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_)));
+    settle_until(&mut visual, &mut tui, &scanned);
+    // The same document in each: a.txt, with a typed draft that is never written by a move.
+    for (i, root) in roots.iter().enumerate() {
+        let open = Command::OpenRetained(root.join("src/a.txt"));
+        if i == 0 { gui.update(&mut visual, |v, cx| v.dispatch_for_test(open, cx)); } else { tui.dispatch(open); }
+    }
+    settle_until(&mut visual, &mut tui, &|s: &State| s.current_source().is_some_and(|d| d.source().ends_with("src/a.txt")));
+    visual.simulate_keystrokes("x");
+    key(&mut tui, KeyCode::Char('x'), KeyModifiers::NONE);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap() == "xsaved\n"));
+    // Each adapter's own highlighted row, which its command hands to the core.
+    let highlight = |visual: &mut VisualTestContext, tui: &mut App, row: &str| {
+        gui.update(visual, |v, cx| { v.dispatch_for_test(Command::RevealInTree(row.into()), cx); v.tree_sel = Some(row.into()); });
+        tui.dispatch(Command::RevealInTree(row.into()));
+        tui.tree_at = tui.session.state().tree_rows().position(|r| &*r.path == row).expect("the row is listed");
+    };
+    let type_both = |visual: &mut VisualTestContext, tui: &mut App, erase: usize, text: &str| {
+        for _ in 0..erase {
+            visual.simulate_keystrokes("backspace");
+            key(tui, KeyCode::Backspace, KeyModifiers::NONE);
+        }
+        for c in text.chars() {
+            visual.simulate_keystrokes(&c.to_string());
+            key(tui, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    };
+    // Rename: each dialog starts with the current name; a taken name is refused in the dialog itself.
+    highlight(&mut visual, &mut tui, "src/a.txt");
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::RenameExplorerEntry, w, cx));
+    tui.run(CommandId::RenameExplorerEntry);
+    assert_eq!(tui.modal.as_ref().map(|m| m.input.as_str()), Some("a.txt"));
+    assert!(gui.read_with(&visual, |v, _| matches!(&v.modal, Some(reader_gui::Modal::Relocate { input, .. }) if input == "a.txt")));
+    type_both(&mut visual, &mut tui, 5, "b.txt");
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(tui.modal.as_ref().and_then(|m| m.error.as_deref()), Some("src/b.txt already exists"));
+    assert!(gui.read_with(&visual, |v, _| matches!(&v.modal, Some(reader_gui::Modal::Relocate { error: Some(e), .. }) if e == "src/b.txt already exists")));
+    type_both(&mut visual, &mut tui, 5, "c.md");
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let renamed = |s: &State| s.active().is_some_and(|t| t.title() == "c.md");
+    settle_until(&mut visual, &mut tui, &renamed);
+    assert!(tui.modal.is_none() && gui.read_with(&visual, |v, _| v.modal.is_none()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    for root in &roots {
+        assert!(!root.join("src/a.txt").exists());
+        assert_eq!(std::fs::read(root.join("src/c.md")).unwrap(), b"saved\n", "a move never writes the draft");
+        assert_eq!(std::fs::read(root.join("src/b.txt")).unwrap(), b"other\n");
+    }
+    // Move: the dialog starts with the current folder; the draft follows into lib.
+    highlight(&mut visual, &mut tui, "src/c.md");
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::MoveExplorerEntry, w, cx));
+    tui.run(CommandId::MoveExplorerEntry);
+    assert_eq!(tui.modal.as_ref().map(|m| m.input.as_str()), Some("src"));
+    type_both(&mut visual, &mut tui, 3, "lib");
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.active().is_some_and(|t| t.source().ends_with("lib/c.md")));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    assert!(tui.session.state().tab_dirty(tui.session.state().active().unwrap().id()));
+    // A whole folder: its open file follows too, and Escape in a dialog moves nothing.
+    highlight(&mut visual, &mut tui, "lib");
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::RenameExplorerEntry, w, cx));
+    tui.run(CommandId::RenameExplorerEntry);
+    visual.simulate_keystrokes("escape");
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    for root in &roots { assert!(root.join("lib/c.md").exists()); }
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::RenameExplorerEntry, w, cx));
+    tui.run(CommandId::RenameExplorerEntry);
+    type_both(&mut visual, &mut tui, 3, "docs");
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.active().is_some_and(|t| t.source().ends_with("docs/c.md")));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    for root in &roots {
+        assert_eq!(std::fs::read(root.join("docs/c.md")).unwrap(), b"saved\n");
+        assert_eq!(std::fs::read(root.join("docs/keep.txt")).unwrap(), b"keep\n");
+        assert!(!root.join("lib").exists());
+    }
+    // Save writes the moved document where it is now, in both.
+    visual.simulate_keystrokes("ctrl-s");
+    key(&mut tui, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.active().is_some_and(|t| !s.tab_dirty(t.id())));
+    for root in &roots { assert_eq!(std::fs::read(root.join("docs/c.md")).unwrap(), b"xsaved\n"); }
+}
+
+#[gpui::test]
 fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_undo(cx: &mut TestAppContext) {
     use lenz_content::git::testing::{commit_all, repo, write};
     let make = || {
