@@ -287,13 +287,44 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering() {
 }
 
 #[test]
+fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket() {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use reader_core::{close::Choice, save::Status};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let d = tempfile::tempdir().unwrap(); let path = d.path().join("fresh-close.txt");
+        std::fs::write(&path, b"saved").unwrap();
+        let mut a = app(d.path()); a.dispatch(Command::OpenRetained(path.clone()));
+        settle(&mut a, |a| a.session.state().current_source().is_some());
+        a.enable_draft_input_for_test(); draw(&mut a, 80, 12);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("draft λ".into()));
+        let tab = a.session.state().active().unwrap().id();
+        key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL); let old = a.session.close_prompt().unwrap();
+        let guard = at_path(&path, fault); key(&mut a, KeyCode::Char('s'), KeyModifiers::NONE);
+        settle(&mut a, |a| matches!(a.session.state().view(tab).unwrap().save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+        drop(guard); assert!(a.session.close_prompt().is_none());
+        let disk = std::fs::read(&path).unwrap();
+        assert_eq!(disk, if fault == Fault::AfterReplace { "draft λ".as_bytes() } else { b"saved" });
+        key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL);
+        let fresh = a.session.close_prompt().unwrap();
+        assert!(fresh.ticket > old.ticket && fresh.discard_disabled.is_none());
+        if fault == Fault::AfterReplace { assert!(draw_screen(&mut a, 80, 12).contains("Discard Draft and Close")); }
+        a.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Discard });
+        assert_eq!(a.session.close_prompt().unwrap().ticket, fresh.ticket);
+        assert!(a.session.state().view(tab).unwrap().dirty() && a.session.state().view(tab).unwrap().can_undo());
+        key(&mut a, KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(a.session.state().active().is_none() && a.modal.is_none());
+        assert_eq!(std::fs::read(path).unwrap(), disk);
+    }
+}
+
+#[test]
 fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk() {
     use lenz_content::write::readiness_fault::{at_path,Fault};
     use reader_core::save::{DiskMatch,Status};
     for changed in [false,true] {
         let d=tempfile::tempdir().unwrap();let path=d.path().join("close.txt");std::fs::write(&path,b"saved").unwrap();let mut a=app(d.path());a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());a.enable_draft_input_for_test();draw(&mut a,80,12);
         key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);a.handle(Event::Paste("draft λ".into()));let tab=a.session.state().active().unwrap().id();let guard=at_path(&path,Fault::AfterReplace);key(&mut a,KeyCode::Char('s'),KeyModifiers::CONTROL);settle(&mut a,|a|matches!(a.session.state().view(tab).unwrap().save_status(),Status::Uncertain(_)));
-        key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);assert!(a.session.state().active().is_some());assert!(a.session.close_prompt().unwrap().discard_disabled.is_some());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);drop(guard);
+        key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);assert!(a.session.state().active().is_some());assert!(a.session.close_prompt().unwrap().discard_disabled.is_none());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);drop(guard);
         if changed {std::fs::write(&path,b"external content").unwrap();}let disk=std::fs::read(&path).unwrap();
         key(&mut a,KeyCode::F(10),KeyModifiers::NONE);draw(&mut a,80,12);let row=a.choices().iter().position(|row|matches!(&row.target,ChoiceTarget::Action(CommandId::RecheckSave))).unwrap();for _ in 0..row {key(&mut a,KeyCode::Down,KeyModifiers::NONE);}key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
         settle(&mut a,|a|matches!(a.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(a.session.state().view(tab).unwrap().save_status(),&Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(a.session.state().tab_dirty(tab));
@@ -324,8 +355,8 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe() 
         assert_eq!(std::fs::read(&path).unwrap(), disk); key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
         if fault==Fault::AfterReplace {
             let before=a.session.state().current_source().unwrap().key();key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);
-            let p=a.session.close_prompt().unwrap();assert!(p.save_disabled.is_some() && p.discard_disabled.is_some());
-            key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);key(&mut a,KeyCode::Char('s'),KeyModifiers::NONE);
+            let p=a.session.close_prompt().unwrap();assert!(p.save_disabled.is_some() && p.discard_disabled.is_none());
+            key(&mut a,KeyCode::Char('s'),KeyModifiers::NONE);
             assert_eq!(a.session.state().current_source().unwrap().key(),before);assert!(a.session.close_prompt().is_some());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);
         }
         drop(guard);

@@ -69,13 +69,17 @@ controls can receive input. Reader modals also consume view-switching and quit k
 in the palette opens an independent terminal view. Ctrl-Shift-Q requests closure of all views in terminals that report it.
 Before removing the last view of an unsaved draft, choose **Save** (`s`), **Discard** (`d`) or **Cancel** (Esc).
 All-view closure prepares every session before removing any; Cancel keeps every view and draft. An earlier
-explicit Save remains on disk even if another view cancels. Failed or uncertain Save cancels the pending close. After an uncertain result, **Recheck Saved File** must finish for the current draft before a fresh
-Discard decision. Discard leaves disk untouched, including when recheck finds different disk content. Another Save
-still requires **Confirm Rechecked Save**; a changed disk result cannot be confirmed for Save.
+explicit Save remains on disk even if another view cancels. Failed or uncertain Save cancels the pending close.
+After an uncertain result, a fresh actual tab, split, window or all-view close offers **Discard Draft and Close**
+without requiring a disk recheck. This discards the in-memory draft/history and leaves disk as it stands;
+it never resumes the failed close or retries Save. Recheck remains available before deciding. Another Save
+still requires **Recheck Saved File** and **Confirm Rechecked Save**; a changed disk result cannot be confirmed for Save.
 Tab closure and Close Split keep a draft whenever another accessible tab still owns it.
 
 Reload, changing folders/worktrees and checking out or creating-and-checking-out a branch use the same
-Save/Discard/Cancel decisions. Cancel retains drafts and positions; earlier confirmed Saves remain written.
+Save/Discard/Cancel decisions. Their Discard decision after an uncertain Save still requires a successful
+current-file recheck. The actual-close exception does not apply to Reload, project/Git transitions or external opens.
+Cancel retains drafts and positions; earlier confirmed Saves remain written.
 Failed or blocked Reload/checkout retains the draft and requires a fresh decision on retry. Watcher,
 focus and index refresh retain drafts and undo history, with a visible notice when disk content changes
 or becomes unavailable. Reload from a saved comparison's Current pane returns to the ordinary draft;

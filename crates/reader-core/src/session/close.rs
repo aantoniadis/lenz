@@ -101,11 +101,15 @@ impl Session {
                 path: source.source().to_owned(),
                 waiting,
                 save_disabled: self.save_buffer_disabled(fence.buffer),
+                discard_label: if pending.intent.closes_views() && entry.save.status.blocked() {
+                    "Discard Draft and Close"
+                } else { "Discard" },
                 discard_disabled: if waiting {
                     Some("Wait for the submitted operation before another close decision")
-                } else if matches!(entry.save.status, crate::save::Status::Uncertain(_))
-                    || matches!(entry.save.status, crate::save::Status::Checked(_))
-                        && current_recheck(entry).is_none()
+                } else if !pending.intent.closes_views()
+                    && (matches!(entry.save.status, crate::save::Status::Uncertain(_))
+                        || matches!(entry.save.status, crate::save::Status::Checked(_))
+                            && current_recheck(entry).is_none())
                 {
                     Some("Recheck the current file before discarding this draft")
                 } else {
