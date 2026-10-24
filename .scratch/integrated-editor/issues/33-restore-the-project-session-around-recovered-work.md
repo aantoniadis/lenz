@@ -4,7 +4,7 @@
 
 **Blocked by:** 32: Recover unsaved drafts with explicit discard tombstones.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Restore independent view state and shared buffer identity while keeping separately opened sessions independent.
 - [ ] Identify recovered/new/missing/external-changed sources and preserve the recovery decision rather than silently replacing them from disk.
