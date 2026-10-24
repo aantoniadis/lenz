@@ -67,6 +67,12 @@ ran zero GUI tests and is excluded from passing evidence.
 
 ## Equivalent release comparison
 
+The later [11–18 batch audit](reader-editor-batch-11-18-performance.md)
+found that this retained collector's single-logical-line scroll fixture requests `Scroll(0)` at its logical end.
+Its historical frame intervals therefore establish repeated repaint, not changing-viewport scroll. The newer
+workload-v2 supplement verifies actual source-crop changes; the original samples remain preserved.
+
+
 Baseline source: `1d874aee50c620c10201d0695de0e97fe140a83a`.
 Measured candidate: `5de351a9ec8c45ec530d48d5af7eb1c2954be938`.
 The latter includes the shared source-read optimization and strict logical-row bounds.

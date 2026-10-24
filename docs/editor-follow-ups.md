@@ -100,3 +100,19 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   titlebar close via an owned display at the next adapter batch boundary with
   disposable fixtures using the existing test-support draft gate. Native macOS
   termination remains ticket03/24, unverified.
+
+
+## Reader batch performance attribution (2026-10-24)
+
+- Distinguish live admitted backing from anonymous allocator residency after large-file Find/reload. The 11–18
+  campaign retains candidate TUI 37.59/46.10–46.42MiB residency bands; phase samples put most of the upper-band
+  difference in anonymous memory. Current source admission invalidates old analysis scope, and no leak or
+  exclusive allocator cause has been proved. Do not average away the upper-band cost. Evidence and attribution
+  limits are in the [batch performance report](research/reader-editor-batch-11-18-performance.md).
+
+- Deferred optimization candidate, not implemented: unchanged snapshots created by `Chunk::shared` retain the
+  original full text/index Arcs behind their chunk ranges. Investigate sharing that backing during admitted
+  `materialize_while` conversion instead of String→Arc flattening when complete contiguous coverage is verified.
+  Large originals span several ranges; do not assume a single full-range chunk or apply this to arbitrary edited
+  snapshots. Preserve source/version fences, worker admission, cancellation and edited/chunked fallback behavior.
+  This may reduce conversion allocation; it is not a measured explanation or guaranteed remedy for the RSS bands.

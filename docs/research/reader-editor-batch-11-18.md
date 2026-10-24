@@ -76,8 +76,47 @@ source crops in each mode/build. The candidate-only edit/Save harness checks exa
 disk output, backing release and history across file switching; its timings do
 not establish frontend typing performance.
 
-The detailed result report and performance decision are being finalized.
-Acceptance of earlier costs does not accept this batch's measured costs.
+The [detailed performance report](reader-editor-batch-11-18-performance.md)
+records identities, full endpoint definitions, diagnostics and limitations.
+The following medians summarize the retained measurements. Core timings pool two
+alternating runs per build; startup timings use eight pairs. RSS stress values
+come from the sustained workflows, with their sampling limits stated below.
+
+| Endpoint | Accepted baseline | Candidate |
+| --- | ---: | ---: |
+| Core first text, 50,400 bytes (`56k` fixture) | 0.104 ms | 0.139 ms |
+| Core first text, roughly 1 MiB | 0.954 ms | 1.359 ms |
+| Cached tab switch | 5.02 µs | 6.36 µs |
+| GUI first-content marker | 139.60 ms | 139.55 ms |
+| TUI first content, 100,000 lines | 7.900 ms | 12.075 ms |
+| TUI completed Go To | 1.551 ms | 1.633 ms |
+| TUI startup RSS | 15.85 MiB | 16.42 MiB |
+| TUI RSS after sustained workflow | 37.73 MiB | 46.42 MiB |
+| Core final settled RSS, passing runs | 20.39 MiB | 22.07 MiB |
+| Core three-minute iterations, passing runs | 1,239,150 | 992,200 |
+
+Core parser readiness was essentially unchanged. GUI ten-tab settled RSS was
+176.47 → 176.23 MiB in the measured runs, and the fake-definition workflow was
+3.218 → 2.163 ms; that fixture does not establish real-provider performance.
+The core stress candidate completed about 20% fewer iterations than the passing
+baseline repeat, or about 21% fewer than the original baseline attempt.
+
+TUI residency is variable: short non-timed workflow replays produced candidate
+final bands near 37.6 and 46.4 MiB, with baselines around 37.7 MiB. The upper
+band recurred; the original 8.69 MiB increase is retained as a cost, rather than
+averaged away. Phase samples put most of the rise in anonymous memory after Find
+and reload. Materialization allocations are possible contributors; these samples
+do not distinguish live ownership from allocator retention or prove a leak.
+
+New exact Save provenance performs original-byte hashing, decoded line-ending
+scanning and file identity checks before Loaded. These are verified load-path
+additions; their individual contributions to the full measured costs have not
+been isolated. Raw samples and aggregation are under
+`target/perf/editor-implementation/merge-11-18/performance/`, including
+`summary.json` and both baseline stress attempts.
+
+The performance decision is pending. Acceptance of earlier costs does not accept
+this batch's measured costs.
 
 Native macOS, physical display latency, GPU memory, crash recovery and real
 external-provider performance remain unverified. Nonblocking observations belong
