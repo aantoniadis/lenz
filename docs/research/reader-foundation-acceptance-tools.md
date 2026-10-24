@@ -56,8 +56,8 @@ fresh explicit Discard removes only the requested window. It does not use XDestr
 Surviving fixture drafts are explicitly discarded for normal last-window cleanup; failed runs reap
 only owned children and retain their logs.
 
-XKB compose maps one unused key on ONLY the private server before app startup. A native Compose+
-apostrophe+e sequence is intended to prove preedit leaves authority/history unchanged, one Unicode
+XKB compose maps one unused key to dead_acute on ONLY the private server before app startup. A native
+dead_acute+e sequence is intended to prove preedit leaves authority/history unchanged, one Unicode
 commit and one Undo. The example records bounded (≤4096-byte) authoritative prefixes and state changes;
 small fixture text is checked exactly. Screenshots and native window IDs supplement those observations.
 This observer is acceptance instrumentation, not a production typing latency endpoint.

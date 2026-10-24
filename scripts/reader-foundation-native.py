@@ -87,7 +87,7 @@ def main():
     args.out.mkdir()  # Refuse to overwrite prior evidence or fixtures.
     root = args.out.resolve()
     (root / 'runtime-dir').mkdir(mode=0o700)
-    (root / 'Compose').write_text('include "%L"\n<Multi_key> <apostrophe> <e> : "é"\n')
+    (root / 'Compose').write_text('include "%L"\n<dead_acute> <e> : "é"\n')
     report = {'schema': 1, 'source_claim': args.source, 'binary': str(binary), 'binary_sha256': sha(binary),
               'driver_sha256': sha(Path(__file__)), 'scenario': args.scenario,
               'scope': 'owned Xvfb/X11 native protocol and XTest delivery with test-support opt-in; no physical display/Wayland/Mac or production latency claim',
@@ -124,7 +124,7 @@ def main():
             mappings = connection.get_keyboard_mapping(first, last - first + 1)
             compose_code = next((first + i for i, values in enumerate(mappings) if not any(values)), last)
             old_mapping = connection.get_keyboard_mapping(compose_code, 1)
-            connection.change_keyboard_mapping(compose_code, [(0xff20, 0xff20)])  # Multi_key
+            connection.change_keyboard_mapping(compose_code, [(0xfe51, 0xfe51)])  # dead_acute has a visible native preedit prefix
             connection.sync()
             env = private_environment(os.environ, root, name)
             app = subprocess.Popen([str(binary), str(root / 'app')], cwd=root, env=env,
@@ -200,7 +200,7 @@ def main():
                 captured = state('a')['source']
                 xtest.fake_input(connection, X.KeyPress, compose_code)
                 xtest.fake_input(connection, X.KeyRelease, compose_code)
-                connection.sync(); key('apostrophe')
+                connection.sync()
                 marked = wait_for(lambda: state('a').get('marked'), '22 read-only marked-state oracle after native XKB preedit')
                 assert state('a')['source'] == captured
                 assert exact_text(state('a')) == 'draft-a'
