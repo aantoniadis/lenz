@@ -371,6 +371,13 @@ actual scrolling is now checked with changing source crops. See the
 [batch performance report](docs/research/reader-editor-batch-11-18-performance.md) for all distributions,
 RSS/ownership limits, the retained baseline failure and new Save/history measurements.
 
+The 14–23 foundation candidate passes the phased local gate and native Linux input/close checks.
+Its paired runs preserve startup/navigation and core-stress throughput, while sustained editing completes
+**5.8% fewer cycles**, with **0.048–0.319 ms** higher matched-history edit medians and **0.676 MiB**
+more TUI startup RSS. These costs await an explicit decision before activation merges; see the
+[foundation batch report](docs/research/reader-editor-foundation-batch-14-23.md) for memory phases,
+retained-history proof, source identities and unverified targets.
+
 The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
 (seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a
 60-second navigation run. Timings end at PTY bytes, and RSS excludes GPU and
