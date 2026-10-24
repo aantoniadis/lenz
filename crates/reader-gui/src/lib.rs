@@ -554,6 +554,8 @@ type NameAt = (TabId, std::ops::Range<usize>);
 /// The documentation popup's layout for one preview, its scroll, and where it was drawn.
 /// The most suggestions the completion popup shows at once (Page Up/Down moves by this many).
 pub const COMPLETION_ROWS: usize = 8;
+/// A drawn suggestion: label, detail, selected, unavailable.
+type CompletionRow = (String, String, bool, bool);
 
 pub struct DocPopup {
     layout: Arc<preview::Layout>,
@@ -2829,7 +2831,7 @@ impl ReaderView {
     /// The completion popup for this frame: under the name being completed (above it without room), clamped to
     /// the window, at most [`COMPLETION_ROWS`] rows scrolled to the selection. Per row: label, detail, selected,
     /// unavailable.
-    fn completion_frame(&mut self, window: &Window) -> Option<(Bounds<Pixels>, Vec<(String, String, bool, bool)>)> {
+    fn completion_frame(&mut self, window: &Window) -> Option<(Bounds<Pixels>, Vec<CompletionRow>)> {
         let state = self.session.state();
         let Some(c) = state.completion() else { self.completion_drawn = None; return None };
         let Some(g) = self.panes.iter().find(|g| state.presentation_shown(g.pane).is_some_and(|t| t.id() == c.tab)).copied() else { self.completion_drawn = None; return None };
