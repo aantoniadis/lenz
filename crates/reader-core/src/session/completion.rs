@@ -153,7 +153,7 @@ impl Session {
         items.sort_by(|a, b| a.0.cmp(&b.0));
         let mut popup = Suggestions { tab: pending.tab, trigger: pending.trigger, session: reply.session, source: pending.source, caret: pending.caret, word, incomplete,
             items: items.into_iter().map(|(_, s)| s).collect(), shown: Vec::new(), selected: 0 };
-        popup.filter(&before[word - line..]);
+        popup.filter(before.get(word - line..).unwrap_or_default());
         if popup.shown.is_empty() {
             self.state.completion = None;
             return self.completion_unavailable(pending.trigger, "No suggestions".into());
