@@ -256,25 +256,47 @@ impl Places {
     pub fn relocate(&mut self, source: &Path, doc: &TextSnapshot) -> bool {
         let changed = relocate(&mut self.bookmarks, source, doc) | relocate(self.recent_locations.make_contiguous(), source, doc);
         if changed {
-            self.bookmarks.sort_by(|a, b| a.key().cmp(&b.key()));
-            // Two marks on one line become one; a key either had stays.
-            self.bookmarks.dedup_by(|later, kept| {
-                let same = later.key() == kept.key();
-                if same {
-                    kept.mnemonic = kept.mnemonic.or(later.mnemonic);
-                }
-                same
-            });
-            // Locations that now lie close together become one, as when visited: the most recent stays.
-            let mut kept: VecDeque<Mark> = VecDeque::with_capacity(self.recent_locations.len());
-            for m in self.recent_locations.drain(..) {
-                if !kept.iter().any(|k| k.source == m.source && k.line.abs_diff(m.line) <= MERGE_LINES) {
-                    kept.push_back(m);
-                }
-            }
-            self.recent_locations = kept;
+            self.coalesce();
         }
         changed
+    }
+
+    /// Move existing source anchors through a validated transaction without searching the document.
+    pub(crate) fn edited(&mut self, paths: &std::collections::HashSet<PathBuf>, previous: &TextSnapshot, next: &TextSnapshot, edits: &[crate::text::TextEdit]) -> bool {
+        let mut changed = false;
+        for mark in self.bookmarks.iter_mut().chain(self.recent_locations.iter_mut()).filter(|mark| paths.contains(mark.source.as_ref())) {
+            if mark.line >= previous.line_count() || !crate::tabs::anchor_matches(previous, mark.line, &mark.anchor) { continue; }
+            let range = previous.reader_line_range(mark.line);
+            let byte = previous.floor_char_boundary(range.start.saturating_add(mark.offset).min(range.end));
+            let byte = crate::text::edited_byte(byte, edits).min(next.len_bytes());
+            let line = next.line_of(byte);
+            let offset = byte - next.reader_line_range(line).start;
+            let anchor: Arc<str> = crate::tabs::anchor(next, line).into();
+            changed |= mark.line != line || mark.offset != offset || mark.anchor != anchor || mark.moved;
+            mark.line = line; mark.offset = offset; mark.anchor = anchor; mark.moved = false;
+        }
+        if changed { self.coalesce(); }
+        changed
+    }
+
+    fn coalesce(&mut self) {
+        self.bookmarks.sort_by(|a, b| a.key().cmp(&b.key()));
+        // Two marks on one line become one; a key either had stays.
+        self.bookmarks.dedup_by(|later, kept| {
+            let same = later.key() == kept.key();
+            if same {
+                kept.mnemonic = kept.mnemonic.or(later.mnemonic);
+            }
+            same
+        });
+        // Locations that now lie close together become one, as when visited: the most recent stays.
+        let mut kept: VecDeque<Mark> = VecDeque::with_capacity(self.recent_locations.len());
+        for m in self.recent_locations.drain(..) {
+            if !kept.iter().any(|k| k.source == m.source && k.line.abs_diff(m.line) <= MERGE_LINES) {
+                kept.push_back(m);
+            }
+        }
+        self.recent_locations = kept;
     }
 
     /// Add `saved` (read from disk) behind what is here: entries here win their line, key and order.

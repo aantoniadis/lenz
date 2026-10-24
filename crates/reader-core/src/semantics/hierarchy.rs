@@ -41,6 +41,8 @@ pub enum Source {
 /// times it calls (or is called) there, and the call site as a location (`uri`, `range`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Call {
+    /// Provider-open identity of the reusable item, independently of its displayed call site.
+    pub source: Option<super::SourceVersion>,
     pub item: Value,
     pub name: String,
     pub kind: u64,
@@ -163,7 +165,7 @@ impl Hierarchy {
 /// The root of a `prepareCallHierarchy` answer (its first item), at its name.
 pub fn prepare(reply: &Value) -> Option<Call> {
     let item = reply.as_array()?.first()?;
-    Some(Call { item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: 1, at: json!({ "uri": item["uri"], "range": item["selectionRange"] }) })
+    Some(Call { source: None, item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: 1, at: json!({ "uri": item["uri"], "range": item["selectionRange"] }) })
 }
 
 /// An `incomingCalls` / `outgoingCalls` answer about a function in `parent_uri`: each caller at its first call
@@ -182,7 +184,7 @@ pub fn calls(reply: &Value, direction: Direction, parent_uri: &str) -> Vec<Call>
             let ranges = c["fromRanges"].as_array().map_or(&[][..], Vec::as_slice);
             let range = ranges.first().unwrap_or(&item["selectionRange"]);
             let uri = site_uri.map_or_else(|| item["uri"].clone(), |u| json!(u));
-            Some(Call { item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: ranges.len().max(1), at: json!({ "uri": uri, "range": range }) })
+            Some(Call { source: None, item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: ranges.len().max(1), at: json!({ "uri": uri, "range": range }) })
         })
         .collect()
 }
@@ -192,7 +194,7 @@ pub fn types(reply: &Value) -> Vec<Call> {
     let Some(items) = reply.as_array() else { return Vec::new() };
     items
         .iter()
-        .map(|item| Call { item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: 1, at: json!({ "uri": item["uri"], "range": item["selectionRange"] }) })
+        .map(|item| Call { source: None, item: item.clone(), name: item["name"].as_str().unwrap_or_default().to_owned(), kind: item["kind"].as_u64().unwrap_or(0), decl: None, calls: 1, at: json!({ "uri": item["uri"], "range": item["selectionRange"] }) })
         .collect()
 }
 
@@ -215,7 +217,7 @@ mod tests {
 
     fn call(name: &str, line: u64) -> Call {
         let range = json!({ "start": { "line": line, "character": 3 }, "end": { "line": line, "character": 4 } });
-        Call { item: json!({ "name": name, "kind": 12, "uri": "file:///a.rs", "range": range, "selectionRange": range }), name: name.into(), kind: 12, decl: None, calls: 1, at: json!({ "uri": "file:///a.rs", "range": range }) }
+        Call { source: None, item: json!({ "name": name, "kind": 12, "uri": "file:///a.rs", "range": range, "selectionRange": range }), name: name.into(), kind: 12, decl: None, calls: 1, at: json!({ "uri": "file:///a.rs", "range": range }) }
     }
 
     fn site(line: usize) -> crate::search::Hit {

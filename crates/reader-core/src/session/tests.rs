@@ -36,6 +36,151 @@ fn text_input_deletion_uses_existing_scalar_boundaries_and_keeps_crlf_atomic() {
 }
 
 #[test]
+fn successful_checkout_keeps_the_displayed_draft_dirty_until_a_matched_disk_read_replaces_it() {
+    use crate::close::Choice;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "feature/x".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let reply = loop {
+        let reply = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(reply, Completion::CheckedOut { .. }) {
+            break reply;
+        }
+        s.dispatch(reply);
+    };
+    s.dispatch(reply);
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert!(
+        active_view(&s).dirty() && active_view(&s).can_undo(),
+        "the old displayed draft must not become a false clean baseline before replacement arrives"
+    );
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(Command::Undo { tab });
+    assert!(active_view(&s).dirty());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn workspace_transitions_resolve_temporary_comparison_tabs_before_deciding_about_the_draft() {
+    use crate::close::Choice;
+    for mode in 0..3 {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("first");
+        let other = d.path().join("second");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let path = write(&root, "a.txt", b"saved\r\n");
+        let mut s = session(&d.path().join("state"));
+        s.dispatch(Command::OpenRoot(root.clone()));
+        settle(&mut s, scanned);
+        open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+        let ordinary = s.state().active().unwrap().id();
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit {
+            tab: ordinary,
+            expected,
+            edits: vec![crate::text::TextEdit {
+                range: 0..5,
+                text: "draft λ".into(),
+            }],
+            kind: crate::text::EditKind::Replace,
+        });
+        let position = s.state().selection();
+        let buffer = s.state().current_source().unwrap().key().buffer;
+        for choice in [Choice::Cancel, Choice::Discard] {
+            s.dispatch(Command::CompareSaved);
+            if mode == 0 {
+                s.dispatch(Command::FocusPane(0));
+                assert_eq!(
+                    s.disabled(CommandId::Reload),
+                    Some("The last saved version is read-only")
+                );
+                s.dispatch(Command::Reload);
+                assert!(s.state().saved_comparison().is_some());
+                s.dispatch(Command::FocusPane(1));
+            }
+            s.dispatch(if mode < 2 {
+                Command::Reload
+            } else {
+                Command::OpenRoot(other.clone())
+            });
+            assert!(
+                s.state().saved_comparison().is_none(),
+                "temporary owners are resolved before preparation"
+            );
+            let p = s
+                .close_prompt()
+                .expect("the ordinary current draft owns this decision");
+            assert_eq!(p.buffer, buffer);
+            assert_eq!(s.state().active().unwrap().id(), ordinary);
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice,
+            });
+            if choice == Choice::Cancel {
+                assert_eq!(s.state().selection(), position);
+                assert_eq!(
+                    source_text(s.state().current_source().unwrap()),
+                    "draft λ\r\n"
+                );
+                assert_eq!(s.state().project().unwrap().root(), root);
+            }
+        }
+        if mode < 2 {
+            settle(&mut s, |s| s.state().loading().is_none());
+            assert_eq!(s.state().active().unwrap().id(), ordinary);
+            assert_eq!(s.state().current_source().unwrap().key().buffer, buffer);
+            assert_eq!(
+                source_text(s.state().current_source().unwrap()),
+                "saved\r\n"
+            );
+            assert!(!active_view(&s).dirty());
+        } else {
+            assert_eq!(s.state().project().unwrap().root(), other);
+        }
+        assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+    }
+}
+
+#[test]
 fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enabling_production_input() {
     let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "input.txt", "e\u{301}👩🏽‍💻\r\n".as_bytes());
     let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "input.txt");
@@ -53,6 +198,642 @@ fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enab
     s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
     s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
     assert_eq!(std::fs::read(path).unwrap(), "e\u{301}👩🏽‍💻\r\n".as_bytes());
+}
+
+#[test]
+fn automatic_refresh_keeps_clean_undo_history_during_index_rebuild() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let path = write(&root, "a.rs", b"fn saved() {}\r\n");
+    let mut s = session(&d.path().join("state"));
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(path.clone()), "a.rs");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 3..8,
+            text: "draft".into(),
+        }],
+        kind: crate::text::EditKind::Replace,
+    });
+    s.dispatch(Command::Undo { tab });
+    assert!(!active_view(&s).dirty());
+    assert!(active_view(&s).can_redo());
+    let expected = s.state().current_source().unwrap().key();
+    let position = s.state().selection();
+    std::fs::write(&path, b"fn external() {}\r\n").unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().stale_on_disk());
+    s.dispatch(Command::RebuildIndex);
+    settle(&mut s, |s| s.state().index_coverage().complete());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "fn saved() {}\r\n"
+    );
+    assert_eq!(s.state().current_source().unwrap().key(), expected);
+    assert_eq!(s.state().selection(), position);
+    assert!(!active_view(&s).dirty() && active_view(&s).can_redo());
+    assert!(s.status_details().contains("changed on disk"));
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "fn draft() {}\r\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"fn external() {}\r\n");
+}
+
+#[test]
+fn checkout_preparation_is_invalidated_when_the_observed_repository_head_changes() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(Command::NewBranch {
+        name: "not-from-old-context".into(),
+        from: None,
+        checkout: true,
+    });
+    let p = s.close_prompt().unwrap();
+    git(r.path(), &["switch", "-q", "feature/x"]);
+    s.dispatch(Completion::Semantic(crate::semantics::Event::Tick));
+    settle(&mut s, |s| {
+        s.branch_label().as_deref() == Some("⎇ feature/x")
+    });
+    assert!(
+        s.close_prompt().is_none(),
+        "HEAD context changed; the old decision cannot silently choose a different starting point"
+    );
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    assert!(!s.state().checking_out());
+    assert!(
+        !git(r.path(), &["branch", "--list", "not-from-old-context"])
+            .contains("not-from-old-context")
+    );
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn blocked_checkout_retains_discard_consent_as_a_draft_and_requires_a_fresh_retry_decision() {
+    use crate::close::Choice;
+    use lenz_content::branches::{CheckoutChoice, Target};
+    use lenz_content::git::testing::{commit_all, git, write as put};
+    let (r, _wt, mut s) = git_branches::repo_session();
+    git(r.path(), &["switch", "-q", "feature/x"]);
+    put(r.path(), "a.txt", "feature\n");
+    commit_all(r.path(), "feature content");
+    git(r.path(), &["switch", "-q", "main"]);
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    put(r.path(), "a.txt", "external local change\n");
+    s.dispatch(Command::Checkout(Target::Branch("feature/x".into())));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| !s.state().checking_out());
+    assert!(s.state().checkout_problem().is_some());
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    s.dispatch(Command::CheckoutChoice(CheckoutChoice::Smart));
+    let fresh = s.close_prompt().unwrap();
+    assert!(fresh.ticket > p.ticket);
+    assert!(!s.state().checking_out());
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    assert_eq!(s.close_prompt().unwrap().ticket, fresh.ticket);
+    s.dispatch(Command::ChooseClose {
+        ticket: fresh.ticket,
+        buffer: fresh.buffer,
+        choice: Choice::Cancel,
+    });
+    assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+    assert_eq!(std::fs::read(path).unwrap(), b"external local change\n");
+}
+
+#[test]
+fn transition_save_failure_and_uncertainty_never_start_workspace_or_git_changes() {
+    use crate::close::Choice;
+    use crate::save::Status;
+    use lenz_content::git::testing::git;
+    use lenz_content::write::readiness_fault::{Fault, at_path};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        for operation in 0..5 {
+            let (r, wt, mut s) = git_branches::repo_session();
+            let path = r.path().join("a.txt");
+            open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+            let tab = s.state().active().unwrap().id();
+            let expected = s.state().current_source().unwrap().key();
+            s.dispatch(Command::Edit {
+                tab,
+                expected,
+                edits: vec![crate::text::TextEdit {
+                    range: 0..0,
+                    text: "draft λ ".into(),
+                }],
+                kind: crate::text::EditKind::Paste,
+            });
+            let command = match operation {
+                0 => Command::Reload,
+                1 => Command::OpenRoot(wt.path().to_owned()),
+                2 => Command::OpenWorktree(wt.path().join("second")),
+                3 => Command::Checkout(lenz_content::branches::Target::Branch("feature/x".into())),
+                _ => Command::NewBranch {
+                    name: "not-created".into(),
+                    from: None,
+                    checkout: true,
+                },
+            };
+            s.dispatch(command);
+            let p = s.close_prompt().unwrap();
+            let _fault = at_path(&path, fault);
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice: Choice::Save,
+            });
+            settle(&mut s, |s| {
+                matches!(
+                    active_view(s).save_status(),
+                    Status::Rejected(_) | Status::Uncertain(_)
+                )
+            });
+            assert!(s.close_prompt().is_none());
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice: Choice::Discard,
+            });
+            assert!(!s.state().checking_out());
+            assert_eq!(s.state().project().unwrap().root(), r.path());
+            assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+            assert!(!git(r.path(), &["branch", "--list", "not-created"]).contains("not-created"));
+            assert_eq!(
+                source_text(s.state().current_source().unwrap()),
+                "draft λ main\n"
+            );
+            assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                if fault == Fault::AfterReplace {
+                    "draft λ main\n".as_bytes()
+                } else {
+                    b"main\n"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn checkout_failure_and_obsolete_completion_keep_drafts_but_report_actual_git_outcome() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "does-not-exist".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| !s.state().checking_out());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "feature/x".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let reply = loop {
+        let reply = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(reply, Completion::CheckedOut { .. }) {
+            break reply;
+        }
+        s.dispatch(reply);
+    };
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(reply);
+    assert_eq!(
+        git(r.path(), &["branch", "--show-current"]).trim(),
+        "feature/x"
+    );
+    assert_eq!(s.branch_label().as_deref(), Some("⎇ feature/x"));
+    assert!(s.status_details().contains("Checked out feature/x"));
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "newer draft λ main\n"
+    );
+    assert!(active_view(&s).dirty());
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn checkout_and_new_branch_wait_for_decisions_and_replace_only_after_success() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    for new_branch in [false, true] {
+        let (r, _wt, mut s) = git_branches::repo_session();
+        let path = r.path().join("a.txt");
+        open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+        let tab = s.state().active().unwrap().id();
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit {
+            tab,
+            expected,
+            edits: vec![crate::text::TextEdit {
+                range: 0..0,
+                text: "draft λ ".into(),
+            }],
+            kind: crate::text::EditKind::Paste,
+        });
+        let action = || {
+            if new_branch {
+                Command::NewBranch {
+                    name: "draft-guard".into(),
+                    from: None,
+                    checkout: true,
+                }
+            } else {
+                Command::Checkout(lenz_content::branches::Target::Branch("feature/x".into()))
+            }
+        };
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        assert!(!s.state().checking_out());
+        assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(
+            source_text(s.state().current_source().unwrap()),
+            "draft λ main\n"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"main\n");
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        assert!(s.state().checking_out());
+        settle(&mut s, |s| !s.state().checking_out());
+        settle(&mut s, |s| {
+            source_text(s.state().current_source().unwrap()) == "main\n"
+        });
+        assert_eq!(
+            git(r.path(), &["branch", "--show-current"]).trim(),
+            if new_branch {
+                "draft-guard"
+            } else {
+                "feature/x"
+            }
+        );
+        assert!(!active_view(&s).dirty());
+        assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+    }
+}
+
+#[test]
+fn workspace_transition_cancel_retains_all_drafts_and_only_confirmed_saves_persist() {
+    use crate::close::Choice;
+    for worktree in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let first = d.path().join("first");
+        let second = d.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let a = write(&first, "a.txt", b"saved\r\n");
+        let b = write(&first, "b.txt", b"other\r\n");
+        let mut s = session(&d.path().join("state"));
+        s.dispatch(Command::OpenRoot(first.clone()));
+        settle(&mut s, scanned);
+        let mut tabs = Vec::new();
+        for path in [&a, &b] {
+            open(
+                &mut s,
+                Command::OpenRetained(path.clone()),
+                path.file_name().unwrap().to_str().unwrap(),
+            );
+            let tab = s.state().active().unwrap().id();
+            let expected = s.state().current_source().unwrap().key();
+            s.dispatch(Command::Edit {
+                tab,
+                expected,
+                edits: vec![crate::text::TextEdit {
+                    range: 0..0,
+                    text: "draft λ ".into(),
+                }],
+                kind: crate::text::EditKind::Paste,
+            });
+            tabs.push(tab);
+        }
+        let position = s.state().selection();
+        let action = || {
+            if worktree {
+                Command::OpenWorktree(second.clone())
+            } else {
+                Command::OpenRoot(second.clone())
+            }
+        };
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        let q = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: q.ticket,
+            buffer: q.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(s.state().project().unwrap().root(), first);
+        assert_eq!(s.state().selection(), position);
+        assert!(tabs.iter().all(|tab| s.state().tab_dirty(*tab)));
+        assert_eq!(std::fs::read(&a).unwrap(), b"saved\r\n");
+        assert_eq!(std::fs::read(&b).unwrap(), b"other\r\n");
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        let saved = p.path.clone();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Save,
+        });
+        settle(&mut s, |s| {
+            s.close_prompt().is_some_and(|q| q.buffer != p.buffer)
+        });
+        let q = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: q.ticket,
+            buffer: q.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(s.state().project().unwrap().root(), first);
+        assert_eq!(
+            std::fs::read(&saved).unwrap(),
+            if saved == a {
+                "draft λ saved\r\n".as_bytes()
+            } else {
+                "draft λ other\r\n".as_bytes()
+            }
+        );
+        assert_eq!(s.state().tabs().len(), 2);
+        assert_eq!(s.state().selection(), position);
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        assert_eq!(s.state().project().unwrap().root(), second);
+        assert!(s.close_prompt().is_none());
+        s.dispatch(Command::OpenRoot(first));
+        settle(&mut s, scanned);
+        open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+        assert_eq!(
+            source_text(s.state().current_source().unwrap()),
+            if saved == a {
+                "draft λ saved\r\n"
+            } else {
+                "saved\r\n"
+            }
+        );
+        assert!(!active_view(&s).dirty());
+    }
+}
+
+#[test]
+fn reload_reply_cannot_discard_an_edit_made_after_the_decision() {
+    use crate::close::Choice;
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "reply.txt");
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Reload);
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "newer draft λ\r\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert!(s.status_details().contains("Reload cancelled"));
+    assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+}
+
+#[test]
+fn reload_requires_current_decision_and_failed_read_retains_the_draft() {
+    use crate::close::Choice;
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "reload.txt");
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 8 }));
+    s.dispatch(Command::Reload);
+    let first = s
+        .close_prompt()
+        .expect("Reload must ask before replacing a dirty buffer");
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    s.dispatch(Command::ChooseClose {
+        ticket: first.ticket,
+        buffer: first.buffer,
+        choice: Choice::Cancel,
+    });
+    assert_eq!(
+        s.state().selection(),
+        Some(Selection { anchor: 6, head: 8 })
+    );
+    s.dispatch(Command::Reload);
+    let second = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: first.ticket,
+        buffer: first.buffer,
+        choice: Choice::Discard,
+    });
+    assert_eq!(s.close_prompt().unwrap().ticket, second.ticket);
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: second.ticket,
+        buffer: second.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert!(
+        s.last_close().is_none(),
+        "starting a failed replacement never publishes a committed discard disposition"
+    );
+    std::fs::write(&path, b"external\r\n").unwrap();
+    s.dispatch(Command::Reload);
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "external\r\n"
+    );
+    assert!(!active_view(&s).dirty() && !active_view(&s).can_undo());
+    assert_eq!(s.state().active().unwrap().id(), tab);
+    assert_eq!(std::fs::read(path).unwrap(), b"external\r\n");
+}
+
+#[test]
+fn automatic_refresh_retains_draft_history_positions_and_reports_external_conflicts() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "refresh.txt");
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 8 }));
+    s.dispatch(Command::ScrollColumn(3));
+    let key = s.state().current_source().unwrap().key();
+    std::fs::write(&path, b"external replacement\r\n").unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().stale_on_disk());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert_eq!(s.state().current_source().unwrap().key(), key);
+    assert_eq!(
+        s.state().selection(),
+        Some(Selection { anchor: 6, head: 8 })
+    );
+    assert_eq!(s.state().active().unwrap().column(), 3);
+    assert!(s.status_details().contains("changed on disk"));
+    let other = write(d.path(), "other.txt", b"other");
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    s.dispatch(Command::ActivateTab(tab));
+    assert!(
+        s.state().active().unwrap().stale_on_disk(),
+        "reactivating a pinned draft retains the observed conflict"
+    );
+    assert!(s.status_details().contains("changed on disk"));
+    assert!(active_view(&s).can_undo());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "saved\r\n"
+    );
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| {
+        s.state().active().unwrap().unavailable().is_some()
+    });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert!(active_view(&s).can_undo());
+    assert!(!path.exists());
 }
 
 #[test]
@@ -407,6 +1188,10 @@ fn saved_comparison_finds_both_versions_without_becoming_current_file_authority(
     assert_eq!(s.state.sources.aliases.get(&path), Some(&current_buffer));
     assert_eq!(s.captured_project_sources(d.path())[&path].identity.key.buffer, current_buffer);
     assert!(s.state().provider().is_none(), "saved text never becomes provider authority");
+    let ordinary_source = s.state.sources.buffers.remove(&current_buffer).unwrap();
+    assert!(Session::target_source(&s.state, &path).is_none(), "the immutable saved side cannot become semantic target authority even without a current snapshot");
+    s.state.sources.buffers.insert(current_buffer, ordinary_source);
+    assert_eq!(Session::target_source(&s.state, &path).unwrap().key().buffer, current_buffer);
     s.dispatch(Command::CloseSavedComparison);
     assert!(!s.state.sources.buffers.contains_key(&synthetic));
     assert_eq!(source_text(s.state().current_source().unwrap()), "draft needle\n");
@@ -2577,7 +3362,7 @@ fn replacing_semantic_target_replies_bounds_actual_document_retaining_jobs() {
     for _ in 0..129 {
         s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
         let request = s.state.asking.as_ref().unwrap().request;
-        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false,
+        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, sources: Default::default(),
             result: Ok(serde_json::json!([{ "uri": semantics::lsp::file_uri(&target), "range": { "start": {"line": 0,"character": 7}, "end": {"line":0,"character":13} } }])) });
         s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
     }
@@ -2611,7 +3396,7 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
         let fence = ResultFence { slot: ResultSlot::Semantic { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
         if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
     }
-    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });
+    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, sources: Default::default(), result: Ok(serde_json::json!([])) });
     assert!(effect.repaint); assert!(s.state.asking.is_none(), "capacity pressure must end this server's answer visibly");
     assert!(s.state.messages.iter().any(|m| m.contains("capacity is full")));
 }
@@ -2747,6 +3532,241 @@ fn semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_t
     assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1);
     assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
     assert_eq!(std::fs::read(file).unwrap(), saved);
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_navigation_refuses_target_coordinates_from_before_another_pane_edit() {
+    #[derive(Clone, Copy)]
+    enum Change { BeforeReply, AfterResolutionUndo, Unrelated }
+    for change in [Change::BeforeReply, Change::AfterResolutionUndo, Change::Unrelated] {
+        let d = tempfile::tempdir().unwrap();
+        write(d.path(), "Cargo.toml", b"[package]\nname = \"target-context\"\n");
+        let a_text = "fn main() { helper(); }\n";
+        let b_text = "pub fn helper() {}\n";
+        let a = write(d.path(), "main.rs", a_text.as_bytes());
+        let b = write(d.path(), "lib.rs", b_text.as_bytes());
+        let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1")]);
+        open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+        settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+        s.dispatch(Command::Split(Split::Columns));
+        open(&mut s, Command::OpenRetained(b.clone()), "lib.rs");
+        let target = s.state().active().unwrap().id();
+        let expected = s.state().view(target).unwrap().snapshot().key();
+        s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 target draft\n".into() }], kind: crate::text::EditKind::Paste });
+        let target_document = analysis_document(&mut s);
+        settle(&mut s, |s| s.state.semantics.session_of(&target_document).is_some());
+        let server = s.state.semantics.session_of(&target_document).unwrap();
+        drop(target_document);
+        settle(&mut s, |s| s.state.semantics.sent(server).get(&b).is_some_and(|doc| doc.version() == s.state().view(target).unwrap().snapshot().key().version));
+        let unrelated = d.path().join("other.rs");
+        let edited = if matches!(change, Change::Unrelated) {
+            std::fs::write(&unrelated, "fn another() {}\n").unwrap();
+            open(&mut s, Command::OpenRetained(unrelated.clone()), "other.rs");
+            s.state().active().unwrap().id()
+        } else { target };
+        s.dispatch(Command::FocusPane(0));
+        let at = a_text.find("helper").unwrap();
+        s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+        let origin = s.state().current_source().unwrap().clone();
+        let origin_selection = s.state().selection();
+        s.dispatch(Command::Definition { peek: false });
+        let rx = s.completions();
+        let held = loop {
+            let completion = rx.recv_blocking_timeout().unwrap();
+            let target_reply = if matches!(change, Change::AfterResolutionUndo) {
+                matches!(&completion, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Targets { .. }))
+            } else {
+                matches!(&completion, Completion::Semantic(semantics::Event::Message { message, .. })
+                    if message["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("lib.rs"))
+                        || message["result"].as_array().is_some_and(|items| items.iter().any(|item| item["uri"].as_str().is_some_and(|uri| uri.ends_with("lib.rs")))))
+            };
+            if target_reply { break completion; }
+            s.dispatch(completion);
+        };
+        let expected = s.state().view(edited).unwrap().snapshot().key();
+        s.dispatch(Command::Edit { tab: edited, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// another shift\n".into() }], kind: crate::text::EditKind::Paste });
+        if matches!(change, Change::AfterResolutionUndo) { s.dispatch(Command::Undo { tab: edited }); }
+        let changed = s.state().view(edited).unwrap().snapshot().clone();
+        settle(&mut s, |s| s.state.semantics.sent(server).get(changed.source()).is_some_and(|doc| doc.version() == changed.key().version));
+        s.dispatch(held);
+        settle(&mut s, |s| s.state().asking().is_none());
+        if matches!(change, Change::Unrelated) {
+            assert_eq!(s.state().current_source().unwrap().source(), b);
+            assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("helper"), "an unrelated source edit must not invalidate a valid target");
+        } else {
+            assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin), "a target edit cannot make the old reply move the origin pane");
+            assert_eq!(s.state().selection(), origin_selection);
+            assert!(s.state().notices().iter().any(|notice| notice.contains("target") && notice.contains("changed")), "{:?}", s.state().notices());
+        }
+        assert!(Arc::ptr_eq(s.state().view(edited).unwrap().snapshot(), &changed));
+        assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes());
+        assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_results_keep_the_captured_target_draft_and_refuse_later_activation() {
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"peek-target\"\n");
+    let a_text = "fn main() { helper(); }\n";
+    let b_text = "pub fn helper() {}\n";
+    let a = write(d.path(), "main.rs", a_text.as_bytes());
+    let b = write(d.path(), "lib.rs", b_text.as_bytes());
+    write(d.path(), "other.rs", b"pub fn helper() {}\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::OpenRetained(b.clone()), "lib.rs");
+    let target = s.state().active().unwrap().id();
+    let expected = s.state().view(target).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 target draft\n".into() }], kind: crate::text::EditKind::Paste });
+    let captured = s.state().view(target).unwrap().snapshot().clone();
+    let target_document = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&target_document).is_some());
+    let server = s.state.semantics.session_of(&target_document).unwrap();
+    drop(target_document);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&b).is_some_and(|doc| doc.version() == captured.key().version));
+    s.dispatch(Command::FocusPane(0));
+    let at = a_text.find("helper").unwrap();
+    s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    let origin = s.state().current_source().unwrap().clone();
+    let selection = s.state().selection();
+    s.dispatch(Command::Definition { peek: true });
+    settle(&mut s, |s| s.state().results().is_some_and(|results| results.results_kind() == ResultsKind::Peek && results.preview().is_some()));
+    assert_eq!(s.state().results().unwrap().hits()[0].line, 1);
+    assert_eq!(s.state().results().unwrap().preview().unwrap().doc.version(), captured.key().version);
+    let expected = captured.key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// newer target\n".into() }], kind: crate::text::EditKind::Paste });
+    let changed = s.state().view(target).unwrap().snapshot().clone();
+    s.dispatch(Command::SelectResult(1));
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|preview| preview.index == 1));
+    s.dispatch(Command::SelectResult(0));
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|preview| preview.index == 0));
+    assert_eq!(s.state().results().unwrap().preview().unwrap().doc.version(), captured.key().version, "a peek retains the version named by its row");
+    s.dispatch(Command::OpenResult(0));
+    settle(&mut s, |s| s.state().results().unwrap().is_stale(0));
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin));
+    assert_eq!(s.state().selection(), selection);
+    assert!(Arc::ptr_eq(s.state().view(target).unwrap().snapshot(), &changed));
+    assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes());
+    assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn outgoing_hierarchy_refuses_a_changed_item_even_when_its_call_site_is_unchanged() {
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"hierarchy-target\"\n");
+    let a_text = "fn main() {\n    helper();\n}\n";
+    let b_text = "pub fn helper() {}\n";
+    let a = write(d.path(), "main.rs", a_text.as_bytes());
+    let b = write(d.path(), "lib.rs", b_text.as_bytes());
+    let (mut s, log) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::OpenRetained(b.clone()), "lib.rs");
+    let target = s.state().active().unwrap().id();
+    s.dispatch(Command::FocusPane(0));
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    s.dispatch(Command::CallHierarchy(Direction::Callees));
+    settle(&mut s, |s| s.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|hierarchy| hierarchy.nodes.len() == 2));
+    let hierarchy = s.state.results.as_ref().unwrap().hierarchy.as_ref().unwrap();
+    assert_eq!(hierarchy.nodes[1].site.path.as_ref(), a.to_string_lossy());
+    assert!(hierarchy.nodes[1].call.item["uri"].as_str().unwrap().ends_with("lib.rs"));
+    let frames = || std::fs::read_to_string(&log).unwrap().lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok()).filter(|frame| frame["method"] == "callHierarchy/outgoingCalls").count();
+    let requests = frames();
+    let expected = s.state().view(target).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// changed item\n".into() }], kind: crate::text::EditKind::Paste });
+    let changed = s.state().view(target).unwrap().snapshot().clone();
+    s.dispatch(Command::ToggleCall(1));
+    settle(&mut s, |s| s.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|hierarchy| !matches!(hierarchy.nodes[1].state, hierarchy::Children::Loading(_))));
+    assert!(matches!(&s.state.results.as_ref().unwrap().hierarchy.as_ref().unwrap().nodes[1].state, hierarchy::Children::Failed(why) if why.contains("changed")), "a node's reusable item is fenced separately from its displayed call site");
+    assert_eq!(frames(), requests, "obsolete item coordinates must not be sent to the provider");
+    assert!(Arc::ptr_eq(s.state().view(target).unwrap().snapshot(), &changed));
+    assert_eq!(s.state().current_source().unwrap().source(), a);
+    assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes());
+    assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_targets_resolve_canonical_provider_uris_from_the_captured_draft_alias() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"alias-target\"\n");
+    let saved = "pub fn helper() {}\n";
+    let actual = write(d.path(), "external.rs", saved.as_bytes());
+    let alias = root.join("lib.rs"); std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let a = write(&root, "main.rs", b"fn main() { helper(); }\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1"), ("FAKE_LSP_CANONICAL_URIS", "1")]);
+    open(&mut s, Command::OpenRetained(alias.clone()), "lib.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|provider| provider.status == semantics::Status::Ready));
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 shifted\n".into() }], kind: crate::text::EditKind::Paste });
+    let draft = s.state().current_source().unwrap().clone();
+    let doc = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&doc).is_some());
+    let server = s.state.semantics.session_of(&doc).unwrap(); drop(doc);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&alias).is_some_and(|doc| doc.version() == draft.key().version));
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    settle(&mut s, |s| s.state().asking().is_none());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &draft), "canonical target coordinates belong to the same admitted alias draft: {:?}", s.state().notices());
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("helper"));
+    assert_eq!(std::fs::read(&actual).unwrap(), saved.as_bytes()); assert_eq!(std::fs::read(alias).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn main() { helper(); }\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn held_semantic_reply_blocks_a_retired_canonical_alias_after_rename() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"retired-alias\"\n");
+    let saved = "pub fn helper() {}\n";
+    let actual = write(d.path(), "external.rs", saved.as_bytes());
+    let alias = root.join("lib.rs"); std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let a = write(&root, "main.rs", b"fn main() { helper(); }\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1"), ("FAKE_LSP_CANONICAL_URIS", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|provider| provider.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::OpenRetained(alias.clone()), "lib.rs");
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 shifted\n".into() }], kind: crate::text::EditKind::Paste });
+    let draft = s.state().current_source().unwrap().clone(); let doc = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&doc).is_some());
+    let server = s.state.semantics.session_of(&doc).unwrap(); drop(doc);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&alias).is_some_and(|doc| doc.version() == draft.key().version));
+    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::Select(Selection { anchor: 12, head: 12 }));
+    let origin = s.state().current_source().unwrap().clone(); let selection = s.state().selection();
+    s.dispatch(Command::Definition { peek: false });
+    let held = loop {
+        let completion = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(&completion, Completion::Semantic(semantics::Event::Message { message, .. })
+            if message["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("external.rs"))) { break completion; }
+        s.dispatch(completion);
+    };
+    // Retire the canonical name itself, not just a symlink spelling of an unchanged target.
+    let moved = d.path().join("relocated.rs"); std::fs::rename(&actual, &moved).unwrap();
+    std::fs::remove_file(&alias).unwrap(); let next_alias = root.join("renamed.rs");
+    std::os::unix::fs::symlink(&moved, &next_alias).unwrap();
+    let replacement = "// different replacement\npub fn helper() {}\n"; std::fs::write(&actual, replacement).unwrap();
+    let token = s.state.tabs.iter().find(|t| t.id == tab).unwrap().refresh;
+    s.dispatch(Completion::Moved { tab, token, to: next_alias.clone(), stamp: Stamp::of(&next_alias), canonical: Some(moved.clone()) });
+    let renamed = s.state().view(tab).unwrap().snapshot().clone();
+    assert_eq!(renamed.key(), draft.key(), "rename preserves the version but changes naming identity");
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&next_alias).is_some_and(|doc| Arc::ptr_eq(doc.source_meta(), renamed.source_meta())));
+    s.dispatch(held); settle(&mut s, |s| s.state().asking().is_none());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin), "old coordinates must not open replacement bytes at the retired canonical name");
+    assert_eq!(s.state().selection(), selection);
+    assert!(s.state().notices().iter().any(|notice| notice.contains("target") && notice.contains("changed")), "{:?}", s.state().notices());
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &renamed));
+    assert_eq!(source_text(&renamed), source_text(&draft));
+    assert_eq!(std::fs::read(&actual).unwrap(), replacement.as_bytes());
+    assert_eq!(std::fs::read(&moved).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(next_alias).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn main() { helper(); }\n");
 }
 
 #[test]
@@ -6056,6 +7076,60 @@ fn bookmark_keys_where_none_can_be_set_say_why() {
 }
 
 #[test]
+fn draft_transactions_move_bookmarks_and_reading_history_with_unicode_text() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let original = "first\r\nα😀 target\r\nlast\r\n";
+    let path = write(&root, "anchors.txt", original.as_bytes());
+    let mut s = session(d.path());
+    open_project(&mut s, &root, "anchors.txt");
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(4) }));
+    let marked = s.state().selection().unwrap().head;
+    s.dispatch(Command::SetMnemonic('2'));
+    s.dispatch(Command::GoToLine(LineColumn { line: 3, column: Some(2) }));
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    let inserted = "é😀 new\r\n";
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: inserted.into() }], kind: crate::text::EditKind::Paste });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, marked - "first\r\n".len()));
+    s.dispatch(Command::Back);
+    assert_eq!(s.state().selection().unwrap().head, marked + inserted.len(), "Back follows the edited source anchor rather than its former line/byte");
+    s.dispatch(Command::JumpMnemonic('2'));
+    assert_eq!(s.state().selection().unwrap().head, marked + inserted.len());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap().line, 1);
+    assert_eq!(source_text(s.state().current_source().unwrap()), original);
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn edited_source_anchors_use_right_bias_at_insertions_and_replacements() {
+    let d = tempfile::tempdir().unwrap();
+    let original = "first\n😀 target\nlast\n";
+    let path = write(d.path(), "bias.txt", original.as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "bias.txt");
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(1) }));
+    s.dispatch(Command::SetMnemonic('2'));
+    let tab = s.state().active().unwrap().id();
+    let start = "first\n".len();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: start..start, text: "é\n".into() }], kind: crate::text::EditKind::Paste });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, 0), "an insertion at the anchor keeps it with the following source");
+    assert_eq!(s.state().selection().unwrap().head, start + "é\n".len());
+    let expected = s.state().current_source().unwrap().key();
+    let point = start + "é\n".len();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: point..point + "😀 ".len(), text: "Ω".into() }], kind: crate::text::EditKind::Replace });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, "Ω".len()), "an anchor inside replaced text collapses after the replacement");
+    assert_eq!(s.state().selection().unwrap().head, point + "Ω".len());
+    s.dispatch(Command::JumpMnemonic('2'));
+    assert_eq!(s.state().selection().unwrap().head, point + "Ω".len());
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
 fn a_numbered_bookmark_jumps_back_through_history_and_unfolds() {
     let d = tempfile::tempdir().unwrap();
     let (mut s, root) = bookmarked_project(d.path());
@@ -6521,7 +7595,7 @@ fn a_superseded_syntax_level_stops_reading_relations() {
     let doc = Arc::new(Document::decode("/a.rs".into(), 1, text.as_bytes()));
     let at = text.find("S for").unwrap();
     let hit = crate::semantics::hit_at(std::path::Path::new("/a.rs"), &doc, at, at + 1);
-    let usage = || crate::semantics::Target { path: "/a.rs".into(), stamp: None, doc: doc.clone(), hit: hit.clone(), at };
+    let usage = || crate::semantics::Target { path: "/a.rs".into(), stamp: None, decoded_digest: None, doc: doc.clone(), hit: hit.clone(), at };
     let latest = Arc::new(std::sync::atomic::AtomicU64::new(5));
     let level = syntax_level(vec![usage()], Direction::Subtypes, crate::semantics::lsp::Encoding::Utf16, latest.clone(), 5);
     assert_eq!(level.iter().map(|(c, _)| c.name.as_str()).collect::<Vec<_>>(), ["C"]);
@@ -6535,7 +7609,7 @@ fn a_usage_past_the_snippet_columns_still_finds_its_relation() {
     let at = text.find("S for").unwrap();
     let hit = crate::semantics::hit_at(std::path::Path::new("/a.rs"), &doc, at, at + 1);
     assert!(hit.text.len() < at - doc.line_range(1).start, "the row's snippet stops before the usage");
-    let usage = crate::semantics::Target { path: "/a.rs".into(), stamp: None, doc: doc.clone(), hit, at };
+    let usage = crate::semantics::Target { path: "/a.rs".into(), stamp: None, decoded_digest: None, doc: doc.clone(), hit, at };
     let level = syntax_level(vec![usage], Direction::Subtypes, crate::semantics::lsp::Encoding::Utf16, Arc::new(std::sync::atomic::AtomicU64::new(1)), 1);
     assert_eq!(level.iter().map(|(c, _)| c.name.as_str()).collect::<Vec<_>>(), ["C"]);
 }

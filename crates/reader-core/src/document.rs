@@ -29,6 +29,8 @@ pub struct Image {
 #[derive(Debug, Clone)]
 pub struct SourceMeta {
     source: PathBuf,
+    /// Naming provenance captured by the exact read; never a live filesystem lookup.
+    canonical: Option<PathBuf>,
     encoding: String,
     original_encoding: &'static str,
     had_bom: bool,
@@ -47,9 +49,11 @@ impl SourceMeta {
     pub(crate) fn fingerprint(&self) -> u64 { self.fingerprint }
     pub(crate) fn is_large(&self) -> bool { self.large }
     pub(crate) fn loaded_version(&self) -> Option<u64> { self.loaded_version }
-    pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, ..self.clone() } }
+    pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, canonical: None, ..self.clone() } }
+    pub(crate) fn with_canonical(mut self, canonical: Option<PathBuf>) -> Self { self.canonical = canonical; self }
+    pub(crate) fn canonical(&self) -> Option<&std::path::Path> { self.canonical.as_deref() }
     pub(crate) fn bytes(&self) -> usize {
-        size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity()
+        size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity() + self.canonical.as_ref().map_or(0, |path| path.capacity())
             + self.image.as_ref().map_or(0, |i| size_of::<Image>() + 2 * size_of::<usize>()
                 + i.pixels.as_ref().map_or_else(|why| why.capacity(), |p| size_of::<img::Pixels>() + 2 * size_of::<usize>() + p.as_raw().capacity()))
     }
@@ -138,6 +142,7 @@ impl Document {
                 binary,
                 language,
                 source,
+                canonical: None,
                 image,
                 fingerprint,
                 large,
@@ -164,6 +169,7 @@ impl Document {
             binary: false,
             language: None,
             source,
+            canonical: None,
             image: None,
             fingerprint: 0,
             large: false,
@@ -190,6 +196,8 @@ impl Document {
             else { source.large || text.len() > LARGE_BYTES || lines > LARGE_LINES };
         Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None }
     }
+
+    pub(crate) fn set_canonical(&mut self, canonical: PathBuf) { Arc::make_mut(&mut self.source).canonical = Some(canonical); }
 
     pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
 
