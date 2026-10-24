@@ -151,3 +151,15 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   about 0.676 MiB across eight launches. See the [batch report](research/reader-editor-foundation-batch-14-23.md).
   Memory phase differences require equal-history/allocator attribution before any
   efficiency claim; no new stress or optimization is authorized by this note.
+
+## Reader code completion (2026-10-24)
+
+- **Per-keystroke completion requests:** while typing a name with the automatic popup closed, each word
+  character sends a new `textDocument/completion` (cancelling the previous one) after the edited version is
+  admitted for analysis and synchronized. While the popup is open, only `isIncomplete` lists are asked again.
+  No debounce exists; measure request/cancel churn and admission cost at the end-of-epic batch before adding one.
+- **Popup filtering and drawing cost:** each continuing keystroke re-filters every received item (lower-cased
+  subsequence match) and the GUI/TUI clone the shown labels per frame. Lists are provider-bounded, not capped
+  by the reader; check large lists (for example rust-analyzer flyimport) in the batch measurements.
+- **Server commands on items:** the parameter-hint/suggest client commands are ignored rather than run; other
+  commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
