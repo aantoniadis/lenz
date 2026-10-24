@@ -1465,7 +1465,7 @@ impl State {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) else { return Vec::new() };
         let buffer = self.sources.admit(tab.canonical.as_deref().unwrap_or(&tab.source), tab.buffer, doc, stamp);
         tab.buffer = Some(buffer);
-        let snapshot = self.sources.buffers[&buffer].snapshot.as_ref().expect("admitted source").clone();
+        let Some(snapshot) = self.sources.buffers.get(&buffer).and_then(|source| source.snapshot.clone()) else { return Vec::new() };
         if previous.as_ref().is_some_and(|previous| Arc::ptr_eq(previous, &snapshot)) { return Vec::new(); }
         let mut changed = Vec::new();
         for tab in &mut self.tabs {
@@ -6734,11 +6734,11 @@ impl Session {
         let Some((path, at)) = self.pending_goto.clone() else { return };
         let Some(t) = self.state.active().filter(|t| t.source == path || t.canonical.as_ref() == Some(&path)) else { return };
         if t.loaded {
+            let Some(doc) = self.state.source(t.id) else { return };
             self.pending_goto = None;
             let at = match at {
                 Goto::At(at) => at,
                 Goto::Mark(m) => {
-                    let doc = self.state.source(t.id).cloned().expect("loaded source");
                     let line = self.current_line_of(&m).min(doc.line_count() - 1);
                     let range = doc.reader_line_range(line);
                     let column = doc.column_of(range.start.saturating_add(m.offset).min(range.end)) as u32 + 1;
