@@ -129,3 +129,10 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   but its running job retains its executor credit until the engine returns. Evaluate finer cancellation if
   pathological comparisons show interference in the next batch; do not create a separate frontend worker pool.
   The [comparison report](research/reader-saved-comparison.md) records current proof and unverified limits.
+
+- **Composition allocation cost:** ticket22's transient persistent snapshot shares
+  source chunks but rebuilds their entry index and copies the pending replacement
+  text. Include repeated preedit at several source sizes in the planned batch
+  measurements; this is not a constant-time update claim. Keep input/render
+  Document-conversion counters separate from these allocations, and preserve the
+  single captured-version commit and bounded worker/context guards if optimizing.

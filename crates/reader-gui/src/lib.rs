@@ -900,6 +900,8 @@ impl ReaderView {
 
     /// When the caret moved, ask for its name's occurrences once it has rested there.
     fn rest_caret(&mut self, cx: &mut Context<Self>) {
+        #[cfg(feature = "test-support")]
+        if self.input_state.capture.is_some() { self.caret_rest = (None, None); return; }
         let state = self.session.state();
         let caret = state.active().map(|t| t.id()).zip(state.selection().map(|s| s.head));
         if caret == self.caret_rest.0 {
@@ -1311,7 +1313,10 @@ impl ReaderView {
             _ => {}
         }
         #[cfg(feature = "test-support")]
-        if self.input_key(ev, window, cx) || self.draft_key(ev, window, cx) { return; }
+        {
+            if self.input_key(ev, window, cx) { return; }
+            if self.draft_key(ev, window, cx) { cx.stop_propagation(); return; }
+        }
         // The preview scrolls in pixels; it has no caret to move.
         if !ctrl && self.focused_markdown().is_some_and(|m| m.layout.is_some()) {
             let view = self.rows as f32 * line_h();
@@ -3184,6 +3189,8 @@ impl ReaderView {
     }
 
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        #[cfg(feature = "test-support")]
+        if self.modal.is_none() && self.input_state.capture.is_some() { self.link = None; self.doc_rest = (None, None); return; }
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let over = self.annotation_at(ev.position);
         if over != self.ann_hovered() {

@@ -6485,6 +6485,7 @@ fn native_composition_rejects_delayed_commit_after_source_selection_permission_m
             _ => unreachable!(),
         }
         let before = f.view.read_with(&v, |r, _| (r.session.state().current_source().unwrap().clone(), r.session.state().selection()));
+        input.replace_and_mark_text_in_range(None, "obsolete preedit", None);
         input.replace_text_in_range(None, "obsolete"); input.unmark_text();
         f.view.read_with(&v, |r, _| {
             assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &before.0), "stale composition case {change}");
@@ -6537,4 +6538,30 @@ fn native_composition_surrounding_text_rejects_surrogates_before_clipping_a_dist
     assert_eq!(reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
     f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
     assert_eq!(std::fs::read(f.dir.path().join("surrounding.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn native_composition_can_begin_again_before_the_next_dead_key_without_reviving_old_terminals(cx: &mut TestAppContext) {
+    for accept in [false, true] {
+        let f = fixture(cx, Some(("repeat-ime.txt", b"base"))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); draw(&mut v);
+        let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "´", None);
+        if accept { input.replace_text_in_range(None, "é"); } else { v.simulate_keystrokes("escape"); }
+        let after_first = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone());
+        input.replace_text_in_range(None, "late"); input.unmark_text();
+        assert!(f.view.read_with(&v, |r, _| Arc::ptr_eq(r.session.state().current_source().unwrap(), &after_first)));
+        // Pinned X11 delivers setMarkedText before this next dead-key KeyDown.
+        input.replace_and_mark_text_in_range(None, "`", None);
+        assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().map(|(_, text)|text)), Some("`".into()));
+        let mut dead = gpui::Keystroke::parse("a").unwrap(); dead.key = "dead_grave".into(); dead.key_char = None;
+        v.simulate_event(gpui::KeyDownEvent { keystroke: dead, is_held: false, prefer_character_input: false });
+        assert!(input.marked_text_range().is_some());
+        assert!(f.view.read_with(&v, |r, _| Arc::ptr_eq(r.session.state().current_source().unwrap(), &after_first)));
+        input.replace_text_in_range(None, "ò"); input.unmark_text();
+        let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| { let source=r.session.state().current_source().unwrap();source.copy_range(0..source.len_bytes()).unwrap() });
+        assert_eq!(text(&v), if accept { "éòbase" } else { "òbase" });
+        v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), if accept { "ébase" } else { "base" });
+        assert_eq!(std::fs::read(f.dir.path().join("repeat-ime.txt")).unwrap(), b"base");
+    }
 }

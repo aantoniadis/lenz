@@ -12,10 +12,14 @@ pub(super) struct Capture {
     pub(super) tab: TabId, pane: u8, base: Arc<TextSnapshot>, selection: Option<Selection>, context: InputContext,
     range: Range<usize>, text: String, selected: Selection,
 }
+struct Ended {
+    tab: TabId, source: PresentationSource, selection: Option<Selection>, context: InputContext,
+}
 #[derive(Default)]
 pub(super) struct InputState {
     pub(super) capture: Option<Capture>,
     stale: bool,
+    ended: Option<Ended>,
     pub registered: std::rc::Rc<std::cell::Cell<bool>>,
 }
 fn utf16_bytes(text: &str, range: Range<usize>) -> Option<Range<usize>> {
@@ -43,22 +47,43 @@ impl ReaderView {
         self.draft_target().is_some_and(|(tab, key, _)| tab == capture.tab && key == capture.base.key())
             && self.session.state().view(capture.tab).is_some_and(|view| view.tab().pane() == capture.pane
                 && Arc::ptr_eq(view.snapshot().source_meta(), capture.base.source_meta()) && view.tab().selection() == capture.selection)
+            && self.session.state().presentation_view(capture.tab).is_some_and(|view| view.snapshot().key() != capture.base.key())
     }
     fn capture_current(&self, capture: &Capture, window: &Window) -> bool {
         self.capture_source_current(capture) && self.focus.is_focused(window) && capture.context == self.input_context(window)
     }
     pub(super) fn invalidate_input_source(&mut self, cx: &mut Context<Self>) {
         if self.input_state.capture.as_ref().is_some_and(|capture| !self.capture_source_current(capture)) { self.cancel_input(true, cx); }
+        if self.input_state.ended.as_ref().is_some_and(|ended| !self.ended_source_current(ended)) { self.input_state.ended = None; }
     }
     pub(super) fn synchronize_input(&mut self, window: &Window, cx: &mut Context<Self>) {
         if self.input_state.capture.as_ref().is_some_and(|capture| !self.capture_current(capture, window)) { self.cancel_input(true, cx); }
+        if self.input_state.ended.as_ref().is_some_and(|ended| !self.ended_current(ended, window)) { self.input_state.ended = None; }
+    }
+    fn ended_context(&self, context: InputContext) -> Option<Ended> {
+        let (tab, _, _) = self.draft_target()?; let view = self.session.state().view(tab)?;
+        Some(Ended { tab, source: PresentationSource::new(view.snapshot()), selection: view.tab().selection(), context })
+    }
+    fn ended_source_current(&self, ended: &Ended) -> bool {
+        self.draft_target().is_some_and(|(tab, _, _)| tab == ended.tab)
+            && self.session.state().view(ended.tab).is_some_and(|view| ended.source.matches(view.snapshot()) && view.tab().selection() == ended.selection)
+            && ended.context.font == self.font && ended.context.layout == self.layout
+            && ended.context.wrap == self.session.state().soft_wrap() && ended.context.split == self.session.state().split()
+    }
+    fn ended_current(&self, ended: &Ended, window: &Window) -> bool {
+        self.focus.is_focused(window) && self.ended_source_current(ended) && ended.context == self.input_context(window)
+    }
+    fn cancel_marked_input(&mut self, cx: &mut Context<Self>) {
+        let context = self.input_state.capture.as_ref().map(|capture| capture.context.clone());
+        self.cancel_input(true, cx);
+        self.input_state.ended = context.and_then(|context| self.ended_context(context));
     }
     pub(super) fn cancel_input(&mut self, stale: bool, cx: &mut Context<Self>) {
         if self.input_state.capture.take().is_some() { self.session.dispatch(Command::ClearPresentation); cx.notify(); }
-        self.input_state.stale = stale;
+        self.input_state.stale = stale; self.input_state.ended = None;
     }
     fn input_snapshot(&self, window: &Window) -> Option<Arc<TextSnapshot>> {
-        if self.input_state.stale || !self.focus.is_focused(window) { return None; }
+        if !self.focus.is_focused(window) || self.input_state.stale && !self.input_state.ended.as_ref().is_some_and(|ended| self.ended_current(ended, window)) { return None; }
         self.draft_target()?;
         if let Some(capture) = &self.input_state.capture {
             if !self.capture_current(capture, window) { return None; }
@@ -66,6 +91,7 @@ impl ReaderView {
         } else { self.session.state().current_source().cloned() }
     }
     fn begin_input(&self, range: Option<Range<usize>>, window: &Window) -> Option<Capture> {
+        if !self.focus.is_focused(window) { return None; }
         let (tab, _, selected) = self.draft_target()?;
         let view = self.session.state().view(tab)?; let base = view.snapshot().clone();
         let range = match range { Some(range) => source_range(&base, range)?, None => selected };
@@ -73,6 +99,10 @@ impl ReaderView {
             selected: Selection { anchor: range.start, head: range.start }, range, text: String::new() })
     }
     fn show_input(&mut self, capture: Capture, cx: &mut Context<Self>) {
+        if self.input_state.capture.is_none() {
+            self.doc_rest = (None, None); self.doc_grace = None; self.doc_popup = None;
+            self.session.dispatch(Command::CloseDocumentation);
+        }
         let command = Command::PresentText { tab: capture.tab, base: PresentationSource::new(&capture.base), base_selection: capture.selection,
             edit: TextEdit { range: capture.range.clone(), text: capture.text.clone().into() }, selected: capture.selected };
         self.input_state.capture = Some(capture); self.dispatch(command, cx);
@@ -84,7 +114,8 @@ impl ReaderView {
         self.dispatch(Command::Edit { tab: capture.tab, expected: capture.base.key(), edits: vec![TextEdit { range: capture.range, text: capture.text.into() }], kind: EditKind::Replace }, cx);
         // IME selection is in the same virtual frame, which is now the committed source.
         self.dispatch(Command::Select(capture.selected), cx);
-        self.input_state.stale = true; // this composition's terminal callback is consumed
+        self.input_state.ended = self.ended_context(capture.context);
+        self.input_state.stale = true; // terminal callbacks stay consumed; a validated new mark begins a new phase
     }
     /// Positive native-input oracle; bounded and absent after cancellation or source invalidation.
     #[doc(hidden)]
@@ -124,11 +155,11 @@ impl ReaderView {
     pub(super) fn input_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) -> bool {
         self.synchronize_input(window, cx);
         let key = &event.keystroke;
-        if key.key == "escape" && self.input_state.capture.is_some() { self.cancel_input(true, cx); cx.stop_propagation(); return true; }
+        if key.key == "escape" && self.input_state.capture.is_some() { self.cancel_marked_input(cx); cx.stop_propagation(); return true; }
         let printable = key.key_char.as_deref().is_some_and(|text| !text.chars().any(char::is_control))
             && !key.modifiers.control && !key.modifiers.platform && !key.modifiers.alt;
         if printable && self.draft_context() && self.input_state.registered.get() {
-            self.input_state.stale = false;
+            self.input_state.stale = false; self.input_state.ended = None;
             return true; // do not stop propagation: Window dispatches the committed text exactly once
         }
         if self.input_state.capture.is_some() {
@@ -170,7 +201,7 @@ impl EntityInputHandler for ReaderView {
         if let Some(mut capture) = self.input_state.capture.clone() {
             #[cfg(not(target_os = "macos"))]
             if text.is_empty() && range.as_ref().is_some_and(|range| self.marked_text_range(window, cx).as_ref() == Some(range)) {
-                self.cancel_input(true, cx); return; // pinned Linux/XIM cancellation, not an empty commit
+                self.cancel_marked_input(cx); return; // pinned Linux/XIM cancellation, not an empty commit
             }
             let Some(local) = self.local_marked_range(&capture, range, false, window) else { return };
             let caret = capture.range.start + local.start + text.len(); capture.text.replace_range(local, text);
@@ -182,7 +213,8 @@ impl EntityInputHandler for ReaderView {
         }
     }
     fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) {
-        self.synchronize_input(window, cx); if self.input_state.stale { return; }
+        self.synchronize_input(window, cx);
+        if self.input_state.stale && !(range.is_none() && self.input_state.ended.as_ref().is_some_and(|ended| self.ended_current(ended, window))) { return; }
         let Some(relative_selection) = utf16_bytes(text, selected.unwrap_or_else(|| { let end = text.encode_utf16().count(); end..end })) else { return };
         let active = self.input_state.capture.is_some();
         let Some(mut capture) = self.input_state.capture.clone().or_else(|| self.begin_input(range.clone(), window)) else { return };
@@ -190,6 +222,7 @@ impl EntityInputHandler for ReaderView {
         let at = capture.range.start + local.start;
         capture.text.replace_range(local, text);
         capture.selected = Selection { anchor: at + relative_selection.start, head: at + relative_selection.end };
+        self.input_state.stale = false; self.input_state.ended = None;
         self.show_input(capture, cx);
     }
     fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
@@ -215,7 +248,10 @@ impl EntityInputHandler for ReaderView {
     fn text_length_utf16(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
         self.synchronize_input(window, cx); Some(self.input_snapshot(window)?.len_utf16())
     }
-    fn accepts_text_input(&self, window: &mut Window, _: &mut Context<Self>) -> bool { self.input_snapshot(window).is_some() }
+    fn accepts_text_input(&self, window: &mut Window, _: &mut Context<Self>) -> bool {
+        self.focus.is_focused(window) && self.draft_target().is_some()
+            && self.input_state.capture.as_ref().is_none_or(|capture| self.capture_current(capture, window))
+    }
     fn set_selected_text_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
         self.synchronize_input(window, cx); let Some(source) = self.input_snapshot(window) else { return };
         let Some(range) = source_range(&source, range) else { return }; let selected = Selection { anchor: range.start, head: range.end };

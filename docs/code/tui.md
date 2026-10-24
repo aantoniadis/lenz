@@ -50,6 +50,11 @@ all views of the same buffer and cannot override intrinsic restrictions or enabl
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
 [basic-input report and limits](../research/reader-text-input.md).
 
+The terminal emulator owns input-method preedit; Lenz receives committed Unicode text and bracketed paste.
+GUI preedit and both adapters' long-line edits use the bounded source-coordinate path; see the
+[composition verification and limits](../research/reader-unicode-composition.md). Production writable input
+remains gated at checkpoint23.
+
 ## Controls
 
 F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared
