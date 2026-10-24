@@ -78,6 +78,8 @@ impl Session {
             tab.stamp = Some(stamp); tab.stale_on_disk = false; tab.unavailable = None;
         }
         self.synced = 0;
+        self.refresh_blame();
+        self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
     }
     pub(super) fn account_saves(&mut self) -> bool {
         let outcomes = self.analysis.take_write_outcomes();

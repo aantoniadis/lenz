@@ -1,11 +1,11 @@
-//! Annotate with Git Blame: per tab, which commit last changed each line of the file on disk. The blame streams
+//! Annotate with Git Blame: per tab, which commit last changed each line of the admitted current draft. The blame streams
 //! from its own worker thread, so a long history never holds the shared jobs that open and colour files.
 
 use std::{
     ops::Range,
     path::PathBuf,
     sync::{
-        Arc, Mutex, OnceLock, PoisonError,
+        Arc, Mutex, OnceLock, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
@@ -14,7 +14,7 @@ use std::{
 
 use lenz_content::blame::{self as git_blame, Commit, CommitDetails};
 
-use crate::{cache::Stamp, session::Completion, tabs::TabId};
+use crate::{cache::Stamp, session::Completion, tabs::TabId, text::{SnapshotKey, TextSnapshot}, document::{Document, SourceMeta}, analysis::Lease};
 
 /// The annotation column's width in cells: `YYYY-MM-DD` and an author cut to 12.
 pub const ANNOTATION_COLS: usize = 23;
@@ -23,7 +23,10 @@ const AUTHOR_COLS: usize = ANNOTATION_COLS - 11;
 /// A tab's annotations while they are on: what blame said so far about the content of `stamp`.
 pub struct Blame {
     pub(crate) stamp: Option<Stamp>,
+    pub(crate) key: Option<SnapshotKey>,
+    metadata: Weak<SourceMeta>,
     pub(crate) request: u64,
+    pub(crate) project: u64,
     /// The request this tab still wants; a job whose request differs stops and ends its git.
     latest: Arc<AtomicU64>,
     pub(crate) root: Option<PathBuf>,
@@ -31,25 +34,55 @@ pub struct Blame {
     /// Oldest and newest committed time seen.
     pub(crate) extent: Option<(i64, i64)>,
     pub(crate) done: bool,
+    pub(crate) error: Option<String>,
 }
 
 impl Blame {
     pub(crate) fn new() -> Self {
-        Blame { stamp: None, request: 0, latest: Arc::new(AtomicU64::new(0)), root: None, lines: Vec::new(), extent: None, done: false }
+        Blame { stamp: None, key: None, metadata: Weak::new(), error: None, request: 0, project: 0, latest: Arc::new(AtomicU64::new(0)), root: None, lines: Vec::new(), extent: None, done: false }
     }
 
-    /// Whether this is the blame of `stamp`'s content (complete or still arriving).
-    pub(crate) fn of(&self, stamp: Option<Stamp>) -> bool {
-        self.request != 0 && self.stamp == stamp
+    /// Identity includes draft bytes, path metadata and the saved-file identity used by Git.
+    pub(crate) fn of(&self, stamp: Option<Stamp>, snapshot: &TextSnapshot) -> bool {
+        self.request != 0 && self.stamp == stamp && self.matches(snapshot)
     }
 
-    /// Start over for `file` as of `stamp` with `lines` lines: request `request` streams to `tx` for `tab`.
-    pub(crate) fn start(&mut self, tab: TabId, file: PathBuf, stamp: Option<Stamp>, lines: usize, request: u64, tx: async_channel::Sender<Completion>) {
-        // Field by field: replacing the whole value would drop it, which stops this very request.
+    pub(crate) fn matches(&self, snapshot: &TextSnapshot) -> bool {
+        self.key == Some(snapshot.key()) && self.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta()))
+    }
+
+    /// Clear annotations synchronously; only admitted immutable draft bytes reach the existing worker.
+    pub(crate) fn start(&mut self, tab: TabId, file: PathBuf, stamp: Option<Stamp>, snapshot: &TextSnapshot, request: u64)
+        -> impl FnOnce(Arc<Document>, Lease) + Send + 'static
+    {
         self.latest.store(request, Ordering::Relaxed);
-        (self.stamp, self.request, self.root, self.lines, self.extent, self.done) = (stamp, request, None, vec![None; lines], None, false);
+        (self.stamp, self.key, self.metadata, self.request, self.root, self.lines, self.extent, self.done, self.error) =
+            (stamp, Some(snapshot.key()), Arc::downgrade(snapshot.source_meta()), request, None, vec![None; snapshot.line_count()], None, false, None);
         let latest = self.latest.clone();
-        submit(Box::new(move || run(tab, &file, request, &latest, &tx)));
+        move |document, lease| submit(Box::new(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(tab, &file, &document, request, &latest, &lease))).is_err()
+                && latest.load(Ordering::Relaxed) == request {
+                lease.send(Completion::Blamed { tab, request, root: None, hunks: Vec::new(), done: Some(Err("Blame worker failed; retry annotations".into())) });
+            }
+        }))
+    }
+
+    pub(crate) fn suspend(&mut self) {
+        self.latest.store(0, Ordering::Relaxed);
+        self.request = 0;
+        self.lines.fill(None);
+    }
+
+    pub(crate) fn fail(&mut self, error: String) {
+        self.lines.fill(None);
+        self.root = None;
+        self.extent = None;
+        self.error = Some(error);
+        self.done = true;
+    }
+
+    pub(crate) fn status(&self) -> Status<'_> {
+        match self.error.as_deref() { Some(error) => Status::Failed(error), None if !self.done => Status::Pending, None => Status::Ready }
     }
 
     pub(crate) fn apply(&mut self, root: Option<PathBuf>, hunks: Vec<(Range<usize>, Arc<Commit>)>) {
@@ -77,6 +110,15 @@ impl Drop for Blame {
     }
 }
 
+/// Current-draft attribution state; pending and failed attribution cannot supply commit actions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status<'a> { Pending, Ready, Failed(&'a str) }
+impl Status<'_> {
+    pub fn label(self) -> Option<&'static str> {
+        match self { Self::Pending => Some("Blame pending…"), Self::Failed(_) => Some("Blame failed"), Self::Ready => None }
+    }
+}
+
 /// What the column shows for one line.
 pub struct Annotation<'a> {
     pub label: String,
@@ -100,20 +142,31 @@ pub(crate) fn annotation(blame: &Blame, line: usize) -> Option<Annotation<'_>> {
 const BATCH_LINES: usize = 256;
 const BATCH_AFTER: Duration = Duration::from_millis(50);
 
-fn run(tab: TabId, file: &std::path::Path, request: u64, latest: &AtomicU64, tx: &async_channel::Sender<Completion>) {
-    let current = || latest.load(Ordering::Relaxed) == request;
+fn run(tab: TabId, file: &std::path::Path, document: &Document, request: u64, latest: &AtomicU64, lease: &Lease) {
+    let current = || latest.load(Ordering::Relaxed) == request && lease.wanted();
     if !current() {
         return;
     }
     let send = |root, hunks, done| {
-        let _ = tx.send_blocking(Completion::Blamed { tab, request, root, hunks, done });
+        lease.send(Completion::Blamed { tab, request, root, hunks, done });
     };
     let (root, path) = match git_blame::repository(file) {
         Ok(found) => found,
         Err(e) => return send(None, Vec::new(), Some(Err(e))),
     };
+    let metadata = document.source_meta();
+    if metadata.is_lossy() { return send(None, Vec::new(), Some(Err("The file has undecodable bytes; exact draft attribution is unavailable".into()))); }
+    let bytes = if metadata.original_encoding() == "UTF-8" && !metadata.had_bom() {
+        std::borrow::Cow::Borrowed(document.text().as_bytes())
+    } else {
+        match lenz_content::write::encode_exact(document.text(), metadata.original_encoding(), metadata.had_bom()) {
+            Ok(bytes) => std::borrow::Cow::Owned(bytes),
+            Err(error) => return send(None, Vec::new(), Some(Err(error.to_string()))),
+        }
+    };
+    if !current() { return; }
     send(Some(root.clone()), Vec::new(), None);
-    stream(&current, |on| git_blame::blame_worktree(&root, &path, &current, on), &|hunks, done| send(None, hunks, done));
+    stream(&current, |on| git_blame::blame_contents(&root, &path, &bytes, &current, on), &|hunks, done| send(None, hunks, done));
 }
 
 type Hunks = Vec<(Range<usize>, Arc<Commit>)>;

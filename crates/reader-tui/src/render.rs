@@ -2053,13 +2053,15 @@ fn draw_source_row(
     let digits = number_cells(view.line_count()) as usize + 3;
     let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
     if ann > 0 {
-        let a = tab.annotation(r.line).filter(|_| r.index == 0 && !sticky);
+        let a = matches!(tab.blame_status(), Some(reader_core::blame::Status::Ready))
+            .then(|| tab.annotation(r.line)).flatten().filter(|_| r.index == 0 && !sticky);
         let bg = match a.as_ref().and_then(|a| a.shade) {
             Some(s) => lenz_content::theme::mix(p.gutter_bg, p.blame_new, s * 0.6),
             None => p.gutter_bg,
         };
         let fg = if a.as_ref().is_some_and(|a| a.shade.is_some()) { p.fg } else { p.dim };
-        let label = a.map_or(String::new(), |a| format!("{:<1$}", a.label, ann as usize));
+        let status = tab.blame_status().and_then(reader_core::blame::Status::label).filter(|_| r.index == 0 && !sticky);
+        let label = status.map_or_else(|| a.map_or(String::new(), |a| format!("{:<1$}", a.label, ann as usize)), str::to_owned);
         let cell = Rect::new(gutter_x, y, ann, 1);
         fill(buf, cell, style(fg, bg));
         line(buf, cell, &label, style(fg, bg));

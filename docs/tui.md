@@ -2,7 +2,7 @@
 
 For the code reader, see the [terminal reader guide](code/tui.md).
 
-Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production reader typing and IME remain gated for editor tickets 21/22.
+Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production reader typing and IME remain gated for editor tickets 21/22. Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
 
 ![The terminal Diff showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
