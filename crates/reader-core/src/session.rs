@@ -2935,8 +2935,12 @@ impl Session {
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) {
+        let previous = self.state.source(id).map(|snapshot| SemanticSource::new(snapshot));
         let changed = self.state.admit_current(id, doc, stamp);
         let version = self.state.source(id).map_or(0, |snapshot| snapshot.key().version);
+        if let Some(snapshot) = self.state.source(id).cloned()
+            && previous.is_some_and(|source| !source.matches(&snapshot))
+        { self.mark_draft_results_stale(&snapshot); }
         if let Some(view) = self.state.view(id) { self.analysis.invalidate(view.snapshot(), self.project_generation.load(Ordering::Relaxed)); }
         for id in changed {
             if self.is_shown(id) {

@@ -1085,8 +1085,14 @@ fn rebuild_discards_saved_and_inflight_records_and_cache_optout_survives_reopen(
     s.dispatch(Completion::Indexed { generation, revision, files: vec![(Arc::from("a.rb"), old)] });
     assert_eq!(s.state.index.coverage().indexed, 0, "held pre-rebuild chunk is obsolete");
     settle(&mut s, |s| !s.index_rebuilding && s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete()
-        && s.state.results.as_ref().is_some_and(|r| r.done && r.hits.len() == 1)
+        && s.state.results.as_ref().is_some_and(|r| r.done)
         && s.state.current_source().is_some_and(|d| source_text(d).contains("Omega")));
+    let captured = s.state.results.as_ref().unwrap();
+    assert!(captured.hits.is_empty(), "the captured Alpha query does not silently switch to refreshed text");
+    assert!(captured.error().is_some_and(|error| error.contains("rerun")), "reloaded query sources must visibly become stale");
+    s.dispatch(Command::RerunSearch);
+    settle(&mut s, searched);
+    assert_eq!(s.state.results.as_ref().unwrap().hits.len(), 1);
     assert_eq!(index::rank(&s.state.index.snapshot(), "Alpha", || true).unwrap().1, 0);
     assert_eq!(index::rank(&s.state.index.snapshot(), "Omega", || true).unwrap().1, 1);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "class Omega; end\n");
@@ -3150,7 +3156,7 @@ fn queued_result_validation_rechecks_the_retained_current_target() {
     s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
     s.tab_mut(tab).unwrap().new_content();
     for release in releases { release.send(()).unwrap(); }
-    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("current source changed")));
+    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("captured draft changed")));
     assert!(s.state().results().unwrap().is_stale(0));
     assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
     s.dispatch(Command::SelectAll);
@@ -3294,6 +3300,14 @@ fn a_previewed_match_is_syntax_coloured_from_its_own_parse_or_its_tab() {
     for i in [1, 0, 1, 0, 1] {
         s.dispatch(Command::SelectResult(i));
     }
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_none()
+        && s.state().notices().iter().any(|n| n.contains("search source changed")));
+    assert!(s.state().results().unwrap().is_stale(1));
+    assert!(s.state().current_source().is_none(), "a refused preview must not navigate or publish current text");
+    assert_eq!(std::fs::read(root.join("b.rs")).unwrap(), b"// needle, changed\n");
+    s.dispatch(Command::RerunSearch);
+    settle(&mut s, searched);
+    s.dispatch(Command::SelectResult(1));
     settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|p| p.index == 1 && p.highlights().is_some() && p.doc.text().contains("changed")));
 }
 
@@ -6499,10 +6513,10 @@ fn unified_navigation_finds_files_symbols_and_actions_without_loading_search_can
     assert!(s.state().current_source().is_none() && s.state().results().is_none(), "ranking must not open documents or replace search results");
     let row = n.rows.iter().position(|r| r.kind == Kind::Symbol && r.label == "wrap").unwrap();
     let chosen = s.navigation_choice(n.revision, row).unwrap();
-    s.dispatch(Command::CloseSearchEverywhere);
     let Chosen::Command(command) = chosen else { panic!("expected source navigation") };
     s.dispatch(command);
     settle(&mut s, |s| s.state().current_source().is_some() && s.state().active().is_some_and(|t| t.selection().is_some()));
+    assert!(s.state().navigation().is_none(), "validated activation closes the picker after success");
     assert_eq!(s.state().active().unwrap().source(), path);
     assert_eq!(s.state().selection().unwrap().head, "// source\n".len());
     assert_eq!(std::fs::read(path).unwrap(), b"// source\nfn wrap() {}\n");
