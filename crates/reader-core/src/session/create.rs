@@ -94,7 +94,7 @@ impl Session {
     }
 
     /// Ask both adapters to show and select `rel`, which is what the user just created.
-    fn show_created(&mut self, rel: Arc<str>) {
+    pub(super) fn show_created(&mut self, rel: Arc<str>) {
         self.state.explorer.selected = Some(rel.to_string());
         let ticket = self.state.tree_reveal.as_ref().map_or(1, |(_, t)| t + 1);
         self.state.tree_reveal = Some((rel, ticket));

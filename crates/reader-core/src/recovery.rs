@@ -200,7 +200,7 @@ pub(crate) struct Recovery {
     /// The user chose Later: the dialog stays closed until they ask for it again.
     postponed: bool,
     /// Released after the saver has written what is pending.
-    owner: Option<Owner>,
+    _owner: Option<Owner>,
 }
 
 impl Recovery {
@@ -217,7 +217,7 @@ impl Recovery {
             offers.push(Offer { id: offers.len() as u64 + 1, record, disk });
         }
         let saver = Saver::new(dir, &loaded, Some(owner.token.clone()));
-        Self { offers, saver, postponed: false, owner: Some(owner) }
+        Self { offers, saver, postponed: false, _owner: Some(owner) }
     }
 
     /// Whether a document's recovered draft still waits for Restore or Discard. Its record is kept as it is until
@@ -262,7 +262,7 @@ impl Recovery {
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn end_ownership(&mut self) {
         self.flush();
-        self.owner = None;
+        self._owner = None;
     }
 }
 

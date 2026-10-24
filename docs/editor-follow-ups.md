@@ -624,6 +624,33 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Unverified:** native macOS and Wayland GUI, physical terminals, and filesystems without advisory locks were not
   exercised for this ticket.
 
+## Explorer rename and move (ticket 36, 2026-10-24)
+
+- **Suspected cost, unmeasured:** Enter in the prompt checks the source, the destination and its folder with
+  `symlink_metadata`/`metadata` on the UI thread, and the move itself (one `renameat2`/`renamex_np`) and the follow-up
+  `canonicalize`/`metadata` of each affected open file run there too. Cheap locally, blocking on slow or network file
+  systems; include a rename of a folder holding many open tabs in the scheduled batch measurements.
+- **New audited FFI:** `lenz_content::write::rename_noclobber` is the content crate's third audited `unsafe` site
+  (listed in its `lib.rs`): Linux `renameat2(RENAME_NOREPLACE)`, macOS `renamex_np(RENAME_EXCL)`. A file system without
+  them (some network and FUSE file systems return `EINVAL`) refuses the move with that error rather than checking and
+  racing; other platforms refuse outright. The macOS route is compiled for but was not run.
+- **What follows a move:** open tabs (shown, released and read-only comparison sides), their drafts and undo history,
+  the inactive cache entry of each followed tab, recovery records, Back/Forward entries, bookmarks and recent places of
+  everything under the moved path, the project inventory, empty-folder and expanded-folder state, and watches. Cached
+  text of files with no tab, and buffer aliases of paths with no tab, are left to age out; reopening reads the new path.
+- **Save target:** a moved document's confirmed save target follows only when the file now at the new path has the same
+  device and inode as the confirmed one; otherwise Save stays closed until Recheck, as after a move made elsewhere.
+- **Refusals:** a running or unconfirmed save inside the moved path, and an undecided recovered draft there, refuse the
+  move. A dirty draft does not: it moves with its file and is never written by the move.
+- **No semantic updates:** references, imports and `require`s in other files are not changed. A move marks open
+  documents for the next language-server sync, as a watcher-followed rename does; no `workspace/willRenameFiles` or
+  `didRenameFiles` is sent, and what a running server does with the old document's URI was not verified with a real
+  provider.
+- **No shortcut:** Rename and Move are reachable from the explorer's row menu and F10 → View in both adapters; IntelliJ's
+  Shift+F6/F6 were not bound because the presets' conflict review is the keymap ticket's decision.
+- **Unverified:** native macOS and Wayland GUI, physical terminals, case-only renames on case-insensitive file systems,
+  and moves across file systems (`EXDEV` is reported, not emulated by copy) were not exercised.
+
 ## Tests that time out under load (2026-10-24)
 
 - **Seven tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never

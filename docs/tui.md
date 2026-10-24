@@ -31,6 +31,13 @@ undo history and Save — and is selected in the explorer; a created folder show
 takes, missing folders, paths outside the project and folders whose permissions refuse new entries are refused with
 their reason before anything is written.
 
+**Rename in Explorer…** and **Move in Explorer…** sit in the same menus and act on the highlighted file or folder: the
+prompt starts with its current name (Rename) or its folder (Move, project-relative; empty is the root). A taken name, a
+folder moved into itself, a document whose save is running or unconfirmed and an undecided recovered draft are refused
+with their reason. The move never replaces another entry; open tabs, unsaved drafts with their undo history, Back and
+Forward, bookmarks and the explorer follow it, and Save then writes the file at its new path. References to the entry in
+other files are not changed. There is no default shortcut; the menus are the route in both adapters.
+
 The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
 in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
 See the [Reader controls](code/tui.md) and [focused verification limits](research/reader-saved-comparison.md).

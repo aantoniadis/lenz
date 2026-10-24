@@ -237,6 +237,21 @@ impl Places {
         changed
     }
 
+    /// `from` (a file or a folder) was moved to `to`: the places of everything inside it follow. Whether any did.
+    pub fn rename_tree(&mut self, from: &Path, to: &Path) -> bool {
+        let mut sources: Vec<PathBuf> = self.bookmarks.iter().chain(self.recent_locations.iter()).map(|m| PathBuf::from(&*m.source))
+            .chain(self.recent_files.iter().cloned()).filter(|p| p.starts_with(from)).collect();
+        sources.sort();
+        sources.dedup();
+        let mut changed = false;
+        for source in sources {
+            let Ok(rest) = source.strip_prefix(from) else { continue };
+            let target = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+            changed |= self.rename(&source, &target);
+        }
+        changed
+    }
+
     pub fn forget_file(&mut self, path: &Path) {
         self.recent_files.retain(|p| p != path);
     }

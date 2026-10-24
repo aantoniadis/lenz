@@ -50,6 +50,8 @@ pub(crate) enum Prompt {
     SaveAs(reader_core::tabs::TabId),
     /// New File / New Folder: the name to create in the explorer's folder (`dir`, project-relative).
     Create { kind: reader_core::create::Kind, dir: String },
+    /// Rename / Move: the new name or folder for explorer entry `from` (project-relative).
+    Relocate { kind: reader_core::relocate::Kind, from: String },
     /// Compare With: the other file or folder for this one.
     Compare(PathBuf),
     WorkspaceRoot,
@@ -518,7 +520,7 @@ impl App {
     }
     pub fn run(&mut self, id: CommandId) {
         // A command acts on the explorer's highlighted row, which only this adapter knows.
-        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder) {
+        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry) {
             self.remember_explorer();
         }
         // Toggling flips what is shown, then the setting alone decides.
@@ -667,6 +669,10 @@ impl App {
                 // The highlighted row is the folder to create in: remember it before asking the core.
                 Some(dir) => Prompt::Create { kind, dir },
                 None => return self.dispatch(Command::Notice("No folder is open".into())),
+            },
+            InterfaceAction::Relocate(kind) => match self.session.relocate_target() {
+                Some(from) => Prompt::Relocate { kind, from },
+                None => return self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into())),
             },
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
@@ -821,6 +827,7 @@ impl App {
                 let (dir, name) = self.session.save_as_start();
                 input = dir.join(name.unwrap_or_default()).display().to_string();
             }
+            Prompt::Relocate { kind, ref from } => input = self.session.relocate_start(kind, from),
             _ => {}
         }
         self.modal = Some(Modal {
@@ -1151,6 +1158,9 @@ impl App {
                 Prompt::Create { kind, dir } => {
                     let where_ = if dir.is_empty() { "the project root" } else { dir.as_str() };
                     return format!("{} in {where_} · Enter creates · Esc cancels", kind.label());
+                }
+                Prompt::Relocate { kind, from } => {
+                    return format!("{} {from} · type {} · Enter · Esc cancels · references are not changed", kind.label(), kind.asks());
                 }
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::Compare(_) => reader_core::external::COMPARISON_PROMPT,
@@ -1768,6 +1778,15 @@ impl App {
                     self.dispatch(Command::SaveAs { tab, path });
                 }
             }
+            Prompt::Relocate { kind, from } => match self.session.relocate_refusal(kind, &from, &input) {
+                Some(why) => {
+                    if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }
+                }
+                None => {
+                    self.close_modal();
+                    self.dispatch(Command::RelocateEntry { kind, from: from.into(), input });
+                }
+            },
             Prompt::Create { kind, dir } => {
                 let name = input.trim().to_string();
                 match self.session.create_refusal(&dir, &name) {
