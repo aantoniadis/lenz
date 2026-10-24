@@ -22,6 +22,8 @@ mod close_work;
 mod external_work;
 #[path = "session/save_as.rs"]
 mod save_as_work;
+#[path = "session/create.rs"]
+mod create_work;
 #[path = "session/recovery.rs"]
 mod recovery_work;
 #[path = "session/transition.rs"]
@@ -119,6 +121,8 @@ pub enum Command {
     ChooseReplace { ticket: u64, choice: crate::save::ReplaceChoice },
     /// A new untitled document, retained in the focused pane.
     NewDocument,
+    /// Create `kind` named `name` in folder `dir` (project-relative, `""` the root) and open or select it.
+    CreateEntry { kind: crate::create::Kind, dir: Arc<str>, name: String },
     /// Show the recovered drafts still undecided (a postponed dialog).
     ShowRecoveredDrafts,
     /// Restore, discard or postpone the recovered draft `ticket` names.
@@ -493,6 +497,10 @@ pub enum CommandId {
     SaveAs,
     /// An untitled document in the focused pane.
     NewDocument,
+    /// Create a file in the explorer's highlighted folder (the adapter asks for its name).
+    NewExplorerFile,
+    /// Create a folder in the explorer's highlighted folder (the adapter asks for its name).
+    NewExplorerFolder,
     /// The recovered drafts read at start, one at a time.
     RecoverDrafts,
     RecheckSave,
@@ -656,7 +664,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 155] = [
+    pub const ALL: [CommandId; 157] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -708,6 +716,8 @@ impl CommandId {
         Self::Save,
         Self::SaveAs,
         Self::NewDocument,
+        Self::NewExplorerFile,
+        Self::NewExplorerFolder,
         Self::RecoverDrafts,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
@@ -888,6 +898,8 @@ impl CommandId {
             Self::Save => "Save",
             Self::SaveAs => "Save As…",
             Self::NewDocument => "New File",
+            Self::NewExplorerFile => "New File in Explorer…",
+            Self::NewExplorerFolder => "New Folder in Explorer…",
             Self::RecoverDrafts => "Recover Unsaved Draft…",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
@@ -1253,6 +1265,8 @@ pub struct State {
     project: Option<Project>,
     libraries: crate::libraries::Libraries,
     tree_revision: u64,
+    /// The explorer row the session asked the adapters to show and select (a just-created entry), with its ticket.
+    tree_reveal: Option<(Arc<str>, u64)>,
     explorer: crate::workspace::Explorer,
     workspace_revision: u64,
     recent: Vec<PathBuf>,
@@ -1827,6 +1841,9 @@ impl State {
     pub fn has_tree(&self) -> bool { self.project.is_some() || !self.libraries.rows().is_empty() }
     /// Changes when navigation asks the adapters to reveal the active library file.
     pub fn tree_revision(&self) -> u64 { self.tree_revision }
+    /// The explorer row the session asked the adapters to show and select (a just-created entry), and its ticket:
+    /// adapters apply it when the ticket changes, after any revision reset.
+    pub fn tree_reveal(&self) -> Option<(Arc<str>, u64)> { self.tree_reveal.clone() }
     pub fn active_in_tree(&self) -> Option<Arc<str>> {
         let t = self.active()?;
         if self.libraries.contains(&t.source) { return Some(t.source.to_string_lossy().as_ref().into()); }
@@ -2416,6 +2433,7 @@ impl Session {
                 project: None,
             libraries: Default::default(),
             tree_revision: 0,
+            tree_reveal: None,
                 explorer: Default::default(), workspace_revision: 0,
                 recent,
                 places: Default::default(),
@@ -2773,6 +2791,7 @@ impl Session {
                 Some(_) => None,
             },
             CommandId::NewDocument => None,
+            CommandId::NewExplorerFile | CommandId::NewExplorerFolder => self.state.project.is_none().then_some("No folder is open"),
             CommandId::RecoverDrafts => self.recovery.offers().is_empty().then_some("No recovered drafts are offered"),
             CommandId::SaveAs => match self.state.active() {
                 None => Some("No file is open"),
@@ -3091,6 +3110,11 @@ impl Session {
             entries.push(C(CommandId::Unsplit));
         }
         entries
+    }
+
+    /// The explorer's row menu, shared by both adapters: what can be made in the highlighted folder.
+    pub fn tree_menu(&self) -> Vec<MenuEntry> {
+        vec![MenuEntry::Command(CommandId::NewExplorerFile), MenuEntry::Command(CommandId::NewExplorerFolder)]
     }
 
     /// Line `line`'s annotation in tab `tab`, while its annotations are on and git has reached it.
@@ -3568,6 +3592,7 @@ impl Session {
             Command::SaveAs { tab, path } => self.save_as(tab, path),
             Command::ChooseReplace { ticket, choice } => self.choose_replace(ticket, choice),
             Command::NewDocument => self.new_document(),
+            Command::CreateEntry { kind, dir, name } => self.create_entry(kind, dir.to_string(), name),
             Command::ShowRecoveredDrafts => self.show_recovered_drafts(),
             Command::ChooseRecoveredDraft { ticket, choice } => self.choose_recovered_draft(ticket, choice),
             Command::RecheckSave { tab } => self.recheck_save(tab),

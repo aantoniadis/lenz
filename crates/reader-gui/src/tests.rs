@@ -1,6 +1,7 @@
 //! Real input through GPUI's test platform: keys, clicks, drags, wheel and resizes reach the session only as
 //! commands, and the file on disk never changes.
 use super::*;
+mod create;
 mod external;
 mod save_as;
 #[cfg(target_os = "linux")]

@@ -48,6 +48,8 @@ pub(crate) enum Prompt {
     OpenFolder,
     /// Save As: the destination path for this tab's document.
     SaveAs(reader_core::tabs::TabId),
+    /// New File / New Folder: the name to create in the explorer's folder (`dir`, project-relative).
+    Create { kind: reader_core::create::Kind, dir: String },
     /// Compare With: the other file or folder for this one.
     Compare(PathBuf),
     WorkspaceRoot,
@@ -159,6 +161,8 @@ pub(crate) struct App {
     pub results_top: usize,
     pub tree_shown: bool,
     pending_explorer: Option<reader_core::workspace::Explorer>,
+    /// The last explorer-reveal ticket applied, so a created entry is selected once.
+    reveal_seen: u64,
     pub notice: Option<String>,
     pub independent_view: Option<(usize, usize)>,
     pub quit: bool,
@@ -204,6 +208,7 @@ impl App {
             results_top: 0,
             tree_shown: true,
             pending_explorer: None,
+            reveal_seen: 0,
             notice: None,
             independent_view: None,
             quit: false, quit_all: false,
@@ -282,6 +287,18 @@ impl App {
             self.tree_at = selected.unwrap_or(0);
             self.tree_top = top.unwrap_or(0);
             self.pending_explorer = None;
+        }
+    }
+
+    /// Show and select the row the session asked for (a just-created entry), once per ticket.
+    pub(crate) fn sync_reveal(&mut self) {
+        let Some((path, ticket)) = self.session.state().tree_reveal() else { return };
+        if ticket <= self.reveal_seen { return; }
+        self.reveal_seen = ticket;
+        if let Some(at) = self.session.state().tree_rows().position(|r| r.path == path) {
+            self.tree_at = at;
+            self.tree_shown = true;
+            self.tree_top = self.tree_top.min(at);
         }
     }
 
@@ -366,6 +383,7 @@ impl App {
             self.tree_shown = true;
             self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
         }
+        self.sync_reveal();
         if let Some(plan) = effect.external { self.start(plan.launch,plan.toast); }
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
@@ -449,6 +467,7 @@ impl App {
             && self.session.state().tree_rows().nth(self.tree_at).is_none_or(|r| r.path != path) {
             self.tree_at = self.session.state().tree_rows().position(|r| r.path == path).unwrap_or(0);
         }
+        self.sync_reveal();
         if self.session.state().results().map(|r| r.id()) != results_id {
             self.results_at = 0;
             self.results_top = 0;
@@ -496,6 +515,10 @@ impl App {
         self.icons_override.unwrap_or_else(|| self.session.state().file_icons())
     }
     pub fn run(&mut self, id: CommandId) {
+        // A command acts on the explorer's highlighted row, which only this adapter knows.
+        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder) {
+            self.remember_explorer();
+        }
         // Toggling flips what is shown, then the setting alone decides.
         if id == CommandId::FileIcons {
             let on = !self.nerd_icons();
@@ -637,6 +660,11 @@ impl App {
             InterfaceAction::SaveAs => match self.session.state().active() {
                 Some(tab) => Prompt::SaveAs(tab.id()),
                 None => return,
+            },
+            InterfaceAction::Create(kind) => match self.session.create_target() {
+                // The highlighted row is the folder to create in: remember it before asking the core.
+                Some(dir) => Prompt::Create { kind, dir },
+                None => return self.dispatch(Command::Notice("No folder is open".into())),
             },
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
@@ -1114,6 +1142,10 @@ impl App {
                 Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
                 Prompt::SaveAs(_) => "Save As · enter the new file's path",
+                Prompt::Create { kind, dir } => {
+                    let where_ = if dir.is_empty() { "the project root" } else { dir.as_str() };
+                    return format!("{} in {where_} · Enter creates · Esc cancels", kind.label());
+                }
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::Compare(_) => reader_core::external::COMPARISON_PROMPT,
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
@@ -1718,6 +1750,18 @@ impl App {
                     let path = self.resolve_path(&input);
                     self.close_modal();
                     self.dispatch(Command::SaveAs { tab, path });
+                }
+            }
+            Prompt::Create { kind, dir } => {
+                let name = input.trim().to_string();
+                match self.session.create_refusal(&dir, &name) {
+                    Some(why) => {
+                        if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }
+                    }
+                    None => {
+                        self.close_modal();
+                        self.dispatch(Command::CreateEntry { kind, dir: dir.into(), name });
+                    }
                 }
             }
             Prompt::Open | Prompt::OpenFolder => {
@@ -2770,6 +2814,18 @@ impl App {
     }
 
     fn context_menu(&mut self, x: u16, y: u16) {
+        // The explorer's own menu (creation), on a row or the empty space below the rows.
+        if self.session.state().has_tree() && self.layout.tree.contains((x, y).into()) {
+            let row = self.tree_top + y.saturating_sub(self.layout.tree.y) as usize;
+            self.focus = Focus::Tree;
+            if row < self.session.state().tree_rows().count() {
+                self.tree_at = row;
+            }
+            self.remember_explorer();
+            let entries = self.session.tree_menu();
+            self.prompt(Prompt::Context { x, y, entries });
+            return;
+        }
         let Some(pane) = self
             .layout
             .panes

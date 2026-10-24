@@ -2670,3 +2670,83 @@ fn find_and_replace_replay_the_same_text_results_and_undo_in_both_adapters(cx: &
     check(&visual, &tui, "bar foo\nfood foo\n");
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
 }
+
+#[gpui::test]
+fn explorer_creation_of_a_file_and_a_folder_matches_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let roots = [dir.path().join("gui"), dir.path().join("tui")];
+    for root in &roots {
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), b"keep\n").unwrap();
+    }
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui-state"))), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    gui.update(&mut visual, |v, cx| v.open_root(roots[0].clone(), cx));
+    let mut tui = App::new(config(&dir.path().join("tui-state")), Some(roots[1].clone()));
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle_until = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !gui.read_with(visual, |v, _| done(v.session().state())) || !done(tui.session.state()) {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::yield_now();
+        }
+    };
+    let scanned = |s: &State| s.project().is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_)));
+    settle_until(&mut visual, &mut tui, &scanned);
+    // Both adapters act on the explorer's highlighted row, which is `src` in each (folders lead, as in both).
+    let highlight_src = |_visual: &mut VisualTestContext, _tui: &mut App| {};
+    let both_selected = |visual: &VisualTestContext, tui: &App| {
+        let gui_row = gui.read_with(visual, |v, _| v.tree_sel.as_deref().map(str::to_string));
+        let tui_row = tui.session.state().tree_rows().nth(tui.tree_at).map(|r| r.path.to_string());
+        assert_eq!(gui_row, tui_row, "the same explorer row is selected");
+        gui_row
+    };
+    // A new file, named through each adapter's own command path and dialog.
+    highlight_src(&mut visual, &mut tui);
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::NewExplorerFile, w, cx));
+    tui.run(CommandId::NewExplorerFile);
+    assert!(matches!(tui.modal.as_ref().map(|m| &m.kind), Some(crate::app::Prompt::Create { dir, .. }) if dir == "src"));
+    for c in "new.txt".chars() {
+        visual.simulate_keystrokes(&c.to_string());
+        key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let opened = |s: &State| s.current_source().is_some() && s.active().is_some_and(|t| t.title() == "new.txt");
+    settle_until(&mut visual, &mut tui, &opened);
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    assert_eq!(both_selected(&visual, &tui).as_deref(), Some("src/new.txt"));
+    assert!(tui.modal.is_none() && gui.read_with(&visual, |v, _| v.modal.is_none()));
+    for root in &roots { assert_eq!(std::fs::read(root.join("src/new.txt")).unwrap(), b"", "an empty file in either project"); }
+    // The created file is an ordinary document in both: typing reaches its draft, not the disk.
+    visual.simulate_keystrokes("a");
+    key(&mut tui, KeyCode::Char('a'), KeyModifiers::NONE);
+    let typed = |s: &State| s.current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).unwrap() == "a");
+    settle_until(&mut visual, &mut tui, &typed);
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    for root in &roots { assert_eq!(std::fs::read(root.join("src/new.txt")).unwrap(), b""); }
+    // A new folder from the same command: both select it and keep the document.
+    highlight_src(&mut visual, &mut tui);
+    gui.update_in(&mut visual, |v, w, cx| v.run(CommandId::NewExplorerFolder, w, cx));
+    tui.run(CommandId::NewExplorerFolder);
+    for c in "docs".chars() {
+        visual.simulate_keystrokes(&c.to_string());
+        key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE);
+    }
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    settle_until(&mut visual, &mut tui, &|s: &State| s.tree_rows().any(|r| &*r.path == "src/docs"));
+    for root in &roots { assert!(root.join("src/docs").is_dir()); }
+    assert_eq!(both_selected(&visual, &tui).as_deref(), Some("src/docs"));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |v, _| snapshot(v.session().state())));
+    assert_eq!(tui.session.state().active().unwrap().title(), "new.txt");
+    // Files the tests did not create are untouched.
+    for root in &roots { assert_eq!(std::fs::read(root.join("src/a.txt")).unwrap(), b"keep\n"); }
+}

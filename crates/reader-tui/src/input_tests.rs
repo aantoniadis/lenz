@@ -1,4 +1,6 @@
 use super::*;
+#[path = "input_tests/create.rs"]
+mod create;
 #[path = "input_tests/external.rs"]
 mod external;
 #[path = "input_tests/find_replace.rs"]
@@ -664,13 +666,16 @@ fn context_menu_follows_the_clicked_split_and_preview_and_scrolls_in_tiny_frames
         }
         key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     }
-    // A right-click in the explorer leaves the document and modal state alone.
+    // A right-click on an explorer row opens the explorer's own menu: creation, never a document command.
     a.handle(Event::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),
         column: 0,
         row: 2,
         modifiers: KeyModifiers::NONE,
     }));
+    assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::Context { .. })));
+    assert!(a.choices().iter().all(|c| matches!(c.target, ChoiceTarget::Action(CommandId::NewExplorerFile | CommandId::NewExplorerFolder))));
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.modal.is_none());
     assert_eq!(std::fs::read_to_string(text).unwrap(), "α界 name\n");
 }
