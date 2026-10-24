@@ -4,6 +4,10 @@ For the code reader, see the [terminal reader guide](code/tui.md).
 
 Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production reader typing and IME remain gated for editor tickets 21/22. Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
 
+The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
+in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
+See the [Reader controls](code/tui.md) and [focused verification limits](research/reader-saved-comparison.md).
+
 ![The terminal Diff showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
 `lenz diff --tui` (installed as `lenz-diff-tui`) is the terminal adapter over the same shared core as the GUI (`lenz diff`): comparison, editing, merge, repository and pull request, image, annotation and search behavior all live in `crates/app`. This page lists the terminal's controls, where it differs from the GUI and its capability limits. Command-line usage, settings and the feature overview are in the [README](../README.md).

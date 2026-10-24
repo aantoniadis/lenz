@@ -28,6 +28,13 @@ is open. Ctrl+Shift+E focuses the explorer; arrows expand or collapse folders an
 and expand to refresh a listing. Server-retrieved sources list visited files only. See the
 [Reader guide](README.md) for listing limits and server-session behavior.
 
+**Compare saved** (Ctrl+Shift+D, also in the palette) opens an in-window comparison against the last
+confirmed saved version. **Last saved (read-only)** and **Current draft** show changed rows with a blue
+background and `▌` gutter marks. The current side shares the ordinary tab’s buffer and undo history;
+the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split restores the original views
+without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
+independently. Production typing remains gated; see the [implementation and verification limits](../research/reader-saved-comparison.md).
+
 ## Controls
 
 F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared

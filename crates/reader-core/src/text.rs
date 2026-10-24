@@ -120,6 +120,8 @@ impl TextSnapshot {
     }
 
     pub(crate) fn with_source_meta(&self, source: Arc<SourceMeta>) -> Self { Self { owned_bytes: self.owned_bytes - self.source.bytes() + source.bytes(), source, ..self.clone() } }
+    /// An immutable comparison side shares its backing, but has independent analysis identity.
+    pub(crate) fn with_buffer(&self, buffer: BufferId) -> Self { Self { key: SnapshotKey { buffer, ..self.key }, ..self.clone() } }
     pub fn key(&self) -> SnapshotKey { self.key }
     pub fn source(&self) -> &Path { self.source.source() }
     pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
