@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import Mock
+from types import SimpleNamespace
 
 spec = importlib.util.spec_from_file_location('foundation_native', Path(__file__).with_name('reader-foundation-native.py'))
 native = importlib.util.module_from_spec(spec)
@@ -43,3 +45,17 @@ class FoundationNativeHelpers(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'truncated'):
             native.exact_text({'source': {'prefix': 'partial', 'prefix_complete': False}})
         self.assertEqual(native.exact_text({'source': {'prefix': 'é', 'prefix_complete': True}}), 'é')
+
+    def test_destroyed_windows_during_native_close_are_ignored_but_other_errors_propagate(self):
+        class Gone(Exception):
+            pass
+        alive = SimpleNamespace(get_attributes=Mock(return_value=SimpleNamespace(map_state=2)), get_wm_name=Mock(return_value='owned'))
+        gone_attributes = SimpleNamespace(get_attributes=Mock(side_effect=Gone))
+        gone_name = SimpleNamespace(get_attributes=Mock(return_value=SimpleNamespace(map_state=2)), get_wm_name=Mock(side_effect=Gone))
+        hidden = SimpleNamespace(get_attributes=Mock(return_value=SimpleNamespace(map_state=0)), get_wm_name=Mock())
+        root = SimpleNamespace(query_tree=Mock(return_value=SimpleNamespace(children=[gone_attributes, alive, gone_name, hidden])))
+        self.assertEqual(native.visible_windows(root, 2, Gone), {'owned': alive})
+        hidden.get_wm_name.assert_not_called()
+        alive.get_attributes.side_effect = ValueError('unexpected X error')
+        with self.assertRaisesRegex(ValueError, 'unexpected X error'):
+            native.visible_windows(root, 2, Gone)

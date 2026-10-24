@@ -366,7 +366,7 @@ for endpoints and limits, and the [completed batch checks](docs/research/reader-
 The 11–18 editor batch measured core first-text increases of **35 µs / 405 µs** for 50 KB / 945 KB,
 TUI first content **7.90→12.07 ms**, and about **20% fewer mixed-stress iterations**. TUI post-workflow
 RSS reached **46.42 MiB versus 37.73 MiB**, with a lower candidate band also observed. These new costs
-await an explicit performance decision. GUI startup/cadence remain similar in these software-display samples;
+were explicitly accepted on 2026-10-24. GUI startup/cadence remain similar in these software-display samples;
 actual scrolling is now checked with changing source crops. See the
 [batch performance report](docs/research/reader-editor-batch-11-18-performance.md) for all distributions,
 RSS/ownership limits, the retained baseline failure and new Save/history measurements.

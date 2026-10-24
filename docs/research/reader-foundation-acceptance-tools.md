@@ -1,8 +1,9 @@
 # Foundation acceptance tools
 
-These are preparation tools for editor ticket23, not an acceptance result or production input enabler.
-The cohort campaign, native input/close runs, 180-second editing workload and full gate have not run here.
-Native macOS remains blocked by03/24; prior11–18 performance costs still await an explicit decision.
+These tools support editor ticket23; they do not enable production input. The native Linux-X11
+correctness supplement has passed. The cohort performance campaign, 180-second editing workload and
+combined full gate remain pending.
+Native macOS remains blocked by03/24; the user accepted the documented11–18 performance costs on 2026-10-24.
 
 ## Shared-core editing/history workload
 
@@ -38,7 +39,9 @@ the harness without running a timed/stress campaign.
 `foundation-native` is a Reader GUI example requiring `test-support`. Its constructor helper delegates
 exactly to the installed production `open_reader_window`, including close coordination, focus callbacks
 and veto hook. Opening through the helper does not enable input; only this disposable example explicitly
-calls the existing test opt-in. No shipped CLI/config/defaults or normal input gates change.
+calls the existing test opt-in. It also explicitly starts the same completion/theme listeners used by
+production; TestPlatform continues to poll manually because it rejects cross-thread wakeups. No shipped
+CLI/config/defaults or normal input gates change.
 
 After cohort release:
 
@@ -57,15 +60,15 @@ Surviving fixture drafts are explicitly discarded for normal last-window cleanup
 only owned children and retain their logs.
 
 XKB compose maps one unused key to dead_acute on ONLY the private server before app startup. A native
-dead_acute+e sequence is intended to prove preedit leaves authority/history unchanged, one Unicode
-commit and one Undo. The example records bounded (≤4096-byte) authoritative prefixes and state changes;
+dead_acute+e sequence proves preedit leaves authority/history unchanged. Two consecutive compositions
+commit `éé`, then Undo restores `é` and the original draft in separate steps. The example records bounded (≤4096-byte) authoritative prefixes and state changes;
 small fixture text is checked exactly. Screenshots and native window IDs supplement those observations.
 This observer is acceptance instrumentation, not a production typing latency endpoint.
 
 The positive native preedit oracle depends on ticket22's read-only
 `ReaderView::marked_text_for_test()->Option<(absolute UTF16 range, bounded preedit String)>`.
-At this preparation checkpoint22 is not integrated: wire that getter into the example's `marked` state
-field before running the compose scenario. A missing oracle must fail, never count as successful preedit.
+Ticket22 is integrated and that getter supplies the example's `marked` state. A missing oracle fails
+the scenario; it never counts as successful preedit.
 `--scenario close` is independent. Native composition cancellation is not exercised: the pinned XKB
 Cancelled branch may commit a dead-key prefix, so physical Escape must not be assumed to cancel.
 Coordinate the native cancellation oracle with22 before any stronger input-method claim.
@@ -91,6 +94,21 @@ application or timed workload. All production and cohort acceptance remains sepa
 
 Collector revision for this cohort: `code-tui-bench.py` schema3 dismisses the palette with Escape before Ctrl-Q, matching the shared modal-first close contract. Its latency endpoints remain first observed PTY output; environment revision2 preserves HOME while isolating XDG. The archived startup-pair wrapper advances schema1→2 for the same environment change. Historical drivers and samples remain untouched; staged driver hashes are recorded under `merge-14-23/performance/staged-collector-identity.json`.
 
-The native observer now records22's real bounded marked-text metadata. The supplement requires two consecutive dead-key compositions with no intervening Undo/navigation, exact `éé`, then one Undo per commit. These assertions have not yet run against X11; physical display, Wayland, native macOS and native cancellation remain unverified. The corrected collector has focused pure/owned-PTY checks only; no cohort timings or stress have run.
+The native observer now records22's real bounded marked-text metadata. The supplement requires two consecutive dead-key compositions with no intervening Undo/navigation, exact `éé`, then one Undo per commit. These assertions pass on owned Xvfb/X11 with actual XTest input and production window close callbacks; physical display, Wayland, native macOS and native cancellation remain unverified. The corrected collector has focused pure/owned-PTY checks only; no cohort timings or stress have run.
 
 The whole-chain replay is `reader-tui/src/foundation_parity_tests.rs`: both actual production constructors start empty, render dark/light and1x1 modal states, then actual Open/typing/paste/split/both-pane edit/Undo/Redo/Save controls run. Two17MiB clean sources force observable weak-cache eviction before returning to the saved buffer and undoing. Exact draft/disk/history/dirty/action state, shared split snapshot, independent pane positions and independent dirty Sessions are asserted throughout. Each adapter owns mirrored disposable files so their explicit Saves do not race each other. This focused TestPlatform replay is distinct from native OS delivery and from performance acceptance.
+
+
+The completed native supplement uses application source `2ad66f6` and driver source `3fa80f0`.
+It passes real WM_DELETE veto, repeated requests and modal input isolation, Cancel preserving two exact
+independent drafts/positions/files, two positive marked phases with independent Unicode Undo, fresh
+Discard removing only its approved window, and normal last-window process exit. Raw evidence is under
+`target/perf/editor-implementation/merge-14-23/performance/native-preflight-complete/`.
+
+Both failed attempts remain alongside it. The first stopped before document loading: the test-support
+build intentionally omitted production receivers until the native example explicitly started them.
+The second passed every semantic assertion but failed cleanup when a window disappeared between X11
+enumeration and attribute lookup. The driver now ignores only that BadWindow race; a focused pure
+regression checks both disappearance points and propagation of other errors. Five pure helper checks,
+the existing constructor check and strict GUI default/test-support lint pass. These corrections add no
+polling loop or executor. No stress or timing workload was repeated for them.

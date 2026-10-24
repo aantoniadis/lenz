@@ -590,6 +590,33 @@ struct Shown {
 }
 
 impl ReaderView {
+    #[cfg(any(not(test), feature = "test-support"))]
+    fn start_updates(&self, cx: &mut Context<Self>) {
+        let completions = self.session.completions();
+        cx.spawn(async move |this, cx| {
+            while let Ok(c) = completions.recv().await {
+                if this.update(cx, |v, cx| { v.dispatch(c, cx); v.poll(cx) }).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+        let themes = self.session.theme_updates();
+        cx.spawn(async move |this, cx| {
+            while let Ok(u) = themes.recv().await {
+                if this.update(cx, |v, cx| { v.dispatch(Completion::Theme(Box::new(u)), cx); v.poll(cx) }).is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Native acceptance uses the production listeners; TestPlatform continues to poll explicitly.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn start_native_updates_for_test(&self, cx: &mut Context<Self>) { self.start_updates(cx); }
+
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
         let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, #[cfg(feature = "test-support")] draft_input: false, #[cfg(feature = "test-support")] input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new() };
@@ -606,26 +633,7 @@ impl ReaderView {
         // Background results and theme changes enter the session through the same dispatch as commands. The
         // test platform rejects wakeups from other threads, so tests call `poll` themselves (as Lenz's do).
         #[cfg(not(any(test, feature = "test-support")))]
-        {
-            let completions = view.session.completions();
-            cx.spawn(async move |this, cx| {
-                while let Ok(c) = completions.recv().await {
-                    if this.update(cx, |v, cx| { v.dispatch(c, cx); v.poll(cx) }).is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-            let themes = view.session.theme_updates();
-            cx.spawn(async move |this, cx| {
-                while let Ok(u) = themes.recv().await {
-                    if this.update(cx, |v, cx| { v.dispatch(Completion::Theme(Box::new(u)), cx); v.poll(cx) }).is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-        }
+        view.start_updates(cx);
         // A folder opens as the project; a file opens in a tab.
         match path {
             Some(path) if path.is_dir() => view.dispatch(Command::OpenRoot(path), cx),

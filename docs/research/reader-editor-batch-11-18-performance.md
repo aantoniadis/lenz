@@ -1,8 +1,8 @@
 # Reader editor batch 11/12/13/16/18: performance
 
-Measured on Linux on 2026-10-24. **The additional costs await an explicit performance decision.**
+Measured on Linux on 2026-10-24. **The user accepted the documented additional costs on 2026-10-24.**
 The [batch report](reader-editor-batch-11-18.md) records correctness separately. Passing its checks or a
-memory ceiling does not establish preservation, and the prior 08–10 decision does not accept these costs.
+memory ceiling does not establish preservation. This explicit decision applies only to this batch.
 
 ## Identity and method
 
