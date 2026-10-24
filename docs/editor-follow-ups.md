@@ -188,3 +188,7 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   draft can be written elsewhere; success moves the buffer to the new file and leaves the old file's
   uncertain state behind. Review whether the user should be told explicitly that the old file was not
   rechecked.
+- **Observed test flakes (not caused by ticket 31):** `current_cached_rename_reactivation_updates_path_and_preserves_held_snapshot`
+  timed out in 2 of 10 isolated runs on the unmodified integration tip `f9c812a` (watcher-driven rename
+  detection). `double_and_triple_click_select_word_and_group` failed once under the parallel reader-tui run
+  and passed 3 of 3 isolated runs (click timing). No cause or fix is claimed.
