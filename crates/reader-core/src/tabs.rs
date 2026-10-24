@@ -513,6 +513,11 @@ impl History {
         self.at + 1 < self.entries.len()
     }
 
+    /// An untitled document's steps now belong to its confirmed file.
+    pub(crate) fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for at in self.entries.iter_mut().filter(|at| at.source == from) { at.source = to.to_path_buf(); }
+    }
+
     /// A committed navigation from `from` (where the reader was, updated in place) to `to`. Forward entries go.
     pub fn visit(&mut self, from: Option<Location>, to: Location) {
         self.entries.truncate(if self.entries.is_empty() { 0 } else { self.at + 1 });

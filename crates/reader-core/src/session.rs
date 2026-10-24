@@ -3120,7 +3120,8 @@ impl Session {
         self.state.sources.buffers.retain(|id, entry| {
             let loaded = self.state.tabs.iter().any(|tab| tab.buffer == Some(*id) && tab.loaded);
             let cached = entry.snapshot.as_ref().is_some_and(|snapshot| self.cache.contains(snapshot.source()));
-            let pinned = entry.pinned();
+            // A closed untitled document has no other copy to keep it for.
+            let pinned = entry.pinned() && !(entry.untitled && !self.state.tabs.iter().any(|tab| tab.buffer == Some(*id)));
             if !loaded && !cached && !pinned { entry.snapshot = None; }
             loaded || cached || pinned || self.state.tabs.iter().any(|tab| tab.buffer == Some(*id))
         });
@@ -7207,6 +7208,10 @@ impl Session {
         // Retrieved source is identified by its opaque URI, never a path; once its tab is gone it is not held.
         let virtual_source = is_virtual(&requested);
         if virtual_source && retrieved.is_none() && !self.state.tabs.iter().any(|t| t.source == requested) {
+            if requested.to_str().is_some_and(|p| p.starts_with(crate::tabs::UNTITLED)) {
+                self.state.messages.push("That untitled document was closed without a file".into());
+                return Effect { repaint: true, copy: None, ..Effect::default() };
+            }
             self.state.messages.push(format!("{} was retrieved from a language server and is no longer held; ask for its definition again", requested.display()));
             return Effect { repaint: true, copy: None, ..Effect::default() };
         }

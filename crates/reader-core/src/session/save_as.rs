@@ -23,11 +23,13 @@ impl Session {
         tab.loaded = true;
         let at = self.state.active.and_then(|a| self.state.tabs.iter().position(|t| t.id == a)).map_or(self.state.tabs.len(), |i| i + 1);
         self.state.tabs.insert(at, tab);
+        let from = self.here();
         self.admit_current(id, &doc, None);
         if let Some(entry) = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer).and_then(|b| self.state.sources.buffers.get_mut(&b)) {
             entry.untitled = true;
         }
         self.activate(id);
+        if let Some(to) = self.here() { self.visit(from, to); }
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
@@ -44,7 +46,7 @@ impl Session {
         if let Some(why) = self.save_as_disabled(tab) { self.state.messages.push(why.into()); return effect; }
         match self.save_as_target(tab, &path) {
             Err(why) => self.state.messages.push(format!("Save As: {why}. Nothing was written.")),
-            Ok((path, None)) => self.submit_save_as(tab, path, None),
+            Ok((path, None)) => { self.close_saved_comparison(); self.submit_save_as(tab, path, None) }
             Ok((path, Some(file))) => {
                 let Some(source) = self.state.source(tab).map(|s| SemanticSource::new(s)) else { return effect };
                 self.save_seq += 1;
@@ -95,7 +97,7 @@ impl Session {
             ReplaceChoice::Replace if !current => self.state.messages.push("Save As cancelled: the document changed. Nothing was written.".into()),
             ReplaceChoice::Replace => match self.save_as_disabled(pending.tab) {
                 Some(why) => self.state.messages.push(why.into()),
-                None => self.submit_save_as(pending.tab, pending.path, Some(pending.file)),
+                None => { self.close_saved_comparison(); self.submit_save_as(pending.tab, pending.path, Some(pending.file)) }
             },
         }
         Effect { repaint: true, copy: None, ..Effect::default() }
@@ -177,7 +179,10 @@ impl Session {
             t.unavailable = None;
             t.new_content();
         }
-        for path in &from { self.cache.take_any(path); }
+        for path in &from {
+            self.cache.take_any(path);
+            if path.to_str().is_some_and(|p| p.starts_with(crate::tabs::UNTITLED)) { self.state.history.rename(path, &to); }
+        }
         self.state.sources.aliases.retain(|_, b| *b != buffer);
         self.state.sources.aliases.insert(canonical.to_path_buf(), buffer);
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };

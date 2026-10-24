@@ -237,3 +237,50 @@ fn save_as_failures_keep_the_original_document_and_never_clobber_a_new_entry() {
     assert_eq!(s.state().active().unwrap().source(), original);
     assert!(s.state().tab_dirty(tab));
 }
+
+#[test]
+fn navigation_comparison_and_buffers_follow_save_as_and_untitled_closure() {
+    let d = tempfile::tempdir().unwrap();
+    let a = write(d.path(), "a.txt", b"a\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+    let buffers = s.state.sources.buffers.len();
+    let tab = new_document(&mut s);
+    type_text(&mut s, tab, "draft\n");
+    s.dispatch(Command::Back);
+    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source() == a) && s.state().current_source().is_some());
+    s.dispatch(Command::Forward);
+    assert_eq!(s.state().active().unwrap().id(), tab, "New File is a navigation step");
+    let b = d.path().join("b.txt");
+    s.dispatch(Command::SaveAs { tab, path: b.clone() });
+    settle(&mut s, |s| !s.state().tab_dirty(tab));
+    s.dispatch(Command::Back);
+    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source() == a) && s.state().current_source().is_some());
+    s.dispatch(Command::Forward);
+    settle(&mut s, |s| s.state().current_source().is_some());
+    assert_eq!(s.state().active().unwrap().id(), tab, "history follows the document to its new file");
+    assert_eq!(s.state().active().unwrap().source(), b);
+    // Save As closes an open saved comparison instead of pairing two files.
+    s.dispatch(Command::CompareSaved);
+    assert!(s.state.comparison.is_some());
+    s.dispatch(Command::SaveAs { tab, path: d.path().join("c.txt") });
+    assert!(s.state.comparison.is_none());
+    settle(&mut s, |s| s.state().active().is_some_and(|t| t.source().ends_with("c.txt")) && !s.state().view(s.state().active().unwrap().id()).unwrap().save_status().busy());
+    // A closed untitled document releases its buffer; Back to it explains that it was closed.
+    let before = s.state.sources.buffers.len();
+    let gone = new_document(&mut s);
+    assert_eq!(s.state.sources.buffers.len(), before + 1);
+    s.dispatch(Command::CloseTab(gone));
+    assert_eq!(s.state.sources.buffers.len(), before);
+    s.state.messages.clear();
+    s.dispatch(Command::Back);
+    settle(&mut s, |s| s.state().current_source().is_some() && s.state().loading().is_none());
+    s.state.messages.clear();
+    s.dispatch(Command::Forward);
+    settle(&mut s, |s| s.state().current_source().is_some() && s.state().loading().is_none());
+    assert!(!s.state.messages.iter().any(|m| m.contains("language server")), "{:?}", s.state.messages);
+    // A recorded step to a closed untitled document explains itself.
+    s.dispatch(Command::Open(PathBuf::from("untitled://2")));
+    assert_eq!(s.state.messages, ["That untitled document was closed without a file"]);
+    assert!(buffers <= before);
+}
