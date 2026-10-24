@@ -17,19 +17,22 @@ impl Session {
             }
         };
         for (path, snapshot) in &results.captured {
-            if snapshot.key().buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); }
+            if snapshot.identity.key.buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); }
         }
-        if let Some(path) = key(current.source()).filter(|path| results.disk_sources.contains_key(path)) { results.stale.insert(path); }
+        if let Some(path) = key(current.source()).filter(|path| results.query_paths.contains(path) || results.disk_sources.contains_key(path)) {
+            results.stale.insert(path);
+            results.error.get_or_insert_with(|| "Open drafts changed since this search; rerun to update results".into());
+        }
     }
 
-    fn captured_project_sources(&self, root: &Path) -> std::collections::HashMap<PathBuf, Arc<crate::text::TextSnapshot>> {
+    fn captured_project_sources(&self, root: &Path) -> std::collections::HashMap<PathBuf, search::CapturedSource> {
         let mut captured = std::collections::HashMap::new();
         for (buffer, entry) in &self.state.sources.buffers {
             let Some(snapshot) = entry.snapshot.as_ref().filter(|_| entry.pinned() || self.state.tabs.iter().any(|t| t.loaded && t.buffer == Some(*buffer))) else { continue };
             for path in self.state.sources.aliases.iter().filter(|(_, id)| **id == *buffer).map(|(path, _)| path)
                 .chain(self.state.tabs.iter().filter(|t| t.buffer == Some(*buffer)).flat_map(|t| std::iter::once(&t.source).chain(t.canonical.iter())))
                 .chain(std::iter::once(&snapshot.source().to_path_buf())) {
-                if path.starts_with(root) { captured.insert(path.clone(), snapshot.clone()); }
+                if path.starts_with(root) { captured.insert(path.clone(), search::CapturedSource::new(snapshot.clone())); }
             }
         }
         captured
@@ -59,6 +62,7 @@ impl Session {
         match paths {
             Ok(paths) => {
                 results.files = paths.len();
+                results.query_paths = paths.iter().cloned().collect();
                 let Some((root, _)) = results.root.as_ref() else { return Effect::default() };
                 let selected: std::collections::HashSet<_> = paths.iter().map(|path| root.join(path.as_ref())).collect();
                 results.captured.retain(|path, _| selected.contains(path));
@@ -83,7 +87,7 @@ impl Session {
         work.active = vec![path.clone()];
         let (id, step, root) = (work.id, work.step, root.clone());
         let query = lenz_content::find::Query { text: results.query.clone(), options: results.options };
-        let snapshot = results.captured.get(&root.join(path.as_ref())).cloned();
+        let snapshot = results.captured.get(&root.join(path.as_ref())).and_then(|source| source.snapshot.clone());
         let declarations = work.declarations.is_some();
         let stage = if declarations { crate::analysis::ResultStage::Declarations } else { crate::analysis::ResultStage::Search };
         let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, stage, id, id, Some(step), snapshot.as_deref());
@@ -122,7 +126,7 @@ impl Session {
         let Some(results) = self.state.results.as_mut().filter(|r| r.id == id) else { return Effect::default() };
         if let Some((root, _)) = &results.root {
             for path in &work.active {
-                if !found.hits.iter().any(|hit| hit.path == *path) { results.captured.remove(&root.join(path.as_ref())); }
+                if !found.hits.iter().any(|hit| hit.path == *path) && let Some(source) = results.captured.get_mut(&root.join(path.as_ref())) { source.snapshot = None; }
             }
         }
         let remaining = search::RESULT_LIMIT.saturating_sub(results.hits.len());
@@ -190,7 +194,7 @@ impl Session {
         results.disk_sources.retain(|path, _| selected.contains(path));
         if let Some((root, _)) = &results.root {
             for path in &work.active {
-                if !selected.contains(path) { results.captured.remove(&root.join(path.as_ref())); }
+                if !selected.contains(path) && let Some(source) = results.captured.get_mut(&root.join(path.as_ref())) { source.snapshot = None; }
             }
         }
         if work.paths.is_empty() {

@@ -1054,7 +1054,7 @@ pub enum DocTrigger {
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticSource { pub(crate) key: crate::text::SnapshotKey, metadata: std::sync::Weak<crate::document::SourceMeta> }
 impl SemanticSource {
-    fn new(snapshot: &crate::text::TextSnapshot) -> Self { Self { key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()) } }
+    pub(crate) fn new(snapshot: &crate::text::TextSnapshot) -> Self { Self { key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()) } }
     pub(crate) fn matches(&self, snapshot: &crate::text::TextSnapshot) -> bool { self.key == snapshot.key() && self.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta())) }
 }
 impl PartialEq for SemanticSource {
@@ -5164,7 +5164,7 @@ impl Session {
                 }
                 r.searched = found.searched;
                 r.failed = found.failed;
-                r.error = found.error;
+                r.error = found.error.or_else(|| r.error.take());
                 r.syntax_errors = found.syntax_errors;
                 r.done = found.done;
                 r.limited = found.limited;
@@ -5223,7 +5223,7 @@ impl Session {
                 }
                 let Some(r) = self.state.results.as_ref().filter(|r| r.id == id) else { return Effect::default() };
                 let (Some(hit), Some(path)) = (r.hits.get(index).cloned(), r.target(index)) else { return Effect::default() };
-                let captured = r.captured.get(&path).cloned();
+                let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
                 let captured_changed = captured.as_ref().is_some_and(|source| !Self::captured_result_current(&self.state, source, &path));
                 let result = result.and_then(|(stamp, doc)| {
                     if captured_changed { return Err("the captured draft changed".into()); }
@@ -5945,7 +5945,7 @@ impl Session {
                 self.state.results = Some(base(self, Scope::File(source.clone()), None, 1, false));
                 let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Search, id, id, None, held.as_deref());
                 if let Some(snapshot) = held {
-                    if let Some(results) = self.state.results.as_mut() { results.captured.insert(source.clone(), snapshot.clone()); }
+                    if let Some(results) = self.state.results.as_mut() { results.captured.insert(source.clone(), search::CapturedSource::new(snapshot.clone())); }
                     let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
                     let project = fence.project;
                     if self.analysis.request_result_document(fence.clone(), Priority::Visible, || {
@@ -5982,7 +5982,7 @@ impl Session {
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
         self.state.results = Some(self.new_results(id, ResultsKind::Outline, String::new(), Scope::File(doc.source().to_owned()), None, 1, false));
-        if let Some(results) = self.state.results.as_mut() { results.captured.insert(doc.source().to_path_buf(), doc.clone()); }
+        if let Some(results) = self.state.results.as_mut() { results.captured.insert(doc.source().to_path_buf(), search::CapturedSource::new(doc.clone())); }
         let latest = self.search_latest.clone();
         let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
         let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Outline, id, id, None, Some(&doc));
@@ -6060,6 +6060,7 @@ impl Session {
             spans_asked: Default::default(),
             matched_files: 0,
             captured: Default::default(),
+            query_paths: Default::default(),
             disk_sources: Default::default(),
         }
     }
@@ -6071,7 +6072,7 @@ impl Session {
         let Some(path) = r.target(i) else { return Effect::default() };
         r.selected = Some(i);
         let id = r.id;
-        let captured = r.captured.get(&path).cloned();
+        let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
         let disk_source = r.hits.get(i).and_then(|hit| r.disk_sources.get(&hit.path)).cloned();
         let stale = r.is_stale(i);
         let current = r.preview.as_ref().filter(|p| match &captured {
@@ -6132,7 +6133,7 @@ impl Session {
         let query = lenz_content::find::Query { text: r.query.clone(), options: r.options };
         // A file search is checked against the document the reader holds (its file may be gone); a project search
         // against the file as it is now.
-        let captured = r.captured.get(&path).cloned();
+        let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
         let disk_source = r.disk_sources.get(&hit.path).cloned();
         let held = captured.clone().or_else(|| file_scope.then(|| self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned())).flatten());
         self.open_seq += 1;
