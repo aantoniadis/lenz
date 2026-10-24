@@ -38,6 +38,9 @@ pub(crate) struct Geometry {
     /// The checkout-problem dialog's buttons, in the core's order.
     pub details_choices: Vec<Rect>,
     pub details_close: Rect,
+    /// The completion popup's rows, and the index of its first shown suggestion.
+    pub completion: Rect,
+    pub completion_first: usize,
     pub navigation_scopes: Vec<(Scope, Rect)>,
     pub navigation_revision: Option<u64>,
     /// Project search: its text and file-pattern fields, and each option's toggle.
@@ -239,7 +242,43 @@ fn clamp(at: &mut usize, top: &mut usize, len: usize, height: usize) {
     }
 }
 
+/// The most suggestions the completion popup shows at once (Page Up/Down moves by this many).
+pub(crate) const COMPLETION_ROWS: usize = 8;
+
 impl App {
+    /// The completion popup: under the name being completed (above it without room), clamped to the terminal,
+    /// scrolled to the selection. Unavailable suggestions are dim.
+    fn draw_completion(&self, frame: &mut ratatui::Frame, geometry: &mut Geometry, p: &Palette) {
+        let state = self.session.state();
+        let Some(c) = state.completion() else { return };
+        let area = frame.area();
+        let Some(pane) = geometry.panes.iter().find(|g| state.shown(g.pane).is_some_and(|t| t.id() == c.tab)) else { return };
+        let at_line = state.view(c.tab).map(|v| v.snapshot().line_of(c.word()));
+        let anchor = pane.hits.iter().filter(|h| Some(h.line) == at_line && h.byte <= c.word())
+            .max_by_key(|h| h.byte).map(|h| if h.byte == c.word() { (h.x, h.y) } else { (h.x + h.width, h.y) });
+        let Some((x, y)) = anchor.or_else(|| pane.hits.iter().find(|h| Some(h.line) == at_line).map(|h| (h.x, h.y))) else { return };
+        let n = c.rows().len();
+        let below = area.bottom().saturating_sub(y + 1);
+        let room = below.max(y.saturating_sub(area.y)) as usize;
+        let shown = n.min(COMPLETION_ROWS).min(room);
+        if shown == 0 || area.width == 0 { return; }
+        let first = c.selected().saturating_sub(shown - 1).min(n - shown);
+        let label = |r: &reader_core::session::Suggestion| match &r.detail { Some(d) => format!(" {}  {d} ", r.label), None => format!(" {} ", r.label) };
+        let width = (c.rows().skip(first).take(shown).map(|r| label(r).width()).max().unwrap_or(1) as u16).min(area.width).min(48);
+        let top = if below as usize >= shown { y + 1 } else { y - shown as u16 };
+        let left = x.min(area.right().saturating_sub(width));
+        let popup = Rect::new(left, top, width, shown as u16);
+        frame.render_widget(Clear, popup);
+        for (i, r) in c.rows().enumerate().skip(first).take(shown) {
+            let bg = if i == c.selected() { p.selected_bg } else { p.status_bg };
+            let at = row(popup, (i - first) as u16);
+            fill(frame.buffer_mut(), at, style(p.fg, bg));
+            line(frame.buffer_mut(), at, &label(r), style(if r.unavailable.is_some() { p.dim } else { p.fg }, bg));
+        }
+        geometry.completion = popup;
+        geometry.completion_first = first;
+    }
+
     pub fn draw(&mut self, frame: &mut ratatui::Frame) {
         self.show_documentation();
         for pane in 0..2 { self.session.dispatch(Command::SetNativeContext { pane, context: 1 }); }
@@ -417,6 +456,8 @@ impl App {
                     .style(style(p.fg, p.status_bg)),
                 inner(popup),
             );
+        } else {
+            self.draw_completion(frame, &mut geometry, p);
         }
         self.layout = geometry;
         for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }

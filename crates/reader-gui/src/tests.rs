@@ -6680,3 +6680,89 @@ fn explorer_and_tabs_paint_git_letters_apart_from_the_dirty_mark(cx: &mut TestAp
     assert_eq!(f.view.read_with(&v, |view, _| view.painted_badges.clone()), ["M", "M", "M", "U"]);
     assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
 }
+
+#[gpui::test]
+fn completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys(cx: &mut TestAppContext) {
+    let text = "fn main() {  }\nfn helper() {}\nfn hello() {}\n";
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    let current = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    let labels = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect::<Vec<_>>()));
+    let at = text.find("{  }").unwrap() + 2;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
+    // Typing a name opens it under the name; Down and Enter accept the second suggestion.
+    type_text(&mut v, "he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    draw(&mut v);
+    assert_eq!(labels(&mut v).unwrap(), ["hello", "helper"]);
+    let tb = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let b = f.view.read_with(&v, |r, _| r.completion_bounds()).expect("a popup is drawn");
+    assert!(b.origin.y >= tb.origin.y + px(line_h()), "below the caret's line: {b:?}");
+    v.simulate_keystrokes("down");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().completion().unwrap().selected()), 1);
+    v.simulate_keystrokes("enter");
+    draw(&mut v);
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ helper }", 1));
+    assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ he }", 1), "one Undo restores the typed name");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), text);
+    // Escape dismisses without changing the text; Tab accepts; punctuation types and closes.
+    type_text(&mut v, "he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("escape");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none() && r.completion_bounds().is_none()));
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ he }", 1));
+    type_text(&mut v, "l");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello }", 1));
+    type_text(&mut v, ".he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    type_text(&mut v, "(");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none()));
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.he( }", 1));
+    // Off: typing opens nothing; Ctrl+Space still asks. A modal takes the keys first and leaves the draft as it is.
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetAutoCompletion(false), cx));
+    v.simulate_keystrokes("backspace");
+    type_text(&mut v, "l");
+    drain(cx, &f, 300);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none()));
+    v.simulate_keystrokes("ctrl-space");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    assert_eq!(labels(&mut v).unwrap(), ["hello", "helper"]);
+    let before = current(&mut v);
+    v.simulate_keystrokes("ctrl-shift-a");
+    type_text(&mut v, "zz");
+    v.simulate_keystrokes("enter");
+    v.simulate_keystrokes("escape");
+    assert_eq!(current(&mut v), before, "the modal kept every key");
+    assert_eq!(std::fs::read(pkg.join("src/main.rs")).unwrap(), text.as_bytes());
+    // A narrow window keeps the popup inside it; a click on a row accepts it.
+    if f.view.read_with(&v, |r, _| r.session.state().completion().is_none()) {
+        v.simulate_keystrokes("ctrl-space");
+        settle(cx, &f, |r| r.session().state().completion().is_some());
+    }
+    v.simulate_resize(size(px(160.0), px(120.0)));
+    draw(&mut v);
+    let b = f.view.read_with(&v, |r, _| r.completion_bounds()).expect("drawn when narrow");
+    assert!(b.origin.x >= px(0.0) && b.origin.x + b.size.width <= px(160.0) && b.origin.y + b.size.height <= px(120.0), "{b:?}");
+    v.simulate_click(point(b.origin.x + px(8.0), b.origin.y + px(2.0 + line_h() * 1.5)), Modifiers::default());
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.helper }", 1));
+    // Opening and closing repeatedly retains no popup.
+    for _ in 0..10 {
+        v.simulate_keystrokes("ctrl-space");
+        settle(cx, &f, |r| r.session().state().completion().is_some());
+        draw(&mut v);
+        v.simulate_keystrokes("escape");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
+    }
+}

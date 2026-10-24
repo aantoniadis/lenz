@@ -97,7 +97,9 @@ folder as a project of its own, kept outside the folder; nothing is written into
 long as the server's usages plus reading its files (a warm rust-analyzer: 0.1 s for `Default` across this
 repository; its first query of a session takes seconds); launch and memory are unchanged. Resting the pointer on a name shows its
 documentation in a popup (Documentation on Hover in the command menu turns that off), and the other occurrences of the
-name at the caret are tinted. Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
+name at the caret are tinted. While editing, typing a name opens the server's completion popup (Ctrl+Space or
+**Code Completion** asks; **Completion While Typing** turns the automatic popup off): Tab or Enter accepts, Escape
+dismisses, punctuation just types ([limits](../research/reader-completion.md)). Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
 provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. The toolbar keeps navigation and frequent file/search actions above the tabs, with a visible app menu.
 The footer separates language-server status, the current message, cursor position and Commands.
 Long messages end with an ellipsis; click the message or use **Status details…** (Shift+F2)
