@@ -34,7 +34,7 @@ Recovery, rich assistance and Git decorations are not prerequisites for the firs
 
 ## Review decisions and evidence
 
-Inspected source: `/home/alex/.codex/worktrees/cf8f/lenz`, clean revision `abf3d61334a68d3c058630a6e986fd33506aeccf`, before this documentation revision. The review traced shared core behavior, both adapters, existing tests and writer fallback paths. No runtime tests, provider probes or benchmarks were executed. The consequences below are source-supported inferences about adding drafts, not reproduced defects in an editor that already exists.
+Inspected source: `$HOME/.codex/worktrees/cf8f/lenz`, clean revision `abf3d61334a68d3c058630a6e986fd33506aeccf`, before this documentation revision. The review traced shared core behavior, both adapters, existing tests and writer fallback paths. No runtime tests, provider probes or benchmarks were executed. The consequences below are source-supported inferences about adding drafts, not reproduced defects in an editor that already exists.
 
 ### Protect drafts from the first editable milestone
 
