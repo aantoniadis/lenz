@@ -91,6 +91,7 @@ pub(crate) enum Details {
     Close,
     External,
     Replace,
+    Recovered,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -885,6 +886,9 @@ impl App {
     fn choose_close(&mut self,choice:reader_core::close::Choice) {
         if let Some(p)=self.session.close_prompt() { self.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice}); }
     }
+    fn choose_recovery(&mut self,choice:reader_core::recovery::Choice) {
+        if let Some(p)=self.session.recovery_prompt() { self.dispatch(Command::ChooseRecoveredDraft {ticket:p.ticket,choice}); }
+    }
     fn close_modal(&mut self) {
         if let Some(modal) = self.modal.take() {
             match modal.kind {
@@ -894,6 +898,7 @@ impl App {
                 Prompt::Details { kind: Details::External, .. } => self.choose_external(reader_core::external::Choice::Cancel),
                 Prompt::Details { kind: Details::Replace, .. } => self.choose_replace(reader_core::save::ReplaceChoice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(reader_core::close::Choice::Cancel),
+                Prompt::Details { kind: Details::Recovered, .. } => self.choose_recovery(reader_core::recovery::Choice::Later),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel)),
                 Prompt::Branches | Prompt::BranchMenu { .. } => self.dispatch(Command::CloseBranches),
@@ -1368,6 +1373,15 @@ impl App {
                 _=>None,
             };
             if let Some(choice)=choice { self.choose_external(choice); return; }
+        }
+        if matches!(kind, Prompt::Details {kind:Details::Recovered,..}) {
+            let choice=match key.code {
+                KeyCode::Char('r'|'R') if !control && !alt => Some(reader_core::recovery::Choice::Restore),
+                KeyCode::Char('d'|'D') if !control && !alt => Some(reader_core::recovery::Choice::Discard),
+                KeyCode::Esc => Some(reader_core::recovery::Choice::Later),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_recovery(choice); return; }
         }
         if matches!(kind, Prompt::Details {kind:Details::Close,..}) {
             let choice=match key.code {
@@ -2393,6 +2407,10 @@ impl App {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) { self.choose_close(*choice); }
                 return;
             }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Recovered,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::recovery::Choice::ALL.get(i) { self.choose_recovery(*choice); }
+                return;
+            }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && let Some(Modal { kind: Prompt::Details { kind: Details::Checkout, .. }, .. }) = &self.modal
             {
@@ -2788,6 +2806,13 @@ impl App {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Replace,body,..},..})) => *body=text,
             (Some(body),None) => self.prompt(Prompt::Details {title:"Replace existing file?",body,logo:false,kind:Details::Replace}),
             (None,Some(Modal {kind:Prompt::Details {kind:Details::Replace,..},..})) => self.modal=None,
+            _=>{}
+        }
+        let recovered=self.session.recovery_prompt().map(|p|p.text());
+        match (recovered,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Recovered,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"Recovered unsaved work",body,logo:false,kind:Details::Recovered}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::Recovered,..},..})) => self.modal=None,
             _=>{}
         }
         let close=self.session.close_prompt().map(|p|p.text());

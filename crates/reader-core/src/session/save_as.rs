@@ -27,6 +27,7 @@ impl Session {
         self.admit_current(id, &doc, None);
         if let Some(entry) = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer).and_then(|b| self.state.sources.buffers.get_mut(&b)) {
             entry.untitled = true;
+            entry.recovery = Some(format!("{}-{n}", self.recovery_token));
         }
         self.activate(id);
         if let Some(to) = self.here() { self.visit(from, to); }
@@ -145,7 +146,10 @@ impl Session {
                     return;
                 }
                 let canonical = target.canonical.clone();
+                // The New File document's record is superseded by the file it now is.
+                let untitled = self.recovery_key(buffer);
                 self.retarget(buffer, &snapshot.path, &canonical);
+                if let Some(key) = untitled { self.recovery.discard(key); }
                 let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
                 let Some(meta) = entry.snapshot.as_ref().map(|s| s.source_meta().clone()) else { return };
                 let captured = Arc::new(captured.with_source_meta(meta));
@@ -187,6 +191,7 @@ impl Session {
         self.state.sources.aliases.insert(canonical.to_path_buf(), buffer);
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         entry.untitled = false;
+        entry.recovery = None;
         entry.document = Default::default();
         if let Some(snapshot) = &entry.snapshot {
             let meta = snapshot.source_meta().renamed(to.clone()).with_canonical(Some(canonical.to_path_buf())).with_language(language);

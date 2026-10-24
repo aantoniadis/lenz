@@ -121,6 +121,8 @@ pub struct Tab {
     pub(crate) preview_source: Option<crate::session::SemanticSource>,
     /// Annotate with Git Blame, while on: kept across releases, made again for new content.
     pub(crate) blame: Option<crate::blame::Blame>,
+    /// Shown from a recovered draft: it stays named as recovered until it is saved, discarded or reloaded.
+    pub(crate) recovered: bool,
 }
 
 impl Tab {
@@ -169,6 +171,7 @@ impl Tab {
             preview: None,
             preview_source: None,
             blame: None,
+            recovered: false,
         }
     }
 
@@ -281,6 +284,7 @@ impl Tab {
             preview_source: self.preview_source.clone(),
             // Its own annotations, blamed for itself once shown.
             blame: self.blame.as_ref().map(|_| crate::blame::Blame::new()),
+            recovered: self.recovered,
         }
     }
     /// The source's identity: absolute and normalized.
@@ -344,6 +348,10 @@ impl Tab {
     }
     pub fn retained(&self) -> bool {
         self.retained
+    }
+    /// Whether this view shows work restored from a recovered draft.
+    pub fn recovered(&self) -> bool {
+        self.recovered
     }
     /// Whether the content is in memory now (an inactive tab's may have been released).
     pub fn loaded(&self) -> bool {

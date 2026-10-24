@@ -205,6 +205,7 @@ impl Session {
             // An untitled document has no file yet: Save chooses one.
             CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
             CommandId::NewDocument => Command::NewDocument,
+            CommandId::RecoverDrafts => Command::ShowRecoveredDrafts,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
                 None => return CatalogAction::Disabled("No file is open"),
@@ -331,7 +332,7 @@ impl CommandId {
     pub fn group(self) -> CommandGroup {
         use CommandGroup as G;
         match self {
-            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecheckSave | Self::ConfirmRecheckedSave
+            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecoverDrafts | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
             | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline

@@ -13,6 +13,8 @@ struct Fixture {
     dir: tempfile::TempDir,
     view: Entity<ReaderView>,
     window: WindowHandle<ReaderView>,
+    /// The same settings for a second window: a restart over the same private state.
+    make: std::rc::Rc<dyn Fn(bool) -> Config>,
 }
 
 fn copied_selection(state: &reader_core::session::State) -> Option<String> {
@@ -86,13 +88,13 @@ fn fixture_setup(cx: &mut TestAppContext,file:Option<(&str,&[u8])>,servers:&[(&s
         dark,
     });
     let (view,window)=if production {
-        let window=cx.update(|cx|open_reader_window(cx,make,path)).unwrap();
+        let window=cx.update(|cx|open_reader_window(cx,make.clone(),path)).unwrap();
         let view=window.root(cx).unwrap();(view,window)
     } else {
-        let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make));
+        let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make.clone()));
         let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();(view,window)
     };
-    Fixture { dir, view, window }
+    Fixture { dir, view, window, make }
 }
 
 /// Run the executor until `done` for up to `seconds` (real language servers), letting worker threads finish.
@@ -117,6 +119,19 @@ fn settle(cx: &mut TestAppContext, f: &Fixture, done: impl Fn(&ReaderView) -> bo
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("timed out: {}", f.view.read_with(cx, |v, _| v.status()));
+}
+
+/// Run until `done`, polling `view`'s own session (a window opened beside a fixture).
+fn settle_view(cx: &mut TestAppContext, view: &Entity<ReaderView>, done: impl Fn(&ReaderView) -> bool) {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.poll(cx));
+        if view.read_with(cx, |v, _| done(v)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("timed out: {}", view.read_with(cx, |v, _| v.status()));
 }
 
 fn visual(cx: &mut TestAppContext, f: &Fixture) -> VisualTestContext {
@@ -6835,6 +6850,115 @@ fn completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys(cx: &
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
     }
+}
+
+/// A second window over the same private state: the next start of the reader.
+fn restart_window(cx: &mut TestAppContext, f: &Fixture) -> (Entity<ReaderView>, VisualTestContext) {
+    let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let mut v = VisualTestContext::from_window(window.into(), cx);
+    let focus = view.read_with(&v, |view, _| view.focus_handle());
+    v.update(|window, cx| focus.focus(window, cx));
+    (view, v)
+}
+
+fn recovered_dialog(view: &Entity<ReaderView>, v: &VisualTestContext) -> bool {
+    view.read_with(v, |view, _| matches!(view.modal, Some(Modal::StatusDetails { kind: Details::Recovered, .. })))
+}
+
+fn text_of(view: &Entity<ReaderView>, v: &VisualTestContext) -> String {
+    view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() })
+}
+
+#[gpui::test]
+fn a_recovered_draft_is_offered_restored_and_saved_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, Some(("recover.txt", b"saved\n")), &[], true);
+    let path = f.dir.path().join("recover.txt");
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("recovered λ\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n", "recovery never writes the original file");
+
+    let (second, mut w) = restart_window(cx, &f);
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the dialog opens at start");
+    assert_eq!(second.read_with(&w, |v, _| v.details_labels(Details::Recovered)), ["Restore Draft", "Discard Draft", "Later"]);
+    second.update(&mut w, |v, cx| v.dispatch(Command::OpenRetained(path.clone()), cx));
+    let second_probe = second.clone();
+    settle_view(cx, &second, |v| v.session.state().current_source().is_some());
+    let text = |v: &VisualTestContext| second_probe.read_with(v, |view, _| { let s = view.session().state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    // The dialog owns input: a printable key edits nothing behind it.
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert_eq!(text(&w), "saved\n");
+    assert!(recovered_dialog(&second, &w));
+    // Tiny windows keep the dialog dismissable and its choices reachable.
+    for (width, height) in [(1.0, 1.0), (150.0, 60.0)] {
+        w.simulate_resize(size(px(width), px(height))); draw(&mut w);
+        w.simulate_keystrokes("end up"); draw(&mut w);
+    }
+    assert!(recovered_dialog(&second, &w));
+    w.simulate_keystrokes("r"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    assert_eq!(text(&w), "recovered λ\n");
+    assert!(second.read_with(&w, |v, _| v.session.state().active().unwrap().recovered()), "the tab says it is recovered");
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n", "Restore does not write");
+    w.simulate_keystrokes("ctrl-s");
+    settle_view(cx, &second, |v| v.session.state().active().is_some_and(|t| !v.session.state().tab_dirty(t.id())));
+    assert_eq!(std::fs::read(&path).unwrap(), "recovered λ\n".as_bytes());
+    assert!(!second.read_with(&w, |v, _| v.session.state().active().unwrap().recovered()));
+    second.update(&mut w, |v, _| v.session.flush_recovery_for_test());
+    let (third, mut t) = restart_window(cx, &f);
+    draw(&mut t);
+    assert!(!recovered_dialog(&third, &t), "saved work has nothing to recover");
+    assert!(third.read_with(&t, |v, _| v.session.recovered_drafts().is_empty()));
+}
+
+#[gpui::test]
+fn later_keeps_the_offer_and_discard_removes_it_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, Some(("decide.txt", b"saved\n")), &[], true);
+    let path = f.dir.path().join("decide.txt");
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("kept draft\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    let (second, mut w) = restart_window(cx, &f);
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w));
+    second.update(&mut w, |v, cx| v.dispatch(Command::OpenRetained(path.clone()), cx));
+    settle_view(cx, &second, |v| v.session.state().current_source().is_some());
+    // A keymap preset changes semantic chords, not the dialog's answers: under VS Code's keymap Ctrl+W closes a tab,
+    // but with the dialog open it reaches nothing behind it.
+    second.update(&mut w, |v, cx| v.dispatch(Command::SetKeymapPreset(reader_core::keymap::KeymapPreset::VsCode), cx));
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "a preset change does not dismiss the dialog");
+    w.simulate_keystrokes("ctrl-w"); draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the dialog takes the key before the keymap");
+    assert_eq!(text_of(&second, &w), "saved\n");
+    w.simulate_keystrokes("escape"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w), "Later dismisses the dialog");
+    assert_eq!(second.read_with(&w, |v, _| v.session.recovered_drafts().len()), 1);
+    // The File menu keeps the recovery reachable: its command reopens the dialog.
+    w.simulate_keystrokes("f10");
+    let at = second.read_with(&w, |v, _| v.modal_rows().iter().position(|row| row.0 == CommandId::RecoverDrafts.label()).unwrap());
+    for _ in 0..at { w.simulate_keystrokes("down"); }
+    w.simulate_keystrokes("enter");
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the File command offers it again");
+    // A stale decision (another offer's ticket) decides nothing; this one is discarded.
+    w.simulate_keystrokes("d"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    assert!(second.read_with(&w, |v, _| v.session.recovered_drafts().is_empty()));
+    second.update(&mut w, |v, _| v.session.flush_recovery_for_test());
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n");
+    let (third, mut t) = restart_window(cx, &f);
+    draw(&mut t);
+    assert!(!recovered_dialog(&third, &t), "a discarded draft stays discarded");
+    assert!(third.read_with(&t, |v, _| v.session.recovered_drafts().is_empty()));
 }
 
 #[gpui::test]

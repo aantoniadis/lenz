@@ -22,6 +22,8 @@ mod close_work;
 mod external_work;
 #[path = "session/save_as.rs"]
 mod save_as_work;
+#[path = "session/recovery.rs"]
+mod recovery_work;
 #[path = "session/transition.rs"]
 mod transition_work;
 
@@ -117,6 +119,10 @@ pub enum Command {
     ChooseReplace { ticket: u64, choice: crate::save::ReplaceChoice },
     /// A new untitled document, retained in the focused pane.
     NewDocument,
+    /// Show the recovered drafts still undecided (a postponed dialog).
+    ShowRecoveredDrafts,
+    /// Restore, discard or postpone the recovered draft `ticket` names.
+    ChooseRecoveredDraft { ticket: u64, choice: crate::recovery::Choice },
     RecheckSave { tab: TabId },
     ConfirmRecheckedSave { tab: TabId },
     PrepareProjection(crate::projection::Request),
@@ -473,6 +479,8 @@ pub enum CommandId {
     SaveAs,
     /// An untitled document in the focused pane.
     NewDocument,
+    /// The recovered drafts read at start, one at a time.
+    RecoverDrafts,
     RecheckSave,
     ConfirmRecheckedSave,
     /// Fold regions: the innermost at the caret, the one on the caret's line, all of them, comments and imports.
@@ -624,7 +632,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 145] = [
+    pub const ALL: [CommandId; 146] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -674,6 +682,7 @@ impl CommandId {
         Self::Save,
         Self::SaveAs,
         Self::NewDocument,
+        Self::RecoverDrafts,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
         Self::CopyPath,
@@ -837,6 +846,7 @@ impl CommandId {
             Self::Save => "Save",
             Self::SaveAs => "Save As…",
             Self::NewDocument => "New File",
+            Self::RecoverDrafts => "Recover Unsaved Draft…",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
             Self::Collapse => "Collapse",
@@ -1385,6 +1395,8 @@ struct CurrentSource {
     read_only: bool,
     /// A New File document: no disk copy exists, so its content is never released or reread.
     untitled: bool,
+    /// A New File document's recovery identity, kept while it has no path.
+    recovery: Option<String>,
     document: std::sync::Weak<Document>,
     snapshot: Option<Arc<crate::text::TextSnapshot>>,
     stamp: Option<Stamp>,
@@ -1401,7 +1413,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, untitled: false, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, untitled: false, recovery: None, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
         if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -2132,6 +2144,10 @@ pub struct Session {
     project_query: Option<project_search::ProjectQuery>,
     navigation_query: Option<navigation_query::NavigationQuery>,
     save_seq: u64,
+    /// Recoverable versions of unsaved work, offered at start and kept current off the UI thread.
+    recovery: crate::recovery::Recovery,
+    /// Names this session's New File identities, so another window's Untitled-1 is another document.
+    recovery_token: String,
     /// The last untitled document's number (Untitled-N), and a Save As waiting for a Replace decision.
     untitled_seq: u64,
     replacing: Option<crate::save::Replacing>,
@@ -2297,6 +2313,8 @@ impl Session {
             }
         });
         let merged = tx.clone();
+        // Recovered drafts live in the reader's own cache, outside every checkout.
+        let recovery_dir = config.cache.join("recovery");
         Self {
             text_input_enabled,
             comparison_seq: 0,
@@ -2353,7 +2371,10 @@ impl Session {
             analysis: Default::default(),
             project_query: None,
             navigation_query: None,
-            save_seq: 0, untitled_seq: 0, replacing: None,
+            save_seq: 0,
+            recovery: crate::recovery::Recovery::open(recovery_dir.clone()),
+            recovery_token: format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
+            untitled_seq: 0, replacing: None,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2658,6 +2679,7 @@ impl Session {
                 Some(_) => None,
             },
             CommandId::NewDocument => None,
+            CommandId::RecoverDrafts => self.recovery.offers().is_empty().then_some("No recovered drafts are offered"),
             CommandId::SaveAs => match self.state.active() {
                 None => Some("No file is open"),
                 Some(tab) => self.save_as_disabled(tab.id),
@@ -3320,6 +3342,7 @@ impl Session {
             self.annotate(tab);
         }
         self.synced = 0;
+        self.recovery_changed(buffer);
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
@@ -3408,6 +3431,8 @@ impl Session {
             Command::SaveAs { tab, path } => self.save_as(tab, path),
             Command::ChooseReplace { ticket, choice } => self.choose_replace(ticket, choice),
             Command::NewDocument => self.new_document(),
+            Command::ShowRecoveredDrafts => self.show_recovered_drafts(),
+            Command::ChooseRecoveredDraft { ticket, choice } => self.choose_recovered_draft(ticket, choice),
             Command::RecheckSave { tab } => self.recheck_save(tab),
             Command::ConfirmRecheckedSave { tab } => self.confirm_rechecked_save(tab),
             Command::PrepareLayout { pane, tab, work } => {
@@ -5324,6 +5349,7 @@ impl Session {
                                     && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
                                     entry.draft = None;
                                     entry.save = Default::default();
+                                    self.forget_recovery(buffer);
                                 }
                                 if let Some(t) = self.tab_mut(tab) {
                                     t.canonical = canonical;
@@ -6112,6 +6138,7 @@ impl Session {
                 t.unavailable = None;
                 let buffer = t.buffer;
                 let identity = t.canonical.clone().unwrap_or_else(|| t.source.clone());
+                let recovered_as = buffer.and_then(|buffer| self.recovery_key(buffer));
                 self.cache.rename(&from, &to);
                 if let Some(id) = buffer {
                     self.state.sources.aliases.retain(|_, buffer| *buffer != id);
@@ -6132,6 +6159,9 @@ impl Session {
                 for t in self.state.tabs.iter_mut().filter(|t| t.buffer == buffer && t.loaded) { t.new_content(); }
                 if self.is_shown(tab) { self.decorate(tab); }
                 self.release_current();
+                // A draft kept for the old path follows the file to its new one.
+                if let Some(key) = recovered_as { self.recovery.discard(key); }
+                if let Some(buffer) = buffer { self.recovery_changed(buffer); }
                 // Its bookmarks and recent places follow it.
                 if Arc::make_mut(&mut self.state.places).rename(&from, &to) {
                     self.places_changed();
@@ -6877,13 +6907,15 @@ impl Session {
         let replacement = buffer.is_some_and(|buffer| self.replacement_current(buffer));
         if let Some(buffer) = buffer {
             self.replacements.remove(&buffer);
-            if replacement && matches!(result, Refresh::Changed(..))
-                && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
+            let replaced = replacement && matches!(result, Refresh::Changed(..));
+            if replaced && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
                 entry.draft = None;
                 entry.save.status = crate::save::Status::Ready;
                 entry.save.checked = None;
                 entry.save.revalidated = None;
             }
+            // The confirmed replacement is the content now: the draft it replaced is not recoverable work.
+            if replaced { self.forget_recovery(buffer); }
         }
         let shown = self.is_shown(id);
         let snapshot = self.state.source(id).cloned();

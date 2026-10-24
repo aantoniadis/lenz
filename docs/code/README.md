@@ -56,7 +56,9 @@ displaced. Enter takes the next key as the selected command's shortcut, Delete r
 leaves or closes. A chord another command already runs is refused with that command named, so no action silently
 loses its key; the command palette and menus list every action regardless, including ones whose shortcut a
 terminal cannot deliver. Reload, Type Hierarchy (Ctrl+H is Backspace in terminals, so Alt+H is the terminal route)
-and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets.
+and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets. A dialog's
+own answers are not chords: the recovered-draft dialog keeps `r`, `d` and Esc in both presets, and its
+**Recover Unsaved Draft…** command stays in the File menu without a preset chord, like Close Window.
 
 **Search Everywhere** follows [IntelliJ's name-navigation pattern](https://www.jetbrains.com/help/idea/searching-everywhere.html):
 one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details.
@@ -144,6 +146,12 @@ readable); with all three off, scrolling CPU and memory as before; with them on,
 reader CPU (+0.1 ms per frame) and the reader holds +5 MiB with `session.rs` and +19 MiB with a 10,000-line file
 (rust-analyzer sends about 6.5 MB of hints for it, decoded straight from the bytes); 100 rounds of toggling and tab
 switching settle at the same memory.
+
+Drafts that were not saved before the reader stopped are offered again at the next start: **Recover Unsaved
+Draft…** in the File menu, or the dialog that opens by itself, names the file or New File document, says whether
+the file on disk still matches the last confirmed save, and offers **Restore Draft** (`r`), **Discard Draft**
+(`d`) or **Later** (Esc). Restored tabs are marked `⟲`; recovery copies stay private, outside the project. See the
+[terminal reader's recovery notes](tui.md) for where they live and their limits.
 
 Code folds like IntelliJ's: a gutter mark (▾ open, ▸ collapsed) on every block, comment run and import run spanning
 lines; a collapsed one shows a boxed `…` and its closing brace, and a click on either opens it. Each pane folds on its

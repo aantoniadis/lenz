@@ -96,6 +96,8 @@ impl Session {
         self.compact_saved_backing(buffer);
         self.synced = 0;
         self.refresh_blame();
+        // The file now holds this work: there is nothing left to recover.
+        self.forget_recovery(buffer);
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
     }
     fn compact_saved_backing(&mut self, buffer: crate::text::BufferId) {

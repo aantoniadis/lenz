@@ -14,6 +14,8 @@ struct Join { tab: TabId, kind: EditKind, at: Instant, direction: i8 }
 struct Transaction { forward: Vec<TextEdit>, inverse: Vec<TextEdit> }
 impl Draft {
     pub(crate) fn new(baseline: Arc<TextSnapshot>) -> Self { Self { baseline, dirty: false, undo: Vec::new(), redo: Vec::new(), join: None } }
+    /// A draft restored from an earlier session: its text differs from its baseline, so it is unsaved work.
+    pub(crate) fn restored(baseline: Arc<TextSnapshot>) -> Self { Self { dirty: true, ..Self::new(baseline) } }
     pub(crate) fn dirty(&self) -> bool { self.dirty }
     pub(crate) fn can_undo(&self) -> bool { !self.undo.is_empty() }
     pub(crate) fn can_redo(&self) -> bool { !self.redo.is_empty() }
