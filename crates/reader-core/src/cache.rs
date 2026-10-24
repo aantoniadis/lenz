@@ -107,7 +107,14 @@ impl InactiveCache {
     /// `from`'s kept snapshot is the same file's under `to` now (a followed rename).
     pub fn rename(&mut self, from: &Path, to: &Path) {
         if let Some(e) = self.entries.iter_mut().find(|(_, d, _)| d.source() == from) {
+            self.used -= e.2;
             e.1 = Arc::new(e.1.with_source_meta(Arc::new(e.1.source_meta().renamed(to.to_path_buf()))));
+            e.2 = e.1.storage_bytes();
+            self.used += e.2;
+        }
+        while self.used > self.limit {
+            let (_, _, freed) = self.entries.remove(0);
+            self.used -= freed;
         }
     }
 
@@ -138,6 +145,20 @@ mod tests {
         Arc::new(TextSnapshot::from_document(crate::text::BufferId(1), &crate::document::Document::decode(PathBuf::from(name), 1, "a".repeat(len).as_bytes())))
     }
     const STAMP: Stamp = Stamp { len: 1, modified: None, file: None };
+
+    #[test]
+    fn rename_recharges_metadata_and_preserves_the_cache_budget() {
+        let (a, b) = (doc("a", 10), doc("b", 10));
+        let limit = a.storage_bytes() + b.storage_bytes();
+        let mut cache = InactiveCache::new(limit);
+        cache.put(STAMP, a); cache.put(STAMP, b.clone());
+        let longer = PathBuf::from("longer-name".repeat(100));
+        cache.rename(Path::new("a"), &longer);
+        assert_eq!(cache.used(), b.storage_bytes());
+        assert_eq!(cache.len(), 1);
+        assert!(Arc::ptr_eq(&cache.peek(Path::new("b")).unwrap(), &b));
+        assert!(!cache.contains(&longer));
+    }
 
     #[test]
     fn evicts_least_recently_left_within_the_budget() {
