@@ -121,6 +121,39 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &mut TestAppContext) {
+    let original = "α saved\r\nsecond\n";
+    let f = fixture(cx, Some(("comparison.txt", original.as_bytes())));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let ordinary = f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id());
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("α draft\r\nsecond\n".into())));
+    v.simulate_keystrokes("ctrl-a ctrl-v shift-f2 ctrl-shift-d");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()), "modal consumes comparison shortcut");
+    v.simulate_keystrokes("escape ctrl-shift-d");
+    settle(cx, &f, |v| v.session().state().saved_comparison().is_some_and(|c| !c.pending()));
+    v.simulate_keystrokes("ctrl-g 1 enter"); draw(&mut v);
+    let (saved, current) = f.view.read_with(&v, |v, _| { let c = v.session().state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) });
+    assert!(f.view.read_with(&v, |v, _| v.tab_hits.iter().any(|(_, _, id)| *id == saved)));
+    assert!(f.view.read_with(&v, |v, _| v.visible_rows().iter().any(|r| r.bg.iter().any(|(_, color)| *color == v.session().state().palette().block[2]))));
+    v.simulate_keystrokes("ctrl-z ctrl-shift-z");
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(0), cx));
+    v.simulate_keystrokes("ctrl-a ctrl-v ctrl-z ctrl-s"); draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state().view(saved).unwrap().snapshot(); s.copy_range(0..s.len_bytes()).unwrap() }), original);
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(1), cx));
+    v.simulate_keystrokes("ctrl-s");
+    settle(cx, &f, |v| !v.session().state().view(current).unwrap().dirty());
+    assert_eq!(std::fs::read(f.dir.path().join("comparison.txt")).unwrap(), "α draft\r\nsecond\n".as_bytes());
+    v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+    v.simulate_keystrokes("ctrl-f4"); draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()));
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id()), ordinary);
+    v.simulate_keystrokes("ctrl-z");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().tab_dirty(ordinary)));
+}
+
+#[gpui::test]
 fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx: &mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path, Fault};
     use reader_core::save::{Status, DiskMatch};

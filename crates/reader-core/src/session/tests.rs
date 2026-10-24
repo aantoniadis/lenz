@@ -10,6 +10,47 @@ fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.le
 fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
 
 #[test]
+fn saved_comparison_restores_an_existing_split_and_never_persists_temporary_views() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let text = "line\n".repeat(100); let path = write(d.path(), "split.txt", text.as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "split.txt");
+    let first = s.state().active().unwrap().id(); s.dispatch(Command::Scroll(20));
+    s.dispatch(Command::Split(Split::Rows)); let second = s.state().active().unwrap().id(); s.dispatch(Command::Scroll(30));
+    s.dispatch(Command::CompareSaved); let comparison = s.state().saved_comparison().unwrap(); let old = comparison.saved_tab(); let current = comparison.current_tab();
+    let expected = s.state().view(first).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: first, expected, edits: vec![TextEdit { range: 0..0, text: "new\n".into() }], kind: EditKind::Paste });
+    assert_eq!(s.state().view(current).unwrap().snapshot().key(), s.state().view(second).unwrap().snapshot().key());
+    let positions: Vec<_> = [first, second].iter().map(|id| { let tab = s.state.tabs.iter().find(|t| t.id == *id).unwrap(); (tab.top_line(), tab.selection()) }).collect();
+    s.dispatch(Command::SetSoftWrap(true));
+    // An incompatible view transition deliberately closes only the comparison before normal split handling.
+    s.dispatch(Command::Unsplit);
+    assert!(s.state().saved_comparison().is_none()); assert_eq!(s.state().split(), Some(Split::Rows));
+    assert_eq!(s.state().focused_pane(), 1); assert_eq!(s.state().active().unwrap().id(), second); assert_eq!(s.state().shown(0).unwrap().id(), first);
+    assert_eq!(s.state().tabs().len(), 2);
+    for (id, position) in [first, second].iter().zip(positions) { let tab = s.state.tabs.iter().find(|t| t.id == *id).unwrap(); assert_eq!((tab.top_line(), tab.selection()), position); }
+    assert!(s.state().view(old).is_none()); assert!(s.state().view(current).is_none());
+    s.dispatch(Command::Undo { tab: second }); assert_eq!(source_text(s.state().current_source().unwrap()), text);
+    assert_eq!(std::fs::read(path).unwrap(), text.as_bytes());
+}
+
+#[test]
+fn saved_comparison_rebinds_compacted_baseline_backing_without_a_new_semantic_version() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let original = "a".repeat(256 * 1024); let path = write(d.path(), "compact.txt", original.as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "compact.txt"); s.dispatch(Command::CompareSaved);
+    let c = s.state().saved_comparison().unwrap(); let (saved, current) = (c.saved_tab(), c.current_tab());
+    let expected = s.state().view(current).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: current, expected, edits: vec![TextEdit { range: 0..original.len() - 16384, text: "".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Save { tab: current });
+    settle(&mut s, |s| matches!(s.state().view(current).unwrap().save_status(), crate::save::Status::Ready) && !s.state().saved_comparison().unwrap().pending());
+    assert!(s.state().view(saved).unwrap().snapshot().storage_bytes() < 64 * 1024);
+    assert_eq!(s.state().view(saved).unwrap().snapshot().key().version, s.state().view(current).unwrap().snapshot().key().version);
+    assert!(s.state().saved_comparison().unwrap().changes().is_empty());
+    s.dispatch(Command::CloseSavedComparison); let ordinary = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab: ordinary });
+    assert_eq!(source_text(s.state().current_source().unwrap()), original); assert_eq!(std::fs::read(path).unwrap(), vec![b'a'; 16384]);
+}
+
+#[test]
 fn saved_comparison_advances_only_the_confirmed_captured_save_and_rejects_old_diffs() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "captured.txt", b"v1\n");

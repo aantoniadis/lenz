@@ -44,6 +44,34 @@ fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
 }
 
 #[test]
+fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("comparison.txt");
+    let original = "α saved\r\nsecond\n"; std::fs::write(&path, original).unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 100, 16);
+    let ordinary = a.session.state().active().unwrap().id();
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("α draft\r\nsecond\n".into()));
+    key(&mut a, KeyCode::F(2), KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert!(a.session.state().saved_comparison().is_none()); key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('d'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    settle(&mut a, |a| a.session.state().saved_comparison().is_some_and(|c| !c.pending()));
+    let (saved, current) = { let c = a.session.state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) };
+    key(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('1'), KeyModifiers::NONE); key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    let screen = draw_screen(&mut a, 100, 16); assert!(screen.contains("Last saved"), "{screen}"); assert!(screen.contains("Current draft"), "{screen}"); assert!(screen.contains('▌'), "{screen}");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    a.dispatch(Command::FocusPane(0)); key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("forbidden".into())); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    let snapshot = a.session.state().view(saved).unwrap().snapshot(); assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), original);
+    a.dispatch(Command::FocusPane(1)); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    settle(&mut a, |a| !a.session.state().view(current).unwrap().dirty()); assert_eq!(std::fs::read(&path).unwrap(), "α draft\r\nsecond\n".as_bytes());
+    draw(&mut a, 28, 6); draw(&mut a, 1, 1);
+    key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL);
+    assert!(a.session.state().saved_comparison().is_none()); assert_eq!(a.session.state().active().unwrap().id(), ordinary);
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); assert!(a.session.state().tab_dirty(ordinary));
+    assert_eq!(std::fs::read(path).unwrap(), "α draft\r\nsecond\n".as_bytes());
+}
+
+#[test]
 fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe() {
     use lenz_content::write::readiness_fault::{at_path, Fault};
     use reader_core::save::{Status, DiskMatch};

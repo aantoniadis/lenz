@@ -1830,6 +1830,7 @@ impl App {
             | (KeyCode::Char('p'), true, false, false) => Some(CommandId::FindFile),
             (KeyCode::Char('k'), true, false, false) => Some(CommandId::SearchEverywhere),
             (KeyCode::Char('d'), true, false, false) => Some(CommandId::CompareSelected),
+            (KeyCode::Char('d' | 'D'), true, true, false) => Some(CommandId::CompareSaved),
             (KeyCode::Char('f' | 'F'), true, true, _) => Some(CommandId::SearchProject),
             (KeyCode::Char('f'), true, false, _) | (KeyCode::Char('/'), false, _, _) => {
                 Some(CommandId::FindInFile)

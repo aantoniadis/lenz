@@ -2743,6 +2743,7 @@ impl Session {
     fn external_tab(&self) -> Result<&Tab, &'static str> {
         match self.state.active() {
             None => Err("No file is open"),
+            Some(t) if t.is_saved_version() => Err("The last saved comparison side is an immutable snapshot; open the current side externally"),
             Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
             Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
             Some(t) => Ok(t),
@@ -2830,7 +2831,7 @@ impl Session {
             }
         }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
-        if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::CompareSaved | Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
             Input::Completion(Completion::SelectionSteps { request, .. }) => Some(*request),
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
@@ -4144,6 +4145,7 @@ impl Session {
     }
 
     fn defer_semantic(&mut self, tab: TabId, request: u64, offset: usize, question: semantics::Question, foreground: Option<Ask>) {
+        if self.state.tabs.iter().any(|t| t.id == tab && t.is_saved_version()) { return; }
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return };
         self.state.semantics.cancel_lane(question.lane());
         self.semantic_wait.insert(question.lane(), SemanticWait { tab, key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()),

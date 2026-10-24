@@ -2031,7 +2031,8 @@ fn draw_source_row(
     }
     let tab = view.tab();
     let Some(source_line) = view.snapshot().line_range(r.line) else { return };
-    let base = if sticky { p.header_bg } else { p.bg };
+    let changed = state.comparison_changed_line(tab.id(), r.line);
+    let base = if sticky { p.header_bg } else if changed { p.block[2] } else { p.bg };
     fill(
         buf,
         Rect::new(gutter_x, y, area.right().saturating_sub(gutter_x), 1),
@@ -2043,7 +2044,7 @@ fn draw_source_row(
     } else {
         None
     };
-    let mark = if bookmark.is_some() { "●" } else { " " };
+    let mark = if changed { "▌" } else if bookmark.is_some() { "●" } else { " " };
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
     // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
     let digits = number_cells(view.line_count()) as usize + 3;

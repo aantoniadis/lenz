@@ -121,17 +121,34 @@ impl Session {
             if let Some(c) = &mut self.state.comparison { c.baseline_backing = Arc::downgrade(&baseline); }
         }
         if self.state.comparison.as_ref().is_none_or(|c| !c.pending || c.submitted) { return changed; }
-        let left = self.admitted_document(saved_id, Priority::Visible);
-        let right = self.admitted_document(current_id, Priority::Visible);
-        let (Some(left), Some(right)) = (left, right) else { return changed };
+        let project = self.project_generation.load(Ordering::Acquire);
+        let mut documents = Vec::with_capacity(2);
+        for id in [saved_id, current_id] {
+            let Some(view) = self.state.view(id) else { return changed };
+            let snapshot = view.snapshot().clone();
+            let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|entry| entry.document.clone()).unwrap_or_default();
+            let admitted = self.analysis.ensure(crate::analysis::Input::new(snapshot.clone(), loaded, project, true), Priority::Visible);
+            let failure = self.analysis.source_failure(&snapshot, project).or((!admitted).then_some("Comparison admission is full; close and try again"));
+            if let Some(why) = failure {
+                if let Some(c) = &mut self.state.comparison { c.pending = false; c.failure = Some(why.into()); }
+                return true;
+            }
+            documents.push(self.analysis.ready(&snapshot, project));
+        }
+        let [Some(left), Some(right)] = documents.as_slice() else { return changed };
+        let (left, right) = (left.clone(), right.clone());
         let Some(c) = self.state.comparison.as_ref() else { return changed };
         let request = c.request;
         let fence = crate::analysis::ResultFence { slot: crate::analysis::ResultSlot::SavedComparison, project: self.project_generation.load(Ordering::Acquire), request, stage: crate::analysis::ResultStage::SavedComparison, result_set: None, node: None, source: Some(c.text.clone()) };
-        if self.analysis.request_result(fence, Priority::Visible, || move |lease| {
+        let admitted = self.analysis.request_result(fence, Priority::Visible, || move |lease| {
             if !lease.wanted() { return; }
             let changes = lenz_engine::compare_lines(&lenz_engine::split_lines(left.text()), &lenz_engine::split_lines(right.text()), &lenz_engine::Options::default());
             if lease.wanted() { lease.send(Completion::SavedCompared { request, changes }); }
-        }).is_ok() && let Some(c) = &mut self.state.comparison { c.submitted = true; }
+        });
+        if let Some(c) = &mut self.state.comparison { match admitted {
+            Ok(_) => c.submitted = true,
+            Err(()) => { c.pending = false; c.failure = Some("Comparison admission is full; close and try again".into()); }
+        } }
         changed
     }
 }

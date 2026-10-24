@@ -1334,6 +1334,7 @@ impl ReaderView {
             ("f", true, true) => self.run(CommandId::SearchProject, window, cx),
             ("f", true, false) => self.run(CommandId::FindInFile, window, cx),
             ("d", true, false) => self.run(CommandId::CompareSelected, window, cx),
+            ("d", true, true) => self.run(CommandId::CompareSaved, window, cx),
             ("g", true, false) => self.run(CommandId::GoToLine, window, cx),
             ("e", true, true) => {
                 self.tree_focus = self.session.state().has_tree();
@@ -3794,6 +3795,7 @@ impl ReaderView {
         let caret = selection.and_then(|sel| projected.caret(sel.head));
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
+        if self.session.state().comparison_changed_line(tab.id(), r.line) { bg.insert(0, (0..projected.text.len(), palette.block[2])); }
         let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
         if let Some((fold, true)) = view.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
@@ -4400,6 +4402,7 @@ impl Render for ReaderView {
                 Some(t) if !rows.is_empty() => Self::bookmark_rows(state, t, g.rows).into_iter().map(|(i, k)| (i as f32, k)).collect(),
                 _ => Vec::new(),
             };
+            let comparison_marks = tab.map_or_else(Vec::new, |t| rows.iter().filter(|row| row.number > 0 && state.comparison_changed_line(t.id(), row.number as usize - 1)).map(|row| (row.y, Some('▌'))).collect());
             let mut sticky_bookmarks = Vec::new();
             for (line, row) in &sticky {
                 let at = gpui::point(g.text.origin.x, g.text.origin.y + px(row.y * line_h()));
@@ -4442,7 +4445,7 @@ impl Render for ReaderView {
                 let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
                 rows.iter().map(|row| logical.get(row.y as usize).map(|r| self.source_parts(tab, r, row, window)).unwrap_or_default()).collect()
             });
-            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
         self.source_geometry = [0, 1].map(|pane| self.session.state().shown(pane).and_then(|tab| self.session.state().view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
@@ -4737,6 +4740,7 @@ impl Render for ReaderView {
                                     lenz_gpui::text(window, cx, m, tx + num_w() - fold_w() + 1.0, ty + row as f32 * m.line_h, if collapsed { "▸" } else { "▾" }, color);
                                 }
                                 paint_bookmarks(window, cx, m, tx, ty, &f.bookmarks, palette.accent);
+                                paint_bookmarks(window, cx, m, tx, ty, &f.comparison_marks, palette.edge[2]);
                                 if let Some((ry, shown)) = &f.link
                                     && let Some(row) = f.rows.iter().find(|r| r.y == *ry)
                                 {
@@ -4972,6 +4976,7 @@ struct PaneFrame {
     /// Bookmarks on text rows and on sticky lines: row (in lines from the top) and key.
     bookmarks: Vec<(f32, Option<char>)>,
     sticky_bookmarks: Vec<(f32, Option<char>)>,
+    comparison_marks: Vec<(f32, Option<char>)>,
     /// The linked identifier's row and display range.
     link: Option<(f32, std::ops::Range<usize>)>,
     /// Underlines (mutable) and strikethroughs (deprecated): row, display range, colour, modifier bits.
