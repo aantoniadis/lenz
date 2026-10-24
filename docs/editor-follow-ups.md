@@ -86,3 +86,11 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   currently rank up to 32 adjacent saved-file record sets per turn. Use the
   scheduled batch comparison on a many-file index before changing that batch
   size; preserve independent query cancellation and completed-action timing.
+- **Intermittent GUI declaration tracer timeout:** the final batch GUI run at
+  `bb2f55f4` timed out once in `outline_and_declaration_search_through_keys`.
+  The unchanged test then passed in isolation, in 25 consecutive isolated
+  reproductions, and in a complete GUI confirmation run. No cause or runtime fix
+  is claimed. Add stage-specific failure diagnostics or a controlled scheduler
+  reproduction if it recurs; preserve the keyboard, selection and activation
+  assertions. Original failure and all attempts are retained under
+  `target/perf/editor-implementation/merge-11-18/reader-gui-*.log`.
