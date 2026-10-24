@@ -2236,7 +2236,7 @@ fn completion_typing_acceptance_and_dismissal_match_in_both_adapters(cx: &mut Te
     visual.simulate_keystrokes("down enter"); key(&mut tui, KeyCode::Down); key(&mut tui, KeyCode::Enter);
     same(&mut visual, &tui);
     assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper }", 1).as_str()));
-    // A trigger character opens it in both; Escape dismisses alike; punctuation types without accepting.
+    // A trigger character opens it in both; Escape dismisses alike; punctuation types (here with its pair) without accepting.
     visual.simulate_keystrokes("."); key(&mut tui, KeyCode::Char('.'));
     wait(&mut visual, &mut tui, &mut terminal, &|state| state.completion().is_some());
     same(&mut visual, &tui);
@@ -2247,7 +2247,7 @@ fn completion_typing_acceptance_and_dismissal_match_in_both_adapters(cx: &mut Te
     wait(&mut visual, &mut tui, &mut terminal, &|state| state.completion().is_some());
     visual.simulate_keystrokes("("); key(&mut tui, KeyCode::Char('('));
     same(&mut visual, &tui);
-    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper.h( }", 1).as_str()));
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper.h() }", 1).as_str()));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 }
 
