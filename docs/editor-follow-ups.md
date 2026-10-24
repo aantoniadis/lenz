@@ -152,6 +152,17 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   Memory phase differences require equal-history/allocator attribution before any
   efficiency claim; no new stress or optimization is authorized by this note.
 
+- **Editing-preference resolution cost (ticket25):** `Session::editing_preferences_details` walks
+  `.editorconfig` files to the filesystem root and probes formatter markers and `PATH` entries on the UI
+  thread each time the dialog opens. Menu toggle states read only the remembered project choice. When
+  indentation commands (27) or format-on-save (42) consult these preferences per keystroke or Save, cache
+  per directory with invalidation or move resolution off the UI thread; measure in the scheduled batch.
+  Not measured for this ticket.
+- **EditorConfig coverage (ticket25):** `{n..m}` numeric ranges never match, and only `indent_style`,
+  `indent_size` and `tab_width` are resolved. `end_of_line`, `charset`, `insert_final_newline` and
+  `trim_trailing_whitespace` are not shown or applied; the exact-ending writer already preserves existing
+  endings. Indentation is not detected from file contents.
+
 ## New File and Save As (ticket 31, 2026-10-24)
 
 - **Suspected cost, unmeasured:** Save As validates its destination with `canonicalize`, `symlink_metadata`

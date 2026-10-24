@@ -1006,13 +1006,13 @@ impl ReaderView {
                     self.modal = Some(Modal::LanguageServer { at: 0 });
                     cx.notify();
                 }
-                InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
+                InterfaceAction::ServerDetails | InterfaceAction::StatusDetails | InterfaceAction::EditingPreferences => {
                     self.dispatch(Command::CloseDocumentation, cx);
                     self.modal_scroll.set(0);
-                    let (title, text) = if action == InterfaceAction::ServerDetails {
-                        ("Server details", self.session.language_server_details())
-                    } else {
-                        ("Status details", self.session.status_details())
+                    let (title, text) = match action {
+                        InterfaceAction::ServerDetails => ("Server details", self.session.language_server_details()),
+                        InterfaceAction::EditingPreferences => ("Editing preferences", self.session.editing_preferences_details()),
+                        _ => ("Status details", self.session.status_details()),
                     };
                     self.modal = Some(Modal::StatusDetails { title, text, logo: None, kind: Details::Text });
                     cx.notify();

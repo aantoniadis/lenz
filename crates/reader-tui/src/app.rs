@@ -703,6 +703,7 @@ impl App {
             }
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
+            InterfaceAction::EditingPreferences => Prompt::Details { title: "Editing preferences", body: self.session.editing_preferences_details(), logo: false, kind: Details::Text },
             InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
                 let (title, mut details) = if action == InterfaceAction::ServerDetails {
                     ("Server details", self.session.language_server_details())

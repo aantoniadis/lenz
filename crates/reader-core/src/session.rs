@@ -38,6 +38,7 @@ use lenz_content::{
 mod project_search;
 mod navigation_query;
 
+use crate::preferences::{Indent, ProjectPreferences};
 use crate::{
     cache::{INACTIVE_BYTES, InactiveCache, Stamp},
     decor::Decor,
@@ -350,6 +351,10 @@ pub enum Command {
     ResetProjectServerSettings,
     SetPersistentIndex(bool),
     RebuildIndex,
+    /// The open project's own indentation (`None`: EditorConfig and language defaults only); remembered outside it.
+    SetProjectIndent(Option<crate::preferences::Indent>),
+    /// Whether Save formats the open project's files first (off: formatting is explicit); remembered outside it.
+    SetFormatOnSave(bool),
     /// An SVG: switch between its rendering and its source text.
     ToggleImageSource,
     /// A Markdown file: switch between its preview and its source, at the same place.
@@ -538,6 +543,15 @@ pub enum CommandId {
     FindSymbol,
     FindAction,
     StatusDetails,
+    /// The active file's resolved indentation, formatter and format-on-save choice, with where each comes from.
+    EditingPreferences,
+    /// The open project's own indentation choice, below EditorConfig.
+    IndentTabs,
+    IndentTwoSpaces,
+    IndentFourSpaces,
+    IndentInherit,
+    /// Format on Save for the open project; off by default.
+    FormatOnSave,
 }
 
 /// How the file panel is split: side by side, or one pane above the other.
@@ -560,7 +574,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 129] = [
+    pub const ALL: [CommandId; 135] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -690,6 +704,12 @@ impl CommandId {
         Self::FindSymbol,
         Self::FindAction,
         Self::StatusDetails,
+        Self::EditingPreferences,
+        Self::IndentTabs,
+        Self::IndentTwoSpaces,
+        Self::IndentFourSpaces,
+        Self::IndentInherit,
+        Self::FormatOnSave,
     ];
 
     pub fn label(self) -> &'static str {
@@ -698,6 +718,12 @@ impl CommandId {
             Self::FindSymbol => "Find Symbol…",
             Self::FindAction => "Find Action…",
             Self::StatusDetails => "Status details…",
+            Self::EditingPreferences => "Editing Preferences…",
+            Self::IndentTabs => "Project Indentation: Tabs",
+            Self::IndentTwoSpaces => "Project Indentation: 2 Spaces",
+            Self::IndentFourSpaces => "Project Indentation: 4 Spaces",
+            Self::IndentInherit => "Project Indentation: EditorConfig and Language Defaults",
+            Self::FormatOnSave => "Format on Save for This Project",
             Self::Open => "Open File…",
             Self::OpenFolder => "Open Folder…",
             Self::OpenRecent => "Open Recent Folder…",
@@ -1773,6 +1799,11 @@ impl State {
         }
         self.semantics.view_source(self.current_source()?.source_meta(), self.current_source()?.is_large())
     }
+    /// The open project's own editing preferences (`None`: no folder is open).
+    pub fn project_preferences(&self) -> Option<ProjectPreferences> {
+        let root = self.project.as_ref()?.root();
+        Some(self.settings.projects.get(root).copied().unwrap_or_default())
+    }
     fn project_provider(&self) -> Option<(usize, PathBuf)> {
         let (provider, Some(Some(root))) = self.semantics.resolved_source(self.current_source()?.source_meta())? else { return None };
         Some((provider, root))
@@ -1835,6 +1866,11 @@ impl State {
             CommandId::DocumentationOnHover => Some(self.settings.documentation_on_hover),
             CommandId::FileIcons => Some(self.settings.file_icons),
             CommandId::AnnotateBlame => Some(self.active().is_some_and(|t| t.blame.is_some())),
+            CommandId::IndentTabs | CommandId::IndentTwoSpaces | CommandId::IndentFourSpaces | CommandId::IndentInherit => {
+                let indent = self.project_preferences()?.indent;
+                Some(indent == match id { CommandId::IndentTabs => Some(Indent::Tabs), CommandId::IndentTwoSpaces => Some(Indent::Spaces(2)), CommandId::IndentFourSpaces => Some(Indent::Spaces(4)), _ => None })
+            }
+            CommandId::FormatOnSave => Some(self.project_preferences()?.format_on_save),
             _ => None,
         }
     }
@@ -2425,6 +2461,10 @@ impl Session {
                 _ => None,
             },
             CommandId::StickyScroll | CommandId::Breadcrumbs | CommandId::PersistentIndex => None,
+            CommandId::IndentTabs | CommandId::IndentTwoSpaces | CommandId::IndentFourSpaces | CommandId::IndentInherit | CommandId::FormatOnSave => {
+                self.state.project.is_none().then_some("Open a folder to choose its editing preferences")
+            }
+            CommandId::EditingPreferences => self.state.current_source().is_none().then_some("No file is open"),
             CommandId::RebuildIndex => if self.state.project.is_none() { Some("Open a project folder first") } else if self.index_rebuilding { Some("The project index is being cleared") } else { None },
             CommandId::FocusBreadcrumbs if !self.state.settings.breadcrumbs => Some("Breadcrumbs are off"),
             CommandId::FocusBreadcrumbs => self.state.active().is_none().then_some("No file is open"),
@@ -2633,6 +2673,41 @@ impl Session {
             rows.push((label, Some(id)));
         }
         rows
+    }
+
+    /// The active file's editing preferences, each with its source, for either adapter. Paths and settings only:
+    /// never file contents or environment values.
+    pub fn editing_preferences_details(&self) -> String {
+        let Some(file) = self.state.current_source().map(|d| d.source().to_owned()) else { return "No file is open.".into() };
+        let language = self.state.current_source().and_then(|d| d.language());
+        let root = self.state.project.as_ref().map(|p| p.root().to_owned()).filter(|r| file.starts_with(r));
+        let project = root.as_ref().and(self.state.project_preferences());
+        let r = crate::preferences::resolve(&file, project.and_then(|p| p.indent), language);
+        let origin = |o: &crate::preferences::Origin| match o {
+            crate::preferences::Origin::EditorConfig(f) => format!("EditorConfig {}", f.display()),
+            crate::preferences::Origin::Project => "this project's choice".into(),
+            crate::preferences::Origin::Default => "language default".into(),
+        };
+        let mut rows = vec![
+            format!("Editing preferences for {}", file.display()),
+            "Precedence: EditorConfig, then this project's choice in Lenz, then the language default.".into(),
+            format!("Indent style: {} ({})", if r.style.0 == crate::preferences::Style::Tab { "tabs" } else { "spaces" }, origin(&r.style.1)),
+            format!("Indent size: {} ({})", r.size.0, origin(&r.size.1)),
+            format!("Tab width: {} ({})", r.tab_width.0, origin(&r.tab_width.1)),
+            match project {
+                None => "Format on save: off. Open this file's folder to choose project preferences.".into(),
+                Some(p) if p.format_on_save => "Format on save: on for this project (Lenz does not format yet)".into(),
+                Some(_) => "Format on save: off. Formatting runs only when you ask for it.".into(),
+            },
+        ];
+        if project.is_some() { rows.push(format!("Project preferences: saved by Lenz in {}, never in the project", self.settings_file.display())); }
+        let path = std::env::var_os("PATH");
+        rows.push(match root.as_deref().and_then(|root| crate::preferences::formatter(&file, root, language, path.as_deref())) {
+            None => "Formatter: none configured for this project. Lenz never installs formatters.".into(),
+            Some(f) => format!("Formatter: {} ({}); {}", f.tool, f.config.map_or_else(|| "tool defaults".into(), |c| format!("configured by {}", c.display())),
+                f.executable.map_or_else(|| "not found in the project or on PATH. Lenz never installs or upgrades formatters.".into(), |e| format!("executable {}", e.display()))),
+        });
+        rows.join("\n")
     }
 
     /// Full, unwrapped diagnostic snapshot for display and copying in either adapter.
@@ -4172,6 +4247,8 @@ impl Session {
                 if self.disabled(CommandId::RebuildIndex).is_none() { self.reset_index(true); }
                 repaint
             }
+            Command::SetProjectIndent(indent) => self.set_project_preferences(|p| p.indent = indent),
+            Command::SetFormatOnSave(on) => self.set_project_preferences(|p| p.format_on_save = on),
         }
     }
 
@@ -7832,6 +7909,16 @@ impl Session {
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
+    fn set_project_preferences(&mut self, change: impl FnOnce(&mut ProjectPreferences)) -> Effect {
+        let Some(root) = self.state.project.as_ref().map(|p| p.root().to_owned()) else { return Effect::default() };
+        let projects = &mut self.state.settings.projects;
+        let mut preferences = projects.remove(&root).unwrap_or_default();
+        change(&mut preferences);
+        if preferences != ProjectPreferences::default() { projects.insert(root, preferences); }
+        self.save_settings();
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
     fn save_settings(&mut self) {
         let (mut settings, file) = (self.state.settings.clone(), self.settings_file.clone());
         if let Some(comparison) = &self.state.comparison { settings.split = comparison.before.split; }
@@ -8151,11 +8238,14 @@ struct Settings {
     semantic_highlighting: bool,
     split: Option<Split>,
     layout: Layout,
+    /// Project root → its own editing preferences (kept here, never in the project).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    projects: std::collections::BTreeMap<PathBuf, ProjectPreferences>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default() }
     }
 }
 

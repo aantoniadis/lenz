@@ -60,6 +60,15 @@ all views of the same buffer and cannot override intrinsic restrictions or enabl
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
 [basic-input report and limits](../research/reader-text-input.md).
 
+**Editing Preferences…** (Find Action or the Selection menu, in both adapters) shows the active file's
+indent style, indent size and tab width, each with its source: EditorConfig first, then the open project's
+choice (**Project Indentation: Tabs / 2 Spaces / 4 Spaces / EditorConfig and Language Defaults**), then the
+language default. It also names the formatter a project configures and where its executable was found;
+resolution only reads files and never installs, upgrades or runs tools or environment files. **Format on
+Save for This Project** is off by default and only remembered for now: Lenz does not format yet. Project
+choices are saved in the Reader settings file, never in the project. EditorConfig `{n..m}` ranges are not
+matched, and indentation commands that use these preferences are not available yet.
+
 The terminal emulator owns input-method preedit; Lenz receives committed Unicode text and bracketed paste.
 GUI preedit and both adapters' long-line edits use the bounded source-coordinate path; see the
 [composition verification and limits](../research/reader-unicode-composition.md). The activation candidate
