@@ -49,6 +49,7 @@ pub struct Tab {
     pub(crate) loaded: bool,
     /// Session-owned source identity, retained when reloadable content is released.
     pub(crate) buffer: Option<crate::text::BufferId>,
+    pub(crate) comparison_side: Option<crate::session::ComparisonSide>,
     /// Its language as last loaded, kept while its content is released (`None`: never loaded).
     pub(crate) language: Option<Option<lenz_content::highlight::Language>>,
     pub(crate) stamp: Option<Stamp>,
@@ -125,6 +126,7 @@ impl Tab {
             retained,
             loaded: false,
             buffer: None,
+            comparison_side: None,
             language: None,
             stamp: None,
             highlights: None,
@@ -231,6 +233,7 @@ impl Tab {
             retained: true,
             loaded: self.loaded,
             buffer: self.buffer,
+            comparison_side: None,
             language: self.language,
             stamp: self.stamp,
             highlights: self.highlights.clone(),
@@ -276,7 +279,10 @@ impl Tab {
         &self.display
     }
     /// The file name, for the tab bar.
+    pub fn comparison_side(&self) -> Option<crate::session::ComparisonSide> { self.comparison_side }
+    pub fn is_saved_version(&self) -> bool { self.comparison_side == Some(crate::session::ComparisonSide::Saved) }
     pub fn title(&self) -> String {
+        if let Some(side) = self.comparison_side { return side.label().into(); }
         self.display.file_name().map_or_else(|| self.display.display().to_string(), |n| n.to_string_lossy().into_owned())
     }
     /// Whether an SVG shows its source text (else it is rendered).
@@ -448,6 +454,20 @@ pub struct Location {
     pub offset: usize,
 }
 
+impl Location {
+    pub(crate) fn edited(&mut self, previous: &TextSnapshot, next: &TextSnapshot, edits: &[crate::text::TextEdit]) {
+        if self.version != previous.key().version { return; }
+        let transform = |byte| crate::text::edited_byte(byte, edits).min(next.len_bytes());
+        let top = previous.reader_line_range(self.top_line.min(previous.line_count() - 1)).start;
+        self.range = transform(self.range.start)..transform(self.range.end);
+        self.top_line = next.line_of(transform(top));
+        self.line = next.line_of(self.range.start);
+        self.offset = self.range.start - next.reader_line_range(self.line).start;
+        self.anchor = anchor(next, self.line);
+        self.version = next.key().version;
+    }
+}
+
 pub(crate) fn anchor(doc: &TextSnapshot, line: usize) -> Box<str> {
     let range = doc.reader_line_range(line);
     // At most four UTF8 bytes per context character; never assemble a long source line.
@@ -469,6 +489,10 @@ pub struct History {
 }
 
 impl History {
+    pub(crate) fn edited(&mut self, paths: &std::collections::HashSet<PathBuf>, previous: &TextSnapshot, next: &TextSnapshot, edits: &[crate::text::TextEdit]) {
+        for at in self.entries.iter_mut().filter(|at| paths.contains(&at.source)) { at.edited(previous, next, edits); }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

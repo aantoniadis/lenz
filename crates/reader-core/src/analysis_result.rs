@@ -3,9 +3,9 @@ use super::*;
 use crate::{semantics::Lane, session::SemanticSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ResultSlot { Semantic { server: u64, lane: Lane }, Search, Navigation, Preview, Validate }
+pub(crate) enum ResultSlot { Semantic { server: u64, lane: Lane }, Search, Navigation, Preview, Validate, SavedComparison }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Declarations, NavigationRank, NavigationValidate, Preview, Validate }
+pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Declarations, NavigationRank, NavigationValidate, Preview, Validate, SavedComparison }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResultFence {
     pub slot: ResultSlot,

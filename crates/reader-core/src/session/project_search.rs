@@ -16,11 +16,15 @@ impl Session {
                 None => Some(path.to_string_lossy().into()),
             }
         };
+        let mut changed = false;
         for (path, snapshot) in &results.captured {
-            if snapshot.identity.key.buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); }
+            if snapshot.identity.key.buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); changed = true; }
         }
         if let Some(path) = key(current.source()).filter(|path| results.query_paths.contains(path) || results.disk_sources.contains_key(path)) {
             results.stale.insert(path);
+            changed = true;
+        }
+        if changed {
             results.error.get_or_insert_with(|| "Open drafts changed since this search; rerun to update results".into());
         }
     }
@@ -28,6 +32,7 @@ impl Session {
     pub(super) fn captured_project_sources(&self, root: &Path) -> std::collections::HashMap<PathBuf, search::CapturedSource> {
         let mut captured = std::collections::HashMap::new();
         for (buffer, entry) in &self.state.sources.buffers {
+            if self.state.saved_buffer(*buffer) { continue; }
             let Some(snapshot) = entry.snapshot.as_ref().filter(|_| entry.pinned() || self.state.tabs.iter().any(|t| t.loaded && t.buffer == Some(*buffer))) else { continue };
             for path in self.state.sources.aliases.iter().filter(|(_, id)| **id == *buffer).map(|(path, _)| path)
                 .chain(self.state.tabs.iter().filter(|t| t.buffer == Some(*buffer)).flat_map(|t| std::iter::once(&t.source).chain(t.canonical.iter())))

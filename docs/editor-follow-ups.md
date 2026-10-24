@@ -116,3 +116,16 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   Large originals span several ranges; do not assume a single full-range chunk or apply this to arbitrary edited
   snapshots. Preserve source/version fences, worker admission, cancellation and edited/chunked fallback behavior.
   This may reduce conversion allocation; it is not a measured explanation or guaranteed remedy for the RSS bands.
+
+- **Disk-only hierarchy request inputs:** ticket 17 fences reusable items against
+  exact open-draft identities and rechecks returned targets with captured disk
+  identity. A disk-only item changed before a later hierarchy request has no new
+  asynchronous input-validation stage. Preserve that limitation when expanding
+  hierarchy support; do not treat a later reread as proof of old coordinates.
+
+## Reader saved comparison (2026-10-24)
+
+- The shared line-diff engine has no internal cancellation checkpoint. A superseded comparison cannot publish,
+  but its running job retains its executor credit until the engine returns. Evaluate finer cancellation if
+  pathological comparisons show interference in the next batch; do not create a separate frontend worker pool.
+  The [comparison report](research/reader-saved-comparison.md) records current proof and unverified limits.

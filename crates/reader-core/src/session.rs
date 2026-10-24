@@ -2,6 +2,9 @@
 //! the user ([`Command`]) or from background work ([`Completion`]). Adapters read [`Session::state`] and
 //! [`Session::actions`]; nothing hands out mutable state.
 
+#[path = "session/saved_comparison.rs"]
+mod saved_comparison;
+pub use saved_comparison::{ComparisonSide, SavedComparison};
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
@@ -76,6 +79,8 @@ pub use crate::native::{NativeReveal, NativeViewport};
 pub enum Command {
     BeginExternal(Box<crate::external::Request>),
     ChooseExternal { ticket: u64, choice: crate::external::Choice },
+    CompareSaved,
+    CloseSavedComparison,
     ChooseClose { ticket: u64, buffer: crate::text::BufferId, choice: crate::close::Choice },
     PrepareClose { batch: u64, intent: crate::close::Intent },
     CancelClose { ticket: u64 },
@@ -451,6 +456,8 @@ pub enum CommandId {
     OpenWithDefaultApp,
     /// The active file, or the explorer's folder or file, against another in Lenz Diff.
     CompareWith,
+    CompareSaved,
+    CloseSavedComparison,
     /// Lenz Diff on the two entries marked in the explorer.
     CompareSelected,
     Symbols,
@@ -523,7 +530,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 121] = [
+    pub const ALL: [CommandId; 123] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -574,6 +581,8 @@ impl CommandId {
         Self::OpenInEditor,
         Self::OpenWithDefaultApp,
         Self::CompareWith,
+        Self::CompareSaved,
+        Self::CloseSavedComparison,
         Self::CompareSelected,
         Self::Collapse,
         Self::Expand,
@@ -743,6 +752,8 @@ impl CommandId {
             Self::OpenInEditor => "Open in Editor",
             Self::OpenWithDefaultApp => "Open with Default App",
             Self::CompareWith => "Compare With…",
+            Self::CompareSaved => "Compare with Last Saved Version",
+            Self::CloseSavedComparison => "Close Saved Comparison",
             Self::CompareSelected => "Compare Selected",
             Self::WorkspaceRoot => "Set Workspace Root…",
             Self::Usages => "Find Usages",
@@ -827,6 +838,7 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    SavedCompared { request: u64, changes: Vec<lenz_engine::ChangeBlock>, line_endings_differ: bool },
     /// A bounded analysis consumer's result, fenced by source and request identity.
     Analyzed { ticket: crate::analysis::Ticket, result: Box<Completion> },
     AnalysisWake,
@@ -905,7 +917,7 @@ pub enum Completion {
     /// A call-hierarchy level, located: each function with its call site.
     /// `limited`: the usages it was read from stopped at the limit (a syntax-built level may miss children).
     /// `indexing`: the server was still loading or indexing when it answered.
-    HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
+    HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool, error: Option<String> },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
     /// A checkout (or new branch, named `label`; `made` when it was only created) in the repository at `root` ended.
@@ -950,6 +962,7 @@ impl Input {
         match self {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
+                Completion::SavedCompared { .. } => "saved-comparison",
                 Completion::Analyzed { .. } => "analyzed",
                 Completion::AnalysisWake => "analysis-wake",
                 Completion::Projected(_) => "source projection",
@@ -1026,6 +1039,7 @@ pub struct Effect {
 
 /// The state adapters present.
 pub struct State {
+    comparison: Option<SavedComparison>,
     sources: Sources,
     tabs: Vec<Tab>,
     /// The focused pane's shown tab; commands act on it.
@@ -1262,10 +1276,11 @@ impl<'a> View<'a> {
     pub fn save_status(&self) -> &'a crate::save::Status { &self.save.status }
     fn write_path_changed(&self) -> bool { self.save.read.as_ref().is_some_and(|read| read.snapshot.path != self.snapshot.source()) }
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
-    pub fn can_undo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_undo) }
-    pub fn can_redo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_redo) }
+    pub fn can_undo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
+    pub fn can_redo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
     pub fn edit_disabled(&self) -> Option<&'static str> {
-        if self.snapshot.image().is_some() { Some("Images are read-only") }
+        if self.tab.is_saved_version() { Some("The last saved version is read-only") }
+        else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
         else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
         else if self.snapshot.source_meta().is_lossy() { Some("Lossy text is read-only") }
@@ -1539,7 +1554,7 @@ impl State {
             PlaceList::Bookmarks => self.places.bookmarks().iter().map(|m| mark(m, Place::Bookmark(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentLocations => self.places.recent_locations().iter().map(|m| mark(m, Place::Location(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentFiles => {
-                let current = self.active().filter(|t| t.retrieved.is_none()).map(|t| t.source.clone());
+                let current = self.active().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).map(|t| t.source.clone());
                 let mut files: Vec<PathBuf> = self.places.recent_files().iter().filter(|p| Some(*p) != current.as_ref()).cloned().collect();
                 if let Some(c) = current {
                     files.insert(files.len().min(1), c);
@@ -1665,7 +1680,7 @@ impl State {
             false => format!("Read-only source retrieved from {}; its server session has ended ({})", v.provider, v.uri),
         });
         // Outside the browsing root, or a dependency inside it (node_modules, a project's virtualenv): its origin.
-        let origin = tab.filter(|t| t.retrieved.is_none()).zip(self.project.as_ref()).and_then(|(t, p)| {
+        let origin = tab.filter(|t| !t.is_saved_version() && t.retrieved.is_none()).zip(self.project.as_ref()).and_then(|(t, p)| {
             let language = self.source(t.id).map_or(t.language.flatten(), |d| d.language());
             let origin = semantics::provider::origin(&t.source, language);
             let inside = t.source.starts_with(p.root());
@@ -1674,7 +1689,12 @@ impl State {
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
-        doc.into_iter().chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
+        let comparison = self.comparison.as_ref().map(|c| match c.failure() {
+            Some(why) => format!("Saved comparison failed: {why}"),
+            None if c.pending() => "Comparing with last saved version…".into(),
+            None => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
+        });
+        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette
@@ -1682,7 +1702,7 @@ impl State {
     /// The semantic provider for the active document and what it is doing; `None` when its language has none.
     pub fn provider(&self) -> Option<ProviderView> {
         // Source a language server returned is not a document any server holds.
-        if self.active()?.retrieved.is_some() {
+        if self.active()?.is_saved_version() || self.active()?.retrieved.is_some() {
             return None;
         }
         self.semantics.view_source(self.current_source()?.source_meta(), self.current_source()?.is_large())
@@ -1889,6 +1909,7 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    comparison_seq: u64,
     id: crate::close::SessionId,
     external_seq: u64,
     external_pending: Option<external_work::Pending>,
@@ -2060,8 +2081,10 @@ impl Session {
         });
         let merged = tx.clone();
         Self {
+            comparison_seq: 0,
             id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
+                comparison: None,
                 sources: Sources::default(),
                 tabs: Vec::new(),
                 active: None,
@@ -2340,6 +2363,7 @@ impl Session {
             },
             CommandId::FindDeclarations => self.state.project.is_none().then_some("No folder is open"),
             CommandId::RerunSearch | CommandId::CloseResults => self.state.results.is_none().then_some("No search results"),
+            CommandId::Reload if self.state.active().is_some_and(Tab::is_saved_version) => Some("The last saved version is read-only"),
             CommandId::Reload if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Source a language server returned cannot be reloaded; ask for the definition again"),
             CommandId::Reload | CommandId::SelectAll => (!open).then_some("No file is open"),
             CommandId::Collapse | CommandId::Expand | CommandId::CollapseAll | CommandId::ExpandAll | CommandId::CollapseCommentsImports => self.fold_unavailable(),
@@ -2376,6 +2400,7 @@ impl Session {
                 None => Some("No file is open"),
                 // Turning annotations off always works, also once the file has gone.
                 Some(t) if t.blame.is_some() => None,
+                Some(t) if t.is_saved_version() => Some("The last saved version has no live Git attribution"),
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
                 Some(t) if !t.loaded && self.state.loading().is_some() => Some("The file is still loading"),
@@ -2385,6 +2410,8 @@ impl Session {
                 Some(_) => None,
             },
             // The explorer's selection, which only the adapter knows, is checked when it asks.
+            CommandId::CompareSaved => self.compare_saved_disabled(),
+            CommandId::CloseSavedComparison => self.state.comparison.is_none().then_some("No saved comparison is open"),
             CommandId::CompareWith => (self.state.active().is_none() && self.state.project.is_none()).then_some("No file or folder is open"),
             CommandId::CompareSelected => (self.state.tree_marks.len() < 2).then_some(MARK_TWO),
             CommandId::CopyPathLine => match self.state.active() {
@@ -2611,7 +2638,7 @@ impl Session {
                 false => entries.extend([Separator, C(CommandId::AnnotateBlame)]),
             }
         }
-        entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith)]);
+        entries.extend([Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison)]);
         entries.extend([Separator, C(CommandId::SplitRight), C(CommandId::SplitDown)]);
         if self.state.settings.split.is_some() {
             entries.push(C(CommandId::Unsplit));
@@ -2677,7 +2704,7 @@ impl Session {
     /// Looks up the repository when what it is looked up for changed: the folder, else the active file's folder.
     fn sync_repo(&mut self) {
         let anchor = self.state.project.as_ref().map(|p| p.root().to_path_buf())
-            .or_else(|| self.state.active().filter(|t| t.retrieved.is_none()).and_then(|t| t.source.parent().map(Path::to_path_buf)));
+            .or_else(|| self.state.active().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).and_then(|t| t.source.parent().map(Path::to_path_buf)));
         if anchor == self.state.repo_anchor {
             return;
         }
@@ -2743,6 +2770,7 @@ impl Session {
     fn external_tab(&self) -> Result<&Tab, &'static str> {
         match self.state.active() {
             None => Err("No file is open"),
+            Some(t) if t.is_saved_version() => Err("The last saved comparison side is an immutable snapshot; open the current side externally"),
             Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
             Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
             Some(t) => Ok(t),
@@ -2838,7 +2866,7 @@ impl Session {
             }
         }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
-        if matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::CompareSaved | Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
             Input::Completion(Completion::SelectionSteps { request, .. }) => Some(*request),
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
@@ -2855,6 +2883,7 @@ impl Session {
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         if self.navigation_query.as_ref().is_some_and(|q| self.state.navigation.as_ref().is_none_or(|n| n.request != q.request)) { self.navigation_query = None; }
+        effect.repaint |= self.refresh_saved_comparison();
         self.invalidate_result_analysis();
         self.refresh_blame();
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
@@ -2871,6 +2900,7 @@ impl Session {
         effect.repaint |= self.retry_semantic_analysis();
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
         effect.repaint |= self.account_saves();
+        effect.repaint |= self.refresh_saved_comparison();
         effect.repaint |= self.advance_close();
         effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
@@ -2914,6 +2944,7 @@ impl Session {
     fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.snapshot().key() != expected || view.edit_disabled().is_some() { return Effect::default(); }
+        if view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
@@ -2928,6 +2959,7 @@ impl Session {
 
     fn undo(&mut self, tab: TabId, redo: bool) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
+        if view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(draft) = self.state.sources.buffers.get_mut(&current.key().buffer).and_then(|entry| entry.draft.as_mut()) else { return Effect::default() };
@@ -2941,15 +2973,12 @@ impl Session {
         // A previously clean, evicted buffer may not have had a snapshot fence when close was prepared.
         self.cancel_close();
         let buffer = next.key().buffer;
-        let transform = |byte: usize| {
-            let mut delta: isize = 0;
-            for edit in edits {
-                if byte < edit.range.start { break; }
-                if byte <= edit.range.end { return edit.range.start.checked_add_signed(delta).unwrap_or(0) + edit.text.len(); }
-                delta += edit.text.len() as isize - (edit.range.end - edit.range.start) as isize;
-            }
-            byte.checked_add_signed(delta).unwrap_or(0)
-        };
+        let transform = |byte| crate::text::edited_byte(byte, edits);
+        let paths: std::collections::HashSet<_> = self.state.sources.aliases.iter().filter(|(_, id)| **id == buffer).map(|(path, _)| path.clone())
+            .chain(self.state.tabs.iter().filter(|tab| tab.buffer == Some(buffer)).flat_map(|tab| std::iter::once(tab.source.clone()).chain(tab.canonical.clone())))
+            .chain([previous.source().to_path_buf(), next.source().to_path_buf()]).collect();
+        self.state.history.edited(&paths, &previous, &next, edits);
+        if Arc::make_mut(&mut self.state.places).edited(&paths, &previous, &next, edits) { self.places_changed(); }
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
         entry.snapshot = Some(next.clone());
         entry.document = Default::default();
@@ -2960,7 +2989,7 @@ impl Session {
             let selection = tab.selection.or_else(|| (tab.id == edited).then_some(Selection { anchor: top, head: top }));
             tab.selection = selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
             tab.set_top(next.line_of(transform(top)), tab.top_row());
-            if tab.restore.is_some() { tab.restore = Some(tab.location(Some(&next))); }
+            if let Some(restore) = &mut tab.restore { restore.edited(&previous, &next, edits); }
             if tab.id == edited { tab.retained = true; }
             changed.push(tab.id);
         }
@@ -3011,7 +3040,7 @@ impl Session {
         // storage, but it cannot replace the source of an already loaded view.
         if self.state.sources.buffers.values().any(|entry| entry.pinned()
             && entry.snapshot.as_ref().is_some_and(|source| source.source() == doc.source())) { return; }
-        if self.state.tabs.iter().any(|tab| tab.loaded && (tab.source == doc.source()
+        if self.state.tabs.iter().any(|tab| !tab.is_saved_version() && tab.loaded && (tab.source == doc.source()
             || tab.canonical.as_deref() == Some(doc.source())
             || self.state.source(tab.id).is_some_and(|source| source.source() == doc.source()))) { return; }
         let id = self.state.sources.admit(doc.source(), None, &doc, Some(stamp));
@@ -3037,8 +3066,19 @@ impl Session {
     }
 
     fn command(&mut self, command: Command) -> Effect {
+        if self.state.comparison.is_some()
+            && (matches!(&command, Command::Split(_) | Command::OpenRoot(_) | Command::MoveTab { .. } | Command::SetLayout(_) | Command::Back | Command::Forward)
+                || matches!(&command, Command::ActivateTab(id) if self.state.tabs.iter().any(|t| t.id == *id && t.comparison_side.is_none())))
+        { self.close_saved_comparison(); }
+
         let repaint = Effect { repaint: true, copy: None, ..Effect::default() };
         match command {
+            Command::CompareSaved => self.compare_saved(),
+            Command::ToggleMarkdownSource if self.state.comparison.is_some() => Effect::default(),
+            Command::CloseSavedComparison => match self.state.comparison.as_ref() {
+                Some(c) => self.prepare_close(crate::close::Intent::Tab(c.current_tab()), None),
+                None => Effect::default(),
+            },
             Command::Edit { tab, expected, edits, kind } => self.edit(tab, expected, edits, kind),
             Command::Undo { tab } => self.undo(tab, false),
             Command::Redo { tab } => self.undo(tab, true),
@@ -4124,6 +4164,7 @@ impl Session {
     }
 
     fn defer_semantic(&mut self, tab: TabId, request: u64, offset: usize, question: semantics::Question, foreground: Option<Ask>) {
+        if self.state.tabs.iter().any(|t| t.id == tab && t.is_saved_version()) { return; }
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()) else { return };
         self.state.semantics.cancel_lane(question.lane());
         self.semantic_wait.insert(question.lane(), SemanticWait { tab, key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()),
@@ -4171,6 +4212,7 @@ impl Session {
 
     /// Ask about `offset` of `doc` (a snapshot a tab holds).
     fn ask_at(&mut self, tab: TabId, offset: usize, ask: Ask) -> Effect {
+        if self.state.tabs.iter().any(|t| t.id == tab && t.is_saved_version()) { return Effect::default(); }
         self.semantic_seq += 1;
         let request = self.semantic_seq;
         self.semantic_wait.remove(&semantics::Lane::Foreground);
@@ -4194,7 +4236,7 @@ impl Session {
         self.sync_semantics(); // the server has this version before it is asked about it
         self.forget_semantic_messages();
         let project = self.state.project.as_ref().map_or(0, |p| p.generation());
-        let source = self.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref())
+        let source = self.state.sources.buffers.iter().filter(|(id, _)| !self.state.saved_buffer(**id)).filter_map(|(_, entry)| entry.snapshot.as_ref())
             .find(|snapshot| snapshot.key().version == doc.version() && Arc::ptr_eq(snapshot.source_meta(), doc.source_meta())).map(|snapshot| SemanticSource::new(snapshot));
         match self.state.semantics.ask(&doc, offset, request, ask.question()) {
             Ok(()) => self.state.asking = Some(Asking { request, ask, at: Some((doc.source().to_owned(), offset, doc.version())), source, project, remaining: 1, since: self.state.semantics.now(), retrieving: None, root: None }),
@@ -4212,7 +4254,7 @@ impl Session {
         self.sync_semantics();
         self.forget_semantic_messages();
         let label = Ask::TypeHierarchy(direction).label();
-        let tab = self.state.tabs.iter().find(|t| t.source == doc.source());
+        let tab = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.source == doc.source());
         let name = if let Some(tab) = tab.filter(|t| self.state.source(t.id).is_some_and(|s| s.key().version == doc.version() && Arc::ptr_eq(s.source_meta(), doc.source_meta()))) {
             self.current_name_at(tab.id, offset, true)
         } else {
@@ -4234,7 +4276,7 @@ impl Session {
         let range = serde_json::json!({ "start": semantics::lsp::position(&doc, name.start, encoding), "end": semantics::lsp::position(&doc, name.end, encoding) });
         let text = doc.text()[name.clone()].to_owned();
         let decl = held.as_deref().and_then(|d| root_kind(d, name.start));
-        let root = Call { item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": text }), name: text, kind: 0, decl, calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
+        let root = Call { source: Some(semantics::SourceVersion::new(&doc)), item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": text }), name: text, kind: 0, decl, calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
         let site = semantics::hit_at(doc.source(), &doc, name.start, name.end);
         self.search_seq += 1;
         let id = self.search_seq;
@@ -4243,14 +4285,14 @@ impl Session {
         results.provider = self.state.semantics.origin(session);
         results.asked = Some((doc.source().to_owned(), offset));
         results.hierarchy = Some(Hierarchy::new(root, site, direction, session, hierarchy::Source::Syntax));
-        self.hierarchy_source = self.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref()).find(|snapshot| snapshot.key().version == doc.version() && Arc::ptr_eq(snapshot.source_meta(), doc.source_meta())).map(|snapshot| (id, SemanticSource::new(snapshot)));
+        self.hierarchy_source = self.state.sources.buffers.iter().filter(|(id, _)| !self.state.saved_buffer(**id)).filter_map(|(_, entry)| entry.snapshot.as_ref()).find(|snapshot| snapshot.key().version == doc.version() && Arc::ptr_eq(snapshot.source_meta(), doc.source_meta())).map(|snapshot| (id, SemanticSource::new(snapshot)));
         results.done = true;
         results.rebuild_hierarchy();
         self.state.results = Some(results);
         if held.is_none()
             && let Some(lang) = doc.language()
         {
-            let snapshot = self.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref()).find(|snapshot| snapshot.key().version == doc.version() && Arc::ptr_eq(snapshot.source_meta(), doc.source_meta())).cloned();
+            let snapshot = self.state.sources.buffers.iter().filter(|(id, _)| !self.state.saved_buffer(**id)).filter_map(|(_, entry)| entry.snapshot.as_ref()).find(|snapshot| snapshot.key().version == doc.version() && Arc::ptr_eq(snapshot.source_meta(), doc.source_meta())).cloned();
             if let Some(snapshot) = snapshot {
                 let input = crate::analysis::Input::new(snapshot, Arc::downgrade(&doc), self.project_generation.load(Ordering::Acquire), true);
                 let (latest, at) = (self.search_latest.clone(), name.start);
@@ -4407,7 +4449,7 @@ impl Session {
     /// holds it).
     fn decode(&mut self, d: semantics::Decoration) {
         if !self.state.semantics.can_ask(d.session) || self.state.semantics.latest(&d.path, d.kind) != Some(d.id) { return; }
-        let Some(tab) = self.state.tabs.iter().find(|t| t.source == d.path).map(|t| t.id) else { return };
+        let Some(tab) = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.source == d.path).map(|t| t.id) else { return };
         let Some(snapshot) = self.state.view(tab).map(|v| v.snapshot().clone()).filter(|s| s.key().version == d.version) else { return };
         let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
         let input = crate::analysis::Input::new(snapshot, loaded, self.project_generation.load(Ordering::Acquire), self.is_shown(tab));
@@ -4469,7 +4511,7 @@ impl Session {
         }) | 1;
         if fingerprint == self.synced { return; }
         self.synced = fingerprint;
-        let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| t.retrieved.is_none()).filter_map(|t| {
+        let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).filter_map(|t| {
             let entry = self.state.sources.buffers.get(&t.buffer?)?;
             if !t.loaded && !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return None; }
             let snapshot = entry.snapshot.as_ref()?;
@@ -4499,7 +4541,7 @@ impl Session {
             false => Vec::new(),
             true => {
                 let mut seen = std::collections::HashSet::new();
-                self.state.tabs.iter().filter(|t| t.retrieved.is_none() && seen.insert(&t.source)).map(|t| (t.source.as_path(), t.language.unwrap_or_else(|| highlight::detect(&t.source, "")))).collect()
+                self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none() && seen.insert(&t.source)).map(|t| (t.source.as_path(), t.language.unwrap_or_else(|| highlight::detect(&t.source, "")))).collect()
             }
         };
         self.state.semantics.sync(&docs, &held, browse.as_deref(), &mut resolve, &self.tx);
@@ -4514,6 +4556,7 @@ impl Session {
     fn result_current(state: &State, fence: &crate::analysis::ResultFence, project: u64, open: u64, preview: u64) -> bool {
         use crate::analysis::{ResultSlot, ResultStage};
         match fence.slot {
+            ResultSlot::SavedComparison => fence.project == project && state.comparison.as_ref().is_some_and(|comparison| comparison.request == fence.request && comparison.matches(state)),
             ResultSlot::Search => fence.project == project && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.id == fence.request
                 && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline) | (ResultStage::Declarations, ResultsKind::Declarations))),
             ResultSlot::Navigation => fence.project == project && state.navigation.as_ref().is_some_and(|navigation| navigation.request == fence.request
@@ -4531,7 +4574,8 @@ impl Session {
                 if fence.source.as_ref().is_some_and(|source| !state.sources.buffers.get(&source.key.buffer).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| source.matches(snapshot))) { return false; }
                 match lane {
                     semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
-                    semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node)),
+                    semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node
+                        && fence.node.and_then(|node| h.nodes.get(node)).is_some_and(|node| Self::hierarchy_item_current(state, &node.call)))),
                     semantics::Lane::Hover | semantics::Lane::Highlight => false,
                 }
             }
@@ -4539,12 +4583,47 @@ impl Session {
     }
 
     fn changed_result_source(state: &State, path: &Path, doc: &Document, buffer: Option<crate::text::BufferId>) -> bool {
-        state.sources.buffers.iter().filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
+        state.sources.buffers.iter().filter(|(id, _)| !state.saved_buffer(**id)).filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
             let captured = buffer == Some(id);
             let target = captured || source.source() == path || state.sources.aliases.get(path) == Some(&id)
                 || state.tabs.iter().any(|tab| tab.buffer == Some(id) && (tab.source == path || tab.canonical.as_deref() == Some(path)));
             target && (!source.matches_document(doc) || captured && source.source() != doc.source())
         })
+    }
+
+    fn target_source<'a>(state: &'a State, path: &Path) -> Option<&'a Arc<crate::text::TextSnapshot>> {
+        state.sources.buffers.iter().filter(|(buffer, _)| !state.saved_buffer(**buffer)).find_map(|(buffer, entry)| {
+            let source = entry.snapshot.as_ref()?;
+            if !entry.pinned() && !state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && tab.loaded) { return None; }
+            (source.source() == path || state.sources.aliases.get(path) == Some(buffer)
+                || state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && (tab.source == path || tab.canonical.as_deref() == Some(path)))).then_some(source)
+        })
+    }
+
+    fn semantic_target_current(&self, target: &semantics::Target) -> bool {
+        match (target.stamp, Self::target_source(&self.state, &target.path)) {
+            (None, Some(source)) => semantics::SourceVersion::new(&target.doc).matches_snapshot(source),
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    fn result_target_compatible(&self, target: &semantics::Target) -> bool {
+        let Some(results) = &self.state.results else { return true };
+        if let Some(source) = results.captured.get(&target.path) {
+            return source.identity.key.version == target.doc.version()
+                && source.identity.metadata.ptr_eq(&Arc::downgrade(target.doc.source_meta()));
+        }
+        results.disk_sources.get(&target.hit.path).is_none_or(|source| Some(source.stamp) == target.stamp && Some(source.digest) == target.decoded_digest)
+    }
+
+    fn hierarchy_item_current(state: &State, call: &Call) -> bool {
+        let Some(path) = call.item["uri"].as_str().and_then(semantics::lsp::uri_path) else { return call.source.is_none() };
+        match (&call.source, Self::target_source(state, &path)) {
+            (Some(source), Some(current)) => source.matches_snapshot(current),
+            (None, None) => true,
+            _ => false,
+        }
     }
 
     fn captured_result_current(state: &State, source: &crate::text::TextSnapshot, path: &Path) -> bool {
@@ -4564,6 +4643,9 @@ impl Session {
     fn result_failed(&mut self, fence: &crate::analysis::ResultFence, why: String) -> Effect {
         use crate::analysis::ResultSlot;
         match fence.slot {
+            ResultSlot::SavedComparison => {
+                if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == fence.request) { comparison.pending = false; comparison.failure = Some(why); }
+            }
             ResultSlot::Search => {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
                     self.project_query = None;
@@ -4641,12 +4723,13 @@ impl Session {
         let request = asking.request;
         // A hierarchy's root: its place is located as a definition's is.
         if let Ask::CallHierarchy(_) | Ask::TypeHierarchy(_) = ask {
-            let Some(root) = hierarchy::prepare(&value) else {
+            let Some(mut root) = hierarchy::prepare(&value) else {
                 self.state.asking = None;
                 let none = if matches!(ask, Ask::TypeHierarchy(_)) { "Not a type" } else { "No call hierarchy here" };
                 self.state.messages.push(format!("{}: {none}", ask.label()));
                 return Effect { repaint: true, copy: None, ..Effect::default() };
             };
+            root.source = root.item["uri"].as_str().and_then(semantics::lsp::uri_path).and_then(|path| reply.sources.get(&path)).cloned();
             value = serde_json::json!([root.at.clone()]);
             if let Some(a) = self.state.asking.as_mut() {
                 a.root = Some(root);
@@ -4680,11 +4763,12 @@ impl Session {
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
             // Capture a sent-map generation only after a bounded owner slot has been reserved.
-            let open = semantics.sent(session);
+            let (open, blocked) = semantics::target_sources(semantics.sent(session), &reply.sources);
             let asked_doc = asked_path.as_ref().and_then(|path| open.get(path).cloned());
             move |lease| {
                 let read = |path: &Path| {
                     if !lease.wanted() { return Err("request was cancelled".into()); }
+                    if blocked.contains(path) { return Err("target source changed since the request; ask again".into()); }
                     match read(path) {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
@@ -4695,11 +4779,12 @@ impl Session {
                         Err(ReadError::Failed(e)) => Err(e),
                     }
                 };
-                let targets = match (ask, asked_doc) {
+                let mut targets = match (ask, asked_doc) {
                     (Ask::FileSymbols, Some(doc)) => semantics::file_symbols_while(&value, &doc, encoding, limit, &|| lease.wanted()),
                     (Ask::FileSymbols, None) => semantics::Targets { failed: vec!["the file is no longer open in the language server; ask again".into()], ..Default::default() },
                     _ => semantics::targets_while(&value, limit, encoding, provider, session, &open, &read, &|| lease.wanted()),
                 };
+                semantics::capture_target_digests(targets.found.iter_mut());
                 lease.send(Completion::Targets { request, session, provider, origin, indexing, targets });
             }
         }).is_err() { return self.result_failed(&fence, "semantic analysis capacity is full".into()); }
@@ -4740,6 +4825,10 @@ impl Session {
 
     fn complete_source(&mut self, completion: Completion, buffer: Option<crate::text::BufferId>) -> Effect {
         match completion {
+            Completion::SavedCompared { request, changes, line_endings_differ } => {
+                if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == request) { comparison.changes = changes; comparison.line_endings_differ = line_endings_differ; comparison.pending = false; }
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
             Completion::AnalysisWake => Effect::default(),
             Completion::Analyzed { ticket, result } => {
                 if let Some(tag) = ticket.result() {
@@ -4859,7 +4948,7 @@ impl Session {
                     Ok((stamp, doc, canonical)) => {
                         // Two spellings of one file (a symlink, `..`) are one document: keep the tab already showing it.
                         let pane = self.state.tabs.iter().find(|t| t.id == tab).map(|t| t.pane);
-                        let duplicate = canonical.as_ref().and_then(|c| self.state.tabs.iter().find(|t| t.id != tab && Some(t.pane) == pane && t.canonical.as_ref() == Some(c)).map(|t| t.id));
+                        let duplicate = canonical.as_ref().and_then(|c| self.state.tabs.iter().find(|t| !t.is_saved_version() && t.id != tab && Some(t.pane) == pane && t.canonical.as_ref() == Some(c)).map(|t| t.id));
                         match duplicate {
                             Some(other) if !reload => {
                                 let (active, shown_other) = (self.state.active == Some(tab), self.state.other == Some(tab));
@@ -5351,7 +5440,7 @@ impl Session {
                     let root = batch.root.clone();
                     for item in items {
                         let path = root.join(item.path.as_ref());
-                        let current = self.state.tabs.iter().find(|tab| tab.source == path || tab.canonical.as_ref() == Some(&path))
+                        let current = self.state.tabs.iter().find(|tab| !tab.is_saved_version() && (tab.source == path || tab.canonical.as_ref() == Some(&path)))
                             .and_then(|tab| tab.buffer).and_then(|buffer| self.state.sources.buffers.get(&buffer)).and_then(|entry| entry.snapshot.as_ref());
                         let valid = match (item.ticket, current) {
                             (Some(ticket), Some(snapshot)) => ticket.matches(snapshot, generation),
@@ -5564,9 +5653,16 @@ impl Session {
                 }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
-            Completion::HierarchyLevel { request, level, limited, indexing } => {
+            Completion::HierarchyLevel { request, level, limited, indexing, error } => {
+                let stale = level.iter().any(|(call, target)| !Self::hierarchy_item_current(&self.state, call)
+                    || !self.semantic_target_current(target) || !self.result_target_compatible(target));
                 let Some(h) = self.state.results.as_mut().and_then(|r| r.hierarchy.as_mut()) else { return Effect::default() };
                 let Some(node) = h.loading(request) else { return Effect::default() };
+                if let Some(error) = error.or_else(|| stale.then(|| "Hierarchy target source changed; ask for its hierarchy again".into())) {
+                    h.failed(node, request, error);
+                    if let Some(results) = &mut self.state.results { results.rebuild_hierarchy(); }
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
+                }
                 if limited {
                     self.state.messages.push(format!("Type hierarchy: only the first {} usages of {} were read; this level may be incomplete", semantics::TYPE_LEVEL_LIMIT, h.nodes[node].call.name));
                 }
@@ -5632,7 +5728,7 @@ impl Session {
                 t.moving = false;
                 let from = std::mem::replace(&mut t.source, to.clone());
                 t.display = to.clone();
-                t.canonical = canonical;
+                t.canonical = canonical.clone();
                 if t.loaded { t.stamp = stamp; }
                 t.unavailable = None;
                 let buffer = t.buffer;
@@ -5644,7 +5740,7 @@ impl Session {
                     if let Some(entry) = self.state.sources.buffers.get_mut(&id) {
                         if let Some(snapshot) = &entry.snapshot {
                             let was_saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(snapshot));
-                            let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()));
+                            let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()).with_canonical(canonical.clone()));
                             entry.snapshot = Some(Arc::new(snapshot.with_source_meta(metadata)));
                             if was_saved { entry.saved = entry.snapshot.as_ref().map(|s| SemanticSource::new(s)); }
                         }
@@ -5670,7 +5766,7 @@ impl Session {
     /// Located targets. A definition: one opens in the main area (a committed navigation, from the snapshot just
     /// read); several, or a peek, list in the results panel with the first previewed. Usages list the same way;
     /// symbols add to the list each server's answer.
-    fn targets_found(&mut self, request: u64, session: u64, provider: &'static str, origin: String, indexing: bool, targets: semantics::Targets) -> Effect {
+    fn targets_found(&mut self, request: u64, session: u64, provider: &'static str, origin: String, indexing: bool, mut targets: semantics::Targets) -> Effect {
         let Some(asked) = self.state.asking.as_ref().filter(|a| a.request == request) else {
             return Effect::default(); // cancelled, or replaced by a later request
         };
@@ -5680,6 +5776,11 @@ impl Session {
             self.state.messages.push(format!("{label}: the file changed while its targets were resolved; ask again"));
             return Effect { repaint: true, copy: None, ..Effect::default() };
         }
+        targets.found.retain(|target| {
+            let current = self.semantic_target_current(target) && (asked.ask != Ask::Symbols || self.result_target_compatible(target));
+            if !current { targets.failed.push(format!("{}: target source changed; ask again", target.path.display())); }
+            current
+        });
         let (ask, at) = (asked.ask, asked.at.clone());
         let label = ask.label();
         // Virtual definition targets only: the first one's text, through the provider's documented method.
@@ -5810,6 +5911,8 @@ impl Session {
     /// Unfold call-hierarchy node `node`, asking for its level the first time (or again after a failure); fold it
     /// when it is unfolded. One level loads at a time: one still loading is given up (unfolding it asks again).
     fn unfold_call(&mut self, node: usize) -> Effect {
+        let item_current = self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).and_then(|h| h.nodes.get(node))
+            .is_some_and(|n| Self::hierarchy_item_current(&self.state, &n.call));
         let Some(r) = self.state.results.as_mut() else { return Effect::default() };
         let Some(h) = r.hierarchy.as_mut() else { return Effect::default() };
         let Some(n) = h.nodes.get_mut(node).filter(|n| !n.recursive) else { return Effect::default() };
@@ -5822,6 +5925,11 @@ impl Session {
                 return Effect { repaint: true, copy: None, ..Effect::default() };
             }
             _ => {}
+        }
+        if !item_current {
+            n.state = hierarchy::Children::Failed("Hierarchy target source changed; ask for its hierarchy again".into());
+            r.rebuild_hierarchy();
+            return Effect { repaint: true, copy: None, ..Effect::default() };
         }
         for other in &mut h.nodes {
             if matches!(other.state, hierarchy::Children::Loading(_)) {
@@ -5890,10 +5998,12 @@ impl Session {
         let latest = self.hierarchy_latest.clone();
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
-            let open = semantics.sent(session);
+            let sources = reply.sources;
+            let (open, blocked) = semantics::target_sources(semantics.sent(session), &sources);
             move |lease| {
                 let read = |path: &Path| {
                     if !lease.wanted() { return Err("request was cancelled".into()); }
+                    if blocked.contains(path) { return Err("target source changed since the request; ask again".into()); }
                     match read(path) {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
@@ -5908,21 +6018,27 @@ impl Session {
                     let usages = semantics::targets_while(&value, semantics::TYPE_LEVEL_LIMIT, encoding, provider, session, &open, &read, &|| lease.wanted());
                     if !lease.wanted() { return; }
                     let limited = usages.limited;
+                    let error = usages.failed.first().cloned();
                     let current = lease.cancellation();
-                    let level = hierarchy::merge_targets(syntax_level_while(usages.found, direction, encoding, move || current() && latest.load(Ordering::Acquire) == request));
-                    lease.send(Completion::HierarchyLevel { request, level, limited, indexing });
+                    let mut level = hierarchy::merge_targets(syntax_level_while(usages.found, direction, encoding, move || current() && latest.load(Ordering::Acquire) == request));
+                    semantics::capture_target_digests(level.iter_mut().map(|(_, target)| target));
+                    lease.send(Completion::HierarchyLevel { request, level, limited, indexing, error });
                 } else {
                     let types = direction.is_type();
                     let calls = if types { hierarchy::types(&value) } else { hierarchy::calls(&value, direction, &parent) };
                     // Each file is read once for all calls in this admitted result.
                     let files = std::cell::RefCell::new(std::collections::HashMap::new());
                     let read = |path: &Path| files.borrow_mut().entry(path.to_owned()).or_insert_with(|| read(path)).clone();
-                    let level = calls.into_iter().take_while(|_| lease.wanted()).filter_map(|call| {
-                        let t = semantics::targets_while(&serde_json::json!([call.at.clone()]), 1, encoding, provider, session, &open, &read, &|| lease.wanted()).found.pop()?;
-                        Some((call, t))
+                    let mut error = None;
+                    let level = calls.into_iter().take_while(|_| lease.wanted()).filter_map(|mut call| {
+                        call.source = call.item["uri"].as_str().and_then(semantics::lsp::uri_path).and_then(|path| sources.get(&path)).cloned();
+                        let mut targets = semantics::targets_while(&serde_json::json!([call.at.clone()]), 1, encoding, provider, session, &open, &read, &|| lease.wanted());
+                        if error.is_none() { error = targets.failed.into_iter().next(); }
+                        Some((call, targets.found.pop()?))
                     }).collect();
-                    let level = if types { hierarchy::merge_targets(level) } else { level };
-                    lease.send(Completion::HierarchyLevel { request, level, limited: false, indexing });
+                    let mut level = if types { hierarchy::merge_targets(level) } else { level };
+                    semantics::capture_target_digests(level.iter_mut().map(|(_, target)| target));
+                    lease.send(Completion::HierarchyLevel { request, level, limited: false, indexing, error });
                 }
             }
         }).is_err() { return self.result_failed(&fence, "semantic analysis capacity is full".into()); }
@@ -5932,6 +6048,14 @@ impl Session {
     /// The snapshots just read serve the previews (within the cache's budget).
     fn keep_previews(&mut self, found: Vec<semantics::Target>) {
         for t in found {
+            let source = Self::target_source(&self.state, &t.path).cloned();
+            if let Some(results) = &mut self.state.results {
+                if let Some(source) = source.filter(|_| t.stamp.is_none()) {
+                    results.captured.entry(t.path.clone()).or_insert_with(|| search::CapturedSource::new(source));
+                } else if let Some((stamp, digest)) = t.stamp.zip(t.decoded_digest) {
+                    results.disk_sources.entry(t.hit.path.clone()).or_insert(search::DiskSource { stamp, digest });
+                }
+            }
             if let Some(stamp) = t.stamp {
                 self.cache_document(stamp, t.doc);
             }
@@ -5941,7 +6065,7 @@ impl Session {
     /// Open `path` in the preview tab at `hit`, from `doc` (the snapshot it was checked against, read as `stamp`
     /// when it came from disk): a committed navigation.
     fn open_at(&mut self, path: PathBuf, hit: &search::Hit, stamp: Option<Stamp>, doc: Arc<Document>) -> Effect {
-        let authoritative = self.state.sources.buffers.iter().find_map(|(buffer, entry)| {
+        let authoritative = self.state.sources.buffers.iter().filter(|(id, _)| !self.state.saved_buffer(**id)).find_map(|(buffer, entry)| {
             let snapshot = entry.snapshot.as_ref()?;
             let matches = snapshot.source() == path || self.state.sources.aliases.get(&path) == Some(buffer)
                 || self.state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && (tab.source == path || tab.canonical.as_ref() == Some(&path)));
@@ -6316,7 +6440,7 @@ impl Session {
 
     /// Check tab `id`'s source against the disk off the UI thread.
     fn refresh(&mut self, id: TabId) {
-        if self.state.tabs.iter().any(|t| t.id == id && (t.moving || t.retrieved.is_some())) {
+        if self.state.tabs.iter().any(|t| t.id == id && (t.moving || t.is_saved_version() || t.retrieved.is_some())) {
             return;
         }
         self.check(id, None);
@@ -6450,7 +6574,7 @@ impl Session {
         let project = self.state.project.as_ref().map(|p| (p.root().to_owned(), p.walk, p.files(), !p.refreshing() && !matches!(p.coverage(), project::Coverage::Scanning(_))));
         // Tabs inside the inventory's folders add nothing: opening one of the project's files costs no rebuild.
         let inside = |d: &Path| self.state.project.as_ref().is_some_and(|p| d == p.root() || d.strip_prefix(p.root()).is_ok_and(|r| p.has_dir(&r.to_string_lossy())));
-        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| t.retrieved.is_none()).filter_map(|t| t.source.parent()).filter(|d| !inside(d)).map(Path::to_path_buf).collect();
+        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).filter_map(|t| t.source.parent()).filter(|d| !inside(d)).map(Path::to_path_buf).collect();
         let key: WatchKey = (project, extra);
         if self.watching.as_ref() == Some(&key) {
             return;
@@ -6923,7 +7047,7 @@ impl Session {
 
     /// Where the reader is now, for history.
     fn here(&self) -> Option<Location> {
-        self.state.active().map(|t| self.state.location(t))
+        self.state.active().filter(|t| t.comparison_side.is_none()).map(|t| self.state.location(t))
     }
 
     /// A committed navigation to `path`: the tab already showing it, else the preview tab (or a new retained tab
@@ -6935,6 +7059,7 @@ impl Session {
     /// [`Session::navigate`], optionally to source a language server returned (`retrieved`): its tab holds that
     /// snapshot and never reads the disk.
     fn navigate_to(&mut self, requested: PathBuf, retain: bool, restore: Option<Location>, record: bool, retrieved: Option<(RetrievedContent, semantics::VirtualSource)>) -> Effect {
+        self.close_saved_comparison();
         self.open_seq += 1; // a result still being checked must not move the view after this
         // A jump to another file that has not landed is given up: it must not fire on that file's next open.
         if self.pending_goto.as_ref().is_some_and(|(p, _)| *p != normalized(&requested)) {
@@ -6955,7 +7080,7 @@ impl Session {
         let from = self.here();
         // Within the focused pane: the other pane keeps its own tabs, of the same sources too.
         let pane = self.state.focused;
-        let existing = self.state.tabs.iter().find(|t| t.pane == pane && (t.source == path || t.canonical.as_ref() == Some(&path))).map(|t| t.id);
+        let existing = self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane == pane && (t.source == path || t.canonical.as_ref() == Some(&path))).map(|t| t.id);
         let id = match existing {
             Some(id) => id,
             None => {
@@ -7106,7 +7231,7 @@ impl Session {
         self.index_batch_seq += 1;
         let request = self.index_batch_seq;
         let mut opened = std::collections::HashMap::new();
-        for tab in &self.state.tabs {
+        for tab in self.state.tabs.iter().filter(|t| !t.is_saved_version()) {
             opened.insert(tab.source.as_path(), tab);
             if let Some(canonical) = &tab.canonical { opened.entry(canonical.as_path()).or_insert(tab); }
         }
@@ -7201,9 +7326,10 @@ impl Session {
     }
 
     fn checkpoint_workspace(&mut self) {
+        if self.state.comparison.is_some() { return; }
         if self.restore_workspace { return; } // A directory closed before its state arrived keeps the saved workspace.
         let Some(project) = &self.state.project else { return };
-        let tabs: Vec<_> = self.state.tabs.iter().filter(|t| t.retrieved.is_none()).take(crate::workspace::MAX_TABS).collect();
+        let tabs: Vec<_> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).take(crate::workspace::MAX_TABS).collect();
         let index = |id| tabs.iter().position(|t| Some(t.id) == id);
         let workspace = crate::workspace::Workspace {
             active: index(self.state.active), other: index(self.state.other), focused: self.state.focused,
@@ -7283,13 +7409,14 @@ impl Session {
     }
 
     fn release(&mut self, id: TabId) {
+        if self.state.tabs.iter().any(|t| t.id == id && t.comparison_side.is_some()) { return; }
         if let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()).filter(|b| !b.done) { b.suspend(); }
         if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer) {
             let last = !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id));
             let dirty = self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty);
             self.analysis.release_view(buffer, id, last && !dirty);
         }
-        if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.retrieved.is_none() && !t.before_root) {
+        if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| !t.is_saved_version() && t.retrieved.is_none() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(&self.state, t).then(|| self.state.location(t)));
             Arc::make_mut(&mut self.state.places).left_file(&source);
             if let Some(at) = at {
@@ -7324,6 +7451,7 @@ impl Session {
     }
 
     fn unsplit(&mut self) -> Effect {
+        if self.state.comparison.is_some() { return self.close_saved_comparison(); }
         if self.state.settings.split.take().is_none() {
             return Effect::default();
         }
@@ -7354,6 +7482,7 @@ impl Session {
     }
 
     fn close_tab(&mut self, id: TabId) -> Effect {
+        if self.state.tabs.iter().any(|t| t.id == id && t.comparison_side.is_some()) { return self.close_saved_comparison(); }
         let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else {
             return Effect::default();
         };
@@ -7402,7 +7531,7 @@ impl Session {
     /// A new tab for `path` in the focused pane; a source the other pane shows lends it its snapshot (and place).
     fn fresh_tab(&mut self, id: TabId, path: &Path, requested: &Path, retained: bool, markdown_source: bool) -> Tab {
         let pane = self.state.focused;
-        let mut tab = match self.state.tabs.iter().find(|t| t.pane != pane && t.source == path && t.loaded && t.retrieved.is_none()) {
+        let mut tab = match self.state.tabs.iter().find(|t| !t.is_saved_version() && t.pane != pane && t.source == path && t.loaded && t.retrieved.is_none()) {
             Some(twin) => twin.duplicate(id, pane),
             None => {
                 let mut tab = Tab::new(id, path.to_path_buf(), retained);
@@ -7464,7 +7593,7 @@ impl Session {
     /// focused pane's goes first, this one follows it).
     fn load_other(&mut self) {
         let Some(id) = self.state.other.filter(|_| self.pending.is_none()) else { return };
-        if self.state.tabs.iter().any(|t| t.id == id && !t.loaded && t.retrieved.is_none()) {
+        if self.state.tabs.iter().any(|t| t.id == id && !t.loaded && !t.is_saved_version() && t.retrieved.is_none()) {
             self.load(id, false);
         }
     }
@@ -7563,7 +7692,8 @@ impl Session {
     }
 
     fn save_settings(&mut self) {
-        let (settings, file) = (self.state.settings.clone(), self.settings_file.clone());
+        let (mut settings, file) = (self.state.settings.clone(), self.settings_file.clone());
+        if let Some(comparison) = &self.state.comparison { settings.split = comparison.before.split; }
         self.settings_seq += 1;
         let (seq, saves) = (self.settings_seq, self.settings_saves.clone());
         self.jobs.submit(Priority::Background, move || {
@@ -7657,7 +7787,7 @@ impl Session {
         let project = self.project_generation.load(Ordering::Relaxed);
         let Some(t) = self.tab_mut(id) else { return };
         let Some(b) = t.blame.as_mut() else { return };
-        if b.of(t.stamp, &doc) && (b.done || b.project == project) || t.retrieved.is_some() {
+        if b.of(t.stamp, &doc) && (b.done || b.project == project) || t.comparison_side == Some(ComparisonSide::Saved) || t.retrieved.is_some() {
             return;
         }
         let file = t.canonical.clone().unwrap_or_else(|| t.source.clone());
@@ -7897,7 +8027,7 @@ fn save_json(file: &Path, value: &impl serde::Serialize) {
 
 /// Whether `t` shows text lines from a file (not an image, a Markdown preview or a language server's source).
 fn shows_text(state: &State, t: &Tab) -> bool {
-    state.view(t.id).is_some_and(|view| (view.snapshot().image().is_none() || t.image_source) && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))) && t.retrieved.is_none()
+    state.view(t.id).is_some_and(|view| (view.snapshot().image().is_none() || t.image_source) && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))) && !t.is_saved_version() && t.retrieved.is_none()
 }
 
 /// What tab content shown as `shown` (read as `stamp`) is now on disk at `path`.
@@ -7923,6 +8053,7 @@ fn check(path: &Path, stamp: Option<Stamp>, shown: Option<&Arc<crate::text::Text
 /// The same raw read supplies display decoding and exact writer provenance, including result previews.
 fn decode_read(path: PathBuf, version: u64, read: &lenz_content::write::ExactRead) -> Document {
     let mut doc = Document::decode(path, version, read.bytes());
+    doc.set_canonical(read.target.canonical.clone());
     let meta = doc.source_meta();
     if doc.image().is_some() || meta.is_binary() || meta.is_lossy() { return doc; }
     let snapshot = read.snapshot(doc.text(), meta.original_encoding(), meta.had_bom(), meta.is_lossy());
@@ -8111,10 +8242,10 @@ fn syntax_level_while(usages: Vec<semantics::Target>, direction: Direction, enco
                 let uri = semantics::lsp::file_uri(&path);
                 let range = serde_json::json!({ "start": semantics::lsp::position(&doc, other.start, encoding), "end": semantics::lsp::position(&doc, other.end, encoding) });
                 let name = doc.text()[other.clone()].to_owned();
-                let call = Call { item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": name }), name, kind: 0, decl: Some(decl), calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
+                let call = Call { source: t.stamp.is_none().then(|| semantics::SourceVersion::new(&doc)), item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": name }), name, kind: 0, decl: Some(decl), calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
                 // The row goes to the child's name, on the relation's header.
                 let hit = semantics::hit_at(&path, &doc, other.start, other.end);
-                out.push((call, semantics::Target { path: path.clone(), stamp: t.stamp, doc: doc.clone(), hit, at: other.start }));
+                out.push((call, semantics::Target { path: path.clone(), stamp: t.stamp, doc: doc.clone(), hit, at: other.start, decoded_digest: t.decoded_digest }));
             }
         }
     }

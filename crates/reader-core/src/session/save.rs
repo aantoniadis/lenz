@@ -47,6 +47,7 @@ impl Session {
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
+        if view.edit_disabled().is_some() { return Effect::default(); }
         if view.save.status.busy() || !view.write_path_changed() && !matches!(view.save.status, Status::Rejected(_) | Status::Uncertain(_) | Status::Checked(_)) { return Effect::default(); }
         let buffer = view.snapshot().key().buffer;
         let path = view.snapshot().source().to_owned();
@@ -69,6 +70,7 @@ impl Session {
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn confirm_rechecked_save(&mut self, tab: TabId) -> Effect {
+        if self.state.view(tab).is_some_and(|view| view.edit_disabled().is_some()) { return Effect::default(); }
         let Some(buffer) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.buffer) else { return Effect::default() };
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
         if !matches!(entry.save.status, Status::Checked(DiskMatch::Baseline | DiskMatch::Attempted)) { return Effect::default(); }
