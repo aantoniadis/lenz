@@ -62,7 +62,7 @@ The shared crates changed (`e6218d2`): run Lenz's own gate and its native UI wor
 git clone https://github.com/aantoniadis/lenz && cd lenz
 scripts/ci-local.sh
 cargo test -p lenz --features gui-test gui_
-python3 scripts/perf-suite.py --profile full --ui native --output target/perf/mac-native
+python3 scripts/perf-suite.py --profile full --ui native --output perf-results/mac-native
 ```
 
 There is no earlier native macOS baseline for Lenz, so these are absolute results; compare a before/after pair on

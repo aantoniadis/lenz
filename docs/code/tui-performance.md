@@ -122,7 +122,7 @@ Reproduction from the workspace root:
 scripts/try-launcher.sh
 python3 -B scripts/code-tui-bench.py \
   --binary target/launcher-trial/lenz-code-tui \
-  --out target/perf/code-tui-check \
+  --out perf-results/code-tui-check \
   --lines 100000 --rounds 100 --stress-seconds 60
 ```
 

@@ -29,6 +29,15 @@ async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd
 # Keep GPUI's patched event-loop commit pinned alongside its tag.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 
+# Dev and test builds keep line tables (backtraces still show file:line) and drop dependency debug info.
+# Full debug info made each test binary up to 813 MB, and the parallel relink after an edit to a core crate needed
+# 37.6 GiB: 179–242 s, against 5–6 s with this profile (2026-10-24, see docs/optimization-notebook.md).
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 debug = "line-tables-only"
 # A wrapped integer is a wrong range, possibly in a file being saved: abort with a crash report instead.

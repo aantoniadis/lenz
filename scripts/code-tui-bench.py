@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Owned-PTY reader correctness/performance probe. Latency ends at PTY bytes, not displayed pixels.
 
-  scripts/code-tui-bench.py --binary target/release/lenz-reader-tui --out target/perf/code-tui --lines 100000 --rounds 30 --stress-seconds 10
+  scripts/code-tui-bench.py --binary target/release/lenz-reader-tui --out perf-results/code-tui --lines 100000 --rounds 30 --stress-seconds 10
 
 Uses disposable documents and private XDG/provider state; HOME is inherited. Linux reads /proc; macOS samples ps RSS,
 not physical footprint. Sampled RSS and the process high-water mark do not measure GPU memory or prove no leak.

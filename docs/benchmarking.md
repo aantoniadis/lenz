@@ -22,7 +22,7 @@ Standalone terminal checks:
 cargo build --locked --release -p lenz-tui
 python3 scripts/tui-bench.py --app target/release/lenz-tui
 # After a full/stress suite run: TUI startup, memory and key feedback over the GUI startup fixtures.
-python3 scripts/tui-startup-bench.py --app target/release/lenz-tui --fixtures target/perf/full/fixtures
+python3 scripts/tui-startup-bench.py --app target/release/lenz-tui --fixtures perf-results/full/fixtures
 LENZ_PERF_JSON=1 cargo test --locked --release -p lenz-tui terminal_perf -- --ignored --nocapture
 ```
 
@@ -37,29 +37,29 @@ streamed blame and search, and independent views.
 
 ```sh
 # Fast component comparison; no display needed, Linux or macOS.
-python3 scripts/perf-suite.py --profile quick --output target/perf/before
+python3 scripts/perf-suite.py --profile quick --output perf-results/before
 
 # Repeat after a code change with identical settings (see "Compare and gate").
-python3 scripts/perf-suite.py --profile quick --output target/perf/after \
-  --compare target/perf/before
+python3 scripts/perf-suite.py --profile quick --output perf-results/after \
+  --compare perf-results/before
 
 # Comprehensive local run: three measured repetitions, plus untimed warmups.
-python3 scripts/perf-suite.py --profile full --output target/perf/full
+python3 scripts/perf-suite.py --profile full --output perf-results/full
 
 # Sustained allocation/worker/undo stress: 15 minutes in one process,
 # plus 50 forward/backward browsing passes per UI trial on Linux.
-python3 scripts/perf-suite.py --profile stress --output target/perf/stress
+python3 scripts/perf-suite.py --profile stress --output perf-results/stress
 
 # Adjust stress length and repetition count explicitly.
 python3 scripts/perf-suite.py --profile stress --stress-seconds 3600 --runs 5 \
-  --output target/perf/hour
+  --output perf-results/hour
 ```
 
 Long-session memory for the terminal (owned PTY; directory pair of large files, `]`/`[` through every file per round):
 
 ```sh
 python3 scripts/tui-soak-bench.py --app target/release/lenz-tui --rounds 200 \
-  target/perf/full/fixtures/files/left target/perf/full/fixtures/files/right
+  perf-results/full/fixtures/files/left perf-results/full/fixtures/files/right
 ```
 
 Standalone workflow and Python collector checks:
@@ -70,7 +70,7 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 cargo test -p lenz --features gui-test gui_
 ```
 
-Output directories must be new or empty; a timestamped directory under `target/perf/` is used when `--output` is omitted. Keep the directory to retain fixtures, per-case stdout and stderr, exact commands, executable hashes, a source manifest, machine and build metadata, raw samples (`results.json`) and a readable report (`summary.md`). `fixtures.json` identifies generated inputs by SHA-256. Results are written after each case and on interruption.
+Output directories must be new or empty; a timestamped directory under `perf-results/` is used when `--output` is omitted. Keep the directory to retain fixtures, per-case stdout and stderr, exact commands, executable hashes, a source manifest, machine and build metadata, raw samples (`results.json`) and a readable report (`summary.md`). `fixtures.json` identifies generated inputs by SHA-256. Results are written after each case and on interruption.
 
 Build time is recorded separately. Tests run as prebuilt executables, sequentially, so compilation and competing benchmark processes do not enter component measurements. Quick runs usually take tens of seconds after building; full runs take several minutes; stress adds its configured sustained duration and longer browsing runs. Large fixtures require a few hundred MiB of disk space, and pathological workloads can use several GiB of RAM. Use `--profile quick` first on smaller machines.
 
@@ -166,10 +166,10 @@ On macOS:
 
 ```sh
 # Safe default: no desktop windows or synthetic input.
-python3 scripts/perf-suite.py --profile full --output target/perf/mac-components
+python3 scripts/perf-suite.py --profile full --output perf-results/mac-components
 
 # Opt in to native application windows for the startup matrix.
-python3 scripts/perf-suite.py --profile full --ui native --output target/perf/mac-native
+python3 scripts/perf-suite.py --profile full --ui native --output perf-results/mac-native
 ```
 
 The native probe launches and terminates its own windows, so run it when the desktop is free. It does not use Accessibility automation or send keys. Missing memory samples are unavailable, never fabricated as zero. macOS cache isolation and automated interactions remain gaps; `--require-ui` deliberately fails there until both are covered. Follow the [release walkthrough](release-checklist.md) for real scrolling, mouse input and display-refresh checks on either platform.
@@ -183,17 +183,17 @@ The macOS path has parser and collection logic checks and uses portable Rust wor
 ```sh
 # Fail if any comparable metric's median increases by more than 20%,
 # or any baseline metric disappears.
-python3 scripts/perf-suite.py --profile quick --output target/perf/candidate \
-  --compare target/perf/before --fail-regression 20
+python3 scripts/perf-suite.py --profile quick --output perf-results/candidate \
+  --compare perf-results/before --fail-regression 20
 
 # Compare different machines informationally; no regression gate allowed.
-python3 scripts/perf-suite.py --profile quick --output target/perf/another-machine \
+python3 scripts/perf-suite.py --profile quick --output perf-results/another-machine \
   --compare /path/to/other-machine-results --allow-machine-mismatch
 
 # Preserve the original reference-machine absolute timing limits.
 scripts/perf-check.sh
 # Or enable those component limits in the portable suite:
-python3 scripts/perf-suite.py --profile quick --check --output target/perf/gated
+python3 scripts/perf-suite.py --profile quick --check --output perf-results/gated
 ```
 
 Default collection enforces workload correctness, subprocess timeouts and memory-growth limits, while recording timing without hard failure on a slower CPU. `--check` enables existing absolute component timing ceilings. `--compare` and `--fail-regression` require the same machine fingerprint, OS version, toolchain, allocator and compiler environment, generated fixtures, and suite settings: profile, `--runs`, `--stress-seconds`, `--ui`, `--max-growth-mib`, `--check` and `--renderer-label`. Pass the same `--renderer-label` for the baseline and the candidate run. The baseline must be a passing completed run. A different machine is never silently treated as a code regression. Source revision changes are expected; hashes and dirty state are recorded. Any unsupported comparison or malformed measurement fails clearly. A zero baseline followed by a positive value cannot produce a percentage: it is explicitly listed and fails an enabled regression gate.

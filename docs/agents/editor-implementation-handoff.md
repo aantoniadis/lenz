@@ -60,6 +60,8 @@ sub-agents absolute paths into `cf8f` instead of pasting ticket text.
   final release and benchmark builds must unset it. The evidence so far is 22 hits out of
   40 executed requests, with most builds reusing warm per-worktree `target/` directories,
   so the benefit is unproven — do not claim it helps.
+- Build settings follow [AGENTS.md](../../AGENTS.md#build-output). The
+  `DEBUG0/INCREMENTAL0/JOBS4` environment in older checkpoints is retired.
 - Sub-agents may install missing language tools from official sources for the language
   tickets.
 - When the user asks to pause after the current ticket: finish and merge it, start

@@ -247,14 +247,14 @@ A measured regression is kept only when it buys something worth the cost and the
 
 ```sh
 # Full suite: components, terminal PTY probes, GUI startup and interactions on a private Xvfb.
-python3 scripts/perf-suite.py --profile full --output target/perf/full
+python3 scripts/perf-suite.py --profile full --output perf-results/full
 
 # TUI startup and key feedback over the same fixtures.
 python3 scripts/tui-startup-bench.py --app target/release/lenz-tui \
-  --fixtures target/perf/full/fixtures > target/perf/full/tui-startup.jsonl
+  --fixtures perf-results/full/fixtures > perf-results/full/tui-startup.jsonl
 
 # On macOS, add native windows to the GUI startup matrix.
-python3 scripts/perf-suite.py --profile full --ui native --output target/perf/mac-full
+python3 scripts/perf-suite.py --profile full --ui native --output perf-results/mac-full
 ```
 
 See the [benchmark guide](benchmarking.md) for comparison against a baseline, regression gates and measurement boundaries, and the [release checklist](release-checklist.md) for the physical-display walkthrough.

@@ -160,7 +160,7 @@ bash scripts/ci-local.sh
 bash scripts/perf-check.sh
 python3 scripts/perf-suite.py --profile full --runs 3 --stress-seconds 60 \
   --require-ui --check --renderer-label 'Xvfb Mesa lavapipe software rendering' \
-  --output target/perf/release-recheck
+  --output perf-results/release-recheck
 ```
 
 Captured GUI frames can contain chrome before content and include capture/poll

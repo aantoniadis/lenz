@@ -1,3 +1,5 @@
 target/
+# Benchmark and validation evidence; kept out of target/ so `cargo clean` is always safe.
+perf-results/
 .claude/
 __pycache__/

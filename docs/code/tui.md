@@ -420,7 +420,7 @@ screen when it exits normally or returns an I/O error; an uncatchable process ki
 scripts/ci-local.sh
 cargo test --locked -p reader-tui --features gui-test parity_tests
 python3 scripts/code-tui-bench.py --binary target/release/lenz-reader-tui \
-  --out target/perf/reader-tui-check --lines 100000 --rounds 30 --stress-seconds 60
+  --out perf-results/reader-tui-check --lines 100000 --rounds 30 --stress-seconds 60
 ```
 
 The local gate runs core tests, actual GPUI input tests, terminal event/render tests and a replay comparing both

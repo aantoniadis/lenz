@@ -98,6 +98,22 @@ For documentation-only changes, verify local links and `git diff --check`;
 runtime tests and benchmark reruns are unnecessary unless executable behavior
 or benchmark definitions also change.
 
+## Build output
+
+- `target/` is disposable: `cargo clean` is always safe. Write benchmark and
+  validation evidence to the ignored `perf-results/`, and keep clones and extra
+  worktrees outside `target/`.
+- Build each worktree into its own on-disk `target/`. Cargo keys workspace
+  crates by relative path and mtime, so a target shared between worktrees reports
+  another worktree's binaries as fresh. Session scratchpads and a tmpfs `/tmp`
+  hold Cargo output in RAM; `packaging/package.sh`'s macOS `/tmp/lenz-dist` is the
+  documented exception.
+- Build with the `Cargo.toml` profiles as they are. Per-command `CARGO_PROFILE_*`,
+  `CARGO_INCREMENTAL` or `RUSTFLAGS` give the target a second artifact set; the dev
+  profile's line tables keep link memory low enough for Cargo's default jobs.
+- When a worktree's branch is merged and the worktree is idle, run `cargo clean`
+  there, or remove the worktree after moving its `perf-results/` elsewhere.
+
 ## Agent skills
 
 ### Issue tracker

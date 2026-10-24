@@ -4,6 +4,44 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## 2026-10-24 dev profile and build output
+
+Long sessions filled the disk: one worktree's `target/` reached 213G, 148G of it
+`debug/`. Each worktree's target only grows (Cargo collects no build artifacts),
+and evidence kept under `target/perf/` made `cargo clean` unsafe.
+
+Method: `scripts/ci-local.sh`'s cargo steps with tests compile-only, each variant in a
+fresh on-disk target, then edit loops (`touch crates/content/src/lib.rs` or
+`crates/reader-gui/src/lib.rs`, rebuild). Source `d17b3b4`, rustc 1.99.1 on Linux (LLD
+already the default linker). One cold sample per variant; the core edit loop ran twice.
+"Disk" is the filesystem's used-bytes delta over all dev steps, release steps excluded;
+`du` overstates it on a compressing filesystem.
+
+| Dev profile | Cold workspace tests | Core edit | Leaf edit | Disk (MiB) |
+|---|---|---|---|---|
+| none (full debug info) | 145 s | 179–204 s | 9.2 s | 15,156 |
+| **kept:** line tables, dependencies none | 90 s | 5.0–5.5 s | 3.9 s | 6,500 |
+| full for workspace crates, dependencies none | 96 s | 8.9–16.1 s | 4.8 s | 8,143 |
+
+The core edit relinks every test binary at once. With full debug info the 52 test
+executables totalled 14.3 GB (up to 813 MB each); a repeat sampled 26 concurrent
+`ld.lld` holding 37.6 GiB (242 s), against 12 holding 4.1 GiB with the kept profile.
+
+- **Rejected: a target shared between worktrees** (`CARGO_TARGET_DIR` or `build.build-dir`).
+  Workspace crates are keyed by relative path and judged fresh by mtime: after a
+  second worktree built into the first's target, the first compiled nothing and its
+  `reader-tui` test binary lacked a test only the first has.
+- **Rejected: `CARGO_BUILD_JOBS=4`.** With the kept profile it cost 111 s cold (90 s) and
+  6.5–7.9 s per core edit (5.0–5.5 s); its reason, link memory, is gone.
+- **Inconclusive, now cheap:** `CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0` in a warm
+  target rebuilt only the 9 workspace crates (15.8 s, +521 MiB) and did not thrash
+  when alternated; with full dependency debug info it duplicated every dependency.
+- Feature variants (`gui-test`, `test-support`) recompile ~100 units and alternate
+  without rebuilding; their cost was the relinked debug info.
+- Not tried: sccache (handoff evidence unproven), mold/wild, `split-debuginfo`, fewer
+  integration-test binaries. Release, dist and benchmark builds are unchanged; native
+  macOS is unverified. Raw logs, timings and drivers: `perf-results/build-profile-20261024/`.
+
 ## 2026-10-21 final release validation
 
 The full Linux suite passed 133 cases and 394 metrics, alongside local CI,
