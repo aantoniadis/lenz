@@ -20,19 +20,19 @@ impl Session {
         let buffer = view.snapshot().key().buffer;
         let project = self.project_generation.load(Ordering::Acquire);
         self.save_seq += 1; let request = self.save_seq;
-        let entry = &self.state.sources.buffers[&buffer];
+        let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
+        let (Some(snapshot), Some(read)) = (&entry.snapshot, &entry.save.read) else { return Effect::default() };
         if !self.analysis.request_write(buffer, request, project, || {
-            let captured = entry.snapshot.as_ref().expect("eligible save source").clone();
-            let read = entry.save.read.clone().expect("eligible save baseline");
+            let captured = snapshot.clone();
+            let read = read.clone();
             (Some(crate::analysis::Input::new(captured, entry.document.clone(), project, false)), move |doc: Option<Arc<Document>>| {
-                let doc = doc.expect("write source is ready");
+                let Some(doc) = doc else { return Outcome::Rejected("Save source is unavailable; nothing was written".into()) };
                 Outcome::Written(lenz_content::write::write_exact(&read.snapshot, &read.target, doc.text()))
             })
         }) { self.state.messages.push("Save admission is full; the draft is retained. Try Save explicitly later.".into()); return Effect { repaint: true, copy: None }; }
-        let entry = self.state.sources.buffers.get_mut(&buffer).expect("save buffer");
         if let Some(draft) = &mut entry.draft { draft.end_group(); }
         entry.save.status = Status::Saving; entry.save.checked = None;
-        entry.save.captured = Some(save::Captured { request, text: entry.snapshot.as_ref().expect("captured save source").clone() });
+        entry.save.captured = Some(save::Captured { request, text: snapshot.clone() });
         Effect { repaint: true, copy: None }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
@@ -43,18 +43,18 @@ impl Session {
         let project = self.project_generation.load(Ordering::Acquire);
         let versions = self.versions.clone();
         self.save_seq += 1; let request = self.save_seq;
+        let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
+        let Some(text) = &entry.snapshot else { return Effect::default() };
         if !self.analysis.request_write(buffer, request, project, || (None, move |_: Option<Arc<Document>>| {
             let result = read(&path).map_err(|why| match why { ReadError::Failed(why) => why, ReadError::Unstable => "the file kept changing while rechecked".into() })
-                .map(|(_, bytes)| {
+                .and_then(|(_, bytes)| {
                     let doc = decode_read(path, versions.fetch_add(1, Ordering::Relaxed) + 1, &bytes);
-                    let baseline = doc.write_baseline.as_deref().expect("exact recheck").clone();
-                    (baseline, Arc::new(crate::text::TextSnapshot::from_document(buffer, &doc)))
+                    let baseline = doc.write_baseline.as_deref().ok_or_else(|| "The rechecked file has no writable exact baseline".to_owned())?.clone();
+                    Ok((baseline, Arc::new(crate::text::TextSnapshot::from_document(buffer, &doc))))
                 });
             Outcome::Rechecked(result)
         })) { self.state.messages.push("Recheck admission is full; try explicitly later".into()); return Effect { repaint: true, copy: None }; }
-        let entry = self.state.sources.buffers.get_mut(&buffer).expect("recheck buffer");
-        let text = entry.snapshot.as_ref().expect("current recheck source").clone();
-        entry.save.captured = Some(save::Captured { request, text });
+        entry.save.captured = Some(save::Captured { request, text: text.clone() });
         entry.save.checked = None; entry.save.status = Status::Rechecking;
         Effect { repaint: true, copy: None }
     }
@@ -82,7 +82,7 @@ impl Session {
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
     }
     fn compact_saved_backing(&mut self, buffer: crate::text::BufferId) {
-        let Some(entry) = self.state.sources.buffers.get(&buffer) else { return };
+        let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         let (Some(current), Some(draft)) = (&entry.snapshot, &entry.draft) else { return };
         if !current.needs_compaction() && !draft.baseline.needs_compaction() { return; }
         let (current, baseline) = (current.clone(), draft.baseline.clone());
@@ -94,7 +94,6 @@ impl Session {
             let baseline = if same { current.clone() } else { Arc::new(baseline.compact_backing()) };
             Outcome::Compacted { current, baseline }
         })) {
-            let entry = self.state.sources.buffers.get_mut(&buffer).expect("saved source");
             entry.save.status = Status::Saving;
             entry.save.captured = Some(save::Captured { request, text: captured });
         }
@@ -104,8 +103,8 @@ impl Session {
         let changed = !outcomes.is_empty();
         for (buffer, request, outcome) in outcomes {
             let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { continue };
-            if !entry.save.captured.as_ref().is_some_and(|c| c.request == request) { continue; }
-            let captured = entry.save.captured.take().expect("matching save request").text;
+            let Some(captured) = entry.save.captured.take_if(|captured| captured.request == request) else { continue };
+            let captured = captured.text;
             match outcome {
                 Outcome::Compacted { current, baseline } => {
                     if let Some(draft) = &mut entry.draft

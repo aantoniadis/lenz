@@ -315,8 +315,7 @@ impl Analysis {
         self.conversions.retain(|scope, conversion| {
             let source = conversion.source.upgrade().or_else(|| conversion.retired.upgrade());
             if (source.is_none() || scope.project != project) && let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); }
-            if conversion.materializing.as_ref().is_some_and(|task| task.done.load(Ordering::Acquire)) {
-                let task = conversion.materializing.take().expect("completed conversion");
+            if let Some(task) = conversion.materializing.take_if(|task| task.done.load(Ordering::Acquire)) {
                 self.running -= 1;
                 self.revision = self.revision.wrapping_add(1);
                 if task.cancel.load(Ordering::Acquire) && scope.project == project && source.as_ref().is_some_and(|source| source.document.get().is_none()) {
@@ -423,7 +422,7 @@ impl Analysis {
                 SourceReady::Waiting => { self.enqueue(id); continue; }
                 SourceReady::Failed(_) => { if let Some(entry) = self.entries.get_mut(&id) { entry.group.cancel(); } continue; }
                 SourceReady::Ready(doc) => {
-                    let entry = self.entries.get_mut(&id).expect("admitted source");
+                    let Some(entry) = self.entries.get_mut(&id) else { continue };
                     let group = &mut entry.group;
                     let Some(intent) = group.waiting.remove(&consumer) else { continue };
                     if intent.priority == Priority::Background && background == MAX_JOBS { group.waiting.insert(consumer, intent); self.enqueue(id); continue; }
