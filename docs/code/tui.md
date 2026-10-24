@@ -71,7 +71,8 @@ At start the dialog names the recovered file (or the New File document), when it
 on disk still matches the draft's confirmed baseline. **Restore Draft** (`r`) reopens it as the ordinary draft, with
 its own undo history, and marks the tab `⟲`; the file on disk is not changed. If the file still matches, Save works
 as usual; if it changed, Save stays closed until **Recheck Saved File** compares the current file, and the retained
-draft can still be written elsewhere with Save As. A missing file restores the draft only. **Discard Draft** (`d`)
+draft can still be written elsewhere with Save As, and **Compare with Last Saved Version** shows it against the
+recovered confirmed baseline. A missing file restores the draft only. **Discard Draft** (`d`)
 deletes the private copy. **Later** (Esc) keeps it for this session; **Recover Unsaved Draft…** in the File menu
 offers it again. The GUI uses the same dialog, keys and labels.
 
