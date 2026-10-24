@@ -1,4 +1,5 @@
 use super::*;
+mod external;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{
