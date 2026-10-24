@@ -55,6 +55,8 @@ struct Snapshot {
     active: Option<String>,
     text: Option<String>,
     selection: Option<reader_core::session::Selection>,
+    /// Every selection of the active view, in source order (several cursors included).
+    selections: Vec<reader_core::session::Selection>,
     split: Option<reader_core::session::Split>,
     pane: u8,
     selected: Option<String>,
@@ -72,6 +74,11 @@ fn snapshot(s: &State) -> Snapshot {
         active: s.active().map(|t| t.title()),
         text: s.current_source().map(|d| d.copy_range(0..d.len_bytes()).unwrap()),
         selection: s.selection(),
+        selections: s.active().map(|tab| {
+            let mut all: Vec<_> = tab.selections().collect();
+            all.sort_by_key(|selection| (selection.range().start, selection.range().end));
+            all
+        }).unwrap_or_default(),
         selected: copied_selection(s),
         split: s.split(),
         pane: s.focused_pane(),
@@ -114,6 +121,57 @@ fn editor_input_printables_paste_read_only_and_modal_precedence_match(cx: &mut T
     let before = snapshot(tui.session.state()); visual.simulate_keystrokes("q delete ctrl-x ctrl-v"); key(&mut tui, KeyCode::Char('q'), KeyModifiers::NONE); key(&mut tui, KeyCode::Delete, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('x'), KeyModifiers::CONTROL); tui.handle(Event::Paste("blocked".into())); assert_eq!(snapshot(tui.session.state()), before); assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), before); assert!(!tui.quit);
     visual.simulate_keystrokes("shift-f2 ctrl-v ctrl-x delete ctrl-s escape"); key(&mut tui, KeyCode::F(2), KeyModifiers::SHIFT); tui.handle(Event::Paste("blocked".into())); for c in ['x', 's'] { key(&mut tui, KeyCode::Char(c), KeyModifiers::CONTROL); } key(&mut tui, KeyCode::Delete, KeyModifiers::NONE); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE); assert_eq!(snapshot(tui.session.state()), before); assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), before);
     draw(&mut visual, &mut tui, &mut terminal); assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn several_cursors_replay_the_same_text_and_selections_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("carets.txt");
+    let original = "aa bb aa\none\n";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let check = |visual: &VisualTestContext, tui: &App, expected: &str| {
+        let state = snapshot(tui.session.state());
+        assert_eq!(state.text.as_deref(), Some(expected));
+        assert_eq!(state, gui.read_with(visual, |view, _| snapshot(view.session().state())));
+    };
+    draw(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    visual.simulate_keystrokes("right alt-shift-down");
+    key(&mut tui, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut tui, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    check(&visual, &tui, original);
+    assert_eq!(snapshot(tui.session.state()).selections.len(), 2, "both adapters hold two cursors");
+    visual.simulate_keystrokes("x y ctrl-z");
+    for c in ['x', 'y'] { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    check(&visual, &tui, original);
+    visual.simulate_keystrokes("x escape");
+    key(&mut tui, KeyCode::Char('x'), KeyModifiers::NONE);
+    key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    check(&visual, &tui, "axa bb aa\noxne\n");
+    assert_eq!(snapshot(tui.session.state()).selections.len(), 1, "Escape keeps one cursor in both adapters");
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
 }
 
 #[gpui::test]

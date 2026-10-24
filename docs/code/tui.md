@@ -68,6 +68,23 @@ all views of the same buffer and cannot override intrinsic restrictions or enabl
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
 [basic-input report and limits](../research/reader-text-input.md).
 
+**Several selections** (Alt+Shift+Down/Up in both adapters, or **Add Cursor Below** / **Add Cursor Above** in the
+menus and the palette) put a caret on the next or previous shown line at the caret's column and keep the earlier
+ones (these also accept Alt+Down / Alt+Up). Terminals that do not report modified arrow keys deliver them as other
+keys, so the two commands always stay reachable from the palette (F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
+literal occurrence outside the selections already made; overlapping and repeated matches are skipped, and a press
+with none left says so and changes nothing. Typing, Enter, Tab, bracketed paste, Delete, Cut and Paste then change
+every selection as one transaction against the displayed version, and each caret follows its own edit. One Undo
+takes the whole typing group, exactly as with one caret; Undo of a paste or deletion restores the text and puts each
+caret back at its own selection. Delete removes one character per caret (a CRLF pair as one); Cut and Copy take each
+selection's text, one per line, so bare carets copy nothing while several cursors exist. **Collapse to Single Cursor**, Escape, a click or any caret movement (arrows, Home,
+End, clicking, Select All, a jump) returns to one selection, so navigation never acts on a stale set. The selections
+belong to the view: a split pane of the same buffer keeps its own, and closing or restoring a workspace keeps only
+the primary one. Read-only mode, an image, a preview, a retrieved or binary source disable all four commands with
+the same reasons as typing, and an open dialog takes the keys first. Several selections that an edit makes identical
+or overlapping are merged into their union; a caret inside a selection is dropped. Only the primary selection is
+composed through an input method, and folding moves a hidden caret to its region's first line.
+
 **Editing Preferences…** (Find Action or the Selection menu, in both adapters) shows the active file's
 indent style, indent size and tab width, each with its source: EditorConfig first, then the open project's
 choice (**Project Indentation: Tabs / 2 Spaces / 4 Spaces / EditorConfig and Language Defaults**), then the

@@ -273,6 +273,16 @@ pub enum Command {
     /// Copy the shown or the caret line's commit id.
     CopyRevision,
     SelectAll,
+    /// Replace every selection of the active tab with `text` as one transaction (typed text, Enter, Tab).
+    InsertText { text: String, kind: crate::text::EditKind },
+    /// One more caret on the next shown line at the caret's column.
+    AddCursorBelow,
+    /// One more caret on the previous shown line at the caret's column.
+    AddCursorAbove,
+    /// Select the next occurrence of the primary selection's text as a further selection.
+    SelectNextOccurrence,
+    /// Keep only the primary selection.
+    CollapseSelections,
     Copy,
     /// Copy text the adapter selected (a Markdown preview's rendered text).
     CopyText(String),
@@ -467,6 +477,14 @@ pub enum CommandId {
     CollapseCommentsImports,
     ExtendSelection,
     ShrinkSelection,
+    /// A further caret on the next shown line, at the caret's column.
+    AddCursorBelow,
+    /// A further caret on the previous shown line, at the caret's column.
+    AddCursorAbove,
+    /// Select the next occurrence of the selected text or the word at the caret.
+    SelectNextOccurrence,
+    /// Drop every selection but the primary one.
+    CollapseSelections,
     ChooseTheme,
     /// The application's name, version, platform, licence and project page (the adapter shows it).
     About,
@@ -592,7 +610,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 137] = [
+    pub const ALL: [CommandId; 141] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -659,6 +677,10 @@ impl CommandId {
         Self::CollapseCommentsImports,
         Self::ExtendSelection,
         Self::ShrinkSelection,
+        Self::AddCursorBelow,
+        Self::AddCursorAbove,
+        Self::SelectNextOccurrence,
+        Self::CollapseSelections,
         Self::ChooseTheme,
         Self::About,
         Self::NewWindow,
@@ -802,6 +824,10 @@ impl CommandId {
             Self::CollapseCommentsImports => "Collapse Comments and Imports",
             Self::ExtendSelection => "Extend Selection",
             Self::ShrinkSelection => "Shrink Selection",
+            Self::AddCursorBelow => "Add Cursor Below",
+            Self::AddCursorAbove => "Add Cursor Above",
+            Self::SelectNextOccurrence => "Select Next Occurrence",
+            Self::CollapseSelections => "Collapse to Single Cursor",
             Self::ChooseTheme => "Change theme",
             Self::About => crate::chrome::ABOUT_TITLE,
             Self::NewWindow => "New Window",
@@ -1782,7 +1808,7 @@ impl State {
     }
 
     pub fn selection(&self) -> Option<Selection> {
-        self.active()?.selection
+        self.active()?.selection()
     }
     pub fn top_line(&self) -> usize {
         self.active().map_or(0, |t| t.top_line)
@@ -2554,7 +2580,7 @@ impl Session {
                 _ => Some("No file is open"),
             },
             CommandId::ShrinkSelection => match self.state.active() {
-                Some(t) if t.expansion.as_ref().is_some_and(|e| e.at > 0 && Some(e.current()) == t.selection) => None,
+                Some(t) if t.expansion.as_ref().is_some_and(|e| e.at > 0 && Some(e.current()) == t.selection()) => None,
                 _ => Some("Nothing to shrink"),
             },
             // Each arrives with its own change.
@@ -2625,6 +2651,7 @@ impl Session {
                 Some(_) => None,
             },
             CommandId::Cut | CommandId::Paste | CommandId::Delete => self.text_action_disabled(id),
+            CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections => self.selection_action_disabled(id),
             CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id)).map_or(Some("No loaded file is open"), |view| view.intrinsic_edit_disabled()),
             CommandId::Copy => match self.state.selection() {
                 _ if !open => Some("No file is open"),
@@ -2987,7 +3014,7 @@ impl Session {
         let b = t.blame.as_ref().ok_or("Annotations are off")?;
         if b.error.is_some() { return Err("Blame failed"); }
         if !b.done { return Err("Blame pending"); }
-        let line = self.state.source(t.id).zip(t.selection).map(|(d, s)| d.line_of(s.head)).ok_or("No line is selected")?;
+        let line = self.state.source(t.id).zip(t.selection()).map(|(d, s)| d.line_of(s.head)).ok_or("No line is selected")?;
         match (b.lines.get(line), &b.root) {
             (Some(Some(c)), _) if !c.is_committed() => Err("This line is not committed"),
             (Some(Some(c)), Some(root)) => Ok((c.sha.clone(), root.clone())),
@@ -2999,7 +3026,7 @@ impl Session {
     pub fn caret_annotation(&self) -> Option<crate::blame::Annotation<'_>> {
         let t = self.state.active()?;
         let b = t.blame.as_ref()?; // nothing more while annotations are off
-        let line = self.state.source(t.id).zip(t.selection).map(|(d, s)| d.line_of(s.head))?;
+        let line = self.state.source(t.id).zip(t.selection()).map(|(d, s)| d.line_of(s.head))?;
         crate::blame::annotation(b, line)
     }
 
@@ -3040,7 +3067,7 @@ impl Session {
 
     fn editor_plan_at(&self, host: &lenz_content::open::Host, configured: Option<&str>, default_app: bool, saved: bool) -> Result<lenz_content::open::Plan, &'static str> {
         let t = self.external_tab()?;
-        let at = self.state.source(t.id).zip(t.selection).map(|(d, s)| {
+        let at = self.state.source(t.id).zip(t.selection()).map(|(d, s)| {
             let line = d.line_of(s.head);
             (line + 1, d.column_of(s.head) + 1)
         });
@@ -3112,7 +3139,7 @@ impl Session {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. }
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. } | Command::InsertText { .. }
             | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
             | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             for entry in self.state.sources.buffers.values_mut() {
@@ -3120,13 +3147,13 @@ impl Session {
             }
         }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
-        if matches!(&input, Input::Command(Command::CompareSaved | Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::CompareSaved | Command::Open(_) | Command::OpenRetained(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::AddCursorBelow | Command::AddCursorAbove | Command::CollapseSelections | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
             Input::Completion(Completion::SelectionSteps { request, .. }) => Some(*request),
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
             Input::Command(_) | Input::Completion(_) => None,
         };
-        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. } | Command::InsertText { .. } | Command::AddCursorBelow | Command::AddCursorAbove)) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let mut effect = match input {
@@ -3245,8 +3272,7 @@ impl Session {
         for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
             let top = previous.reader_line_range(tab.top_line.min(previous.line_count() - 1)).start;
             tab.new_content();
-            let selection = tab.selection.or_else(|| (tab.id == edited).then_some(Selection { anchor: top, head: top }));
-            tab.selection = selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
+            tab.edit_selections(transform, (tab.id == edited).then_some(Selection { anchor: top, head: top }));
             tab.set_top(next.line_of(transform(top)), tab.top_row());
             if let Some(restore) = &mut tab.restore { restore.edited(&previous, &next, edits); }
             if tab.id == edited { tab.retained = true; }
@@ -3440,7 +3466,7 @@ impl Session {
             Command::StepBookmark { forward } => {
                 let (source, line, last) = self.state.active().and_then(|t| {
                     let doc = self.state.source(t.id)?;
-                    Some((t.source.clone(), doc.line_of(t.selection.map_or(0, |s| s.head)), doc.line_count() - 1))
+                    Some((t.source.clone(), doc.line_of(t.selection().map_or(0, |s| s.head)), doc.line_count() - 1))
                 }).unwrap_or((PathBuf::new(), 0, usize::MAX));
                 match self.state.places.step(&source, line, last, forward).cloned() {
                     Some(m) => self.jump_to_mark(m),
@@ -3804,8 +3830,8 @@ impl Session {
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 let clamp = |b: usize| doc.floor_char_boundary(b);
                 let s = Selection { anchor: clamp(s.anchor), head: clamp(s.head) };
-                let changed = t.selection != Some(s);
-                t.selection = Some(s);
+                let changed = t.selection() != Some(s) || !t.extra_selections().is_empty();
+                t.place_selection(Some(s));
                 t.approximate = false;
                 Effect { repaint: changed, copy: None, ..Effect::default() }
             }
@@ -3926,7 +3952,7 @@ impl Session {
                 }
                 let sha = commit.sha.clone();
                 let start = doc.reader_line_range(line).start;
-                t.selection = Some(Selection { anchor: start, head: start });
+                t.place_selection(Some(Selection { anchor: start, head: start }));
                 self.commit_requests += 1;
                 let (request, tx) = (self.commit_requests, self.tx.clone());
                 self.state.commit = Some(crate::blame::CommitPopup { tab, sha: sha.clone(), root: root.clone(), details: None, request });
@@ -3975,7 +4001,7 @@ impl Session {
                 } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 if doc.source_meta().image().is_some() && !t.image_source { return Effect::default(); }
-                let s = t.selection.unwrap_or_else(|| {
+                let s = t.selection().unwrap_or_else(|| {
                     let origin = if cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
                     Selection { anchor: origin, head: origin }
                 });
@@ -3991,7 +4017,7 @@ impl Session {
                     _ => moved(&doc, &visible, s.head, motion),
                 };
                 let head = if visible.hidden(doc.line_of(head)) { doc.reader_line_range(visible.shown(doc.line_of(head))).end } else { head };
-                t.selection = Some(Selection {anchor:head,head});
+                t.place_selection(Some(Selection {anchor:head,head}));
                 t.approximate = false;
                 t.show_head(&doc);
                 repaint
@@ -4008,7 +4034,7 @@ impl Session {
                     }
                 } else { None };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let s = t.selection.unwrap_or_else(|| {
+                let s = t.selection().unwrap_or_else(|| {
                     let origin = if wrap_cols.is_none() { doc.reader_line_range(t.top_line).start } else { 0 };
                     Selection { anchor: origin, head: origin }
                 });
@@ -4017,7 +4043,7 @@ impl Session {
                 // Keep the head on screen as far as the core knows the view: at or below the top line, and below the
                 // sticky lines.
                 t.top_line = t.top_line.min(line);
-                t.selection = Some(Selection { head, ..s });
+                t.place_selection(Some(Selection { head, ..s }));
                 repaint
             }
             Command::ExtendSelection if self.disabled(CommandId::ExtendSelection).is_some() => Effect::default(),
@@ -4025,10 +4051,11 @@ impl Session {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 // Only while the expansion's last selection is still the tab's.
-                let Some(e) = t.expansion.as_mut().filter(|e| Some(e.current()) == t.selection) else { return Effect::default() };
+                let current = t.selection();
+                let Some(e) = t.expansion.as_mut().filter(|e| Some(e.current()) == current) else { return Effect::default() };
                 match e.shrink() {
                     Some(s) => {
-                        t.selection = Some(s);
+                        t.place_selection(Some(s));
                         t.show_head(&doc);
                         repaint
                     }
@@ -4040,10 +4067,10 @@ impl Session {
                 let Some(snapshot) = self.state.current() else { return Effect::default() };
                 let version = snapshot.key().version;
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let from = t.selection.unwrap_or(Selection { anchor: 0, head: 0 });
+                let from = t.selection().unwrap_or(Selection { anchor: 0, head: 0 });
                 if let Some(e) = t.expansion.as_mut().filter(|e| e.version == version && e.current() == from) {
                     return match e.extend() {
-                        Some(next) => { t.selection = Some(next); if reveal { t.show_head(&snapshot); } repaint }
+                        Some(next) => { t.place_selection(Some(next)); if reveal { t.show_head(&snapshot); } repaint }
                         None => Effect::default(),
                     };
                 }
@@ -4069,7 +4096,7 @@ impl Session {
             Command::SelectAll => {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                t.selection = Some(Selection { anchor: 0, head: doc.len_bytes() });
+                t.place_selection(Some(Selection { anchor: 0, head: doc.len_bytes() }));
                 repaint
             }
             Command::CopyPath { line } => {
@@ -4078,7 +4105,7 @@ impl Session {
                     Some(relative) => relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
                     None => t.source.to_string_lossy().into_owned(),
                 };
-                let at = self.state.view(t.id).map_or(0, |view| t.selection.map_or(0, |s| view.snapshot().line_of(s.head)) + 1);
+                let at = self.state.view(t.id).map_or(0, |view| t.selection().map_or(0, |s| view.snapshot().line_of(s.head)) + 1);
                 Effect { repaint: false, copy: Some(if line { format!("{path}:{at}") } else { path }), ..Effect::default() }
             }
             Command::CopyText(text) => Effect { repaint: false, copy: (!text.is_empty()).then_some(text), ..Effect::default() },
@@ -4087,13 +4114,24 @@ impl Session {
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::Cut => self.cut(),
+            Command::InsertText { text, kind } => self.insert_text(text, kind),
+            Command::AddCursorBelow => self.add_cursor(true),
+            Command::AddCursorAbove => self.add_cursor(false),
+            Command::SelectNextOccurrence => self.select_next_occurrence(),
+            Command::CollapseSelections => self.collapse_selections(),
             Command::Paste(text) => self.paste(text),
             Command::Delete { backward } => self.delete(backward),
             Command::SetReadOnly(on) => self.set_read_only(on),
             Command::Copy => {
                 let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Effect::default() };
-                let Some(s) = view.tab().selection() else { return Effect::default() };
                 let doc = view.snapshot();
+                let selections: Vec<_> = view.tab().selections().collect();
+                // Several selections copy one per line, as Cut does; an empty one contributes nothing.
+                if selections.len() > 1 {
+                    let text = selections.iter().filter(|s| !s.range().is_empty()).filter_map(|s| doc.copy_range(s.range())).collect::<Vec<_>>().join("\n");
+                    return Effect { repaint: false, copy: (!text.is_empty()).then_some(text), ..Effect::default() };
+                }
+                let Some(s) = selections.first().copied() else { return Effect::default() };
                 // No selection: the caret's visible line with its original ending.
                 let range = if s.range().is_empty() { doc.line_with_ending(doc.line_of(s.head)).unwrap_or(0..0) } else { s.range() };
                 Effect { repaint: false, copy: (!range.is_empty()).then(|| doc.copy_range(range)).flatten(), ..Effect::default() }
@@ -4137,7 +4175,7 @@ impl Session {
                 let Some(t) = self.active_mut() else { return Effect::default() };
                 let Some(folds) = t.folds.clone() else { return Effect::default() };
                 // The caret's row (a selection's head may be on a hidden line).
-                let line = t.visible_for(&doc).shown(t.selection.map_or(t.top_line, |s| doc.line_of(s.head)));
+                let line = t.visible_for(&doc).shown(t.selection().map_or(t.top_line, |s| doc.line_of(s.head)));
                 // The innermost open region holding the line: regions are sorted by first line, so the last that holds it.
                 let open = folds.regions.iter().rev().find(|f| f.first as usize <= line && line <= f.last as usize && t.collapsed.get(f.first as usize) != Some(f.kind));
                 let Some(f) = open.copied() else { return Effect::default() };
@@ -4148,7 +4186,7 @@ impl Session {
             Command::Expand => {
                 let Some(doc) = self.state.current() else { return Effect::default() };
                 let Some(t) = self.active_mut() else { return Effect::default() };
-                let line = t.visible_for(&doc).shown(t.selection.map_or(t.top_line, |s| doc.line_of(s.head)));
+                let line = t.visible_for(&doc).shown(t.selection().map_or(t.top_line, |s| doc.line_of(s.head)));
                 Effect { repaint: t.collapsed.remove(line), copy: None, ..Effect::default() }
             }
             Command::CollapseAll | Command::CollapseCommentsImports => {
@@ -5405,7 +5443,7 @@ impl Session {
             Completion::SelectionSteps { request, steps } => {
                 let Some((id, version, from, _, reveal)) = self.expanding.take_if(|e| e.3 == request) else { return Effect::default() };
                 // Still that tab, version and selection; else the answer is stale.
-                let current = self.state.active().is_some_and(|t| t.id == id && t.selection.unwrap_or(Selection { anchor: 0, head: 0 }) == from)
+                let current = self.state.active().is_some_and(|t| t.id == id && t.selection().unwrap_or(Selection { anchor: 0, head: 0 }) == from)
                     && self.state.source(id).is_some_and(|s| s.key().version == version);
                 if !current { return Effect::default(); }
                 let Some(steps) = steps else { self.state.messages.push("Selection expansion unavailable; try again".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; };
@@ -5423,7 +5461,7 @@ impl Session {
                     }
                     Ok((matches, capped)) => {
                         (f.error, f.matches, f.capped) = (None, matches.into(), capped);
-                        let at = t.selection.zip(snapshot.as_ref()).map_or((t.top_line, 0), |(s, d)| {
+                        let at = t.selection().zip(snapshot.as_ref()).map_or((t.top_line, 0), |(s, d)| {
                             let at = s.anchor.min(s.head);
                             let line = d.line_of(at);
                             (line, at - d.reader_line_range(line).start)
@@ -7206,7 +7244,7 @@ impl Session {
         let range = doc.reader_line_range(line);
         let offset = doc.byte_at_column(line, at.column.unwrap_or(1).saturating_sub(1) as usize);
         let byte = offset - range.start;
-        t.selection = Some(Selection { anchor: offset, head: offset });
+        t.place_selection(Some(Selection { anchor: offset, head: offset }));
         t.expansion = None;
         t.reveal(line);
         let id = t.id;
@@ -7272,7 +7310,7 @@ impl Session {
         let Some(t) = self.tab_mut(tab) else { return Effect::default() };
         let Some((line, range)) = t.find.as_ref().and_then(|f| f.matches.get(f.current?).cloned()) else { return Effect::default() };
         let start = doc.reader_line_range(line).start;
-        t.selection = Some(Selection { anchor: start + range.start, head: start + range.end });
+        t.place_selection(Some(Selection { anchor: start + range.start, head: start + range.end }));
         t.expansion = None;
         t.reveal(line);
         self.bring_into_view(tab, line, range.start);
@@ -7676,7 +7714,7 @@ impl Session {
             active: index(self.state.active), other: index(self.state.other), focused: self.state.focused,
             split: self.state.settings.split, layout: self.state.settings.layout, soft_wrap: self.state.settings.soft_wrap,
             expanded: project.expanded(), explorer: self.state.explorer.clone(),
-            tabs: tabs.into_iter().map(|t| crate::workspace::SavedTab { path: t.source.clone(), selection: t.selection, top_line: t.top_line, top_row: t.top_row(), column: t.column, pane: t.pane, retained: t.retained, markdown_source: t.markdown_source, image_source: t.image_source }).collect(),
+            tabs: tabs.into_iter().map(|t| crate::workspace::SavedTab { path: t.source.clone(), selection: t.selection(), top_line: t.top_line, top_row: t.top_row(), column: t.column, pane: t.pane, retained: t.retained, markdown_source: t.markdown_source, image_source: t.image_source }).collect(),
         };
         Arc::make_mut(&mut self.state.places).workspace = Some(Box::new(workspace));
         self.places_changed();
@@ -7689,7 +7727,7 @@ impl Session {
         self.state.tabs = saved.tabs.into_iter().map(|s| {
             self.next_tab += 1;
             let mut tab = Tab::new(TabId(self.next_tab), s.path, s.retained);
-            tab.pane = s.pane; tab.selection = s.selection; tab.set_top(s.top_line, s.top_row); tab.column = s.column;
+            tab.pane = s.pane; tab.place_selection(s.selection); tab.set_top(s.top_line, s.top_row); tab.column = s.column;
             tab.markdown_source = s.markdown_source; tab.image_source = s.image_source;
             tab
         }).collect();
@@ -7744,7 +7782,7 @@ impl Session {
     fn caret_mark(&self) -> Option<crate::places::Mark> {
         let t = self.state.active().filter(|t| shows_text(&self.state, t))?;
         let doc = self.state.source(t.id)?;
-        let at = t.selection.map_or_else(|| doc.reader_line_range(t.top_line.min(doc.line_count() - 1)).start, |s| s.head);
+        let at = t.selection().map_or_else(|| doc.reader_line_range(t.top_line.min(doc.line_count() - 1)).start, |s| s.head);
         let line = doc.line_of(at);
         Some(crate::places::Mark::at(&t.source, doc, line, at - doc.reader_line_range(line).start))
     }
@@ -8107,7 +8145,8 @@ impl Session {
         }
         t.language = Some(snapshot.language());
         t.new_content();
-        t.selection = t.selection.map(|s| Selection { anchor: snapshot.floor_char_boundary(s.anchor), head: snapshot.floor_char_boundary(s.head) });
+        let clamped = t.selection().map(|s| Selection { anchor: snapshot.floor_char_boundary(s.anchor), head: snapshot.floor_char_boundary(s.head) });
+        t.place_selection(clamped);
         t.top_line = t.top_line.min(snapshot.line_count() - 1);
         if let Some(at) = t.restore.take().filter(|_| !reload) { t.restore_to(&at, &snapshot); }
         let source = t.source.clone();
@@ -8234,7 +8273,7 @@ impl Session {
         t.expansion = Some(e);
         match next {
             Some(s) => {
-                t.selection = Some(s);
+                t.place_selection(Some(s));
                 if reveal {
                     t.show_head(&doc);
                 }

@@ -1,4 +1,7 @@
 //! Ordinary input actions share buffer permissions, source coordinates and transaction history.
+//!
+//! Typing, Delete, Cut, Paste and Copy act on every selection of the focused view as one transaction: the ranges are
+//! sorted, validated and applied together, and each caret follows its own edit.
 use super::*;
 use crate::text::{EditKind, TextEdit};
 
@@ -15,42 +18,159 @@ impl Session {
         if let Some(why) = view.edit_disabled() { return Some(why); }
         if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Some("Show source to edit text"); }
         if !self.text_input_enabled { return Some("Text input is gated on this unvalidated platform/backend"); }
-        if id == CommandId::Cut && view.selected_range().is_none() { return Some("Select text to cut"); }
+        if id == CommandId::Cut && view.tab().selections().all(|selection| selection.range().is_empty()) { return Some("Select text to cut"); }
         None
     }
-    fn input_selection(&self) -> Option<(TabId, crate::text::SnapshotKey, std::ops::Range<usize>)> {
-        let view = self.state.active().and_then(|tab| self.state.view(tab.id))?;
-        let range = view.tab.selection.map(|s| s.range()).unwrap_or_else(|| { let start = view.snapshot.reader_line_range(view.tab.top_line).start; start..start });
-        Some((view.tab.id, view.snapshot.key(), range))
+
+    /// Availability of the commands that add or drop selections: the same source permissions as editing, and no
+    /// place to add one past the document's end.
+    pub(super) fn selection_action_disabled(&self, id: CommandId) -> Option<&'static str> {
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return Some("No loaded file is open") };
+        if let Some(why) = view.edit_disabled() { return Some(why); }
+        if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Some("Show source to edit text"); }
+        if !self.text_input_enabled { return Some("Text input is gated on this unvalidated platform/backend"); }
+        let (snapshot, tab) = (view.snapshot(), view.tab());
+        let Some(primary) = tab.selection() else { return Some("Place the caret in the text first") };
+        match id {
+            CommandId::AddCursorBelow | CommandId::AddCursorAbove => {
+                let below = id == CommandId::AddCursorBelow;
+                let line = snapshot.line_of(primary.head);
+                let target = tab.visible_for(snapshot).step(line, if below { 1 } else { -1 });
+                (target == line).then_some(if below { "The caret is on the last line" } else { "The caret is on the first line" })
+            }
+            CommandId::SelectNextOccurrence => {
+                let range = primary.range();
+                (range.is_empty() && snapshot.word_at(primary.head).is_empty()).then_some("Place the caret on a word or select text")
+            }
+            CommandId::CollapseSelections => (tab.extra_selections().is_empty()).then_some("One selection is active"),
+            _ => None,
+        }
     }
+
+    /// The focused view's transaction target: its version and every selection's range in source order. A view without
+    /// a selection edits at its top line, as a reader that has not placed a caret does.
+    fn selection_ranges(&self) -> Option<(TabId, crate::text::SnapshotKey, Vec<std::ops::Range<usize>>)> {
+        let view = self.state.active().and_then(|tab| self.state.view(tab.id))?;
+        let mut ranges: Vec<_> = view.tab().selections().map(|selection| selection.range()).collect();
+        if ranges.is_empty() {
+            let start = view.snapshot.reader_line_range(view.tab.top_line).start;
+            ranges.push(start..start);
+        }
+        ranges.sort_by_key(|range| (range.start, range.end));
+        Some((view.tab.id, view.snapshot.key(), ranges))
+    }
+
+    /// The same text at every selection, as one transaction (typed text, Enter, Tab, bracketed paste).
+    pub(super) fn insert_text(&mut self, text: String, kind: EditKind) -> Effect {
+        if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
+        let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
+        let edits = ranges.into_iter().map(|range| TextEdit { range, text: text.as_str().into() }).collect();
+        self.edit(tab, expected, edits, kind)
+    }
+
     pub(super) fn cut(&mut self) -> Effect {
         if self.text_action_disabled(CommandId::Cut).is_some() { return Effect::default(); }
-        let Some((tab, expected, range)) = self.input_selection() else { return Effect::default() };
-        let Some(text) = self.state.source(tab).and_then(|s| s.copy_range(range.clone())) else { return Effect::default() };
-        let mut effect = self.edit(tab, expected, vec![TextEdit { range, text: "".into() }], EditKind::Replace);
+        let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
+        let Some(source) = self.state.source(tab) else { return Effect::default() };
+        // The selections' text in source order, one per line, so pasting it elsewhere keeps them apart.
+        let copied: Vec<String> = ranges.iter().filter(|range| !range.is_empty()).filter_map(|range| source.copy_range(range.clone())).collect();
+        let text = copied.join("\n");
+        let edits: Vec<_> = ranges.into_iter().map(|range| TextEdit { range, text: "".into() }).collect();
+        let mut effect = self.edit(tab, expected, edits, EditKind::Replace);
         if effect.repaint { effect.copy = Some(text); }
         effect
     }
+
     pub(super) fn paste(&mut self, text: String) -> Effect {
         if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
-        let Some((tab, expected, range)) = self.input_selection() else { return Effect::default() };
-        self.edit(tab, expected, vec![TextEdit { range, text: text.into() }], EditKind::Paste)
+        let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
+        let edits = ranges.into_iter().map(|range| TextEdit { range, text: text.as_str().into() }).collect();
+        self.edit(tab, expected, edits, EditKind::Paste)
     }
+
     pub(super) fn delete(&mut self, backward: bool) -> Effect {
         if self.text_action_disabled(CommandId::Delete).is_some() { return Effect::default(); }
-        let Some((tab, expected, mut range)) = self.input_selection() else { return Effect::default() };
+        let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
         let Some(source) = self.state.source(tab) else { return Effect::default() };
-        if range.is_empty() {
+        // An empty selection takes the neighbouring character (a CRLF pair as one), as a caret alone does.
+        let mut removals: Vec<std::ops::Range<usize>> = ranges.into_iter().map(|range| {
+            if !range.is_empty() { return range; }
             let at = range.start;
-            range = if backward {
-                if source.range(at.saturating_sub(2)..at).as_deref() == Some("\r\n") { at - 2..at }
-                else { source.previous_char_boundary(at)..at }
+            if backward {
+                if source.range(at.saturating_sub(2)..at).as_deref() == Some("\r\n") { at - 2..at } else { source.previous_char_boundary(at)..at }
             } else if source.range(at..at.saturating_add(2).min(source.len_bytes())).as_deref() == Some("\r\n") { at..at + 2 }
-                else { at..source.next_char_boundary(at) };
+            else { at..source.next_char_boundary(at) }
+        }).filter(|range| !range.is_empty()).collect();
+        // Neighbouring carets can reach for the same character, and a deletion already covered by a selection is
+        // removed once; keeping them ascending and disjoint lets the whole set apply as one transaction.
+        removals.sort_by_key(|range| (range.start, range.end));
+        let mut disjoint: Vec<std::ops::Range<usize>> = Vec::with_capacity(removals.len());
+        for range in removals {
+            if let Some(last) = disjoint.last_mut().filter(|last| range.start < last.end) {
+                last.end = last.end.max(range.end);
+            } else {
+                disjoint.push(range);
+            }
         }
-        if range.is_empty() { return Effect::default(); }
-        self.edit(tab, expected, vec![TextEdit { range, text: "".into() }], EditKind::Delete)
+        if disjoint.is_empty() { return Effect::default(); }
+        let edits = disjoint.into_iter().map(|range| TextEdit { range, text: "".into() }).collect();
+        self.edit(tab, expected, edits, EditKind::Delete)
     }
+
+    /// One more caret on the next (or previous) shown line at the primary caret's column; the new caret becomes the
+    /// primary one, so repeating walks on in the same direction.
+    pub(super) fn add_cursor(&mut self, below: bool) -> Effect {
+        let id = if below { CommandId::AddCursorBelow } else { CommandId::AddCursorAbove };
+        if self.disabled(id).is_some() { return Effect::default(); }
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return Effect::default() };
+        let doc = view.snapshot().clone();
+        let Some(primary) = view.tab().selection() else { return Effect::default() };
+        let Some(next) = crate::selection::caret_on_adjacent_line(&doc, &view.visible(), primary, below) else { return Effect::default() };
+        let selections: Vec<_> = view.tab().selections().collect();
+        let Some(tab) = self.tab_mut(view.tab().id()) else { return Effect::default() };
+        tab.set_selections(next, selections);
+        tab.show_head(&doc);
+        Effect { repaint: true, ..Effect::default() }
+    }
+
+    /// Select the next occurrence of the primary selection's text as a further selection. A caret first selects the
+    /// word it rests on; a press that finds no occurrence the set does not already cover changes nothing and says so.
+    pub(super) fn select_next_occurrence(&mut self) -> Effect {
+        if self.disabled(CommandId::SelectNextOccurrence).is_some() { return Effect::default(); }
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id)) else { return Effect::default() };
+        let doc = view.snapshot().clone();
+        let Some(primary) = view.tab().selection() else { return Effect::default() };
+        let taken: Vec<_> = view.tab().selections().collect();
+        let Some(tab) = self.tab_mut(view.tab().id()) else { return Effect::default() };
+        if primary.range().is_empty() {
+            let word = doc.word_at(primary.head);
+            if word.is_empty() { return Effect::default(); }
+            tab.set_selections(Selection { anchor: word.start, head: word.end }, taken);
+            return Effect { repaint: true, ..Effect::default() };
+        }
+        let Some(needle) = doc.copy_range(primary.range()) else { return Effect::default() };
+        match crate::selection::next_occurrence(&doc, &needle, primary.range().end, &taken) {
+            Some(found) => {
+                tab.set_selections(found, taken);
+                tab.show_head(&doc);
+                Effect { repaint: true, ..Effect::default() }
+            }
+            None => {
+                let shown: String = needle.chars().take(40).collect();
+                self.state.messages.push(format!("No further occurrence of “{shown}”"));
+                Effect { repaint: true, ..Effect::default() }
+            }
+        }
+    }
+
+    /// Keep only the primary selection: a click or a move does the same, but Escape can drop several at once.
+    pub(super) fn collapse_selections(&mut self) -> Effect {
+        if self.disabled(CommandId::CollapseSelections).is_some() { return Effect::default(); }
+        let Some(tab) = self.active_mut() else { return Effect::default() };
+        tab.collapse_selections();
+        Effect { repaint: true, ..Effect::default() }
+    }
+
     pub(super) fn set_read_only(&mut self, on: bool) -> Effect {
         if self.disabled(CommandId::ReadOnlyMode).is_some() { return Effect::default(); }
         let Some(buffer) = self.state.active().and_then(|t| t.buffer) else { return Effect::default() };

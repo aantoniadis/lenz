@@ -1243,12 +1243,13 @@ impl ReaderView {
         Some((view.tab().id(), view.snapshot().key(), range))
     }
 
+    /// Typed text replaces every selection of the focused view; the core makes it one transaction.
     fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
-        let Some((tab, expected, range)) = self.draft_target() else {
+        if self.draft_target().is_none() {
             if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
             return false;
-        };
-        self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);
+        }
+        self.dispatch(Command::InsertText { text: text.to_owned(), kind }, cx);
         true
     }
 
@@ -1466,6 +1467,12 @@ impl ReaderView {
             ("f12", false, false) => self.run(CommandId::Definition, window, cx),
             ("f2", false, false) => self.run(CommandId::LanguageServer, window, cx),
             ("escape", false, false) if self.session.state().asking().is_some() => self.dispatch(Command::CancelSemantic, cx),
+            // Several cursors: Escape goes back to one before it closes anything else.
+            ("escape", false, false) if self.session.disabled(CommandId::CollapseSelections).is_none() => self.run(CommandId::CollapseSelections, window, cx),
+            // IntelliJ's add-selection key, and VS Code's add-cursor-next-line key.
+            ("j", false, false) if k.modifiers.alt => self.run(CommandId::SelectNextOccurrence, window, cx),
+            ("down", false, true) if k.modifiers.alt => self.run(CommandId::AddCursorBelow, window, cx),
+            ("up", false, true) if k.modifiers.alt => self.run(CommandId::AddCursorAbove, window, cx),
             ("left", false, true) => self.extend(Motion::Left, cx),
             ("right", false, true) => self.extend(Motion::Right, cx),
             ("up", false, true) => self.extend(Motion::Up, cx),
@@ -2300,7 +2307,7 @@ impl ReaderView {
                             .chain(spans.get(n).into_iter().flatten().map(|(sr, c)| (at(sr.start)..at(sr.end), palette.syntax_color(*c))))
                             .collect();
                         let bg = found.into_iter().map(|m| (m, match_bg)).collect();
-                        TextRow { y: n as f32, number: l as u32 + 1, text, fg, bg, selected: None, caret: None }
+                        TextRow { y: n as f32, number: l as u32 + 1, text, fg, bg, selected: None, caret: None, extra: Vec::new() }
                     })
                     .collect()
             }
@@ -3983,10 +3990,18 @@ impl ReaderView {
         }
         let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
         let caret = selection.and_then(|sel| projected.caret(sel.head));
+        // Every other selection, as the part this row shows (an empty one keeps its caret's place).
+        let extra: Vec<_> = if sticky { Vec::new() } else {
+            tab.selections().skip(1).filter_map(|sel| {
+                let caret = sel.range().is_empty().then(|| projected.caret(sel.head)).flatten();
+                let range = if caret.is_some() { 0..0 } else { projected.range(sel.range()) };
+                (caret.is_some() || !range.is_empty()).then_some((range, caret))
+            }).collect()
+        };
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
         if !transient && self.session.state().comparison_changed_line(tab.id(), r.line) { bg.insert(0, (0..projected.text.len(), palette.block[2])); }
-        let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
+        let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret, extra };
         if let Some((fold, true)) = view.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
             row.text.push_str(PLACEHOLDER);
@@ -4004,6 +4019,10 @@ impl ReaderView {
             for (range, _) in &mut row.bg { range.start += offset; range.end += offset; }
             if let Some(range) = &mut row.selected { range.start += offset; range.end += offset; }
             if let Some(caret) = &mut row.caret { *caret += offset; }
+            for (range, caret) in &mut row.extra {
+                range.start += offset; range.end += offset;
+                if let Some(caret) = caret { *caret += offset; }
+            }
             for (_, range, _, _) in &mut decor { range.start += offset; range.end += offset; }
         }
         Some((row, decor))
@@ -5256,6 +5275,11 @@ fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, pal
             bg: row.bg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
             selected: row.selected.as_ref().and_then(cut),
             caret: row.caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start),
+            extra: row.extra.iter().filter_map(|(range, caret)| {
+                let range = cut(range).unwrap_or(0..0);
+                let caret = caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start);
+                (caret.is_some() || !range.is_empty()).then_some((range, caret))
+            }).collect(),
         };
         debug_assert!(fragment.text.len() <= 6144);
         lenz_gpui::paint_row(window, cx, metrics, palette, bounds, x, width, scroll - origin, &fragment);

@@ -218,3 +218,38 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
 - **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
   the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.
+
+## Several selections (ticket 29, 2026-10-24)
+
+- **Only one range shape can be created:** Add Cursor Above/Below adds carets at the same column of neighbouring
+  lines, and Select Next Occurrence adds matches of the primary selection's text. There is no command that adds a
+  selection of a different length (or extends one cursor into a selection), so differing-length selections exist in
+  the model and in editing only after an edit collapses them; a shift-click or a second cursor's own extension
+  would need its own command. Until then the model's merge rules for arbitrary overlaps are exercised through
+  occurrence selection and cursor absorption.
+- **Caret motions act on the primary selection only:** arrows, Home/End, Extend/Shrink Selection, clicks and jumps
+  collapse the set (the same rule as Escape), and Up/Down ignore the other carets. Moving every caret, and extending
+  every selection with Shift, is the natural next step; it needs per-caret layout queries for wrapped lines.
+- **Typing merges per caret, deletions do not:** repeated typing at several carets joins one Undo step
+  (`Draft::merge_carets`), as one caret's typing does. Repeated Delete/Backspace at several carets is one transaction
+  per keystroke, unlike the joined single-caret deletion; joining it needs the same per-caret offset bookkeeping in
+  the other direction. Paste, Cut and every explicit edit end the group, as before.
+- **Input-method composition is single-cursor:** the GUI's composition capture places a pending replacement at the
+  primary selection, and its commit is one explicit-range edit, so a composed character changes only that place while
+  the other carets shift with it. Completion acceptance is likewise one explicit edit. Decide whether composition
+  should fan out or drop the extra carets before claiming parity for IME with several cursors.
+- **Select Next Occurrence cost, unmeasured:** each press scans the draft one bounded 64 KiB window at a time
+  (`selection::find_from`) from the primary selection to the end and then from the start, so a large file is never
+  assembled whole but the scan is linear in the file per press. It is an explicit user action, like Find; include a
+  large-file occurrence walk in the scheduled batch measurements before optimizing (for example, reusing the find
+  match list).
+- **Several cursors are not persisted:** only the primary selection is saved in the workspace and history, so
+  reopening a project, Back/Forward and a restored view keep one cursor. A split pane copies the set when the view is
+  duplicated, then follows its own.
+- **Terminal modifier delivery:** Alt+Shift+Down/Up reaches Lenz only from terminals that report modified arrow keys
+  (the enhanced keyboard protocol). Otherwise the terminal sends another key; the palette and Selection menu keep
+  both commands reachable, and the in-app help says so. Native macOS GUI and Wayland GUI editing remain gated by
+  ticket 23/24; the multi-cursor behaviour was verified on the GPUI test platform and the Linux terminal only.
+- **Rendering cost:** the GUI builds one extra selection list per visible row (`projected_row`) and the terminal
+  checks each cell against every selection. Both are proportional to the visible rows times the carets, not the
+  document; measure the many-caret case (for example 50 carets) in the batch before caching anything.

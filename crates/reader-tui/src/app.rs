@@ -19,7 +19,7 @@ use reader_core::{
     },
     tabs::TabId,
 };
-use reader_core::text::{EditKind, SnapshotKey, TextEdit};
+use reader_core::text::{EditKind, SnapshotKey};
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -1810,12 +1810,13 @@ impl App {
         Some((view.tab().id(), view.snapshot().key(), range))
     }
 
+    /// Typed text replaces every selection of the focused view; the core makes it one transaction.
     fn replace_draft_input(&mut self, text: &str, kind: EditKind) -> bool {
-        let Some((tab, expected, range)) = self.draft_target() else {
+        if self.draft_target().is_none() {
             if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
             return false;
-        };
-        self.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind });
+        }
+        self.dispatch(Command::InsertText { text: text.to_owned(), kind });
         true
     }
 
@@ -1883,6 +1884,15 @@ impl App {
             && let KeyCode::Char(c @ '0'..='9') = key.code
         {
             self.dispatch(Command::SetMnemonic(c));
+            return;
+        }
+        // Several cursors: Alt+Shift+Down/Up add one, Alt+J selects the next occurrence, Esc returns to one.
+        if alt && !ctrl && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+            self.run(if key.code == KeyCode::Up { CommandId::AddCursorAbove } else { CommandId::AddCursorBelow });
+            return;
+        }
+        if alt && !ctrl && !shift && key.code == KeyCode::Char('j') {
+            self.run(CommandId::SelectNextOccurrence);
             return;
         }
         if alt && shift && !ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right) {
@@ -2035,6 +2045,9 @@ impl App {
             } else if self.focus == Focus::Tree && !self.session.state().tree_marks().is_empty() {
                 // First the explorer's marks, as in the GUI; the next Esc leaves the explorer.
                 self.dispatch(Command::ClearTreeMarks);
+            } else if self.focus == Focus::Text && self.session.disabled(CommandId::CollapseSelections).is_none() {
+                // Several cursors go back to one before Esc means leaving the text.
+                self.run(CommandId::CollapseSelections);
             } else {
                 self.focus = Focus::Text;
                 self.notice = None;
