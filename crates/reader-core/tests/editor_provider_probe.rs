@@ -390,16 +390,21 @@ fn postgres_sql_assistance() {
     println!("PostgreSQL {version}: metadata boundary checked; language provider absent");
 }
 
+/// A fake `docker` written from another process: a child forked by a parallel test would otherwise keep a writable
+/// descriptor and make running it fail with ETXTBSY.
+fn fake_docker(dir: &Path, script: &str) -> PathBuf {
+    let docker=dir.join("docker");
+    assert!(Command::new("/bin/sh").args(["-c",r#"printf '%s' "$2" > "$1" && chmod 755 "$1""#,"fake_docker"]).arg(&docker).arg(script).status().unwrap().success());
+    docker
+}
+
 #[test]
 fn postgres_cleanup_requires_successful_acquisition() {
-    use std::os::unix::fs::PermissionsExt;
     let temp=tempfile::tempdir().unwrap();
-    let docker=temp.path().join("docker");
-    fs::write(&docker,r#"#!/bin/sh
+    let docker=fake_docker(temp.path(),r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.calls"
 if [ "$1" = run ]; then exit 1; fi
-"#).unwrap();
-    fs::set_permissions(&docker,fs::Permissions::from_mode(0o755)).unwrap();
+"#);
     assert!(Pg::start(&docker,temp.path(),"existing-container").is_err());
     let calls=fs::read_to_string(temp.path().join("docker.calls")).unwrap();
     assert_eq!(calls.lines().count(),1,"failed creation must not inspect or remove an unowned container: {calls}");
@@ -407,13 +412,11 @@ if [ "$1" = run ]; then exit 1; fi
 
 #[test]
 fn postgres_cleanup_uses_the_acquired_id() {
-    use std::os::unix::fs::PermissionsExt;
-    let temp=tempfile::tempdir().unwrap();let docker=temp.path().join("docker");let id="a".repeat(64);
-    fs::write(&docker,format!(r#"#!/bin/sh
+    let temp=tempfile::tempdir().unwrap();let id="a".repeat(64);
+    let docker=fake_docker(temp.path(),&format!(r#"#!/bin/sh
 printf '%s\n' "$*" >> "$0.calls"
 if [ "$1" = run ]; then printf '%s\n' '{id}'; fi
-"#)).unwrap();
-    fs::set_permissions(&docker,fs::Permissions::from_mode(0o755)).unwrap();
+"#));
     let pg=Pg::start(&docker,temp.path(),"reusable-name").unwrap();assert_eq!(pg.id,id);drop(pg);
     let calls=fs::read_to_string(temp.path().join("docker.calls")).unwrap();
     assert_eq!(calls.lines().skip(1).collect::<Vec<_>>(),vec![format!("logs {id}"),format!("rm -f {id}")]);
