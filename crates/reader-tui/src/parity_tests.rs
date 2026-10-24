@@ -2152,3 +2152,81 @@ fn completion_typing_acceptance_and_dismissal_match_in_both_adapters(cx: &mut Te
     assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text.replacen("{  }", "{ helper.h( }", 1).as_str()));
     assert_eq!(std::fs::read_to_string(&path).unwrap(), text);
 }
+
+#[gpui::test]
+fn gui_and_terminal_choose_and_show_project_editing_preferences_through_find_action(cx: &mut TestAppContext) {
+    let scratch = tempfile::tempdir().unwrap();
+    let root = scratch.path().join("project"); std::fs::create_dir(&root).unwrap();
+    std::fs::write(root.join(".editorconfig"), "[*.rs]\nindent_size = 2\n").unwrap();
+    let path = root.join("a.rs"); let source = "fn private_body() {}\n"; std::fs::write(&path, source).unwrap();
+    let (gc, tc) = (config(&scratch.path().join("gui")), config(&scratch.path().join("tui")));
+    let (gs, ts) = (gc.settings.clone(), tc.settings.clone());
+    let mut core = Session::new(gc); core.dispatch(Command::OpenRoot(root.clone()));
+    let gui = cx.new(|cx| ReaderView::new(core, Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle()); visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(tc, Some(root.clone()));
+    tui.session.dispatch(Command::Open(path.clone()));
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            let ready = |s: &State| s.current_source().is_some_and(|d| d.source() == path) && s.navigation().is_none_or(|n| !n.pending);
+            if gui.read_with(visual, |v, _| ready(v.session().state())) && ready(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    let find_action = |visual: &mut VisualTestContext, tui: &mut App, query: &str| {
+        let typed: Vec<String> = query.chars().map(|c| if c == ' ' { "space".into() } else { c.to_string() }).collect();
+        visual.simulate_keystrokes(&format!("ctrl-shift-a {}", typed.join(" ")));
+        key(tui, KeyCode::Char('a'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        tui.handle(Event::Paste(query.into()));
+        settle(visual, tui);
+        // Enter accepts the revision the GUI drew.
+        visual.update(|w, cx| { let _ = w.draw(cx); });
+        visual.simulate_keystrokes("enter");
+        key(tui, KeyCode::Enter, KeyModifiers::NONE);
+        settle(visual, tui);
+    };
+    let on = |s: &Session, id| s.actions().iter().find(|a| a.id == id).and_then(|a| a.on);
+    settle(&mut visual, &mut tui);
+    find_action(&mut visual, &mut tui, "indentation tabs");
+    find_action(&mut visual, &mut tui, "format on save for this project");
+    for id in [CommandId::IndentTabs, CommandId::FormatOnSave] {
+        assert_eq!(gui.read_with(&visual, |v, _| on(v.session(), id)), Some(true), "{id:?} through the GUI");
+        assert_eq!(on(&tui.session, id), Some(true), "{id:?} through the terminal");
+    }
+    find_action(&mut visual, &mut tui, "editing preferences");
+    let expected = [
+        "Indent style: tabs (this project's choice)".to_owned(),
+        format!("Indent size: 2 (EditorConfig {})", root.join(".editorconfig").display()),
+        "Format on save: on for this project (Lenz does not format yet)".to_owned(),
+    ];
+    let shown = gui.read_with(&visual, |v, _| v.modal_rows()).into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+    assert_eq!(shown[0], "Editing preferences");
+    for row in &expected { assert!(shown.contains(row), "GUI modal lacks {row}: {shown:?}"); }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(200, 40)).unwrap();
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    let screen: String = terminal.backend().buffer().content().chunks(200).map(|r| r.iter().map(|c| c.symbol()).collect::<String>() + "\n").collect();
+    assert!(screen.contains("Editing preferences"), "{screen}");
+    for row in &expected { assert!(screen.contains(row.as_str()), "terminal lacks {row}:\n{screen}"); }
+    let Some(crate::app::Prompt::Details { body, .. }) = tui.modal.as_ref().map(|m| &m.kind) else { panic!("no terminal details") };
+    assert!(!body.contains("private_body") && !shown.iter().any(|r| r.contains("private_body")), "the rows never quote the source");
+    // Tiny layouts and dismissal leave the documents and project files as they were.
+    for (w, h) in [(1u16, 1u16), (26, 8)] { ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap().draw(|f| tui.draw(f)).unwrap(); }
+    for (w, h) in [(1., 1.), (180., 90.), (800., 400.)] { visual.simulate_resize(gpui::size(gpui::px(w), gpui::px(h))); visual.update(|w, cx| { let _ = w.draw(cx); }); }
+    visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE); settle(&mut visual, &mut tui);
+    assert!(gui.read_with(&visual, |v, _| v.modal_rows()).is_empty() && tui.modal_title().is_empty());
+    assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), snapshot(tui.session.state()));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2, "nothing was written into the project");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let saved = |p: &std::path::PathBuf| std::fs::read(p).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).map(|v| v["projects"].clone());
+    while saved(&gs) != Some(serde_json::json!({ root.to_str().unwrap(): { "indent": "Tabs", "format_on_save": true } })) || saved(&gs) != saved(&ts) {
+        assert!(Instant::now() < deadline, "{:?} {:?}", saved(&gs), saved(&ts)); std::thread::sleep(Duration::from_millis(2));
+    }
+}
