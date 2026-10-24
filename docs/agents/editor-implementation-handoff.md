@@ -8,9 +8,11 @@ not here.
 ## State
 
 - The work is **paused**. Do not start tickets until the user says to resume.
-- Integration checkout: `$HOME/.codex/worktrees/cf8f/lenz`, branch
-  `integration/integrated-editor`, clean at `1ef0f11`. Nothing pushed; no PR. Leave the
-  separate primary checkout (`$HOME/dev/lenz`) untouched.
+- Integration checkout: the worktree on `integration/integrated-editor` (`git worktree
+  list` shows where), clean and pushed to origin; no PR. Leave the primary checkout (the
+  repository's main worktree) untouched.
+- Since ticket 30 the branch also carries the dev build profile and the end-of-epic gate
+  fixes listed under [Known issues to carry](#known-issues-to-carry).
 - **36 of 68 tickets resolved.** No agents running; every worktree idle and clean.
 - Ready frontier when resumed: 33, 36, 39, 40, 41, 42, 43, 55, 56, 67. Ticket 03 is
   `needs-info` (no macOS runner; do not ask again), which blocks 24 and therefore 68.
@@ -21,7 +23,7 @@ not here.
 
 The tracker lives under `.scratch/integrated-editor/` in the integration checkout. It is
 git-ignored on purpose: never force-add it, never copy it into a worktree, and give
-sub-agents absolute paths into `cf8f` instead of pasting ticket text.
+sub-agents absolute paths into the integration checkout instead of pasting ticket text.
 
 1. `.scratch/integrated-editor/implementation-state.json` — authoritative:
    `resolved`, `worktrees`, `verification_cadence`, `concurrency`, `build_cache`,
@@ -71,7 +73,8 @@ sub-agents absolute paths into `cf8f` instead of pasting ticket text.
 
 - Claim the ticket (`**Status:** claimed`), record it under `worktrees` in the state
   JSON, then `git switch -c work/editor-NN-<slug> integration/integrated-editor` in an
-  idle worktree: `$HOME/.codex/worktrees/{b67f,da19,f9b3}/lenz` are the reusable ones.
+  idle worktree: those `git worktree list` shows on merged `work/editor-*` branches are
+  the reusable ones (merged worktrees with no further use were removed).
 - Launch one background implementer with a pointer-only prompt: the ticket path, the
   spec, [AGENTS.md](../../AGENTS.md), the policy block above, "call the Skill tool with
   `tdd`", the filtered gate, "the integration root is read-only for you" (two agents
@@ -88,12 +91,15 @@ sub-agents absolute paths into `cf8f` instead of pasting ticket text.
 
 ## Known issues to carry
 
-- Flaky under load and predating these tickets: reader-core
-  `current_cached_rename_reactivation_*`, reader-tui `followed_rename_invalidates_*` and
-  `double_and_triple_click_select_word_and_group`. Seen once each: GUI
-  `outline_and_declaration_search_through_keys`, reader-core
-  `semantic_requests_wait_for_the_current_admitted_snapshot_*`, and `semantics --
-  completion` while several suites ran at once. Do not chase them.
+- Six tests time out at random, so roughly one full gate in three fails: the list, rates
+  and repro are in [editor follow-ups](../editor-follow-ups.md#tests-that-time-out-under-load-2026-10-24).
+  Two of the same class were product bugs, now fixed (`42e7fc7` rename identity,
+  `9c4e9de` prompts settled during drawing): trace one before raising a timeout, but not
+  during ticket work. Also seen before: reader-tui
+  `double_and_triple_click_select_word_and_group`, and `semantics -- completion` while
+  several suites ran at once.
+- The filtered per-ticket gate let three TUI expectations go stale through tickets 66
+  (gutter marker cells) and 27 (paired delimiters); the full gate caught them (`a6a63b8`).
 - A panicked Git status read can leave `git_status_running` stuck (ticket 65).
 - Some ticket 31 branch merge commits lack the trailer; left alone, no history rewrite.
 - The installed rust-analyzer is not a provider-tested version, so the `real_rust`
