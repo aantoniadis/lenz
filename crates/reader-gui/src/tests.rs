@@ -129,6 +129,26 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn unicode_delete_and_cut_paste_use_shared_transactions(cx: &mut TestAppContext) {
+    let original = "é😀\r\nsecond";
+    let f = fixture(cx, Some(("typing.txt", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    v.simulate_keystrokes("right delete"); assert_eq!(text(&v), original, "ordinary constructors keep writing gated");
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("delete"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), original);
+    v.simulate_keystrokes("backspace"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-a ctrl-x"); assert_eq!(text(&v), "");
+    assert_eq!(v.read_from_clipboard().unwrap().text().as_deref(), Some("é\r\nsecond"));
+    v.simulate_keystrokes("ctrl-v"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), "");
+    v.simulate_keystrokes("ctrl-shift-z"); assert_eq!(text(&v), "é\r\nsecond");
+    assert_eq!(std::fs::read(f.dir.path().join("typing.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
 fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &mut TestAppContext) {
     let original = "α saved\r\nsecond\n";
     let f = fixture(cx, Some(("comparison.txt", original.as_bytes())));
