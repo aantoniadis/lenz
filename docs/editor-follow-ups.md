@@ -162,3 +162,17 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   `indent_size` and `tab_width` are resolved. `end_of_line`, `charset`, `insert_final_newline` and
   `trim_trailing_whitespace` are not shown or applied; the exact-ending writer already preserves existing
   endings. Indentation is not detected from file contents.
+
+## Reader code completion (2026-10-24)
+
+- **Per-keystroke completion requests:** while typing a name with the automatic popup closed, each word
+  character sends a new `textDocument/completion` (cancelling the previous one) after the edited version is
+  admitted for analysis and synchronized. While the popup is open, only `isIncomplete` lists are asked again.
+  No debounce exists; measure request/cancel churn and admission cost at the end-of-epic batch before adding one.
+- **Popup filtering and drawing cost:** each continuing keystroke re-filters every received item (lower-cased
+  subsequence match) and the GUI/TUI clone the shown labels per frame. Lists are provider-bounded, not capped
+  by the reader; check large lists (for example rust-analyzer flyimport) in the batch measurements.
+- **Server commands on items:** the parameter-hint/suggest client commands are ignored rather than run; other
+  commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
+- **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
+  the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.

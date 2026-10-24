@@ -83,7 +83,8 @@ fn real_many(servers: &[(&str, &Path, Option<&str>, Value)], files: &[(&str, &st
     }
     let providers = dir.path().join("config/providers.json");
     write(dir.path(), "config/providers.json", &json!({ "providers": all }).to_string());
-    let s = Session::new(Config {
+    // Draft input as on a validated backend: completion edits the draft (never the fixture on disk).
+    let s = Session::with_text_input(Config {
         themes: ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-reader"),
         recent: dir.path().join("state/recent.json"),
         settings: dir.path().join("state/settings.json"),
@@ -93,7 +94,7 @@ fn real_many(servers: &[(&str, &Path, Option<&str>, Value)], files: &[(&str, &st
         clock: std::sync::Arc::new(Instant::now),
         overrides: ThemeOverrides::default(),
         dark: true,
-    });
+    }, true);
     Real { _dir: dir, root, s }
 }
 
@@ -1323,6 +1324,44 @@ const RS_FILES: [(&str, &str); 6] = [
     ("app/src/main.rs", "use shapes::{make, Círculo};\r\n\r\nfn main() {\r\n    let s = \"𝄞\"; let c: Círculo = make(2.0);\r\n    println!(\"{s} {}\", c.área() + make(1.0).área());\r\n    let v: Vec<u8> = Vec::new();\r\n    drop(v);\r\n}\r\n"),
     ("loose/Cargo.toml", "[package]\nname = \"loose\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
 ];
+
+/// rust-analyzer completion through the session: a manual request after a non-BMP character on a CRLF line
+/// (UTF-16 replacement ranges), acceptance as one undoable draft edit, a member list opened by typing `.`, and
+/// the fixture on disk unchanged. Items rust-analyzer sends with extra edits are listed as unavailable.
+#[test]
+#[ignore = "needs an installed rust-analyzer; run in release, alone"]
+fn real_rust_completion() {
+    let Some((exe, path)) = installed("rust-analyzer", "RUST_ANALYZER") else {
+        println!("SKIPPED: rust-analyzer is not installed");
+        return;
+    };
+    let main = "fn helper_function() -> u32 {\r\n    1\r\n}\r\n\r\nfn main() {\r\n    let s = String::from(\"𝄞\"); helper_fu\r\n}\r\n";
+    let mut f = real("rust-analyzer", &exe, path.as_deref(), &[("Cargo.toml", "[package]\nname = \"complete\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"), ("src/main.rs", main)]);
+    assert!(std::process::Command::new("cargo").args(["generate-lockfile", "--offline"]).current_dir(&f.root).status().is_ok_and(|s| s.success()));
+    f.open_ready("src/main.rs");
+    let at = main.find("helper_fu\r").unwrap() + "helper_fu".len();
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.s.dispatch(Command::Complete);
+    f.settle("completion", Duration::from_secs(60), |s| s.state().completion().is_some());
+    let rows: Vec<_> = f.s.state().completion().unwrap().rows().map(|r| (r.label.clone(), r.unavailable)).collect();
+    println!("rows: {rows:?}");
+    let row = rows.iter().position(|(label, why)| label.starts_with("helper_function") && why.is_none()).expect("helper_function is offered");
+    f.s.dispatch(Command::SelectCompletion(row));
+    f.s.dispatch(Command::AcceptCompletion);
+    let accepted = current_text(f.s.state());
+    assert_eq!(accepted, main.replacen("); helper_fu\r", "); helper_function\r", 1), "only the name changed");
+    // A member list, opened by typing the trigger character.
+    let tab = f.s.state().active().unwrap().id();
+    let caret = f.s.state().selection().unwrap().head;
+    let expected = f.s.state().view(tab).unwrap().snapshot().key();
+    f.s.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range: caret..caret, text: "; s.".into() }], kind: reader_core::text::EditKind::Typing });
+    f.settle("member completion", Duration::from_secs(60), |s| s.state().completion().is_some_and(|c| c.rows().any(|r| r.label.starts_with("len"))));
+    f.s.dispatch(Command::CloseCompletion);
+    f.s.dispatch(Command::Undo { tab });
+    f.s.dispatch(Command::Undo { tab });
+    assert_eq!(current_text(f.s.state()), main, "each step undoes on its own");
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), main);
+}
 
 /// rust-analyzer on a pinned Cargo workspace: definitions across crates (Unicode, CRLF), into the standard
 /// library (rust-src) with its origin, usages, workspace and file symbols, one server for the workspace, a crate

@@ -1814,7 +1814,29 @@ impl App {
         }
     }
 
+    /// Ctrl+Space (or the terminal's NUL for it) asks for completion; while its popup shows, it takes Up/Down/Page
+    /// keys, Tab/Enter (accept) and Esc. Every other key, punctuation included, types as usual.
+    fn completion_key(&mut self, key: KeyEvent) -> bool {
+        if !self.draft_context() { return false; }
+        let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let other = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SHIFT | KeyModifiers::SUPER | KeyModifiers::META);
+        if !other && (key.code == KeyCode::Null || (control && key.code == KeyCode::Char(' '))) { self.run(CommandId::Completion); return true; }
+        if control || other || self.session.state().completion().is_none() { return false; }
+        let command = match key.code {
+            KeyCode::Up => Command::MoveCompletion(-1),
+            KeyCode::Down => Command::MoveCompletion(1),
+            KeyCode::PageUp => Command::MoveCompletion(-(crate::render::COMPLETION_ROWS as isize)),
+            KeyCode::PageDown => Command::MoveCompletion(crate::render::COMPLETION_ROWS as isize),
+            KeyCode::Enter | KeyCode::Tab => Command::AcceptCompletion,
+            KeyCode::Esc => Command::CloseCompletion,
+            _ => return false,
+        };
+        self.dispatch(command);
+        true
+    }
+
     fn key(&mut self, key: KeyEvent) {
+        if self.completion_key(key) { return; }
         if self.draft_key(key) { return; }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -2370,6 +2392,12 @@ impl App {
                     .min(count.saturating_sub(visible));
                 }
             }
+            return;
+        }
+        // A click on a suggestion accepts it.
+        if event.kind == MouseEventKind::Down(MouseButton::Left) && self.layout.completion.contains(point) && self.session.state().completion().is_some() {
+            self.dispatch(Command::SelectCompletion(self.layout.completion_first + usize::from(y - self.layout.completion.y)));
+            self.dispatch(Command::AcceptCompletion);
             return;
         }
         if event.kind == MouseEventKind::Down(MouseButton::Left) && self.layout.app_menu.contains(point) {

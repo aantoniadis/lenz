@@ -48,6 +48,15 @@ fn fixture_with(env: &[(&str, &str)], files: &[(&str, &str)], settings: Value, c
 
 /// As [`fixture_with`], with the fake standing in for provider `id`.
 fn fixture_as(id: &str, env: &[(&str, &str)], files: &[(&str, &str)], settings: Value, clock: reader_core::semantics::Clock) -> Fixture {
+    fixture_input(id, env, files, settings, clock, false)
+}
+
+/// As [`fixture`], with draft text input enabled (as on a validated backend).
+fn editing_fixture(env: &[(&str, &str)], files: &[(&str, &str)]) -> Fixture {
+    fixture_input("rust-analyzer", env, files, serde_json::json!({}), std::sync::Arc::new(Instant::now), true)
+}
+
+fn fixture_input(id: &str, env: &[(&str, &str)], files: &[(&str, &str)], settings: Value, clock: reader_core::semantics::Clock, text_input: bool) -> Fixture {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     write(&root, "Cargo.toml", "[package]\nname = \"proj\"\n");
@@ -76,7 +85,7 @@ fn fixture_as(id: &str, env: &[(&str, &str)], files: &[(&str, &str)], settings: 
     let mut all: serde_json::Map<String, Value> = reader_core::semantics::provider::PROVIDERS.iter().map(|p| (p.id.to_string(), serde_json::json!({ "executable": format!("/nonexistent/{}", p.id) }))).collect();
     all.insert(id.into(), ra);
     std::fs::write(&providers, serde_json::json!({ "providers": all }).to_string()).unwrap();
-    let s = Session::new(Config {
+    let s = Session::with_text_input(Config {
         themes: ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-reader"),
         recent: dir.path().join("state/recent-roots.json"),
         settings: dir.path().join("state/settings.json"),
@@ -86,7 +95,7 @@ fn fixture_as(id: &str, env: &[(&str, &str)], files: &[(&str, &str)], settings: 
         clock,
         overrides: ThemeOverrides::default(),
         dark: true,
-    });
+    }, text_input);
     Fixture { _dir: dir, root, log, s }
 }
 
@@ -2649,4 +2658,168 @@ fn standalone_navigation_within_the_servers_workspace_does_not_create_a_library(
     f.definition("helper()", false);
     f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("inner/helper.rs")));
     assert!(!f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
+}
+
+impl Fixture {
+    /// Type `text` at the caret as one keystroke of the active document's draft.
+    fn type_text(&mut self, text: &str) {
+        let tab = self.s.state().active().unwrap().id();
+        let view = self.s.state().view(tab).unwrap();
+        let at = view.tab().selection().map(|s| s.range()).unwrap();
+        let expected = view.snapshot().key();
+        self.s.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range: at, text: text.into() }], kind: reader_core::text::EditKind::Typing });
+    }
+    fn labels(&self) -> Vec<String> {
+        self.s.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect()).unwrap_or_default()
+    }
+}
+
+#[test]
+fn manual_completion_accepts_one_undoable_replacement_of_the_current_version() {
+    let text = "fn main() { hel }\nfn helper() {}\nfn hello_world() {}\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text)]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("hel }").unwrap() + 3;
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.s.dispatch(Command::Complete);
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["hello_world", "helper"]);
+    assert_eq!(f.s.state().completion().unwrap().selected(), 0);
+    f.s.dispatch(Command::MoveCompletion(1));
+    assert_eq!(f.s.state().completion().unwrap().selected(), 1);
+    f.s.dispatch(Command::AcceptCompletion);
+    assert!(f.s.state().completion().is_none());
+    assert_eq!(current_text(f.s.state()), text.replacen("hel }", "helper }", 1));
+    assert_eq!(f.s.state().selection().unwrap().head, at + 3, "the caret follows the inserted name");
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), text, "only the draft changes");
+    let tab = f.s.state().active().unwrap().id();
+    f.s.dispatch(Command::Undo { tab });
+    assert_eq!(current_text(f.s.state()), text, "one Undo restores the completion");
+}
+
+#[test]
+fn dismissed_or_left_completion_is_not_reopened_by_its_late_reply() {
+    let text = "fn main() { slow_ }\nfn slow_alpha() {}\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text)]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("slow_ }").unwrap() + 5;
+    let asked = |log: &Path| messages(log).iter().filter(|m| m["method"] == "textDocument/completion").count();
+    let wait_late = |f: &mut Fixture, n: usize| {
+        let log = f.log.clone();
+        f.settle_until(move || asked(&log) == n);
+        let until = Instant::now() + Duration::from_millis(700);
+        while Instant::now() < until { let rx = f.s.completions(); if let Ok(c) = recv(&rx) { f.s.dispatch(c); } }
+    };
+    // Escape before the slow answer: it never opens.
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.s.dispatch(Command::Complete);
+    f.s.dispatch(Command::CloseCompletion);
+    wait_late(&mut f, 1);
+    assert!(f.s.state().completion().is_none(), "a dismissed popup stays dismissed");
+    // Leaving for another tab: it opens on neither.
+    f.s.dispatch(Command::Complete);
+    f.s.dispatch(Command::Open(f.root.join("Cargo.toml")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("Cargo.toml")));
+    wait_late(&mut f, 2);
+    assert!(f.s.state().completion().is_none());
+    f.s.dispatch(Command::Back);
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
+    assert!(f.s.state().completion().is_none(), "not kept for its return");
+    // Moving the caret: the answer about the old place is dropped.
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.s.dispatch(Command::Complete);
+    f.s.dispatch(Command::Select(Selection { anchor: 1, head: 1 }));
+    wait_late(&mut f, 3);
+    assert!(f.s.state().completion().is_none());
+    assert_eq!(current_text(f.s.state()), text);
+}
+
+#[test]
+fn typing_opens_filters_and_closes_completion_without_accepting_punctuation() {
+    let text = "fn main() {  }\nfn helper() {}\nfn hello() {}\nstruct Item;\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text)]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("{  }").unwrap() + 2;
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    assert!(f.s.state().auto_completion());
+    f.type_text("h");
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.s.state().completion().unwrap().trigger, reader_core::session::CompletionTrigger::Typing);
+    assert_eq!(f.labels(), ["hello", "helper"]);
+    // Continuing the name keeps it open, filtered to the new version at once.
+    f.type_text("elp");
+    assert_eq!(f.labels(), ["helper"]);
+    // Punctuation types itself and closes the popup.
+    f.type_text("(");
+    assert!(f.s.state().completion().is_none());
+    assert_eq!(current_text(f.s.state()), text.replacen("{  }", "{ help( }", 1));
+    // A trigger character asks too; Backspace past the name's start closes it.
+    f.type_text("Item.");
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.s.state().completion().unwrap().word(), f.s.state().selection().unwrap().head);
+    f.s.dispatch(Command::Delete { backward: true });
+    assert!(f.s.state().completion().is_none());
+    // Off: typing asks nothing, the command still works, and the setting is remembered.
+    f.s.dispatch(Command::SetAutoCompletion(false));
+    let before = messages(&f.log).iter().filter(|m| m["method"] == "textDocument/completion").count();
+    f.type_text(" he");
+    let until = Instant::now() + Duration::from_millis(300);
+    while Instant::now() < until { let rx = f.s.completions(); if let Ok(c) = recv(&rx) { f.s.dispatch(c); } }
+    assert!(f.s.state().completion().is_none());
+    assert_eq!(messages(&f.log).iter().filter(|m| m["method"] == "textDocument/completion").count(), before);
+    f.s.dispatch(Command::Complete);
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["hello", "helper"]);
+    let settings = f._dir.path().join("state/settings.json");
+    f.settle_until(|| std::fs::read_to_string(&settings).ok().and_then(|s| serde_json::from_str::<Value>(&s).ok()).is_some_and(|v| v["auto_completion"] == false));
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), text);
+}
+
+#[test]
+fn unavailable_completion_says_why_and_never_applies_part_of_a_suggestion() {
+    let text = "fn main() { with }\n";
+    let mut f = editing_fixture(&[], &[("src/main.rs", text), ("notes.txt", "he\n")]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    let at = text.find("with }").unwrap() + 4;
+    f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    f.s.dispatch(Command::Complete);
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["with_import"]);
+    let row = f.s.state().completion().unwrap().rows().next().unwrap().clone();
+    assert_eq!(row.unavailable, Some("Suggestions with import or other extra edits are not supported yet"));
+    f.s.dispatch(Command::AcceptCompletion);
+    assert!(f.notice("import or other extra edits"));
+    assert_eq!(current_text(f.s.state()), text, "neither the name nor the import is applied");
+    f.s.dispatch(Command::CloseCompletion);
+    // A snippet is refused the same way.
+    f.type_text(" snip");
+    f.settle(|s| s.state().completion().is_some());
+    assert_eq!(f.labels(), ["snippet_call"]);
+    let before = current_text(f.s.state());
+    f.s.dispatch(Command::AcceptCompletion);
+    assert!(f.notice("Snippet suggestions are not supported yet"));
+    assert_eq!(current_text(f.s.state()), before);
+    // No provider for the language: the command is unavailable and says so.
+    f.s.dispatch(Command::Open(f.root.join("notes.txt")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("notes.txt")));
+    f.s.dispatch(Command::Select(Selection { anchor: 2, head: 2 }));
+    assert_eq!(f.s.disabled(CommandId::Completion), Some("No language server for this language"));
+    f.s.dispatch(Command::Complete);
+    assert!(f.notice("Code completion: No language server for this language"));
+}
+
+#[test]
+fn a_server_without_completion_is_reported_as_unavailable() {
+    let mut f = editing_fixture(&[("FAKE_LSP_NO_COMPLETION", "1")], &[("src/main.rs", "fn main() { he }\nfn helper() {}\n")]);
+    f.s.dispatch(Command::OpenRoot(f.root.clone()));
+    f.open("src/main.rs");
+    f.caret("e }");
+    assert_eq!(f.s.disabled(CommandId::Completion), Some("The language server does not offer completion"));
+    f.type_text("l");
+    assert!(f.s.state().completion().is_none());
+    assert!(!messages(&f.log).iter().any(|m| m["method"] == "textDocument/completion"));
 }
