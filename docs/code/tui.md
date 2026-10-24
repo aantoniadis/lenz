@@ -68,17 +68,26 @@ all views of the same buffer and cannot override intrinsic restrictions or enabl
 normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
 [basic-input report and limits](../research/reader-text-input.md).
 
-**Several selections** (Alt+Shift+Down/Up in both adapters, or **Add Cursor Below** / **Add Cursor Above** in the
-menus and the palette) put a caret on the next or previous shown line at the caret's column and keep the earlier
-ones (these also accept Alt+Down / Alt+Up). Terminals that do not report modified arrow keys deliver them as other
-keys, so the two commands always stay reachable from the palette (F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
+**Keymap…** (F10 → Application, in both adapters) lists every command with a chord, marks overrides as *your choice*
+and names a binding an override displaced. Type to filter, Enter gives the highlighted command the next key
+(Esc cancel, Delete restores the preset's chord), Esc closes. A chord another command already runs is refused with
+that command named, so no action silently loses its key. **Keymap: IntelliJ (Default)** and **Keymap: VS Code**
+persist with any overrides in the Reader's settings file, never in the project. The terminal keeps Ctrl-Q for closing
+the view: a command rebound to it is warned about here and stays in F10. Flow control (XOFF) can also swallow Ctrl-S
+in some terminals, so Save is in F10 too. The [Reader guide](README.md#keymaps) lists both presets.
+
+**Several selections** (Alt+Shift+Down/Up, which both presets keep, or Ctrl+Alt+Down/Up in the VS Code keymap; also
+**Add Cursor Below** / **Add Cursor Above** in the menus and the palette) put a caret on the next or previous shown
+line at the caret's column and keep the earlier ones. These are ordinary keymap chords, so **Keymap…** can move them;
+terminals that do not report modified arrow keys deliver them as other keys, which is why both commands also sit in
+the palette (F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
 literal occurrence outside the selections already made; overlapping and repeated matches are skipped, and a press
 with none left says so and changes nothing. Typing, Enter, Tab, bracketed paste, Delete, Cut and Paste then change
 every selection as one transaction against the displayed version, and each caret follows its own edit. One Undo
 takes the whole typing group, exactly as with one caret; Undo of a paste or deletion restores the text and puts each
 caret back at its own selection. Delete removes one character per caret (a CRLF pair as one); Cut and Copy take each
-selection's text, one per line, so bare carets copy nothing while several cursors exist. **Collapse to Single Cursor**, Escape, a click or any caret movement (arrows, Home,
-End, clicking, Select All, a jump) returns to one selection, so navigation never acts on a stale set. The selections
+selection's text, one per line, so bare carets copy nothing while several cursors exist. **Collapse to Single Cursor**, Escape (a fixed editing key, like Delete, so not rebindable), a click or any caret
+movement (arrows, Home, End, clicking, Select All, a jump) returns to one selection, so navigation never acts on a stale set. The selections
 belong to the view: a split pane of the same buffer keeps its own, and closing or restoring a workspace keeps only
 the primary one. Read-only mode, an image, a preview, a retrieved or binary source disable all four commands with
 the same reasons as typing, and an open dialog takes the keys first. Several selections that an edit makes identical
@@ -147,7 +156,7 @@ the Last saved pane remains read-only.
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
-| Reload / close tab | F5 or Ctrl-R / Ctrl-F4 |
+| Reload / close tab | Ctrl-R or F5 / Ctrl-F4 (VS Code keymap: Ctrl-W closes) |
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
 | Focus tree, reading area and results | Shift-Tab; click a pane (Tab cycles outside source input mode; in editable source it inserts a tab) |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
@@ -168,9 +177,10 @@ the Last saved pane remains read-only.
 | Set / visit numbered bookmark | Ctrl-Shift-digit / Alt-digit |
 | Recent files / locations | Ctrl-E / Ctrl-Alt-E |
 | Outline / declarations | Ctrl-Shift-O / Ctrl-T |
+| Keymap preset, rebinding, every chord | F10 → Application: Keymap…, Keymap: IntelliJ (Default), Keymap: VS Code, Reset All Keybindings |
 | Definition / peek / usages | F12 / Alt-F12 / Shift-F12 |
 | Type definition / implementations | Ctrl-Shift-B / Ctrl-Alt-B |
-| Call / type hierarchy | Ctrl-Alt-H / Ctrl-H |
+| Call / type hierarchy | Ctrl-Alt-H / Ctrl-H or Alt-H (many terminals send Ctrl-H as Backspace) |
 
 **Search Everywhere** has the same All / Files / Symbols / Actions scopes as the GUI. Type to fuzzy-match,
 Tab / Shift+Tab changes scope while keeping the query, arrows/Page/Home/End select, Enter opens/runs and Esc

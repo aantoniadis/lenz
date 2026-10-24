@@ -219,6 +219,41 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
   the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.
 
+## Keymaps (ticket 26, 2026-10-24)
+
+- **Rebinding commands without a chord:** the Keymap dialog lists commands that have a chord or an override, so a
+  command that has never had a shortcut (for example Show Commit) can only gain one by hand-editing the settings
+  file's `keybindings` (by command slug). Listing all commands needs a filter in the GUI dialog and a decision about
+  making 140 rows navigable; not implemented here.
+- **Editing keys are not rebindable:** Copy, Cut, Paste, Delete, Select All, Undo and Redo stay the fixed keys the
+  adapters map as text input (`CommandId::input_hint`), because they run before the keymap in both adapters. A
+  keymap that drives them would have to keep the draft-context guards (a preview must not be undone through the
+  keymap path).
+- **Terminal delivery is a static guess:** `Chord::terminal_blocked` marks Ctrl-Q/Ctrl-S (flow control),
+  Ctrl-H/M/I (Backspace/Enter/Tab) and Ctrl+Shift+letter (enhanced protocol) as unreliable. It cannot see the actual
+  terminal, keyboard protocol or multiplexer, so the TUI only warns on a captured chord and hides nothing; the
+  GUI ignores the notion because it delivers every chord.
+- **Preset shadowing only appears on a preset change:** `Keymap::bind` refuses a chord another command runs, so
+  overrides cannot displace preset bindings while rebinding. Switching to the other preset can still leave an
+  override holding a chord the new preset gives another command; the switch reports it and the displaced command
+  keeps its menu entry.
+- **Slugs follow variant names:** remembered overrides are keyed by a slug derived from `CommandId`'s Rust variant
+  name (`SearchEverywhere` → `search_everywhere`). Renaming a variant drops that command's override on the next load
+  (silently, like an unknown key); there is no migration or warning yet.
+- **Per-keystroke resolution:** `Session::key_command` scans the resolved binding list (about 50 chords) with string
+  comparisons on every key. Expected to be negligible, but it is new per-keystroke work in both adapters; include
+  fast typing in the scheduled measurements rather than assuming it.
+- **Dialog cost:** the Keymap dialog rebuilds its rows (scanning `CommandId::ALL` for the bound ones, then formatting
+  labels, chords and notes) each time it is drawn or a key moves the selection. The list is bounded and small; no
+  caching was added.
+- **Observed test flakes (not caused by ticket 26):** the full `reader-tui` suite failed
+  `double_and_triple_click_select_word_and_group` once and the full `reader-gui` suite failed
+  `outline_and_declaration_search_through_keys` once under parallel load; both passed 3 of 3 isolated runs, matching
+  the earlier records above. No cause or fix is claimed.
+- **Keymap overrides on another platform:** VS Code's macOS chords (for example Cmd-based ones) are reported through
+  the same logical Ctrl chords the adapters already normalize; native macOS and Wayland GUI editing remain gated and
+  unverified.
+
 ## Several selections (ticket 29, 2026-10-24)
 
 - **Only one range shape can be created:** Add Cursor Above/Below adds carets at the same column of neighbouring
@@ -238,6 +273,10 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   primary selection, and its commit is one explicit-range edit, so a composed character changes only that place while
   the other carets shift with it. Completion acceptance is likewise one explicit edit. Decide whether composition
   should fan out or drop the extra carets before claiming parity for IME with several cursors.
+- **Multi-cursor chords in the VS Code preset:** VS Code's Ctrl+D selects the next occurrence, but it is Compare
+  Selected here, so Select Next Occurrence keeps Alt+J in both presets instead of displacing an existing action; the
+  add-cursor commands take VS Code's Ctrl+Alt+Down/Up and keep Alt+Shift+Down/Up as aliases so the documented keys
+  work under either preset. Revisit if ticket 27 wants Alt+Shift+Down for duplicate line.
 - **Select Next Occurrence cost, unmeasured:** each press scans the draft one bounded 64 KiB window at a time
   (`selection::find_from`) from the primary selection to the end and then from the start, so a large file is never
   assembled whole but the scan is linear in the file per press. It is an explicit user action, like Find; include a
@@ -246,10 +285,13 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Several cursors are not persisted:** only the primary selection is saved in the workspace and history, so
   reopening a project, Back/Forward and a restored view keep one cursor. A split pane copies the set when the view is
   duplicated, then follows its own.
-- **Terminal modifier delivery:** Alt+Shift+Down/Up reaches Lenz only from terminals that report modified arrow keys
-  (the enhanced keyboard protocol). Otherwise the terminal sends another key; the palette and Selection menu keep
-  both commands reachable, and the in-app help says so. Native macOS GUI and Wayland GUI editing remain gated by
-  ticket 23/24; the multi-cursor behaviour was verified on the GPUI test platform and the Linux terminal only.
+- **Terminal modifier delivery:** the add-cursor chords (Alt+Shift+Down/Up in both presets, plus VS Code's
+  Ctrl+Alt+Down/Up) reach Lenz only from terminals that report modified keys (the enhanced keyboard protocol).
+  Otherwise the terminal sends another key; the palette and Selection menu keep both commands reachable, the in-app
+  help says so, and **Keymap…** can move them. Collapse to Single Cursor stays on Escape as a fixed editing key
+  (`CommandId::input_hint`), so it is not rebindable, like Delete and Undo. Native macOS GUI and Wayland GUI editing
+  remain gated by ticket 23/24; the multi-cursor behaviour was verified on the GPUI test platform and the Linux
+  terminal only.
 - **Rendering cost:** the GUI builds one extra selection list per visible row (`projected_row`) and the terminal
   checks each cell against every selection. Both are proportional to the visible rows times the carets, not the
   document; measure the many-caret case (for example 50 carets) in the batch before caching anything.

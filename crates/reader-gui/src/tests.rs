@@ -3595,9 +3595,10 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
     let shown = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().state().documentation().is_some());
     f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
     draw(&mut v);
-    assert_eq!(key_hint(CommandId::Documentation), Some("Ctrl+Q"));
-    assert_eq!(key_hint(CommandId::CloseWindow), None);
-    assert_eq!(key_hint(CommandId::QuitAll), Some("Ctrl+Shift+Q"));
+    let hint = |id| f.view.read_with(&v, |r, _| r.key_hint(id));
+    assert_eq!(hint(CommandId::Documentation).as_deref(), Some("Ctrl+Q"));
+    assert_eq!(hint(CommandId::CloseWindow), None, "closing a window is a menu action in the GUI");
+    assert_eq!(hint(CommandId::QuitAll).as_deref(), Some("Ctrl+Shift+Q"));
     let unchanged = |r: &ReaderView| {
         let state=r.session.state();let view=state.view(state.active().unwrap().id()).unwrap();
         (view.snapshot().key(), view.copy_selection(), view.tab().selection(), view.dirty(), view.can_undo(), view.can_redo())
@@ -3658,7 +3659,7 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
     settle(cx,&f,|r|r.session.state().navigation().is_some_and(|n|!n.pending && n.rows.iter().any(|row|row.action()==Some(CommandId::CloseWindow))));
     draw(&mut v);
     assert!(f.view.read_with(&v,|r,_|r.modal_rows().iter().any(|row|row.0.starts_with("Close Window") && !row.0.contains("Ctrl+Q"))));
-    assert_eq!(CommandId::CloseWindow.shortcut(),Some("Ctrl+Q"),"the terminal binding is unchanged");
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::CloseWindow)), None, "no key claims Ctrl+Q here; the terminal closes a view with it");
     v.simulate_keystrokes("escape");
     // Another tab closes it too.
     v.simulate_keystrokes("ctrl-q");
@@ -3755,8 +3756,8 @@ fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     v.simulate_keystrokes("ctrl-+");
     draw(&mut v);
     assert_eq!(numbers(&mut v), vec![6, 7, 8, 9]);
-    assert_eq!(key_hint(CommandId::Collapse), Some("Ctrl+-"));
-    assert_eq!(key_hint(CommandId::ExpandAll), Some("Ctrl+Shift+="));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Collapse)).as_deref(), Some("Ctrl+-"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ExpandAll)).as_deref(), Some("Ctrl+Shift+="));
     for (w, h) in [(1.0, 1.0), (60.0, 30.0)] {
         v.simulate_resize(size(px(w), px(h)));
         draw(&mut v);
@@ -3782,9 +3783,9 @@ fn ctrl_w_extends_ctrl_shift_w_shrinks_and_ctrl_f4_closes(cx: &mut TestAppContex
     assert_eq!(sel(&mut v), "hello world");
     v.simulate_keystrokes("ctrl-shift-w");
     assert_eq!(sel(&mut v), "world");
-    assert_eq!(key_hint(CommandId::Close), Some("Ctrl+F4"));
-    assert_eq!(key_hint(CommandId::ExtendSelection), Some("Ctrl+W"));
-    assert_eq!(key_hint(CommandId::ShrinkSelection), Some("Ctrl+Shift+W"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Close)).as_deref(), Some("Ctrl+F4"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ExtendSelection)).as_deref(), Some("Ctrl+W"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ShrinkSelection)).as_deref(), Some("Ctrl+Shift+W"));
     v.simulate_keystrokes("ctrl-f4");
     assert!(f.view.read_with(&v, |v, _| v.session().state().active().is_none()));
 }
@@ -4305,8 +4306,8 @@ fn bookmark_entries_show_in_the_command_menu_with_their_keys(cx: &mut TestAppCon
     for l in ["Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…"] {
         assert!(labels.iter().any(|x| x == l), "{l}");
     }
-    assert_eq!(key_hint(CommandId::ToggleBookmark), Some("F11"));
-    assert_eq!(key_hint(CommandId::RecentLocations), Some("Ctrl+Alt+E"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ToggleBookmark)).as_deref(), Some("F11"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::RecentLocations)).as_deref(), Some("Ctrl+Alt+E"));
 }
 
 fn modal_lines(f: &Fixture, v: &VisualTestContext) -> Vec<String> {
@@ -6834,4 +6835,94 @@ fn completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys(cx: &
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
     }
+}
+
+#[gpui::test]
+fn keymap_presets_change_what_keys_run_and_what_menus_show(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("keys.rs", b"fn main() {}\nfn other() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    let hint = |v: &VisualTestContext, id| f.view.read_with(v, |r, _| r.key_hint(id));
+    assert_eq!(hint(&v, CommandId::FindAction).as_deref(), Some("Ctrl+Shift+A"));
+    assert_eq!(hint(&v, CommandId::Close).as_deref(), Some("Ctrl+F4"));
+    // IntelliJ's Ctrl+W extends the selection; the same key closes the tab under VS Code's keymap.
+    let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state(); s.current_source().map(|d| d.copy_range(0..d.len_bytes())) });
+    v.simulate_keystrokes("ctrl-w");
+    assert_eq!(text(&v).flatten().as_deref(), Some("fn main() {}\nfn other() {}\n"), "Ctrl+W changes no text here");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_some()));
+    f.view.update_in(&mut v, |r, window, cx| r.run(CommandId::KeymapVsCode, window, cx));
+    assert_eq!(hint(&v, CommandId::FindAction).as_deref(), Some("Ctrl+Shift+P"));
+    assert_eq!(hint(&v, CommandId::Close).as_deref(), Some("Ctrl+W"));
+    assert_eq!(hint(&v, CommandId::LanguageServer), None, "F2 is Rename in VS Code; the status stays in the menu");
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_some()), "Ctrl+F4 is not bound under VS Code");
+    v.simulate_keystrokes("ctrl-w");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_none()), "Ctrl+W closes the tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().keymap().preset()), reader_core::keymap::KeymapPreset::VsCode);
+}
+
+#[gpui::test]
+fn the_keymap_dialog_binds_refuses_a_taken_chord_and_restores_the_preset(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("dialog.rs", b"fn main() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    let path = f.dir.path().join("dialog.rs");
+    let bytes = std::fs::read(&path).unwrap();
+    f.view.update_in(&mut v, |r, window, cx| r.run(CommandId::Keymap, window, cx));
+    draw(&mut v);
+    let lines = modal_lines(&f, &v);
+    assert!(lines[0].contains("Keymap: IntelliJ"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "Save — Ctrl+S"), "{lines:?}");
+    // Typing in the dialog neither edits nor saves the document behind it; narrow windows still draw it.
+    v.simulate_keystrokes("s");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    for (w, h) in [(160.0, 120.0), (60.0, 40.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        v.simulate_keystrokes("end up up pagedown");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| !r.modal_rows().is_empty()), "{w}x{h}");
+    }
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    v.simulate_keystrokes("home");
+    draw(&mut v);
+    let at = f.view.read_with(&v, |r, _| r.session().keymap().rows().iter().position(|row| row.command == CommandId::Save).unwrap());
+    for _ in 0..at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+    draw(&mut v);
+    assert!(modal_lines(&f, &v)[0].contains("Press the new shortcut"), "{:?}", modal_lines(&f, &v)[0]);
+    // A bare typing key is refused and the capture stays open.
+    v.simulate_keystrokes("x");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().notices().iter().any(|n| n == "A shortcut needs Ctrl, Alt or a function key")), "{:?}", f.view.read_with(&v, |r, _| r.session.state().notices()));
+    v.simulate_keystrokes("ctrl-alt-s");
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+Alt+S"));
+    assert!(modal_lines(&f, &v).iter().any(|l| l == "Save — Ctrl+Alt+S (your choice)"), "{:?}", modal_lines(&f, &v));
+    // A chord another command runs is refused with the owner named; the binding that exists stays.
+    v.simulate_keystrokes("enter ctrl-k");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().notices().iter().any(|n| n.starts_with("Ctrl+K already runs"))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+Alt+S"));
+    // Delete restores the preset's chord.
+    v.simulate_keystrokes("delete");
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+S"));
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[gpui::test]
+fn a_keymap_override_persists_and_reaches_the_palette_label(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("persist.rs", b"fn main() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetKeybinding { command: CommandId::FindFile, chord: "Ctrl+Alt+F".into() }, cx));
+    settle(cx, &f, |r| r.session().keymap().overrides().len() == 1);
+    // Menus name the new key, and the old chord runs nothing.
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::FindFile)).as_deref(), Some("Ctrl+Alt+F"));
+    v.simulate_keystrokes("ctrl-shift-n");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "the preset's chord no longer opens the file finder");
+    v.simulate_keystrokes("ctrl-alt-f");
+    assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Navigation { .. })));
+    v.simulate_keystrokes("escape");
 }
