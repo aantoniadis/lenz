@@ -197,6 +197,12 @@ fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enab
     s.dispatch(Command::SetReadOnly(false)); assert_eq!(s.disabled(CommandId::Cut), None);
     s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
     s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CompareSaved); s.dispatch(Command::FocusPane(0));
+    assert_eq!(s.disabled(CommandId::ReadOnlyMode), Some("The last saved version is read-only"));
+    s.dispatch(Command::SetReadOnly(false)); s.dispatch(Command::Paste("blocked".into()));
+    assert_eq!(s.disabled(CommandId::Paste), Some("The last saved version is read-only"));
+    assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CloseSavedComparison);
     assert_eq!(std::fs::read(path).unwrap(), "e\u{301}👩🏽‍💻\r\n".as_bytes());
 }
 

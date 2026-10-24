@@ -35,6 +35,13 @@ the saved side cannot be edited. **Close comparison**, Ctrl+F4 or Close Split re
 without discarding the draft. Rejected or uncertain Save keeps the prior baseline. The panes scroll
 independently. Production typing remains gated; see the [implementation and verification limits](../research/reader-saved-comparison.md).
 
+Basic editor input is currently exercised through existing test opt-ins; production writable input stays
+blocked until safety checkpoint23. In that input mode q/j/k/slash/Space type literally, bracketed paste is
+one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
+all views of the same buffer and cannot override intrinsic restrictions or enable writing. Terminal Paste
+normally comes from the emulator (often Ctrl+Shift+V); the Paste command explains this route. See the
+[basic-input report and limits](../research/reader-text-input.md).
+
 ## Controls
 
 F10 or `:` opens the command palette. Type to filter, use the arrows and Enter to run. It includes all shared
