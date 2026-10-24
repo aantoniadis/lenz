@@ -155,12 +155,14 @@ impl Session {
                 }
             }).is_err() { self.result_failed(&fence, "Declaration ranking capacity is full".into()); }
         } else if let Some(snapshot) = snapshot {
-            let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
+            let entry = self.state.sources.buffers.get(&snapshot.key().buffer);
+            let loaded = entry.map(|entry| entry.document.clone()).unwrap_or_default();
+            let stamp = entry.filter(|entry| entry.saved.as_ref().is_some_and(|saved| saved.matches(&snapshot))).and_then(|entry| entry.stamp);
             let project = fence.project;
             if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
                 let mut failed = 0;
                 let mut errors = false;
-                let cache = index::index_document(&doc, None, lease.cancellation());
+                let cache = index::index_document(&doc, stamp, lease.cancellation());
                 let next = match &cache {
                     FileIndex::Done { items, syntax_errors, .. } => {
                         errors = *syntax_errors;

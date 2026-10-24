@@ -4471,6 +4471,15 @@ impl Session {
         }
     }
 
+    fn changed_result_source(state: &State, path: &Path, doc: &Document, buffer: Option<crate::text::BufferId>) -> bool {
+        state.sources.buffers.iter().filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
+            let captured = buffer == Some(id);
+            let target = captured || source.source() == path || state.sources.aliases.get(path) == Some(&id)
+                || state.tabs.iter().any(|tab| tab.buffer == Some(id) && (tab.source == path || tab.canonical.as_deref() == Some(path)));
+            target && (!source.matches_document(doc) || captured && source.source() != doc.source())
+        })
+    }
+
     fn captured_result_current(state: &State, source: &crate::text::TextSnapshot, path: &Path) -> bool {
         let buffer = source.key().buffer;
         state.sources.buffers.get(&buffer).and_then(|entry| entry.snapshot.as_ref())
@@ -5250,11 +5259,7 @@ impl Session {
                 let captured_changed = captured.as_ref().is_some_and(|source| !Self::captured_result_current(&self.state, source, &path));
                 let result = result.and_then(|(stamp, doc)| {
                     if captured_changed { return Err("the captured draft changed".into()); }
-                    let changed = self.state.sources.buffers.iter().filter_map(|(id, entry)| Some((*id, entry.snapshot.as_ref()?))).any(|(id, source)| {
-                        let captured = buffer == Some(id);
-                        let target = captured || source.source() == path || self.state.tabs.iter().any(|tab| tab.buffer == Some(id) && (tab.source == path || tab.canonical.as_ref() == Some(&path)));
-                        target && (!source.matches_document(&doc) || captured && source.source() != doc.source())
-                    });
+                    let changed = Self::changed_result_source(&self.state, &path, &doc, buffer);
                     if changed { Err("the current source changed".into()) } else { Ok((stamp, doc)) }
                 });
                 match result {
@@ -5869,6 +5874,16 @@ impl Session {
     /// Open `path` in the preview tab at `hit`, from `doc` (the snapshot it was checked against, read as `stamp`
     /// when it came from disk): a committed navigation.
     fn open_at(&mut self, path: PathBuf, hit: &search::Hit, stamp: Option<Stamp>, doc: Arc<Document>) -> Effect {
+        let authoritative = self.state.sources.buffers.iter().find_map(|(buffer, entry)| {
+            let snapshot = entry.snapshot.as_ref()?;
+            let matches = snapshot.source() == path || self.state.sources.aliases.get(&path) == Some(buffer)
+                || self.state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && (tab.source == path || tab.canonical.as_ref() == Some(&path)));
+            matches.then(|| (snapshot.clone(), entry.stamp))
+        });
+        if Self::changed_result_source(&self.state, &path, &doc, None) {
+            self.state.messages.push("This result's current source changed; rerun the search".into());
+            return Effect { repaint: true, copy: None };
+        }
         let dependency = semantics::provider::origin(&path, doc.language()) != semantics::provider::OUTSIDE;
         let outside = self.state.project.as_ref().map_or_else(|| self.state.provider().and_then(|p| p.root).is_some_and(|root| !path.starts_with(root)), |p| !path.starts_with(p.root()));
         if dependency || outside || self.state.libraries.contains(&path) {
@@ -5887,15 +5902,20 @@ impl Session {
             line: hit.line,
             offset: hit.range.start,
         };
-        match (self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id)), stamp) {
-            // Already open with this snapshot (or the same text): that is the checked one.
-            (Some(open), _) if open.matches_document(&doc) => at.version = open.key().version,
-            // Open but older: its refresh brings the checked content; the anchor finds the line.
-            (Some(_), _) => {}
-            (None, Some(stamp)) => self.cache_document(stamp, doc),
-            (None, None) => {}
+        if let Some((snapshot, _)) = &authoritative { at.version = snapshot.key().version; }
+        let effect = self.navigate(path.clone(), false, Some(at), true);
+        if let Some(id) = self.state.active().filter(|tab| (tab.source == path || tab.canonical.as_ref() == Some(&path)) && !tab.loaded).map(|tab| tab.id) {
+            if self.pending.as_ref().is_some_and(|(tab, _)| *tab == id) {
+                self.next_request();
+                self.pending = None;
+                self.state.loading = None;
+            }
+            // Activation already checked this payload. Cache refusal must not cause another read.
+            match authoritative {
+                Some((snapshot, stamp)) if self.state.sources.buffers.contains_key(&snapshot.key().buffer) => self.show_snapshot(id, snapshot, stamp, false),
+                Some(_) | None => self.show(id, doc, stamp, false),
+            }
         }
-        let effect = self.navigate(path, false, Some(at), true);
         Effect { repaint: true, ..effect }
     }
 

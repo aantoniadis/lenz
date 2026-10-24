@@ -85,6 +85,93 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 
 #[cfg(unix)]
 #[test]
+fn validated_result_promotes_its_checked_payload_when_the_inactive_cache_refuses_it() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "a.txt", b"needle captured\n"); let other = write(&root, "other.txt", b"stay here\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(other), "other.txt"); s.cache = InactiveCache::new(0);
+    s.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }); settle(&mut s, searched);
+    s.dispatch(Command::OpenResult(0));
+    let completion = loop {
+        let completion = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(&completion, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::Validated { .. })) { break completion; }
+        s.dispatch(completion);
+    };
+    std::fs::write(&file, b"new unrelated\n").unwrap();
+    s.dispatch(completion);
+    let source = s.state().current_source().expect("activation must publish its checked source without another disk read");
+    assert_eq!(source_text(source), "needle captured\n");
+    assert_eq!(s.state().selected_text().as_deref(), Some("needle"));
+    assert!(s.state().loading().is_none(), "the redundant load has been superseded");
+    while let Ok(completion) = s.completions().try_recv() {
+        if matches!(completion, Completion::Loaded { .. } | Completion::AnalysisWake) { s.dispatch(completion); }
+    }
+    assert_eq!(source_text(s.state().current_source().unwrap()), "needle captured\n");
+    assert_eq!(std::fs::read(file).unwrap(), b"new unrelated\n");
+}
+
+#[test]
+fn closing_symbol_navigation_preserves_panel_capture_and_releases_its_own_query() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "a.rs", b"fn Saved() {}\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+    open(&mut s, Command::OpenRetained(file.clone()), "a.rs"); let tab = s.state().active().unwrap().id();
+    let replace = |s: &mut Session, text: &str| {
+        let source = s.state().current_source().unwrap(); let (expected, len) = (source.key(), source.len_bytes());
+        s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: text.into() }], kind: EditKind::Replace });
+    };
+    replace(&mut s, "fn OldDraftOnly() {}\n"); let old = Arc::downgrade(s.state().current_source().unwrap());
+    let (started, starts) = std::sync::mpsc::channel();
+    let releases: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+    }).collect();
+    for _ in &releases { starts.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Search { query: "OldDraftOnly".into(), scope: SearchIn::Project });
+    let panel = s.state().results().unwrap().id();
+    s.dispatch(Command::SearchEverywhere { scope: crate::navigation::Scope::Symbols, query: "OldDraftOnly".into() });
+    replace(&mut s, "fn NewerCurrent() {}\n");
+    s.dispatch(Command::CloseSearchEverywhere);
+    assert!(s.state().navigation().is_none()); assert_eq!(s.state().results().unwrap().id(), panel);
+    assert!(old.upgrade().is_some(), "independent panel query still captures the old version");
+    for release in releases { release.send(()).unwrap(); }
+    settle(&mut s, searched);
+    assert_eq!(s.state().results().unwrap().hits()[0].text.as_ref(), "fn OldDraftOnly() {}");
+    assert!(s.state().navigation().is_none(), "cancelled modal completion cannot resurrect it");
+    s.dispatch(Command::CloseResults); settle(&mut s, |_| old.upgrade().is_none());
+    assert_eq!(source_text(s.state().current_source().unwrap()), "fn NewerCurrent() {}\n");
+    assert_eq!(std::fs::read(file).unwrap(), b"fn Saved() {}\n");
+}
+
+#[test]
+fn scoped_declaration_records_keep_disk_identity_after_a_clean_view_is_evicted() {
+    use crate::navigation::{Chosen, Scope as NavigationScope};
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "a.rs", b"// before\nfn UniqueEvictedSymbol() {}\n"); let other = write(&root, "other.txt", b"stay here\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+    open(&mut s, Command::OpenRetained(file.clone()), "a.rs"); s.cache = InactiveCache::new(0);
+    s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "UniqueEvictedSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    s.dispatch(Command::CloseSearchEverywhere);
+    open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+    s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "UniqueEvictedSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let revision = s.state().navigation().unwrap().revision;
+    let Some(Chosen::Command(command)) = s.navigation_choice(revision, 0) else { panic!("captured disk symbol") };
+    s.dispatch(command); settle(&mut s, |s| s.state().navigation().is_none() && s.state().current_source().is_some_and(|source| source.source() == file) || s.navigation_status().contains("search again"));
+    assert!(s.state().navigation().is_none(), "unchanged evicted source remains valid");
+    assert_eq!(s.state().current_source().unwrap().source(), file.as_path());
+    open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+    s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "UniqueEvictedSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let revision = s.state().navigation().unwrap().revision;
+    let Some(Chosen::Command(command)) = s.navigation_choice(revision, 0) else { panic!("second captured disk symbol") };
+    let stamp = Stamp::of(&file).unwrap(); std::fs::write(&file, b"// change\nfn UniqueEvictedSymbol() {}\n").unwrap();
+    std::fs::File::options().write(true).open(&file).unwrap().set_modified(stamp.modified.unwrap()).unwrap(); assert_eq!(Stamp::of(&file), Some(stamp));
+    s.dispatch(command); settle(&mut s, |s| s.state().navigation().is_none() || s.navigation_status().contains("search again"));
+    assert!(s.state().navigation().is_some()); assert!(s.navigation_status().contains("source changed"));
+    assert_eq!(s.state().current_source().unwrap().source(), other.as_path());
+}
+
+#[test]
 fn navigation_symbol_queries_overlay_drafts_and_keep_panel_search_independent() {
     use crate::text::{EditKind, TextEdit};
     use crate::navigation::{Scope as NavigationScope, Kind, Chosen};

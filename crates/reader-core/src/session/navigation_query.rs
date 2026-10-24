@@ -67,11 +67,13 @@ impl Session {
         let cached = snapshot.as_ref().and_then(|source| self.state.index.scoped(&path, source));
         if let Some(snapshot) = snapshot.filter(|_| cached.is_none()) {
             work.saved.remove(&path);
-            let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|entry| entry.document.clone()).unwrap_or_default();
+            let entry = self.state.sources.buffers.get(&snapshot.key().buffer);
+            let loaded = entry.map(|entry| entry.document.clone()).unwrap_or_default();
+            let stamp = entry.filter(|entry| entry.saved.as_ref().is_some_and(|saved| saved.matches(&snapshot))).and_then(|entry| entry.stamp);
             let fence = self.navigation_fence(request, crate::analysis::ResultStage::NavigationRank, Some(step));
             let project = fence.project;
             if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
-                let cache = index::index_document(&doc, None, lease.cancellation());
+                let cache = index::index_document(&doc, stamp, lease.cancellation());
                 let files = match &cache { FileIndex::Done { items, .. } => vec![(path.clone(), items.clone())], _ => Vec::new() };
                 if let Some(next) = index::rank(&files, &query, lease.cancellation()) {
                     lease.send(Completion::NavigationOverlay { request, step, best: index::merge_ranked(best, next, &query), found: search::Found::default(), cache: Some((path, cache)) });
@@ -177,7 +179,7 @@ impl Session {
         let snapshot = self.navigation_query.as_ref().and_then(|work| work.captured.get(&path)).and_then(|source| source.snapshot.as_ref());
         if snapshot.is_some_and(|snapshot| !Self::captured_result_current(&self.state, snapshot, &path)) { return self.navigation_refused("This symbol's source changed; search again".into()); }
         let (stamp, doc) = match result { Ok(result) => result, Err(message) => return self.navigation_refused(message) };
-        if self.state.sources.buffers.values().filter_map(|entry| entry.snapshot.as_ref()).any(|snapshot| snapshot.source() == path && !snapshot.matches_document(&doc)) {
+        if Self::changed_result_source(&self.state, &path, &doc, None) {
             return self.navigation_refused("This symbol's current source changed; search again".into());
         }
         self.command(Command::CloseSearchEverywhere);
