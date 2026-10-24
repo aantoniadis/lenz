@@ -173,6 +173,11 @@ fn project_text_search_reads_shifted_drafts_and_refuses_stale_activation_in_both
     replay_draft_project_query(cx, false);
 }
 
+#[gpui::test]
+fn project_declaration_search_reads_shifted_drafts_and_refuses_stale_activation_in_both_adapters(cx: &mut TestAppContext) {
+    replay_draft_project_query(cx, true);
+}
+
 fn replay_draft_project_query(cx: &mut TestAppContext, declarations: bool) {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     let dir = tempfile::tempdir().unwrap();
