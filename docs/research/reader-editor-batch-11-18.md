@@ -1,7 +1,7 @@
 # Draft ownership, editing, Save and search batch
 
 This batch implements editor tickets 11, 12, 13, 16 and 18. Correctness checks and
-release measurements are complete; the measured performance decision is pending.
+release measurements are complete. The user accepted the documented costs on 2026-10-24.
 Production reader typing remains gated until the later input and safety tickets.
 
 ## Delivered behavior
@@ -115,8 +115,11 @@ been isolated. Raw samples and aggregation are under
 `target/perf/editor-implementation/merge-11-18/performance/`, including
 `summary.json` and both baseline stress attempts.
 
-The performance decision is pending. Acceptance of earlier costs does not accept
-this batch's measured costs.
+The user accepted this batch's documented costs on 2026-10-24 and requested continued
+implementation: first text +0.40 ms at roughly 1 MiB, TUI first content +4.17 ms,
+TUI workflow RSS up to +8.69 MiB and roughly 20% fewer synthetic stress iterations.
+Tickets 11, 12, 13, 16 and 18 are resolved against this evidence. This decision
+does not approve costs from later batches.
 
 Native macOS, physical display latency, GPU memory, crash recovery and real
 external-provider performance remain unverified. Nonblocking observations belong

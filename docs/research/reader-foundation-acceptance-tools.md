@@ -3,7 +3,7 @@
 These tools support editor ticket23; they do not enable production input. The native Linux-X11
 correctness supplement has passed. The cohort performance campaign, 180-second editing workload and
 combined full gate remain pending.
-Native macOS remains blocked by03/24; prior11–18 performance costs still await an explicit decision.
+Native macOS remains blocked by03/24; the user accepted the documented11–18 performance costs on 2026-10-24.
 
 ## Shared-core editing/history workload
 

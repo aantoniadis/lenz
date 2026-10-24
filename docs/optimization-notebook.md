@@ -1725,7 +1725,7 @@ Full validation and stress will run once after each batch of several tickets.
 
 The [detailed performance report](research/reader-editor-batch-11-18-performance.md) compares exact
 `bb162738`/`bb2f55f4` release binaries. Correctness is recorded separately in the
-[batch report](research/reader-editor-batch-11-18.md). **New measured costs await an explicit decision.**
+[batch report](research/reader-editor-batch-11-18.md). **The user accepted this batch’s documented costs on 2026-10-24; later costs require their own decision.**
 
 | Approach or experiment | Outcome and evidence | Limit or next step |
 |---|---|---|
