@@ -342,6 +342,16 @@ pub enum Event {
 }
 
 /// A definition reply for the session to resolve, or why there is none.
+#[derive(Clone, Debug)]
+pub struct SourceVersion { version: u64, metadata: std::sync::Weak<crate::document::SourceMeta> }
+impl SourceVersion {
+    pub(crate) fn new(doc: &Document) -> Self { Self { version: doc.version(), metadata: Arc::downgrade(doc.source_meta()) } }
+    pub(crate) fn matches(&self, doc: &Document) -> bool { self.version == doc.version() && self.metadata.ptr_eq(&Arc::downgrade(doc.source_meta())) }
+    pub(crate) fn matches_snapshot(&self, source: &crate::text::TextSnapshot) -> bool { self.version == source.key().version && self.metadata.ptr_eq(&Arc::downgrade(source.source_meta())) }
+}
+impl PartialEq for SourceVersion { fn eq(&self, other: &Self) -> bool { self.version == other.version && self.metadata.ptr_eq(&other.metadata) } }
+impl Eq for SourceVersion {}
+
 pub struct Reply {
     /// The lane it was asked in.
     pub lane: Lane,
@@ -352,7 +362,11 @@ pub struct Reply {
     pub result: Result<Value, String>,
     /// The server was still indexing when it answered.
     pub indexing: bool,
+    /// Compact identities of provider-open targets when the request entered its text-ordered FIFO.
+    pub sources: HashMap<PathBuf, SourceVersion>,
 }
+
+struct PendingRequest { request: u64, id: i64, sources: HashMap<PathBuf, SourceVersion> }
 
 /// What the session must do after an event.
 #[derive(Default)]
@@ -417,7 +431,7 @@ struct Server {
     dirty_open: HashMap<PathBuf, bool>,
     /// The definition request in flight: the session's request id and the protocol id.
     /// Each lane's pending request: the session request and its JSON-RPC id.
-    pending: HashMap<Lane, (u64, i64)>,
+    pending: HashMap<Lane, PendingRequest>,
     /// Work-done progress in progress, by token.
     progress: HashMap<String, Progress>,
     /// rust-analyzer's `experimental/serverStatus`: not quiescent while loading the workspace.
@@ -960,7 +974,7 @@ impl Semantics {
         let now = (self.clock)();
         for s in &mut self.servers {
             s.deferred.remove(&lane);
-            if let Some((_, id)) = s.pending.remove(&lane) {
+            if let Some(PendingRequest { id, .. }) = s.pending.remove(&lane) {
                 s.notify("$/cancelRequest", json!({ "id": id }));
             }
             s.touch(now);
@@ -1140,9 +1154,9 @@ impl Semantics {
                 let mut replies: Vec<_> = s
                     .pending
                     .drain()
-                    .map(|(lane, (request, _))| Reply { lane, request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false })
+                    .map(|(lane, pending)| Reply { lane, request: pending.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false, sources: pending.sources })
                     .collect();
-                replies.extend(s.deferred.drain().map(|(lane, d)| Reply { lane, request: d.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false }));
+                replies.extend(s.deferred.drain().map(|(lane, d)| Reply { lane, request: d.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false, sources: Default::default() }));
                 Outcome { repaint: true, replies, ready: false, ..Outcome::default() }
             }
             Event::Written { session, token } => {
@@ -1388,7 +1402,10 @@ impl Server {
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-        self.pending.insert(lane, (request, id));
+        let sources = if matches!(lane, Lane::Foreground | Lane::Hierarchy) {
+            self.open.iter().map(|(path, doc)| (path.clone(), SourceVersion::new(doc))).collect()
+        } else { Default::default() };
+        self.pending.insert(lane, PendingRequest { request, id, sources });
         self.idle_since = None;
         Ok(())
     }
@@ -1459,7 +1476,7 @@ impl Server {
     }
 
     fn failed_reply(&self, lane: Lane, request: u64, why: &str) -> Reply {
-        Reply { lane, request, session: self.session, encoding: self.encoding, provider: PROVIDERS[self.key.provider].name, result: Err(why.to_owned()), indexing: false }
+        Reply { lane, request, session: self.session, encoding: self.encoding, provider: PROVIDERS[self.key.provider].name, result: Err(why.to_owned()), indexing: false, sources: Default::default() }
     }
 
     fn pump_text(&mut self) {
@@ -1558,8 +1575,8 @@ impl Server {
                     self.update_status();
                     return Outcome { repaint: true, ready: true, ..Outcome::default() };
                 }
-                let Some(lane) = self.pending.iter().find(|(_, (_, p))| Some(*p) == id).map(|(l, _)| *l) else { return Outcome::default() };
-                let Some((request, _)) = self.pending.remove(&lane) else { return Outcome::default() };
+                let Some(lane) = self.pending.iter().find(|(_, pending)| Some(pending.id) == id).map(|(l, _)| *l) else { return Outcome::default() };
+                let Some(PendingRequest { request, sources, .. }) = self.pending.remove(&lane) else { return Outcome::default() };
                 let result = match m.get("error") {
                     Some(e) => Err(format!("{name} failed: {}", e["message"].as_str().unwrap_or("unknown error"))),
                     None => Ok(m.get("result").cloned().unwrap_or(Value::Null)),
@@ -1567,7 +1584,7 @@ impl Server {
                 // Still indexing, or (for a server that never says) just started.
                 let no_status = !PROVIDERS[self.key.provider].reports_status;
                 let indexing = matches!(self.status, Status::Indexing(_)) || no_status && self.initialized_at.is_some_and(|t| now.duration_since(t) < UNREPORTED_WARMUP);
-                Outcome { repaint: true, replies: vec![Reply { lane, request, session: self.session, encoding: self.encoding, provider: name, result, indexing }], ready: false, ..Outcome::default() }
+                Outcome { repaint: true, replies: vec![Reply { lane, request, session: self.session, encoding: self.encoding, provider: name, result, indexing, sources }], ready: false, ..Outcome::default() }
             }
             (None, None) => Outcome::default(),
         }
@@ -1952,6 +1969,8 @@ fn finish_server(mut child: Child, key: &Key, provider: &Provider, exe: &Path, s
 /// A definition target in a file, read and located: the snapshot it was located in (with its stamp when read
 /// from disk), and the result row.
 pub struct Target {
+    /// Decoded disk identity computed once while resolving this file.
+    pub decoded_digest: Option<[u8; 32]>,
     pub path: PathBuf,
     pub stamp: Option<crate::cache::Stamp>,
     pub doc: Arc<Document>,
@@ -1973,7 +1992,7 @@ pub struct Targets {
 }
 
 /// A target file's snapshot, and its stamp when it was read from disk.
-type Snapshot = (Option<crate::cache::Stamp>, Arc<Document>);
+type Snapshot = (Option<crate::cache::Stamp>, Arc<Document>, Option<[u8; 32]>);
 
 /// Reads a file target from disk: its stamp and snapshot.
 pub type ReadFile<'a> = &'a dyn Fn(&Path) -> Result<(crate::cache::Stamp, Arc<Document>), String>;
@@ -2017,11 +2036,14 @@ pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, pro
             continue;
         };
         let file = files.entry(path.clone()).or_insert_with(|| match open.get(&path) {
-            Some(doc) => Ok((None, doc.clone())),
-            None => read(&path).map(|(stamp, doc)| (Some(stamp), doc)),
+            Some(doc) => Ok((None, doc.clone(), None)),
+            None => read(&path).map(|(stamp, doc)| {
+                let digest = crate::search::decoded_digest(doc.text().as_bytes());
+                (Some(stamp), doc, Some(digest))
+            }),
         });
-        let (stamp, doc) = match file {
-            Ok((stamp, doc)) => (*stamp, doc.clone()),
+        let (stamp, doc, decoded_digest) = match file {
+            Ok((stamp, doc, digest)) => (*stamp, doc.clone(), *digest),
             Err(e) => {
                 out.failed.push(format!("{}: {e}", path.display()));
                 continue;
@@ -2032,7 +2054,7 @@ pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, pro
             continue;
         };
         let hit = hit_at(&path, &doc, start, end);
-        out.found.push(Target { path, stamp, doc, hit, at: start });
+        out.found.push(Target { path, stamp, doc, hit, at: start, decoded_digest });
     }
     out
 }
@@ -2094,7 +2116,7 @@ pub(crate) fn file_symbols_while(reply: &Value, doc: &Arc<Document>, encoding: E
                     let kind = decl_kind(item["kind"].as_u64().unwrap_or(0));
                     let (a, b) = (start - bounds.start, end.clamp(start, bounds.end) - bounds.start);
                     let hit = crate::search::Hit { path: doc.source().to_string_lossy().into(), line, range: a..b, text: name.into(), decl: Some((kind, depth)), origin: None };
-                    out.found.push(Target { path: doc.source().to_owned(), stamp: None, doc: doc.clone(), hit, at: start });
+                    out.found.push(Target { path: doc.source().to_owned(), stamp: None, doc: doc.clone(), hit, at: start, decoded_digest: None });
                 }
                 None => out.failed.push(format!("{}: a symbol outside the file as sent", item["name"].as_str().unwrap_or("?"))),
             }

@@ -2131,7 +2131,7 @@ fn replacing_semantic_target_replies_bounds_actual_document_retaining_jobs() {
     for _ in 0..129 {
         s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
         let request = s.state.asking.as_ref().unwrap().request;
-        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false,
+        s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, sources: Default::default(),
             result: Ok(serde_json::json!([{ "uri": semantics::lsp::file_uri(&target), "range": { "start": {"line": 0,"character": 7}, "end": {"line":0,"character":13} } }])) });
         s.analysis.pump(&s.jobs, &s.tx, &s.project_generation);
     }
@@ -2165,7 +2165,7 @@ fn semantic_capacity_and_worker_failure_finish_the_current_spinner() {
         let fence = ResultFence { slot: ResultSlot::Semantic { server: n, lane: semantics::Lane::Foreground }, project, request: 1, stage: ResultStage::Targets, result_set: None, node: None, source: None };
         if s.analysis.request_result(fence, Priority::Visible, || |_| {}).is_err() { break; }
     }
-    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, result: Ok(serde_json::json!([])) });
+    let effect = s.semantic_reply(semantics::Reply { lane: semantics::Lane::Foreground, request, session: server, encoding: s.state.semantics.encoding(server), provider: "rust-analyzer", indexing: false, sources: Default::default(), result: Ok(serde_json::json!([])) });
     assert!(effect.repaint); assert!(s.state.asking.is_none(), "capacity pressure must end this server's answer visibly");
     assert!(s.state.messages.iter().any(|m| m.contains("capacity is full")));
 }
@@ -2301,6 +2301,107 @@ fn semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_t
     assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 1);
     assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
     assert_eq!(std::fs::read(file).unwrap(), saved);
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_navigation_refuses_target_coordinates_from_before_another_pane_edit() {
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"target-context\"\n");
+    let a_text = "fn main() { helper(); }\n";
+    let b_text = "pub fn helper() {}\n";
+    let a = write(d.path(), "main.rs", a_text.as_bytes());
+    let b = write(d.path(), "lib.rs", b_text.as_bytes());
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::OpenRetained(b.clone()), "lib.rs");
+    let target = s.state().active().unwrap().id();
+    let expected = s.state().view(target).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 target draft\n".into() }], kind: crate::text::EditKind::Paste });
+    let target_document = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&target_document).is_some());
+    let server = s.state.semantics.session_of(&target_document).unwrap();
+    drop(target_document);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&b).is_some_and(|doc| doc.version() == s.state().view(target).unwrap().snapshot().key().version));
+    s.dispatch(Command::FocusPane(0));
+    let at = a_text.find("helper").unwrap();
+    s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    let origin = s.state().current_source().unwrap().clone();
+    let origin_selection = s.state().selection();
+    s.dispatch(Command::Definition { peek: false });
+    let rx = s.completions();
+    let held = loop {
+        let completion = rx.recv_blocking_timeout().unwrap();
+        let target_reply = matches!(&completion, Completion::Semantic(semantics::Event::Message { message, .. })
+            if message["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("lib.rs"))
+                || message["result"].as_array().is_some_and(|items| items.iter().any(|item| item["uri"].as_str().is_some_and(|uri| uri.ends_with("lib.rs")))));
+        if target_reply { break completion; }
+        s.dispatch(completion);
+    };
+    let expected = s.state().view(target).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// another shift\n".into() }], kind: crate::text::EditKind::Paste });
+    let changed = s.state().view(target).unwrap().snapshot().clone();
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&b).is_some_and(|doc| doc.version() == changed.key().version));
+    s.dispatch(held);
+    settle(&mut s, |s| s.state().asking().is_none());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin), "a target edit cannot make the old reply move the origin pane");
+    assert_eq!(s.state().selection(), origin_selection);
+    assert!(Arc::ptr_eq(s.state().view(target).unwrap().snapshot(), &changed));
+    assert!(s.state().notices().iter().any(|notice| notice.contains("target") && notice.contains("changed")), "{:?}", s.state().notices());
+    assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes());
+    assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_results_keep_the_captured_target_draft_and_refuse_later_activation() {
+    let d = tempfile::tempdir().unwrap();
+    write(d.path(), "Cargo.toml", b"[package]\nname = \"peek-target\"\n");
+    let a_text = "fn main() { helper(); }\n";
+    let b_text = "pub fn helper() {}\n";
+    let a = write(d.path(), "main.rs", a_text.as_bytes());
+    let b = write(d.path(), "lib.rs", b_text.as_bytes());
+    write(d.path(), "other.rs", b"pub fn helper() {}\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|v| v.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns));
+    open(&mut s, Command::OpenRetained(b.clone()), "lib.rs");
+    let target = s.state().active().unwrap().id();
+    let expected = s.state().view(target).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 target draft\n".into() }], kind: crate::text::EditKind::Paste });
+    let captured = s.state().view(target).unwrap().snapshot().clone();
+    let target_document = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&target_document).is_some());
+    let server = s.state.semantics.session_of(&target_document).unwrap();
+    drop(target_document);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&b).is_some_and(|doc| doc.version() == captured.key().version));
+    s.dispatch(Command::FocusPane(0));
+    let at = a_text.find("helper").unwrap();
+    s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    let origin = s.state().current_source().unwrap().clone();
+    let selection = s.state().selection();
+    s.dispatch(Command::Definition { peek: true });
+    settle(&mut s, |s| s.state().results().is_some_and(|results| results.results_kind() == ResultsKind::Peek && results.preview().is_some()));
+    assert_eq!(s.state().results().unwrap().hits()[0].line, 1);
+    assert_eq!(s.state().results().unwrap().preview().unwrap().doc.version(), captured.key().version);
+    let expected = captured.key();
+    s.dispatch(Command::Edit { tab: target, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// newer target\n".into() }], kind: crate::text::EditKind::Paste });
+    let changed = s.state().view(target).unwrap().snapshot().clone();
+    s.dispatch(Command::SelectResult(1));
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|preview| preview.index == 1));
+    s.dispatch(Command::SelectResult(0));
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|preview| preview.index == 0));
+    assert_eq!(s.state().results().unwrap().preview().unwrap().doc.version(), captured.key().version, "a peek retains the version named by its row");
+    s.dispatch(Command::OpenResult(0));
+    settle(&mut s, |s| s.state().results().unwrap().is_stale(0));
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin));
+    assert_eq!(s.state().selection(), selection);
+    assert!(Arc::ptr_eq(s.state().view(target).unwrap().snapshot(), &changed));
+    assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes());
+    assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
 }
 
 #[test]
@@ -5638,6 +5739,32 @@ fn draft_transactions_move_bookmarks_and_reading_history_with_unicode_text() {
 }
 
 #[test]
+fn edited_source_anchors_use_right_bias_at_insertions_and_replacements() {
+    let d = tempfile::tempdir().unwrap();
+    let original = "first\n😀 target\nlast\n";
+    let path = write(d.path(), "bias.txt", original.as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "bias.txt");
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(1) }));
+    s.dispatch(Command::SetMnemonic('2'));
+    let tab = s.state().active().unwrap().id();
+    let start = "first\n".len();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: start..start, text: "é\n".into() }], kind: crate::text::EditKind::Paste });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, 0), "an insertion at the anchor keeps it with the following source");
+    assert_eq!(s.state().selection().unwrap().head, start + "é\n".len());
+    let expected = s.state().current_source().unwrap().key();
+    let point = start + "é\n".len();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: point..point + "😀 ".len(), text: "Ω".into() }], kind: crate::text::EditKind::Replace });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, "Ω".len()), "an anchor inside replaced text collapses after the replacement");
+    assert_eq!(s.state().selection().unwrap().head, point + "Ω".len());
+    s.dispatch(Command::JumpMnemonic('2'));
+    assert_eq!(s.state().selection().unwrap().head, point + "Ω".len());
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
 fn a_numbered_bookmark_jumps_back_through_history_and_unfolds() {
     let d = tempfile::tempdir().unwrap();
     let (mut s, root) = bookmarked_project(d.path());
@@ -6103,7 +6230,7 @@ fn a_superseded_syntax_level_stops_reading_relations() {
     let doc = Arc::new(Document::decode("/a.rs".into(), 1, text.as_bytes()));
     let at = text.find("S for").unwrap();
     let hit = crate::semantics::hit_at(std::path::Path::new("/a.rs"), &doc, at, at + 1);
-    let usage = || crate::semantics::Target { path: "/a.rs".into(), stamp: None, doc: doc.clone(), hit: hit.clone(), at };
+    let usage = || crate::semantics::Target { path: "/a.rs".into(), stamp: None, decoded_digest: None, doc: doc.clone(), hit: hit.clone(), at };
     let latest = Arc::new(std::sync::atomic::AtomicU64::new(5));
     let level = syntax_level(vec![usage()], Direction::Subtypes, crate::semantics::lsp::Encoding::Utf16, latest.clone(), 5);
     assert_eq!(level.iter().map(|(c, _)| c.name.as_str()).collect::<Vec<_>>(), ["C"]);
@@ -6117,7 +6244,7 @@ fn a_usage_past_the_snippet_columns_still_finds_its_relation() {
     let at = text.find("S for").unwrap();
     let hit = crate::semantics::hit_at(std::path::Path::new("/a.rs"), &doc, at, at + 1);
     assert!(hit.text.len() < at - doc.line_range(1).start, "the row's snippet stops before the usage");
-    let usage = crate::semantics::Target { path: "/a.rs".into(), stamp: None, doc: doc.clone(), hit, at };
+    let usage = crate::semantics::Target { path: "/a.rs".into(), stamp: None, decoded_digest: None, doc: doc.clone(), hit, at };
     let level = syntax_level(vec![usage], Direction::Subtypes, crate::semantics::lsp::Encoding::Utf16, Arc::new(std::sync::atomic::AtomicU64::new(1)), 1);
     assert_eq!(level.iter().map(|(c, _)| c.name.as_str()).collect::<Vec<_>>(), ["C"]);
 }

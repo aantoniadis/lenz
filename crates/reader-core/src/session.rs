@@ -2900,15 +2900,12 @@ impl Session {
 
     fn publish_edit(&mut self, edited: TabId, previous: Arc<crate::text::TextSnapshot>, next: Arc<crate::text::TextSnapshot>, edits: &[crate::text::TextEdit]) -> Effect {
         let buffer = next.key().buffer;
-        let transform = |byte: usize| {
-            let mut delta: isize = 0;
-            for edit in edits {
-                if byte < edit.range.start { break; }
-                if byte <= edit.range.end { return edit.range.start.checked_add_signed(delta).unwrap_or(0) + edit.text.len(); }
-                delta += edit.text.len() as isize - (edit.range.end - edit.range.start) as isize;
-            }
-            byte.checked_add_signed(delta).unwrap_or(0)
-        };
+        let transform = |byte| crate::text::edited_byte(byte, edits);
+        let paths: std::collections::HashSet<_> = self.state.sources.aliases.iter().filter(|(_, id)| **id == buffer).map(|(path, _)| path.clone())
+            .chain(self.state.tabs.iter().filter(|tab| tab.buffer == Some(buffer)).flat_map(|tab| std::iter::once(tab.source.clone()).chain(tab.canonical.clone())))
+            .chain([previous.source().to_path_buf(), next.source().to_path_buf()]).collect();
+        self.state.history.edited(&paths, &previous, &next, edits);
+        if Arc::make_mut(&mut self.state.places).edited(&paths, &previous, &next, edits) { self.places_changed(); }
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
         entry.snapshot = Some(next.clone());
         entry.document = Default::default();
@@ -2919,7 +2916,7 @@ impl Session {
             let selection = tab.selection.or_else(|| (tab.id == edited).then_some(Selection { anchor: top, head: top }));
             tab.selection = selection.map(|selection| Selection { anchor: transform(selection.anchor), head: transform(selection.head) });
             tab.set_top(next.line_of(transform(top)), tab.top_row());
-            if tab.restore.is_some() { tab.restore = Some(tab.location(Some(&next))); }
+            if let Some(restore) = &mut tab.restore { restore.edited(&previous, &next, edits); }
             if tab.id == edited { tab.retained = true; }
             changed.push(tab.id);
         }
@@ -4527,6 +4524,22 @@ impl Session {
         })
     }
 
+    fn target_source<'a>(state: &'a State, path: &Path) -> Option<&'a Arc<crate::text::TextSnapshot>> {
+        state.sources.buffers.iter().find_map(|(buffer, entry)| {
+            let source = entry.snapshot.as_ref()?;
+            (source.source() == path || state.sources.aliases.get(path) == Some(buffer)
+                || state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && (tab.source == path || tab.canonical.as_deref() == Some(path)))).then_some(source)
+        })
+    }
+
+    fn semantic_target_current(&self, target: &semantics::Target) -> bool {
+        match (target.stamp, Self::target_source(&self.state, &target.path)) {
+            (None, Some(source)) => semantics::SourceVersion::new(&target.doc).matches_snapshot(source),
+            (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
     fn captured_result_current(state: &State, source: &crate::text::TextSnapshot, path: &Path) -> bool {
         let buffer = source.key().buffer;
         state.sources.buffers.get(&buffer).and_then(|entry| entry.snapshot.as_ref())
@@ -4660,11 +4673,18 @@ impl Session {
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
             // Capture a sent-map generation only after a bounded owner slot has been reserved.
-            let open = semantics.sent(session);
+            let mut open = semantics.sent(session);
+            let mut blocked: std::collections::HashSet<_> = reply.sources.keys().cloned().collect();
+            open.retain(|path, doc| {
+                let current = reply.sources.get(path).is_some_and(|source| source.matches(doc));
+                if current { blocked.remove(path); } else { blocked.insert(path.clone()); }
+                current
+            });
             let asked_doc = asked_path.as_ref().and_then(|path| open.get(path).cloned());
             move |lease| {
                 let read = |path: &Path| {
                     if !lease.wanted() { return Err("request was cancelled".into()); }
+                    if blocked.contains(path) { return Err("target source changed since the request; ask again".into()); }
                     match read(path) {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
@@ -5650,7 +5670,7 @@ impl Session {
     /// Located targets. A definition: one opens in the main area (a committed navigation, from the snapshot just
     /// read); several, or a peek, list in the results panel with the first previewed. Usages list the same way;
     /// symbols add to the list each server's answer.
-    fn targets_found(&mut self, request: u64, session: u64, provider: &'static str, origin: String, indexing: bool, targets: semantics::Targets) -> Effect {
+    fn targets_found(&mut self, request: u64, session: u64, provider: &'static str, origin: String, indexing: bool, mut targets: semantics::Targets) -> Effect {
         let Some(asked) = self.state.asking.as_ref().filter(|a| a.request == request) else {
             return Effect::default(); // cancelled, or replaced by a later request
         };
@@ -5660,6 +5680,11 @@ impl Session {
             self.state.messages.push(format!("{label}: the file changed while its targets were resolved; ask again"));
             return Effect { repaint: true, copy: None };
         }
+        targets.found.retain(|target| {
+            let current = self.semantic_target_current(target);
+            if !current { targets.failed.push(format!("{}: target source changed; ask again", target.path.display())); }
+            current
+        });
         let (ask, at) = (asked.ask, asked.at.clone());
         let label = ask.label();
         // Virtual definition targets only: the first one's text, through the provider's documented method.
@@ -5912,6 +5937,14 @@ impl Session {
     /// The snapshots just read serve the previews (within the cache's budget).
     fn keep_previews(&mut self, found: Vec<semantics::Target>) {
         for t in found {
+            let source = Self::target_source(&self.state, &t.path).cloned();
+            if let Some(results) = &mut self.state.results {
+                if let Some(source) = source.filter(|_| t.stamp.is_none()) {
+                    results.captured.entry(t.path.clone()).or_insert_with(|| search::CapturedSource::new(source));
+                } else if let Some((stamp, digest)) = t.stamp.zip(t.decoded_digest) {
+                    results.disk_sources.entry(t.hit.path.clone()).or_insert(search::DiskSource { stamp, digest });
+                }
+            }
             if let Some(stamp) = t.stamp {
                 self.cache_document(stamp, t.doc);
             }
@@ -8064,7 +8097,7 @@ fn syntax_level_while(usages: Vec<semantics::Target>, direction: Direction, enco
                 let call = Call { item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": name }), name, kind: 0, decl: Some(decl), calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
                 // The row goes to the child's name, on the relation's header.
                 let hit = semantics::hit_at(&path, &doc, other.start, other.end);
-                out.push((call, semantics::Target { path: path.clone(), stamp: t.stamp, doc: doc.clone(), hit, at: other.start }));
+                out.push((call, semantics::Target { path: path.clone(), stamp: t.stamp, doc: doc.clone(), hit, at: other.start, decoded_digest: t.decoded_digest }));
             }
         }
     }
