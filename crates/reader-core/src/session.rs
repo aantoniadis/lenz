@@ -4694,13 +4694,7 @@ impl Session {
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
             // Capture a sent-map generation only after a bounded owner slot has been reserved.
-            let mut open = semantics.sent(session);
-            let mut blocked: std::collections::HashSet<_> = reply.sources.keys().cloned().collect();
-            open.retain(|path, doc| {
-                let current = reply.sources.get(path).is_some_and(|source| source.matches(doc));
-                if current { blocked.remove(path); } else { blocked.insert(path.clone()); }
-                current
-            });
+            let (open, blocked) = semantics::target_sources(semantics.sent(session), &reply.sources);
             let asked_doc = asked_path.as_ref().and_then(|path| open.get(path).cloned());
             move |lease| {
                 let read = |path: &Path| {
@@ -5661,7 +5655,7 @@ impl Session {
                 t.moving = false;
                 let from = std::mem::replace(&mut t.source, to.clone());
                 t.display = to.clone();
-                t.canonical = canonical;
+                t.canonical = canonical.clone();
                 if t.loaded { t.stamp = stamp; }
                 t.unavailable = None;
                 let buffer = t.buffer;
@@ -5673,7 +5667,7 @@ impl Session {
                     if let Some(entry) = self.state.sources.buffers.get_mut(&id) {
                         if let Some(snapshot) = &entry.snapshot {
                             let was_saved = entry.saved.as_ref().is_some_and(|saved| saved.matches(snapshot));
-                            let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()));
+                            let metadata = Arc::new(snapshot.source_meta().renamed(to.clone()).with_canonical(canonical.clone()));
                             entry.snapshot = Some(Arc::new(snapshot.with_source_meta(metadata)));
                             if was_saved { entry.saved = entry.snapshot.as_ref().map(|s| SemanticSource::new(s)); }
                         }
@@ -5931,14 +5925,8 @@ impl Session {
         let latest = self.hierarchy_latest.clone();
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
-            let mut open = semantics.sent(session);
             let sources = reply.sources;
-            let mut blocked: std::collections::HashSet<_> = sources.keys().cloned().collect();
-            open.retain(|path, doc| {
-                let current = sources.get(path).is_some_and(|source| source.matches(doc));
-                if current { blocked.remove(path); } else { blocked.insert(path.clone()); }
-                current
-            });
+            let (open, blocked) = semantics::target_sources(semantics.sent(session), &sources);
             move |lease| {
                 let read = |path: &Path| {
                     if !lease.wanted() { return Err("request was cancelled".into()); }
@@ -7956,6 +7944,7 @@ fn check(path: &Path, stamp: Option<Stamp>, shown: Option<&Arc<crate::text::Text
 /// The same raw read supplies display decoding and exact writer provenance, including result previews.
 fn decode_read(path: PathBuf, version: u64, read: &lenz_content::write::ExactRead) -> Document {
     let mut doc = Document::decode(path, version, read.bytes());
+    doc.set_canonical(read.target.canonical.clone());
     let meta = doc.source_meta();
     if doc.image().is_some() || meta.is_binary() || meta.is_lossy() { return doc; }
     let snapshot = read.snapshot(doc.text(), meta.original_encoding(), meta.had_bom(), meta.is_lossy());

@@ -2494,6 +2494,56 @@ fn semantic_targets_resolve_canonical_provider_uris_from_the_captured_draft_alia
     assert_eq!(std::fs::read(a).unwrap(), b"fn main() { helper(); }\n");
 }
 
+#[cfg(unix)]
+#[test]
+fn held_semantic_reply_blocks_a_retired_canonical_alias_after_rename() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"retired-alias\"\n");
+    let saved = "pub fn helper() {}\n";
+    let actual = write(d.path(), "external.rs", saved.as_bytes());
+    let alias = root.join("lib.rs"); std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let a = write(&root, "main.rs", b"fn main() { helper(); }\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1"), ("FAKE_LSP_CANONICAL_URIS", "1")]);
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|provider| provider.status == semantics::Status::Ready));
+    s.dispatch(Command::Split(Split::Columns)); open(&mut s, Command::OpenRetained(alias.clone()), "lib.rs");
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 shifted\n".into() }], kind: crate::text::EditKind::Paste });
+    let draft = s.state().current_source().unwrap().clone(); let doc = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&doc).is_some());
+    let server = s.state.semantics.session_of(&doc).unwrap(); drop(doc);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&alias).is_some_and(|doc| doc.version() == draft.key().version));
+    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::Select(Selection { anchor: 12, head: 12 }));
+    let origin = s.state().current_source().unwrap().clone(); let selection = s.state().selection();
+    s.dispatch(Command::Definition { peek: false });
+    let held = loop {
+        let completion = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(&completion, Completion::Semantic(semantics::Event::Message { message, .. })
+            if message["result"]["uri"].as_str().is_some_and(|uri| uri.ends_with("external.rs"))) { break completion; }
+        s.dispatch(completion);
+    };
+    // Retire the canonical name itself, not just a symlink spelling of an unchanged target.
+    let moved = d.path().join("relocated.rs"); std::fs::rename(&actual, &moved).unwrap();
+    std::fs::remove_file(&alias).unwrap(); let next_alias = root.join("renamed.rs");
+    std::os::unix::fs::symlink(&moved, &next_alias).unwrap();
+    let replacement = "// different replacement\npub fn helper() {}\n"; std::fs::write(&actual, replacement).unwrap();
+    let token = s.state.tabs.iter().find(|t| t.id == tab).unwrap().refresh;
+    s.dispatch(Completion::Moved { tab, token, to: next_alias.clone(), stamp: Stamp::of(&next_alias), canonical: Some(moved.clone()) });
+    let renamed = s.state().view(tab).unwrap().snapshot().clone();
+    assert_eq!(renamed.key(), draft.key(), "rename preserves the version but changes naming identity");
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&next_alias).is_some_and(|doc| Arc::ptr_eq(doc.source_meta(), renamed.source_meta())));
+    s.dispatch(held); settle(&mut s, |s| s.state().asking().is_none());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &origin), "old coordinates must not open replacement bytes at the retired canonical name");
+    assert_eq!(s.state().selection(), selection);
+    assert!(s.state().notices().iter().any(|notice| notice.contains("target") && notice.contains("changed")), "{:?}", s.state().notices());
+    assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &renamed));
+    assert_eq!(source_text(&renamed), source_text(&draft));
+    assert_eq!(std::fs::read(&actual).unwrap(), replacement.as_bytes());
+    assert_eq!(std::fs::read(&moved).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(next_alias).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn main() { helper(); }\n");
+}
+
 #[test]
 fn large_encoded_sources_keep_their_existing_syntax_reduction() {
     let d = tempfile::tempdir().unwrap();

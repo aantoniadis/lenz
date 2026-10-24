@@ -341,7 +341,7 @@ pub enum Event {
     Memory(Vec<(u64, u64, u64)>),
 }
 
-/// A definition reply for the session to resolve, or why there is none.
+/// Exact admitted text identity without retaining its decoded text.
 #[derive(Clone, Debug)]
 pub struct SourceVersion { version: u64, metadata: std::sync::Weak<crate::document::SourceMeta> }
 impl SourceVersion {
@@ -351,6 +351,41 @@ impl SourceVersion {
 }
 impl PartialEq for SourceVersion { fn eq(&self, other: &Self) -> bool { self.version == other.version && self.metadata.ptr_eq(&other.metadata) } }
 impl Eq for SourceVersion {}
+
+/// Freeze both admitted URI names. An ambiguous alias is a nonmatching tombstone, not an
+/// insertion-order choice. Contexts retain weak metadata only, within the existing request lanes.
+fn source_context(open: &HashMap<PathBuf, Arc<Document>>) -> HashMap<PathBuf, SourceVersion> {
+    let mut sources = HashMap::new();
+    for (path, doc) in open {
+        let source = SourceVersion::new(doc);
+        for path in std::iter::once(path.as_path()).chain(doc.source_meta().canonical()) {
+            sources.entry(path.to_owned()).and_modify(|existing| {
+                if *existing != source { *existing = SourceVersion { version: 0, metadata: Default::default() }; }
+            }).or_insert_with(|| source.clone());
+        }
+    }
+    sources
+}
+
+/// Resolve only exact written identities, preserving every captured obsolete name as blocked.
+/// Current aliases cannot erase a retired canonical-name tombstone after a rename.
+pub(crate) fn target_sources(written: HashMap<PathBuf, Arc<Document>>, captured: &HashMap<PathBuf, SourceVersion>)
+    -> (HashMap<PathBuf, Arc<Document>>, std::collections::HashSet<PathBuf>)
+{
+    let identities = source_context(&written);
+    let mut blocked: std::collections::HashSet<_> = captured.keys().cloned().collect();
+    let mut open = HashMap::new();
+    for (path, doc) in written {
+        for alias in std::iter::once(path.as_path()).chain(doc.source_meta().canonical()) {
+            if captured.get(alias).is_some_and(|source| source.matches(&doc))
+                && identities.get(alias).is_some_and(|source| source.matches(&doc)) {
+                blocked.remove(alias);
+                open.insert(alias.to_owned(), doc.clone());
+            } else { blocked.insert(alias.to_owned()); }
+        }
+    }
+    (open, blocked)
+}
 
 pub struct Reply {
     /// The lane it was asked in.
@@ -1403,7 +1438,7 @@ impl Server {
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
         let sources = if matches!(lane, Lane::Foreground | Lane::Hierarchy) {
-            self.open.iter().map(|(path, doc)| (path.clone(), SourceVersion::new(doc))).collect()
+            source_context(&self.open)
         } else { Default::default() };
         self.pending.insert(lane, PendingRequest { request, id, sources });
         self.idle_since = None;
@@ -2172,6 +2207,34 @@ fn add_trigger_file(options: &mut Value, uri: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_target_aliases_preserve_snapshot_identity_and_refuse_collisions() {
+        let mut doc = Document::decode("/project/link.rs".into(), 7, b"fn target() {}\n");
+        doc.set_canonical("/outside/actual.rs".into());
+        let snapshot = crate::text::TextSnapshot::from_document(crate::text::BufferId(1), &doc);
+        let draft = snapshot.apply_edits(8, &[crate::text::TextEdit { range: 0..0, text: "// draft\n".into() }]).unwrap();
+        let doc = Arc::new(draft.materialize());
+        assert_eq!(doc.source_meta().canonical(), Some(Path::new("/outside/actual.rs")));
+        let written = HashMap::from([(doc.source().to_path_buf(), doc.clone())]);
+        let captured = source_context(&written);
+        let (open, blocked) = target_sources(written.clone(), &captured);
+        assert!(blocked.is_empty()); assert!(Arc::ptr_eq(&open[Path::new("/outside/actual.rs")], &doc));
+        let renamed = Arc::new(doc.renamed("/project/new.rs".into()));
+        assert!(renamed.source_meta().canonical().is_none(), "unknown rename identity cannot inherit the old canonical name");
+        let (open, blocked) = target_sources(HashMap::from([(renamed.source().to_path_buf(), renamed)]), &captured);
+        assert!(open.is_empty()); assert!(blocked.contains(Path::new("/outside/actual.rs")));
+        let mut other = Document::decode("/project/other.rs".into(), 8, b"fn other() {}\n");
+        other.set_canonical("/outside/actual.rs".into());
+        let mut collision = written; collision.insert(other.source().to_path_buf(), Arc::new(other));
+        let ambiguous = source_context(&collision);
+        let (open, blocked) = target_sources(collision.clone(), &captured);
+        assert!(!open.contains_key(Path::new("/outside/actual.rs")));
+        assert!(blocked.contains(Path::new("/outside/actual.rs")));
+        let (open, blocked) = target_sources(collision, &ambiguous);
+        assert!(!open.contains_key(Path::new("/outside/actual.rs")));
+        assert!(blocked.contains(Path::new("/outside/actual.rs")));
+    }
 
     #[test]
     fn request_target_contexts_replace_per_lane_and_retire_on_cancel_reply_and_exit() {
