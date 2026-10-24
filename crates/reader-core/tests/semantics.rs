@@ -1774,7 +1774,23 @@ fn the_context_menu_lists_navigation_then_copy_and_copies_paths() {
     f.open("src/main.rs");
     f.caret("helper();");
     use reader_core::session::MenuEntry::{Command as C, Separator};
-    assert_eq!(f.s.context_menu(), vec![C(CommandId::Definition), C(CommandId::PeekDefinition), C(CommandId::TypeDefinition), C(CommandId::Implementation), C(CommandId::Usages), C(CommandId::CallHierarchy), C(CommandId::TypeHierarchy), C(CommandId::Documentation), Separator, C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll), Separator, C(CommandId::Copy), C(CommandId::CopyPath), C(CommandId::CopyPathLine), C(CommandId::LocateFile), Separator, C(CommandId::AnnotateBlame), Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp), C(CommandId::CompareWith), Separator, C(CommandId::SplitRight), C(CommandId::SplitDown)]);
+    assert_eq!(f.s.context_menu(), vec![
+        C(CommandId::Definition), C(CommandId::PeekDefinition), C(CommandId::TypeDefinition),
+        C(CommandId::Implementation), C(CommandId::Usages), C(CommandId::CallHierarchy),
+        C(CommandId::TypeHierarchy), C(CommandId::Documentation), Separator,
+        C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll), Separator,
+        C(CommandId::Copy), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode),
+        C(CommandId::CopyPath), C(CommandId::CopyPathLine), C(CommandId::LocateFile), Separator,
+        C(CommandId::AnnotateBlame), Separator, C(CommandId::OpenInEditor), C(CommandId::OpenWithDefaultApp),
+        C(CommandId::CompareWith), C(CommandId::CompareSaved), C(CommandId::CloseSavedComparison), Separator,
+        C(CommandId::SplitRight), C(CommandId::SplitDown),
+    ]);
+    for id in [CommandId::Cut, CommandId::Paste, CommandId::Delete] {
+        assert_eq!(f.s.disabled(id), Some("Text input is gated on this unvalidated platform/backend"));
+    }
+    assert_eq!(f.s.disabled(CommandId::ReadOnlyMode), None);
+    assert_eq!(f.s.disabled(CommandId::CompareSaved), None);
+    assert_eq!(f.s.disabled(CommandId::CloseSavedComparison), Some("No saved comparison is open"));
     assert_eq!(f.s.dispatch(Command::CopyPath { line: false }).copy.as_deref(), Some("src/main.rs"));
     assert_eq!(f.s.dispatch(Command::CopyPath { line: true }).copy.as_deref(), Some("src/main.rs:2"));
     assert_eq!(CommandId::CopyPathLine.label(), "Copy Path:Line");
