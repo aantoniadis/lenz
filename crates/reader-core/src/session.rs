@@ -7,6 +7,8 @@ pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 mod save_work;
 #[path = "session/close.rs"]
 mod close_work;
+#[path = "session/transition.rs"]
+mod transition_work;
 
 use std::{
     path::{Path, PathBuf},
@@ -1920,6 +1922,8 @@ pub struct Session {
     versions: Arc<AtomicU64>,
     /// The tab the pending load or check is for, and whether it reloads shown content.
     pending: Option<(TabId, bool)>,
+    reload_source: Option<SemanticSource>,
+    checkout_sources: Vec<(crate::text::BufferId, SemanticSource)>,
     next_tab: u64,
     /// The current root's generation, for scans and rankings to stop when superseded.
     root_generation: Arc<AtomicU64>,
@@ -2115,7 +2119,7 @@ impl Session {
             other_current: Arc::new(AtomicU64::new(0)),
             renders: Arc::new(AtomicU64::new(0)),
             versions: Arc::new(AtomicU64::new(0)),
-            pending: None,
+            pending: None, reload_source: None, checkout_sources: Vec::new(),
             next_tab: 0,
             root_generation: Arc::new(AtomicU64::new(0)),
             project_generation: Arc::new(AtomicU64::new(0)),
@@ -3396,11 +3400,7 @@ impl Session {
             },
             Command::SaveWorkspace => { self.checkpoint_workspace(); self.places_saver.flush(); Effect::default() }
             Command::SetExplorer(explorer) => { self.state.explorer = explorer; repaint }
-            Command::OpenRoot(root) => {
-                self.state.tree_marks.clear();
-                self.open_root(root);
-                repaint
-            }
+            Command::OpenRoot(root) => self.prepare_transition(transition_work::Transition::Root(root)),
             Command::ActivateTree { path, retain } => self.activate_tree(path, retain),
             Command::ToggleDir(dir) => {
                 if self.state.libraries.rows().iter().any(|r| r.path.as_ref() == dir) {
@@ -3476,16 +3476,9 @@ impl Session {
                 Effect { repaint: open, copy: None }
             }
             Command::Reload if self.disabled(CommandId::Reload).is_some() => Effect::default(),
-            Command::Reload => match (self.state.active, self.state.current_source().is_some()) {
-                (Some(id), true) => {
-                    // Blamed again even when the bytes are the same: commits may have changed.
-                    if let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) {
-                        b.stamp = None;
-                    }
-                    self.load(id, true);
-                    repaint
-                }
-                _ => Effect::default(),
+            Command::Reload => match self.state.active.filter(|_| self.state.current_source().is_some()) {
+                Some(tab) => self.prepare_transition(transition_work::Transition::Reload(tab)),
+                None => Effect::default(),
             },
             Command::Select(s) => {
                 let Some(doc) = self.state.current() else { return Effect::default() };
@@ -3547,7 +3540,7 @@ impl Session {
                 repaint
             }
             Command::ClearTreeMarks => Effect { repaint: !std::mem::take(&mut self.state.tree_marks).is_empty(), copy: None },
-            Command::Checkout(target) => self.retry(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal),
+            Command::Checkout(target) => self.prepare_transition(transition_work::Transition::Checkout(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal)),
             Command::CheckoutChoice(choice) => {
                 use crate::branches::CheckoutChoice as C;
                 let Some(p) = self.state.checkout_problem.clone() else { return Effect::default() };
@@ -3558,7 +3551,7 @@ impl Session {
                     C::Cancel => self.state.checkout_problem = None,
                     C::Smart => {
                         self.state.checkout_problem = None;
-                        return self.retry(p.retry, lenz_content::branches::Mode::Smart);
+                        return self.prepare_transition(transition_work::Transition::Checkout(p.retry, lenz_content::branches::Mode::Smart));
                     }
                     C::Force => {
                         let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
@@ -3572,12 +3565,12 @@ impl Session {
                     }
                     C::ConfirmForce => {
                         self.state.checkout_problem = None;
-                        return self.retry(p.retry, lenz_content::branches::Mode::Force);
+                        return self.prepare_transition(transition_work::Transition::Checkout(p.retry, lenz_content::branches::Mode::Force));
                     }
                 }
                 repaint
             }
-            Command::NewBranch { name, from, checkout: true } => self.retry(crate::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal),
+            Command::NewBranch { name, from, checkout: true } => self.prepare_transition(transition_work::Transition::Checkout(crate::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal)),
             Command::NewBranch { name, from, checkout: false } => {
                 let Some(root) = self.writable_repo() else { return repaint };
                 let request = self.begin_checkout();
@@ -4838,6 +4831,12 @@ impl Session {
                 }
                 self.state.loading = None;
                 let reload = self.pending.take().is_some_and(|(_, r)| r);
+                let authorized = self.reload_source.take();
+                if reload && !authorized.as_ref().is_some_and(|source| self.state.source(tab).is_some_and(|now| source.matches(now))) {
+                    self.state.messages.push("Reload cancelled: the source changed while it was being read. The draft is retained.".into());
+                    self.load_other();
+                    return Effect { repaint: true, copy: None };
+                }
                 match result {
                     Ok((stamp, doc, canonical)) => {
                         // Two spellings of one file (a symlink, `..`) are one document: keep the tab already showing it.
@@ -4855,6 +4854,11 @@ impl Session {
                                 }
                             }
                             _ => {
+                                if reload && let Some(buffer) = self.state.source(tab).map(|source| source.key().buffer)
+                                    && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
+                                    entry.draft = None;
+                                    entry.save = Default::default();
+                                }
                                 if let Some(t) = self.tab_mut(tab) {
                                     t.canonical = canonical;
                                 }
@@ -4892,6 +4896,7 @@ impl Session {
                 }
                 self.state.checkout_running = None;
                 let retry = self.pending_checkout.take();
+                if result.is_err() || made { self.checkout_sources.clear(); }
                 // The folder changed meanwhile: what happened there is still said, naming it; nothing here reloads.
                 let here = self.state.repo.as_ref().is_some_and(|r| r.root == root);
                 let place = if here { String::new() } else { format!(" in {}", root.display()) };
@@ -4908,6 +4913,7 @@ impl Session {
                 match result {
                     Ok(_) if made => self.state.messages.push(format!("Created branch {label}{place}")),
                     Ok(outcome) => {
+                        self.finish_checkout_sources(here);
                         self.state.messages.push(format!("Checked out {now}{place}"));
                         if let Some(w) = outcome.warning {
                             self.state.messages.push(format!("Checkout{place}: {w}"));
@@ -7574,6 +7580,7 @@ impl Session {
         let Some(path) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone()) else { return };
         let request = self.next_request();
         self.pending = Some((id, reload));
+        self.reload_source = reload.then(|| self.state.source(id).map(|source| SemanticSource::new(source))).flatten();
         self.state.loading = Some(path.clone());
         let (latest, versions, tx) = (self.latest.clone(), self.versions.clone(), self.tx.clone());
         self.jobs.submit(Priority::Visible, move || {

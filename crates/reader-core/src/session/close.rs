@@ -28,6 +28,7 @@ pub(super) struct Pending {
     split: Option<Split>,
     project: u64,
     buffers: Vec<Fence>,
+    next: Option<super::transition_work::Transition>,
 }
 fn current_recheck(entry: &CurrentSource) -> Option<&crate::save::Revalidated> {
     if !matches!(entry.save.status, crate::save::Status::Checked(_)) {
@@ -114,6 +115,9 @@ impl Session {
         None
     }
     pub(crate) fn prepare_close(&mut self, intent: Intent, batch: Option<u64>) -> Effect {
+        self.prepare_close_with(intent, batch, None)
+    }
+    pub(super) fn prepare_close_with(&mut self, intent: Intent, batch: Option<u64>, next: Option<super::transition_work::Transition>) -> Effect {
         if self.closed || self.closing.is_some() {
             return Effect {
                 repaint: true,
@@ -128,7 +132,11 @@ impl Session {
                 .filter(|t| t.id == id)
                 .map(|t| t.id)
                 .collect(),
-            Intent::Session => self.state.tabs.iter().map(|t| t.id).collect(),
+            Intent::Session | Intent::Workspace => self.state.tabs.iter().map(|t| t.id).collect(),
+            Intent::Reload(id) => {
+                let buffer = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer);
+                self.state.tabs.iter().filter(|t| t.id == id || buffer.is_some() && t.buffer == buffer).map(|t| t.id).collect()
+            },
             Intent::Unsplit => self
                 .state
                 .tabs
@@ -195,6 +203,7 @@ impl Session {
             split: self.state.settings.split,
             project: self.project_generation.load(Ordering::Acquire),
             buffers,
+            next,
         });
         self.advance_close();
         Effect {
@@ -268,7 +277,7 @@ impl Session {
                 }
                 self.cancel_close();
                 self.state.messages.push(
-                    "Close cancelled: the requested Save was not confirmed. The draft is retained."
+                    "Operation cancelled: the requested Save was not confirmed. The draft is retained."
                         .into(),
                 );
                 return true;
@@ -368,7 +377,12 @@ impl Session {
                 .map(|f| f.buffer)
                 .collect(),
         });
+        if let Some(next) = pending.next {
+            let sources = pending.buffers.into_iter().map(|f| (f.buffer, f.source)).collect();
+            return self.commit_transition(next, sources);
+        }
         match pending.intent {
+            Intent::Reload(_) | Intent::Workspace => return Effect::default(),
             Intent::Tab(id) => {
                 self.close_tab(id);
             }

@@ -18,6 +18,31 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn reload_requires_current_decision_and_failed_read_retains_the_draft() {
+    use crate::close::Choice;
+    let d = tempfile::tempdir().unwrap(); let (mut s,path,tab)=close_fixture(d.path(),"reload.txt");
+    s.dispatch(Command::Select(Selection {anchor:6,head:8}));
+    s.dispatch(Command::Reload);
+    let first=s.close_prompt().expect("Reload must ask before replacing a dirty buffer");
+    assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n");
+    s.dispatch(Command::ChooseClose {ticket:first.ticket,buffer:first.buffer,choice:Choice::Cancel});
+    assert_eq!(s.state().selection(),Some(Selection {anchor:6,head:8}));
+    s.dispatch(Command::Reload); let second=s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {ticket:first.ticket,buffer:first.buffer,choice:Choice::Discard});
+    assert_eq!(s.close_prompt().unwrap().ticket,second.ticket);
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::ChooseClose {ticket:second.ticket,buffer:second.buffer,choice:Choice::Discard});
+    settle(&mut s,|s|s.state().loading().is_none());
+    assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n"); assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    std::fs::write(&path,b"external\r\n").unwrap();
+    s.dispatch(Command::Reload);let p=s.close_prompt().unwrap();s.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});
+    settle(&mut s,|s|s.state().loading().is_none());
+    assert_eq!(source_text(s.state().current_source().unwrap()),"external\r\n");
+    assert!(!active_view(&s).dirty() && !active_view(&s).can_undo());assert_eq!(s.state().active().unwrap().id(),tab);
+    assert_eq!(std::fs::read(path).unwrap(),b"external\r\n");
+}
+
+#[test]
 fn automatic_refresh_retains_draft_history_positions_and_reports_external_conflicts() {
     let d = tempfile::tempdir().unwrap();
     let (mut s, path, tab) = close_fixture(d.path(), "refresh.txt");
