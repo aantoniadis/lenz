@@ -57,7 +57,8 @@ native macOS validation is pending. The Reader edits existing files on verified 
   Dependency definitions reveal a lazy **Libraries** section for browsing their source files.
   F2 offers [project-scoped LSP settings](docs/code/providers.md#project-language-server-settings),
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
-- **Find** within a file or across the project, with case, whole-word and regular-expression
+- **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
+  step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
 - **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
   **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the

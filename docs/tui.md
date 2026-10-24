@@ -8,6 +8,11 @@ Reader editing also covers several selections: Alt+Shift+Down / Up and **Select 
 cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. The
 [terminal reader guide](code/tui.md) lists the keys and the terminal's modifier-key limits.
 
+Find in the current draft also replaces: both adapters open find with Ctrl+F, Tab moves to the replacement row,
+Enter replaces the current match and selects the next, and Alt+A replaces every listed match. The replacement text,
+pattern, options and captured document version live in the shared session, so the GUI's box and the terminal's
+prompt show the same state; each replace is one undo step on the draft and never writes a file.
+
 The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
 in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
 See the [Reader controls](code/tui.md) and [focused verification limits](research/reader-saved-comparison.md).

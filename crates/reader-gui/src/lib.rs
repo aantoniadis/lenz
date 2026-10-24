@@ -307,6 +307,8 @@ pub struct ReaderView {
     reading: Option<(Arc<lenz_content::theme::Palette>, Arc<lenz_gpui::markdown::ReadingStyle>)>,
     /// The pane whose find box has the keys (typing goes to its query).
     pub find_focus: Option<u8>,
+    /// The keys go to the find box's replacement row rather than its query.
+    pub find_replace: bool,
     /// Each pane's text size (columns, rows) last reported to the core.
     sent_size: [(usize, usize); 2],
     source: source::Cache,
@@ -632,7 +634,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1132,6 +1134,7 @@ impl ReaderView {
                 InterfaceAction::FindInFile => {
                     let seed = self.session.find_seed();
                     self.find_focus = Some(self.session.state().focused_pane());
+                    self.find_replace = false;
                     self.results_focus = false;
                     self.tree_focus = false;
                     self.dispatch(Command::Find(seed), cx);
@@ -1181,13 +1184,16 @@ impl ReaderView {
         }
     }
 
-    /// Keys while a find box has them: typing edits the query, Enter steps, Alt+C/W/R toggle the options, Alt+Enter
-    /// lists every match, Escape closes. Caret and page keys go on to the text. Returns whether it took the key.
+    /// Keys while a find box has them: typing edits the query or the replacement row, Enter steps (or replaces the
+    /// current match from the replacement row), Alt+A replaces every match, Alt+C/W/R toggle the options, Alt+Enter
+    /// lists every match, Tab switches rows, Escape closes. Caret and page keys go on to the text. Returns whether
+    /// it took the key.
     fn find_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
         let k = &ev.keystroke;
         let query = self.session.state().active().and_then(|t| t.find()).map(|f| f.query().to_owned());
         let Some(query) = query.filter(|_| self.find_focus == Some(self.session.state().focused_pane())) else {
             self.find_focus = None;
+            self.find_replace = false;
             return false;
         };
         let (key, ctrl, alt) = (k.key.as_str(), k.modifiers.control || k.modifiers.platform, k.modifiers.alt);
@@ -1196,11 +1202,20 @@ impl ReaderView {
                 let option = match key { "c" => FindOption::Case, "w" => FindOption::Word, _ => FindOption::Regex };
                 self.dispatch(Command::ToggleFindOption(option), cx);
             }
+            "a" if alt && !ctrl => self.dispatch(Command::ReplaceFind { all: true }, cx),
             "enter" if alt => self.dispatch(Command::ListMatches, cx),
+            "enter" if self.find_replace => self.dispatch(Command::ReplaceFind { all: false }, cx),
             "enter" => self.dispatch(Command::FindStep { forward: !k.modifiers.shift }, cx),
+            "tab" => self.find_replace = !k.modifiers.shift,
             "escape" => {
                 self.find_focus = None;
+                self.find_replace = false;
                 self.dispatch(Command::CloseFind, cx);
+            }
+            "backspace" if self.find_replace => {
+                let mut replacement = self.session.replace_text().to_owned();
+                replacement.pop();
+                self.dispatch(Command::SetReplaceText(replacement), cx);
             }
             "backspace" => {
                 let mut query = query;
@@ -1209,6 +1224,7 @@ impl ReaderView {
             }
             _ if ctrl || alt => return false,
             _ => match k.key_char.as_deref().filter(|c| !c.chars().any(char::is_control)) {
+                Some(typed) if self.find_replace => self.dispatch(Command::SetReplaceText(format!("{}{typed}", self.session.replace_text())), cx),
                 Some(typed) => self.dispatch(Command::Find(query + typed), cx),
                 None => return false,
             },
@@ -1216,7 +1232,7 @@ impl ReaderView {
         true
     }
 
-    /// The shared find control over this pane's document.
+    /// The shared find control over this pane's document, with its replacement row.
     pub fn find_box(&self, g: &PaneGeom) -> Option<FindBox> {
         let state = self.session.state();
         let f = state.shown(g.pane)?.find()?;
@@ -1229,6 +1245,11 @@ impl ReaderView {
             counter: f.counter(),
             error: f.error().is_some(),
             focused: self.find_focus == Some(g.pane),
+            show_replace: true,
+            replace_label: CommandId::ReplaceMatch.label().to_owned(),
+            replace: self.session.replace_text().to_owned(),
+            replace_focused: self.find_replace,
+            replace_row: Bounds::default(),
         }.layout(g.text, line_h(), self.char_w))
     }
 
@@ -2950,6 +2971,7 @@ impl ReaderView {
                         self.dispatch(Command::FocusPane(pane), cx);
                     }
                     self.find_focus = Some(pane);
+                    self.find_replace = b.replace_at(ev.position);
                     cx.notify();
                 }
             }
@@ -2957,6 +2979,7 @@ impl ReaderView {
         }
         // A click elsewhere gives the keys back to the text; the box stays open.
         self.find_focus = None;
+        self.find_replace = false;
         // A click on a suggestion accepts it; one elsewhere closes the popup (and goes on).
         if let Some((b, first, n)) = self.completion_drawn.filter(|_| self.session.state().completion().is_some()) {
             if b.contains(&ev.position) {

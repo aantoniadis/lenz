@@ -178,6 +178,8 @@ impl Session {
             CommandId::MatchCase => Command::ToggleFindOption(FindOption::Case),
             CommandId::WholeWord => Command::ToggleFindOption(FindOption::Word),
             CommandId::RegularExpression => Command::ToggleFindOption(FindOption::Regex),
+            CommandId::ReplaceMatch => Command::ReplaceFind { all: false },
+            CommandId::ReplaceAll => Command::ReplaceFind { all: true },
             CommandId::ListMatches => Command::ListMatches,
             CommandId::SoftWrap => Command::SetSoftWrap(!state.soft_wrap()),
             CommandId::StickyScroll => Command::SetStickyScroll(!state.sticky_scroll()),
@@ -362,7 +364,7 @@ impl CommandId {
             | Self::TypeHierarchy | Self::TypeHierarchySupertypes | Self::TypeHierarchySubtypes
             | Self::Documentation => G::Navigate,
             Self::SearchEverywhere | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
-            | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
+            | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ReplaceMatch | Self::ReplaceAll | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
             Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection

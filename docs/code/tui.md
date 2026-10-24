@@ -188,6 +188,7 @@ the Last saved pane remains read-only.
 | Compare two explorer entries | Space on each (or Ctrl+click where the terminal reports it), then Ctrl+D; Esc forgets them |
 | Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare Saved Disk Inputs… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |
+| Replace current / every match | In find: Tab to the Replace field, Enter replaces the match; Alt-A replaces all (also F10 → Find) |
 | Find options | Alt-C / Alt-W / Alt-R in find or search |
 | Search project / file pattern | Ctrl-Shift-F / Tab in search |
 | Reload / close tab | Ctrl-R or F5 / Ctrl-F4 (VS Code keymap: Ctrl-W closes) |
@@ -273,6 +274,14 @@ servers while rebuilding local symbols. Both controls also appear in F10 and Fin
 
 The finder accepts `name:line[:column]`. Go to line accepts `line`, `line:column` or `line,column` and reports
 invalid input. Find updates while typing; Enter leaves its matches available for F3, while Esc closes find.
+
+The find prompt's second field is the replacement text: Tab gives it the keys and Shift-Tab returns to the query,
+Enter in the Replace row replaces the current match and keeps the prompt open for the next one, and Alt-A replaces
+every listed match. The
+prompt's footer shows the counter, "No matches" or the expression's error. The replacement is literal (no `$1`
+groups), an empty one deletes the match, each replace is one undo step and only the current draft changes; Replace
+All refuses a search capped at 10,000 matches. Read-only files and previews refuse replace and say why.
+
 Project search supports the same file globs, options, streamed results and cancellation as the GUI. Result
 selection previews a snapshot; Enter validates and opens it. Left/Right fold result groups and hierarchy levels;
 the palette changes hierarchy direction. Mouse and keyboard selection copy source bytes, including hidden folded

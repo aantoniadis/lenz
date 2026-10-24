@@ -759,6 +759,7 @@ impl App {
         match kind {
             Prompt::Find => {
                 input = self.session.find_seed();
+                secondary = self.session.replace_text().to_owned();
                 self.dispatch(Command::Find(input.clone()));
             }
             Prompt::Search => {
@@ -1122,7 +1123,7 @@ impl App {
                 Prompt::RecentRoots => "Recent folders",
                 Prompt::Navigation => "Search Everywhere · Tab scope · ↑↓ select · Enter open",
                 Prompt::Search => "Search in Project",
-                Prompt::Find => "Find in file · F3 next · Alt+C/W/R options",
+                Prompt::Find => "Find in file · Tab replaces · F3 next · Alt+C/W/R options",
                 Prompt::Declarations => "Find declaration · Tab: workspace symbols",
                 Prompt::Symbols => "Workspace symbols · Tab: declarations",
                 Prompt::GoTo => "Go to line · line:column",
@@ -1267,7 +1268,8 @@ impl App {
         modal.top = 0;
         modal.reveal_selection = true;
         modal.error = None;
-        let (kind, query) = (modal.kind.clone(), modal.input.clone());
+        let (kind, query, replacement, replacing) =
+            (modal.kind.clone(), modal.input.clone(), modal.secondary.clone(), modal.secondary_focus);
         match kind {
             Prompt::Navigation => {
                 if let Some(search) = self.session.state().navigation() {
@@ -1277,6 +1279,8 @@ impl App {
                     });
                 }
             }
+            // The replacement field only edits remembered text; Enter in it replaces (see `accept`).
+            Prompt::Find if replacing => self.dispatch(Command::SetReplaceText(replacement)),
             Prompt::Find => self.dispatch(Command::Find(query)),
             Prompt::Declarations => self.dispatch(Command::FindDeclarations(query)),
             Prompt::Symbols => self.dispatch(Command::Symbols(query)),
@@ -1356,6 +1360,13 @@ impl App {
             && let Some(Modal { kind: Prompt::NewBranch { checkout, .. }, .. }) = self.modal.as_mut()
         {
             *checkout = !*checkout;
+            return;
+        }
+        if kind == Prompt::Find && matches!(key.code, KeyCode::Tab | KeyCode::BackTab) && !control && !alt {
+            if let Some(m) = self.modal.as_mut() {
+                // Tab gives the replacement row the keys; Shift-Tab (BackTab) returns to the query, as in the GUI.
+                m.secondary_focus = !(matches!(key.code, KeyCode::BackTab) || key.modifiers.contains(KeyModifiers::SHIFT));
+            }
             return;
         }
         if matches!(kind, Prompt::Details {kind:Details::Replace,..}) {
@@ -1468,6 +1479,8 @@ impl App {
                 && let Some(id) = command
             {
                 self.run(id);
+            } else if kind == Prompt::Find && matches!(key.code, KeyCode::Char('a' | 'A')) {
+                self.dispatch(Command::ReplaceFind { all: true });
             }
             return;
         }
@@ -1762,6 +1775,11 @@ impl App {
                         SearchIn::Matching(secondary)
                     },
                 });
+            }
+            // From the replacement field Enter replaces the current match and keeps the prompt for the next one;
+            // from the query field it steps on and closes, as before.
+            Prompt::Find if self.modal.as_ref().is_some_and(|m| m.secondary_focus) => {
+                self.dispatch(Command::ReplaceFind { all: false });
             }
             Prompt::Find => {
                 self.close_modal();

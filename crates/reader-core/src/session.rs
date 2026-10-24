@@ -177,6 +177,12 @@ pub enum Command {
     CloseFind,
     /// Flip one find option (case, whole word, regular expression); an open find runs again with it.
     ToggleFindOption(lenz_content::find::FindOption),
+    /// The text Replace and Replace All write in place of a match; remembered while the reader runs, like the
+    /// find options. It is literal: a regular expression's groups are not expanded.
+    SetReplaceText(String),
+    /// Replace the focused tab's current find match (or every listed match) with the replacement text, at the
+    /// query, options and document version the matches were found for.
+    ReplaceFind { all: bool },
     /// Put the caret at a 1-based line and column of the active document (clamped to it), its fold open; a step in
     /// history (Back returns).
     GoToLine(lenz_content::goto::LineColumn),
@@ -438,6 +444,10 @@ pub enum CommandId {
     MatchCase,
     WholeWord,
     RegularExpression,
+    /// Replace the current match of the focused tab's find with the replacement text.
+    ReplaceMatch,
+    /// Replace every listed match of the focused tab's find with the replacement text.
+    ReplaceAll,
     /// The find query's matches listed in the results panel.
     ListMatches,
     /// Go to a line (or line:column) of the active document.
@@ -646,7 +656,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 153] = [
+    pub const ALL: [CommandId; 155] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -659,6 +669,8 @@ impl CommandId {
         Self::MatchCase,
         Self::WholeWord,
         Self::RegularExpression,
+        Self::ReplaceMatch,
+        Self::ReplaceAll,
         Self::ListMatches,
         Self::GoToLine,
         Self::SoftWrap,
@@ -837,6 +849,8 @@ impl CommandId {
             Self::MatchCase => "Find: Match Case",
             Self::WholeWord => "Find: Whole Word",
             Self::RegularExpression => "Find: Regular Expression",
+            Self::ReplaceMatch => "Replace",
+            Self::ReplaceAll => "Replace All",
             Self::ListMatches => "List All Matches",
             Self::GoToLine => "Go to Line…",
             Self::SoftWrap => "Soft Wrap",
@@ -2281,6 +2295,8 @@ pub struct Session {
     search_latest: Arc<AtomicU64>,
     /// Case, whole word, regular expression: the find box's and project search's options, while the reader runs.
     find_options: lenz_content::find::FindOptions,
+    /// What Replace and Replace All write instead of a match, while the reader runs.
+    replace_text: String,
     find_seq: u64,
     /// Where to go once a source opened by [`Command::OpenAt`] or a place jump is shown.
     pending_goto: Option<(PathBuf, Goto)>,
@@ -2486,6 +2502,7 @@ impl Session {
             refresh_seq: 0,
             search_latest: Arc::new(AtomicU64::new(0)),
             find_options: Default::default(),
+            replace_text: String::new(),
             find_seq: 0,
             pending_goto: None,
             search_seq: 0,
@@ -2658,6 +2675,7 @@ impl Session {
             },
             CommandId::NextMatch | CommandId::PreviousMatch | CommandId::CloseFind | CommandId::ListMatches => self.state.active().and_then(|t| t.find.as_ref()).is_none().then_some("No find is open"),
             CommandId::MatchCase | CommandId::WholeWord | CommandId::RegularExpression => None,
+            CommandId::ReplaceMatch | CommandId::ReplaceAll => self.find_action_disabled(id),
             CommandId::SoftWrap => match self.state.active().and_then(|t| Some((t, self.state.view(t.id).map(|view| view.snapshot())?))) {
                 Some((_, d)) if d.is_large() => Some("Too large to wrap"),
                 Some((t, d)) if d.image().is_some() && !t.image_source => Some("An image has no lines"),
@@ -3794,6 +3812,11 @@ impl Session {
                     None => Effect { repaint: true, ..Effect::default() },
                 }
             }
+            Command::SetReplaceText(text) => {
+                self.replace_text = text;
+                Effect { repaint: true, ..Effect::default() }
+            }
+            Command::ReplaceFind { all } => self.replace_find(all),
             Command::ListMatches => match self.state.active().and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) {
                 Some(query) => self.command(Command::Search { query, scope: SearchIn::ActiveFile }),
                 None => Effect::default(),
@@ -7389,6 +7412,11 @@ impl Session {
         self.find_options
     }
 
+    /// The text Replace and Replace All write in place of a match (literal; empty deletes the matches).
+    pub fn replace_text(&self) -> &str {
+        &self.replace_text
+    }
+
     /// Why `query` cannot be searched with the session's options (a bad regular expression); project search refuses it.
     pub fn search_refusal(&self, query: &str) -> Option<String> {
         lenz_content::find::Matcher::new(&lenz_content::find::Query { text: query.to_owned(), options: self.find_options }).err().map(|e| e.to_string())
@@ -7479,6 +7507,64 @@ impl Session {
         let effect = self.command(Command::Open(m.source.to_path_buf()));
         self.apply_pending_goto();
         Effect { repaint: true, ..effect }
+    }
+
+    /// Availability of Replace and Replace All: the same source permissions as editing, and a settled find whose
+    /// matches are for the document version shown now (a later edit rejects them rather than replacing stale text).
+    fn find_action_disabled(&self, id: CommandId) -> Option<&'static str> {
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Some("No loaded file is open") };
+        if let Some(why) = view.edit_disabled() { return Some(why); }
+        if matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return Some("Replace works on the source; Ctrl+Shift+V shows it") }
+        if !self.text_input_enabled { return Some("Text input is gated on this unvalidated platform/backend") }
+        let Some(find) = view.tab().find() else { return Some("No find is open") };
+        if find.error().is_some() { return Some("The search pattern is invalid") }
+        if find.pending() { return Some("Wait for the search to finish") }
+        if find.version != view.snapshot().key().version { return Some("The search results are out of date") }
+        if find.matches().is_empty() { return Some("No matches to replace") }
+        match id {
+            CommandId::ReplaceAll => find.capped().then_some("Only the first 10,000 matches are listed; narrow the search to replace all"),
+            _ => find.current().filter(|current| *current < find.matches().len()).is_none().then_some("No current match to replace"),
+        }
+    }
+
+    /// Replace the focused tab's current find match (or every listed match) with the replacement text: one
+    /// `Replace` transaction per press, at the version the matches were found for. A single replace then selects
+    /// the next match once its results arrive.
+    fn replace_find(&mut self, all: bool) -> Effect {
+        let id = if all { CommandId::ReplaceAll } else { CommandId::ReplaceMatch };
+        if let Some(why) = self.find_action_disabled(id) {
+            self.state.messages.push(format!("Replace: {why}"));
+            return Effect { repaint: true, copy: None, ..Effect::default() };
+        }
+        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return Effect::default() };
+        let (tab, expected, find) = (view.tab().id(), view.snapshot().key(), view.tab().find());
+        let Some(find) = find else { return Effect::default() };
+        let ranges: Vec<std::ops::Range<usize>> = match (all, find.current()) {
+            (false, Some(current)) => find.matches().get(current).map(|(line, range)| {
+                let start = view.snapshot().reader_line_range(*line).start;
+                start + range.start..start + range.end
+            }).into_iter().collect(),
+            _ => find.matches().iter().map(|(line, range)| {
+                let start = view.snapshot().reader_line_range(*line).start;
+                start + range.start..start + range.end
+            }).collect(),
+        };
+        let replacement = self.replace_text.clone();
+        // Writing the matched text back changes nothing: a single replace steps on instead, as a find step does.
+        let unchanged = ranges.len() == 1 && view.snapshot().copy_range(ranges[0].clone()).as_deref() == Some(replacement.as_str());
+        let replaced = ranges.len();
+        let edits: Vec<crate::text::TextEdit> = ranges.into_iter().map(|range| crate::text::TextEdit { range, text: replacement.as_str().into() }).collect();
+        if !all && unchanged { return self.find_step(true) }
+        let effect = self.edit(tab, expected, edits, crate::text::EditKind::Replace);
+        if effect.repaint {
+            if all {
+                self.state.messages.push(format!("Replaced {replaced} {}", if replaced == 1 { "match" } else { "matches" }));
+            } else if let Some(find) = self.tab_mut(tab).and_then(|tab| tab.find.as_mut()) {
+                // The edit's own rerun carries no reveal; ask it to select the match after the replacement.
+                find.reveal = true;
+            }
+        }
+        effect
     }
 
     /// Step the active tab's find to its next (or previous) match, wrapping and saying so.

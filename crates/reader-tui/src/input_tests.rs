@@ -1,6 +1,8 @@
 use super::*;
 #[path = "input_tests/external.rs"]
 mod external;
+#[path = "input_tests/find_replace.rs"]
+mod find_replace;
 #[path = "input_tests/save_as.rs"]
 mod save_as;
 #[path = "input_tests/recovery.rs"]

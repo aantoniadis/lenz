@@ -2010,6 +2010,8 @@ impl Viewer {
             bounds: Bounds::default(), toggles: [(FindOption::Case, Bounds::default()); 3],
             on: [o.case, o.word, o.regex], query: f.query.clone(), counter: f.counter(),
             error: f.error().is_some(), focused: self.modal() == Some(Modal::Find),
+            // Diff's find bar searches the comparison; it has no replace.
+            show_replace: false, replace_label: String::new(), replace: String::new(), replace_focused: false, replace_row: Bounds::default(),
         }.layout(pane, line_h(), self.text_char_w()))
     }
     #[cfg(all(test, feature = "gui-test"))]
