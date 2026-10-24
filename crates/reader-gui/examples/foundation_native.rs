@@ -41,7 +41,8 @@ fn snapshot(view: &ReaderView) -> Value {
             "selection": view.tab().selection().map(|s| [s.anchor,s.head]),
             "top_line": view.tab().top_line(), "column": view.tab().column()})
     });
-    json!({"source":source,"closed":session.closed(),"close_prompt":session.close_prompt().map(|p|json!({
+    let marked = view.marked_text_for_test().map(|(range, text)| json!({"utf16":[range.start,range.end],"text":text}));
+    json!({"source":source,"marked":marked,"closed":session.closed(),"close_prompt":session.close_prompt().map(|p|json!({
         "ticket":p.ticket,"buffer":p.buffer.0,"waiting":p.waiting,
         "save_disabled":p.save_disabled,"discard_disabled":p.discard_disabled}))})
 }

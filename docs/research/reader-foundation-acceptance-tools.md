@@ -88,3 +88,7 @@ The constructor test uses TestPlatform and is deliberately not the native delive
 gate-off assertion pins preparation safety; only the later validated-target enablement may change that
 expectation. The Python tests are pure protocol/environment/state-parser checks; they start no server,
 application or timed workload. All production and cohort acceptance remains separate.
+
+Collector revision for this cohort: `code-tui-bench.py` schema3 dismisses the palette with Escape before Ctrl-Q, matching the shared modal-first close contract. Its latency endpoints remain first observed PTY output; environment revision2 preserves HOME while isolating XDG. The archived startup-pair wrapper advances schema1→2 for the same environment change. Historical drivers and samples remain untouched; staged driver hashes are recorded under `merge-14-23/performance/staged-collector-identity.json`.
+
+The native observer now records22's real bounded marked-text metadata. The supplement requires two consecutive dead-key compositions with no intervening Undo/navigation, exact `éé`, then one Undo per commit. These assertions have not yet run against X11; physical display, Wayland, native macOS and native cancellation remain unverified. The corrected collector has focused pure/owned-PTY checks only; no cohort timings or stress have run.

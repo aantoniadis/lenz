@@ -198,22 +198,29 @@ def main():
                 focus(a); key('a', 'Control_L')
                 wait_for(lambda: state('a')['source']['selection'] == [0, 7], 'capture selected draft before preedit')
                 captured = state('a')['source']
-                xtest.fake_input(connection, X.KeyPress, compose_code)
-                xtest.fake_input(connection, X.KeyRelease, compose_code)
-                connection.sync()
-                marked = wait_for(lambda: state('a').get('marked'), '22 read-only marked-state oracle after native XKB preedit')
-                assert state('a')['source'] == captured
-                assert exact_text(state('a')) == 'draft-a'
-                screenshot(a, 'native-preedit')
-                key('e')
-                wait_for(lambda: exact_text(state('a')) == 'é', 'native compose commits exact Unicode')
-                assert not state('a').get('marked')
-                key('z', 'Control_L')
-                wait_for(lambda: exact_text(state('a')) == 'draft-a', 'one Undo removes one composed transaction')
+                marked_phases = []
+                for phase, expected_before, expected_after in [(1, 'draft-a', 'é'), (2, 'é', 'éé')]:
+                    captured = state('a')['source']
+                    xtest.fake_input(connection, X.KeyPress, compose_code)
+                    xtest.fake_input(connection, X.KeyRelease, compose_code)
+                    connection.sync()
+                    marked = wait_for(lambda: state('a').get('marked'), f'positive native preedit phase {phase}')
+                    assert marked['text'], marked
+                    assert state('a')['source'] == captured
+                    assert exact_text(state('a')) == expected_before
+                    screenshot(a, f'native-preedit-{phase}')
+                    marked_phases.append(marked)
+                    key('e')
+                    wait_for(lambda: exact_text(state('a')) == expected_after and not state('a').get('marked'),
+                             f'native Unicode commit phase {phase}')
+                # No navigation or Undo between compositions: exercise the same ended input context.
+                for expected in ['é', 'draft-a']:
+                    key('z', 'Control_L')
+                    wait_for(lambda: exact_text(state('a')) == expected, f'one transaction Undo to {expected!r}')
                 assert (root / 'app/a.txt').read_bytes() == originals['a']
-                report['compose'] = {'marked': marked, 'commit': 'é', 'undo': 'draft-a',
+                report['compose'] = {'marked_phases': marked_phases, 'commit': 'éé', 'undos': ['é', 'draft-a'],
                                      'native_cancel': 'not exercised; platform Cancelled can commit a dead-key prefix'}
-                report['checks'].append('native XKB preedit leaves authoritative draft/history unchanged; one Unicode commit and one Undo; disk untouched')
+                report['checks'].append('two consecutive native preedits preserve authoritative draft/history; exact éé commits undo independently; disk untouched')
             if args.scenario in ('close', 'both'):
                 focus(a); request_close()
                 wait_for(lambda: state('a').get('close_prompt'), 'fresh close decision')
