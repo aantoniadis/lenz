@@ -1879,7 +1879,13 @@ fn visible_find_promotes_its_queued_background_materialization() {
     s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
     s.dispatch(operation);
     releases[0].send(()).unwrap();
-    let before_sentinel = sentinel_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    let until = std::time::Instant::now() + Duration::from_secs(5);
+    let before_sentinel = loop {
+        if let Ok(count) = sentinel_rx.try_recv() { break count; }
+        assert!(std::time::Instant::now() < until, "promoted dependency and consumer did not release the executor reservation");
+        while let Ok(completion) = s.completions().try_recv() { s.dispatch(completion); }
+        std::thread::yield_now();
+    };
     for release in releases.iter().skip(1) { release.send(()).unwrap(); }
     if finding { settle(&mut s, |s| s.state().active().unwrap().find().is_some_and(|f| !f.pending)); }
     assert_eq!(before_sentinel, 1, "new visible demand must promote an already queued background materializer");
