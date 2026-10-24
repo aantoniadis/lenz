@@ -45,6 +45,8 @@ pub(crate) struct State {
     pub read: Option<Baseline>,
     pub status: Status,
     pub captured: Option<Captured>,
+    /// Actual accounted successful write; compaction and recheck never create this receipt.
+    pub written: Option<(u64, crate::session::SemanticSource)>,
     pub attempted: Option<Arc<TextSnapshot>>,
     pub checked: Option<Checked>,
 }

@@ -7,17 +7,27 @@ impl Session {
     pub(super) fn save_disabled(&self, tab: TabId) -> Option<&'static str> {
         let Some(view) = self.state.view(tab) else { return Some("No loaded file is open") };
         if let Some(why) = view.edit_disabled() { return Some(why); }
-        if view.save_status().busy() { return Some("A save operation is running"); }
-        if view.save_status().blocked() { return Some("Recheck and confirm the disk outcome before saving again"); }
-        if view.save.read.is_none() { return Some("This source has no confirmed write target; reopen the file before saving"); }
-        if view.write_path_changed() { return Some("The saved target path changed; recheck and confirm the current file before saving"); }
-        if !view.dirty() { return Some("No unsaved changes"); }
+        self.save_buffer_disabled(view.snapshot().key().buffer)
+    }
+    pub(super) fn save_buffer_disabled(&self, buffer: crate::text::BufferId) -> Option<&'static str> {
+        let Some(entry) = self.state.sources.buffers.get(&buffer) else { return Some("No file is open") };
+        let Some(source) = entry.snapshot.as_ref() else { return Some("Current source is unavailable") };
+        if source.image().is_some() || source.source_meta().is_binary() || source.source_meta().is_lossy()
+            || self.state.tabs.iter().any(|t| t.buffer == Some(buffer) && t.retrieved.is_some()) { return Some("This source is read-only"); }
+        if entry.save.status.busy() { return Some("A save operation is running"); }
+        if entry.save.status.blocked() { return Some("Recheck and confirm the disk outcome before saving again"); }
+        let Some(read) = &entry.save.read else { return Some("This source has no confirmed write target; reopen the file before saving") };
+        if read.snapshot.path != source.source() { return Some("The saved target path changed; recheck and confirm the current file before saving"); }
+        if !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return Some("No unsaved changes"); }
         None
     }
     pub(super) fn save(&mut self, tab: TabId) -> Effect {
         if let Some(why) = self.save_disabled(tab) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
-        let Some(view) = self.state.view(tab) else { return Effect::default() };
-        let buffer = view.snapshot().key().buffer;
+        let Some(buffer) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.buffer) else { return Effect::default() };
+        self.save_buffer(buffer)
+    }
+    pub(super) fn save_buffer(&mut self, buffer: crate::text::BufferId) -> Effect {
+        if let Some(why) = self.save_buffer_disabled(buffer) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
         let project = self.project_generation.load(Ordering::Acquire);
         self.save_seq += 1; let request = self.save_seq;
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
@@ -120,6 +130,7 @@ impl Session {
                 Outcome::Written(WriteOutcome::Saved { snapshot, target }) => {
                     let read = save::Baseline { snapshot, target };
                     if entry.snapshot.as_ref().is_some_and(|current| Arc::ptr_eq(current.source_meta(), captured.source_meta())) {
+                        entry.save.written = Some((request, SemanticSource::new(&captured)));
                         self.saved_baseline(buffer, captured, read);
                     } else {
                         entry.save.status = Status::Uncertain(format!("Captured Save completed at {}, but the current source identity changed. Recheck the current file before confirming its baseline.", read.snapshot.path.display()));

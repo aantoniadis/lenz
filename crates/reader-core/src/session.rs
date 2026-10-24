@@ -5,6 +5,8 @@
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
+#[path = "session/close.rs"]
+mod close_work;
 
 use std::{
     path::{Path, PathBuf},
@@ -70,6 +72,9 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    ChooseClose { ticket: u64, buffer: crate::text::BufferId, choice: crate::close::Choice },
+    CancelClose,
+    CommitClose(crate::close::Permit),
     /// Apply one atomic UTF-8 transaction to this exact current version.
     Edit { tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind },
     Undo { tab: TabId },
@@ -1871,6 +1876,10 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    id: crate::close::SessionId,
+    close_seq: u64,
+    closing: Option<close_work::Pending>,
+    closed: bool,
     state: State,
     cache: InactiveCache,
     index_cache_dir: PathBuf,
@@ -2035,6 +2044,7 @@ impl Session {
         });
         let merged = tx.clone();
         Self {
+            id: crate::close::SessionId::allocate(), close_seq: 0, closing: None, closed: false,
             state: State {
                 sources: Sources::default(),
                 tabs: Vec::new(),
@@ -2836,6 +2846,7 @@ impl Session {
         effect.repaint |= self.retry_semantic_analysis();
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
         effect.repaint |= self.account_saves();
+        effect.repaint |= self.advance_close();
         effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
         for reply in self.state.semantics.take_failures() { effect.repaint |= self.semantic_reply(reply).repaint; }
@@ -3128,9 +3139,12 @@ impl Session {
                 });
                 Effect::default()
             }
-            Command::CloseTab(id) => self.close_tab(id),
+            Command::ChooseClose { ticket, buffer, choice } => self.choose_close(ticket, buffer, choice),
+            Command::CancelClose => { self.cancel_close(); repaint }
+            Command::CommitClose(permit) => self.commit_close(permit),
+            Command::CloseTab(id) => self.prepare_close(crate::close::Intent::Tab(id), None),
             Command::Close => match self.state.active {
-                Some(id) => self.close_tab(id),
+                Some(id) => self.prepare_close(crate::close::Intent::Tab(id), None),
                 None => Effect::default(),
             },
             Command::Pin(id) => match self.state.tabs.iter_mut().find(|t| t.id == id && !t.retained) {
@@ -3416,34 +3430,7 @@ impl Session {
                 }
                 repaint
             }
-            Command::Unsplit => {
-                if self.state.settings.split.take().is_none() {
-                    return Effect::default();
-                }
-                let (focused, away) = (self.state.focused, 1 - self.state.focused);
-                let other = self.state.other.take();
-                if other.is_some() {
-                    self.other_current.store(0, Ordering::Relaxed);
-                }
-                // From an empty pane, the other pane's file stays shown; else it is let go.
-                let shown = other.filter(|_| self.state.active.is_none());
-                if let Some(id) = other.filter(|_| shown.is_none()) {
-                    self.release(id);
-                }
-                // A source open in both panes keeps the focused pane's tab.
-                let twins: Vec<TabId> = self.state.tabs.iter().filter(|t| t.pane == away && self.state.tabs.iter().any(|u| u.pane == focused && u.source == t.source)).map(|t| t.id).collect();
-                self.state.tabs.retain(|t| !twins.contains(&t.id));
-                for t in &mut self.state.tabs {
-                    t.pane = 0;
-                }
-                self.state.focused = 0;
-                if let Some(id) = shown {
-                    self.activate(id);
-                }
-                self.save_settings();
-                self.rewatch();
-                repaint
-            }
+            Command::Unsplit => self.prepare_close(crate::close::Intent::Unsplit, None),
             Command::FocusPane(pane) => Effect { repaint: self.focus_pane(pane), copy: None },
             Command::MoveTab { tab, pane, index } => self.move_tab(tab, pane, index),
             Command::SetLayout(layout) => {
@@ -7296,6 +7283,37 @@ impl Session {
         self.release_current();
     }
 
+    fn unsplit(&mut self) -> Effect {
+
+                if self.state.settings.split.take().is_none() {
+                    return Effect::default();
+                }
+                let (focused, away) = (self.state.focused, 1 - self.state.focused);
+                let other = self.state.other.take();
+                if other.is_some() {
+                    self.other_current.store(0, Ordering::Relaxed);
+                }
+                // From an empty pane, the other pane's file stays shown; else it is let go.
+                let shown = other.filter(|_| self.state.active.is_none());
+                if let Some(id) = other.filter(|_| shown.is_none()) {
+                    self.release(id);
+                }
+                // A source open in both panes keeps the focused pane's tab.
+                let twins: Vec<TabId> = self.state.tabs.iter().filter(|t| t.pane == away && self.state.tabs.iter().any(|u| u.pane == focused && u.source == t.source)).map(|t| t.id).collect();
+                self.state.tabs.retain(|t| !twins.contains(&t.id));
+                for t in &mut self.state.tabs {
+                    t.pane = 0;
+                }
+                self.state.focused = 0;
+                if let Some(id) = shown {
+                    self.activate(id);
+                }
+                self.save_settings();
+                self.rewatch();
+                Effect { repaint: true, copy: None }
+
+    }
+
     fn close_tab(&mut self, id: TabId) -> Effect {
         let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else {
             return Effect::default();
@@ -7308,7 +7326,7 @@ impl Session {
     /// After the user closed or moved a tab out of `pane`: a split pane left without tabs closes the split.
     fn left_pane(&mut self, pane: u8) -> Effect {
         if self.state.settings.split.is_some() && !self.state.tabs.iter().any(|t| t.pane == pane) {
-            return self.command(Command::Unsplit);
+            return self.unsplit();
         }
         self.rewatch();
         Effect { repaint: true, copy: None }

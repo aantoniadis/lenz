@@ -9,6 +9,74 @@ use lenz_content::goto::LineColumn;
 fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.len_bytes()).unwrap() }
 fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
 
+fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
+    let path = write(dir, name, b"saved\r\n");
+    let mut s = session(&dir.join(format!("{name}-state")));
+    open(&mut s, Command::OpenRetained(path.clone()), name);
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..5, text: "draft λ".into() }], kind: crate::text::EditKind::Replace });
+    (s, path, tab)
+}
+#[test]
+fn close_batch_cancel_preserves_every_draft_and_only_explicit_saves_persist() {
+    use crate::close::{Choice, CloseCoordinator, Progress};
+    for choice in [Choice::Discard, Choice::Save] {
+        let d = tempfile::tempdir().unwrap(); let (mut a, ap, at) = close_fixture(d.path(), "a.txt"); let (mut b, bp, bt) = close_fixture(d.path(), "b.txt");
+        let mut coordinator = CloseCoordinator::default(); coordinator.register(a.id()); coordinator.register(b.id());
+        coordinator.begin(&mut [&mut a, &mut b]);
+        assert_eq!(coordinator.progress(&mut [&mut a, &mut b]), Progress::Pending(a.id()));
+        let prompt = a.close_prompt().unwrap(); a.dispatch(Command::ChooseClose { ticket: prompt.ticket, buffer: prompt.buffer, choice });
+        if choice == Choice::Save { settle(&mut a, |s| s.close_prompt().is_none()); }
+        assert!(!a.closed() && !b.closed(), "early consent must never remove a participant");
+        let prompt = b.close_prompt().unwrap(); b.dispatch(Command::ChooseClose { ticket: prompt.ticket, buffer: prompt.buffer, choice: Choice::Cancel });
+        assert_eq!(coordinator.progress(&mut [&mut a, &mut b]), Progress::Cancelled);
+        assert_eq!(a.state().active().unwrap().id(), at); assert_eq!(b.state().active().unwrap().id(), bt);
+        assert_eq!(source_text(a.state().current_source().unwrap()), "draft λ\r\n"); assert_eq!(source_text(b.state().current_source().unwrap()), "draft λ\r\n");
+        assert_eq!(std::fs::read(ap).unwrap(), if choice == Choice::Save { "draft λ\r\n".as_bytes() } else { b"saved\r\n" });
+        assert_eq!(std::fs::read(bp).unwrap(), b"saved\r\n");
+    }
+}
+#[test]
+fn close_batch_rejects_edited_or_replaced_membership_before_any_commit() {
+    use crate::close::{Choice, CloseCoordinator, Progress};
+    for new_member in [false, true] {
+        let d = tempfile::tempdir().unwrap(); let (mut a, ap, _) = close_fixture(d.path(), "a.txt"); let (mut b, bp, _) = close_fixture(d.path(), "b.txt");
+        let mut coordinator = CloseCoordinator::default(); coordinator.register(a.id()); coordinator.register(b.id()); coordinator.begin(&mut [&mut a, &mut b]);
+        for s in [&mut a, &mut b] { let p=s.close_prompt().unwrap(); s.dispatch(Command::ChooseClose { ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard }); }
+        if new_member { let c=session(&d.path().join("c")); coordinator.register(c.id()); }
+        else { let tab=a.state().active().unwrap().id(); let expected=a.state().current_source().unwrap().key(); a.dispatch(Command::Edit {tab,expected,edits:vec![crate::text::TextEdit {range:0..0,text:"new ".into()}],kind:crate::text::EditKind::Paste}); }
+        assert_eq!(coordinator.progress(&mut [&mut a,&mut b]),Progress::Cancelled);
+        assert!(!a.closed() && !b.closed()); assert_eq!(std::fs::read(ap).unwrap(),b"saved\r\n"); assert_eq!(std::fs::read(bp).unwrap(),b"saved\r\n");
+    }
+}
+#[test]
+fn close_save_resolves_inactive_dirty_buffer_without_activating_it() {
+    use crate::close::{Choice, CloseCoordinator, Progress};
+    let d=tempfile::tempdir().unwrap(); let (mut s,path,tab)=close_fixture(d.path(),"a.txt");
+    let other=write(d.path(),"b.txt",b"other"); open(&mut s,Command::OpenRetained(other),"b.txt"); let active=s.state().active().unwrap().id();
+    assert!(s.state().view(tab).is_none());
+    let mut coordinator=CloseCoordinator::default();coordinator.register(s.id());coordinator.begin(&mut [&mut s]);let p=s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Save});settle(&mut s,|s|s.close_prompt().is_none());
+    assert_eq!(s.state().active().unwrap().id(),active);assert_eq!(std::fs::read(path).unwrap(),"draft λ\r\n".as_bytes());
+    assert_eq!(coordinator.progress(&mut [&mut s]),Progress::Committed(vec![s.id()])); assert!(s.closed());
+}
+
+#[test]
+fn dirty_last_tab_close_preserves_the_draft_until_a_close_decision() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "close.txt", b"saved\r\n");
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "close.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..5, text: "draft λ".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::CloseTab(tab));
+    assert_eq!(s.state().active().map(|t| t.id()), Some(tab), "last dirty owner must wait for Save/Discard/Cancel");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+    assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+}
+
 #[test]
 fn promoted_panel_and_symbol_targets_keep_exact_save_provenance() {
     use crate::navigation::{Chosen, Scope as NavigationScope};
