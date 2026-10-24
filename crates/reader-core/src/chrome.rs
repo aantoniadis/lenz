@@ -57,6 +57,8 @@ impl Session {
             (CommandId::FindFile, "Find file"),
             (CommandId::SearchProject, "Search"),
         ]);
+        controls.push(if self.state().saved_comparison().is_some() { (CommandId::CloseSavedComparison, "Close comparison") }
+            else { (CommandId::CompareSaved, "Compare saved") });
         controls
     }
 

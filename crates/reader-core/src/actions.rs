@@ -88,7 +88,7 @@ impl Session {
 
     /// The Markdown toggle belongs to the file shown in this pane, including an unfocused pane.
     pub fn preview_control(&self, pane: u8) -> Option<Action> {
-        let tab = self.state().shown(pane).filter(|t| self.state().view(t.id()).is_some_and(|v| v.rendering().is_some()))?;
+        let tab = self.state().shown(pane).filter(|t| t.comparison_side().is_none()).filter(|t| self.state().view(t.id()).is_some_and(|v| v.rendering().is_some()))?;
         Some(Action {
             id: CommandId::MarkdownSource,
             label: if tab.markdown_source() { "Preview" } else { "Source" },
@@ -115,6 +115,8 @@ impl Session {
             CommandId::Open => return CatalogAction::Interface(InterfaceAction::Open),
             CommandId::OpenInEditor => return CatalogAction::Interface(InterfaceAction::OpenInEditor),
             CommandId::OpenWithDefaultApp => return CatalogAction::Interface(InterfaceAction::OpenWithDefaultApp),
+            CommandId::CompareSaved => Command::CompareSaved,
+            CommandId::CloseSavedComparison => Command::CloseSavedComparison,
             CommandId::CompareWith => return CatalogAction::Interface(InterfaceAction::CompareWith),
             CommandId::ShowCommitDiff => return CatalogAction::Interface(InterfaceAction::ShowCommitDiff),
             CommandId::NewBranch => return CatalogAction::Interface(InterfaceAction::NewBranch),
@@ -296,7 +298,7 @@ impl CommandId {
         match self {
             Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
-            | Self::CompareWith | Self::CompareSelected => G::File,
+            | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
@@ -340,6 +342,7 @@ impl CommandId {
             Self::Outline => Some("Ctrl+Shift+O"),
             Self::FindInFile => Some("Ctrl+F"),
             Self::CompareSelected => Some("Ctrl+D"),
+            Self::CompareSaved => Some("Ctrl+Shift+D"),
             Self::SearchProject => Some("Ctrl+Shift+F"),
             Self::GoToLine => Some("Ctrl+G"),
             Self::Reload => Some("F5"),

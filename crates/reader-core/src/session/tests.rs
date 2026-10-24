@@ -10,6 +10,131 @@ fn source_text(source: &TextSnapshot) -> String { source.copy_range(0..source.le
 fn source_line(source: &TextSnapshot, line: usize) -> String { source.copy_range(source.reader_line_range(line)).unwrap() }
 
 #[test]
+fn saved_comparison_advances_only_the_confirmed_captured_save_and_rejects_old_diffs() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "captured.txt", b"v1\n");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "captured.txt");
+    s.dispatch(Command::CompareSaved);
+    let (left, right) = { let c = s.state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) };
+    // Keep a real completed worker reply queued while the comparison's inputs change.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let old = loop {
+        assert!(std::time::Instant::now() < deadline);
+        if let Ok(reply) = s.completions().try_recv() {
+            if matches!(&reply, Completion::Analyzed { result, .. } if matches!(result.as_ref(), Completion::SavedCompared { .. })) { break reply; }
+            s.dispatch(reply);
+        } else { std::thread::yield_now(); }
+    };
+    let expected = s.state().view(right).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: right, expected, edits: vec![TextEdit { range: 0..3, text: "captured v2\n".into() }], kind: EditKind::Replace });
+    s.dispatch(old);
+    assert!(s.state().saved_comparison().unwrap().pending());
+    assert!(s.state().saved_comparison().unwrap().changes().is_empty());
+    s.dispatch(Command::Save { tab: right });
+    let expected = s.state().view(right).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: right, expected, edits: vec![TextEdit { range: 0..12, text: "newer v3\n".into() }], kind: EditKind::Replace });
+    settle(&mut s, |s| matches!(s.state().view(right).unwrap().save_status(), crate::save::Status::Ready) && !s.state().saved_comparison().unwrap().pending());
+    assert_eq!(source_text(s.state().view(left).unwrap().snapshot()), "captured v2\n");
+    assert_eq!(source_text(s.state().view(right).unwrap().snapshot()), "newer v3\n");
+    assert!(s.state().view(right).unwrap().dirty());
+    assert_eq!(std::fs::read(path).unwrap(), b"captured v2\n");
+    s.dispatch(Command::CloseTab(left));
+    assert!(s.state().saved_comparison().is_none());
+    s.dispatch(Command::Undo { tab: s.state().active().unwrap().id() });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "captured v2\n");
+    assert!(!active_view(&s).dirty());
+}
+
+#[test]
+fn saved_comparison_keeps_the_confirmed_side_after_rejected_or_uncertain_save() {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use crate::text::{EditKind, TextEdit};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "fault.txt", b"confirmed\n");
+        let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "fault.txt");
+        s.dispatch(Command::CompareSaved); let c = s.state().saved_comparison().unwrap(); let (left, right) = (c.saved_tab(), c.current_tab());
+        let expected = s.state().view(right).unwrap().snapshot().key();
+        s.dispatch(Command::Edit { tab: right, expected, edits: vec![TextEdit { range: 0..10, text: "attempted\n".into() }], kind: EditKind::Replace });
+        let _fault = at_path(&path, fault); s.dispatch(Command::Save { tab: right });
+        settle(&mut s, |s| matches!(s.state().view(right).unwrap().save_status(), crate::save::Status::Rejected(_) | crate::save::Status::Uncertain(_)));
+        assert_eq!(source_text(s.state().view(left).unwrap().snapshot()), "confirmed\n");
+        assert_eq!(source_text(s.state().view(right).unwrap().snapshot()), "attempted\n");
+        assert!(s.state().view(right).unwrap().dirty());
+        assert_eq!(std::fs::read(path).unwrap(), if fault == Fault::AfterReplace { b"attempted\n" } else { b"confirmed\n" });
+    }
+}
+
+#[test]
+fn saved_comparison_finds_both_versions_without_becoming_current_file_authority() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "versions.txt", b"saved needle\n");
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "versions.txt");
+    let ordinary = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab: ordinary, expected, edits: vec![TextEdit { range: 0..13, text: "draft needle\n".into() }], kind: EditKind::Replace });
+    let (started, entered) = std::sync::mpsc::channel();
+    let gates: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+        let (release, wait) = std::sync::mpsc::channel(); let started = started.clone();
+        s.jobs.submit(Priority::Visible, move || { started.send(()).unwrap(); let _ = wait.recv_timeout(Duration::from_secs(5)); }); release
+    }).collect();
+    for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+    s.dispatch(Command::Find("draft".into()));
+    s.dispatch(Command::CompareSaved);
+    let comparison = s.state().saved_comparison().unwrap();
+    let (saved, current) = (comparison.saved_tab(), comparison.current_tab());
+    let synthetic = s.state().view(saved).unwrap().snapshot().key().buffer;
+    let current_buffer = s.state().view(current).unwrap().snapshot().key().buffer;
+    assert_ne!(synthetic, current_buffer);
+    s.dispatch(Command::FocusPane(0)); s.dispatch(Command::Find("saved".into()));
+    for gate in gates { gate.send(()).unwrap(); }
+    settle(&mut s, |s| [saved, ordinary].iter().all(|id| s.state.tabs.iter().find(|t| t.id == *id).unwrap().find().is_some_and(|find| !find.pending())));
+    assert_eq!(s.state.tabs.iter().find(|t| t.id == saved).unwrap().find().unwrap().matches().len(), 1);
+    assert_eq!(s.state.tabs.iter().find(|t| t.id == ordinary).unwrap().find().unwrap().matches().len(), 1);
+    assert_eq!(s.state.sources.aliases.get(&path), Some(&current_buffer));
+    assert_eq!(s.captured_project_sources(d.path())[&path].identity.key.buffer, current_buffer);
+    assert!(s.state().provider().is_none(), "saved text never becomes provider authority");
+    s.dispatch(Command::CloseSavedComparison);
+    assert!(!s.state.sources.buffers.contains_key(&synthetic));
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft needle\n");
+    assert_eq!(std::fs::read(path).unwrap(), b"saved needle\n");
+}
+
+#[test]
+fn saved_comparison_edits_the_ordinary_buffer_and_restores_its_view() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap();
+    let file = write(d.path(), "compare.txt", "α saved\r\nsecond\n".as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(file.clone()), "compare.txt");
+    let ordinary = s.state().active().unwrap().id();
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 }));
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab: ordinary, expected, edits: vec![TextEdit { range: 3..8, text: "draft".into() }], kind: EditKind::Replace });
+    let ordinary_position = s.state().selection();
+    s.dispatch(Command::CompareSaved);
+    let comparison = s.state().saved_comparison().unwrap();
+    let (saved, current) = (comparison.saved_tab(), comparison.current_tab());
+    assert_eq!(source_text(s.state().view(saved).unwrap().snapshot()), "α saved\r\nsecond\n");
+    assert_eq!(s.state().view(saved).unwrap().edit_disabled(), Some("The last saved version is read-only"));
+    assert_eq!(s.state().view(current).unwrap().snapshot().key().buffer, s.state().view(ordinary).unwrap().snapshot().key().buffer);
+    let expected = s.state().view(current).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: current, expected, edits: vec![TextEdit { range: 3..8, text: "current".into() }], kind: EditKind::Replace });
+    assert_eq!(source_text(s.state().view(ordinary).unwrap().snapshot()), "α current\r\nsecond\n");
+    let old = s.state().view(saved).unwrap().snapshot().key();
+    s.dispatch(Command::Edit { tab: saved, expected: old, edits: vec![TextEdit { range: 0..0, text: "forbidden".into() }], kind: EditKind::Paste });
+    s.dispatch(Command::Undo { tab: saved });
+    assert_eq!(source_text(s.state().view(saved).unwrap().snapshot()), "α saved\r\nsecond\n");
+    s.dispatch(Command::Undo { tab: current });
+    assert_eq!(source_text(s.state().view(current).unwrap().snapshot()), "α draft\r\nsecond\n");
+    settle(&mut s, |s| s.state().saved_comparison().is_some_and(|comparison| !comparison.pending()));
+    assert_eq!(s.state().saved_comparison().unwrap().changes().len(), 1);
+    s.dispatch(Command::CloseSavedComparison);
+    assert_eq!(s.state().active().unwrap().id(), ordinary);
+    assert_eq!(s.state().selection(), ordinary_position);
+    assert!(s.state().view(ordinary).unwrap().can_redo());
+    assert_eq!(std::fs::read(file).unwrap(), "α saved\r\nsecond\n".as_bytes());
+}
+
+#[test]
 fn promoted_panel_and_symbol_targets_keep_exact_save_provenance() {
     use crate::navigation::{Chosen, Scope as NavigationScope};
     use crate::text::{EditKind, TextEdit};
@@ -1229,7 +1354,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Undo", "Redo", "Save", "Recheck Saved File", "Confirm Rechecked Save", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Compare Selected", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Undo", "Redo", "Save", "Recheck Saved File", "Confirm Rechecked Save", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Compare with Last Saved Version", "Close Saved Comparison", "Compare Selected", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
