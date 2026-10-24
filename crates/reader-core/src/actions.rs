@@ -66,6 +66,8 @@ pub enum InterfaceAction {
     ServerRuntime,
     StatusDetails,
     EditingPreferences,
+    /// Every command's chord, its preset and any displaced binding: rebinding captures the next key.
+    Keymap,
 }
 
 impl Session {
@@ -100,6 +102,7 @@ impl Session {
             label: if tab.markdown_source() { "Preview" } else { "Source" },
             disabled: matches!(tab.preview, Some(Err(_))).then_some("This document cannot be previewed (the notice says why)"),
             on: None,
+            shortcut: None,
         })
     }
 
@@ -112,6 +115,10 @@ impl Session {
         let state = self.state();
         let command = match id {
             CommandId::StatusDetails => return CatalogAction::Interface(InterfaceAction::StatusDetails),
+            CommandId::Keymap => return CatalogAction::Interface(InterfaceAction::Keymap),
+            CommandId::KeymapIntelliJ => Command::SetKeymapPreset(crate::keymap::KeymapPreset::IntelliJ),
+            CommandId::KeymapVsCode => Command::SetKeymapPreset(crate::keymap::KeymapPreset::VsCode),
+            CommandId::ResetKeymap => Command::ResetKeymap,
             CommandId::EditingPreferences => return CatalogAction::Interface(InterfaceAction::EditingPreferences),
             CommandId::SearchEverywhere => return CatalogAction::Interface(InterfaceAction::SearchEverywhere),
             CommandId::FindAction => return CatalogAction::Interface(InterfaceAction::FindAction),
@@ -348,67 +355,25 @@ impl CommandId {
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
-            Self::ChooseTheme | Self::About | Self::CloseWindow | Self::QuitAll => G::Application,
+            Self::ChooseTheme | Self::About | Self::CloseWindow | Self::QuitAll
+            | Self::Keymap | Self::KeymapIntelliJ | Self::KeymapVsCode | Self::ResetKeymap => G::Application,
         }
     }
 }
 
 
 impl CommandId {
-    /// Key labels shared by name-search results and pointer menus.
-    pub fn shortcut(self) -> Option<&'static str> {
+    /// The fixed editing keys adapters map as text input themselves. Semantic commands take their keys from the
+    /// session's keymap instead, so a preset or an override changes what menus show and what keys run.
+    pub fn input_hint(self) -> Option<&'static str> {
         match self {
-            Self::SearchEverywhere => Some("Double Shift / Ctrl+K"),
-            Self::FindFile => Some("Ctrl+P / Ctrl+Shift+N"),
-            Self::FindSymbol => Some("Ctrl+Alt+Shift+N"),
-            Self::FindAction => Some("Ctrl+Shift+A"),
-            Self::Open => Some("Ctrl+O"),
-            Self::SplitRight => Some("Ctrl+\\"),
-            Self::SplitDown => Some("Ctrl+Shift+\\"),
-            Self::Outline => Some("Ctrl+Shift+O"),
-            Self::FindInFile => Some("Ctrl+F"),
-            Self::CompareSelected => Some("Ctrl+D"),
-            Self::CompareSaved => Some("Ctrl+Shift+D"),
-            Self::SearchProject => Some("Ctrl+Shift+F"),
-            Self::GoToLine => Some("Ctrl+G"),
-            Self::Reload => Some("F5"),
-            Self::SoftWrap => Some("Alt+Z"),
-            Self::LanguageServer => Some("F2"),
-            Self::StatusDetails => Some("Shift+F2"),
-            Self::Definition => Some("F12"),
-            Self::PeekDefinition => Some("Alt+F12"),
-            Self::TypeDefinition => Some("Ctrl+Shift+B"),
-            Self::Implementation => Some("Ctrl+Alt+B"),
-            Self::AnnotateBlame | Self::CloseAnnotations => Some("Alt+B"),
-            Self::Usages => Some("Shift+F12"),
-            Self::CallHierarchy => Some("Ctrl+Alt+H"),
-            Self::TypeHierarchy => Some("Ctrl+H"),
-            Self::Documentation => Some("Ctrl+Q"),
-            Self::Completion => Some("Ctrl+Space"),
+            Self::SelectAll => Some("Ctrl+A"),
             Self::Copy => Some("Ctrl+C"),
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
             Self::Delete => Some("Delete"),
-            Self::Save => Some("Ctrl+S"),
-            Self::SaveAs => Some("Ctrl+Shift+S"),
-            Self::NewDocument => Some("Ctrl+N"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
-            Self::Close => Some("Ctrl+F4"),
-            Self::CloseWindow => Some("Ctrl+Q"),
-            Self::QuitAll => Some("Ctrl+Shift+Q"),
-            Self::ExtendSelection => Some("Ctrl+W"),
-            Self::ShrinkSelection => Some("Ctrl+Shift+W"),
-            Self::FocusBreadcrumbs => Some("Ctrl+Shift+."),
-            Self::ToggleBookmark => Some("F11"),
-            Self::SetBookmarkMnemonic => Some("Ctrl+F11"),
-            Self::ShowBookmarks => Some("Shift+F11"),
-            Self::RecentFiles => Some("Ctrl+E"),
-            Self::RecentLocations => Some("Ctrl+Alt+E"),
-            Self::Collapse => Some("Ctrl+-"),
-            Self::Expand => Some("Ctrl+="),
-            Self::CollapseAll => Some("Ctrl+Shift+-"),
-            Self::ExpandAll => Some("Ctrl+Shift+="),
             _ => None,
         }
     }

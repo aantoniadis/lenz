@@ -5,6 +5,8 @@ mod external;
 mod save_as;
 #[path = "input_tests/recovery.rs"]
 mod recovery;
+#[path = "input_tests/keymap.rs"]
+mod keymap;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{

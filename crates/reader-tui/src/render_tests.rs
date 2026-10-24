@@ -1000,3 +1000,32 @@ fn explorer_and_tabs_show_git_letters_apart_from_the_dirty_mark() {
     assert!(rows[1].contains(" clean.txt M ") && !rows[1].contains("●"), "{:?}", rows[1]);
     assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
 }
+
+#[test]
+fn the_keymap_dialog_draws_its_rows_and_capture_hint_at_any_size() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    a.run(CommandId::Keymap);
+    let screen = text(&draw(&mut a, 100, 30));
+    assert!(screen.contains("Keymap: IntelliJ"), "the preset heads the dialog");
+    assert!(screen.contains("Save — Ctrl+S"), "rows name their chords");
+    assert!(screen.contains("Enter rebinds"), "the footer explains the keys");
+    // Capture: the title says what the next key does.
+    a.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    let screen = text(&draw(&mut a, 100, 30));
+    assert!(screen.contains("press the new shortcut"), "{screen}");
+    a.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    // Tiny terminals keep the dialog drawable, scrollable and dismissible.
+    for (w, h) in [(40, 8), (20, 4), (1, 1)] {
+        a.run(CommandId::Keymap);
+        draw(&mut a, w, h);
+        for _ in 0..3 {
+            a.handle(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+            a.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+            draw(&mut a, w, h);
+        }
+        a.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(a.modal.is_none(), "{w}x{h}");
+    }
+}

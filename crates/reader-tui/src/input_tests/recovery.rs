@@ -80,6 +80,15 @@ fn later_keeps_the_draft_and_the_command_offers_it_again() {
     let mut a = restarted(dir.path(), &path);
     draw(&mut a, 80, 24);
     assert!(recovered(&a));
+    // A preset changes semantic chords, not the dialog's answers: VS Code's Ctrl+W closes a tab, but the dialog
+    // takes the key first and nothing behind it changes.
+    a.dispatch(Command::SetKeymapPreset(reader_core::keymap::KeymapPreset::VsCode));
+    draw(&mut a, 80, 24);
+    key(&mut a, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    draw(&mut a, 80, 24);
+    assert!(recovered(&a), "the dialog keeps the key under another preset");
+    assert!(a.session.state().active().is_some(), "Ctrl+W did not close the tab behind the dialog");
+    assert_eq!(active_text(&a), "saved\n");
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     draw(&mut a, 80, 24);
     assert!(!recovered(&a), "Later dismisses the dialog");

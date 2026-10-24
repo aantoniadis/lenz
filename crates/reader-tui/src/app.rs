@@ -79,6 +79,8 @@ pub(crate) enum Prompt {
     NewBranch { from: Option<String>, checkout: bool },
     /// Checkout Tag or Revision (`input`).
     Revision,
+    /// Every command's chord: type to filter, Enter captures a new shortcut, Delete restores the preset.
+    Keymap,
 }
 /// What a details prompt is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,6 +102,8 @@ pub(crate) struct Modal {
     pub top: usize,
     pub reveal_selection: bool,
     pub error: Option<String>,
+    /// The keymap modal takes the next key as this command's shortcut.
+    pub capture: Option<CommandId>,
 }
 #[derive(Clone)]
 pub(crate) struct Choice {
@@ -121,6 +125,8 @@ pub(crate) enum ChoiceTarget {
         crumb: usize,
         index: usize,
     },
+    /// A keymap row: Enter captures the next key for this command.
+    Keymap(CommandId),
     /// A Git Branches row (Enter runs its first action), or one of a row's actions.
     Branch(reader_core::branches::BranchTarget),
     BranchAction(reader_core::branches::BranchTarget, reader_core::branches::BranchAction),
@@ -705,6 +711,7 @@ impl App {
             InterfaceAction::WorkspaceRoot => Prompt::WorkspaceRoot,
             InterfaceAction::LanguageServer => Prompt::LanguageServer,
             InterfaceAction::EditingPreferences => Prompt::Details { title: "Editing preferences", body: self.session.editing_preferences_details(), logo: false, kind: Details::Text },
+            InterfaceAction::Keymap => Prompt::Keymap,
             InterfaceAction::ServerDetails | InterfaceAction::StatusDetails => {
                 let (title, mut details) = if action == InterfaceAction::ServerDetails {
                     ("Server details", self.session.language_server_details())
@@ -793,6 +800,7 @@ impl App {
             top: 0,
             reveal_selection: true,
             error: None,
+            capture: None,
         });
         if self
             .modal
@@ -1012,6 +1020,19 @@ impl App {
                     target: ChoiceTarget::Action(a.id),
                 })
                 .collect(),
+            Prompt::Keymap => self
+                .session
+                .keymap()
+                .rows()
+                .into_iter()
+                .filter(|r| query.is_empty() || r.label.to_lowercase().contains(&query))
+                .map(|r| Choice {
+                    label: format!("{} — {}{}", r.label, r.chords, r.note.map_or_else(String::new, |note| format!(" ({note})"))),
+                    detail: None,
+                    disabled: None,
+                    target: ChoiceTarget::Keymap(r.command),
+                })
+                .collect(),
             Prompt::RecentRoots => self
                 .session
                 .state()
@@ -1109,6 +1130,15 @@ impl App {
                 Prompt::Places(PlaceList::RecentFiles) => "Recent files · Delete forgets",
                 Prompt::Places(PlaceList::RecentLocations) => "Recent locations · Delete forgets",
                 Prompt::Mnemonic => "Bookmark key · press 0–9 or A–Z",
+                Prompt::Keymap if self.modal.as_ref().is_some_and(|m| m.capture.is_some()) => {
+                    "Keymap · press the new shortcut (Esc cancels)"
+                }
+                Prompt::Keymap => {
+                    return format!(
+                        "Keymap: {} · type to filter · Enter rebinds · Delete restores the preset · Esc closes",
+                        self.session.keymap().preset().label()
+                    );
+                }
                 Prompt::Siblings { .. } => "Breadcrumb entries",
                 Prompt::Help => "Reader help",
                 Prompt::Details { title, .. } => title,
@@ -1257,6 +1287,27 @@ impl App {
         let kind = self.modal.as_ref().unwrap().kind.clone();
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
+        // The keymap waiting for a key: Escape cancels, any other shortcut becomes the highlighted command's.
+        if kind == Prompt::Keymap
+            && let Some(command) = self.modal.as_ref().and_then(|m| m.capture)
+        {
+            if key.code == KeyCode::Esc {
+                if let Some(m) = self.modal.as_mut() { m.capture = None; m.error = None; }
+                return;
+            }
+            let Some(press) = key_press(key) else { return };
+            let Some(chord) = reader_core::keymap::Chord::from_press(&press) else {
+                if let Some(m) = self.modal.as_mut() { m.error = Some("A shortcut needs Ctrl, Alt or a function key".into()); }
+                return;
+            };
+            if let Some(m) = self.modal.as_mut() { m.capture = None; m.error = None; }
+            let blocked = chord.terminal_blocked();
+            self.dispatch(Command::SetKeybinding { command, chord: chord.label() });
+            if blocked {
+                self.dispatch(Command::Notice(format!("{} is not delivered by most terminals; the command stays in F10", chord.label())));
+            }
+            return;
+        }
         if kind == Prompt::LanguageServer
             && control
             && !alt
@@ -1472,6 +1523,18 @@ impl App {
                     && let ChoiceTarget::Place(place) = &choice.target
                 {
                     self.dispatch(Command::ForgetPlace(place.clone()));
+                }
+                self.clamp();
+            }
+            KeyCode::Delete if kind == Prompt::Keymap => {
+                let at = self.modal.as_ref().map(|m| m.at);
+                let choices = self.choices();
+                let command = at.and_then(|at| choices.get(at)).and_then(|c| match c.target {
+                    ChoiceTarget::Keymap(command) => Some(command),
+                    _ => None,
+                });
+                if let Some(command) = command {
+                    self.dispatch(Command::ResetKeybinding(command));
                 }
                 self.clamp();
             }
@@ -1723,6 +1786,17 @@ impl App {
                 Err(e) => if let Some(m) = self.modal.as_mut() { m.error = Some(e) },
             },
             Prompt::Mnemonic => {}
+            // Enter on a keymap row asks for the next key instead of closing the dialog.
+            Prompt::Keymap => {
+                let command = self.choices().get(at).and_then(|c| match c.target {
+                    ChoiceTarget::Keymap(command) => Some(command),
+                    _ => None,
+                });
+                if let Some(modal) = &mut self.modal {
+                    modal.capture = command;
+                    modal.error = None;
+                }
+            }
             // Enter on the current branch or worktree does nothing (its other actions are in its menu), as in the GUI.
             Prompt::Branches if self.choices().get(at).is_some_and(|c| matches!(&c.target, ChoiceTarget::Branch(t) if !matches!(t, reader_core::branches::BranchTarget::Action(_)) && self.session.branch_enter(t).is_none())) => {}
             _ => {
@@ -1743,7 +1817,7 @@ impl App {
                 };
                 self.close_modal();
                 match choice.target {
-                    ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) => {}
+                    ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) | ChoiceTarget::Keymap(_) => {}
                     ChoiceTarget::Action(id) => self.run(id),
                     ChoiceTarget::Path(path) if kind == Prompt::RecentRoots => self.open_root(path),
                     ChoiceTarget::Path(path) => self.dispatch(Command::Open(path)),
@@ -1899,6 +1973,16 @@ impl App {
             self.dispatch(Command::SetMnemonic(c));
             return;
         }
+        // Semantic commands take their keys from the session's keymap: a preset or an override changes what runs, and
+        // an unavailable command says why instead of vanishing. Typing keys are never bound there.
+        if let Some(id) = key_press(key).and_then(|press| self.session.key_command(&press)) {
+            // A held search key must not reopen its list over and over.
+            let opener = matches!(id, CommandId::SearchEverywhere | CommandId::FindFile | CommandId::FindSymbol | CommandId::FindAction | CommandId::RecentFiles);
+            if key.kind != KeyEventKind::Repeat || !opener {
+                self.run(id);
+            }
+            return;
+        }
         if alt && shift && !ctrl && matches!(key.code, KeyCode::Left | KeyCode::Right) {
             let target = {
                 let state = self.session.state();
@@ -1929,66 +2013,19 @@ impl App {
                 self.prompt(Prompt::Help);
                 return;
             }
-            (KeyCode::F(2), false, true, false) => {
-                self.run(CommandId::StatusDetails);
-                return;
-            }
-            (KeyCode::F(2), _, _, _) => {
-                self.run(CommandId::LanguageServer);
-                return;
-            }
-            (KeyCode::Char('z'), false, _, true) => Some(CommandId::SoftWrap),
             (KeyCode::Char('v' | 'V'), true, true, _) => Some(CommandId::MarkdownSource),
-            (KeyCode::Char('-' | '_'), true, true, _) | (KeyCode::Char('_'), true, false, _) => {
-                Some(CommandId::CollapseAll)
-            }
-            (KeyCode::Char('=' | '+'), true, true, _) | (KeyCode::Char('+'), true, false, _) => {
-                Some(CommandId::ExpandAll)
-            }
-            (KeyCode::Char('-'), true, false, _) => Some(CommandId::Collapse),
-            (KeyCode::Char('='), true, false, _) => Some(CommandId::Expand),
-            (KeyCode::Char('o' | 'O'), true, true, _) => Some(CommandId::Outline),
-            (KeyCode::Char('o'), true, false, _) => Some(CommandId::Open),
-            (KeyCode::Char('p' | 'P'), true, true, false)
-            | (KeyCode::Char('a' | 'A'), true, true, false) => Some(CommandId::FindAction),
-            (KeyCode::Char('n' | 'N'), true, true, true) => Some(CommandId::FindSymbol),
-            (KeyCode::Char('n' | 'N'), true, true, false)
-            | (KeyCode::Char('p'), true, false, false) => Some(CommandId::FindFile),
-            (KeyCode::Char('k'), true, false, false) => Some(CommandId::SearchEverywhere),
-            (KeyCode::Char('d'), true, false, false) => Some(CommandId::CompareSelected),
-            (KeyCode::Char('d' | 'D'), true, true, false) => Some(CommandId::CompareSaved),
-            (KeyCode::Char('f' | 'F'), true, true, _) => Some(CommandId::SearchProject),
-            (KeyCode::Char('f'), true, false, _) | (KeyCode::Char('/'), false, _, _) => {
-                Some(CommandId::FindInFile)
-            }
-            (KeyCode::Char('g'), true, false, _) => Some(CommandId::GoToLine),
-            (KeyCode::Char('r'), true, _, _) | (KeyCode::F(5), _, _, _) => Some(CommandId::Reload),
+            (KeyCode::Char('/'), false, _, _) => Some(CommandId::FindInFile),
             (KeyCode::Char('a'), true, _, _) => Some(CommandId::SelectAll),
             (KeyCode::Char('c'), true, _, _) => Some(CommandId::Copy),
-            (KeyCode::Char('w' | 'W'), true, true, _) => Some(CommandId::ShrinkSelection),
-            (KeyCode::Char('w'), true, false, _) => Some(CommandId::ExtendSelection),
-            (KeyCode::F(4), true, _, _) => Some(CommandId::Close),
             (KeyCode::Char('t'), true, _, _) => Some(CommandId::FindDeclarations),
             (KeyCode::Char('e' | 'E'), true, true, _) => {
                 self.tree_shown = true;
                 self.focus = Focus::Tree;
                 return;
             }
-            (KeyCode::Char('e'), true, false, true) => Some(CommandId::RecentLocations),
-            (KeyCode::Char('e'), true, false, false) => Some(CommandId::RecentFiles),
-            (KeyCode::Char('b'), true, false, true) => Some(CommandId::Implementation),
-            (KeyCode::Char('s'), true, false, false) => Some(CommandId::Save),
-            (KeyCode::Char('s' | 'S'), true, true, false) => Some(CommandId::SaveAs),
-            (KeyCode::Char('n'), true, false, false) => Some(CommandId::NewDocument),
-            (KeyCode::Char('b'), false, false, true) => Some(CommandId::AnnotateBlame),
-            (KeyCode::Char('`' | '~'), true, _, _) => Some(CommandId::GitBranches),
-            (KeyCode::Char('b' | 'B'), true, true, _) => Some(CommandId::TypeDefinition),
             (KeyCode::Char('b'), true, false, false) => Some(CommandId::ToggleExplorer),
-            (KeyCode::Char('h'), true, _, true) => Some(CommandId::CallHierarchy),
-            (KeyCode::Char('h'), true, _, false) => Some(CommandId::TypeHierarchy),
+            (KeyCode::Char('`' | '~'), true, _, _) => Some(CommandId::GitBranches),
             (KeyCode::Char('k' | 'K'), true, true, _) => Some(CommandId::PinTab),
-            (KeyCode::Char('\\'), true, false, _) => Some(CommandId::SplitRight),
-            (KeyCode::Char('\\' | '|'), true, true, _) => Some(CommandId::SplitDown),
             (KeyCode::Char('1'), true, _, _) => {
                 self.dispatch(Command::FocusPane(0));
                 return;
@@ -1997,19 +2034,12 @@ impl App {
                 self.dispatch(Command::FocusPane(1));
                 return;
             }
-            (KeyCode::Char('.'), true, true, _) => Some(CommandId::FocusBreadcrumbs),
             (KeyCode::Tab, true, true, _) | (KeyCode::BackTab, true, _, _) => {
                 Some(CommandId::PreviousTab)
             }
             (KeyCode::Tab, true, false, _) => Some(CommandId::NextTab),
             (KeyCode::F(3), _, true, _) => Some(CommandId::PreviousMatch),
             (KeyCode::F(3), _, false, _) => Some(CommandId::NextMatch),
-            (KeyCode::F(11), true, _, _) => Some(CommandId::SetBookmarkMnemonic),
-            (KeyCode::F(11), false, true, _) => Some(CommandId::ShowBookmarks),
-            (KeyCode::F(11), false, false, _) => Some(CommandId::ToggleBookmark),
-            (KeyCode::F(12), _, _, true) => Some(CommandId::PeekDefinition),
-            (KeyCode::F(12), _, true, _) => Some(CommandId::Usages),
-            (KeyCode::F(12), _, false, _) => Some(CommandId::Definition),
             (KeyCode::Left, true, _, true) => {
                 self.dispatch(Command::ScrollColumn(
                     self.session.state().column().saturating_sub(4),
@@ -2831,6 +2861,34 @@ impl App {
         }
     }
 }
+/// A terminal key as the session keymap names it: its key and the modifiers that ran the binding. Terminals report
+/// shifted symbols for Shift+- = `_`, Shift+\\ = `|`, Shift+. = `>`; the keymap normalizes those itself.
+fn key_press(key: KeyEvent) -> Option<reader_core::keymap::KeyPress> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    let name = match key.code {
+        KeyCode::Char(c) => c.to_string(),
+        KeyCode::F(n) => format!("f{n}"),
+        KeyCode::Tab => "tab".into(),
+        KeyCode::Enter => "enter".into(),
+        KeyCode::Esc => "escape".into(),
+        KeyCode::Backspace => "backspace".into(),
+        KeyCode::Delete => "delete".into(),
+        KeyCode::Left => "left".into(),
+        KeyCode::Right => "right".into(),
+        KeyCode::Up => "up".into(),
+        KeyCode::Down => "down".into(),
+        KeyCode::Home => "home".into(),
+        KeyCode::End => "end".into(),
+        KeyCode::PageUp => "pageup".into(),
+        KeyCode::PageDown => "pagedown".into(),
+        KeyCode::Null => "null".into(),
+        _ => return None,
+    };
+    reader_core::keymap::KeyPress::new(&name, ctrl, shift, alt)
+}
+
 fn stepped(at: usize, len: usize, key: KeyCode, page: usize) -> usize {
     let last = len.saturating_sub(1);
     match key {

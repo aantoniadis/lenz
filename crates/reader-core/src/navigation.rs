@@ -24,7 +24,7 @@ pub struct Row {
     pub kind: Kind,
     pub disabled: Option<&'static str>,
     pub on: Option<bool>,
-    pub shortcut: Option<&'static str>,
+    pub shortcut: Option<String>,
     pub(crate) target: Target,
 }
 impl Row {
@@ -119,7 +119,7 @@ pub(crate) fn rank_with_total(snapshot: Snapshot, scope: Scope, query: &str, cur
             let score = lenz_content::fuzzy::score(query, action.label).or_else(|| lenz_content::fuzzy::score(query, &format!("{} {}", action.id.group().label(), action.label)));
             if let Some(score) = score {
                 matched += 1;
-                ranked.push((score, Row {label: action.label.into(), detail: action.id.group().label().into(), kind: Kind::Action, disabled: action.disabled, on: action.on, shortcut: action.id.shortcut(), target: Target::Action(action.id)}));
+                ranked.push((score, Row {label: action.label.into(), detail: action.id.group().label().into(), kind: Kind::Action, disabled: action.disabled, on: action.on, shortcut: action.shortcut.clone(), target: Target::Action(action.id)}));
             }
         }
     }
@@ -160,7 +160,7 @@ impl DoubleShift {
 mod tests {
     use super::*;
     fn snapshot() -> Snapshot {
-        Snapshot {root: Some("/project".into()), files: vec![vec![Entry::new("src/NetworkParserEngine.rs"),Entry::new("test/NetworkParserEngine.rs"),Entry::new("src/Other.rs")].into()], symbols: Vec::new(), recent: vec!["/project/src/Other.rs".into()], actions: vec![Action {id: CommandId::SoftWrap,label: "Soft Wrap",disabled: None,on: Some(false)}]}
+        Snapshot {root: Some("/project".into()), files: vec![vec![Entry::new("src/NetworkParserEngine.rs"),Entry::new("test/NetworkParserEngine.rs"),Entry::new("src/Other.rs")].into()], symbols: Vec::new(), recent: vec!["/project/src/Other.rs".into()], actions: vec![Action {id: CommandId::SoftWrap,label: "Soft Wrap",disabled: None,on: Some(false),shortcut: None}]}
     }
     #[test]
     fn filename_subsequence_disambiguates_paths_and_preserves_line_column() {

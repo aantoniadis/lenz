@@ -173,7 +173,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   leave reads stopped until the repository changes. Not measured for this ticket.
 - **Git status presentation gaps (ticket65):** folders do not aggregate their children's statuses; paths are
   matched as `/`-separated (Windows separators unhandled); git's stderr is read only after its output ends.
-  Draft recovery has no "recovered" state yet, so only dirty and Git status are shown.
+  A restored draft marks its tab as recovered (`⟲`, ticket 32); explorer rows still show only their own dirty state
+  and Git status, so a recovered file's row has no recovered badge.
 
 ## New File and Save As (ticket 31, 2026-10-24)
 
@@ -245,3 +246,43 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   run there. Wayland GUI and physical terminals were not exercised for this ticket.
 - **No content in diagnostics:** records and prompts never carry source text; `Record`/`Version` `Debug` show identity and
   sizes only. Keep it that way when adding fields (for example a diff summary) to the dialog.
+- **Observed core-suite flakes (not caused by this ticket):** with draft recovery present, the full `reader-core`
+  suite also timed out once in `semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_text`
+  (3 of 3 isolated runs passed, and two full runs afterwards passed). The rename watcher test above did the same
+  3 times in 6 full runs while passing 5 of 5 isolated runs. No cause or fix is claimed; the recovery worker adds one
+  idle thread per session, which is not shown to matter.
+
+## Keymaps (ticket 26, 2026-10-24)
+
+- **Rebinding commands without a chord:** the Keymap dialog lists commands that have a chord or an override, so a
+  command that has never had a shortcut (for example Show Commit) can only gain one by hand-editing the settings
+  file's `keybindings` (by command slug). Listing all commands needs a filter in the GUI dialog and a decision about
+  making 140 rows navigable; not implemented here.
+- **Editing keys are not rebindable:** Copy, Cut, Paste, Delete, Select All, Undo and Redo stay the fixed keys the
+  adapters map as text input (`CommandId::input_hint`), because they run before the keymap in both adapters. A
+  keymap that drives them would have to keep the draft-context guards (a preview must not be undone through the
+  keymap path).
+- **Terminal delivery is a static guess:** `Chord::terminal_blocked` marks Ctrl-Q/Ctrl-S (flow control),
+  Ctrl-H/M/I (Backspace/Enter/Tab) and Ctrl+Shift+letter (enhanced protocol) as unreliable. It cannot see the actual
+  terminal, keyboard protocol or multiplexer, so the TUI only warns on a captured chord and hides nothing; the
+  GUI ignores the notion because it delivers every chord.
+- **Preset shadowing only appears on a preset change:** `Keymap::bind` refuses a chord another command runs, so
+  overrides cannot displace preset bindings while rebinding. Switching to the other preset can still leave an
+  override holding a chord the new preset gives another command; the switch reports it and the displaced command
+  keeps its menu entry.
+- **Slugs follow variant names:** remembered overrides are keyed by a slug derived from `CommandId`'s Rust variant
+  name (`SearchEverywhere` → `search_everywhere`). Renaming a variant drops that command's override on the next load
+  (silently, like an unknown key); there is no migration or warning yet.
+- **Per-keystroke resolution:** `Session::key_command` scans the resolved binding list (about 50 chords) with string
+  comparisons on every key. Expected to be negligible, but it is new per-keystroke work in both adapters; include
+  fast typing in the scheduled measurements rather than assuming it.
+- **Dialog cost:** the Keymap dialog rebuilds its rows (scanning `CommandId::ALL` for the bound ones, then formatting
+  labels, chords and notes) each time it is drawn or a key moves the selection. The list is bounded and small; no
+  caching was added.
+- **Observed test flakes (not caused by ticket 26):** the full `reader-tui` suite failed
+  `double_and_triple_click_select_word_and_group` once and the full `reader-gui` suite failed
+  `outline_and_declaration_search_through_keys` once under parallel load; both passed 3 of 3 isolated runs, matching
+  the earlier records above. No cause or fix is claimed.
+- **Keymap overrides on another platform:** VS Code's macOS chords (for example Cmd-based ones) are reported through
+  the same logical Ctrl chords the adapters already normalize; native macOS and Wayland GUI editing remain gated and
+  unverified.

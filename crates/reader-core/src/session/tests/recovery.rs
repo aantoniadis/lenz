@@ -202,6 +202,13 @@ fn later_keeps_the_offer_and_the_command_reopens_the_dialog() {
     }
     let mut s = session(d.path());
     let ticket = s.recovery_prompt().unwrap().ticket;
+    // The presets give recovery no chord: the File menu is its route, and menus say so.
+    for preset in crate::keymap::KeymapPreset::ALL {
+        s.dispatch(Command::SetKeymapPreset(preset));
+        assert_eq!(s.key_hint(CommandId::RecoverDrafts), None, "{preset:?}");
+        assert_eq!(s.action(CommandId::RecoverDrafts), crate::actions::CatalogAction::Command(Command::ShowRecoveredDrafts), "{preset:?}");
+        assert_eq!(s.recovery_prompt().map(|p| p.ticket), Some(ticket), "a preset change does not decide the offer");
+    }
     s.dispatch(Command::ChooseRecoveredDraft { ticket, choice: Choice::Later });
     assert!(s.recovery_prompt().is_none() && s.recovered_drafts().len() == 1);
     assert_eq!(s.disabled(CommandId::RecoverDrafts), None);

@@ -59,6 +59,9 @@ native macOS validation is pending. The Reader edits existing files on verified 
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
 - **Find** within a file or across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
+- **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
+  **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the
+  terminal. A shortcut a terminal cannot deliver leaves its command in the command menu.
 - **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
   with `Ctrl+Shift+V`, soft wrap with `Alt+Z`, and search with `Ctrl+F`.
 - **Share appearance** with Diff: theme selection, custom themes and desktop font
