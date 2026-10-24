@@ -8,6 +8,8 @@ pub use saved_comparison::{ComparisonSide, SavedComparison};
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
+#[path = "session/text_input.rs"]
+mod text_input;
 #[path = "session/close.rs"]
 mod close_work;
 #[path = "session/transition.rs"]
@@ -77,6 +79,10 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    Cut,
+    Paste(String),
+    Delete { backward: bool },
+    SetReadOnly(bool),
     CompareSaved,
     CloseSavedComparison,
     ChooseClose { ticket: u64, buffer: crate::text::BufferId, choice: crate::close::Choice },
@@ -403,6 +409,10 @@ pub enum CommandId {
     QuitAll,
     SelectAll,
     Copy,
+    Cut,
+    Paste,
+    Delete,
+    ReadOnlyMode,
     Undo,
     Redo,
     Save,
@@ -528,7 +538,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 123] = [
+    pub const ALL: [CommandId; 127] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -569,6 +579,10 @@ impl CommandId {
         Self::QuitAll,
         Self::SelectAll,
         Self::Copy,
+        Self::Cut,
+        Self::Paste,
+        Self::Delete,
+        Self::ReadOnlyMode,
         Self::Undo,
         Self::Redo,
         Self::Save,
@@ -700,6 +714,10 @@ impl CommandId {
             Self::QuitAll => "Quit All Windows",
             Self::SelectAll => "Select All",
             Self::Copy => "Copy",
+            Self::Cut => "Cut",
+            Self::Paste => "Paste",
+            Self::Delete => "Delete",
+            Self::ReadOnlyMode => "Read-only Mode",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Save => "Save",
@@ -1229,6 +1247,7 @@ struct Sources {
     buffers: std::collections::HashMap<crate::text::BufferId, CurrentSource>,
 }
 struct CurrentSource {
+    read_only: bool,
     document: std::sync::Weak<Document>,
     snapshot: Option<Arc<crate::text::TextSnapshot>>,
     stamp: Option<Stamp>,
@@ -1245,7 +1264,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
         if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -1264,6 +1283,7 @@ pub struct View<'a> {
     tab: &'a Tab,
     snapshot: &'a Arc<crate::text::TextSnapshot>,
     draft: Option<&'a crate::draft::Draft>,
+    read_only: bool,
     save: &'a crate::save::State,
 }
 impl<'a> View<'a> {
@@ -1274,7 +1294,13 @@ impl<'a> View<'a> {
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
-    pub fn edit_disabled(&self) -> Option<&'static str> {
+    /// Existing confirmed ending preference; typing never normalizes the remaining source.
+    pub fn input_newline(&self) -> &'static str {
+        if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) { "\r\n" } else { "\n" }
+    }
+    pub fn read_only(&self) -> bool { self.read_only }
+    pub fn edit_disabled(&self) -> Option<&'static str> { self.intrinsic_edit_disabled().or(self.read_only.then_some("Read-only mode is on")) }
+    fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
         if self.tab.is_saved_version() { Some("The last saved version is read-only") }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
@@ -1482,7 +1508,7 @@ impl State {
         let buffer = tab.buffer?;
         let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
         if !tab.loaded { return None; }
-        Some(View { snapshot, tab, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
+        Some(View { snapshot, tab, read_only: self.sources.buffers.get(&buffer)?.read_only, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
@@ -1683,6 +1709,7 @@ impl State {
             let inside = t.source.starts_with(p.root());
             (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Read-only source from {origin}"))
         });
+        let read_only = tab.and_then(|t| self.view(t.id)).and_then(|view| view.edit_disabled().map(str::to_owned));
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
@@ -1691,7 +1718,7 @@ impl State {
             None if c.pending() => "Comparing with last saved version…".into(),
             None => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
         });
-        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(conflict).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
+        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(conflict).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(read_only).chain(saving).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette
@@ -1906,6 +1933,7 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    text_input_enabled: bool,
     comparison_seq: u64,
     id: crate::close::SessionId,
     close_seq: u64,
@@ -2079,6 +2107,7 @@ impl Session {
         });
         let merged = tx.clone();
         Self {
+            text_input_enabled: false,
             comparison_seq: 0,
             id: crate::close::SessionId::allocate(), close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
@@ -2275,6 +2304,7 @@ impl Session {
     fn on(&self, id: CommandId) -> Option<bool> {
         let o = self.find_options;
         match id {
+            CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id())).map(|view| view.read_only()),
             CommandId::MatchCase => Some(o.case),
             CommandId::WholeWord => Some(o.word),
             CommandId::RegularExpression => Some(o.regex),
@@ -2434,6 +2464,8 @@ impl Session {
                 Some(view) if id == CommandId::Redo && !view.can_redo() => Some("Nothing to redo"),
                 Some(_) => None,
             },
+            CommandId::Cut | CommandId::Paste | CommandId::Delete => self.text_action_disabled(id),
+            CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id)).map_or(Some("No loaded file is open"), |view| view.intrinsic_edit_disabled()),
             CommandId::Copy => match self.state.selection() {
                 _ if !open => Some("No file is open"),
                 // The adapter holds a preview's selection.
@@ -2619,7 +2651,7 @@ impl Session {
         if text {
             entries.extend([CommandId::Definition, CommandId::PeekDefinition, CommandId::TypeDefinition, CommandId::Implementation, CommandId::Usages, CommandId::CallHierarchy, CommandId::TypeHierarchy, CommandId::Documentation].map(C));
             entries.extend([Separator, C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll)]);
-            entries.extend([Separator, C(CommandId::Copy), C(CommandId::CopyPath), C(CommandId::CopyPathLine)]);
+            entries.extend([Separator, C(CommandId::Copy), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode), C(CommandId::CopyPath), C(CommandId::CopyPathLine)]);
         } else {
             if matches!(self.state.rendering(), Some(Rendering::Preview(_))) {
                 entries.push(C(CommandId::Copy));
@@ -2851,7 +2883,7 @@ impl Session {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. }
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. }
             | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
             | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
             for entry in self.state.sources.buffers.values_mut() {
@@ -2865,7 +2897,7 @@ impl Session {
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
             Input::Command(_) | Input::Completion(_) => None,
         };
-        let edit_reveal = matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let mut effect = match input {
@@ -2934,7 +2966,6 @@ impl Session {
     fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.snapshot().key() != expected || view.edit_disabled().is_some() { return Effect::default(); }
-        if view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
@@ -3810,6 +3841,10 @@ impl Session {
                 self.state.messages.push(text);
                 Effect { repaint: true, copy: None }
             }
+            Command::Cut => self.cut(),
+            Command::Paste(text) => self.paste(text),
+            Command::Delete { backward } => self.delete(backward),
+            Command::SetReadOnly(on) => self.set_read_only(on),
             Command::Copy => {
                 let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Effect::default() };
                 let Some(s) = view.tab().selection() else { return Effect::default() };

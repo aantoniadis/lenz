@@ -44,6 +44,35 @@ pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
 }
 
 #[test]
+fn explicit_read_only_editor_input_cannot_fall_through_to_reading_shortcuts() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("readonly.txt"); let original = "e\u{301}👩🏽‍💻\r\n"; std::fs::write(&path, original).unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone())); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);
+    a.run(CommandId::ReadOnlyMode);
+    for c in ['q', 'j', 'k', '/', ' '] { key(&mut a, KeyCode::Char(c), KeyModifiers::NONE); }
+    assert!(!a.quit, "read-only editor input must not become Quit");
+    assert!(a.modal.is_none(), "slash must not become Find");
+    let source = a.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original);
+    assert!(a.session.status_details().contains("Read-only mode is on"));
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn unicode_delete_cut_and_bracketed_paste_use_shared_transactions() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("typing.txt"); let original = "é😀\r\nsecond"; std::fs::write(&path, original).unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone())); settle(&mut a, |a| a.session.state().current_source().is_some()); draw(&mut a, 80, 16);
+    let text = |a: &App| { let source = a.session.state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE); key(&mut a, KeyCode::Delete, KeyModifiers::NONE); assert_eq!(text(&a), original);
+    a.enable_draft_input_for_test(); key(&mut a, KeyCode::Delete, KeyModifiers::NONE); assert_eq!(text(&a), "é\r\nsecond");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); assert_eq!(text(&a), original);
+    key(&mut a, KeyCode::Backspace, KeyModifiers::NONE); assert_eq!(text(&a), "é\r\nsecond");
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('x'), KeyModifiers::CONTROL); assert_eq!(text(&a), ""); assert_eq!(a.copy.as_deref(), Some("é\r\nsecond"));
+    a.handle(Event::Paste(a.copy.clone().unwrap())); assert_eq!(text(&a), "é\r\nsecond");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); assert_eq!(text(&a), "");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT); assert_eq!(text(&a), "é\r\nsecond");
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
 fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence() {
     let d = tempfile::tempdir().unwrap();
     let path = d.path().join("refresh.txt");
