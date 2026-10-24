@@ -13,6 +13,9 @@ mod presentation;
 pub use presentation::PresentationSource;
 #[path = "session/text_input.rs"]
 mod text_input;
+#[path = "session/completion.rs"]
+mod completion;
+pub use completion::{CompletionTrigger, Suggestion, Suggestions};
 #[path = "session/close.rs"]
 mod close_work;
 #[path = "session/external.rs"]
@@ -312,6 +315,17 @@ pub enum Command {
     CloseDocumentation,
     /// Whether resting the pointer on a name shows its documentation; remembered.
     SetDocumentationOnHover(bool),
+    /// Ask for completion at the caret (the popup opens when suggestions arrive).
+    Complete,
+    /// Move the popup's selection by rows (wrapping), or to a row.
+    MoveCompletion(isize),
+    SelectCompletion(usize),
+    /// Replace the name with the selected suggestion as one undoable transaction.
+    AcceptCompletion,
+    /// Dismiss the popup; its pending reply is dropped.
+    CloseCompletion,
+    /// Whether typing a name opens completion by itself; remembered.
+    SetAutoCompletion(bool),
     /// Whether files show their file-type icons (Nerd Font glyphs in a terminal); remembered.
     SetFileIcons(bool),
     /// Copy the active file's path (relative to the open folder), with `:line` of the caret when `line`.
@@ -459,6 +473,10 @@ pub enum CommandId {
     Documentation,
     /// Whether resting the pointer on a name shows its documentation; remembered.
     DocumentationOnHover,
+    /// The language server's suggestions for the name at the caret, in a popup.
+    Completion,
+    /// Whether typing a name opens completion by itself; remembered.
+    AutoCompletion,
     /// File-type icons beside file names; remembered.
     FileIcons,
     /// Inlay hints naming types; remembered.
@@ -549,7 +567,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 127] = [
+    pub const ALL: [CommandId; 129] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -630,6 +648,8 @@ impl CommandId {
         Self::TypeHierarchySubtypes,
         Self::Documentation,
         Self::DocumentationOnHover,
+        Self::Completion,
+        Self::AutoCompletion,
         Self::FileIcons,
         Self::InlayTypes,
         Self::InlayParameters,
@@ -756,6 +776,8 @@ impl CommandId {
             Self::TypeHierarchySubtypes => "Type Hierarchy: Subtypes",
             Self::Documentation => "Quick Documentation",
             Self::DocumentationOnHover => "Documentation on Hover",
+            Self::Completion => "Code Completion",
+            Self::AutoCompletion => "Completion While Typing",
             Self::GitBranches => "Git Branches…",
             Self::NewBranch => "New Branch…",
             Self::CheckoutRevision => "Checkout Tag or Revision…",
@@ -1107,6 +1129,8 @@ pub struct State {
     occurrences: Option<Occurrences>,
     /// The documentation shown in a popup.
     documentation: Option<Documentation>,
+    /// The completion popup.
+    completion: Option<Suggestions>,
     /// The commit an annotation opened, while shown.
     commit: Option<crate::blame::CommitPopup>,
     /// The repository of what is shown, the path it was looked up for, and the last path answered.
@@ -1816,6 +1840,7 @@ impl State {
             CommandId::StickyScroll => Some(self.settings.sticky_scroll),
             CommandId::Breadcrumbs => Some(self.settings.breadcrumbs),
             CommandId::DocumentationOnHover => Some(self.settings.documentation_on_hover),
+            CommandId::AutoCompletion => Some(self.settings.auto_completion),
             CommandId::FileIcons => Some(self.settings.file_icons),
             CommandId::AnnotateBlame => Some(self.active().is_some_and(|t| t.blame.is_some())),
             _ => None,
@@ -2053,6 +2078,7 @@ pub struct Session {
     semantic_seq: u64,
     /// The documentation request: its id, and the tab, version, name and trigger it is about.
     pending_doc: Option<DocumentationRequest>,
+    pending_completion: Option<completion::CompletionRequest>,
     doc_latest: Arc<AtomicU64>,
     /// The occurrences request: its id, and the file, version and caret it is about.
     pending_highlight: Option<HighlightRequest>,
@@ -2168,6 +2194,7 @@ impl Session {
                 asking: None,
                 occurrences: None,
                 documentation: None,
+                completion: None,
                 commit: None,
                 repo: None,
                 repo_anchor: None,
@@ -2239,6 +2266,7 @@ impl Session {
             semantic_seq: 0,
             pending_highlight: None,
             pending_doc: None,
+            pending_completion: None,
             doc_latest: Arc::default(),
             synced: 0,
             hierarchy_latest: Arc::default(),
@@ -2439,7 +2467,7 @@ impl Session {
             // The shown hierarchy turns around from its own root.
             CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees if self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|h| !h.direction.is_type()) => None,
             CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes if self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|h| h.direction.is_type()) => None,
-            CommandId::DocumentationOnHover | CommandId::FileIcons => None,
+            CommandId::DocumentationOnHover | CommandId::FileIcons | CommandId::AutoCompletion => None,
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
             CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
@@ -2540,7 +2568,8 @@ impl Session {
                 }
                 _ => None,
             },
-            CommandId::Definition | CommandId::PeekDefinition | CommandId::TypeDefinition | CommandId::Implementation | CommandId::Documentation | CommandId::CallHierarchy | CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees | CommandId::TypeHierarchy | CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes | CommandId::Usages | CommandId::FileSymbols => match (current.as_ref(), self.state.provider()) {
+            CommandId::Completion if self.text_action_disabled(id).is_some() => self.text_action_disabled(id),
+            CommandId::Definition | CommandId::PeekDefinition | CommandId::TypeDefinition | CommandId::Implementation | CommandId::Documentation | CommandId::Completion | CommandId::CallHierarchy | CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees | CommandId::TypeHierarchy | CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes | CommandId::Usages | CommandId::FileSymbols => match (current.as_ref(), self.state.provider()) {
                 (None, _) => Some("No file is open"),
                 _ if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Not available in source a language server returned"),
                 (Some(d), _) if d.is_large() => Some("Large file: no language server"),
@@ -2554,6 +2583,7 @@ impl Session {
                     _ if !v.supports.is_empty() && id == CommandId::Implementation && !v.offers(semantics::Question::Implementation) => Some("The language server does not offer implementations"),
                     _ if !v.supports.is_empty() && id == CommandId::TypeDefinition && !v.offers(semantics::Question::TypeDefinition) => Some("The language server does not offer type definitions"),
                     _ if !v.supports.is_empty() && id == CommandId::Documentation && !v.offers(semantics::Question::Hover) => Some("The language server does not offer documentation"),
+                    _ if !v.supports.is_empty() && id == CommandId::Completion && !v.offers(semantics::Question::Completion) => Some("The language server does not offer completion"),
                     _ if !v.supports.is_empty() && matches!(id, CommandId::CallHierarchy | CommandId::CallHierarchyCallers | CommandId::CallHierarchyCallees) && !v.offers(semantics::Question::PrepareCallHierarchy) => Some("The language server does not offer call hierarchy"),
                     _ if !v.supports.is_empty() && matches!(id, CommandId::TypeHierarchy | CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes) && !v.offers(semantics::Question::PrepareTypeHierarchy) && !v.offers(semantics::Question::Usages) => Some(no_type_hierarchy(v.name)),
                     _ => None,
@@ -2941,6 +2971,9 @@ impl Session {
             Input::Completion(c) => self.complete(c),
         };
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
+        // A popup or request whose tab, version, caret or server is no longer current is gone, not hidden.
+        if self.pending_completion.as_ref().is_some_and(|p| !p.current(&self.state)) { self.cancel_completion(); }
+        if self.state.completion.is_some() && self.state.completion().is_none() { self.state.completion = None; effect.repaint = true; }
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         if self.navigation_query.as_ref().is_some_and(|q| self.state.navigation.as_ref().is_none_or(|n| n.request != q.request)) { self.navigation_query = None; }
         effect.repaint |= self.refresh_saved_comparison();
@@ -3012,7 +3045,7 @@ impl Session {
         let result = draft.edit(&current, version, edits.clone(), tab, kind, self.state.semantics.now());
         if !draft.can_undo() && !draft.can_redo() && !draft.dirty() { entry.draft = None; }
         match result {
-            Ok(Some(next)) => self.publish_edit(tab, current, Arc::new(next), &edits),
+            Ok(Some(next)) => { let effect = self.publish_edit(tab, current, Arc::new(next), &edits); self.completion_edited(tab, &edits, kind); effect }
             Ok(None) | Err(_) => Effect::default(),
         }
     }
@@ -4006,6 +4039,12 @@ impl Session {
                 self.state.semantics.cancel_lane(semantics::Lane::Hover);
                 Effect { repaint: self.state.documentation.take().is_some(), copy: None, ..Effect::default() }
             }
+            Command::Complete => self.complete_at_caret(CompletionTrigger::Manual),
+            Command::MoveCompletion(by) => self.move_completion(by),
+            Command::SelectCompletion(row) => self.select_completion(row),
+            Command::AcceptCompletion => self.accept_completion(),
+            Command::CloseCompletion => self.close_completion(),
+            Command::SetAutoCompletion(on) => self.set_auto_completion(on),
             Command::SetDocumentationOnHover(on) => {
                 self.state.settings.documentation_on_hover = on;
                 self.save_settings();
@@ -4231,7 +4270,7 @@ impl Session {
 
     fn retry_semantic_analysis(&mut self) -> bool {
         let mut repaint = false;
-        for lane in [semantics::Lane::Foreground, semantics::Lane::Hover, semantics::Lane::Highlight, semantics::Lane::Hierarchy] {
+        for lane in [semantics::Lane::Foreground, semantics::Lane::Hover, semantics::Lane::Highlight, semantics::Lane::Hierarchy, semantics::Lane::Completion] {
             let Some(wait) = self.semantic_wait.remove(&lane) else { continue };
             let current = self.state.view(wait.tab).is_some_and(|v| v.snapshot().key() == wait.key && wait.metadata.ptr_eq(&Arc::downgrade(v.snapshot().source_meta())))
                 && self.project_generation.load(Ordering::Acquire) == wait.project;
@@ -4240,20 +4279,23 @@ impl Session {
                 semantics::Lane::Hover => self.pending_doc.as_ref().is_some_and(|p| p.request == wait.request),
                 semantics::Lane::Highlight => self.pending_highlight.as_ref().is_some_and(|p| p.request == wait.request),
                 semantics::Lane::Hierarchy => false,
+                semantics::Lane::Completion => self.pending_completion.as_ref().is_some_and(|p| p.request() == wait.request),
             };
             if !current || !requested {
-                if requested { match lane { semantics::Lane::Foreground => { self.state.asking = None; repaint = true; }, semantics::Lane::Hover => self.cancel_documentation(), semantics::Lane::Highlight => self.pending_highlight = None, semantics::Lane::Hierarchy => {} } }
+                if requested { match lane { semantics::Lane::Foreground => { self.state.asking = None; repaint = true; }, semantics::Lane::Hover => self.cancel_documentation(), semantics::Lane::Highlight => self.pending_highlight = None, semantics::Lane::Completion => self.cancel_completion(), semantics::Lane::Hierarchy => {} } }
                 continue;
             }
             let Some(doc) = self.admitted_document(wait.tab, Priority::Visible) else { self.semantic_wait.insert(lane, wait); continue };
             // Readiness changes independently of the view's source identity.
             self.synced = 0;
             self.sync_semantics();
+            if lane == semantics::Lane::Completion && let Some(p) = &mut self.pending_completion { p.admitted(&doc); }
             if let Some(ask) = wait.foreground { repaint |= self.ask_ready(doc, wait.offset, ask, wait.request).repaint; }
             else if let Err(why) = self.state.semantics.ask(&doc, wait.offset, wait.request, wait.question) {
                 match lane {
                     semantics::Lane::Hover => { if self.pending_doc.as_ref().is_some_and(|p| p.trigger == DocTrigger::Caret) { self.state.messages.push(format!("Quick documentation: {why}")); repaint = true; } self.cancel_documentation(); }
                     semantics::Lane::Highlight => self.pending_highlight = None,
+                    semantics::Lane::Completion => { let trigger = self.pending_completion.as_ref().map(|p| p.trigger()); if let Some(trigger) = trigger { repaint |= self.completion_unavailable(trigger, why).repaint; } }
                     semantics::Lane::Foreground | semantics::Lane::Hierarchy => {}
                 }
             }
@@ -4634,7 +4676,7 @@ impl Session {
                     semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
                     semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node
                         && fence.node.and_then(|node| h.nodes.get(node)).is_some_and(|node| Self::hierarchy_item_current(state, &node.call)))),
-                    semantics::Lane::Hover | semantics::Lane::Highlight => false,
+                    semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion => false,
                 }
             }
         }
@@ -4741,7 +4783,7 @@ impl Session {
                         && let Some(node) = h.loading(fence.request).filter(|node| Some(*node) == fence.node)
                     { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None, ..Effect::default() }; }
                 }
-                semantics::Lane::Hover | semantics::Lane::Highlight => {}
+                semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion => {}
             },
         }
         Effect::default()
@@ -4759,6 +4801,7 @@ impl Session {
             semantics::Lane::Hierarchy => return self.hierarchy_reply(reply),
             semantics::Lane::Highlight => return self.occurrences_reply(reply),
             semantics::Lane::Hover => return self.documentation_reply(reply),
+            semantics::Lane::Completion => return self.completion_reply(reply),
         }
         let project = self.state.project.as_ref().map_or(0, |p| p.generation());
         let Some(asking) = self.state.asking.as_ref().filter(|a| a.request == reply.request && a.project == project && self.state.semantics.has_session(reply.session)) else {
@@ -8095,6 +8138,8 @@ struct Settings {
     persistent_index: bool,
     folders_first: bool,
     documentation_on_hover: bool,
+    /// Typing a name opens completion by itself.
+    auto_completion: bool,
     /// File-type icons beside file names (Nerd Font glyphs in a terminal).
     file_icons: bool,
     /// Long lines wrap at the pane's width.
@@ -8115,7 +8160,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default() }
     }
 }
 

@@ -69,6 +69,8 @@ pub enum Question {
     Hover,
     /// The occurrences in its document of the symbol at a position.
     Highlight,
+    /// Suggestions for the name being typed at a position.
+    Completion,
 }
 
 /// Which of a server's requests a question replaces: each lane has at most one pending, so a background question
@@ -79,6 +81,8 @@ pub enum Lane {
     Hover,
     Highlight,
     Hierarchy,
+    /// Suggestions while typing: never cancelled by documentation or the user's navigation.
+    Completion,
 }
 
 impl Question {
@@ -99,6 +103,7 @@ impl Question {
             Question::TypeUsages => "textDocument/references",
             Question::Hover => "textDocument/hover",
             Question::Highlight => "textDocument/documentHighlight",
+            Question::Completion => "textDocument/completion",
         }
     }
 
@@ -115,6 +120,7 @@ impl Question {
             Question::TypeUsages => "referencesProvider",
             Question::Hover => "hoverProvider",
             Question::Highlight => "documentHighlightProvider",
+            Question::Completion => "completionProvider",
         }
     }
 
@@ -132,6 +138,7 @@ impl Question {
             Question::TypeUsages => "usages",
             Question::Hover => "documentation",
             Question::Highlight => "occurrence highlighting",
+            Question::Completion => "completion",
         }
     }
 
@@ -140,6 +147,7 @@ impl Question {
         match self {
             Question::Hover => Lane::Hover,
             Question::Highlight => Lane::Highlight,
+            Question::Completion => Lane::Completion,
             // A hierarchy's root is the user's own request; its levels load in the background.
             Question::IncomingCalls | Question::OutgoingCalls | Question::Supertypes | Question::Subtypes | Question::TypeUsages => Lane::Hierarchy,
             Question::Definition | Question::Usages | Question::Symbols | Question::FileSymbols | Question::Implementation | Question::TypeDefinition | Question::PrepareCallHierarchy | Question::PrepareTypeHierarchy => Lane::Foreground,
@@ -147,7 +155,7 @@ impl Question {
     }
 
     /// Every question, for capability views.
-    pub const ALL: [Question; 15] = [
+    pub const ALL: [Question; 16] = [
         Question::Definition,
         Question::Usages,
         Question::Symbols,
@@ -163,6 +171,7 @@ impl Question {
         Question::Supertypes,
         Question::Subtypes,
         Question::TypeUsages,
+        Question::Completion,
     ];
 }
 
@@ -817,6 +826,8 @@ impl Semantics {
                             "synchronization": { "dynamicRegistration": false },
                             "definition": { "linkSupport": true },
                             "references": {},
+                            // Plain insert text only: snippets and resolved edits are not applied yet.
+                            "completion": { "dynamicRegistration": false, "contextSupport": true, "completionItem": { "snippetSupport": false } },
                             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
                             "typeHierarchy": { "dynamicRegistration": false },
                             // typescript-language-server offers call hierarchy only to a client that declares it.
@@ -914,6 +925,7 @@ impl Semantics {
             Question::IncomingCalls | Question::OutgoingCalls => return Err("a call-hierarchy level is asked about its item".into()),
             Question::Supertypes | Question::Subtypes => return Err("a type-hierarchy level is asked about its item".into()),
             Question::TypeUsages => return Err("type usages are asked at a location".into()),
+            Question::Completion => params["context"] = json!({ "triggerKind": 1 }),
             Question::Definition | Question::Symbols | Question::Implementation | Question::TypeDefinition | Question::PrepareCallHierarchy | Question::PrepareTypeHierarchy | Question::Hover | Question::Highlight => {}
         }
         if !background {
@@ -956,6 +968,13 @@ impl Semantics {
             self.last_asked = Some(session);
         }
         s.request(question, params, request)
+    }
+
+    /// The characters after which the initialized server holding `path` offers completion unasked.
+    pub fn completion_triggers(&self, path: &Path) -> Vec<char> {
+        self.servers.iter().find(|s| s.initialized() && s.open.contains_key(path))
+            .and_then(|s| s.capabilities["completionProvider"]["triggerCharacters"].as_array())
+            .map(|t| t.iter().filter_map(|c| c.as_str()?.chars().next()).collect()).unwrap_or_default()
     }
 
     /// The initialized server holding `doc` at its version: its session.

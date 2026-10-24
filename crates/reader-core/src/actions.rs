@@ -219,6 +219,8 @@ impl Session {
             CommandId::TypeHierarchySubtypes => Command::HierarchyDirection(Direction::Subtypes),
             CommandId::Documentation => Command::Documentation,
             CommandId::DocumentationOnHover => Command::SetDocumentationOnHover(!state.documentation_on_hover()),
+            CommandId::Completion => Command::Complete,
+            CommandId::AutoCompletion => Command::SetAutoCompletion(!state.auto_completion()),
             CommandId::FileIcons => Command::SetFileIcons(!state.file_icons()),
             CommandId::AnnotateBlame => Command::SetAnnotate(state.active().is_none_or(|t| t.blame.is_none())),
             CommandId::CloseAnnotations => Command::SetAnnotate(false),
@@ -310,7 +312,7 @@ impl CommandId {
             | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
-            | Self::DocumentationOnHover | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
+            | Self::DocumentationOnHover | Self::AutoCompletion | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
             | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
@@ -327,7 +329,7 @@ impl CommandId {
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
-            Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection => G::Selection,
+            Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection | Self::Completion => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
@@ -367,6 +369,7 @@ impl CommandId {
             Self::CallHierarchy => Some("Ctrl+Alt+H"),
             Self::TypeHierarchy => Some("Ctrl+H"),
             Self::Documentation => Some("Ctrl+Q"),
+            Self::Completion => Some("Ctrl+Space"),
             Self::Copy => Some("Ctrl+C"),
             Self::Cut => Some("Ctrl+X"),
             Self::Paste => Some("Ctrl+V"),
