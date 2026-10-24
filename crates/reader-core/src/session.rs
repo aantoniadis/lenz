@@ -4574,7 +4574,7 @@ impl Session {
     }
 
     fn target_source<'a>(state: &'a State, path: &Path) -> Option<&'a Arc<crate::text::TextSnapshot>> {
-        state.sources.buffers.iter().find_map(|(buffer, entry)| {
+        state.sources.buffers.iter().filter(|(buffer, _)| !state.saved_buffer(**buffer)).find_map(|(buffer, entry)| {
             let source = entry.snapshot.as_ref()?;
             if !entry.pinned() && !state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && tab.loaded) { return None; }
             (source.source() == path || state.sources.aliases.get(path) == Some(buffer)

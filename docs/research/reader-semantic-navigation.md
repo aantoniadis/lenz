@@ -21,7 +21,8 @@ map lifecycle, worker pool or full-text input/render materialization is added.
 
 Publication independently validates the target against loaded or pinned current
 sources. Identical text after Undo still has a fresh identity and cannot validate
-old coordinates. Cached immutable previews do not become authoritative drafts.
+old coordinates. Cached immutable previews and the read-only saved comparison side do not become
+authoritative drafts.
 Peek, usages and multiple-target results retain the accepted source snapshot;
 later preview and activation reuse ticket 16's exact snapshot or disk
 Stamp/decoded-digest checks. Reusable hierarchy items carry their own source

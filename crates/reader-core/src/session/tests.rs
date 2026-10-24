@@ -369,6 +369,10 @@ fn saved_comparison_finds_both_versions_without_becoming_current_file_authority(
     assert_eq!(s.state.sources.aliases.get(&path), Some(&current_buffer));
     assert_eq!(s.captured_project_sources(d.path())[&path].identity.key.buffer, current_buffer);
     assert!(s.state().provider().is_none(), "saved text never becomes provider authority");
+    let ordinary_source = s.state.sources.buffers.remove(&current_buffer).unwrap();
+    assert!(Session::target_source(&s.state, &path).is_none(), "the immutable saved side cannot become semantic target authority even without a current snapshot");
+    s.state.sources.buffers.insert(current_buffer, ordinary_source);
+    assert_eq!(Session::target_source(&s.state, &path).unwrap().key().buffer, current_buffer);
     s.dispatch(Command::CloseSavedComparison);
     assert!(!s.state.sources.buffers.contains_key(&synthetic));
     assert_eq!(source_text(s.state().current_source().unwrap()), "draft needle\n");
