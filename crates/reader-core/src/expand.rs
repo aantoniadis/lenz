@@ -78,6 +78,44 @@ pub fn fallback_steps(doc: &Document, range: Range<usize>) -> Vec<Range<usize>> 
     out
 }
 
+/// Ordinary plain-text expansion stays immediate; longer scans use admitted background analysis.
+/// At most 4 KiB of source is read, plus a UTF-8 boundary adjustment for the word window.
+pub(crate) fn snapshot_fallback_steps(doc: &crate::text::TextSnapshot, range: Range<usize>) -> Option<Vec<Range<usize>>> {
+    let mut budget = 4096usize;
+    let mut out: Vec<Range<usize>> = Vec::new();
+    let mut push = |r: Range<usize>| {
+        let last = out.last().unwrap_or(&range);
+        if r.start <= last.start && r.end >= last.end && &r != last { out.push(r); }
+    };
+    if doc.len_bytes() == 0 { return Some(out); }
+    let (first, last) = (doc.line_of(range.start), doc.line_of(range.end));
+    if range.is_empty() {
+        let line = doc.reader_line_range(first);
+        let from = doc.floor_char_boundary(range.start.saturating_sub(budget / 2).max(line.start));
+        let to = doc.floor_char_boundary(range.start.saturating_add(budget / 2).min(line.end));
+        let text = doc.range(from..to)?;
+        budget = budget.saturating_sub(text.len());
+        let at = range.start - from;
+        let word = |c: char| c.is_alphanumeric() || c == '_';
+        let start = text[..at].char_indices().rev().take_while(|(_, c)| word(*c)).last().map_or(at, |(i, _)| i);
+        let end = text[at..].char_indices().take_while(|(_, c)| word(*c)).last().map_or(at, |(i, c)| at + i + c.len_utf8());
+        if start == 0 && from > line.start || end == text.len() && to < line.end { return None; }
+        if start < end { push(from + start..from + end); }
+    }
+    push(doc.reader_line_range(first).start..doc.reader_line_range(last).end);
+    let mut blank = |line| {
+        let range = doc.reader_line_range(line);
+        budget = budget.checked_sub(range.len())?;
+        Some(doc.range(range)?.trim().is_empty())
+    };
+    let (mut a, mut b) = (first, last);
+    while a > 0 && !blank(a - 1)? && !blank(a)? { a -= 1; }
+    while b + 1 < doc.line_count() && !blank(b + 1)? && !blank(b)? { b += 1; }
+    push(doc.reader_line_range(a).start..doc.reader_line_range(b).end);
+    push(0..doc.len_bytes());
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
