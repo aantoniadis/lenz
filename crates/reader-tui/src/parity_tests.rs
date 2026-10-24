@@ -699,6 +699,11 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
     let focus = gui.read_with(&visual, |v, _| v.focus_handle());
     visual.update(|w, cx| focus.focus(w, cx));
     let mut tui = App::new(config(&scratch.path().join("tui")), Some(path.clone()));
+    // Match input capabilities explicitly; platform-default policy has separate constructor coverage.
+    gui.update(&mut visual, |view, cx| { view.enable_draft_input_for_test(); cx.notify(); });
+    tui.enable_draft_input_for_test();
+    assert!(gui.read_with(&visual, |view, _| view.session().text_input_enabled()));
+    assert!(tui.session.text_input_enabled());
     let key = |app: &mut App, code, modifiers| {
         app.handle(Event::Key(KeyEvent::new(code, modifiers)));
     };
@@ -924,7 +929,7 @@ fn gui_and_terminal_keys_share_selection_find_split_reload_and_modal_outcomes(
     // Both handed the same editor and default-app launches over (recorded, not started).
     assert_eq!(tui.launched.len(), 2);
     assert_eq!(gui.read_with(&visual, |v, _| v.launched.clone()), tui.launched);
-    // A pending navigation can be cancelled in either adapter without changing the read-only document.
+    // A pending navigation can be cancelled in either adapter without changing the source.
     tui.dispatch(Command::CancelSemantic);
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
 }
