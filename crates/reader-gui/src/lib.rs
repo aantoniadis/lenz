@@ -1208,7 +1208,7 @@ impl ReaderView {
     #[cfg(feature = "test-support")]
     fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
         let Some((tab, expected, range)) = self.draft_target() else {
-            if self.draft_context() && let Some(why) = self.session.disabled(CommandId::Paste) { self.dispatch(Command::Notice(why.into()), cx); return true; }
+            if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
             return false;
         };
         self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);

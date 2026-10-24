@@ -1758,7 +1758,7 @@ impl App {
     #[cfg(test)]
     fn replace_draft_input(&mut self, text: &str, kind: EditKind) -> bool {
         let Some((tab, expected, range)) = self.draft_target() else {
-            if self.draft_context() && let Some(why) = self.session.disabled(CommandId::Paste) { self.dispatch(Command::Notice(why.into())); return true; }
+            if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
             return false;
         };
         self.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind });

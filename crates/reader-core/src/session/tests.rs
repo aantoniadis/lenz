@@ -18,23 +18,21 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
-fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enabling_production_input() {
-    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "input.txt", "e\u{301}👩🏽‍💻\r\n".as_bytes());
-    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "input.txt");
-    let first = s.state().active().unwrap().id(); s.dispatch(Command::Split(Split::Columns)); let second = s.state().active().unwrap().id();
-    assert_eq!(s.disabled(CommandId::Paste), Some("Text input is gated until the editor safety checkpoint"));
-    s.dispatch(Command::Paste("blocked".into())); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
-    s.enable_text_input_for_test(); s.dispatch(Command::SelectAll);
-    assert_eq!(s.disabled(CommandId::Cut), None); assert_eq!(s.disabled(CommandId::Paste), None);
-    s.dispatch(Command::SetReadOnly(true));
-    for id in [first, second] { assert!(s.state().view(id).unwrap().read_only()); }
-    for action in [CommandId::Cut, CommandId::Paste, CommandId::Delete, CommandId::Undo, CommandId::Save] { assert_eq!(s.disabled(action), Some("Read-only mode is on")); }
-    let copy = s.dispatch(Command::Copy); assert_eq!(copy.copy.as_deref(), Some("e\u{301}👩🏽‍💻\r\n"));
-    s.dispatch(Command::Cut); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Paste("blocked".into()));
-    s.dispatch(Command::SetReadOnly(false)); assert_eq!(s.disabled(CommandId::Cut), None);
-    s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
-    s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
-    assert_eq!(std::fs::read(path).unwrap(), "e\u{301}👩🏽‍💻\r\n".as_bytes());
+fn text_input_adjacent_deletion_is_one_undo_group() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "delete.txt", b"abc"); let now = std::time::Instant::now();
+    let mut s = session_clock(d.path(), Arc::new(move || now)); open(&mut s, Command::OpenRetained(path.clone()), "delete.txt"); s.enable_text_input_for_test();
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Delete { backward: true });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "a"); let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), "abc");
+    assert_eq!(std::fs::read(path).unwrap(), b"abc");
+}
+
+#[test]
+fn text_input_deletion_uses_existing_scalar_boundaries_and_keeps_crlf_atomic() {
+    for (original, caret, backward, expected) in [("e\u{301}", 3, true, "e"), ("👩🏽‍💻", 15, true, "👩🏽‍"), ("a\r\nb", 3, true, "ab"), ("a\r\nb", 1, false, "ab")] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "boundaries.txt", original.as_bytes()); let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "boundaries.txt"); s.enable_text_input_for_test();
+        s.dispatch(Command::Select(Selection { anchor: caret, head: caret })); s.dispatch(Command::Delete { backward }); assert_eq!(source_text(s.state().current_source().unwrap()), expected);
+        let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), original); assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+    }
 }
 
 #[test]
@@ -180,6 +178,32 @@ fn workspace_transitions_resolve_temporary_comparison_tabs_before_deciding_about
         }
         assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
     }
+}
+
+#[test]
+fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enabling_production_input() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "input.txt", "e\u{301}👩🏽‍💻\r\n".as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "input.txt");
+    let first = s.state().active().unwrap().id(); s.dispatch(Command::Split(Split::Columns)); let second = s.state().active().unwrap().id();
+    assert_eq!(s.disabled(CommandId::Paste), Some("Text input is gated until the editor safety checkpoint"));
+    s.dispatch(Command::Paste("blocked".into())); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.enable_text_input_for_test(); s.dispatch(Command::SelectAll);
+    assert_eq!(s.disabled(CommandId::Cut), None); assert_eq!(s.disabled(CommandId::Paste), None);
+    s.dispatch(Command::SetReadOnly(true));
+    for id in [first, second] { assert!(s.state().view(id).unwrap().read_only()); }
+    for action in [CommandId::Cut, CommandId::Paste, CommandId::Delete, CommandId::Undo, CommandId::Save] { assert_eq!(s.disabled(action), Some("Read-only mode is on")); }
+    let copy = s.dispatch(Command::Copy); assert_eq!(copy.copy.as_deref(), Some("e\u{301}👩🏽‍💻\r\n"));
+    s.dispatch(Command::Cut); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Paste("blocked".into()));
+    s.dispatch(Command::SetReadOnly(false)); assert_eq!(s.disabled(CommandId::Cut), None);
+    s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
+    s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CompareSaved); s.dispatch(Command::FocusPane(0));
+    assert_eq!(s.disabled(CommandId::ReadOnlyMode), Some("The last saved version is read-only"));
+    s.dispatch(Command::SetReadOnly(false)); s.dispatch(Command::Paste("blocked".into()));
+    assert_eq!(s.disabled(CommandId::Paste), Some("The last saved version is read-only"));
+    assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CloseSavedComparison);
+    assert_eq!(std::fs::read(path).unwrap(), "e\u{301}👩🏽‍💻\r\n".as_bytes());
 }
 
 #[test]
