@@ -43,7 +43,7 @@ impl Session {
 
     /// Why a document at or inside `source` must not move now: its save is running or its outcome is unknown, or
     /// its recovered draft is still undecided. A draft that is simply unsaved moves with its file.
-    fn relocate_blocked(&self, source: &Path) -> Option<String> {
+    pub(super) fn relocate_blocked(&self, source: &Path) -> Option<String> {
         for tab in self.state.tabs.iter().filter(|t| t.is_file() && t.source.starts_with(source)) {
             let name = tab.title();
             let save = tab.buffer.and_then(|b| self.state.sources.buffers.get(&b)).map(|entry| &entry.save.status);

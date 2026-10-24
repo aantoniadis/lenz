@@ -128,6 +128,8 @@ pub enum Modal {
     Create { kind: reader_core::create::Kind, dir: String, name: String, error: Option<String> },
     /// Rename or Move: the new name or folder for explorer entry `from` (project-relative).
     Relocate { kind: reader_core::relocate::Kind, from: String, input: String, error: Option<String> },
+    /// Delete: confirm removing explorer entry `from` (project-relative), into the trash or permanently.
+    ConfirmDelete { removal: reader_core::trash::Removal, from: String, error: Option<String> },
     /// The keymap: its rows' highlight, and whether the next key becomes a shortcut for the highlighted command.
     Keymap { at: usize, capture: bool },
 }
@@ -997,7 +999,8 @@ impl ReaderView {
     pub fn run(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
         // A create acts on the explorer's highlighted row, which only this adapter knows (the first row is drawn
         // highlighted before anything is picked, as in the terminal).
-        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry) {
+        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry
+            | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently) {
             if self.tree_sel.is_none() {
                 self.tree_sel = self.session.state().tree_rows().nth(self.tree_at()).map(|r| r.path.clone());
             }
@@ -1104,6 +1107,10 @@ impl ReaderView {
                 },
                 InterfaceAction::Relocate(kind) => match self.session.relocate_target() {
                     Some(from) => self.modal = Some(Modal::Relocate { kind, input: self.session.relocate_start(kind, &from), from, error: None }),
+                    None => self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into()), cx),
+                },
+                InterfaceAction::ConfirmDelete(removal) => match self.session.relocate_target() {
+                    Some(from) => self.modal = Some(Modal::ConfirmDelete { error: self.session.delete_refusal(removal, &from), removal, from }),
                     None => self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into()), cx),
                 },
                 InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None }),
@@ -1309,6 +1316,10 @@ impl ReaderView {
     /// A core command through this view's own dispatch, as its menus and keys send them (other crates' parity tests).
     #[cfg(feature = "test-support")]
     pub fn dispatch_for_test(&mut self, command: Command, cx: &mut Context<Self>) { self.dispatch(command, cx); }
+
+    /// Deletions go to this private trash, never the user's own (other crates' tests).
+    #[cfg(feature = "test-support")]
+    pub fn set_trash_home_for_test(&mut self, home: PathBuf) { self.session.set_trash_home_for_test(home); }
 
     /// A currently visible result row's click point for real input replays.
     #[cfg(feature = "test-support")]
@@ -1616,7 +1627,7 @@ impl ReaderView {
                 Some(&(_, action)) => self.branch_action(&target, action, window, cx),
                 None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
             },
-            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. }) => self.modal = m,
+            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
             Some(Modal::Places { list, query, at }) => {
                 let row = self.session.state().place_rows(list, &query).into_iter().nth(at).filter(|r| !r.missing);
                 match row {
@@ -1662,7 +1673,7 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. }) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -1945,6 +1956,22 @@ impl ReaderView {
             *error = None;
             return cx.notify();
         }
+        // A delete waits for its confirmation: Enter deletes (unless the core refuses), Escape cancels, nothing else acts.
+        if let Some(Modal::ConfirmDelete { removal, from, error }) = &mut self.modal {
+            match key {
+                "escape" => self.modal = None,
+                "enter" => match self.session.delete_refusal(*removal, from) {
+                    Some(why) => *error = Some(why),
+                    None => {
+                        let (removal, from) = (*removal, from.clone());
+                        self.modal = None;
+                        self.dispatch(Command::DeleteEntry { removal, from: from.into() }, cx);
+                    }
+                },
+                _ => {}
+            }
+            return cx.notify();
+        }
         // An entry's new name or folder: typing edits it, Enter moves it, Escape cancels.
         if let Some(Modal::Relocate { kind, from, input, error }) = &mut self.modal {
             match key {
@@ -2216,7 +2243,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } | Modal::Keymap { .. }) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } | Modal::Keymap { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -4531,6 +4558,13 @@ impl ReaderView {
                 let hint = error.clone().unwrap_or_else(|| format!("{} in {where_} — Enter creates, Escape cancels", kind.label()));
                 vec![(format!("› {name}"), None), (hint, None)]
             }
+            Some(Modal::ConfirmDelete { removal, from, error }) => {
+                let hint = match error {
+                    Some(why) => format!("{why} — Escape closes"),
+                    None => format!("Enter: {} — Escape cancels", removal.label()),
+                };
+                vec![(self.session.delete_prompt(*removal, from), None), (hint, None)]
+            }
             Some(Modal::Relocate { kind, from, input, error }) => {
                 let hint = error.clone().unwrap_or_else(|| format!("{} {from}: type {} — Enter, Escape cancels. References in other files are not changed.", kind.label(), kind.asks()));
                 vec![(format!("› {input}"), None), (hint, None)]
@@ -5738,7 +5772,7 @@ impl Modal {
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,

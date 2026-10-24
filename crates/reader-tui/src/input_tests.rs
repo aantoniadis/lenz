@@ -697,7 +697,8 @@ fn context_menu_follows_the_clicked_split_and_preview_and_scrolls_in_tiny_frames
         modifiers: KeyModifiers::NONE,
     }));
     assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::Context { .. })));
-    assert!(a.choices().iter().all(|c| matches!(c.target, ChoiceTarget::Action(CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry))));
+    assert!(a.choices().iter().all(|c| matches!(c.target, ChoiceTarget::Action(CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry
+        | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently | CommandId::RestoreDeleted))));
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.modal.is_none());
     assert_eq!(std::fs::read_to_string(text).unwrap(), "α界 name\n");

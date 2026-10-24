@@ -34,7 +34,7 @@ fn gui_the_explorer_creates_a_file_and_a_folder_through_real_input(cx: &mut Test
         assert!(matches!(r.modal, Some(Modal::Context { .. })));
         r.modal_rows()
     });
-    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["New File in Explorer…", "New Folder in Explorer…", "—", "Rename in Explorer…", "Move in Explorer…"], "{rows:?}");
+    assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), ["New File in Explorer…", "New Folder in Explorer…", "—", "Rename in Explorer…", "Move in Explorer…", "—", "Delete in Explorer…", "Delete Permanently in Explorer…", "Restore Last Deleted Entry"], "{rows:?}");
     v.simulate_keystrokes("enter");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Create { kind: reader_core::create::Kind::File, dir, .. }) if dir == "src")));
     // The dialog owns the keys: typing goes to the name field, not the document or the explorer.

@@ -52,6 +52,8 @@ pub(crate) enum Prompt {
     Create { kind: reader_core::create::Kind, dir: String },
     /// Rename / Move: the new name or folder for explorer entry `from` (project-relative).
     Relocate { kind: reader_core::relocate::Kind, from: String },
+    /// Delete: confirm removing explorer entry `from` (project-relative), into the trash or permanently.
+    ConfirmDelete { removal: reader_core::trash::Removal, from: String },
     /// Compare With: the other file or folder for this one.
     Compare(PathBuf),
     WorkspaceRoot,
@@ -520,7 +522,8 @@ impl App {
     }
     pub fn run(&mut self, id: CommandId) {
         // A command acts on the explorer's highlighted row, which only this adapter knows.
-        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry) {
+        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry
+            | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently) {
             self.remember_explorer();
         }
         // Toggling flips what is shown, then the setting alone decides.
@@ -674,6 +677,10 @@ impl App {
                 Some(from) => Prompt::Relocate { kind, from },
                 None => return self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into())),
             },
+            InterfaceAction::ConfirmDelete(removal) => match self.session.relocate_target() {
+                Some(from) => Prompt::ConfirmDelete { removal, from },
+                None => return self.dispatch(Command::Notice("Highlight a file or folder in the explorer".into())),
+            },
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
                 let default_app = action == InterfaceAction::OpenWithDefaultApp;
@@ -792,6 +799,7 @@ impl App {
         }
         let mut input = String::new();
         let mut secondary = String::new();
+        let mut error = None;
         match kind {
             Prompt::Find => {
                 input = self.session.find_seed();
@@ -828,6 +836,7 @@ impl App {
                 input = dir.join(name.unwrap_or_default()).display().to_string();
             }
             Prompt::Relocate { kind, ref from } => input = self.session.relocate_start(kind, from),
+            Prompt::ConfirmDelete { removal, ref from } => error = self.session.delete_refusal(removal, from),
             _ => {}
         }
         self.modal = Some(Modal {
@@ -838,7 +847,7 @@ impl App {
             at: 0,
             top: 0,
             reveal_selection: true,
-            error: None,
+            error,
             capture: None,
         });
         if self
@@ -1162,6 +1171,9 @@ impl App {
                 Prompt::Relocate { kind, from } => {
                     return format!("{} {from} · type {} · Enter · Esc cancels · references are not changed", kind.label(), kind.asks());
                 }
+                Prompt::ConfirmDelete { removal, from } => {
+                    return format!("{} · Enter: {} · Esc cancels", self.session.delete_prompt(*removal, from), removal.label());
+                }
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::Compare(_) => reader_core::external::COMPARISON_PROMPT,
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
@@ -1299,6 +1311,7 @@ impl App {
                 | Prompt::Menu(_)
                 | Prompt::LanguageServer
                 | Prompt::Themes
+                | Prompt::ConfirmDelete { .. }
         ) {
             return;
         }
@@ -1417,6 +1430,8 @@ impl App {
             }
             return;
         }
+        // A delete confirmation takes Enter and Escape only: nothing types into it or reaches behind it.
+        if matches!(kind, Prompt::ConfirmDelete { .. }) && !matches!(key.code, KeyCode::Enter | KeyCode::Esc) { return; }
         if matches!(kind, Prompt::Details {kind:Details::Replace,..}) {
             let choice=match key.code {
                 KeyCode::Char('r'|'R') if !control && !alt => Some(reader_core::save::ReplaceChoice::Replace),
@@ -1778,6 +1793,15 @@ impl App {
                     self.dispatch(Command::SaveAs { tab, path });
                 }
             }
+            Prompt::ConfirmDelete { removal, from } => match self.session.delete_refusal(removal, &from) {
+                Some(why) => {
+                    if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }
+                }
+                None => {
+                    self.close_modal();
+                    self.dispatch(Command::DeleteEntry { removal, from: from.into() });
+                }
+            },
             Prompt::Relocate { kind, from } => match self.session.relocate_refusal(kind, &from, &input) {
                 Some(why) => {
                     if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }

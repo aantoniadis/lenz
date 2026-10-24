@@ -33,6 +33,8 @@ mod save_as_work;
 mod create_work;
 #[path = "session/relocate.rs"]
 mod relocate_work;
+#[path = "session/delete.rs"]
+mod delete_work;
 #[path = "session/recovery.rs"]
 mod recovery_work;
 #[path = "session/reconcile.rs"]
@@ -148,6 +150,10 @@ pub enum Command {
     CreateEntry { kind: crate::create::Kind, dir: Arc<str>, name: String },
     /// Rename or move project entry `from` (project-relative) for the typed `input`: a name, or a folder.
     RelocateEntry { kind: crate::relocate::Kind, from: Arc<str>, input: String },
+    /// Delete project entry `from` (project-relative), into the trash or permanently; the adapter has confirmed.
+    DeleteEntry { removal: crate::trash::Removal, from: Arc<str> },
+    /// Restore the entry this session last moved to the trash.
+    RestoreDeleted,
     /// Show the recovered drafts still undecided (a postponed dialog).
     ShowRecoveredDrafts,
     /// Restore, discard or postpone the recovered draft `ticket` names.
@@ -534,6 +540,12 @@ pub enum CommandId {
     RenameExplorerEntry,
     /// Move the explorer's highlighted file or folder to another folder (the adapter asks which).
     MoveExplorerEntry,
+    /// Move the explorer's highlighted file or folder to the trash (the adapter confirms).
+    DeleteExplorerEntry,
+    /// Remove the explorer's highlighted file or folder for good (the adapter confirms).
+    DeleteExplorerPermanently,
+    /// Put the entry this session last moved to the trash back.
+    RestoreDeleted,
     /// The recovered drafts read at start, one at a time.
     RecoverDrafts,
     RecheckSave,
@@ -713,7 +725,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 167] = [
+    pub const ALL: [CommandId; 170] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -769,6 +781,9 @@ impl CommandId {
         Self::NewExplorerFolder,
         Self::RenameExplorerEntry,
         Self::MoveExplorerEntry,
+        Self::DeleteExplorerEntry,
+        Self::DeleteExplorerPermanently,
+        Self::RestoreDeleted,
         Self::RecoverDrafts,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
@@ -961,6 +976,9 @@ impl CommandId {
             Self::NewExplorerFolder => "New Folder in Explorer…",
             Self::RenameExplorerEntry => "Rename in Explorer…",
             Self::MoveExplorerEntry => "Move in Explorer…",
+            Self::DeleteExplorerEntry => "Delete in Explorer…",
+            Self::DeleteExplorerPermanently => "Delete Permanently in Explorer…",
+            Self::RestoreDeleted => "Restore Last Deleted Entry",
             Self::RecoverDrafts => "Recover Unsaved Draft…",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
@@ -2391,6 +2409,9 @@ pub struct Session {
     restore_workspace: bool,
     /// Ended as an interruption would end it (tests): no clean-exit checkpoint.
     interrupted: bool,
+    /// The home trash deletions go to (none: only a mount's own trash), and what this session put there, last last.
+    trash_home: Option<PathBuf>,
+    trashed: Vec<crate::trash::Trashed>,
     watcher: Watcher,
     /// The project's folders to watch, for its root, walk and size (built once per inventory), and the tabs' folders
     /// outside them that were last added.
@@ -2625,6 +2646,8 @@ impl Session {
             runtime_request: 0,
             restore_workspace: false,
             interrupted: false,
+            trash_home: crate::trash::home_trash(),
+            trashed: Vec::new(),
             watcher,
             watching: None,
             inventory_folders: None,
@@ -2912,8 +2935,11 @@ impl Session {
             },
             CommandId::NewDocument => None,
             CommandId::NewExplorerFile | CommandId::NewExplorerFolder => self.state.project.is_none().then_some("No folder is open"),
-            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry if self.state.project.is_none() => Some("No folder is open"),
-            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry => self.relocate_target().is_none().then_some("Highlight a file or folder in the explorer"),
+            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently
+                if self.state.project.is_none() => Some("No folder is open"),
+            CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently
+                => self.relocate_target().is_none().then_some("Highlight a file or folder in the explorer"),
+            CommandId::RestoreDeleted => self.trashed.is_empty().then_some("Nothing was moved to the trash in this session"),
             CommandId::RecoverDrafts if self.recovery.offers().is_empty() => Some("No recovered drafts are offered"),
             CommandId::RecoverDrafts => self.restore_workspace.then_some(recovery_work::RESTORING),
             CommandId::SaveAs => match self.state.active() {
@@ -3241,7 +3267,8 @@ impl Session {
     /// done with the highlighted entry.
     pub fn tree_menu(&self) -> Vec<MenuEntry> {
         vec![MenuEntry::Command(CommandId::NewExplorerFile), MenuEntry::Command(CommandId::NewExplorerFolder), MenuEntry::Separator,
-            MenuEntry::Command(CommandId::RenameExplorerEntry), MenuEntry::Command(CommandId::MoveExplorerEntry)]
+            MenuEntry::Command(CommandId::RenameExplorerEntry), MenuEntry::Command(CommandId::MoveExplorerEntry), MenuEntry::Separator,
+            MenuEntry::Command(CommandId::DeleteExplorerEntry), MenuEntry::Command(CommandId::DeleteExplorerPermanently), MenuEntry::Command(CommandId::RestoreDeleted)]
     }
 
     /// Line `line`'s annotation in tab `tab`, while its annotations are on and git has reached it.
@@ -3750,6 +3777,8 @@ impl Session {
             Command::NewDocument => self.new_document(),
             Command::CreateEntry { kind, dir, name } => self.create_entry(kind, dir.to_string(), name),
             Command::RelocateEntry { kind, from, input } => self.relocate_entry(kind, from.to_string(), input),
+            Command::DeleteEntry { removal, from } => self.delete_entry(removal, from.to_string()),
+            Command::RestoreDeleted => self.restore_deleted(),
             Command::ShowRecoveredDrafts => self.show_recovered_drafts(),
             Command::ChooseRecoveredDraft { ticket, choice } => self.choose_recovered_draft(ticket, choice),
             Command::RecheckSave { tab } => self.recheck_save(tab),

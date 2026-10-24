@@ -651,6 +651,29 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Unverified:** native macOS and Wayland GUI, physical terminals, case-only renames on case-insensitive file systems,
   and moves across file systems (`EXDEV` is reported, not emulated by copy) were not exercised.
 
+## Explorer delete (ticket 37, 2026-10-24)
+
+- **Trash choice (user decision):** Lenz implements the freedesktop.org Trash specification itself, with no new
+  dependency: the home trash (`$XDG_DATA_HOME/Trash`) when the entry is on the same device, else the mount's
+  `.Trash/$uid` (only a real sticky folder) or `.Trash-$uid`. Other platforms, macOS included, refuse recoverable
+  deletion and offer Delete Permanently; Finder's trash is not used.
+- **Deletion date in UTC:** `.trashinfo` `DeletionDate` is written in UTC, not local time as the specification asks,
+  because the core has no time-zone database. Restoring does not read it; desktop trash views show the time offset by
+  the local zone. Directory size caches (`directorysizes`) are not updated.
+- **Suspected cost, unmeasured:** the checks, the `.trashinfo` write with `fsync`, the rename and a permanent
+  `remove_dir_all` run on the UI thread; a large folder deleted permanently blocks until it is removed. Restore starts a
+  project rescan. Include both in the scheduled batch measurements.
+- **Unsaved work refuses:** a document with a draft, a running or unconfirmed save, or an undecided recovered draft
+  inside the entry refuses both deletes rather than asking Save/Discard; the user closes or saves first. Closed tabs'
+  recovery keys are tombstoned so a later start cannot offer them.
+- **Restore scope:** Restore Last Deleted Entry offers only this session's trash moves, newest first, and forgets them
+  at exit; older items are restored from the desktop's trash. A restore refused because something now occupies the
+  path keeps the item offered.
+- **Partial permanent deletion:** what was removed is reconciled (tabs closed, tree updated) and the rest stays listed
+  after a rescan, with the error reported.
+- **Unverified:** a mount-level `.Trash`/`.Trash-$uid` route (no second file system in the test environment), native
+  macOS and Wayland GUI, and physical terminals.
+
 ## Tests that time out under load (2026-10-24)
 
 - **Seven tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never
