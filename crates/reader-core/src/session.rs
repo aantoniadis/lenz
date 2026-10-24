@@ -83,6 +83,7 @@ pub use crate::native::{NativeReveal, NativeViewport};
 pub enum Command {
     BeginExternal(Box<crate::external::Request>),
     ChooseExternal { ticket: u64, choice: crate::external::Choice },
+    TakeExternal { ticket: u64 },
     Cut,
     Paste(String),
     Delete { backward: bool },
@@ -2892,13 +2893,13 @@ impl Session {
         if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
         if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. }
             | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
-            | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+            | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             for entry in self.state.sources.buffers.values_mut() {
                 if let Some(draft) = &mut entry.draft { draft.end_group(); }
             }
@@ -2973,9 +2974,7 @@ impl Session {
         self.layouts.pump(&self.jobs, &self.tx);
         self.projections.invalidate(|r| projection_current(&self.state, r));
         self.projections.pump(&self.jobs, &self.tx);
-        let external_pending = self.external_pending.is_some();
-        effect.external = self.advance_external();
-        effect.repaint |= external_pending && self.external_pending.is_none();
+        effect.repaint |= self.advance_external();
         effect
     }
 
@@ -3254,6 +3253,7 @@ impl Session {
             }
             Command::BeginExternal(request) => self.begin_external(*request),
             Command::ChooseExternal { ticket, choice } => self.choose_external(ticket, choice),
+            Command::TakeExternal { ticket } => self.take_external(ticket),
             Command::ChooseClose { ticket, buffer, choice } => self.choose_close(ticket, buffer, choice),
             Command::PrepareClose { batch, intent } => self.prepare_close(intent,Some(batch)),
             Command::CancelClose { ticket } => { if self.close_ticket()==ticket {self.cancel_close();} repaint }
