@@ -98,7 +98,7 @@ impl Session {
             return Some(Prompt {
                 ticket: pending.ticket,
                 buffer: fence.buffer,
-                path: source.source().to_owned(),
+                path: if entry.untitled { self.state.tabs.iter().find(|t| t.buffer == Some(fence.buffer)).map_or_else(|| source.source().to_owned(), |t| t.display.clone()) } else { source.source().to_owned() },
                 waiting,
                 save_disabled: self.save_buffer_disabled(fence.buffer),
                 discard_label: if pending.intent.closes_views() && entry.save.status.blocked() {
@@ -135,6 +135,7 @@ impl Session {
         }
         // A new explicit decision supersedes any earlier asynchronous replacement consent.
         self.external_pending = None;
+        self.replacing = None;
         self.replacements.clear();
         self.checkout_sources.clear();
         // Temporary comparison owners must not authorize dropping the ordinary draft's last view.

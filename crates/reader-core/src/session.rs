@@ -17,6 +17,8 @@ mod text_input;
 mod close_work;
 #[path = "session/external.rs"]
 mod external_work;
+#[path = "session/save_as.rs"]
+mod save_as_work;
 #[path = "session/transition.rs"]
 mod transition_work;
 
@@ -105,6 +107,11 @@ pub enum Command {
     Undo { tab: TabId },
     Redo { tab: TabId },
     Save { tab: TabId },
+    /// Write `tab`'s draft to `path`; an existing target first needs [`Command::ChooseReplace`].
+    SaveAs { tab: TabId, path: PathBuf },
+    ChooseReplace { ticket: u64, choice: crate::save::ReplaceChoice },
+    /// A new untitled document, retained in the focused pane.
+    NewDocument,
     RecheckSave { tab: TabId },
     ConfirmRecheckedSave { tab: TabId },
     PrepareProjection(crate::projection::Request),
@@ -427,6 +434,10 @@ pub enum CommandId {
     Undo,
     Redo,
     Save,
+    /// Write the draft to a chosen new path (the adapter asks where).
+    SaveAs,
+    /// An untitled document in the focused pane.
+    NewDocument,
     RecheckSave,
     ConfirmRecheckedSave,
     /// Fold regions: the innermost at the caret, the one on the caret's line, all of them, comments and imports.
@@ -549,7 +560,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 127] = [
+    pub const ALL: [CommandId; 129] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -597,6 +608,8 @@ impl CommandId {
         Self::Undo,
         Self::Redo,
         Self::Save,
+        Self::SaveAs,
+        Self::NewDocument,
         Self::RecheckSave,
         Self::ConfirmRecheckedSave,
         Self::CopyPath,
@@ -732,6 +745,8 @@ impl CommandId {
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Save => "Save",
+            Self::SaveAs => "Save As…",
+            Self::NewDocument => "New File",
             Self::RecheckSave => "Recheck Saved File",
             Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
             Self::Collapse => "Collapse",
@@ -1262,6 +1277,8 @@ struct Sources {
 }
 struct CurrentSource {
     read_only: bool,
+    /// A New File document: no disk copy exists, so its content is never released or reread.
+    untitled: bool,
     document: std::sync::Weak<Document>,
     snapshot: Option<Arc<crate::text::TextSnapshot>>,
     stamp: Option<Stamp>,
@@ -1270,7 +1287,7 @@ struct CurrentSource {
     save: crate::save::State,
 }
 impl CurrentSource {
-    fn pinned(&self) -> bool { self.save.status.busy() || self.save.status.blocked() || self.draft.as_ref().is_some_and(|draft| draft.dirty() || draft.can_undo() || draft.can_redo()) }
+    fn pinned(&self) -> bool { self.untitled || self.save.status.busy() || self.save.status.blocked() || self.draft.as_ref().is_some_and(|draft| draft.dirty() || draft.can_undo() || draft.can_redo()) }
 }
 impl Sources {
     fn admit(&mut self, source: &Path, previous: Option<crate::text::BufferId>, doc: &Arc<Document>, stamp: Option<Stamp>) -> crate::text::BufferId {
@@ -1278,7 +1295,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, untitled: false, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
         if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -1314,7 +1331,7 @@ impl<'a> View<'a> {
     }
     pub fn read_only(&self) -> bool { self.read_only }
     pub fn edit_disabled(&self) -> Option<&'static str> { self.intrinsic_edit_disabled().or(self.read_only.then_some("Read-only mode is on")) }
-    fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
+    pub(super) fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
         if self.tab.is_saved_version() { Some("The last saved version is read-only") }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
@@ -1601,7 +1618,7 @@ impl State {
             PlaceList::Bookmarks => self.places.bookmarks().iter().map(|m| mark(m, Place::Bookmark(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentLocations => self.places.recent_locations().iter().map(|m| mark(m, Place::Location(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentFiles => {
-                let current = self.active().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).map(|t| t.source.clone());
+                let current = self.active().filter(|t| t.is_file()).map(|t| t.source.clone());
                 let mut files: Vec<PathBuf> = self.places.recent_files().iter().filter(|p| Some(*p) != current.as_ref()).cloned().collect();
                 if let Some(c) = current {
                     files.insert(files.len().min(1), c);
@@ -1728,7 +1745,7 @@ impl State {
             false => format!("Read-only source retrieved from {}; its server session has ended ({})", v.provider, v.uri),
         });
         // Outside the browsing root, or a dependency inside it (node_modules, a project's virtualenv): its origin.
-        let origin = tab.filter(|t| !t.is_saved_version() && t.retrieved.is_none()).zip(self.project.as_ref()).and_then(|(t, p)| {
+        let origin = tab.filter(|t| t.is_file()).zip(self.project.as_ref()).and_then(|(t, p)| {
             let language = self.source(t.id).map_or(t.language.flatten(), |d| d.language());
             let origin = semantics::provider::origin(&t.source, language);
             let inside = t.source.starts_with(p.root());
@@ -1751,7 +1768,7 @@ impl State {
     /// The semantic provider for the active document and what it is doing; `None` when its language has none.
     pub fn provider(&self) -> Option<ProviderView> {
         // Source a language server returned is not a document any server holds.
-        if self.active()?.is_saved_version() || self.active()?.retrieved.is_some() {
+        if !self.active()?.is_file() {
             return None;
         }
         self.semantics.view_source(self.current_source()?.source_meta(), self.current_source()?.is_large())
@@ -1984,6 +2001,9 @@ pub struct Session {
     project_query: Option<project_search::ProjectQuery>,
     navigation_query: Option<navigation_query::NavigationQuery>,
     save_seq: u64,
+    /// The last untitled document's number (Untitled-N), and a Save As waiting for a Replace decision.
+    untitled_seq: u64,
+    replacing: Option<crate::save::Replacing>,
     semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -2189,7 +2209,7 @@ impl Session {
             analysis: Default::default(),
             project_query: None,
             navigation_query: None,
-            save_seq: 0,
+            save_seq: 0, untitled_seq: 0, replacing: None,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2373,6 +2393,7 @@ impl Session {
             CommandId::Back => (!self.state.can_back()).then_some("Nothing to go back to"),
             CommandId::Forward => (!self.state.can_forward()).then_some("Nothing to go forward to"),
             CommandId::ToggleBookmark | CommandId::SetBookmarkMnemonic => match self.state.active() {
+                Some(t) if t.untitled() => Some(UNTITLED_NO_FILE),
                 Some(t) if self.state.view(t.id).is_some() && !shows_text(&self.state, t) => Some("Bookmarks need a text view"),
                 Some(t) if self.state.view(t.id).is_some() => None,
                 _ => Some("No file is open"),
@@ -2423,6 +2444,7 @@ impl Session {
             CommandId::RerunSearch | CommandId::CloseResults => self.state.results.is_none().then_some("No search results"),
             CommandId::Reload if self.state.active().is_some_and(Tab::is_saved_version) => Some("The last saved version is read-only"),
             CommandId::Reload if self.state.active().is_some_and(|t| t.retrieved.is_some()) => Some("Source a language server returned cannot be reloaded; ask for the definition again"),
+            CommandId::Reload if self.state.active().is_some_and(Tab::untitled) => Some(UNTITLED_NO_FILE),
             CommandId::Reload | CommandId::SelectAll => (!open).then_some("No file is open"),
             CommandId::Collapse | CommandId::Expand | CommandId::CollapseAll | CommandId::ExpandAll | CommandId::CollapseCommentsImports => self.fold_unavailable(),
             CommandId::ExtendSelection => match self.state.active() {
@@ -2441,7 +2463,7 @@ impl Session {
             CommandId::TypeHierarchySupertypes | CommandId::TypeHierarchySubtypes if self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).is_some_and(|h| h.direction.is_type()) => None,
             CommandId::DocumentationOnHover | CommandId::FileIcons => None,
             CommandId::InlayTypes | CommandId::InlayParameters | CommandId::SemanticHighlighting => None,
-            CommandId::CopyPath => self.state.active().is_none().then_some("No file is open"),
+            CommandId::CopyPath => match self.state.active() { None => Some("No file is open"), Some(t) if t.untitled() => Some(UNTITLED_NO_FILE), Some(_) => None },
             CommandId::OpenInEditor | CommandId::OpenWithDefaultApp => self.external_tab().err(),
             CommandId::ShowCommit | CommandId::ShowCommitDiff | CommandId::CopyRevision => self.commit_target().err(),
             CommandId::GitBranches | CommandId::NewBranch | CommandId::CheckoutRevision => match &self.state.repo {
@@ -2460,6 +2482,7 @@ impl Session {
                 Some(t) if t.blame.is_some() => None,
                 Some(t) if t.is_saved_version() => Some("The last saved version has no live Git attribution"),
                 Some(t) if t.retrieved.is_some() => Some("Source from a language server has no Git history"),
+                Some(t) if t.untitled() => Some(UNTITLED_NO_FILE),
                 Some(t) if t.unavailable.is_some() => Some("The file is unavailable"),
                 Some(t) if !t.loaded && self.state.loading().is_some() => Some("The file is still loading"),
                 // An SVG shown as its source is text.
@@ -2474,8 +2497,14 @@ impl Session {
             CommandId::CompareSelected => (self.state.tree_marks.len() < 2).then_some(MARK_TWO),
             CommandId::CopyPathLine => match self.state.active() {
                 None => Some("No file is open"),
+                Some(t) if t.untitled() => Some(UNTITLED_NO_FILE),
                 Some(t) if !t.loaded => Some("No text to point at"),
                 Some(_) => None,
+            },
+            CommandId::NewDocument => None,
+            CommandId::SaveAs => match self.state.active() {
+                None => Some("No file is open"),
+                Some(tab) => self.save_as_disabled(tab.id),
             },
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match self.state.active() {
                 None => Some("No file is open"),
@@ -2764,7 +2793,7 @@ impl Session {
     /// Looks up the repository when what it is looked up for changed: the folder, else the active file's folder.
     fn sync_repo(&mut self) {
         let anchor = self.state.project.as_ref().map(|p| p.root().to_path_buf())
-            .or_else(|| self.state.active().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).and_then(|t| t.source.parent().map(Path::to_path_buf)));
+            .or_else(|| self.state.active().filter(|t| t.is_file()).and_then(|t| t.source.parent().map(Path::to_path_buf)));
         if anchor == self.state.repo_anchor {
             return;
         }
@@ -2832,6 +2861,7 @@ impl Session {
             None => Err("No file is open"),
             Some(t) if t.is_saved_version() => Err("The last saved comparison side is an immutable snapshot; open the current side externally"),
             Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
+            Some(t) if t.untitled() => Err(UNTITLED_NO_FILE),
             Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
             Some(t) => Ok(t),
         }
@@ -2911,7 +2941,7 @@ impl Session {
         let input = input.into();
         // Authorized windows are immutable while platform ownership and metadata cleanup finish.
         if self.closed { return match input { Input::Command(Command::SaveWorkspace) => self.command(Command::SaveWorkspace), _ => Effect::default() }; }
-        if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
+        if matches!(&input,Input::Command(Command::Save {..}|Command::SaveAs {..}|Command::ChooseReplace {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
         if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
@@ -3147,6 +3177,9 @@ impl Session {
             Command::Undo { tab } => self.undo(tab, false),
             Command::Redo { tab } => self.undo(tab, true),
             Command::Save { tab } => self.save(tab),
+            Command::SaveAs { tab, path } => self.save_as(tab, path),
+            Command::ChooseReplace { ticket, choice } => self.choose_replace(ticket, choice),
+            Command::NewDocument => self.new_document(),
             Command::RecheckSave { tab } => self.recheck_save(tab),
             Command::ConfirmRecheckedSave { tab } => self.confirm_rechecked_save(tab),
             Command::PrepareLayout { pane, tab, work } => {
@@ -3872,7 +3905,7 @@ impl Session {
                 repaint
             }
             Command::CopyPath { line } => {
-                let Some(t) = self.state.active() else { return Effect::default() };
+                let Some(t) = self.state.active().filter(|t| !t.untitled()) else { return Effect::default() };
                 let path = match self.state.project.as_ref().and_then(|p| t.source.strip_prefix(p.root()).ok()) {
                     Some(relative) => relative.to_string_lossy().replace(std::path::MAIN_SEPARATOR, "/"),
                     None => t.source.to_string_lossy().into_owned(),
@@ -4569,7 +4602,7 @@ impl Session {
         }) | 1;
         if fingerprint == self.synced { return; }
         self.synced = fingerprint;
-        let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).filter_map(|t| {
+        let tabs: Vec<TabId> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| {
             let entry = self.state.sources.buffers.get(&t.buffer?)?;
             if !t.loaded && !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return None; }
             let snapshot = entry.snapshot.as_ref()?;
@@ -4599,7 +4632,7 @@ impl Session {
             false => Vec::new(),
             true => {
                 let mut seen = std::collections::HashSet::new();
-                self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none() && seen.insert(&t.source)).map(|t| (t.source.as_path(), t.language.unwrap_or_else(|| highlight::detect(&t.source, "")))).collect()
+                self.state.tabs.iter().filter(|t| t.is_file() && seen.insert(&t.source)).map(|t| (t.source.as_path(), t.language.unwrap_or_else(|| highlight::detect(&t.source, "")))).collect()
             }
         };
         self.state.semantics.sync(&docs, &held, browse.as_deref(), &mut resolve, &self.tx);
@@ -6511,7 +6544,7 @@ impl Session {
 
     /// Check tab `id`'s source against the disk off the UI thread.
     fn refresh(&mut self, id: TabId) {
-        if self.state.tabs.iter().any(|t| t.id == id && (t.moving || t.is_saved_version() || t.retrieved.is_some())) {
+        if self.state.tabs.iter().any(|t| t.id == id && (t.moving || !t.is_file())) {
             return;
         }
         self.check(id, None);
@@ -6676,7 +6709,7 @@ impl Session {
         let project = self.state.project.as_ref().map(|p| (p.root().to_owned(), p.walk, p.files(), !p.refreshing() && !matches!(p.coverage(), project::Coverage::Scanning(_))));
         // Tabs inside the inventory's folders add nothing: opening one of the project's files costs no rebuild.
         let inside = |d: &Path| self.state.project.as_ref().is_some_and(|p| d == p.root() || d.strip_prefix(p.root()).is_ok_and(|r| p.has_dir(&r.to_string_lossy())));
-        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).filter_map(|t| t.source.parent()).filter(|d| !inside(d)).map(Path::to_path_buf).collect();
+        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| t.source.parent()).filter(|d| !inside(d)).map(Path::to_path_buf).collect();
         let key: WatchKey = (project, extra);
         if self.watching.as_ref() == Some(&key) {
             return;
@@ -7431,7 +7464,7 @@ impl Session {
         if self.state.comparison.is_some() { return; }
         if self.restore_workspace { return; } // A directory closed before its state arrived keeps the saved workspace.
         let Some(project) = &self.state.project else { return };
-        let tabs: Vec<_> = self.state.tabs.iter().filter(|t| !t.is_saved_version() && t.retrieved.is_none()).take(crate::workspace::MAX_TABS).collect();
+        let tabs: Vec<_> = self.state.tabs.iter().filter(|t| t.is_file()).take(crate::workspace::MAX_TABS).collect();
         let index = |id| tabs.iter().position(|t| Some(t.id) == id);
         let workspace = crate::workspace::Workspace {
             active: index(self.state.active), other: index(self.state.other), focused: self.state.focused,
@@ -7518,7 +7551,7 @@ impl Session {
             let dirty = self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty);
             self.analysis.release_view(buffer, id, last && !dirty);
         }
-        if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| !t.is_saved_version() && t.retrieved.is_none() && !t.before_root) {
+        if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.is_file() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(&self.state, t).then(|| self.state.location(t)));
             Arc::make_mut(&mut self.state.places).left_file(&source);
             if let Some(at) = at {
@@ -7695,7 +7728,7 @@ impl Session {
     /// focused pane's goes first, this one follows it).
     fn load_other(&mut self) {
         let Some(id) = self.state.other.filter(|_| self.pending.is_none()) else { return };
-        if self.state.tabs.iter().any(|t| t.id == id && !t.loaded && !t.is_saved_version() && t.retrieved.is_none()) {
+        if self.state.tabs.iter().any(|t| t.id == id && !t.loaded && t.is_file()) {
             self.load(id, false);
         }
     }
@@ -7892,8 +7925,9 @@ impl Session {
         let Some(doc) = self.state.source(id).cloned() else { return };
         let project = self.project_generation.load(Ordering::Relaxed);
         let Some(t) = self.tab_mut(id) else { return };
+        let file = t.is_file();
         let Some(b) = t.blame.as_mut() else { return };
-        if b.of(t.stamp, &doc) && (b.done || b.project == project) || t.comparison_side == Some(ComparisonSide::Saved) || t.retrieved.is_some() {
+        if b.of(t.stamp, &doc) && (b.done || b.project == project) || !file {
             return;
         }
         let file = t.canonical.clone().unwrap_or_else(|| t.source.clone());
@@ -8133,7 +8167,7 @@ fn save_json(file: &Path, value: &impl serde::Serialize) {
 
 /// Whether `t` shows text lines from a file (not an image, a Markdown preview or a language server's source).
 fn shows_text(state: &State, t: &Tab) -> bool {
-    state.view(t.id).is_some_and(|view| (view.snapshot().image().is_none() || t.image_source) && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))) && !t.is_saved_version() && t.retrieved.is_none()
+    state.view(t.id).is_some_and(|view| (view.snapshot().image().is_none() || t.image_source) && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending))) && t.is_file()
 }
 
 /// What tab content shown as `shown` (read as `stamp`) is now on disk at `path`.
@@ -8197,6 +8231,9 @@ fn read(path: &Path) -> Result<(Stamp, lenz_content::write::ExactRead), ReadErro
 
 /// Whether `path` is a language server's opaque URI rather than a file path: `scheme://…` with a URI scheme of
 /// at least two characters (not a drive letter) other than `file`.
+/// Why disk-file actions are unavailable for a New File document.
+pub(crate) const UNTITLED_NO_FILE: &str = "This document has no file yet; use Save As first";
+
 fn is_virtual(path: &Path) -> bool {
     path.to_str().and_then(|s| s.split_once("://")).is_some_and(|(scheme, _)| {
         scheme.len() > 1

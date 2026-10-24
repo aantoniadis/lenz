@@ -51,6 +51,7 @@ impl SourceMeta {
     pub(crate) fn loaded_version(&self) -> Option<u64> { self.loaded_version }
     pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, canonical: None, ..self.clone() } }
     pub(crate) fn with_canonical(mut self, canonical: Option<PathBuf>) -> Self { self.canonical = canonical; self }
+    pub(crate) fn with_language(mut self, language: Option<Language>) -> Self { self.language = language; self }
     pub(crate) fn canonical(&self) -> Option<&std::path::Path> { self.canonical.as_deref() }
     pub(crate) fn bytes(&self) -> usize {
         size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity() + self.canonical.as_ref().map_or(0, |path| path.capacity())
