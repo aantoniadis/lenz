@@ -18,6 +18,62 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn closed_sessions_reject_new_user_mutations_and_old_close_permits() {
+    use crate::close::{Choice,CloseCoordinator,Progress};
+    let d=tempfile::tempdir().unwrap();let (mut s,path,tab)=close_fixture(d.path(),"a.txt");let mut c=CloseCoordinator::default();c.register(s.id());c.begin(&mut [&mut s]);let p=s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});let id=s.id();assert_eq!(c.progress(&mut [&mut s]),Progress::Committed(vec![id]));
+    let source=s.state().current_source().unwrap().clone();
+    assert_eq!(s.last_close().unwrap().discarded,vec![source.key().buffer]);
+    s.dispatch(Command::Edit {tab,expected:source.key(),edits:vec![crate::text::TextEdit {range:0..0,text:"late ".into()}],kind:crate::text::EditKind::Paste});s.dispatch(Command::Undo {tab});s.dispatch(Command::OpenRetained(path.clone()));
+    s.dispatch(Command::CommitClose(crate::close::Permit {session:id,ticket:p.ticket}));
+    assert_eq!(s.state().current_source().unwrap().key(),source.key(),"closed Session is metadata for cleanup, never a mutable editor");assert!(s.closed());assert!(s.close_prompt().is_none());assert_eq!(std::fs::read(path).unwrap(),b"saved\r\n");
+}
+
+#[test]
+fn close_consent_is_invalidated_by_a_new_explicit_save() {
+    use crate::close::{Choice,CloseCoordinator,Progress};
+    let d=tempfile::tempdir().unwrap();let (mut a,path,tab)=close_fixture(d.path(),"a.txt");
+    let mut c=CloseCoordinator::default();c.register(a.id());c.begin(&mut [&mut a]);let p=a.close_prompt().unwrap();
+    a.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});
+    a.dispatch(Command::Save {tab});
+    settle(&mut a,|s| !s.state().tab_dirty(tab));
+    assert_eq!(c.progress(&mut [&mut a]),Progress::Cancelled,"an intervening explicit operation supersedes old destructive consent");assert!(!a.closed());
+    assert_eq!(std::fs::read(path).unwrap(),"draft λ\r\n".as_bytes());
+}
+
+#[test]
+fn close_twins_unsplit_and_final_discard_preserve_accessible_draft_owners() {
+    use crate::close::Choice;
+    let d=tempfile::tempdir().unwrap();let (mut s,path,first)=close_fixture(d.path(),"a.txt");
+    s.dispatch(Command::Split(Split::Columns)); let twin=s.state().active().unwrap().id(); assert_ne!(first,twin);
+    s.dispatch(Command::CloseTab(twin)); assert!(s.close_prompt().is_none());assert_eq!(s.state().active().unwrap().id(),first);
+    assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n");
+    s.dispatch(Command::Split(Split::Columns));let other=write(d.path(),"b.txt",b"other");open(&mut s,Command::OpenRetained(other),"b.txt");
+    s.dispatch(Command::Unsplit);assert!(s.close_prompt().is_none());assert_eq!(s.state().tabs().len(),2,"distinct tabs move; only the duplicate source view is removed");
+    let first=s.state().tabs().iter().find(|t|t.source()==path).unwrap().id();
+    s.dispatch(Command::CloseTab(first));let p=s.close_prompt().unwrap();s.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Cancel});
+    assert!(s.state().tabs().iter().any(|t|t.id()==first));
+    s.dispatch(Command::CloseTab(first));let p=s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {ticket:p.ticket-1,buffer:p.buffer,choice:Choice::Discard});assert_eq!(s.close_prompt().unwrap().ticket,p.ticket,"an obsolete response cannot cancel or approve the new decision");
+    s.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});assert!(!s.state().tabs().iter().any(|t|t.id()==first));
+    open(&mut s,Command::OpenRetained(path.clone()),"a.txt");assert_eq!(source_text(s.state().current_source().unwrap()),"saved\r\n");assert_eq!(std::fs::read(path).unwrap(),b"saved\r\n");
+}
+#[test]
+fn close_batch_save_failure_cancels_every_prepared_discard() {
+    use crate::close::{Choice,CloseCoordinator,Progress};
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    for fault in [Fault::BeforeReplace,Fault::AfterReplace] {
+        let d=tempfile::tempdir().unwrap();let (mut a,ap,_)=close_fixture(d.path(),"a.txt");let (mut b,bp,_)=close_fixture(d.path(),"b.txt");
+        let mut c=CloseCoordinator::default();c.register(a.id());c.register(b.id());c.begin(&mut [&mut a,&mut b]);
+        let p=a.close_prompt().unwrap();a.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Discard});
+        let guard=at_path(&bp,fault);let p=b.close_prompt().unwrap();b.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice:Choice::Save});
+        settle(&mut b,|s|s.close_prompt().is_none());assert_eq!(c.progress(&mut [&mut a,&mut b]),Progress::Cancelled);
+        assert!(!a.closed() && !b.closed());assert_eq!(source_text(a.state().current_source().unwrap()),"draft λ\r\n");assert_eq!(source_text(b.state().current_source().unwrap()),"draft λ\r\n");
+        assert_eq!(std::fs::read(ap).unwrap(),b"saved\r\n");assert_eq!(std::fs::read(bp).unwrap(),if fault==Fault::AfterReplace {"draft λ\r\n".as_bytes()} else {b"saved\r\n"});drop(guard);
+    }
+}
+
+#[test]
 fn close_batch_cancel_preserves_every_draft_and_only_explicit_saves_persist() {
     use crate::close::{Choice, CloseCoordinator, Progress};
     for choice in [Choice::Discard, Choice::Save] {

@@ -53,6 +53,8 @@ pub enum InterfaceAction {
     /// Start Lenz Diff on the current branch's changes since its base.
     ShowBranchChanges,
     NewWindow,
+    CloseWindow,
+    QuitAll,
     FocusBreadcrumbs,
     ToggleExplorer,
     WorkspaceRoot,
@@ -141,6 +143,8 @@ impl Session {
             CommandId::RecentLocations => return CatalogAction::Interface(InterfaceAction::RecentLocations),
             CommandId::ChooseTheme => return CatalogAction::Interface(InterfaceAction::ChooseTheme),
             CommandId::About => return CatalogAction::Interface(InterfaceAction::About),
+            CommandId::CloseWindow => return CatalogAction::Interface(InterfaceAction::CloseWindow),
+            CommandId::QuitAll => return CatalogAction::Interface(InterfaceAction::QuitAll),
             CommandId::NewWindow => return CatalogAction::Interface(InterfaceAction::NewWindow),
             CommandId::FocusBreadcrumbs => return CatalogAction::Interface(InterfaceAction::FocusBreadcrumbs),
             CommandId::ToggleExplorer => return CatalogAction::Interface(InterfaceAction::ToggleExplorer),
@@ -320,7 +324,7 @@ impl CommandId {
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,
-            Self::ChooseTheme | Self::About => G::Application,
+            Self::ChooseTheme | Self::About | Self::CloseWindow | Self::QuitAll => G::Application,
         }
     }
 }
@@ -360,6 +364,8 @@ impl CommandId {
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
             Self::Close => Some("Ctrl+F4"),
+            Self::CloseWindow => Some("Ctrl+Q"),
+            Self::QuitAll => Some("Ctrl+Shift+Q"),
             Self::ExtendSelection => Some("Ctrl+W"),
             Self::ShrinkSelection => Some("Ctrl+Shift+W"),
             Self::FocusBreadcrumbs => Some("Ctrl+Shift+."),

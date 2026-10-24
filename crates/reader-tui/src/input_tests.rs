@@ -11,7 +11,7 @@ fn copied_selection(state: &reader_core::session::State) -> Option<String> {
     state.view(state.active()?.id())?.copy_selection()
 }
 
-fn config(dir: &Path) -> Config {
+pub(crate) fn config(dir: &Path) -> Config {
     Config {
         themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-reader"),
         recent: dir.join("state/recent.json"),
@@ -31,7 +31,7 @@ fn app(dir: &Path) -> App {
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle(Event::Key(KeyEvent::new(code, modifiers)));
 }
-fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
+pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done(app) {
         assert!(Instant::now() < deadline, "background work timed out");
@@ -760,7 +760,7 @@ fn empty_real_constructor_and_tiny_frames_are_safe() {
     assert!(a.modal.is_none());
 }
 
-fn draw(app: &mut App, width: u16, height: u16) {
+pub(crate) fn draw(app: &mut App, width: u16, height: u16) {
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();
@@ -1379,6 +1379,10 @@ fn path_validation_and_empty_independent_view_preserve_open_document() {
     let empty = App::new(config(dir.path()), None);
     assert!(empty.session.state().active().is_none());
     key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+    assert!(!a.quit, "a modal consumes close input before the runtime");
+    assert!(a.modal.is_some());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
     assert!(a.quit);
 }
@@ -3381,7 +3385,7 @@ fn space_or_ctrl_click_marks_two_entries_and_ctrl_d_compares_them() {
 }
 
 /// The screen as text after a draw.
-fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
+pub(crate) fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| a.draw(f)).unwrap();
     terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()

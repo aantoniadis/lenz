@@ -86,3 +86,5 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   currently rank up to 32 adjacent saved-file record sets per turn. Use the
   scheduled batch comparison on a many-file index before changing that batch
   size; preserve independent query cancellation and completed-action timing.
+
+- Ticket14 native delivery acceptance: production Reader windows install a veto and focused tests replay that exact handler plus real keyboard decisions. GPUI TestPlatform has no native close-event simulator; replay one ordinary Linux titlebar close via an owned display at the next adapter batch boundary with disposable, test-support-only draft fixtures. Native macOS termination remains ticket03/24, unverified. No production editing switch was added.
