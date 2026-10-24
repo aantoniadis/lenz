@@ -26,6 +26,7 @@ pub struct Blame {
     pub(crate) key: Option<SnapshotKey>,
     metadata: Weak<SourceMeta>,
     pub(crate) request: u64,
+    pub(crate) project: u64,
     /// The request this tab still wants; a job whose request differs stops and ends its git.
     latest: Arc<AtomicU64>,
     pub(crate) root: Option<PathBuf>,
@@ -38,7 +39,7 @@ pub struct Blame {
 
 impl Blame {
     pub(crate) fn new() -> Self {
-        Blame { stamp: None, key: None, metadata: Weak::new(), error: None, request: 0, latest: Arc::new(AtomicU64::new(0)), root: None, lines: Vec::new(), extent: None, done: false }
+        Blame { stamp: None, key: None, metadata: Weak::new(), error: None, request: 0, project: 0, latest: Arc::new(AtomicU64::new(0)), root: None, lines: Vec::new(), extent: None, done: false }
     }
 
     /// Identity includes draft bytes, path metadata and the saved-file identity used by Git.
@@ -58,7 +59,18 @@ impl Blame {
         (self.stamp, self.key, self.metadata, self.request, self.root, self.lines, self.extent, self.done, self.error) =
             (stamp, Some(snapshot.key()), Arc::downgrade(snapshot.source_meta()), request, None, vec![None; snapshot.line_count()], None, false, None);
         let latest = self.latest.clone();
-        move |document, lease| submit(Box::new(move || run(tab, &file, &document, request, &latest, &lease)))
+        move |document, lease| submit(Box::new(move || {
+            if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(tab, &file, &document, request, &latest, &lease))).is_err()
+                && latest.load(Ordering::Relaxed) == request {
+                lease.send(Completion::Blamed { tab, request, root: None, hunks: Vec::new(), done: Some(Err("Blame worker failed; retry annotations".into())) });
+            }
+        }))
+    }
+
+    pub(crate) fn suspend(&mut self) {
+        self.latest.store(0, Ordering::Relaxed);
+        self.request = 0;
+        self.lines.fill(None);
     }
 
     pub(crate) fn fail(&mut self, error: String) {
@@ -142,8 +154,19 @@ fn run(tab: TabId, file: &std::path::Path, document: &Document, request: u64, la
         Ok(found) => found,
         Err(e) => return send(None, Vec::new(), Some(Err(e))),
     };
+    let metadata = document.source_meta();
+    if metadata.is_lossy() { return send(None, Vec::new(), Some(Err("The file has undecodable bytes; exact draft attribution is unavailable".into()))); }
+    let bytes = if metadata.original_encoding() == "UTF-8" && !metadata.had_bom() {
+        std::borrow::Cow::Borrowed(document.text().as_bytes())
+    } else {
+        match lenz_content::write::encode_exact(document.text(), metadata.original_encoding(), metadata.had_bom()) {
+            Ok(bytes) => std::borrow::Cow::Owned(bytes),
+            Err(error) => return send(None, Vec::new(), Some(Err(error.to_string()))),
+        }
+    };
+    if !current() { return; }
     send(Some(root.clone()), Vec::new(), None);
-    stream(&current, |on| git_blame::blame_contents(&root, &path, document.text().as_bytes(), &current, on), &|hunks, done| send(None, hunks, done));
+    stream(&current, |on| git_blame::blame_contents(&root, &path, &bytes, &current, on), &|hunks, done| send(None, hunks, done));
 }
 
 type Hunks = Vec<(Range<usize>, Arc<Commit>)>;

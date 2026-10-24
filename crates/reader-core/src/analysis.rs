@@ -198,6 +198,10 @@ impl Analysis {
             .then(|| entry.group.source.as_ref().and_then(|source| source.document.get().cloned())).flatten()
     }
 
+    pub(crate) fn source_failure(&self, snapshot: &TextSnapshot, project: u64) -> Option<&'static str> {
+        self.conversions.get(&scope(snapshot, project)).and_then(|conversion| conversion.failure)
+    }
+
     fn enqueue(&mut self, id: BufferId) {
         if let Some(entry) = self.entries.get_mut(&id) && !entry.queued {
             entry.queued = true;

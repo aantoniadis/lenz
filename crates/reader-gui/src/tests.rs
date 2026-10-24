@@ -5432,6 +5432,69 @@ fn annotated(v: &ReaderView) -> bool {
 }
 
 #[gpui::test]
+fn edited_blame_renders_pending_current_lines_undo_and_failure_without_saving(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::git;
+    let (f, sha) = blame_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    v.simulate_keystrokes("home");
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("new\n".into())));
+    v.simulate_keystrokes("ctrl-v home");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().disabled(CommandId::CopyRevision)), Some("Blame pending"));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    draw(&mut v);
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        assert_eq!(view.session().annotation(tab, 0).unwrap().label, "Not committed");
+        for line in [1, 2] { assert_eq!(view.session().annotation(tab, line).unwrap().commit.sha, sha); }
+        assert!(view.painted_annotations.iter().any(|label| label == "Not committed"));
+        assert!(view.visible_rows().iter().any(|row| row.text == "new"));
+    });
+    v.simulate_keystrokes("shift-right shift-right shift-right shift-right");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().range()), 4..8);
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("λ".into())));
+    v.simulate_keystrokes("ctrl-v");
+    f.view.read_with(&v, |view, _| { let source = view.session().state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\nλtwo\n", "selected replacement deletes the old newline"); });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        let source = view.session().state().current_source().unwrap();
+        assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\nλtwo\n");
+        assert_eq!(view.session().annotation(tab, 0).unwrap().label, "Not committed");
+        assert_eq!(view.session().annotation(tab, 1).unwrap().label, "Not committed");
+    });
+    v.simulate_keystrokes("ctrl-z");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    v.simulate_keystrokes("ctrl-z");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    draw(&mut v);
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        assert_eq!(view.session().annotation(tab, 0).unwrap().commit.sha, sha);
+        let source = view.session().state().current_source().unwrap();
+        assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "one\ntwo\n");
+    });
+    std::fs::write(f.dir.path().join("bad-revisions"), "not-a-revision\n").unwrap();
+    git(f.dir.path(), &["config", "blame.ignoreRevsFile", "bad-revisions"]);
+    v.simulate_keystrokes("alt-b alt-b");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Failed(_))));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame failed")));
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().disabled(CommandId::CopyRevision)), Some("Blame failed"));
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "one\ntwo\n");
+}
+
+#[gpui::test]
 fn gui_annotation_column_shifts_text_and_click_opens_the_commit(cx: &mut TestAppContext) {
     let (f, sha) = blame_fixture(cx);
     let mut v = visual(cx, &f);
