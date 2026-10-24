@@ -117,8 +117,7 @@ impl Session {
         if self.closed || self.closing.is_some() {
             return Effect {
                 repaint: true,
-                copy: None,
-            };
+                copy: None, ..Effect::default() };
         }
         let removed: Vec<_> = match intent {
             Intent::Tab(id) => self
@@ -199,8 +198,7 @@ impl Session {
         self.advance_close();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
     pub(crate) fn cancel_close(&mut self) {
         self.closing = None;
@@ -306,8 +304,7 @@ impl Session {
             self.cancel_close();
             return Effect {
                 repaint: true,
-                copy: None,
-            };
+                copy: None, ..Effect::default() };
         }
         let Some(prompt) = self
             .close_prompt()
@@ -348,8 +345,7 @@ impl Session {
         self.advance_close();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
     pub(super) fn commit_close(&mut self, permit: Permit) -> Effect {
         if permit.session != self.id || !self.close_ready(permit.ticket) {
@@ -406,7 +402,6 @@ impl Session {
         self.release_current();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
 }

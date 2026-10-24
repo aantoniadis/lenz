@@ -71,7 +71,7 @@ impl Session {
             }
             Err(error) => { results.done = true; results.error = Some(error); self.project_query = None; }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     fn continue_project_search(&mut self) {
@@ -221,7 +221,7 @@ impl Session {
             self.project_query = None;
             if !results.hits.is_empty() { return self.select_result(0); }
         } else { declarations.best = best; self.continue_project_search(); }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
 }
