@@ -85,6 +85,7 @@ pub(crate) enum Details {
     Text,
     Commit,
     Checkout,
+    Close,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -151,6 +152,7 @@ pub(crate) struct App {
     pub notice: Option<String>,
     pub independent_view: Option<(usize, usize)>,
     pub quit: bool,
+    pub quit_all: bool,
     pub new_view: bool,
     /// The folder the new view opens (Open in New Window on a worktree).
     pub new_view_root: Option<PathBuf>,
@@ -194,7 +196,7 @@ impl App {
             pending_explorer: None,
             notice: None,
             independent_view: None,
-            quit: false,
+            quit: false, quit_all: false,
             new_view: false,
             new_view_root: None,
             copy: None,
@@ -225,7 +227,7 @@ impl App {
         }
         app
     }
-    fn remember_explorer(&mut self) {
+    pub(crate) fn remember_explorer(&mut self) {
         if self.pending_explorer.is_some() {
             return;
         }
@@ -609,6 +611,8 @@ impl App {
     }
     fn interface(&mut self, action: InterfaceAction) {
         let kind = match action {
+            InterfaceAction::CloseWindow => { self.quit = true; return; }
+            InterfaceAction::QuitAll => { self.quit_all = true; return; }
             InterfaceAction::Open => Prompt::Open,
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
@@ -841,12 +845,16 @@ impl App {
             Chosen::Action(id) => self.run(id),
         }
     }
+    fn choose_close(&mut self,choice:reader_core::close::Choice) {
+        if let Some(p)=self.session.close_prompt() { self.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice}); }
+    }
     fn close_modal(&mut self) {
         if let Some(modal) = self.modal.take() {
             match modal.kind {
                 Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
+                Prompt::Details { kind: Details::Close, .. } => self.choose_close(reader_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel)),
                 Prompt::Branches | Prompt::BranchMenu { .. } => self.dispatch(Command::CloseBranches),
@@ -1120,15 +1128,12 @@ impl App {
                     return false;
                 }
                 self.hover = None;
-                // Ctrl+Q is the one action supported through every modal.
-                if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
-                    self.quit = true;
-                    return true;
-                }
                 if self.modal.is_some() {
                     self.modal_key(key);
                 } else {
-                    self.key(key);
+                    if matches!(key.code, KeyCode::Char('q' | 'Q')) && key.modifiers.contains(KeyModifiers::CONTROL) {
+                        if key.modifiers.contains(KeyModifiers::SHIFT) { self.quit_all = true; } else { self.quit = true; }
+                    } else { self.key(key); }
                 }
             }
             Event::Paste(text) => {
@@ -1264,6 +1269,15 @@ impl App {
         {
             *checkout = !*checkout;
             return;
+        }
+        if matches!(kind, Prompt::Details {kind:Details::Close,..}) {
+            let choice=match key.code {
+                KeyCode::Char('s'|'S') if !control && !alt => Some(reader_core::close::Choice::Save),
+                KeyCode::Char('d'|'D') if !control && !alt => Some(reader_core::close::Choice::Discard),
+                KeyCode::Esc => Some(reader_core::close::Choice::Cancel),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_close(choice); return; }
         }
         if let Prompt::Details { kind: Details::Commit, .. } = &kind
             && !alt
@@ -2233,6 +2247,10 @@ impl App {
                     return;
                 }
             }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Close,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) { self.choose_close(*choice); }
+                return;
+            }
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && let Some(Modal { kind: Prompt::Details { kind: Details::Checkout, .. }, .. }) = &self.modal
             {
@@ -2610,6 +2628,14 @@ impl App {
         self.prompt(Prompt::Context { x, y, entries });
     }
     pub(crate) fn clamp(&mut self) {
+        let close=self.session.close_prompt().map(|p|p.text());
+        match (close,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Close,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"Unsaved changes",body,logo:false,kind:Details::Close}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::Close,..},..})) => self.modal=None,
+            _=>{}
+        }
+
         if self.modal.as_ref().is_some_and(|modal| modal.kind == Prompt::Navigation) && self.session.state().navigation().is_none() {
             self.modal = None;
             self.focus = Focus::Text;
@@ -2677,7 +2703,7 @@ fn clamp_list(at: &mut usize, top: &mut usize, len: usize, rows: usize) {
 
 #[cfg(test)]
 #[path = "input_tests.rs"]
-mod tests;
+pub(crate) mod tests;
 
 impl Drop for App {
     fn drop(&mut self) {

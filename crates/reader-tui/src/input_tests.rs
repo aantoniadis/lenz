@@ -11,7 +11,7 @@ fn copied_selection(state: &reader_core::session::State) -> Option<String> {
     state.view(state.active()?.id())?.copy_selection()
 }
 
-fn config(dir: &Path) -> Config {
+pub(crate) fn config(dir: &Path) -> Config {
     Config {
         themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-reader"),
         recent: dir.join("state/recent.json"),
@@ -31,7 +31,7 @@ fn app(dir: &Path) -> App {
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle(Event::Key(KeyEvent::new(code, modifiers)));
 }
-fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
+pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done(app) {
         assert!(Instant::now() < deadline, "background work timed out");
@@ -59,16 +59,36 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering() {
     let (saved, current) = { let c = a.session.state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) };
     key(&mut a, KeyCode::Char('g'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('1'), KeyModifiers::NONE); key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     let screen = draw_screen(&mut a, 100, 16); assert!(screen.contains("Last saved"), "{screen}"); assert!(screen.contains("Current draft"), "{screen}"); assert!(screen.contains('▌'), "{screen}");
+    for theme in ["github-light", "darcula"] {
+        a.dispatch(Command::Theme(lenz_content::theme::ThemeCommand::Select(lenz_content::theme::ThemeSelection::from_id(theme).unwrap())));
+        assert!(draw_screen(&mut a, 100, 16).contains('▌'));
+    }
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
     a.dispatch(Command::FocusPane(0)); key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("forbidden".into())); key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
     let snapshot = a.session.state().view(saved).unwrap().snapshot(); assert_eq!(snapshot.copy_range(0..snapshot.len_bytes()).unwrap(), original);
     a.dispatch(Command::FocusPane(1)); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
-    settle(&mut a, |a| !a.session.state().view(current).unwrap().dirty()); assert_eq!(std::fs::read(&path).unwrap(), "α draft\r\nsecond\n".as_bytes());
+    settle(&mut a, |a| !a.session.state().view(current).unwrap().dirty() && !a.session.state().saved_comparison().unwrap().pending()); assert_eq!(std::fs::read(&path).unwrap(), "α draft\r\nsecond\n".as_bytes());
     draw(&mut a, 28, 6); draw(&mut a, 1, 1);
     key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL);
     assert!(a.session.state().saved_comparison().is_none()); assert_eq!(a.session.state().active().unwrap().id(), ordinary);
     key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL); assert!(a.session.state().tab_dirty(ordinary));
     assert_eq!(std::fs::read(path).unwrap(), "α draft\r\nsecond\n".as_bytes());
+}
+
+#[test]
+fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk() {
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    use reader_core::save::{DiskMatch,Status};
+    for changed in [false,true] {
+        let d=tempfile::tempdir().unwrap();let path=d.path().join("close.txt");std::fs::write(&path,b"saved").unwrap();let mut a=app(d.path());a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());a.enable_draft_input_for_test();draw(&mut a,80,12);
+        key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);a.handle(Event::Paste("draft λ".into()));let tab=a.session.state().active().unwrap().id();let guard=at_path(&path,Fault::AfterReplace);key(&mut a,KeyCode::Char('s'),KeyModifiers::CONTROL);settle(&mut a,|a|matches!(a.session.state().view(tab).unwrap().save_status(),Status::Uncertain(_)));
+        key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);assert!(a.session.state().active().is_some());assert!(a.session.close_prompt().unwrap().discard_disabled.is_some());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);drop(guard);
+        if changed {std::fs::write(&path,b"external content").unwrap();}let disk=std::fs::read(&path).unwrap();
+        key(&mut a,KeyCode::F(10),KeyModifiers::NONE);draw(&mut a,80,12);let row=a.choices().iter().position(|row|matches!(&row.target,ChoiceTarget::Action(CommandId::RecheckSave))).unwrap();for _ in 0..row {key(&mut a,KeyCode::Down,KeyModifiers::NONE);}key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
+        settle(&mut a,|a|matches!(a.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(a.session.state().view(tab).unwrap().save_status(),&Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(a.session.state().tab_dirty(tab));
+        key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);let p=a.session.close_prompt().unwrap();assert!(p.save_disabled.is_some() && p.discard_disabled.is_none());assert!(draw_screen(&mut a,80,12).contains("Unsaved changes"));key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);
+        assert!(a.session.state().active().is_none());assert!(a.modal.is_none());assert_eq!(std::fs::read(path).unwrap(),disk);
+    }
 }
 
 #[test]
@@ -91,6 +111,12 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe() 
         key(&mut a, KeyCode::F(2), KeyModifiers::SHIFT);
         assert!(a.modal.is_some()); key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
         assert_eq!(std::fs::read(&path).unwrap(), disk); key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+        if fault==Fault::AfterReplace {
+            let before=a.session.state().current_source().unwrap().key();key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);
+            let p=a.session.close_prompt().unwrap();assert!(p.save_disabled.is_some() && p.discard_disabled.is_some());
+            key(&mut a,KeyCode::Char('d'),KeyModifiers::NONE);key(&mut a,KeyCode::Char('s'),KeyModifiers::NONE);
+            assert_eq!(a.session.state().current_source().unwrap().key(),before);assert!(a.session.close_prompt().is_some());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);
+        }
         drop(guard);
         a.run(CommandId::RecheckSave);
         settle(&mut a, |a| matches!(a.session.state().view(tab).unwrap().save_status(), Status::Checked(_)));
@@ -98,9 +124,14 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe() 
         assert_eq!(a.session.state().view(tab).unwrap().save_status(), &Status::Checked(expected));
         assert!(a.session.state().tab_dirty(tab));
         assert!(draw_screen(&mut a, 28, 6).contains("Disk"));
+        if fault==Fault::AfterReplace {
+            key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);assert!(a.session.close_prompt().unwrap().discard_disabled.is_none());
+            assert!(a.session.state().active().is_some());key(&mut a,KeyCode::Esc,KeyModifiers::NONE);
+        }
         a.run(CommandId::ConfirmRecheckedSave);
         assert_eq!(a.session.state().tab_dirty(tab), fault != Fault::AfterReplace);
         assert_eq!(std::fs::read(path).unwrap(), disk);
+        if fault==Fault::AfterReplace {key(&mut a,KeyCode::F(4),KeyModifiers::CONTROL);assert!(a.session.state().active().is_none());}
     }
 }
 
@@ -788,7 +819,7 @@ fn empty_real_constructor_and_tiny_frames_are_safe() {
     assert!(a.modal.is_none());
 }
 
-fn draw(app: &mut App, width: u16, height: u16) {
+pub(crate) fn draw(app: &mut App, width: u16, height: u16) {
     let mut terminal =
         ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| app.draw(f)).unwrap();
@@ -1407,6 +1438,10 @@ fn path_validation_and_empty_independent_view_preserve_open_document() {
     let empty = App::new(config(dir.path()), None);
     assert!(empty.session.state().active().is_none());
     key(&mut a, KeyCode::F(1), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
+    assert!(!a.quit, "a modal consumes close input before the runtime");
+    assert!(a.modal.is_some());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     key(&mut a, KeyCode::Char('q'), KeyModifiers::CONTROL);
     assert!(a.quit);
 }
@@ -3409,7 +3444,7 @@ fn space_or_ctrl_click_marks_two_entries_and_ctrl_d_compares_them() {
 }
 
 /// The screen as text after a draw.
-fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
+pub(crate) fn draw_screen(a: &mut App, width: u16, height: u16) -> String {
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
     terminal.draw(|f| a.draw(f)).unwrap();
     terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect()

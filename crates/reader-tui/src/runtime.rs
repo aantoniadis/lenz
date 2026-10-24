@@ -148,11 +148,48 @@ async fn wait(input: &mut EventStream, views: &[App]) -> Wake {
     .await
 }
 
+fn progress_closes(views: &mut Vec<App>, active: &mut usize, coordinator: &mut reader_core::close::CloseCoordinator) -> bool {
+    use reader_core::close::Progress;
+    if !coordinator.pending() {return false;}
+    for view in views.iter_mut() {view.remember_explorer();}
+    for view in views.iter() { coordinator.register(view.session.id()); }
+    let result = { let mut sessions: Vec<_> = views.iter_mut().map(|v| &mut v.session).collect(); coordinator.progress(&mut sessions) };
+    match result {
+        Progress::Pending(id) => {
+            let before=*active;
+            if let Some(index)=views.iter().position(|v|v.session.id()==id) { *active=index; }
+            let changed=before!=*active || views.iter().any(|view| view.session.close_prompt().is_some_and(|p| !view.modal.as_ref().is_some_and(|m| matches!(&m.kind,crate::app::Prompt::Details {kind:crate::app::Details::Close,body,..} if *body==p.text()))));
+            for view in views.iter_mut() { view.clamp(); }
+            changed
+        }
+        Progress::Committed(ids) => {
+            views.retain(|v| !ids.contains(&v.session.id()));
+            for id in ids { coordinator.unregister(id); }
+            *active=(*active).min(views.len().saturating_sub(1)); true
+        }
+        Progress::Cancelled => { for view in views.iter_mut() { view.clamp(); } true }
+        Progress::Idle => false,
+    }
+}
+fn dispatch_input(views: &mut Vec<App>, active: &mut usize, coordinator: &mut reader_core::close::CloseCoordinator, event: Event) -> bool {
+    let mut dirty=views[*active].handle(event);
+    let all=std::mem::take(&mut views[*active].quit_all);
+    let one=std::mem::take(&mut views[*active].quit);
+    if all || one {
+        for view in views.iter() { coordinator.register(view.session.id()); }
+        let mut sessions:Vec<_>=views.iter_mut().enumerate().filter(|(i,_)|all || *i==*active).map(|(_,v)|&mut v.session).collect();
+        coordinator.begin(&mut sessions);
+    }
+    dirty |= progress_closes(views,active,coordinator);
+    dirty
+}
+
 fn run(path: Option<PathBuf>) -> io::Result<()> {
     let _restore = Restore;
     let mut terminal = enter()?;
     let mut views = vec![App::new(Config::from_env(true), path)];
     let mut active = 0usize;
+    let mut coordinator = reader_core::close::CloseCoordinator::default();
     let mut input = None;
     let mut dirty = true;
     loop {
@@ -194,15 +231,8 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
             dirty = true;
             continue;
         }
-        if views[active].quit {
-            views.remove(active);
-            if views.is_empty() {
-                return Ok(());
-            }
-            active = active.min(views.len() - 1);
-            dirty = true;
-            continue;
-        }
+        dirty |= progress_closes(&mut views,&mut active,&mut coordinator);
+        if views.is_empty() { return Ok(()); }
         // Drawing reports pane dimensions to the core and can schedule newly visible work.
         if dirty {
             continue;
@@ -212,29 +242,20 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
                 let event = event?;
                 if let Event::Key(k) = event
                     && k.kind == KeyEventKind::Press
+                    && k.code == KeyCode::F(8) && views[active].modal.is_none()
                 {
-                    if matches!(k.code, KeyCode::Char('q' | 'Q'))
-                        && k.modifiers.contains(KeyModifiers::CONTROL)
-                    {
-                        if k.modifiers.contains(KeyModifiers::SHIFT) {
-                            return Ok(());
-                        }
-                        views[active].quit = true;
-                        continue;
-                    }
-                    if k.code == KeyCode::F(8) {
-                        views[active].handle(Event::FocusLost);
-                        active = if k.modifiers.contains(KeyModifiers::SHIFT) {
-                            (active + views.len() - 1) % views.len()
-                        } else {
-                            (active + 1) % views.len()
-                        };
-                        views[active].dispatch(reader_core::session::Command::Recheck);
-                        dirty = true;
-                        continue;
-                    }
+                    views[active].handle(Event::FocusLost);
+                    active = if k.modifiers.contains(KeyModifiers::SHIFT) {
+                        (active + views.len() - 1) % views.len()
+                    } else {
+                        (active + 1) % views.len()
+                    };
+                    views[active].dispatch(reader_core::session::Command::Recheck);
+                    dirty = true;
+                    continue;
                 }
-                dirty |= views[active].handle(event);
+                dirty |= dispatch_input(&mut views, &mut active, &mut coordinator, event);
+                if views.is_empty() { return Ok(()); }
             }
             Wake::Completion(i, c) => dirty |= views[i].apply(c) && i == active,
             Wake::Theme(i, t) => {
@@ -297,6 +318,82 @@ pub fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn runtime_quit_all_waits_for_every_independent_draft_decision() {
+        use crossterm::event::{KeyEvent, KeyModifiers};
+        use reader_core::session::Command;
+        for first in ['d','s'] {
+            let d=tempfile::tempdir().unwrap(); let mut views=Vec::new();
+            for name in ["a.txt","b.txt"] {
+                let path=d.path().join(name);std::fs::write(&path,b"saved\r\n").unwrap();
+                let mut app=super::App::new(crate::app::tests::config(&d.path().join(format!("{name}-state"))),None);
+                app.dispatch(Command::OpenRetained(path)); crate::app::tests::settle(&mut app,|a|a.session.state().current_source().is_some());
+                app.enable_draft_input_for_test();crate::app::tests::draw(&mut app,80,12);
+                app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Char('a'),KeyModifiers::CONTROL)));
+                app.handle(crossterm::event::Event::Paste("draft λ\r\n".into()));
+                if name=="a.txt" {
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Char('\\'),KeyModifiers::CONTROL)));
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::F(10),KeyModifiers::NONE)));
+                    let at=app.choices().iter().position(|row|matches!(&row.target,crate::app::ChoiceTarget::Action(reader_core::session::CommandId::Unsplit))).unwrap();
+                    for _ in 0..at {app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Down,KeyModifiers::NONE)));}
+                    app.handle(crossterm::event::Event::Key(KeyEvent::new(super::KeyCode::Enter,KeyModifiers::NONE)));
+                    assert!(app.session.state().split().is_none());assert_eq!(app.session.state().tabs().len(),1);assert!(app.session.state().tab_dirty(app.session.state().active().unwrap().id()));assert!(app.modal.is_none());
+                }
+                views.push(app);
+            }
+            let positions:Vec<_>=views.iter().map(|v|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line())).collect();
+            let mut active=0; let mut coordinator=reader_core::close::CloseCoordinator::default();
+            let event=|code,mods|crossterm::event::Event::Key(KeyEvent::new(code,mods));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Char('q'),KeyModifiers::CONTROL|KeyModifiers::SHIFT));
+            assert_eq!(views.len(),2,"Quit All must prepare every session before removing either view");
+            assert!(crate::app::tests::draw_screen(&mut views[active],80,12).contains("Unsaved changes"));
+            // Repeated quit, paste and Save shortcuts cannot escape the close decision.
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Char('q'),KeyModifiers::CONTROL|KeyModifiers::SHIFT));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,crossterm::event::Event::Paste("ignored".into()));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Char('s'),KeyModifiers::CONTROL));
+            assert_eq!(std::fs::read(d.path().join("a.txt")).unwrap(),b"saved\r\n");
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Char(first),KeyModifiers::NONE));
+            let until=std::time::Instant::now()+std::time::Duration::from_secs(10);
+            while active==0 {
+                assert!(std::time::Instant::now()<until,"close Save did not finish");
+                if let Ok(c)=views[0].session.completions().try_recv() { views[0].apply(c); }
+                super::progress_closes(&mut views,&mut active,&mut coordinator);
+                std::thread::yield_now();
+            }
+
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::End,KeyModifiers::NONE));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Up,KeyModifiers::NONE));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Esc,KeyModifiers::NONE));
+            assert_eq!(views.len(),2);assert!(!coordinator.pending());
+            for (i,v) in views.iter().enumerate() {
+                let source=v.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(),"draft λ\r\n");
+                assert_eq!((v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line()),positions[i]);
+                assert!(!v.session.closed());assert!(v.modal.is_none());
+            }
+            assert_eq!(std::fs::read(d.path().join("a.txt")).unwrap(),if first=='s' {"draft λ\r\n".as_bytes()} else {b"saved\r\n"});
+            assert_eq!(std::fs::read(d.path().join("b.txt")).unwrap(),b"saved\r\n");
+            // A separate tiny/scrolled close decision dismisses safely without comparing resize-clamped positions.
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Char('q'),KeyModifiers::CONTROL));
+            crate::app::tests::draw(&mut views[active],1,1);crate::app::tests::draw(&mut views[active],18,5);
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::End,KeyModifiers::NONE));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Up,KeyModifiers::NONE));
+            super::dispatch_input(&mut views,&mut active,&mut coordinator,event(super::KeyCode::Esc,KeyModifiers::NONE));
+            assert_eq!(views.len(),2);assert!(!coordinator.pending());
+
+        }
+    }
+    #[test]
+    fn runtime_empty_view_close_respects_modal_priority_and_tiny_dismissal() {
+        use crossterm::event::{Event,KeyCode,KeyEvent,KeyModifiers};
+        let d=tempfile::tempdir().unwrap();let mut views=vec![super::App::new(crate::app::tests::config(d.path()),None)];let mut active=0;let mut c=reader_core::close::CloseCoordinator::default();
+        let key=|code,mods|Event::Key(KeyEvent::new(code,mods));
+        for id in [reader_core::session::CommandId::Undo,reader_core::session::CommandId::Reload] {views[0].run(id);}
+        super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::F(1),KeyModifiers::NONE));
+        super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::Char('q'),KeyModifiers::CONTROL));assert_eq!(views.len(),1);assert!(views[0].modal.is_some());
+        crate::app::tests::draw(&mut views[0],1,1);super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::End,KeyModifiers::NONE));super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::Up,KeyModifiers::NONE));
+        super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::Esc,KeyModifiers::NONE));assert!(views[0].modal.is_none());
+        super::dispatch_input(&mut views,&mut active,&mut c,key(KeyCode::Char('q'),KeyModifiers::CONTROL));assert!(views.is_empty());
+    }
     #[test]
     fn clipboard_cannot_inject_source_controls_into_the_terminal() {
         let mut out = Vec::new();

@@ -76,6 +76,8 @@ source crops in each mode/build. The candidate-only edit/Save harness checks exa
 disk output, backing release and history across file switching; its timings do
 not establish frontend typing performance.
 
+The [detailed performance report](reader-editor-batch-11-18-performance.md)
+records identities, full endpoint definitions, diagnostics and limitations.
 The following medians summarize the retained measurements. Core timings pool two
 alternating runs per build; startup timings use eight pairs. RSS stress values
 come from the sustained workflows, with their sampling limits stated below.

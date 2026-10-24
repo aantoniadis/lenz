@@ -29,6 +29,7 @@ mod preview;
 mod navigation;
 mod search;
 mod source;
+mod close;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -125,6 +126,7 @@ pub enum Details {
     Text,
     Commit,
     Checkout,
+    Close,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -359,6 +361,9 @@ impl SourceGeometry {
 
 /// Open a reader window with its own session; `path` opens a file in it.
 pub fn open_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool) -> Config>, path: Option<PathBuf>) -> Result<(), String> {
+    open_reader_window(cx,make_config,path).map(|_|())
+}
+fn open_reader_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool)->Config>,path:Option<PathBuf>)->Result<gpui::WindowHandle<ReaderView>,String> {
     let options = WindowOptions {
         app_id: Some("lenz-reader".into()),
         focus: true,
@@ -381,11 +386,13 @@ pub fn open_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool) -> Config
             })
             .detach();
         });
+        close::register(&view,window,cx);
+        let closing=view.downgrade();
+        window.on_window_should_close(cx,move|_,cx|closing.update(cx,|v,cx|v.window_should_close(cx)).unwrap_or(true));
         let focus = view.read(cx).focus.clone();
         window.focus(&focus, cx);
         view
     })
-    .map(|_| ())
     .map_err(|e| e.to_string())
 }
 
@@ -738,6 +745,7 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
+            Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
             Some(Modal::StatusDetails { kind: Details::Checkout, .. }) => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel), cx),
@@ -871,6 +879,8 @@ impl ReaderView {
                 _ => {}
             }
         }
+        self.sync_close_prompt();
+        close::schedule(cx);
         if effect.repaint {
             cx.notify();
         }
@@ -1077,6 +1087,7 @@ impl ReaderView {
                     self.dispatch(Command::CheckPlaces, cx);
                     cx.notify();
                 }
+                InterfaceAction::CloseWindow | InterfaceAction::QuitAll => close::request(self.session.id(),action == InterfaceAction::QuitAll,cx),
                 InterfaceAction::NewWindow => {
                     let make_config = self.make_config.clone();
                     cx.defer(move |cx| {
@@ -1214,6 +1225,7 @@ impl ReaderView {
             cx.notify();
             return;
         }
+        if key=="q" && ctrl && !k.modifiers.alt { return self.run(if shift {CommandId::QuitAll} else {CommandId::CloseWindow},window,cx); }
         if key == "f2" && shift && !ctrl && !k.modifiers.alt {
             return self.run(CommandId::StatusDetails, window, cx);
         }
@@ -1530,6 +1542,11 @@ impl ReaderView {
                 self.dispatch(Command::CheckoutChoice(c), cx);
             }
             return cx.notify();
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Close,..})) {
+            let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
+            let choice=match key {"s" if !ctrl && !ev.keystroke.modifiers.alt=>Some(reader_core::close::Choice::Save),"d" if !ctrl && !ev.keystroke.modifiers.alt=>Some(reader_core::close::Choice::Discard),"escape"=>Some(reader_core::close::Choice::Cancel),_=>None};
+            if let Some(choice)=choice {self.choose_close(choice,cx);return;}
         }
         if let Some(Modal::StatusDetails { text, kind, .. }) = &self.modal {
             let commit = *kind == Details::Commit;
@@ -2519,6 +2536,7 @@ impl ReaderView {
             Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
+            Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|c.label()).collect(),
         }
     }
 
@@ -2784,6 +2802,7 @@ impl ReaderView {
                         let (text, kind) = (text.clone(), *kind);
                         let hit = l.details_buttons(self.char_w, &self.details_labels(kind)).iter().position(|b| b.contains(&ev.position));
                         match (kind, hit) {
+                            (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
                             (Details::Checkout, Some(i)) => {
                                 if let Some(&(_, c)) = self.session.checkout_choices().get(i) {
                                     self.dispatch(Command::CheckoutChoice(c), cx);

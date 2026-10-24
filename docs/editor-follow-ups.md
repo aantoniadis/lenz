@@ -94,6 +94,12 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   reproduction if it recurs; preserve the keyboard, selection and activation
   assertions. Original failure and all attempts are retained under
   `target/perf/editor-implementation/merge-11-18/reader-gui-*.log`.
+- **Ticket14 native delivery acceptance:** production Reader windows install a
+  veto, and focused tests replay that exact handler plus real keyboard decisions.
+  GPUI TestPlatform has no native close-event simulator; replay one ordinary Linux
+  titlebar close via an owned display at the next adapter batch boundary with
+  disposable fixtures using the existing test-support draft gate. Native macOS
+  termination remains ticket03/24, unverified.
 
 
 ## Reader batch performance attribution (2026-10-24)
