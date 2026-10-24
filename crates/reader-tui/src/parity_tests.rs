@@ -291,16 +291,16 @@ fn replay_draft_project_query(cx: &mut TestAppContext, mode: DraftQuery) {
             gui.update(&mut visual, |view, cx| view.poll(cx));
             while let Ok(completion) = tui.session.completions().try_recv() { tui.apply(completion); }
             draw(&mut visual, &mut tui, &mut terminal);
-            if gui.read_with(&visual, |view, _| view.session().navigation_status().contains("rerun")) && tui.session.navigation_status().contains("rerun") { break; }
+            if gui.read_with(&visual, |view, _| view.session().navigation_status().contains("search again")) && tui.session.navigation_status().contains("search again") { break; }
             assert!(Instant::now() < deadline, "stale symbol did not report its refusal");
         }
         assert_eq!(snapshot(tui.session.state()), before, "a changed disk symbol must not open its old line");
         assert_eq!(gui.read_with(&visual, |view, _| snapshot(view.session().state())), before);
         assert!(tui.modal.is_some(), "a refused activation keeps navigation open");
         let labels = gui.read_with(&visual, |view, _| view.modal_rows().into_iter().map(|row| row.0).collect::<Vec<_>>().join("\n"));
-        assert!(labels.contains("rerun"), "{labels}");
+        assert!(labels.contains("search again"), "{labels}");
         let shown: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
-        assert!(shown.contains("rerun"), "{shown}");
+        assert!(shown.contains("search again"), "{shown}");
         visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(std::fs::read(root.join("a.rs")).unwrap(), saved_a.as_bytes());
         assert_eq!(std::fs::read(root.join("b.rs")).unwrap(), saved_b.as_bytes());
@@ -387,6 +387,10 @@ fn replay_draft_project_query(cx: &mut TestAppContext, mode: DraftQuery) {
     assert!(rows.iter().any(|row| row.hit == Some(0) && row.stale && row.label.contains("changed since")));
     let shown: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
     assert!(shown.contains("[changed]"), "{shown}");
+    let list = tui.layout.results;
+    let header: String = (list.x..120).map(|x| terminal.backend().buffer()[(x, list.y - 1)].symbol()).collect();
+    assert!(header.contains("Open drafts changed"), "the stale-query error stays above the result rows: {header}");
+    assert!(gui.read_with(&visual, |view, _| view.results_status().unwrap().contains("Open drafts changed")));
     for (name, text) in [("a.rs", saved_a), ("b.rs", saved_b), ("c.rs", saved_c)] { assert_eq!(std::fs::read(root.join(name)).unwrap(), text.as_bytes()); }
 }
 

@@ -811,6 +811,13 @@ impl ReaderView {
         let tree_revision = self.session.state().tree_revision();
         let library_read = matches!(&input, reader_core::session::Input::Completion(Completion::LibraryRead { .. }));
         let effect = self.session.dispatch(input);
+        if matches!(self.modal, Some(Modal::Navigation { .. })) && self.session.state().navigation().is_none() {
+            self.modal = None;
+            self.navigation_drawn = None;
+            self.modal_seen.set(None);
+            self.tree_focus = false;
+            self.results_focus = false;
+        }
         if theme_update { self.refresh_theme_entries(cx); }
         self.sync_workspace(workspace);
         if self.session.state().tree_revision() != tree_revision {
