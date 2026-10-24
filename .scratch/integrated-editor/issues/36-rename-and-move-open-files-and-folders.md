@@ -4,7 +4,7 @@
 
 **Blocked by:** 35: Create files and folders from the explorer.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Protect dirty files and reconcile every affected buffer/path, view, history anchor, watch and provider environment after confirmed movement.
 - [ ] Detect collisions, concurrent moves and stale requests; failure leaves recoverable state and does not retarget another file.
