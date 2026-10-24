@@ -174,3 +174,5 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   by the reader; check large lists (for example rust-analyzer flyimport) in the batch measurements.
 - **Server commands on items:** the parameter-hint/suggest client commands are ignored rather than run; other
   commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
+- **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
+  the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.

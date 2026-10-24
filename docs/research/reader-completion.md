@@ -39,9 +39,11 @@ Completion is a shared Session behavior; the GUI and terminal translate keys and
   palette precedence, a 30×6 terminal and a click on a row.
 - Parity (`completion_typing_acceptance_and_dismissal_match_in_both_adapters`): one replay through both
   adapters with equal text, selection and popup rows/selection after each step.
-- Real provider (opt-in, `real_rust_completion` in `tests/providers.rs`): rust-analyzer 1 (9074e9b4c6
-  2026-09-06) on Linux; manual completion after a non-BMP character on a CRLF line, acceptance, a `.` member
-  list and Undo, disk unchanged. Other providers are unverified for completion.
+- Real provider (opt-in, `real_rust_completion` in `tests/providers.rs`): an installed rust-analyzer build
+  (9074e9b4c6 2026-09-06) on Linux that the provider table does not list as tested (the existing `real_rust`
+  check rejects it as untested); no run with a tested version exists. It covered manual completion after a
+  non-BMP character on a CRLF line, acceptance, a `.` member list and Undo, disk unchanged. Other providers are
+  unverified for completion.
 
 ## Not covered here
 
