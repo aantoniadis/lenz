@@ -38,7 +38,8 @@ fn dirty_external_choices_use_real_terminal_menus_input_and_save_receipts() {
         menu(&mut app,CommandId::OpenWithDefaultApp);
         key(&mut app,KeyCode::Char('o'),KeyModifiers::NONE);
         assert_eq!(app.launched.len(),1);
-        assert_eq!(app.launched[0].args,[path.to_string_lossy().into_owned()]);
+        assert_eq!(app.launched[0].args.last(),Some(&path.to_string_lossy().into_owned()));
+        assert!(!app.launched[0].args.iter().any(|arg|arg=="--goto" || arg.starts_with(&format!("{}:",path.display()))));
         assert!(app.session.state().view(app.session.state().active().unwrap().id()).unwrap().dirty());
         assert_eq!(std::fs::read(&path).unwrap(),b"saved\r\n");
         menu(&mut app,CommandId::OpenWithDefaultApp);
@@ -49,5 +50,32 @@ fn dirty_external_choices_use_real_terminal_menus_input_and_save_receipts() {
         key(&mut app,KeyCode::Char('z'),KeyModifiers::CONTROL);
         assert!(app.session.state().view(app.session.state().active().unwrap().id()).unwrap().dirty());
         assert_eq!(std::fs::read(path).unwrap(),"draft λ\r\n".as_bytes());
+        menu(&mut app,CommandId::CompareWith);
+        assert!(draw_screen(&mut app,100,18).contains("saved disk inputs"));
+        key(&mut app,KeyCode::Esc,KeyModifiers::NONE);
+    }
+}
+
+#[test]
+fn external_save_failures_dismiss_the_terminal_decision_without_launching() {
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    use reader_core::save::Status;
+    for fault in [Fault::BeforeReplace,Fault::AfterReplace] {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("external-fault.txt");
+        std::fs::write(&path,b"saved").unwrap();let mut app=app(dir.path());
+        app.dispatch(Command::OpenRetained(path.clone()));settle(&mut app,|a|a.session.state().current_source().is_some());
+        app.enable_draft_input_for_test();draw(&mut app,100,18);
+        key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL);app.handle(Event::Paste("draft λ".into()));
+        let tab=app.session.state().active().unwrap().id();let guard=at_path(&path,fault);
+        menu(&mut app,CommandId::OpenWithDefaultApp);let ticket=app.session.external_prompt().unwrap().ticket;
+        key(&mut app,KeyCode::Char('s'),KeyModifiers::NONE);
+        settle(&mut app,|a|matches!(a.session.state().view(tab).unwrap().save_status(),Status::Rejected(_)|Status::Uncertain(_)));
+        draw(&mut app,100,18);
+        assert!(app.launched.is_empty() && app.modal.is_none() && app.session.external_prompt().is_none());
+        assert!(app.session.state().view(tab).unwrap().dirty() && app.session.state().view(tab).unwrap().can_undo());
+        app.dispatch(Command::ChooseExternal {ticket,choice:reader_core::external::Choice::OpenSavedVersion});
+        assert!(app.launched.is_empty());
+        assert_eq!(std::fs::read(path).unwrap(),if fault==Fault::AfterReplace {"draft λ".as_bytes()}else{b"saved"});
+        drop(guard);
     }
 }

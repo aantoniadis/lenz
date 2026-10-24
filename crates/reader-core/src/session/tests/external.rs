@@ -2,6 +2,21 @@ use super::*;
 use crate::external::Choice;
 
 #[test]
+fn comparison_actions_identify_saved_disk_inputs_without_changing_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, path, _) = close_fixture(dir.path(), "compare.txt");
+    let other = write(dir.path(), "other.txt", b"other saved");
+    let bin = dir.path().join("bin"); std::fs::create_dir(&bin).unwrap();
+    std::fs::write(bin.join("lenz-diff"), b"").unwrap();
+    let launch = s.compare_launch(&path, &other, &bin.join("lenz-code"), false).unwrap();
+    assert!(CommandId::CompareWith.label().contains("Saved Disk"));
+    assert!(CommandId::CompareSelected.label().contains("Saved Disk"));
+    assert_eq!(launch.args, ["--no-index".to_owned(), path.to_string_lossy().into_owned(), other.to_string_lossy().into_owned()], "saved-input labels must preserve real file paths and copy/navigation behavior in Diff");
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+    assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+}
+
+#[test]
 fn dirty_external_open_offers_saved_version_or_cancel_without_losing_history() {
     for default_app in [false, true] {
         let dir = tempfile::tempdir().unwrap();

@@ -49,7 +49,9 @@ fn dirty_external_choices_use_real_menus_input_and_saved_receipts(cx: &mut TestA
         });
         v.simulate_click(saved_button, Modifiers::default());
         assert_eq!(f.view.read_with(&v, |view, _| view.launched.len()), 1);
-        assert_eq!(f.view.read_with(&v, |view, _| view.launched[0].args.clone()), [path.to_string_lossy().into_owned()]);
+        let args=f.view.read_with(&v, |view, _| view.launched[0].args.clone());
+        assert_eq!(args.last(),Some(&path.to_string_lossy().into_owned()));
+        assert!(!args.iter().any(|arg|arg=="--goto" || arg.starts_with(&format!("{}:",path.display()))));
         assert!(f.view.read_with(&v, |view, _| view.session.state().view(view.session.state().active().unwrap().id()).unwrap().dirty()));
         assert_eq!(std::fs::read(&path).unwrap(), b"saved\r\n");
 
@@ -61,5 +63,33 @@ fn dirty_external_choices_use_real_menus_input_and_saved_receipts(cx: &mut TestA
         v.simulate_keystrokes("ctrl-z");
         assert!(f.view.read_with(&v, |view, _| view.session.state().view(view.session.state().active().unwrap().id()).unwrap().dirty()));
         assert_eq!(std::fs::read(path).unwrap(), "draft λ\r\n".as_bytes());
+    }
+}
+
+#[gpui::test]
+fn external_save_failures_close_the_decision_without_launching(cx: &mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    use reader_core::save::Status;
+    for fault in [Fault::BeforeReplace,Fault::AfterReplace] {
+        let f=fixture(cx,Some(("external-fault.txt",b"saved")));
+        let path=f.dir.path().join("external-fault.txt");
+        settle(cx,&f,|view|view.session.state().current_source().is_some());
+        let mut v=visual(cx,&f);draw(&mut v);
+        f.view.update(&mut v,|view,_|view.enable_draft_input_for_test());
+        v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));
+        v.simulate_keystrokes("ctrl-a ctrl-v");
+        let tab=f.view.read_with(&v,|view,_|view.session.state().active().unwrap().id());
+        let guard=at_path(&path,fault);
+        menu(&mut v,&f,CommandId::OpenWithDefaultApp);
+        let ticket=f.view.read_with(&v,|view,_|view.session.external_prompt().unwrap().ticket);
+        v.simulate_keystrokes("s");
+        settle(cx,&f,|view|matches!(view.session.state().view(tab).unwrap().save_status(),Status::Rejected(_)|Status::Uncertain(_)));
+        draw(&mut v);
+        assert!(f.view.read_with(&v,|view,_|view.launched.is_empty() && view.modal.is_none() && view.session.external_prompt().is_none()));
+        assert!(f.view.read_with(&v,|view,_|view.session.state().view(tab).unwrap().dirty() && view.session.state().view(tab).unwrap().can_undo()));
+        f.view.update(&mut v,|view,cx|view.dispatch(Command::ChooseExternal {ticket,choice:reader_core::external::Choice::OpenSavedVersion},cx));
+        assert!(f.view.read_with(&v,|view,_|view.launched.is_empty()));
+        assert_eq!(std::fs::read(path).unwrap(),if fault==Fault::AfterReplace {"draft λ".as_bytes()}else{b"saved"});
+        drop(guard);
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+#[path = "input_tests/external.rs"]
 mod external;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};

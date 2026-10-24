@@ -3,6 +3,9 @@ use std::path::PathBuf;
 use crate::{session::SemanticSource, tabs::TabId};
 use lenz_content::open::Plan;
 
+pub const COMPARISON_PROMPT: &str = "Compare saved disk inputs · enter a file or folder path";
+pub const COMPARISON_NOTICE: &str = "External comparison uses saved disk inputs; drafts remain in Lenz.";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice { SaveAndOpen, OpenSavedVersion, Cancel }
 impl Choice {
@@ -45,6 +48,7 @@ impl Prompt {
     }
     pub fn text(&self) -> String {
         let mut text = format!("{} has unsaved changes.\n\nExternal tools open the file on disk. Open Saved Version keeps your draft and history in Lenz.\n", self.path.display());
+        text.push_str(&format!("\n{} (S)\n{} (O)\n{} (Esc)\n",Choice::SaveAndOpen.label(),Choice::OpenSavedVersion.label(),Choice::Cancel.label()));
         if self.waiting { text.push_str("\nWaiting for the submitted Save to finish.\n"); }
         if let Some(why) = self.save_disabled { text.push_str(&format!("\nSave and Open: {why}\n")); }
         if let Some(why) = self.saved_disabled { text.push_str(&format!("\nOpen Saved Version: {why}\n")); }

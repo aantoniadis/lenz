@@ -1251,7 +1251,14 @@ impl App {
             let mut content = content;
             if matches!(modal.kind, Prompt::Details { .. }) && content.height > 0 {
                 content.height -= 1;
-                if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Close,..}) {
+                if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::External,..}) {
+                    let mut x=content.x;
+                    for (choice,key) in reader_core::external::Choice::ALL.into_iter().zip(["s","o","Esc"]) {
+                        let text=format!("[{} {key}]",choice.label());let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
+                        let disabled=self.session.external_prompt().is_some_and(|prompt|prompt.disabled(choice).is_some());
+                        let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(if disabled {p.dim} else {p.fg},p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
+                    }
+                } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Close,..}) {
                     let mut x=content.x;
                     for (label,key) in [(reader_core::close::Choice::Save.label(),"s"),(reader_core::close::Choice::Discard.label(),"d"),(reader_core::close::Choice::Cancel.label(),"Esc")] {
                         let text=format!("[{label} {key}]");let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
@@ -1286,7 +1293,7 @@ impl App {
                     geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
                     line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
                 }
-                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close, .. }) {
+                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close | crate::app::Details::External, .. }) {
                     line(frame.buffer_mut(), geometry.details_close, "[Close Esc]", style(p.fg, p.selected_bg));
                 }
             }

@@ -86,6 +86,7 @@ pub(crate) enum Details {
     Commit,
     Checkout,
     Close,
+    External,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -353,6 +354,7 @@ impl App {
             self.tree_shown = true;
             self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
         }
+        if let Some(plan) = effect.external { self.start(plan.launch,plan.toast); }
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
             self.notice = Some("Copied to terminal clipboard".into());
@@ -438,6 +440,7 @@ impl App {
         if self.hover.is_some_and(|h| !self.hover_current(h)) {
             self.hover = None;
         }
+        if let Some(plan) = effect.external { self.start(plan.launch,plan.toast); }
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
         }
@@ -617,8 +620,8 @@ impl App {
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
                 let default_app = action == InterfaceAction::OpenWithDefaultApp;
-                match self.session.editor_plan(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
-                    Ok(plan) => self.start(plan.launch, plan.toast),
+                match self.session.external_command(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
+                    Ok(command) => self.dispatch(command),
                     Err(why) => self.dispatch(Command::Notice(why.into())),
                 }
                 return;
@@ -629,7 +632,7 @@ impl App {
             InterfaceAction::CompareSelected => {
                 let exe = self.exe();
                 match self.session.compare_selected_launch(&exe, true) {
-                    Ok(launch) => self.foreground = Some(launch),
+                    Ok(launch) => { self.dispatch(Command::Notice(reader_core::external::COMPARISON_NOTICE.into())); self.foreground = Some(launch); },
                     Err(e) => self.dispatch(Command::Notice(e)),
                 }
                 return;
@@ -845,6 +848,9 @@ impl App {
             Chosen::Action(id) => self.run(id),
         }
     }
+    fn choose_external(&mut self,choice:reader_core::external::Choice) {
+        if let Some(prompt)=self.session.external_prompt() { self.dispatch(Command::ChooseExternal {ticket:prompt.ticket,choice}); }
+    }
     fn choose_close(&mut self,choice:reader_core::close::Choice) {
         if let Some(p)=self.session.close_prompt() { self.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice}); }
     }
@@ -854,6 +860,7 @@ impl App {
                 Prompt::Themes => self.dispatch(Command::PreviewTheme(None)),
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
+                Prompt::Details { kind: Details::External, .. } => self.choose_external(reader_core::external::Choice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(reader_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel)),
@@ -1055,7 +1062,7 @@ impl App {
                 Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
                 Prompt::OpenFolder => "Open folder · enter path",
-                Prompt::Compare(_) => "Compare with · enter a file or folder path",
+                Prompt::Compare(_) => reader_core::external::COMPARISON_PROMPT,
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
                 Prompt::ServerRuntime => {
                     "Server runtime executable / install folder · Enter saves and restarts"
@@ -1269,6 +1276,15 @@ impl App {
         {
             *checkout = !*checkout;
             return;
+        }
+        if matches!(kind, Prompt::Details {kind:Details::External,..}) {
+            let choice=match key.code {
+                KeyCode::Char('s'|'S') if !control && !alt => Some(reader_core::external::Choice::SaveAndOpen),
+                KeyCode::Char('o'|'O') if !control && !alt => Some(reader_core::external::Choice::OpenSavedVersion),
+                KeyCode::Esc => Some(reader_core::external::Choice::Cancel),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_external(choice); return; }
         }
         if matches!(kind, Prompt::Details {kind:Details::Close,..}) {
             let choice=match key.code {
@@ -1562,6 +1578,7 @@ impl App {
                 match launch {
                     Ok(launch) => {
                         self.close_modal();
+                        self.dispatch(Command::Notice(reader_core::external::COMPARISON_NOTICE.into()));
                         self.foreground = Some(launch);
                     }
                     Err(e) => {
@@ -2247,6 +2264,10 @@ impl App {
                     return;
                 }
             }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::External,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::external::Choice::ALL.get(i) { self.choose_external(*choice); }
+                return;
+            }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Close,..})) {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) { self.choose_close(*choice); }
                 return;
@@ -2628,6 +2649,13 @@ impl App {
         self.prompt(Prompt::Context { x, y, entries });
     }
     pub(crate) fn clamp(&mut self) {
+        let external=self.session.external_prompt().map(|prompt|prompt.text());
+        match (external,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::External,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"Open file externally",body,logo:false,kind:Details::External}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::External,..},..})) => self.modal=None,
+            _=>{}
+        }
         let close=self.session.close_prompt().map(|p|p.text());
         match (close,&mut self.modal) {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Close,body,..},..})) => *body=text,
