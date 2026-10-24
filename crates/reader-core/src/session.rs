@@ -17,6 +17,7 @@ use lenz_content::{
 };
 
 mod project_search;
+mod navigation_query;
 
 use crate::{
     cache::{INACTIVE_BYTES, InactiveCache, Stamp},
@@ -77,6 +78,7 @@ pub enum Command {
     CancelProjection { pane: u8, request: u64 },
     SearchEverywhere { scope: crate::navigation::Scope, query: String },
     CloseSearchEverywhere,
+    ActivateNavigation { revision: u64, index: usize },
     /// Forget one recent-file result only if its displayed identity is still current.
     ForgetNavigation { revision: u64, index: usize },
     /// Add an anonymous bookmark on the caret's line, or remove the one there.
@@ -841,7 +843,9 @@ pub enum Completion {
     Found { id: u64, found: search::Found },
     ProjectListed { id: u64, paths: Result<Vec<Arc<str>>, String> },
     ProjectFound { id: u64, step: usize, found: search::Found },
-    ProjectRanked { id: u64, step: usize, best: index::Ranked, found: search::Found },
+    NavigationOverlay { request: u64, step: usize, best: index::Ranked, found: search::Found, cache: Option<(Arc<str>, FileIndex)> },
+    NavigationValidated { request: u64, revision: u64, index: usize, result: Result<(Option<Stamp>, Arc<Document>), String> },
+    ProjectRanked { id: u64, step: usize, best: index::Ranked, found: search::Found, cache: Option<(Arc<str>, FileIndex)> },
     /// Line colours for results of search `id`.
     ResultSpans { id: u64, spans: Vec<(usize, search::LineSpans)> },
     /// Syntax colours of the previewed snapshot `version`.
@@ -937,7 +941,7 @@ impl Input {
                 Completion::Theme(_) => "theme",
                 Completion::Changed(_) => "changed",
                 Completion::Refreshed { .. } => "refreshed",
-                Completion::Found { .. } | Completion::ProjectListed { .. } | Completion::ProjectFound { .. } | Completion::ProjectRanked { .. } => "found",
+                Completion::Found { .. } | Completion::ProjectListed { .. } | Completion::ProjectFound { .. } | Completion::ProjectRanked { .. } | Completion::NavigationOverlay { .. } | Completion::NavigationValidated { .. } => "found",
                 Completion::Previewed { .. } | Completion::CurrentPreview { .. } => "previewed",
                 Completion::PreviewHighlighted { .. } => "preview highlighted",
                 Completion::ResultSpans { .. } => "result spans",
@@ -1054,7 +1058,7 @@ pub enum DocTrigger {
 #[derive(Clone, Debug)]
 pub(crate) struct SemanticSource { pub(crate) key: crate::text::SnapshotKey, metadata: std::sync::Weak<crate::document::SourceMeta> }
 impl SemanticSource {
-    fn new(snapshot: &crate::text::TextSnapshot) -> Self { Self { key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()) } }
+    pub(crate) fn new(snapshot: &crate::text::TextSnapshot) -> Self { Self { key: snapshot.key(), metadata: Arc::downgrade(snapshot.source_meta()) } }
     pub(crate) fn matches(&self, snapshot: &crate::text::TextSnapshot) -> bool { self.key == snapshot.key() && self.metadata.ptr_eq(&Arc::downgrade(snapshot.source_meta())) }
 }
 impl PartialEq for SemanticSource {
@@ -1858,6 +1862,7 @@ pub struct Session {
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
     project_query: Option<project_search::ProjectQuery>,
+    navigation_query: Option<navigation_query::NavigationQuery>,
     semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -2052,6 +2057,7 @@ impl Session {
             jobs: Jobs::new(),
             analysis: Default::default(),
             project_query: None,
+            navigation_query: None,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2777,6 +2783,7 @@ impl Session {
         };
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
+        if self.navigation_query.as_ref().is_some_and(|q| self.state.navigation.as_ref().is_none_or(|n| n.request != q.request)) { self.navigation_query = None; }
         self.invalidate_result_analysis();
         self.refresh_blame();
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
@@ -2980,11 +2987,12 @@ impl Session {
                 self.projections.cancel(pane, request);
                 Effect::default()
             }
+            Command::ActivateNavigation { revision, index } => self.activate_navigation(revision, index),
             Command::SearchEverywhere {scope, query} => {
                 if scope == crate::navigation::Scope::Recent && self.state.navigation.as_ref().is_none_or(|n| n.scope != scope) {
                     self.command(Command::CheckPlaces);
                 }
-                self.state.navigation = Some(crate::navigation::Search {scope, query, rows: Vec::new(), revision: 0, pending: false, request: 0, dirty: false, matched: 0});
+                self.state.navigation = Some(crate::navigation::Search {scope, query, rows: Vec::new(), revision: 0, pending: false, request: 0, dirty: false, matched: 0, message: None});
                 self.rank_navigation();
                 repaint
             }
@@ -4441,6 +4449,12 @@ impl Session {
         match fence.slot {
             ResultSlot::Search => fence.project == project && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.id == fence.request
                 && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline) | (ResultStage::Declarations, ResultsKind::Declarations))),
+            ResultSlot::Navigation => fence.project == project && state.navigation.as_ref().is_some_and(|navigation| navigation.request == fence.request
+                && match fence.stage {
+                    ResultStage::NavigationRank => true,
+                    ResultStage::NavigationValidate => fence.result_set == Some(navigation.revision) && fence.node.is_some_and(|index| index < navigation.rows.len()),
+                    _ => false,
+                }),
             ResultSlot::Preview => fence.project == project && fence.request == preview && fence.stage == ResultStage::Preview
                 && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.selected == fence.node),
             ResultSlot::Validate => fence.project == project && fence.request == open && fence.stage == ResultStage::Validate
@@ -4478,6 +4492,12 @@ impl Session {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
                     self.project_query = None;
                     r.done = true; r.error = Some(why); return Effect { repaint: true, copy: None };
+                }
+            }
+            ResultSlot::Navigation => {
+                if self.state.navigation.as_ref().is_some_and(|n| n.request == fence.request) {
+                    self.navigation_query = None;
+                    return self.navigation_refused(format!("{why}; search again"));
                 }
             }
             ResultSlot::Preview => {
@@ -5123,6 +5143,7 @@ impl Session {
                 n.pending = false;
                 let dirty = n.dirty;
                 if let Some((rows, matched)) = found { n.rows = rows; n.matched = matched; n.revision = request; }
+                self.navigation_ready(request);
                 if dirty || self.state.project.as_ref().map_or(0, |p| p.files()) != files || self.state.index.coverage().indexed != indexed { self.rank_navigation(); }
                 Effect {repaint: true, copy: None}
             }
@@ -5148,9 +5169,11 @@ impl Session {
                 let effect = self.themes.apply(*update);
                 self.theme_effect(effect)
             }
+            Completion::NavigationOverlay { request, step, best, found, cache } => self.navigation_overlay(request, step, best, found, cache),
+            Completion::NavigationValidated { request, revision, index, result } => self.navigation_validated(request, revision, index, result),
             Completion::ProjectListed { id, paths } => self.project_listed(id, paths),
             Completion::ProjectFound { id, step, found } => self.project_found(id, step, found),
-            Completion::ProjectRanked { id, step, best, found } => self.project_ranked(id, step, best, found),
+            Completion::ProjectRanked { id, step, best, found, cache } => self.project_ranked(id, step, best, found, cache),
             Completion::Found { id, found } => {
                 let generation = self.state.project.as_ref().map(|p| p.generation());
                 let Some(r) = self.state.results.as_mut().filter(|r| r.id == id && r.root.as_ref().is_none_or(|(_, g)| Some(*g) == generation)) else {
@@ -5164,7 +5187,7 @@ impl Session {
                 }
                 r.searched = found.searched;
                 r.failed = found.failed;
-                r.error = found.error;
+                r.error = found.error.or_else(|| r.error.take());
                 r.syntax_errors = found.syntax_errors;
                 r.done = found.done;
                 r.limited = found.limited;
@@ -5223,7 +5246,7 @@ impl Session {
                 }
                 let Some(r) = self.state.results.as_ref().filter(|r| r.id == id) else { return Effect::default() };
                 let (Some(hit), Some(path)) = (r.hits.get(index).cloned(), r.target(index)) else { return Effect::default() };
-                let captured = r.captured.get(&path).cloned();
+                let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
                 let captured_changed = captured.as_ref().is_some_and(|source| !Self::captured_result_current(&self.state, source, &path));
                 let result = result.and_then(|(stamp, doc)| {
                     if captured_changed { return Err("the captured draft changed".into()); }
@@ -5945,7 +5968,7 @@ impl Session {
                 self.state.results = Some(base(self, Scope::File(source.clone()), None, 1, false));
                 let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Search, id, id, None, held.as_deref());
                 if let Some(snapshot) = held {
-                    if let Some(results) = self.state.results.as_mut() { results.captured.insert(source.clone(), snapshot.clone()); }
+                    if let Some(results) = self.state.results.as_mut() { results.captured.insert(source.clone(), search::CapturedSource::new(snapshot.clone())); }
                     let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
                     let project = fence.project;
                     if self.analysis.request_result_document(fence.clone(), Priority::Visible, || {
@@ -5982,7 +6005,7 @@ impl Session {
         let id = self.search_seq;
         self.search_latest.store(id, Ordering::Relaxed);
         self.state.results = Some(self.new_results(id, ResultsKind::Outline, String::new(), Scope::File(doc.source().to_owned()), None, 1, false));
-        if let Some(results) = self.state.results.as_mut() { results.captured.insert(doc.source().to_path_buf(), doc.clone()); }
+        if let Some(results) = self.state.results.as_mut() { results.captured.insert(doc.source().to_path_buf(), search::CapturedSource::new(doc.clone())); }
         let latest = self.search_latest.clone();
         let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
         let fence = self.local_result_fence(crate::analysis::ResultSlot::Search, crate::analysis::ResultStage::Outline, id, id, None, Some(&doc));
@@ -6060,6 +6083,7 @@ impl Session {
             spans_asked: Default::default(),
             matched_files: 0,
             captured: Default::default(),
+            query_paths: Default::default(),
             disk_sources: Default::default(),
         }
     }
@@ -6071,7 +6095,7 @@ impl Session {
         let Some(path) = r.target(i) else { return Effect::default() };
         r.selected = Some(i);
         let id = r.id;
-        let captured = r.captured.get(&path).cloned();
+        let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
         let disk_source = r.hits.get(i).and_then(|hit| r.disk_sources.get(&hit.path)).cloned();
         let stale = r.is_stale(i);
         let current = r.preview.as_ref().filter(|p| match &captured {
@@ -6132,7 +6156,7 @@ impl Session {
         let query = lenz_content::find::Query { text: r.query.clone(), options: r.options };
         // A file search is checked against the document the reader holds (its file may be gone); a project search
         // against the file as it is now.
-        let captured = r.captured.get(&path).cloned();
+        let captured = r.captured.get(&path).and_then(|source| source.snapshot.clone());
         let disk_source = r.disk_sources.get(&hit.path).cloned();
         let held = captured.clone().or_else(|| file_scope.then(|| self.state.tabs.iter().find(|t| t.source == path).and_then(|t| self.state.source(t.id).cloned())).flatten());
         self.open_seq += 1;
@@ -6465,6 +6489,8 @@ impl Session {
         use crate::navigation::{Chosen, Target};
         let search = self.state.navigation.as_ref().filter(|s| s.revision == revision)?;
         let row = search.rows.get(index)?;
+        if search.pending || search.request != search.revision { return None; }
+        if row.kind == crate::navigation::Kind::Symbol { return Some(Chosen::Command(Command::ActivateNavigation { revision, index })); }
         match &row.target {
             Target::Recent {path, at} => (!self.state.missing.contains(path)).then(|| Chosen::Command(match at {
                 Some(at) => Command::OpenAt {path:path.clone(),at:*at},
@@ -6499,6 +6525,7 @@ impl Session {
             }
         }
         if n.scope == S::Symbols && n.query.is_empty() { parts.push("Type a symbol name".into()); }
+        if let Some(message) = &n.message { parts.push(message.clone()); }
         if n.scope == S::Recent { parts.push("Recent files · Delete forgets".into()); }
         parts.join(" · ")
     }
@@ -6526,6 +6553,10 @@ impl Session {
         if scope == navigation::Scope::Recent {
             let found = navigation::rank(snapshot, scope, &query, || true);
             self.complete(Completion::Navigation {request,files,indexed,found});
+            return;
+        }
+        if !query.is_empty() && matches!(scope, navigation::Scope::All | navigation::Scope::Symbols) && snapshot.root.is_some() {
+            self.start_navigation_query(request, files, indexed, snapshot, scope, query);
             return;
         }
         let (latest, tx) = (self.navigation_latest.clone(), self.tx.clone());

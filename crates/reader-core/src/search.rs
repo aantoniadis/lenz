@@ -53,6 +53,17 @@ impl Hit {
     }
 }
 
+/// A query keeps exact hit sources; processed no-hit sources retain only their compact identity.
+pub(crate) struct CapturedSource {
+    pub identity: crate::session::SemanticSource,
+    pub snapshot: Option<Arc<crate::text::TextSnapshot>>,
+}
+impl CapturedSource {
+    pub fn new(snapshot: Arc<crate::text::TextSnapshot>) -> Self {
+        Self { identity: crate::session::SemanticSource::new(&snapshot), snapshot: Some(snapshot) }
+    }
+}
+
 /// What a result list holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ResultsKind {
@@ -424,7 +435,8 @@ pub struct Results {
     pub(crate) scope: Scope,
     /// The root the paths are relative to (project scope), and its generation when the search ran.
     pub(crate) root: Option<(std::path::PathBuf, u64)>,
-    pub(crate) captured: std::collections::HashMap<std::path::PathBuf, Arc<crate::text::TextSnapshot>>,
+    pub(crate) captured: std::collections::HashMap<std::path::PathBuf, CapturedSource>,
+    pub(crate) query_paths: std::collections::HashSet<Arc<str>>,
     pub(crate) disk_sources: std::collections::HashMap<Arc<str>, DiskSource>,
     pub(crate) hits: Vec<Hit>,
     pub(crate) searched: usize,
