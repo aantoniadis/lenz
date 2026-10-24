@@ -1706,7 +1706,7 @@ impl State {
             let inside = t.source.starts_with(p.root());
             (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Read-only source from {origin}"))
         });
-        let read_only = tab.and_then(|t| self.view(t.id)).filter(|view| view.read_only()).map(|_| "Read-only mode is on".to_owned());
+        let read_only = tab.and_then(|t| self.view(t.id)).and_then(|view| view.edit_disabled().map(str::to_owned));
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
