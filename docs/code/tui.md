@@ -36,6 +36,18 @@ change: after the repository is found, on file changes, and when the index or HE
 five-second tick). Refreshing never touches drafts or history. At most 20,000 changed paths are read; folders show
 only their own untracked status.
 
+The gutter marks the draft's changes too, left of the line numbers: **M** in the modified-file blue for a line the
+draft modifies and **A** in the added-file green for a line it adds, each identified by its letter rather than its
+colour (`NO_COLOR` loses only the colours); a second cell shows **D** where the draft deleted lines just above the
+line. The baseline is named in the status bar (`vs HEAD`, `vs new`, `vs saved`) and in **Status details…** (Shift+F2,
+`vs HEAD (main · 1a2b3c3): 2 added, 1 modified`), and the caret's line names its change there
+(`Modified from HEAD (main · 1a2b3c3)`) unless blame annotates that line. Tracked files are compared with HEAD's version — unsaved edits included, so
+Save leaves them — new and untracked files are compared with nothing and say so (`new file (untracked)`, or
+`new file (added to Git)`), and files outside Git with the last confirmed save. Blame keeps its column further left,
+bookmarks their cell, and folds and line numbers keep theirs; pinned (sticky) lines carry their letters too. The comparison is made
+once the draft rests (about a third of a second after the last keystroke) for the files on screen only, so typing
+starts no work of its own: the last result stays drawn until the newer one is ready.
+
 **Compare saved** (Ctrl+Shift+D, also in the palette) opens an in-window comparison against the last
 confirmed saved version. **Last saved (read-only)** and **Current draft** show changed rows with a blue
 background and `▌` gutter marks. The current side shares the ordinary tab’s buffer and undo history;

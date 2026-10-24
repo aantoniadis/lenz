@@ -31,6 +31,9 @@ pub struct Metrics<'a> {
     pub num_w: f32,
 }
 
+/// One cell of the monospace font, as a gutter mark counts it.
+pub fn cell_w(font_size: f32) -> f32 { font_size * 0.6 }
+
 /// One numbered source row, already in display coordinates ([`display::display_line`]): `fg` colours text, `bg`
 /// fills behind it (later entries in `bg` lose to earlier ones), `selected` and `caret` are display offsets. A reader
 /// editing several selections at once lists the rest in `extra`, painted as the selection and caret do.

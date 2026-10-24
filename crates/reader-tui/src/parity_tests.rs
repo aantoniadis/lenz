@@ -2750,3 +2750,79 @@ fn explorer_creation_of_a_file_and_a_folder_matches_in_both_adapters(cx: &mut Te
     // Files the tests did not create are untouched.
     for root in &roots { assert_eq!(std::fs::read(root.join("src/a.txt")).unwrap(), b"keep\n"); }
 }
+
+#[gpui::test]
+fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_undo(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, repo, write};
+    let make = || {
+        let r = repo();
+        write(r.path(), "a.txt", "one\ntwo\nthree\n");
+        commit_all(r.path(), "base");
+        write(r.path(), "other.txt", "untracked\n");
+        r
+    };
+    let (gr, tr) = (make(), make());
+    let state = tempfile::tempdir().unwrap();
+    let mut core = Session::new(config(&state.path().join("gui")));
+    core.dispatch(Command::OpenRoot(gr.path().to_path_buf()));
+    let gui = cx.new(|cx| ReaderView::new(core, Some(gr.path().join("a.txt")), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&state.path().join("tui")), Some(tr.path().to_path_buf()));
+    tui.session.dispatch(Command::OpenRetained(tr.path().join("a.txt")));
+    // What both adapters' gutter letters show for the active tab, and the baseline they name.
+    let markers = |s: &State| {
+        let markers = s.active().and_then(|tab| s.markers(tab.id()))?;
+        Some((
+            markers.baseline().map(reader_core::markers::Baseline::kind),
+            // The transient catch-up suffix is a timing detail, not a different marker.
+            markers.summary().map(|summary| summary.replace(" (updating…)", "")),
+            (0..3).map(|line| format!("{}{}", markers.change(line).map_or(" ", reader_core::markers::LineChange::letter), if markers.deleted_above(line) > 0 { "D" } else { " " })).collect::<Vec<_>>(),
+        ))
+    };
+    let settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |v, cx| v.poll(cx));
+            while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            if gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline, "adapters did not settle: {:?} / {:?}", gui.read_with(visual, |v, _| markers(v.session().state())), markers(tui.session.state()));
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    settle(&mut visual, &mut tui, &|s| s.markers(s.active().map(|t| t.id()).unwrap_or(reader_core::tabs::TabId(0))).is_some_and(|m| !m.pending()));
+    assert_eq!(markers(tui.session.state()), gui.read_with(&visual, |v, _| markers(v.session().state())));
+    assert_eq!(markers(tui.session.state()).map(|m| (m.0, m.2.clone())), Some((Some(reader_core::markers::BaselineKind::Head), vec!["  ".into(), "  ".into(), "  ".into()])));
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    // A real keystroke in each adapter, then the same settled change against HEAD.
+    visual.simulate_keystrokes("x");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    let changed = |s: &State| markers(s).is_some_and(|m| !s.active().and_then(|t| s.markers(t.id())).unwrap().pending() && m.2[0] == "M ");
+    settle(&mut visual, &mut tui, &changed);
+    let (g, t) = (gui.read_with(&visual, |v, _| markers(v.session().state())), markers(tui.session.state()));
+    assert_eq!(g, t);
+    assert_eq!(t.map(|m| m.2), Some(vec!["M ".into(), "  ".into(), "  ".into()]));
+    assert_eq!(gui.read_with(&visual, |v, _| v.marker_letters().len()), 1);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|f| tui.draw(f)).unwrap();
+    let rows = (0..24).map(|y| (0..100).map(|x| terminal.backend().buffer()[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+    assert!(rows.iter().any(|r| r.contains(" M")), "{rows:#?}");
+    // Save keeps the repository markers in both, and writes the same bytes.
+    visual.simulate_keystrokes("ctrl-s");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    let saved = |s: &State| s.tabs().iter().all(|t| !s.tab_dirty(t.id())) && markers(s).is_some_and(|m| m.2[0] == "M ");
+    settle(&mut visual, &mut tui, &saved);
+    assert_eq!(gui.read_with(&visual, |v, _| markers(v.session().state())), markers(tui.session.state()));
+    for r in [&gr, &tr] { assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "xone\ntwo\nthree\n"); }
+    // Undo returns to the committed text: neither adapter shows a change any more.
+    visual.simulate_keystrokes("ctrl-z");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)));
+    let undone = |s: &State| s.active().and_then(|t| s.markers(t.id())).is_some_and(|m| !m.pending() && m.change(0).is_none());
+    settle(&mut visual, &mut tui, &undone);
+    assert_eq!(gui.read_with(&visual, |v, _| markers(v.session().state())), markers(tui.session.state()));
+    assert_eq!(gui.read_with(&visual, |v, _| v.marker_letters()), Vec::<(char, u32)>::new());
+    for r in [&gr, &tr] { assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "xone\ntwo\nthree\n", "undo changes no disk bytes"); }
+}

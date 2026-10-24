@@ -3,9 +3,10 @@ use super::*;
 use crate::{semantics::Lane, session::SemanticSource};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum ResultSlot { Semantic { server: u64, lane: Lane }, Search, Navigation, Preview, Validate, SavedComparison }
+pub(crate) enum ResultSlot { Semantic { server: u64, lane: Lane }, Search, Navigation, Preview, Validate, SavedComparison, /// One buffer's draft change markers.
+    Markers(crate::text::BufferId) }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Declarations, NavigationRank, NavigationValidate, Preview, Validate, SavedComparison }
+pub(crate) enum ResultStage { Targets, Retrieved, Hierarchy, SyntaxHierarchy, Search, Outline, Declarations, NavigationRank, NavigationValidate, Preview, Validate, SavedComparison, Markers }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ResultFence {
     pub slot: ResultSlot,
@@ -82,6 +83,15 @@ impl Analysis {
             entry.queued = true;
             self.queue.push_back(Owner::Result(slot));
         }
+    }
+    /// Stops `slot`'s work and takes back its result without a failure: its owner asked again with a newer fence.
+    pub(crate) fn cancel_result(&mut self, slot: ResultSlot) {
+        let Some(entry) = self.results.get_mut(&slot) else { return };
+        if let Some(run) = &entry.running { run.task.cancel.store(false, Ordering::Release); }
+        entry.pending = None;
+        entry.completed = None;
+        entry.ack = entry.latest.serial;
+        self.dirty = true;
     }
     pub(crate) fn acknowledge_result(&mut self, tag: &ResultTicket) -> bool {
         let Some(entry) = self.results.get_mut(&tag.slot) else { return false };

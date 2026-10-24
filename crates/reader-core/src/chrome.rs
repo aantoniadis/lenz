@@ -129,10 +129,37 @@ impl Session {
                 }
             };
         }
+        // The caret line's change against its baseline, named in words, so the marker never rests on colour alone.
+        // An annotation of that line is more specific about its past and comes first.
+        if let Some(marker) = self.caret_marker() {
+            return marker;
+        }
         state.current_source().map_or_else(
             || "No file open — Ctrl+O file, F10 commands".into(),
             |d| shown_name(state, d),
         )
+    }
+
+    /// The caret line's change marker in words (`Modified from HEAD (main · 1a2b3c4)`), when it has one.
+    pub fn caret_marker(&self) -> Option<String> {
+        let tab = self.state().active()?;
+        let head = tab.selection()?.head;
+        let line = self.state().view(tab.id())?.snapshot().line_of(head);
+        self.state().markers(tab.id())?.line_label(line)
+    }
+
+    /// The active file's change-marker baseline, named (`HEAD (main · 1a2b3c4)`, a new file, or the last save).
+    pub fn markers_baseline(&self) -> Option<&crate::markers::Baseline> {
+        self.state().active().and_then(|tab| self.state().markers(tab.id()))?.baseline()
+    }
+
+    /// The shown draft's baseline and what changed against it, for the status details.
+    pub fn markers_details(&self) -> Option<String> {
+        let markers = self.state().active().and_then(|tab| self.state().markers(tab.id()))?;
+        markers.summary().or_else(|| {
+            let baseline = markers.baseline()?;
+            Some(format!("vs {}", baseline.label()))
+        })
     }
 
     /// Cursor position (byte column, as in the existing terminal status) or image dimensions.
@@ -209,6 +236,7 @@ impl Session {
             .chain(state.notices())
             .chain([name])
             .chain((!position.is_empty()).then_some(position))
+            .chain(self.markers_details())
             .chain(image)
             .chain(project)
             .chain(state.provider().map(|p| p.summary()))

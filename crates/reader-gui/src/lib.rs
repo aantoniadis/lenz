@@ -214,6 +214,9 @@ pub struct ReaderView {
     /// The dirty marks and Git status letters painted on tabs, then on explorer rows, in order.
     #[cfg(test)]
     painted_badges: Vec<&'static str>,
+    /// The change-marker letters painted in the gutters, in order, with the colour each was painted in.
+    #[cfg(feature = "test-support")]
+    painted_markers: Vec<(char, u32)>,
     /// The font's advance, measured at each paint.
     char_w: f32,
     /// Window width, from the last paint, for wrapping.
@@ -639,7 +642,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -3111,7 +3114,7 @@ impl ReaderView {
                 self.open_navigation(reader_core::navigation::Scope::Actions, cx);
                 return;
             }
-            let (server, _, branch, _, sql) = self.status_segments();
+            let (server, _, branch, _, sql, _) = self.status_segments();
             let id = if server.0.contains(&ev.position) { CommandId::LanguageServer } else if sql.0.contains(&ev.position) { CommandId::SqlDialect } else if branch.0.contains(&ev.position) { CommandId::GitBranches } else { CommandId::StatusDetails };
             self.run(id, window, cx);
             return;
@@ -3456,11 +3459,11 @@ impl ReaderView {
         let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
             .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
                 if self.modal.is_none() && y >= self.body_bottom() && self.status_h() > 0.0 {
-                    let (server, message, branch, _, sql) = self.status_segments();
+                    let (server, message, branch, _, sql, markers) = self.status_segments();
                     if server.0.contains(&ev.position) { Some(CommandId::LanguageServer) }
                     else if sql.0.contains(&ev.position) { Some(CommandId::SqlDialect) }
                     else if branch.0.contains(&ev.position) { Some(CommandId::GitBranches) }
-                    else if message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
+                    else if markers.0.contains(&ev.position) || message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
             });
         let preview_hover = self.modal.is_none().then(|| self.panes.iter().find(|g| self.preview_button(**g).is_some_and(|(b, _)| b.contains(&ev.position))).map(|g| g.pane)).flatten();
@@ -3626,7 +3629,7 @@ impl ReaderView {
     }
 
     /// Independent footer cells; narrow windows keep recovery and message targets accessible.
-    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, StatusCell) {
+    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, StatusCell, StatusCell) {
         let left = STATUS_PAD.min(self.width / 2.0);
         let right = self.commands_button().map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
@@ -3635,6 +3638,9 @@ impl ReaderView {
         // The SQL dialect (or "not set") beside the server status, never assumed.
         let sql = self.session.sql_dialect_label().unwrap_or_default();
         let sql_w = if sql.is_empty() { 0.0 } else { ((lenz_content::wrap::width(&sql) as f32 + 2.0) * self.char_w).min(room * 0.35) };
+        // The open draft's change-marker baseline: which version its gutter letters are compared against.
+        let markers = self.session.markers_baseline().map(|b| format!("vs {}", b.short())).unwrap_or_default();
+        let markers_w = if markers.is_empty() || self.width < 480.0 { 0.0 } else { ((lenz_content::wrap::width(&markers) as f32 + 2.0) * self.char_w).min(room * 0.15) };
         let position = self.session.status_position();
         let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
         let cell = |x: f32, w: f32, text: &str| {
@@ -3644,8 +3650,8 @@ impl ReaderView {
         // The branch, before the position, when there is room for both.
         let branch = self.session.branch_label().filter(|_| self.width >= 480.0).unwrap_or_default();
         let branch_w = if branch.is_empty() { 0.0 } else { ((lenz_content::wrap::width(&branch) as f32 + 2.0) * self.char_w).min(room * 0.25) };
-        let message_w = (room - server_w - sql_w - position_w - branch_w).max(0.0);
-        (cell(left, server_w, &label), cell(left + server_w + sql_w, message_w, &self.session.status_message()), cell(right - position_w - branch_w, branch_w, &branch), cell(right - position_w, position_w, &position), cell(left + server_w, sql_w, &sql))
+        let message_w = (room - server_w - sql_w - markers_w - position_w - branch_w).max(0.0);
+        (cell(left, server_w, &label), cell(left + server_w + sql_w + markers_w, message_w, &self.session.status_message()), cell(right - position_w - branch_w, branch_w, &branch), cell(right - position_w, position_w, &position), cell(left + server_w, sql_w, &sql), cell(left + server_w + sql_w, markers_w, &markers))
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
@@ -4248,6 +4254,11 @@ impl ReaderView {
     /// For tests: the status bar's branch cell.
     pub fn status_branch(&self) -> StatusCell { self.status_segments().2 }
     pub fn status_sql(&self) -> StatusCell { self.status_segments().4 }
+    /// For tests: the change-marker letters painted in the gutters, and the colour each was painted in.
+    #[cfg(feature = "test-support")]
+    pub fn marker_letters(&self) -> Vec<(char, u32)> { self.painted_markers.clone() }
+    /// For tests: the status bar's change-marker baseline cell.
+    pub fn status_markers(&self) -> StatusCell { self.status_segments().5 }
 
     /// The status bar's height: none in a window too short for it and the toolbar.
     fn status_h(&self) -> f32 {
@@ -4524,7 +4535,7 @@ impl Render for ReaderView {
         let narrow = self.width < 320.0;
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
         self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
-        let (server_cell, message_cell, branch_cell, position_cell, sql_cell) = self.status_segments();
+        let (server_cell, message_cell, branch_cell, position_cell, sql_cell, markers_cell) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, reader_core::semantics::Status::Missing(_) | reader_core::semantics::Status::Failed(_) | reader_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
@@ -4722,6 +4733,8 @@ impl Render for ReaderView {
         let mut frames = Vec::new();
         let mut sticky_hits = Vec::new();
         let mut marks_drawn = Vec::new();
+        #[cfg(feature = "test-support")]
+        let mut painted_markers = Vec::new();
         // Reused each frame (the test accessor): no allocation once warm.
         let mut folds_drawn = std::mem::take(&mut self.fold_marks_drawn);
         folds_drawn.clear();
@@ -4774,12 +4787,30 @@ impl Render for ReaderView {
                 _ => Vec::new(),
             };
             let comparison_marks = tab.map_or_else(Vec::new, |t| rows.iter().filter(|row| row.number > 0 && state.comparison_changed_line(t.id(), row.number as usize - 1)).map(|row| (row.y, Some('▌'))).collect());
+            // The draft's change against its baseline: the change's letter, then a deletion above the line.
+            let change_marks = tab.map_or_else(Vec::new, |t| state.markers(t.id()).map_or_else(Vec::new, |markers| {
+                rows.iter().filter(|row| row.number > 0).flat_map(|row| {
+                    let line = row.number as usize - 1;
+                    let change = markers.change(line).map(|change| (row.y, change.letter().chars().next().unwrap_or(' '), change.color(&palette)));
+                    let deleted = (markers.deleted_above(line) > 0).then(|| (row.y, 'D', reader_core::markers::deleted_color(&palette)));
+                    change.into_iter().chain(deleted)
+                }).collect()
+            }));
             let mut sticky_bookmarks = Vec::new();
+            let mut sticky_change = Vec::new();
             for (line, row) in &sticky {
                 let at = gpui::point(g.text.origin.x, g.text.origin.y + px(row.y * line_h()));
                 sticky_hits.push((Bounds { origin: at, size: gpui::size(g.text.size.width, px(line_h())) }, g.pane, *line));
                 if let Some(m) = tab.and_then(|t| state.places().bookmark(t.source(), *line)) {
                     sticky_bookmarks.push((row.y, m.mnemonic));
+                }
+                if let Some(markers) = tab.and_then(|t| state.markers(t.id())) {
+                    if let Some(change) = markers.change(*line) {
+                        sticky_change.push((row.y, change.letter().chars().next().unwrap_or(' '), change.color(&palette)));
+                    }
+                    if markers.deleted_above(*line) > 0 {
+                        sticky_change.push((row.y, 'D', reader_core::markers::deleted_color(&palette)));
+                    }
                 }
             }
             // Rows under the sticky band are hidden by it; its own marks are painted over it.
@@ -4818,8 +4849,12 @@ impl Render for ReaderView {
                 let logical = view.layout_rows(g.rows, state.wrap_cols(tab)).rows;
                 rows.iter().map(|row| logical.get(row.y as usize).map(|r| self.source_parts(tab, r, row, window)).unwrap_or_default()).collect()
             });
-            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            #[cfg(feature = "test-support")]
+            painted_markers.extend(change_marks.iter().map(|&(_, glyph, color)| (glyph, color)));
+            frames.push(PaneFrame { row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, change_marks, sticky_change, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
         }
+        #[cfg(feature = "test-support")]
+        { self.painted_markers = painted_markers; }
         self.source_geometry = [0, 1].map(|pane| self.session.state().presentation_shown(pane).and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
         self.marks_drawn = marks_drawn;
@@ -5038,7 +5073,7 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&branch_cell, palette.fg, Some(CommandId::GitBranches)), (&position_cell, palette.dim, None)] {
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&markers_cell, palette.fg, Some(CommandId::StatusDetails)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&branch_cell, palette.fg, Some(CommandId::GitBranches)), (&position_cell, palette.dim, None)] {
                                 let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
                                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                     if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }
@@ -5136,8 +5171,9 @@ impl Render for ReaderView {
                                     let color = if bright { palette.fg } else { palette.num_fg };
                                     lenz_gpui::text(window, cx, m, tx + num_w() - fold_w() + 1.0, ty + row as f32 * m.line_h, if collapsed { "▸" } else { "▾" }, color);
                                 }
-                                paint_bookmarks(window, cx, m, tx, ty, &f.bookmarks, palette.accent);
+                                paint_bookmarks(window, cx, m, tx + 2.0, ty, &f.bookmarks, palette.accent);
                                 paint_bookmarks(window, cx, m, tx, ty, &f.comparison_marks, palette.edge[2]);
+                                paint_change_marks(window, cx, m, tx, ty, &f.change_marks);
                                 if let Some((ry, shown)) = &f.link
                                     && let Some(row) = f.rows.iter().find(|r| r.y == *ry)
                                 {
@@ -5188,7 +5224,8 @@ impl Render for ReaderView {
                                         }
                                     }
                                     lenz_gpui::fill(window, tx, ty + n * m.line_h - 1.0, tw, 1.0, palette.border);
-                                    paint_bookmarks(window, cx, m, tx, ty, &f.sticky_bookmarks, palette.accent);
+                                    paint_bookmarks(window, cx, m, tx + 2.0, ty, &f.sticky_bookmarks, palette.accent);
+                                    paint_change_marks(window, cx, m, tx, ty, &f.sticky_change);
                                 }
                                 if let Some(b) = &f.find {
                                     b.paint(window, cx, m, &palette, gpui::point(px(x0), px(y0)), char_w);
@@ -5392,6 +5429,10 @@ struct PaneFrame {
     bookmarks: Vec<(f32, Option<char>)>,
     sticky_bookmarks: Vec<(f32, Option<char>)>,
     comparison_marks: Vec<(f32, Option<char>)>,
+    /// The draft's change markers on text rows: row, its letter, and the letter's colour.
+    change_marks: Vec<(f32, char, u32)>,
+    /// The same on the sticky lines pinned over them.
+    sticky_change: Vec<(f32, char, u32)>,
     /// The linked identifier's row and display range.
     link: Option<(f32, std::ops::Range<usize>)>,
     /// Underlines (mutable) and strikethroughs (deprecated): row, display range, colour, modifier bits.
@@ -5442,10 +5483,20 @@ fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, pal
 }
 
 /// Bookmark marks at the gutter's left edge (line numbers are right-aligned): the key, or a dot when it has none.
-fn paint_bookmarks(window: &mut Window, cx: &mut App, m: Metrics, tx: f32, ty: f32, marks: &[(f32, Option<char>)], color: u32) {
+fn paint_bookmarks(window: &mut Window, cx: &mut App, m: Metrics, x: f32, ty: f32, marks: &[(f32, Option<char>)], color: u32) {
     for &(row, key) in marks {
         let glyph = key.map_or_else(|| "●".to_string(), String::from);
-        lenz_gpui::text(window, cx, m, tx + 2.0, ty + row * m.line_h, &glyph, color);
+        lenz_gpui::text(window, cx, m, x, ty + row * m.line_h, &glyph, color);
+    }
+}
+
+/// The draft change markers in the gutter's left margin: the change's letter, then the deletion above it. Bookmarks
+/// keep the third cell, so a changed bookmarked line shows both.
+fn paint_change_marks(window: &mut Window, cx: &mut App, m: Metrics, tx: f32, ty: f32, marks: &[(f32, char, u32)]) {
+    let cell = lenz_gpui::cell_w(m.font_size);
+    for &(row, glyph, color) in marks {
+        let x = tx + 2.0 + if glyph == 'D' { cell } else { 0.0 };
+        lenz_gpui::text(window, cx, m, x, ty + row * m.line_h, &glyph.to_string(), color);
     }
 }
 

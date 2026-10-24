@@ -432,3 +432,47 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Unverified:** native macOS and Wayland GUI creation were not run (editing remains gated there); the GUI checks
   ran on the GPUI test platform and the terminal checks in a test backend, so physical terminal layouts and real
   desktops are unverified for this ticket.
+## Draft change markers (ticket 66, 2026-10-24)
+
+- **Suspected cost, unmeasured:** a settled draft is compared with its baseline in one background pass over the whole
+  document (`lenz_engine::compare_lines` allocates its prepared line tables each time), and a dirty draft also
+  materializes once through the shared analysis conversion. Typing stops at the three-hundred-millisecond rest, so a
+  burst costs one comparison, but a user who pauses often on a 100,000-line file compares that file on every pause.
+  Measure the many-pause case on the readiness corpus before deciding whether to reuse the previous blocks
+  incrementally (mapping them through the edit ranges and re-diffing only the touched region) or to reduce marker
+  coverage for large files; no benchmark was run for this ticket. The diff engine still has no internal cancellation
+  checkpoint (see the saved-comparison note): a superseded comparison stops publishing but runs to its end.
+- **Markers lag the text while catching up:** the last published blocks stay drawn while a newer version is compared,
+  so a line inserted or deleted during that fraction of a second can show a marker one line off until the newer result
+  arrives. Adapters label the state (`updating…` in Status details) but do not transform the blocks through the edit;
+  the alternative — clearing them on every change — was judged worse than a brief imprecision. Revisit with the
+  incremental idea above.
+- **Pairing inside a replaced block:** additions are recognised inside a both-sided block only by pairing its lines by
+  place (`n` lines against `m`), so a line inserted at the start of a rewritten run is marked **M**, not **A**. A
+  membership-based or LCS-based split would need a per-line rule that also explains a genuinely deleted line; keep the
+  current conservative letter until a real example asks for more.
+- **Ignored-but-untracked files:** Git's status does not list ignored files, so a file inside `.gitignore` is read as
+  `new file (not in HEAD)` (it has no HEAD blob and no status). It is never shown as modified; whether an ignored file
+  should instead show no markers at all is a presentation question.
+- **Files of another repository:** the markers use the session's repository (the project's, else the open file's
+  folder), as ticket 65's statuses do. A file from a different repository while a project is open therefore compares
+  with its last saved version and is labelled `last saved`, not with that other repository's HEAD. Same limit as the
+  explorer badges.
+- **Where the markers sit:** the terminal reserves two extra gutter cells for every text file (whether or not it has a
+  baseline), so opening a file does not shift its text when the first comparison arrives; that costs two of the
+  terminal's columns on every row. The GUI keeps its gutter width — widening it re-wraps every wrapped row, which
+  perturbs click mapping and wrapping tests and costs the text two cells — and draws the letters in the gutter's left
+  margin: `M`/`A` at the left edge and `D` one cell right of it, with bookmarks a cell further right. On a file of
+  five digits or more the right-aligned number reaches into that margin, so a letter can sit over the number's first
+  digit (bookmarks already did). A gutter that grows with the markers' column, as the terminal's does, would fix it;
+  measure the text-width cost and re-baseline the wrap and click tests before changing it.
+- **One more thread per session:** the rest before a comparison is timed by a `reader-markers` thread per session,
+  like the tick's and the places saver's. It only waits and wakes; a session with no draft text still holds it until
+  the session drops.
+- **Unreadable statuses leave markers pending:** when `git status` fails for the session's repository, `State::git_status`
+  stays empty, which the markers cannot tell apart from "still loading": the file shows no letters and no reason. A
+  failed read could carry its own state (as the blame column does) if this turns out to matter.
+- **Unverified:** native macOS and Wayland GUI drawing were not run (editing remains gated there); the GUI checks ran
+  on the GPUI test platform and the terminal checks in a test backend. The marker look with exotic fonts, at very
+  narrow widths and in physical terminals is unverified, and the marker column's cost per frame was not measured
+  (the lookup is a binary search per drawn line).

@@ -45,7 +45,7 @@ impl SavedComparison {
 impl State {
     pub fn saved_comparison(&self) -> Option<&SavedComparison> { self.comparison.as_ref() }
     pub(super) fn saved_buffer(&self, buffer: BufferId) -> bool { self.comparison.as_ref().is_some_and(|c| c.buffer == buffer) }
-    fn confirmed_baseline(&self, buffer: BufferId) -> Option<&Arc<TextSnapshot>> {
+    pub(super) fn confirmed_baseline(&self, buffer: BufferId) -> Option<&Arc<TextSnapshot>> {
         let entry = self.sources.buffers.get(&buffer)?;
         entry.draft.as_ref().map(|d| &d.baseline).or(entry.snapshot.as_ref())
     }

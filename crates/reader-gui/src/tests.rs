@@ -1173,6 +1173,7 @@ fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppCon
         f32::from(bounds.origin.x) + num_w() + 8.0 + origin + f32::from(window.text_system().shape_line(row.text.clone().into(), px(font_size()), &[run], None).x_for_index(at))
     });
     let y = bounds.origin.y + px((row.y + 0.5) * line_h());
+
     v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
     v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
     let end = source.find("END").unwrap();
@@ -5963,10 +5964,10 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, g, c, sql) = r.status_segments();
-                assert!(a.0.right() <= sql.0.left() && sql.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
+                let (a, b, g, c, sql, markers) = r.status_segments();
+                assert!(a.0.right() <= sql.0.left() && sql.0.right() <= markers.0.left() && markers.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
                 assert!(c.0.right() <= px(w));
-                for (bounds, text) in [a, b, g, c, sql] {
+                for (bounds, text) in [a, b, g, c, sql, markers] {
                     assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
                 }
                 assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
@@ -7133,4 +7134,45 @@ fn a_keymap_override_persists_and_reaches_the_palette_label(cx: &mut TestAppCont
     v.simulate_keystrokes("ctrl-alt-f");
     assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Navigation { .. })));
     v.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn gutter_paints_change_letters_in_their_own_colours_against_head(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    use reader_core::markers::{BaselineKind, LineChange};
+    let r = repo();
+    put(r.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "other.txt", "untracked\n");
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRoot(r.path().to_path_buf()), cx));
+    settle(cx, &f, |view| view.session().state().tree_rows().any(|row| view.session().state().row_status(row) == Some(lenz_content::branches::FileStatus::Untracked)));
+    f.view.update(&mut v, |view, cx| { view.enable_draft_input_for_test(); view.dispatch(Command::OpenRetained(r.path().join("a.txt")), cx); });
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let tab = |view: &ReaderView| view.session().state().active().unwrap().id();
+    // The debounce thread runs for real: the markers settle once the draft rests.
+    settle(cx, &f, |view| view.session().state().markers(tab(view)).is_some_and(|m| !m.pending()));
+    assert_eq!(f.view.read_with(&v, |view, _| view.marker_letters()), Vec::<(char, u32)>::new(), "a committed file shows no letter");
+    v.simulate_keystrokes("x");
+    settle(cx, &f, |view| view.session().state().markers(tab(view)).is_some_and(|m| !m.pending() && m.change(0) == Some(LineChange::Modified)));
+    draw(&mut v);
+    let (palette, letters) = f.view.read_with(&v, |view, _| (view.session().state().palette().clone(), view.marker_letters()));
+    assert_eq!(letters, vec![('M', LineChange::Modified.color(&palette))], "the changed line's letter, in the modified colour");
+    assert_ne!(LineChange::Added.color(&palette), LineChange::Modified.color(&palette));
+    let (kind, summary) = f.view.read_with(&v, |view, _| {
+        let markers = view.session().state().markers(tab(view)).unwrap();
+        (markers.baseline().map(reader_core::markers::Baseline::kind), markers.summary())
+    });
+    assert_eq!(kind, Some(BaselineKind::Head));
+    assert_eq!(summary.as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{summary:?}");
+    assert!(f.view.read_with(&v, |view, _| view.status_markers().1.clone()).contains("vs HEAD"), "the status bar names the baseline");
+    // Blame and a bookmark take their own gutter places beside the letters.
+    f.view.update(&mut v, |view, cx| { view.dispatch(Command::SetAnnotate(true), cx); view.dispatch(Command::ToggleBookmark, cx); });
+    settle(cx, &f, |view| view.session().state().active().is_some_and(|t| t.blame_status() == Some(reader_core::blame::Status::Ready)));
+    draw(&mut v);
+    assert!(!f.view.read_with(&v, |view, _| view.painted_annotations.clone()).is_empty(), "the blame column is painted");
+    assert_eq!(f.view.read_with(&v, |view, _| view.marker_letters()).iter().map(|(glyph, _)| *glyph).collect::<Vec<_>>(), vec!['M'], "the change letter stays painted beside both");
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
 }

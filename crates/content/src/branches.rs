@@ -65,6 +65,44 @@ pub fn head(root: &Path, git_dir: &Path) -> Option<Head> {
     }
 }
 
+/// The commit `HEAD` resolves to (`None` on an unborn branch, or where it cannot be read).
+pub fn head_commit(root: &Path) -> Option<String> {
+    let out = git::run(root, &["rev-parse", "--verify", "-q", "HEAD"]).ok()?;
+    let sha = String::from_utf8_lossy(&out).trim().to_string();
+    (!sha.is_empty()).then_some(sha)
+}
+
+/// The bytes of `path` (repository-relative, `/`-separated) as `HEAD` has them; `None` when it has no such file (a new
+/// file, a rename, or a repository without a commit).
+pub fn blob_at_head(root: &Path, path: &str) -> Result<Option<Vec<u8>>, String> {
+    match git::run(root, &["cat-file", "blob", &format!("HEAD:{path}")]) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) => if in_head(root, path) { Err(e) } else { Ok(None) },
+    }
+}
+
+/// Whether `path` is in the index (a file Git knows, though HEAD may have no version of it yet).
+pub fn tracks(root: &Path, path: &str) -> bool {
+    git::command(root).is_ok_and(|mut cmd| {
+        cmd.args(["ls-files", "--error-unmatch", "--", path])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
+/// Whether `HEAD` holds a file at `path`.
+pub fn in_head(root: &Path, path: &str) -> bool {
+    git::command(root).is_ok_and(|mut cmd| {
+        cmd.args(["cat-file", "-e", &format!("HEAD:{path}")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    })
+}
+
 /// What changes when HEAD may have: the `HEAD` file's time, or a reftable repository's table list's.
 pub fn head_signal(git_dir: &Path) -> Option<std::time::SystemTime> {
     let file = if git_dir.join("reftable").is_dir() { git_dir.join("reftable/tables.list") } else { git_dir.join("HEAD") };

@@ -38,6 +38,10 @@ impl Statuses {
         let files = read.files.into_iter().map(|(mut p, s)| { if p.ends_with('/') { p.pop(); } (p, s) }).collect();
         Self { root, anchor, files, untracked_folders, limited: read.limited }
     }
+    /// Whether `path` is inside the repository's folder: its files' baselines are HEAD's (changed or not).
+    pub fn contains(&self, path: &std::path::Path) -> bool {
+        path.starts_with(&self.anchor.0) || path.starts_with(&self.root)
+    }
     /// The status of the file or folder at `path`: a file inside an untracked folder is untracked.
     pub fn of(&self, path: &std::path::Path) -> Option<FileStatus> {
         let inside = match path.strip_prefix(&self.anchor.0) {

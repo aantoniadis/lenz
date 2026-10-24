@@ -26,6 +26,7 @@ pub mod jobs;
 pub mod keymap;
 pub mod libraries;
 pub mod markdown;
+pub mod markers;
 pub mod places;
 pub mod preferences;
 pub mod recovery;

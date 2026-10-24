@@ -251,6 +251,22 @@ Branches… add **Compare with Working Tree** (branches, tags and worktrees) and
 Here** (other branches). Folder comparisons inside a repository skip what git ignores (`target/`, `node_modules/`); submodules and nested
 repositories are compared by their own ignore rules.
 
+The gutter also marks the draft's own changes. Left of the line numbers, a line the draft modifies shows **M** in the
+modified-file blue and a line it adds shows **A** in the added-file green; a second cell shows **D** where the draft
+deleted lines just above, with their count in **Status details…**. The letters are the identification, so a terminal
+without colour, or `NO_COLOR`, loses nothing. The baseline is named and never guessed: tracked files are compared
+against **HEAD**'s version of the file (`vs HEAD (main · a1b2c3c)`, in the status bar and in Status details), new and
+untracked files against nothing — every line is added, labelled `new file (untracked)` or `new file (added to Git)` —
+and files outside Git against the last confirmed save. Unsaved edits count, so saving a tracked file leaves its
+repository markers and only a new HEAD clears them; outside Git, Save becomes the new baseline. The caret's line names
+its change in the status line (`Modified from HEAD (main · a1b2c3c)`), except while blame annotates that line, whose
+commit it names instead. The comparison runs in the background once the
+draft rests, a fraction of a second after the last keystroke, and only for the files on screen; while it catches up
+the last result stays drawn and Status details says `updating…`. Added lines are recognised within a replaced block
+only where the diff pairs the block's lines by place, so a rewritten run shows as **M** even where a line or two
+arrive; the block's letter is what the diff can defend. Pinned (sticky) lines carry their letters too. Large files
+(over 5 MiB or 100,000 lines) keep the markers.
+
 **Annotate with Git Blame** (View menu, right-click, Alt+B) shows, left of the line numbers, the date and author of
 the commit that last changed each line, tinted by age (newest strongest); lines not committed yet say so. It is per
 tab, streams in as git reports it, and runs again when the file changes on disk; after a commit, amend or checkout

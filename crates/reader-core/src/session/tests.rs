@@ -7,6 +7,7 @@ mod save_as;
 mod preferences;
 mod keymap;
 mod git_status;
+mod markers;
 mod sql_dialect;
 mod recovery;
 use crate::tabs::TabId;

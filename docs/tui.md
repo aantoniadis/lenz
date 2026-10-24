@@ -8,6 +8,12 @@ Reader editing also covers several selections: Alt+Shift+Down / Up and **Select 
 cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. The
 [terminal reader guide](code/tui.md) lists the keys and the terminal's modifier-key limits.
 
+The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
+line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.
+Tracked files compare with HEAD (unsaved edits included, so Save keeps the marks), new files say they are new, and
+files outside Git compare with the last save; the status bar and Status details name the baseline. See the
+[terminal reader guide](code/tui.md) for the cells, the timing and the limits.
+
 Find in the current draft also replaces: both adapters open find with Ctrl+F, Tab moves to the replacement row,
 Enter replaces the current match and selects the next, and Alt+A replaces every listed match. The replacement text,
 pattern, options and captured document version live in the shared session, so the GUI's box and the terminal's
