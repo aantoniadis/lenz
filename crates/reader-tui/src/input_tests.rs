@@ -1,6 +1,8 @@
 use super::*;
 #[path = "input_tests/external.rs"]
 mod external;
+#[path = "input_tests/save_as.rs"]
+mod save_as;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{

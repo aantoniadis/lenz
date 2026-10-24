@@ -31,6 +31,9 @@ pub struct StickyLine {
 /// A tab's shown lines and what they were made for: its folds, collapsed generation and line count.
 type VisibleCache = (Option<Arc<lenz_content::highlight::Folds>>, u64, usize, Arc<crate::folds::Visible>);
 
+/// The identity prefix of untitled documents; never read, watched or persisted as a path.
+pub(crate) const UNTITLED: &str = "untitled://";
+
 /// One tab: a source and how it is being read. Its document may be released while inactive (reloadable content
 /// goes to the inactive cache); positions stay.
 pub struct Tab {
@@ -281,6 +284,10 @@ impl Tab {
     /// The file name, for the tab bar.
     pub fn comparison_side(&self) -> Option<crate::session::ComparisonSide> { self.comparison_side }
     pub fn is_saved_version(&self) -> bool { self.comparison_side == Some(crate::session::ComparisonSide::Saved) }
+    /// A New File document with no path yet: its session buffer is the only copy until Save As succeeds.
+    pub fn untitled(&self) -> bool { self.retrieved.is_none() && self.source.to_str().is_some_and(|s| s.starts_with(UNTITLED)) }
+    /// A view of an actual disk file (not a saved side, retrieved source or untitled document).
+    pub(crate) fn is_file(&self) -> bool { !self.is_saved_version() && self.retrieved.is_none() && !self.untitled() }
     pub fn title(&self) -> String {
         if let Some(side) = self.comparison_side { return side.label().into(); }
         self.display.file_name().map_or_else(|| self.display.display().to_string(), |n| n.to_string_lossy().into_owned())
@@ -504,6 +511,11 @@ impl History {
     }
     pub fn can_forward(&self) -> bool {
         self.at + 1 < self.entries.len()
+    }
+
+    /// An untitled document's steps now belong to its confirmed file.
+    pub(crate) fn rename(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for at in self.entries.iter_mut().filter(|at| at.source == from) { at.source = to.to_path_buf(); }
     }
 
     /// A committed navigation from `from` (where the reader was, updated in place) to `to`. Forward entries go.

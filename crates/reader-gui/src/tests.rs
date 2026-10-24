@@ -2,6 +2,7 @@
 //! commands, and the file on disk never changes.
 use super::*;
 mod external;
+mod save_as;
 #[cfg(target_os = "linux")]
 mod composition_probe;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, point, size};

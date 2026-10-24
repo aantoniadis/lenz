@@ -51,6 +51,16 @@ nothing. An already requested Save can still finish after Cancel. External
 comparison actions explicitly use saved disk inputs. See the
 [handoff behavior and verification](../research/reader-external-open-decisions.md).
 
+**New File** (Ctrl+N) opens an untitled document with its own history; it is never written, watched or
+restored until **Save As…** (Ctrl+Shift+S, or Save on an untitled document) chooses a path. The terminal asks
+for the path (relative paths resolve against the project); the GUI uses the platform save dialog. Save As
+refuses missing folders, folders, broken links and files open in another tab, and an existing file needs
+**Replace** (`r`) or **Cancel** (Esc) in a Lenz dialog; Replace writes only if that same file is still there.
+A new file is created without replacing anything that appears meanwhile. The draft keeps its encoding, BOM
+and exact line endings (UTF-8 without BOM when untitled). Only a confirmed write moves every view to the new
+path; a rejected or uncertain write leaves the document, its original file and its Save state unchanged.
+The original file and its bookmarks stay where they were.
+
 The checkpoint23 candidate enables basic editor input by default on Linux TUI and Linux X11 GUI.
 The GUI uses its actual backend identity; Wayland and native macOS stay gated. q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
@@ -114,6 +124,7 @@ the Last saved pane remains read-only.
 | --- | --- |
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
 | Open file / go to line | Ctrl-O / Ctrl-G |
+| New file / Save As | Ctrl-N / Ctrl-Shift-S (where the terminal reports it; also F10 → File) |
 | Compare two explorer entries | Space on each (or Ctrl+click where the terminal reports it), then Ctrl+D; Esc forgets them |
 | Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare Saved Disk Inputs… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |

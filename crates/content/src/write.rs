@@ -309,6 +309,35 @@ pub fn write_exact(snapshot: &Snapshot, expected: &TargetIdentity, text: &str) -
     Saved { snapshot: Snapshot { hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(), ..snapshot.clone() }, target }
 }
 
+/// Creates a file that must not exist, with exact endings in `encoding`/`bom`. The temp is linked into
+/// place without replacing anything that appeared meanwhile (including a dangling symlink); missing
+/// directories are not created. The returned identity supports a later [`write_exact`].
+pub fn create_exact(path: &Path, encoding: &str, bom: bool, text: &str) -> WriteOutcome {
+    #[cfg(any(test, feature = "write-testing"))]
+    let _fault = readiness_fault::enter_path(path);
+    use WriteOutcome::{Rejected, Saved, Uncertain};
+    let bytes = match encode_exact(text, encoding, bom) { Ok(bytes) => bytes, Err(e) => return Rejected(e) };
+    let tmp = match tempfile::Builder::new().prefix(".lenz-").suffix(".lenz~").tempfile_in(parent(path)) {
+        Ok(tmp) => tmp,
+        Err(e) => return Rejected(io_err("creating", path)(e)),
+    };
+    if let Err(e) = (|| { let mut file = tmp.as_file(); file.write_all(&bytes)?; file.sync_all() })() { return Rejected(io_err("writing", path)(e)); }
+    #[cfg(any(test, feature = "write-testing"))]
+    if let Err(e) = readiness_fault::point(readiness_fault::Fault::BeforeReplace) { return Rejected(io_err("writing", path)(e)); }
+    let file = match tmp.persist_noclobber(path) { Ok(file) => file, Err(e) => return Rejected(io_err("creating", path)(e.error)) };
+    if let Err(e) = File::open(parent(path)).and_then(|dir| dir.sync_all()) { return Uncertain(io_err("syncing directory for", path)(e)); }
+    #[cfg(any(test, feature = "write-testing"))]
+    if let Err(e) = readiness_fault::point(readiness_fault::Fault::AfterReplace) { return Uncertain(io_err("reading", path)(e)); }
+    let meta = match file.metadata() { Ok(meta) => meta, Err(e) => return Uncertain(io_err("reading", path)(e)) };
+    let canonical = match fs::canonicalize(path) { Ok(canonical) => canonical, Err(e) => return Uncertain(io_err("reading", path)(e)) };
+    let target = TargetIdentity::from_metadata(canonical, &meta);
+    if let Err(e) = target.verify(path) { return Uncertain(e); }
+    let crlf = text.matches("\r\n").count();
+    let snapshot = Snapshot { path: path.to_path_buf(), hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(),
+        encoding: Encoding::for_label(encoding.as_bytes()).unwrap_or(UTF_8), bom, crlf: crlf > text.matches('\n').count() - crlf, lossy: false, repository_root: None };
+    Saved { snapshot, target }
+}
+
 fn hash(bytes: &[u8]) -> u64 {
     let mut h = DefaultHasher::new();
     h.write(bytes);

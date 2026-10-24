@@ -20,6 +20,8 @@ pub enum InterfaceAction {
     FindAction,
     FindSymbol,
     Open,
+    /// Ask for a new path, then dispatch [`crate::session::Command::SaveAs`] for the active tab.
+    SaveAs,
     OpenFolder,
     OpenRecent,
     FindFile,
@@ -192,6 +194,10 @@ impl Session {
             CommandId::Paste => return CatalogAction::Interface(InterfaceAction::Paste),
             CommandId::Delete => Command::Delete { backward: false },
             CommandId::ReadOnlyMode => Command::SetReadOnly(!state.active().and_then(|t| state.view(t.id())).is_some_and(|view| view.read_only())),
+            CommandId::SaveAs => return CatalogAction::Interface(InterfaceAction::SaveAs),
+            // An untitled document has no file yet: Save chooses one.
+            CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
+            CommandId::NewDocument => Command::NewDocument,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
                 None => return CatalogAction::Disabled("No file is open"),
@@ -314,7 +320,7 @@ impl CommandId {
     pub fn group(self) -> CommandGroup {
         use CommandGroup as G;
         match self {
-            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::RecheckSave | Self::ConfirmRecheckedSave
+            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
             | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
@@ -383,6 +389,8 @@ impl CommandId {
             Self::Paste => Some("Ctrl+V"),
             Self::Delete => Some("Delete"),
             Self::Save => Some("Ctrl+S"),
+            Self::SaveAs => Some("Ctrl+Shift+S"),
+            Self::NewDocument => Some("Ctrl+N"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
             Self::Close => Some("Ctrl+F4"),

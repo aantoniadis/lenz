@@ -154,3 +154,38 @@ fn raw_exact_read_keeps_the_original_descriptor_identity_without_decoding_twice(
     assert_eq!(write_exact(&snapshot, &raw.target, "new\r\n"), WriteOutcome::Rejected(WriteError::ChangedOnDisk));
     assert_eq!(std::fs::read(other).unwrap(), b"\xef\xbb\xbfold\r\n");
 }
+
+#[test]
+fn new_file_creation_writes_exact_encoding_and_never_replaces_an_existing_entry() {
+    use lenz_content::write::{create_exact, WriteError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new.txt");
+    let WriteOutcome::Saved { snapshot, target } = create_exact(&path, "UTF-16LE", true, "a\r\nλ\n") else { panic!("create rejected") };
+    assert_eq!(std::fs::read(&path).unwrap(), b"\xff\xfea\0\r\0\n\0\xbb\x03\n\0");
+    assert!(matches!(write_exact(&snapshot, &target, "b\n"), WriteOutcome::Saved { .. }), "the returned identity supports the next exact Save");
+    let existing = dir.path().join("existing.txt");
+    std::fs::write(&existing, b"keep").unwrap();
+    assert!(matches!(create_exact(&existing, "UTF-8", false, "clobber"), WriteOutcome::Rejected(WriteError::Io(_))));
+    assert_eq!(std::fs::read(&existing).unwrap(), b"keep");
+    std::os::unix::fs::symlink(dir.path().join("dangling-target"), dir.path().join("link")).unwrap();
+    assert!(matches!(create_exact(&dir.path().join("link"), "UTF-8", false, "x"), WriteOutcome::Rejected(_)));
+    assert!(!dir.path().join("dangling-target").exists(), "a dangling symlink is never followed into a new file");
+    assert!(matches!(create_exact(&dir.path().join("missing/new.txt"), "UTF-8", false, "x"), WriteOutcome::Rejected(_)), "Save As never creates directories");
+    assert!(matches!(create_exact(&dir.path().join("bad.txt"), "windows-1252", false, "😀"), WriteOutcome::Rejected(WriteError::Unrepresentable { .. })));
+    assert!(!dir.path().join("bad.txt").exists());
+    let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(names.len(), 3, "no temporary files remain: {names:?}");
+}
+
+#[cfg(feature = "write-testing")]
+#[test]
+fn new_file_creation_faults_leave_no_target() {
+    use lenz_content::write::{create_exact, readiness_fault::{during, Fault}};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("new.txt");
+    assert!(matches!(during(Fault::BeforeReplace, || create_exact(&path, "UTF-8", false, "x")), WriteOutcome::Rejected(_)));
+    assert!(!path.exists());
+    assert!(matches!(during(Fault::AfterReplace, || create_exact(&path, "UTF-8", false, "x")), WriteOutcome::Uncertain(_)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"x");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}

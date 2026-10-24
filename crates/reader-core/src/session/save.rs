@@ -3,6 +3,9 @@ use super::*;
 use crate::save::{self, DiskMatch, Outcome, Status};
 use lenz_content::write::WriteOutcome;
 
+/// Plain Save needs a confirmed file; an untitled document gets one only from Save As.
+pub(crate) const UNTITLED_SAVE: &str = "Use Save As to choose where to save this document";
+
 impl Session {
     pub(super) fn save_disabled(&self, tab: TabId) -> Option<&'static str> {
         let Some(view) = self.state.view(tab) else { return Some("No loaded file is open") };
@@ -17,6 +20,7 @@ impl Session {
             || self.state.tabs.iter().any(|t| t.buffer == Some(buffer) && t.retrieved.is_some()) { return Some("This source is read-only"); }
         if entry.save.status.busy() { return Some("A save operation is running"); }
         if entry.save.status.blocked() { return Some("Recheck and confirm the disk outcome before saving again"); }
+        if entry.untitled { return Some(UNTITLED_SAVE); }
         let Some(read) = &entry.save.read else { return Some("This source has no confirmed write target; reopen the file before saving") };
         if read.snapshot.path != source.source() { return Some("The saved target path changed; recheck and confirm the current file before saving"); }
         if !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return Some("No unsaved changes"); }
@@ -43,7 +47,7 @@ impl Session {
         }) { self.state.messages.push("Save admission is full; the draft is retained. Try Save explicitly later.".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         if let Some(draft) = &mut entry.draft { draft.end_group(); }
         entry.save.status = Status::Saving; entry.save.checked = None; entry.save.revalidated = None;
-        entry.save.captured = Some(save::Captured { request, text: snapshot.clone(), compacting: false });
+        entry.save.captured = Some(save::Captured { request, text: snapshot.clone(), compacting: false, save_as: None });
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
@@ -66,7 +70,7 @@ impl Session {
                 });
             Outcome::Rechecked(result)
         })) { self.state.messages.push("Recheck admission is full; try explicitly later".into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
-        entry.save.captured = Some(save::Captured { request, text: text.clone(), compacting: false });
+        entry.save.captured = Some(save::Captured { request, text: text.clone(), compacting: false, save_as: None });
         entry.save.checked = None; entry.save.revalidated = None; entry.save.status = Status::Rechecking;
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
@@ -79,7 +83,7 @@ impl Session {
         self.saved_baseline(buffer, checked.text, checked.read);
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
-    fn saved_baseline(&mut self, buffer: crate::text::BufferId, captured: Arc<crate::text::TextSnapshot>, read: save::Baseline) {
+    pub(super) fn saved_baseline(&mut self, buffer: crate::text::BufferId, captured: Arc<crate::text::TextSnapshot>, read: save::Baseline) {
         let stamp = read.stamp();
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         if let (Some(draft), Some(current)) = (&mut entry.draft, &entry.snapshot) { draft.confirm_baseline(captured.clone(), current); }
@@ -108,7 +112,7 @@ impl Session {
             Outcome::Compacted { current, baseline }
         })) {
             entry.save.status = Status::Saving;
-            entry.save.captured = Some(save::Captured { request, text: captured, compacting: true });
+            entry.save.captured = Some(save::Captured { request, text: captured, compacting: true, save_as: None });
         }
     }
     pub(super) fn account_saves(&mut self) -> bool {
@@ -117,6 +121,10 @@ impl Session {
         for (buffer, request, outcome) in outcomes {
             let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { continue };
             let Some(captured) = entry.save.captured.take_if(|captured| captured.request == request) else { continue };
+            if let Some(save_as) = captured.save_as {
+                self.saved_as(buffer, request, captured.text, save_as, outcome);
+                continue;
+            }
             let captured = captured.text;
             match outcome {
                 Outcome::Compacted { current, baseline } => {
