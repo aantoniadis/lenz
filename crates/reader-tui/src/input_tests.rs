@@ -301,6 +301,26 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering() {
 }
 
 #[test]
+fn drawing_drops_a_close_dialog_the_core_settled_outside_the_apps_dispatch() {
+    use reader_core::close::Choice;
+    let d = tempfile::tempdir().unwrap(); let path = d.path().join("settled.txt");
+    std::fs::write(&path, b"saved").unwrap();
+    let mut a = app(d.path()); a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    a.enable_draft_input_for_test(); draw(&mut a, 80, 12);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL); a.handle(Event::Paste("draft".into()));
+    key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL); let p = a.session.close_prompt().unwrap();
+    assert!(a.modal.is_some());
+    // Draw-time layout commands reach the core directly, and any core dispatch can settle a prompt.
+    a.session.dispatch(Command::ChooseClose { ticket: p.ticket, buffer: p.buffer, choice: Choice::Cancel });
+    draw(&mut a, 80, 12);
+    assert!(a.session.close_prompt().is_none() && a.modal.is_none());
+    key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL);
+    assert!(a.session.close_prompt().is_some_and(|fresh| fresh.ticket > p.ticket) && a.modal.is_some());
+    assert_eq!(std::fs::read(path).unwrap(), b"saved");
+}
+
+#[test]
 fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket() {
     use lenz_content::write::readiness_fault::{at_path, Fault};
     use reader_core::{close::Choice, save::Status};

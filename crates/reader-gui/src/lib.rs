@@ -860,6 +860,16 @@ impl ReaderView {
         self.focus.clone()
     }
 
+    /// Follow the core's decision prompts. Any core dispatch can open or settle one (each finishes by accounting
+    /// completed saves), a render-time layout command included, so rendering calls this after its own dispatches.
+    fn sync_prompts(&mut self) {
+        self.sync_close_prompt();
+        self.sync_external_prompt();
+        self.sync_replace_prompt();
+        self.sync_recovery_prompt();
+        self.sync_reconcile_prompt();
+    }
+
     fn metrics(&self) -> Metrics<'_> {
         metrics(&self.font)
     }
@@ -954,11 +964,7 @@ impl ReaderView {
                 _ => {}
             }
         }
-        self.sync_close_prompt();
-        self.sync_external_prompt();
-        self.sync_replace_prompt();
-        self.sync_recovery_prompt();
-        self.sync_reconcile_prompt();
+        self.sync_prompts();
         self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
@@ -4113,6 +4119,7 @@ impl ReaderView {
         for command in commands {
             if self.session.dispatch(command).repaint { window.request_animation_frame(); }
         }
+        self.sync_prompts();
     }
 
     #[allow(clippy::type_complexity)]

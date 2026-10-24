@@ -2895,7 +2895,9 @@ impl App {
         let entries = self.session.context_menu();
         self.prompt(Prompt::Context { x, y, entries });
     }
-    pub(crate) fn clamp(&mut self) {
+    /// Follow the core's decision prompts. Any core dispatch can open or settle one (each finishes by accounting
+    /// completed saves), a draw-time layout command included, so drawing calls this after its own dispatches.
+    pub(crate) fn sync_prompts(&mut self) {
         let external=self.session.external_prompt().map(|prompt|prompt.text());
         match (external,&mut self.modal) {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::External,body,..},..})) => *body=text,
@@ -2931,6 +2933,9 @@ impl App {
             (None,Some(Modal {kind:Prompt::Details {kind:Details::Close,..},..})) => self.modal=None,
             _=>{}
         }
+    }
+    pub(crate) fn clamp(&mut self) {
+        self.sync_prompts();
 
         if self.modal.as_ref().is_some_and(|modal| modal.kind == Prompt::Navigation) && self.session.state().navigation().is_none() {
             self.modal = None;

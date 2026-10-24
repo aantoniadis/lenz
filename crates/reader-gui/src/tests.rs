@@ -525,6 +525,26 @@ fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket(cx
 }
 
 #[gpui::test]
+fn rendering_drops_a_close_dialog_the_core_settled_outside_the_views_dispatch(cx: &mut TestAppContext) {
+    use reader_core::close::Choice;
+    let f = fixture_setup(cx, Some(("settled.txt", b"saved")), &[], true);
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v ctrl-f4");
+    let p = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+    assert!(f.view.read_with(&v, |v, _| matches!(v.modal, Some(Modal::StatusDetails { kind: Details::Close, .. }))));
+    // Render-time layout commands reach the core directly, and any core dispatch can settle a prompt.
+    f.view.update(&mut v, |v, _| { v.session.dispatch(Command::ChooseClose { ticket: p.ticket, buffer: p.buffer, choice: Choice::Cancel }); });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_none() && v.modal.is_none()));
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_some_and(|fresh| fresh.ticket > p.ticket)));
+    assert_eq!(std::fs::read(f.dir.path().join("settled.txt")).unwrap(), b"saved");
+}
+
+#[gpui::test]
 fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path,Fault};
     use reader_core::save::{DiskMatch,Status};
