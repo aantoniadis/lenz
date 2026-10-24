@@ -454,6 +454,20 @@ pub struct Location {
     pub offset: usize,
 }
 
+impl Location {
+    pub(crate) fn edited(&mut self, previous: &TextSnapshot, next: &TextSnapshot, edits: &[crate::text::TextEdit]) {
+        if self.version != previous.key().version { return; }
+        let transform = |byte| crate::text::edited_byte(byte, edits).min(next.len_bytes());
+        let top = previous.reader_line_range(self.top_line.min(previous.line_count() - 1)).start;
+        self.range = transform(self.range.start)..transform(self.range.end);
+        self.top_line = next.line_of(transform(top));
+        self.line = next.line_of(self.range.start);
+        self.offset = self.range.start - next.reader_line_range(self.line).start;
+        self.anchor = anchor(next, self.line);
+        self.version = next.key().version;
+    }
+}
+
 pub(crate) fn anchor(doc: &TextSnapshot, line: usize) -> Box<str> {
     let range = doc.reader_line_range(line);
     // At most four UTF8 bytes per context character; never assemble a long source line.
@@ -475,6 +489,10 @@ pub struct History {
 }
 
 impl History {
+    pub(crate) fn edited(&mut self, paths: &std::collections::HashSet<PathBuf>, previous: &TextSnapshot, next: &TextSnapshot, edits: &[crate::text::TextEdit]) {
+        for at in self.entries.iter_mut().filter(|at| paths.contains(&at.source)) { at.edited(previous, next, edits); }
+    }
+
     pub fn len(&self) -> usize {
         self.entries.len()
     }

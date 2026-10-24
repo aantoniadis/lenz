@@ -11,6 +11,17 @@ pub struct BufferId(pub u64);
 pub struct SnapshotKey { pub buffer: BufferId, pub version: u64 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit { pub range: Range<usize>, pub text: Arc<str> }
+
+/// Source anchors follow inserted text; an anchor replaced or deleted collapses after its replacement.
+pub(crate) fn edited_byte(byte: usize, edits: &[TextEdit]) -> usize {
+    let mut delta: isize = 0;
+    for edit in edits {
+        if byte < edit.range.start { break; }
+        if byte < edit.range.end { return edit.range.start.checked_add_signed(delta).unwrap_or(0) + edit.text.len(); }
+        delta += edit.text.len() as isize - (edit.range.end - edit.range.start) as isize;
+    }
+    byte.checked_add_signed(delta).unwrap_or(0)
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditKind { Typing, Delete, Paste, Replace }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

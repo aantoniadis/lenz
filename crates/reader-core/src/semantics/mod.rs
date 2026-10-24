@@ -341,7 +341,52 @@ pub enum Event {
     Memory(Vec<(u64, u64, u64)>),
 }
 
-/// A definition reply for the session to resolve, or why there is none.
+/// Exact admitted text identity without retaining its decoded text.
+#[derive(Clone, Debug)]
+pub struct SourceVersion { version: u64, metadata: std::sync::Weak<crate::document::SourceMeta> }
+impl SourceVersion {
+    pub(crate) fn new(doc: &Document) -> Self { Self { version: doc.version(), metadata: Arc::downgrade(doc.source_meta()) } }
+    pub(crate) fn matches(&self, doc: &Document) -> bool { self.version == doc.version() && self.metadata.ptr_eq(&Arc::downgrade(doc.source_meta())) }
+    pub(crate) fn matches_snapshot(&self, source: &crate::text::TextSnapshot) -> bool { self.version == source.key().version && self.metadata.ptr_eq(&Arc::downgrade(source.source_meta())) }
+}
+impl PartialEq for SourceVersion { fn eq(&self, other: &Self) -> bool { self.version == other.version && self.metadata.ptr_eq(&other.metadata) } }
+impl Eq for SourceVersion {}
+
+/// Freeze both admitted URI names. An ambiguous alias is a nonmatching tombstone, not an
+/// insertion-order choice. Contexts retain weak metadata only, within the existing request lanes.
+fn source_context(open: &HashMap<PathBuf, Arc<Document>>) -> HashMap<PathBuf, SourceVersion> {
+    let mut sources = HashMap::new();
+    for (path, doc) in open {
+        let source = SourceVersion::new(doc);
+        for path in std::iter::once(path.as_path()).chain(doc.source_meta().canonical()) {
+            sources.entry(path.to_owned()).and_modify(|existing| {
+                if *existing != source { *existing = SourceVersion { version: 0, metadata: Default::default() }; }
+            }).or_insert_with(|| source.clone());
+        }
+    }
+    sources
+}
+
+/// Resolve only exact written identities, preserving every captured obsolete name as blocked.
+/// Current aliases cannot erase a retired canonical-name tombstone after a rename.
+pub(crate) fn target_sources(written: HashMap<PathBuf, Arc<Document>>, captured: &HashMap<PathBuf, SourceVersion>)
+    -> (HashMap<PathBuf, Arc<Document>>, std::collections::HashSet<PathBuf>)
+{
+    let identities = source_context(&written);
+    let mut blocked: std::collections::HashSet<_> = captured.keys().cloned().collect();
+    let mut open = HashMap::new();
+    for (path, doc) in written {
+        for alias in std::iter::once(path.as_path()).chain(doc.source_meta().canonical()) {
+            if captured.get(alias).is_some_and(|source| source.matches(&doc))
+                && identities.get(alias).is_some_and(|source| source.matches(&doc)) {
+                blocked.remove(alias);
+                open.insert(alias.to_owned(), doc.clone());
+            } else { blocked.insert(alias.to_owned()); }
+        }
+    }
+    (open, blocked)
+}
+
 pub struct Reply {
     /// The lane it was asked in.
     pub lane: Lane,
@@ -352,7 +397,11 @@ pub struct Reply {
     pub result: Result<Value, String>,
     /// The server was still indexing when it answered.
     pub indexing: bool,
+    /// Compact identities of provider-open targets when the request entered its text-ordered FIFO.
+    pub sources: HashMap<PathBuf, SourceVersion>,
 }
+
+struct PendingRequest { request: u64, id: i64, sources: HashMap<PathBuf, SourceVersion> }
 
 /// What the session must do after an event.
 #[derive(Default)]
@@ -417,7 +466,7 @@ struct Server {
     dirty_open: HashMap<PathBuf, bool>,
     /// The definition request in flight: the session's request id and the protocol id.
     /// Each lane's pending request: the session request and its JSON-RPC id.
-    pending: HashMap<Lane, (u64, i64)>,
+    pending: HashMap<Lane, PendingRequest>,
     /// Work-done progress in progress, by token.
     progress: HashMap<String, Progress>,
     /// rust-analyzer's `experimental/serverStatus`: not quiescent while loading the workspace.
@@ -960,7 +1009,7 @@ impl Semantics {
         let now = (self.clock)();
         for s in &mut self.servers {
             s.deferred.remove(&lane);
-            if let Some((_, id)) = s.pending.remove(&lane) {
+            if let Some(PendingRequest { id, .. }) = s.pending.remove(&lane) {
                 s.notify("$/cancelRequest", json!({ "id": id }));
             }
             s.touch(now);
@@ -1140,9 +1189,9 @@ impl Semantics {
                 let mut replies: Vec<_> = s
                     .pending
                     .drain()
-                    .map(|(lane, (request, _))| Reply { lane, request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false })
+                    .map(|(lane, pending)| Reply { lane, request: pending.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false, sources: pending.sources })
                     .collect();
-                replies.extend(s.deferred.drain().map(|(lane, d)| Reply { lane, request: d.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false }));
+                replies.extend(s.deferred.drain().map(|(lane, d)| Reply { lane, request: d.request, session, encoding: s.encoding, provider: name, result: Err(format!("{name} stopped before answering")), indexing: false, sources: Default::default() }));
                 Outcome { repaint: true, replies, ready: false, ..Outcome::default() }
             }
             Event::Written { session, token } => {
@@ -1388,7 +1437,10 @@ impl Server {
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-        self.pending.insert(lane, (request, id));
+        let sources = if matches!(lane, Lane::Foreground | Lane::Hierarchy) {
+            source_context(&self.open)
+        } else { Default::default() };
+        self.pending.insert(lane, PendingRequest { request, id, sources });
         self.idle_since = None;
         Ok(())
     }
@@ -1459,7 +1511,7 @@ impl Server {
     }
 
     fn failed_reply(&self, lane: Lane, request: u64, why: &str) -> Reply {
-        Reply { lane, request, session: self.session, encoding: self.encoding, provider: PROVIDERS[self.key.provider].name, result: Err(why.to_owned()), indexing: false }
+        Reply { lane, request, session: self.session, encoding: self.encoding, provider: PROVIDERS[self.key.provider].name, result: Err(why.to_owned()), indexing: false, sources: Default::default() }
     }
 
     fn pump_text(&mut self) {
@@ -1558,8 +1610,8 @@ impl Server {
                     self.update_status();
                     return Outcome { repaint: true, ready: true, ..Outcome::default() };
                 }
-                let Some(lane) = self.pending.iter().find(|(_, (_, p))| Some(*p) == id).map(|(l, _)| *l) else { return Outcome::default() };
-                let Some((request, _)) = self.pending.remove(&lane) else { return Outcome::default() };
+                let Some(lane) = self.pending.iter().find(|(_, pending)| Some(pending.id) == id).map(|(l, _)| *l) else { return Outcome::default() };
+                let Some(PendingRequest { request, sources, .. }) = self.pending.remove(&lane) else { return Outcome::default() };
                 let result = match m.get("error") {
                     Some(e) => Err(format!("{name} failed: {}", e["message"].as_str().unwrap_or("unknown error"))),
                     None => Ok(m.get("result").cloned().unwrap_or(Value::Null)),
@@ -1567,7 +1619,7 @@ impl Server {
                 // Still indexing, or (for a server that never says) just started.
                 let no_status = !PROVIDERS[self.key.provider].reports_status;
                 let indexing = matches!(self.status, Status::Indexing(_)) || no_status && self.initialized_at.is_some_and(|t| now.duration_since(t) < UNREPORTED_WARMUP);
-                Outcome { repaint: true, replies: vec![Reply { lane, request, session: self.session, encoding: self.encoding, provider: name, result, indexing }], ready: false, ..Outcome::default() }
+                Outcome { repaint: true, replies: vec![Reply { lane, request, session: self.session, encoding: self.encoding, provider: name, result, indexing, sources }], ready: false, ..Outcome::default() }
             }
             (None, None) => Outcome::default(),
         }
@@ -1952,6 +2004,8 @@ fn finish_server(mut child: Child, key: &Key, provider: &Provider, exe: &Path, s
 /// A definition target in a file, read and located: the snapshot it was located in (with its stamp when read
 /// from disk), and the result row.
 pub struct Target {
+    /// Decoded disk identity computed once while resolving this file.
+    pub decoded_digest: Option<[u8; 32]>,
     pub path: PathBuf,
     pub stamp: Option<crate::cache::Stamp>,
     pub doc: Arc<Document>,
@@ -1970,6 +2024,14 @@ pub struct Targets {
     pub failed: Vec<String>,
     /// More targets than the limit: the rest are not shown.
     pub limited: bool,
+}
+
+/// Capture disk identities once per file after this admitted resolution batch, before publication.
+pub(crate) fn capture_target_digests<'a>(targets: impl Iterator<Item = &'a mut Target>) {
+    let mut digests = HashMap::new();
+    for target in targets.filter(|target| target.stamp.is_some()) {
+        target.decoded_digest = Some(*digests.entry(target.path.clone()).or_insert_with(|| crate::search::decoded_digest(target.doc.text().as_bytes())));
+    }
 }
 
 /// A target file's snapshot, and its stamp when it was read from disk.
@@ -2032,7 +2094,7 @@ pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, pro
             continue;
         };
         let hit = hit_at(&path, &doc, start, end);
-        out.found.push(Target { path, stamp, doc, hit, at: start });
+        out.found.push(Target { path, stamp, doc, hit, at: start, decoded_digest: None });
     }
     out
 }
@@ -2094,7 +2156,7 @@ pub(crate) fn file_symbols_while(reply: &Value, doc: &Arc<Document>, encoding: E
                     let kind = decl_kind(item["kind"].as_u64().unwrap_or(0));
                     let (a, b) = (start - bounds.start, end.clamp(start, bounds.end) - bounds.start);
                     let hit = crate::search::Hit { path: doc.source().to_string_lossy().into(), line, range: a..b, text: name.into(), decl: Some((kind, depth)), origin: None };
-                    out.found.push(Target { path: doc.source().to_owned(), stamp: None, doc: doc.clone(), hit, at: start });
+                    out.found.push(Target { path: doc.source().to_owned(), stamp: None, doc: doc.clone(), hit, at: start, decoded_digest: None });
                 }
                 None => out.failed.push(format!("{}: a symbol outside the file as sent", item["name"].as_str().unwrap_or("?"))),
             }
@@ -2145,6 +2207,83 @@ fn add_trigger_file(options: &mut Value, uri: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_target_aliases_preserve_snapshot_identity_and_refuse_collisions() {
+        let mut doc = Document::decode("/project/link.rs".into(), 7, b"fn target() {}\n");
+        doc.set_canonical("/outside/actual.rs".into());
+        let snapshot = crate::text::TextSnapshot::from_document(crate::text::BufferId(1), &doc);
+        let draft = snapshot.apply_edits(8, &[crate::text::TextEdit { range: 0..0, text: "// draft\n".into() }]).unwrap();
+        let doc = Arc::new(draft.materialize());
+        assert_eq!(doc.source_meta().canonical(), Some(Path::new("/outside/actual.rs")));
+        let written = HashMap::from([(doc.source().to_path_buf(), doc.clone())]);
+        let captured = source_context(&written);
+        let (open, blocked) = target_sources(written.clone(), &captured);
+        assert!(blocked.is_empty()); assert!(Arc::ptr_eq(&open[Path::new("/outside/actual.rs")], &doc));
+        let renamed = Arc::new(doc.renamed("/project/new.rs".into()));
+        assert!(renamed.source_meta().canonical().is_none(), "unknown rename identity cannot inherit the old canonical name");
+        let (open, blocked) = target_sources(HashMap::from([(renamed.source().to_path_buf(), renamed)]), &captured);
+        assert!(open.is_empty()); assert!(blocked.contains(Path::new("/outside/actual.rs")));
+        let mut other = Document::decode("/project/other.rs".into(), 8, b"fn other() {}\n");
+        other.set_canonical("/outside/actual.rs".into());
+        let mut collision = written; collision.insert(other.source().to_path_buf(), Arc::new(other));
+        let ambiguous = source_context(&collision);
+        let (open, blocked) = target_sources(collision.clone(), &captured);
+        assert!(!open.contains_key(Path::new("/outside/actual.rs")));
+        assert!(blocked.contains(Path::new("/outside/actual.rs")));
+        let (open, blocked) = target_sources(collision, &ambiguous);
+        assert!(!open.contains_key(Path::new("/outside/actual.rs")));
+        assert!(blocked.contains(Path::new("/outside/actual.rs")));
+    }
+
+    #[test]
+    fn request_target_contexts_replace_per_lane_and_retire_on_cancel_reply_and_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut semantics = Semantics::new(dir.path().join("providers.json"), dir.path().join("cache"), IDLE, Arc::new(std::time::Instant::now));
+        let doc = Arc::new(Document::decode(PathBuf::from("/project/b.rs"), 1, b"fn target() {}\n"));
+        let session = semantics.queue(Key { provider: 0, root: "/project".into(), launch: Launch { executable: "/nonexistent".into(), args: Vec::new(), env: Vec::new() } }, doc.source().to_path_buf());
+        let server = &mut semantics.servers[0];
+        server.status = Status::Ready;
+        server.open.insert(doc.source().to_path_buf(), doc.clone());
+        server.desired = server.open.clone();
+        let weak = Arc::weak_count(doc.source_meta());
+        for request in 1..=32 {
+            semantics.cancel_lane(Lane::Foreground);
+            semantics.servers[0].request(Question::Definition, json!({}), request).unwrap();
+            assert_eq!(semantics.servers[0].pending.len(), 1);
+            assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1, "unanswered replaced requests cannot accumulate identity maps");
+        }
+        semantics.servers[0].request(Question::IncomingCalls, json!({}), 40).unwrap();
+        semantics.servers[0].request(Question::Hover, json!({}), 41).unwrap();
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 2, "only foreground and hierarchy retain target contexts");
+        assert!(semantics.servers[0].pending[&Lane::Hover].sources.is_empty());
+        semantics.cancel_lane(Lane::Foreground);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1);
+        semantics.cancel_lane(Lane::Hierarchy);
+        semantics.cancel_lane(Lane::Hover);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+        let next = Arc::new(Document::decode(doc.source().to_path_buf(), 2, b"fn newer() {}\n"));
+        semantics.servers[0].desired.insert(next.source().to_path_buf(), next.clone());
+        for request in 50..=81 { semantics.servers[0].request(Question::Definition, json!({}), request).unwrap(); }
+        assert_eq!(semantics.servers[0].deferred.len(), 1);
+        assert!(semantics.servers[0].pending.is_empty());
+        assert_eq!(Arc::weak_count(next.source_meta()), 0, "deferred requests capture no pre-admission context");
+        semantics.cancel_lane(Lane::Foreground);
+        semantics.servers[0].desired = semantics.servers[0].open.clone();
+        semantics.servers[0].request(Question::Definition, json!({}), 90).unwrap();
+        let id = semantics.servers[0].next_id;
+        let (tx, _) = async_channel::bounded(8);
+        let outcome = semantics.event(Event::Message { session, message: json!({ "jsonrpc": "2.0", "id": id, "result": null }) }, &tx);
+        assert!(semantics.servers[0].pending.is_empty());
+        assert_eq!(outcome.replies[0].sources.len(), 1);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1, "the reply owns the original map once");
+        drop(outcome);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+        semantics.servers[0].request(Question::Definition, json!({}), 91).unwrap();
+        drop(semantics.event(Event::Exited { session, reason: "fixture stopped".into() }, &tx));
+        assert!(semantics.servers[0].pending.is_empty() && semantics.servers[0].deferred.is_empty());
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+    }
 
     #[test]
     fn stderr_retains_bounded_raw_head_and_tail_across_arbitrary_chunks() {
