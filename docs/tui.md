@@ -2,7 +2,7 @@
 
 For the code reader, see the [terminal reader guide](code/tui.md).
 
-Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production writable input remains gated until safety checkpoint23; basic input uses existing test opt-ins, and IME/composition belongs to ticket22. Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
+Reader draft editing and Undo/Redo input are currently exercised only through explicit opt-in test support. Production writable input remains gated until safety checkpoint23; basic input and GUI composition use existing test opt-ins. See the [Unicode composition limits](research/reader-unicode-composition.md). Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
 
 The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
 in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.

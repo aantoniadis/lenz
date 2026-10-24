@@ -9793,3 +9793,64 @@ fn current_cached_rename_reactivation_updates_path_and_preserves_held_snapshot()
     s.dispatch(Command::SelectAll);
     assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("original\r\n"));
 }
+
+#[test]
+fn input_presentation_is_not_a_draft_and_cannot_outlive_its_captured_source() {
+    use crate::text::{EditKind, TextEdit};
+    let d = tempfile::tempdir().unwrap(); let original = "a😀\r\nsuffix\n";
+    let path = write(d.path(), "ime.txt", original.as_bytes()); let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "ime.txt"); s.enable_text_input_for_test();
+    s.dispatch(Command::Split(Split::Columns)); let tab = s.state().active().unwrap().id();
+    let sibling = s.state().shown(0).unwrap().id();
+    s.dispatch(Command::Select(Selection { anchor: 1, head: 5 }));
+    let base = s.state().current_source().unwrap().clone(); let selection = s.state().selection();
+    s.dispatch(Command::PresentText { tab, base: PresentationSource::new(&base), base_selection: selection,
+        edit: TextEdit { range: 1..5, text: "界\nβ".into() }, selected: Selection { anchor: 8, head: 8 } });
+    let virtual_source = s.state().presentation_view(tab).unwrap().snapshot().clone();
+    assert_eq!(source_text(&virtual_source), "a界\nβ\r\nsuffix\n");
+    assert_ne!(virtual_source.key(), base.key());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &base));
+    assert!(Arc::ptr_eq(s.state().presentation_view(sibling).unwrap().snapshot(), &base));
+    assert_eq!(s.state().selection(), selection); assert!(!s.state().view(tab).unwrap().can_undo());
+    s.dispatch(Command::ClearPresentation); assert!(Arc::ptr_eq(s.state().presentation_view(tab).unwrap().snapshot(), &base));
+    s.dispatch(Command::PresentText { tab, base: PresentationSource::new(&base), base_selection: selection,
+        edit: TextEdit { range: 1..5, text: "next".into() }, selected: Selection { anchor: 5, head: 5 } });
+    assert!(s.state().presentation_view(tab).unwrap().snapshot().key().version > virtual_source.key().version);
+    s.dispatch(Command::Edit { tab: sibling, expected: base.key(), edits: vec![TextEdit { range: 0..0, text: "changed ".into() }], kind: EditKind::Paste });
+    assert!(s.state.presentation.is_none());
+    s.dispatch(Command::PresentText { tab, base: PresentationSource::new(&base), base_selection: selection,
+        edit: TextEdit { range: 1..5, text: "obsolete".into() }, selected: Selection { anchor: 1, head: 1 } });
+    assert!(s.state.presentation.is_none());
+    assert_eq!(source_text(s.state().current_source().unwrap()), format!("changed {original}"));
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
+fn transient_layout_uses_the_existing_worker_and_rejects_completion_after_cancel() {
+    use crate::{layout::Query, text::TextEdit};
+    let d = tempfile::tempdir().unwrap(); let text = " x".repeat(12_000) + "\n";
+    let path = write(d.path(), "layout-ime.txt", text.as_bytes()); let mut s = session(d.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "layout-ime.txt"); s.enable_text_input_for_test();
+    s.dispatch(Command::SetSoftWrap(true)); s.dispatch(Command::SetTextSize { pane: 0, cols: 40, rows: 0 });
+    let tab = s.state().active().unwrap().id(); let base = s.state().current_source().unwrap().clone();
+    let calls = crate::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    for cancel in [false, true] {
+        s.dispatch(Command::PresentText { tab, base: PresentationSource::new(&base), base_selection: s.state().selection(),
+            edit: TextEdit { range: 0..0, text: "preedit\n".into() }, selected: Selection { anchor: 8, head: 8 } });
+        let shown = s.state().presentation_view(tab).unwrap().snapshot().clone();
+        let Query::Pending(work) = s.state().presentation_view(tab).unwrap().layout_last(1, Some(40)) else { panic!("the fixture must exhaust synchronous layout budget") };
+        s.dispatch(Command::PrepareLayout { pane: 0, tab, work });
+        let held = loop { let done = s.completions().recv_blocking_timeout().unwrap();
+            if matches!(&done, Completion::LaidOut(_)) { break done; } s.dispatch(done);
+        };
+        if cancel { s.dispatch(Command::ClearPresentation); }
+        let applied = s.dispatch(held).repaint;
+        assert_eq!(applied, !cancel, "only a registered exact presentation may receive its worker layout");
+        if !cancel { assert!(matches!(s.state().presentation_view(tab).unwrap().layout_last(1, Some(40)), Query::Ready(Some(_)))); }
+        assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &base));
+        assert_ne!(base.key(), shown.key());
+    }
+    assert_eq!(crate::text::TextSnapshot::conversion_calls_on_thread_for_test(), calls);
+    assert_eq!(s.analysis.materializations.load(Ordering::Relaxed), 0);
+    assert_eq!(std::fs::read(path).unwrap(), text.as_bytes());
+}
