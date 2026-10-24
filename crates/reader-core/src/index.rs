@@ -70,7 +70,7 @@ impl Coverage {
 }
 
 /// One file's records: the stamp it was read as, its declarations, and whether it had syntax errors.
-type Records = (Option<Stamp>, Arc<[Indexed]>, bool, Option<[u8; 32]>, [u8; 32]);
+type Records = (Option<Stamp>, Arc<[Indexed]>, bool, Option<[u8; 32]>, [u8; 32], Option<crate::session::SemanticSource>);
 /// Accounted per indexed file beyond its records: the map entry, the path and the shared slice's header.
 const FILE_OVERHEAD: usize = std::mem::size_of::<(Arc<str>, Records)>() + 2 * std::mem::size_of::<usize>();
 /// Ranked declarations (file and record) and how many matched in all.
@@ -151,7 +151,7 @@ impl DeclIndex {
 
     /// Forget `path`'s records (it changed or went) and index it again if it was a candidate and still exists.
     pub fn invalidate(&mut self, path: &Arc<str>, exists: bool) {
-        if let Some((_, items, _, _, _)) = self.files.remove(path) {
+        if let Some((_, items, _, _, _, _)) = self.files.remove(path) {
             self.bytes -= file_bytes(path, &items);
             self.limited = self.limited && self.bytes >= self.limit;
         }
@@ -181,7 +181,7 @@ impl DeclIndex {
         for rel in &self.known {
             let path = root.join(rel.as_ref());
             if !path.ancestors().any(|p| folders.contains(p)) { continue; }
-            match self.files.get(rel).and_then(|(stamp, _, _, _, _)| *stamp) {
+            match self.files.get(rel).and_then(|(stamp, _, _, _, _, _)| *stamp) {
                 Some(stamp) => checks.push((path, stamp)),
                 None if !self.queued.contains(rel) => retry.push(rel.clone()),
                 None => {}
@@ -234,7 +234,7 @@ impl DeclIndex {
                     return;
                 }
                 self.bytes += bytes;
-                self.files.insert(path, (stamp, items, syntax_errors, fingerprint, decoded_digest));
+                self.files.insert(path, (stamp, items, syntax_errors, fingerprint, decoded_digest, None));
             }
             FileIndex::TooLarge => _ = self.failed.insert(path, true),
             FileIndex::Unreadable => _ = self.failed.insert(path, false),
@@ -258,6 +258,19 @@ impl DeclIndex {
         self.bytes
     }
 
+    pub(crate) fn scoped(&self, path: &str, snapshot: &crate::text::TextSnapshot) -> Option<(Arc<[Indexed]>, bool)> {
+        let record = self.files.get(path)?;
+        record.5.as_ref().filter(|source| source.matches(snapshot))?;
+        Some((record.1.clone(), record.2))
+    }
+
+    pub(crate) fn add_scoped(&mut self, path: Arc<str>, result: FileIndex, source: crate::session::SemanticSource) {
+        let expected = match &result { FileIndex::Done { items, decoded_digest, .. } => Some((items.clone(), *decoded_digest)), _ => None };
+        self.add(path.clone(), result);
+        if let (Some(record), Some((items, digest))) = (self.files.get_mut(&path), expected)
+            && Arc::ptr_eq(&record.1, &items) && record.4 == digest { record.5 = Some(source); }
+    }
+
     pub(crate) fn source(&self, path: &str) -> Option<crate::search::DiskSource> {
         let record = self.files.get(path)?;
         Some(crate::search::DiskSource { stamp: record.0?, digest: record.4 })
@@ -265,7 +278,7 @@ impl DeclIndex {
 
     /// The records as they are now, shared, for a ranking job.
     pub fn snapshot(&self) -> Vec<(Arc<str>, Arc<[Indexed]>)> {
-        self.files.iter().map(|(p, (_, items, _, _, _))| (p.clone(), items.clone())).collect()
+        self.files.iter().map(|(p, (_, items, _, _, _, _))| (p.clone(), items.clone())).collect()
     }
 }
 

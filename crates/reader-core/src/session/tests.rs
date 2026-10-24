@@ -85,6 +85,41 @@ fn doc_bytes(s: &Session, name: &str) -> usize {
 
 #[cfg(unix)]
 #[test]
+fn navigation_symbol_queries_overlay_drafts_and_keep_panel_search_independent() {
+    use crate::text::{EditKind, TextEdit};
+    use crate::navigation::{Scope as NavigationScope, Kind, Chosen};
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let file = write(&root, "a.rs", b"fn RemovedZebraSymbol() {}\n");
+    write(&root, "b.rs", b"fn DiskZebraSymbol() {}\n");
+    let mut s = session(d.path()); s.dispatch(Command::OpenRoot(root)); settle(&mut s, |s| scanned(s) && s.state().index_coverage().complete());
+    open(&mut s, Command::OpenRetained(file.clone()), "a.rs"); let tab = s.state().active().unwrap().id();
+    let source = s.state().current_source().unwrap(); let (expected, len) = (source.key(), source.len_bytes());
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..len, text: "\nfn UnsavedZebraSymbol() {}\n".into() }], kind: EditKind::Replace });
+    s.dispatch(Command::Search { query: "ZebraSymbol".into(), scope: SearchIn::Project }); settle(&mut s, searched);
+    let panel = s.state().results().unwrap().id();
+    for scope in [NavigationScope::All, NavigationScope::Symbols] {
+        s.dispatch(Command::SearchEverywhere { scope, query: "ZebraSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+        let mut symbols: Vec<_> = s.state().navigation().unwrap().rows.iter().filter(|row| row.kind == Kind::Symbol).map(|row| row.label.as_str()).collect(); symbols.sort();
+        assert_eq!(symbols, ["DiskZebraSymbol", "UnsavedZebraSymbol"]);
+        assert_eq!(s.state().results().unwrap().id(), panel);
+        s.dispatch(Command::CloseSearchEverywhere);
+        assert!(s.state().results().unwrap().done());
+    }
+    s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "RemovedZebraSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    assert!(s.state().navigation().unwrap().rows.is_empty());
+    s.dispatch(Command::SearchEverywhere { scope: NavigationScope::Symbols, query: "UnsavedZebraSymbol".into() }); settle(&mut s, |s| s.state().navigation().is_some_and(|n| !n.pending));
+    let revision = s.state().navigation().unwrap().revision;
+    let Some(Chosen::Command(command)) = s.navigation_choice(revision, 0) else { panic!("symbol activation is a shared command") };
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range: 0..0, text: "// shifted\n".into() }], kind: EditKind::Typing });
+    let selection = s.state().selection(); s.dispatch(command);
+    assert_eq!(s.state().selection(), selection);
+    assert!(s.state().navigation().is_some()); assert!(s.navigation_status().contains("source changed"));
+    assert_eq!(s.state().results().unwrap().id(), panel);
+    assert_eq!(std::fs::read(file).unwrap(), b"fn RemovedZebraSymbol() {}\n");
+}
+
+#[test]
 fn project_overlay_follows_canonical_aliases_without_searching_the_saved_source() {
     use crate::text::{EditKind, TextEdit};
     let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();

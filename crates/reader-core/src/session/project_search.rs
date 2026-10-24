@@ -25,7 +25,7 @@ impl Session {
         }
     }
 
-    fn captured_project_sources(&self, root: &Path) -> std::collections::HashMap<PathBuf, search::CapturedSource> {
+    pub(super) fn captured_project_sources(&self, root: &Path) -> std::collections::HashMap<PathBuf, search::CapturedSource> {
         let mut captured = std::collections::HashMap::new();
         for (buffer, entry) in &self.state.sources.buffers {
             let Some(snapshot) = entry.snapshot.as_ref().filter(|_| entry.pinned() || self.state.tabs.iter().any(|t| t.loaded && t.buffer == Some(*buffer))) else { continue };
@@ -148,20 +148,27 @@ impl Session {
         let Some(work) = self.project_query.as_mut() else { return };
         let Some(declarations) = &mut work.declarations else { return };
         let best = std::mem::take(&mut declarations.best);
-        if let Some(snapshot) = snapshot {
+        if let Some((items, errors)) = snapshot.as_ref().and_then(|snapshot| self.state.index.scoped(&path, snapshot)) {
+            if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
+                if let Some(next) = index::rank(&[(path, items)], &query, lease.cancellation()) {
+                    lease.send(Completion::ProjectRanked { id, step, best: index::merge_ranked(best, next, &query), found: search::Found { searched: 1, syntax_errors: errors, ..Default::default() }, cache: None });
+                }
+            }).is_err() { self.result_failed(&fence, "Declaration ranking capacity is full".into()); }
+        } else if let Some(snapshot) = snapshot {
             let loaded = self.state.sources.buffers.get(&snapshot.key().buffer).map(|e| e.document.clone()).unwrap_or_default();
             let project = fence.project;
             if self.analysis.request_result_document(fence.clone(), Priority::Visible, || (crate::analysis::Input::new(snapshot, loaded, project, false), move |doc: Arc<Document>, lease: crate::analysis::Lease| {
                 let mut failed = 0;
                 let mut errors = false;
-                let next = match index::index_document(&doc, None, lease.cancellation()) {
+                let cache = index::index_document(&doc, None, lease.cancellation());
+                let next = match &cache {
                     FileIndex::Done { items, syntax_errors, .. } => {
-                        errors = syntax_errors;
-                        index::rank(&[(path, items)], &query, lease.cancellation())
+                        errors = *syntax_errors;
+                        index::rank(&[(path.clone(), items.clone())], &query, lease.cancellation())
                     }
                     FileIndex::TooLarge | FileIndex::Unreadable => { failed = 1; Some(Default::default()) }
                 };
-                if let Some(next) = next { lease.send(Completion::ProjectRanked { id, step, best: index::merge_ranked(best, next, &query), found: search::Found { searched: 1, failed, syntax_errors: errors, ..Default::default() } }); }
+                if let Some(next) = next { lease.send(Completion::ProjectRanked { id, step, best: index::merge_ranked(best, next, &query), found: search::Found { searched: 1, failed, syntax_errors: errors, ..Default::default() }, cache: Some((path, cache)) }); }
             })).is_err() { self.result_failed(&fence, "Declaration analysis capacity is full".into()); }
         } else {
             let mut paths = vec![path];
@@ -178,13 +185,20 @@ impl Session {
             let searched = paths.len();
             if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
                 if let Some(next) = index::rank(&files, &query, lease.cancellation()) {
-                    lease.send(Completion::ProjectRanked { id, step, best: index::merge_ranked(best, next, &query), found: search::Found { searched, sources, ..Default::default() } });
+                    lease.send(Completion::ProjectRanked { id, step, best: index::merge_ranked(best, next, &query), found: search::Found { searched, sources, ..Default::default() }, cache: None });
                 }
             }).is_err() { self.result_failed(&fence, "Declaration analysis capacity is full".into()); }
         }
     }
 
-    pub(super) fn project_ranked(&mut self, id: u64, step: usize, best: index::Ranked, found: search::Found) -> Effect {
+    pub(super) fn project_ranked(&mut self, id: u64, step: usize, best: index::Ranked, found: search::Found, cache: Option<(Arc<str>, FileIndex)>) -> Effect {
+        if self.project_query.as_ref().is_some_and(|work| work.id == id && work.step == step)
+            && let Some((path, cache)) = cache
+            && let Some((root, _)) = self.state.results.as_ref().and_then(|r| r.root.as_ref())
+            && let Some(source) = self.state.results.as_ref().and_then(|r| r.captured.get(&root.join(path.as_ref())))
+            && let Some(snapshot) = &source.snapshot
+            && Self::captured_result_current(&self.state, snapshot, &root.join(path.as_ref()))
+        { self.state.index.add_scoped(path, cache, source.identity.clone()); }
         let Some(work) = self.project_query.as_mut().filter(|q| q.id == id && q.step == step) else { return Effect::default() };
         let Some(declarations) = work.declarations.as_mut() else { return Effect::default() };
         let Some(results) = self.state.results.as_mut().filter(|r| r.id == id) else { return Effect::default() };
