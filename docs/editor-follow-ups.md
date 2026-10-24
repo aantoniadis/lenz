@@ -75,3 +75,10 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   `today()` call. Preserve the exact attribution assertion and rerun that single
   case with a fresh fixture for18; deterministic fixture dates remain deferred.
   Evidence: `target/perf/editor-implementation/18-blame/core-final.log`.
+
+- **Inactive-tab Save feedback:** buffer-owned rejection/uncertainty and recheck
+  state survive navigation; activating the tab reveals its full shared status.
+  Headers currently expose its dirty marker. Consider a persistent inactive-tab
+  save-state badge or actionable session notification, using the same core
+  state rather than frontend-owned errors. This is presentation followup;
+  draft/history retention and Save blocking remain enforced while inactive.

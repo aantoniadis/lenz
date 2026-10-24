@@ -5,11 +5,13 @@ use crate::{document::{Document, SourceMeta}, jobs::{Jobs, Priority, MAX_JOBS}, 
 const BUFFERS: usize = 64;
 #[path = "analysis_result.rs"]
 mod result;
+#[path = "analysis_write.rs"]
+mod write;
 pub(crate) use result::{ResultFence, ResultSlot, ResultStage};
 use result::{ResultEntry, ResultTicket};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum Owner { Buffer(BufferId), Result(ResultSlot) }
+enum Owner { Buffer(BufferId), Result(ResultSlot), Write(BufferId) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum Consumer { Blame(TabId), Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
@@ -52,7 +54,7 @@ struct SourceDependency {
     document: Arc<OnceLock<Arc<Document>>>,
 }
 enum SourceReady { Ready(Arc<Document>), Waiting, Failed(&'static str) }
-struct Conversion { source: Weak<SourceDependency>, materializing: Option<Task>, failure: Option<&'static str> }
+struct Conversion { source: Weak<SourceDependency>, retired: Weak<SourceDependency>, materializing: Option<Task>, failure: Option<&'static str> }
 struct ConversionDone { done: Arc<AtomicBool>, tx: async_channel::Sender<Completion> }
 impl Drop for ConversionDone {
     fn drop(&mut self) { self.done.store(true, Ordering::Release); let _ = self.tx.try_send(Completion::AnalysisWake); }
@@ -121,7 +123,7 @@ impl Drop for Lease {
 
 #[derive(Default)]
 pub(crate) struct Analysis {
-    entries: HashMap<BufferId, Entry>, conversions: HashMap<Scope, Conversion>, results: HashMap<ResultSlot, ResultEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
+    entries: HashMap<BufferId, Entry>, conversions: HashMap<Scope, Conversion>, results: HashMap<ResultSlot, ResultEntry>, writes: HashMap<BufferId, write::WriteEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
     pub(crate) revision: u64,
     dirty: bool, project: u64,
     #[cfg(test)]
@@ -130,16 +132,26 @@ pub(crate) struct Analysis {
 impl Analysis {
     /// Called only after a buffer/result owner has been admitted to the combined owner bound.
     fn source_dependency(&mut self, input: Input) -> Arc<SourceDependency> {
-        if let Some(source) = self.conversions.get(&input.scope).and_then(|c| c.source.upgrade()) { return source; }
+        if let Some(conversion) = self.conversions.get_mut(&input.scope)
+            && let Some(previous) = conversion.source.upgrade().or_else(|| conversion.retired.upgrade()) {
+            // The fallback preserves captured-result demand, never old backing for a reopened current group.
+            if previous.snapshot.needs_compaction() && !input.snapshot.needs_compaction() {
+                let source = Arc::new(SourceDependency { scope: input.scope, snapshot: input.snapshot, document: previous.document.clone() });
+                conversion.retired = Arc::downgrade(&previous); conversion.source = Arc::downgrade(&source);
+                return source;
+            }
+            return previous;
+        }
         let document = OnceLock::new();
         if let Some(loaded) = input.loaded.upgrade().filter(|doc| doc.version() == input.scope.key.version && Arc::ptr_eq(doc.source_meta(), input.snapshot.source_meta())) {
             let _ = document.set(loaded);
         }
         let source = Arc::new(SourceDependency { scope: input.scope, snapshot: input.snapshot, document: Arc::new(document) });
-        let conversion = self.conversions.entry(input.scope).or_insert_with(|| Conversion { source: Weak::new(), materializing: None, failure: None });
+        let conversion = self.conversions.entry(input.scope).or_insert_with(|| Conversion { source: Weak::new(), retired: Weak::new(), materializing: None, failure: None });
         // A previous owner expired while its cancelled worker unwinds. Reuse the slot, not its cell.
         if let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); }
         conversion.source = Arc::downgrade(&source);
+        conversion.retired = Weak::new();
         conversion.failure = None;
         self.dirty = true;
         source
@@ -149,7 +161,7 @@ impl Analysis {
         let id = input.scope.key.buffer;
         self.dirty = true;
         let live = input.live;
-        if !self.entries.contains_key(&id) && self.entries.len() + self.results.len() == BUFFERS {
+        if !self.entries.contains_key(&id) && self.entries.len() + self.results.len() + self.writes.len() >= BUFFERS {
             let discard = self.entries.iter().find(|(_, entry)| !entry.live && !entry.group.running(&self.conversions)).map(|(id, _)| *id);
             let Some(discard) = discard else { return false };
             self.entries.remove(&discard);
@@ -196,6 +208,26 @@ impl Analysis {
         let entry = self.entries.get(&snapshot.key().buffer)?;
         (entry.pending.is_none() && entry.group.scope == scope(snapshot, project) && entry.group.cancel.load(Ordering::Acquire))
             .then(|| entry.group.source.as_ref().and_then(|source| source.document.get().cloned())).flatten()
+    }
+
+    /// Identical immutable bytes with compact backing reuse the same admitted conversion cell.
+    /// Captured result owners keep their original dependency until their own acknowledgement.
+    pub(crate) fn rebind_backing(&mut self, snapshot: Arc<TextSnapshot>, project: u64) {
+        let scope = scope(&snapshot, project);
+        let Some(entry) = self.entries.get_mut(&scope.key.buffer) else { return };
+        let owner = if entry.group.scope == scope && entry.group.source.is_some() { &mut entry.group.source }
+            else if let Some(pending) = entry.pending.as_mut().filter(|p| p.source.scope == scope) {
+                let previous = Arc::downgrade(&pending.source);
+                let source = Arc::new(SourceDependency { scope, snapshot, document: pending.source.document.clone() });
+                pending.source = source.clone();
+                if let Some(conversion) = self.conversions.get_mut(&scope) { conversion.retired = previous; conversion.source = Arc::downgrade(&source); }
+                return;
+            } else { return };
+        let Some(previous) = owner else { return };
+        let retired = Arc::downgrade(previous);
+        let source = Arc::new(SourceDependency { scope, snapshot, document: previous.document.clone() });
+        *owner = Some(source.clone());
+        if let Some(conversion) = self.conversions.get_mut(&scope) { conversion.retired = retired; conversion.source = Arc::downgrade(&source); }
     }
 
     pub(crate) fn source_failure(&self, snapshot: &TextSnapshot, project: u64) -> Option<&'static str> {
@@ -274,13 +306,14 @@ impl Analysis {
     pub(crate) fn close(&mut self) {
         for entry in self.entries.values_mut() { entry.group.cancel(); entry.pending = None; }
         self.close_results();
+        self.close_writes();
         for conversion in self.conversions.values_mut() { if let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); } }
         self.queue.clear();
     }
 
     fn reap_conversions(&mut self, project: u64) {
         self.conversions.retain(|scope, conversion| {
-            let source = conversion.source.upgrade();
+            let source = conversion.source.upgrade().or_else(|| conversion.retired.upgrade());
             if (source.is_none() || scope.project != project) && let Some(task) = &conversion.materializing { task.cancel.store(false, Ordering::Release); }
             if conversion.materializing.as_ref().is_some_and(|task| task.done.load(Ordering::Acquire)) {
                 let task = conversion.materializing.take().expect("completed conversion");
@@ -363,7 +396,8 @@ impl Analysis {
             (entry.group.cancel.load(Ordering::Acquire) && (entry.live || !entry.group.waiting.is_empty())) || entry.group.running(&self.conversions)
         });
         self.reap_results();
-        self.queue.retain(|id| match id { Owner::Buffer(id) => self.entries.contains_key(id), Owner::Result(slot) => self.results.contains_key(slot) });
+        self.reap_writes();
+        self.queue.retain(|id| match id { Owner::Buffer(id) => self.entries.contains_key(id), Owner::Result(slot) => self.results.contains_key(slot), Owner::Write(id) => self.writes.contains_key(id) });
         for id in retry { self.enqueue(id); }
         // Background work cannot occupy the visible queue's entire admission allowance. The same
         // three workers execute both classes; at most six task closures can be submitted here.
@@ -376,6 +410,7 @@ impl Analysis {
             let Some(owner) = self.queue.pop_front() else { break };
             let id = match owner {
                 Owner::Buffer(id) => id,
+                Owner::Write(id) => { self.submit_write(id, jobs, tx, project, &mut background); continue; }
                 Owner::Result(slot) => { self.submit_result(slot, jobs, tx, project, &mut background); continue; }
             };
             let Some(entry) = self.entries.get_mut(&id) else { continue };

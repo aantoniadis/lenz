@@ -96,6 +96,7 @@ pub struct Document {
     /// Where language servers' lines start, when they differ from the reader's: a CR not followed by LF ends a line
     /// for them, not for the reader. Found when a language server first needs it, not at every open.
     protocol_lines: std::sync::OnceLock<Option<Arc<[usize]>>>,
+    pub(crate) write_baseline: Option<Arc<crate::save::Baseline>>,
 }
 
 impl Document {
@@ -147,6 +148,7 @@ impl Document {
             large,
             version,
             protocol_lines: std::sync::OnceLock::new(),
+            write_baseline: None,
         }
     }
 
@@ -186,7 +188,7 @@ impl Document {
         let lines = line_starts.len() - usize::from(text.ends_with('\n'));
         let large = if source.loaded_version == Some(version) { source.large }
             else { source.large || text.len() > LARGE_BYTES || lines > LARGE_LINES };
-        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new() }
+        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None }
     }
 
     pub fn source_meta(&self) -> &Arc<SourceMeta> { &self.source }
@@ -229,6 +231,7 @@ impl Document {
             line_starts: self.line_starts.clone(),
             large: self.large,
             protocol_lines: self.protocol_lines.clone(),
+            write_baseline: self.write_baseline.clone(),
         }
     }
 
