@@ -136,3 +136,10 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   measurements; this is not a constant-time update claim. Keep input/render
   Document-conversion counters separate from these allocations, and preserve the
   single captured-version commit and bounded worker/context guards if optimizing.
+
+- **Native screenshot synchronization:** the foundation driver captures screenshots
+  immediately after its state observer reports preedit, without a completed-paint
+  acknowledgement. Keep them illustrative alongside the callback/authority/Undo
+  assertions. If native visual assertions are added, acknowledge the corresponding
+  painted presentation before capturing; a state notification can precede paint.
+  The existing TestWindow render checks remain separate evidence.
