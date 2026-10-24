@@ -28,9 +28,15 @@ new baseline. Another Save retains the existing explicit confirmation rules.
 Close preparation cancels competing external consent even when the all-session
 coordinator invokes it directly, before another dispatch.
 
-One optional `Effect::external` delivers the plan at the end of dispatch, after
-write accounting and current-context validation. Both adapters consume it for
-commands and completions. Their existing wrapped Details presentation displays
+Write accounting marks the existing pending request ready without consuming its
+plan. The normal GUI command/completion handler and TUI command/completion handlers
+explicitly issue `TakeExternal` with that ticket. The core revalidates the current
+context and saved-version permission or exact Written receipt, removes the request,
+then returns one optional `Effect::external`. Render housekeeping can therefore
+account a completed Save without losing delivery. Cancel remains available until
+the take, and repeated, premature or wrong-ticket takes cannot launch a second
+time. The take is internal delivery acknowledgement and preserves edit grouping
+and pending layout intentions. Their existing wrapped Details presentation displays
 the same choices and disabled reasons; S/O/Escape and pointer controls precede
 underlying typing, paste, Undo and Save. The raw `editor_plan` API refuses dirty
 files so existing callers cannot bypass the decision.
@@ -46,25 +52,35 @@ paths and copy/navigation semantics. Drafts remain owned by Reader.
 The implementation follows the approved Session-command boundary and real
 adapter input/render replay:
 
-- Six core external-open checks cover all choices, exactly-once confirmed Save,
+- Seven core external-open checks cover all choices, exactly-once confirmed Save,
   real rejected/uncertain writes and recheck, delayed Save with Cancel/edit/file
   switch, permission/close invalidation, history and exact Unicode/CRLF bytes.
-- Two actual GUI and two standalone TUI traces drive the command palette,
+  The delivery protocol also checks readiness across housekeeping, premature and
+  wrong-ticket takes, and Cancel/edit/permission/file changes before delivery.
+- Three actual GUI and three standalone TUI traces drive the command palette,
   clipboard/bracketed paste and decision controls. They cover both appearances,
   narrow/tiny resizing and scrolling, modal isolation, saved-version coordinates,
   confirmed Save, Undo, failure presentation and stale choices. Test seams record
   external launches instead of starting applications on the user's desktop.
+  A controlled completed Save is accounted by direct GUI render housekeeping or
+  actual TUI drawing before normal wake delivery; both then launch exactly once,
+  or zero times if Escape cancels the ready request first.
 - The existing clean editor-plan, catalogue, shared permission and comparison
   authority checks pass, as do 26 affected close checks. Strict core/GUI/TUI lint
   and ordinary production binary checks pass on the merged foundation.
 
 Observed red/green cases include the missing adapter decision, missing saved-disk
 labels, permission changes retaining old consent, and coordinator preparation
-retaining a competing external decision. Auxiliary failures were fixture-only:
+retaining a competing external decision. A later caller audit found that direct
+render dispatches ignored effects, consuming an external launch before its normal
+handler. The actual GUI and TUI regressions failed with zero launches or missing
+repaint, then passed with explicit ready/take delivery. Auxiliary failures were fixture-only:
 the system opener may add arguments before the file path, and the TUI's existing
-`#[path]` test module needs an explicit child path. Failed logs are retained.
+`#[path]` test module needs an explicit child path. Failed logs are retained, including two incorrectly filtered zero-test runs;
+only executed test cases count as verification.
 
-Runtime implementation checkpoint: `259869c`. Raw commands, logs, source file and
+Initial runtime implementation checkpoint: `259869c`; the follow-up delivery fix
+is identified separately by source/executable hashes in the evidence directory. Raw commands, logs, source file and
 test-executable identities are under
 `target/perf/editor-implementation/19-external-open/`. The merge preserves tickets
 14/15/17/20/21; focused checks replace per-ticket full-suite and stress runs.
