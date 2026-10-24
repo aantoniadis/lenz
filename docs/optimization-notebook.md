@@ -1740,3 +1740,24 @@ The [detailed performance report](research/reader-editor-batch-11-18-performance
 Timing ended before documentation work and other builds resumed. All sources, executables, commands, durations,
 raw samples and failed attempts remain under `target/perf/editor-implementation/merge-11-18/performance/`.
 Native macOS/Windows, physical presentation, GPU allocations, real providers and long sessions remain unverified.
+
+
+## Existing-file editor foundation — batch 14–23 (2026-10-24)
+
+The [batch report](research/reader-editor-foundation-batch-14-23.md) compares accepted baseline
+bb2f55f4 with private activation candidate fce466f. The full correctness gate is complete in phases,
+including the real Ctrl-Q documentation regression repair. Native X11 default input/WM_DELETE and
+ordinary Linux TUI input/Save/dirty-close checks pass. Mac/Wayland GUI remain gated.
+
+One quiet campaign used prebuilt artifacts and identical fixtures. Startup/navigation and existing
+three-minute core-stress throughput remain similar. One 180-second growing-history edit workload per
+build, followed by complete independent Undo/Redo, passed: candidate cycles fell 5.8%, and every
+matched cycle window showed higher edit medians (+0.048–0.319 ms). Eight TUI launches show +0.676 MiB
+median startup RSS. These costs await explicit acceptance; no optimization is claimed.
+
+Editing and GUI RSS changes are mixed and allocator/history dependent. Lower peak editing RSS and
+lower terminal post-workflow RSS do not establish an efficiency improvement. Candidate-only preedit
+callback medians are 0.128/0.140 ms at 50 KiB/1 MiB, with four tagged warmups excluded from 32 samples;
+these are synchronous callback wall times, not worker, paint or native display latency. Deferred
+profiling is in the backlog; no extra stress was run. Raw samples, failed gate attempts, configuration
+and hashes remain under target/perf/editor-implementation/merge-14-23/performance/.

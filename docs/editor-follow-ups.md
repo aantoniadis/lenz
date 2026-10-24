@@ -143,3 +143,11 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   assertions. If native visual assertions are added, acknowledge the corresponding
   painted presentation before capturing; a state notification can precede paint.
   The existing TestWindow render checks remain separate evidence.
+
+- **Editor history-growth cost:** the 14–23 batch's matched raw editing windows show
+  +0.048–0.319 ms median dispatch at equal cycle/content lengths and 5.8% fewer 180-second
+  workload cycles. Profile the additional per-edit work before optimizing; retain
+  anchor/source/permission fences and complete Undo/Redo. TUI startup RSS rises
+  about 0.676 MiB across eight launches. See the [batch report](research/reader-editor-foundation-batch-14-23.md).
+  Memory phase differences require equal-history/allocator attribution before any
+  efficiency claim; no new stress or optimization is authorized by this note.
