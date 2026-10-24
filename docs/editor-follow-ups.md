@@ -167,7 +167,10 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   lookup; changes during a read coalesce into one rerun. A superseded read stops git between entries; at most
   `STATUS_LIMIT` (20,000) entries are kept and git is stopped beyond it. Suspected costs: a large worktree's
   `git status` on every save burst, and the per-row `row_dirty` tab scan while painting the explorer.
-  Staging/commits from a terminal appear only on the next tick (up to 5 s). Not measured for this ticket.
+  Staging/commits from a terminal appear only on the next tick (up to 5 s). Any burst under the repository
+  triggers a read, including the reader's own state/cache writes when the open folder contains them (a home
+  or dotfiles repository). A failed read clears every badge until the next trigger, and a panicking read would
+  leave reads stopped until the repository changes. Not measured for this ticket.
 - **Git status presentation gaps (ticket65):** folders do not aggregate their children's statuses; paths are
   matched as `/`-separated (Windows separators unhandled); git's stderr is read only after its output ends.
   Draft recovery has no "recovered" state yet, so only dirty and Git status are shown.
