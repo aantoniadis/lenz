@@ -44,6 +44,43 @@ fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
 }
 
 #[test]
+fn save_shortcut_keeps_history_after_actual_cache_eviction() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("save.txt");
+    let original = "\u{feff}α😀\r\nbeta\n";
+    std::fs::write(&path, original).unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    a.enable_draft_input_for_test(); draw(&mut a, 80, 12);
+    let tab = a.session.state().active().unwrap().id();
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Right, KeyModifiers::SHIFT);
+    a.handle(Event::Paste("é".into()));
+    assert!(a.session.state().tab_dirty(tab));
+    key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+    settle(&mut a, |a| !a.session.state().tab_dirty(tab));
+    assert_eq!(std::fs::read(&path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+    assert!(!draw_screen(&mut a, 80, 12).contains('●'));
+    let clean = dir.path().join("evicted.txt"); let other = dir.path().join("pressure.txt");
+    std::fs::write(&clean, vec![b'a'; 17 << 20]).unwrap(); std::fs::write(&other, vec![b'b'; 17 << 20]).unwrap();
+    a.dispatch(Command::OpenRetained(clean.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|s| s.source() == clean));
+    draw(&mut a, 80, 12);
+    let weak = Arc::downgrade(a.session.state().current_source().unwrap());
+    a.dispatch(Command::OpenRetained(other.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|s| s.source() == other));
+    draw(&mut a, 80, 12);
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|s| s.source() == path));
+    draw(&mut a, 80, 12);
+    assert!(weak.upgrade().is_none(), "an unrelated reloadable source really left the bounded cache");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(a.session.state().current_source().unwrap().copy_range(0..13).as_deref(), Some("α😀\r\nbeta\n"));
+    assert!(a.session.state().tab_dirty(tab));
+    assert!(draw_screen(&mut a, 28, 6).contains('●'));
+    assert_eq!(std::fs::read(path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+}
+
+#[test]
 fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("draft.txt");
