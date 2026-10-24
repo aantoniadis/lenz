@@ -1209,8 +1209,14 @@ fn rebuild_discards_saved_and_inflight_records_and_cache_optout_survives_reopen(
     s.dispatch(Completion::Indexed { generation, revision, files: vec![(Arc::from("a.rb"), old)] });
     assert_eq!(s.state.index.coverage().indexed, 0, "held pre-rebuild chunk is obsolete");
     settle(&mut s, |s| !s.index_rebuilding && s.state.index.coverage().indexed == 1 && s.state.index.coverage().complete()
-        && s.state.results.as_ref().is_some_and(|r| r.done && r.hits.len() == 1)
+        && s.state.results.as_ref().is_some_and(|r| r.done)
         && s.state.current_source().is_some_and(|d| source_text(d).contains("Omega")));
+    let captured = s.state.results.as_ref().unwrap();
+    assert!(captured.hits.is_empty(), "the captured Alpha query does not silently switch to refreshed text");
+    assert!(captured.error().is_some_and(|error| error.contains("rerun")), "reloaded query sources must visibly become stale");
+    s.dispatch(Command::RerunSearch);
+    settle(&mut s, searched);
+    assert_eq!(s.state.results.as_ref().unwrap().hits.len(), 1);
     assert_eq!(index::rank(&s.state.index.snapshot(), "Alpha", || true).unwrap().1, 0);
     assert_eq!(index::rank(&s.state.index.snapshot(), "Omega", || true).unwrap().1, 1);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "class Omega; end\n");
@@ -1347,7 +1353,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Compare Selected", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Select All", "Copy", "Undo", "Redo", "Save", "Recheck Saved File", "Confirm Rechecked Save", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare With…", "Compare Selected", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));
@@ -3274,7 +3280,7 @@ fn queued_result_validation_rechecks_the_retained_current_target() {
     s.state.sources.buffers.get_mut(&current.key().buffer).unwrap().snapshot = Some(current.clone());
     s.tab_mut(tab).unwrap().new_content();
     for release in releases { release.send(()).unwrap(); }
-    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("current source changed")));
+    settle(&mut s, |s| s.state().notices().iter().any(|n| n.contains("captured draft changed")));
     assert!(s.state().results().unwrap().is_stale(0));
     assert!(Arc::ptr_eq(s.state().view(tab).unwrap().snapshot(), &current));
     s.dispatch(Command::SelectAll);
@@ -3418,6 +3424,14 @@ fn a_previewed_match_is_syntax_coloured_from_its_own_parse_or_its_tab() {
     for i in [1, 0, 1, 0, 1] {
         s.dispatch(Command::SelectResult(i));
     }
+    settle(&mut s, |s| s.state().results().unwrap().preview().is_none()
+        && s.state().notices().iter().any(|n| n.contains("search source changed")));
+    assert!(s.state().results().unwrap().is_stale(1));
+    assert!(s.state().current_source().is_none(), "a refused preview must not navigate or publish current text");
+    assert_eq!(std::fs::read(root.join("b.rs")).unwrap(), b"// needle, changed\n");
+    s.dispatch(Command::RerunSearch);
+    settle(&mut s, searched);
+    s.dispatch(Command::SelectResult(1));
     settle(&mut s, |s| s.state().results().unwrap().preview().is_some_and(|p| p.index == 1 && p.highlights().is_some() && p.doc.text().contains("changed")));
 }
 
@@ -4861,6 +4875,36 @@ fn extend_without_a_grammar_uses_words_lines_and_paragraphs() {
     assert_eq!(s.state().selection().unwrap().range(), 6..10, "at once: no parse");
     s.dispatch(Command::ExtendSelection);
     assert_eq!(s.state().selection().unwrap().range(), 0..10);
+}
+
+#[test]
+fn plain_expansion_preserves_fragmented_unicode_and_defers_unbounded_runs() {
+    let d = tempfile::tempdir().unwrap();
+    let original = "π alpha βeta\r\nγamma\r\n\r\nδelta\r\n";
+    let path = write(d.path(), "unicode.txt", original.as_bytes());
+    let mut s = session(d.path());
+    open(&mut s, Command::Open(path.clone()), "unicode.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "λ ".into() }], kind: crate::text::EditKind::Replace });
+    let text = format!("λ {original}");
+    let at = text.find("βeta").unwrap() + "β".len();
+    s.dispatch(Command::Select(Selection { anchor: at, head: at }));
+    for expected in ["βeta", "λ π alpha βeta", "λ π alpha βeta\r\nγamma", &text] {
+        s.dispatch(Command::ExtendSelection);
+        assert_eq!(s.state().selected_text().as_deref(), Some(expected), "ordinary expansion is immediate across UTF-8 chunks and CRLF");
+    }
+    s.dispatch(Command::ShrinkSelection);
+    assert_eq!(s.state().selected_text().as_deref(), Some("λ π alpha βeta\r\nγamma"));
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+    let long = "a".repeat(128 << 10);
+    let path = write(d.path(), "long.txt", long.as_bytes());
+    open(&mut s, Command::Open(path.clone()), "long.txt");
+    s.dispatch(Command::Select(Selection { anchor: 65536, head: 65536 }));
+    s.dispatch(Command::ExtendSelection);
+    assert_eq!(s.state().selection().unwrap().range(), 65536..65536, "an unbounded run stays on admitted background work");
+    settle(&mut s, |s| s.state().selection().unwrap().range() == (0..long.len()));
+    assert_eq!(std::fs::read(path).unwrap(), long.as_bytes());
 }
 
 #[test]
@@ -6623,10 +6667,10 @@ fn unified_navigation_finds_files_symbols_and_actions_without_loading_search_can
     assert!(s.state().current_source().is_none() && s.state().results().is_none(), "ranking must not open documents or replace search results");
     let row = n.rows.iter().position(|r| r.kind == Kind::Symbol && r.label == "wrap").unwrap();
     let chosen = s.navigation_choice(n.revision, row).unwrap();
-    s.dispatch(Command::CloseSearchEverywhere);
     let Chosen::Command(command) = chosen else { panic!("expected source navigation") };
     s.dispatch(command);
     settle(&mut s, |s| s.state().current_source().is_some() && s.state().active().is_some_and(|t| t.selection().is_some()));
+    assert!(s.state().navigation().is_none(), "validated activation closes the picker after success");
     assert_eq!(s.state().active().unwrap().source(), path);
     assert_eq!(s.state().selection().unwrap().head, "// source\n".len());
     assert_eq!(std::fs::read(path).unwrap(), b"// source\nfn wrap() {}\n");

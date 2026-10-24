@@ -2958,8 +2958,12 @@ impl Session {
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) {
+        let previous = self.state.source(id).map(|snapshot| SemanticSource::new(snapshot));
         let changed = self.state.admit_current(id, doc, stamp);
         let version = self.state.source(id).map_or(0, |snapshot| snapshot.key().version);
+        if let Some(snapshot) = self.state.source(id).cloned()
+            && previous.is_some_and(|source| !source.matches(&snapshot))
+        { self.mark_draft_results_stale(&snapshot); }
         if let Some(view) = self.state.view(id) { self.analysis.invalidate(view.snapshot(), self.project_generation.load(Ordering::Relaxed)); }
         for id in changed {
             if self.is_shown(id) {
@@ -3731,6 +3735,9 @@ impl Session {
                 let id = t.id;
                 if self.expanding.is_some_and(|(tab, v, s, ..)| tab == id && v == version && s == from) { return Effect::default(); }
                 let lang = snapshot.language().filter(|_| !snapshot.is_large());
+                if lang.is_none() && let Some(steps) = crate::expand::snapshot_fallback_steps(&snapshot, from.range()) {
+                    return self.start_expansion(id, version, from, steps, reveal);
+                }
                 let request = self.expand_latest.fetch_add(1, Ordering::Relaxed) + 1;
                 self.expanding = Some((id, version, from, request, reveal));
                 let loaded = self.state.sources.buffers[&snapshot.key().buffer].document.clone();
