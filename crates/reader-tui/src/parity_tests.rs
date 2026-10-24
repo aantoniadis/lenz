@@ -169,6 +169,152 @@ fn gated_drafts_share_split_history_and_keep_views_and_sessions_independent(cx: 
 }
 
 #[gpui::test]
+fn project_text_search_reads_shifted_drafts_and_refuses_stale_activation_in_both_adapters(cx: &mut TestAppContext) {
+    replay_draft_project_query(cx, false);
+}
+
+fn replay_draft_project_query(cx: &mut TestAppContext, declarations: bool) {
+    use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let saved_a = "fn SavedOnlyA() {}\r\n";
+    let saved_b = "fn SavedOnlyB() {}\r\n";
+    let saved_c = "fn UnopenedDraftOnly() {}\r\n";
+    let draft_a = "\r\n// é👩🏽‍💻\r\nfn DraftOnlyA() {}\r\n";
+    let draft_b = "\r\n\r\n// 界\r\nfn DraftOnlyB() {}\r\n";
+    for (name, text) in [("a.rs", saved_a), ("b.rs", saved_b), ("c.rs", saved_c)] { std::fs::write(root.join(name), text).unwrap(); }
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(root.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    visual.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(700.0)));
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(root.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 36)).unwrap();
+    let key = |tui: &mut App, code, modifiers| tui.handle(Event::Key(KeyEvent::new(code, modifiers)));
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let wait = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            gui.update(visual, |view, cx| view.poll(cx));
+            while let Ok(completion) = tui.session.completions().try_recv() { tui.apply(completion); }
+            draw(visual, tui, terminal);
+            if gui.read_with(visual, |view, _| done(view.session().state())) && done(tui.session.state()) { break; }
+            assert!(Instant::now() < deadline, "draft query adapters did not settle: GUI {:?}; TUI {:?}", gui.read_with(visual, |view, _| snapshot(view.session().state())), snapshot(tui.session.state()));
+            std::thread::yield_now();
+        }
+    };
+    wait(&mut visual, &mut tui, &mut terminal, &|state| state.project().is_some_and(|project| matches!(project.coverage(), reader_core::project::Coverage::Complete(_))) && state.index_coverage().complete());
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let paste = |visual: &mut VisualTestContext, tui: &mut App, text: &str| {
+        visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.into())));
+        visual.simulate_keystrokes("ctrl-v");
+        tui.handle(Event::Paste(text.into()));
+    };
+    for (name, text) in [("a.rs", draft_a), ("b.rs", draft_b)] {
+        visual.simulate_keystrokes("ctrl-p");
+        visual.simulate_keystrokes(&name.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
+        key(&mut tui, KeyCode::Char('p'), KeyModifiers::CONTROL);
+        tui.handle(Event::Paste(name.into()));
+        wait(&mut visual, &mut tui, &mut terminal, &|state| state.navigation().is_some_and(|search| !search.pending && !search.rows.is_empty()));
+        visual.simulate_keystrokes("enter");
+        key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+        wait(&mut visual, &mut tui, &mut terminal, &|state| state.current_source().is_some_and(|source| source.source().ends_with(name)) && state.loading().is_none());
+        visual.simulate_keystrokes("ctrl-a");
+        key(&mut tui, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        paste(&mut visual, &mut tui, text);
+        assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+        assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text));
+    }
+    let query = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>, text: &str| {
+        visual.simulate_keystrokes(if declarations { "ctrl-t" } else { "ctrl-shift-f" });
+        key(tui, KeyCode::Char(if declarations { 't' } else { 'f' }), if declarations { KeyModifiers::CONTROL } else { KeyModifiers::CONTROL | KeyModifiers::SHIFT });
+        if !declarations {
+            for _ in 0..9 { visual.simulate_keystrokes("backspace"); key(tui, KeyCode::Backspace, KeyModifiers::NONE); }
+        }
+        visual.simulate_keystrokes(&text.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" "));
+        tui.handle(Event::Paste(text.into()));
+        visual.simulate_keystrokes("enter");
+        key(tui, KeyCode::Enter, KeyModifiers::NONE);
+        wait(visual, tui, terminal, &|state| state.results().is_some_and(|results| results.done() && results.query() == text));
+    };
+    query(&mut visual, &mut tui, &mut terminal, "draftonly");
+    let hits = |state: &State| { let mut hits: Vec<_> = state.results().unwrap().hits().iter().map(|hit| (hit.path.to_string(), hit.line, hit.range.clone(), hit.text.to_string())).collect(); hits.sort_by(|a, b| (&a.0, a.1).cmp(&(&b.0, b.1))); hits };
+    let expected = if declarations {
+        vec![("a.rs".into(), 2, 3..13, "DraftOnlyA".into()), ("b.rs".into(), 3, 3..13, "DraftOnlyB".into()), ("c.rs".into(), 0, 3..20, "UnopenedDraftOnly".into())]
+    } else {
+        vec![("a.rs".into(), 2, 3..12, "fn DraftOnlyA() {}".into()), ("b.rs".into(), 3, 3..12, "fn DraftOnlyB() {}".into()), ("c.rs".into(), 0, 11..20, "fn UnopenedDraftOnly() {}".into())]
+    };
+    assert_eq!(hits(tui.session.state()), expected);
+    assert_eq!(hits(tui.session.state()), gui.read_with(&visual, |view, _| hits(view.session().state())));
+    assert!(tui.session.state().tabs().iter().all(|tab| !tab.source().ends_with("c.rs")), "unopened result is read from disk");
+    query(&mut visual, &mut tui, &mut terminal, "savedonly");
+    assert!(tui.session.state().results().unwrap().hits().is_empty(), "removed disk matches disappear from both drafts");
+    assert!(gui.read_with(&visual, |view, _| view.session().state().results().unwrap().hits().is_empty()));
+    query(&mut visual, &mut tui, &mut terminal, "draftonly");
+    let select_first = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        draw(visual, tui, terminal);
+        let (x, y) = gui.read_with(visual, |view, _| view.result_point_of(0)).unwrap();
+        visual.simulate_click(gpui::point(gpui::px(x), gpui::px(y)), gpui::Modifiers::default());
+        let row = tui.session.state().results().unwrap().row_of_hit(0).unwrap();
+        let area = tui.layout.results;
+        tui.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: area.x + 8, row: area.y + row as u16, modifiers: KeyModifiers::NONE }));
+        wait(visual, tui, terminal, &|state| state.results().unwrap().preview().is_some_and(|preview| preview.index == 0));
+    };
+    select_first(&mut visual, &mut tui, &mut terminal);
+    let preview = |state: &State| state.results().unwrap().preview().unwrap().doc.text().to_string();
+    assert_eq!(preview(tui.session.state()), draft_a);
+    assert_eq!(gui.read_with(&visual, |view, _| preview(view.session().state())), draft_a);
+    assert!(tui.session.state().current_source().unwrap().source().ends_with("b.rs"), "preview does not move the editor");
+    let (_, rows) = gui.update(&mut visual, |view, _| view.panel_contents(16, 16));
+    assert!(rows.iter().any(|row| row.number == 3 && row.text == "fn DraftOnlyA() {}"));
+    let area = tui.layout.results;
+    let preview_cells: String = (area.y..area.bottom()).flat_map(|y| (area.right() + 1..120).map(move |x| (x, y))).map(|point| terminal.backend().buffer()[point].symbol()).collect();
+    assert!(preview_cells.contains("fn DraftOnlyA() {}"), "{preview_cells}");
+    visual.simulate_keystrokes("ctrl-shift-tab");
+    key(&mut tui, KeyCode::Tab, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    wait(&mut visual, &mut tui, &mut terminal, &|state| state.current_source().is_some_and(|source| source.source().ends_with("a.rs")));
+    let caret = gui.read_with(&visual, |view, _| view.session().state().selection().unwrap().head);
+    let (x, y) = gui.read_with(&visual, |view, _| view.text_point_of(caret)).unwrap();
+    visual.simulate_click(gpui::point(gpui::px(x), gpui::px(y)), gpui::Modifiers::default());
+    let area = tui.layout.panes[0].text;
+    tui.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column: area.x, row: area.y, modifiers: KeyModifiers::NONE }));
+    visual.simulate_keystrokes("ctrl-a");
+    key(&mut tui, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    let changed = format!("// later\r\n{draft_a}");
+    paste(&mut visual, &mut tui, &changed);
+    assert!(tui.session.state().results().unwrap().is_stale(0));
+    assert!(gui.read_with(&visual, |view, _| view.session().state().results().unwrap().is_stale(0)));
+    assert_eq!(preview(tui.session.state()), draft_a, "preview retains the exact query snapshot after another edit");
+    assert_eq!(gui.read_with(&visual, |view, _| preview(view.session().state())), draft_a);
+    let before = snapshot(tui.session.state());
+    assert_eq!(before, gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    select_first(&mut visual, &mut tui, &mut terminal);
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(completion) = tui.session.completions().try_recv() { tui.apply(completion); }
+        draw(&mut visual, &mut tui, &mut terminal);
+        if gui.read_with(&visual, |view, _| view.session().status_message().contains("rerun the search")) && tui.session.status_message().contains("rerun the search") { break; }
+        assert!(Instant::now() < deadline, "stale result did not report its refusal");
+    }
+    assert_eq!(snapshot(tui.session.state()), before, "stale result must not navigate to old coordinates");
+    assert_eq!(gui.read_with(&visual, |view, _| snapshot(view.session().state())), before);
+    let (rows, _) = gui.update(&mut visual, |view, _| view.panel_contents(16, 16));
+    assert!(rows.iter().any(|row| row.hit == Some(0) && row.stale && row.label.contains("changed since")));
+    let shown: String = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect();
+    assert!(shown.contains("[changed]"), "{shown}");
+    for (name, text) in [("a.rs", saved_a), ("b.rs", saved_b), ("c.rs", saved_c)] { assert_eq!(std::fs::read(root.join(name)).unwrap(), text.as_bytes()); }
+}
+
+#[gpui::test]
 fn markdown_header_buttons_target_their_own_pane_and_respect_modals(cx: &mut TestAppContext) {
     use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
     use reader_core::session::{Rendering, Split};

@@ -1154,6 +1154,13 @@ impl ReaderView {
     #[cfg(feature = "test-support")]
     pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
 
+    /// A currently visible result row's click point for real input replays.
+    #[cfg(feature = "test-support")]
+    pub fn result_point_of(&self, index: usize) -> Option<(f32, f32)> {
+        let row = self.session.state().results()?.row_of_hit(index)?.checked_sub(self.results_scroll)?;
+        (row < self.panel_list_rows).then_some((self.sidebar_w + 16.0, self.panel_list_y + (row as f32 + 0.5) * line_h()))
+    }
+
     #[cfg(feature = "test-support")]
     fn draft_target(&self) -> Option<(TabId, reader_core::text::SnapshotKey, std::ops::Range<usize>)> {
         if !self.draft_input || self.modal.is_some() || self.tree_focus || self.results_focus || self.find_focus.is_some() || self.crumb_focus.is_some() { return None; }
