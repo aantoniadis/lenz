@@ -1991,8 +1991,16 @@ pub struct Targets {
     pub limited: bool,
 }
 
+/// Capture disk identities once per file after this admitted resolution batch, before publication.
+pub(crate) fn capture_target_digests<'a>(targets: impl Iterator<Item = &'a mut Target>) {
+    let mut digests = HashMap::new();
+    for target in targets.filter(|target| target.stamp.is_some()) {
+        target.decoded_digest = Some(*digests.entry(target.path.clone()).or_insert_with(|| crate::search::decoded_digest(target.doc.text().as_bytes())));
+    }
+}
+
 /// A target file's snapshot, and its stamp when it was read from disk.
-type Snapshot = (Option<crate::cache::Stamp>, Arc<Document>, Option<[u8; 32]>);
+type Snapshot = (Option<crate::cache::Stamp>, Arc<Document>);
 
 /// Reads a file target from disk: its stamp and snapshot.
 pub type ReadFile<'a> = &'a dyn Fn(&Path) -> Result<(crate::cache::Stamp, Arc<Document>), String>;
@@ -2036,14 +2044,11 @@ pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, pro
             continue;
         };
         let file = files.entry(path.clone()).or_insert_with(|| match open.get(&path) {
-            Some(doc) => Ok((None, doc.clone(), None)),
-            None => read(&path).map(|(stamp, doc)| {
-                let digest = crate::search::decoded_digest(doc.text().as_bytes());
-                (Some(stamp), doc, Some(digest))
-            }),
+            Some(doc) => Ok((None, doc.clone())),
+            None => read(&path).map(|(stamp, doc)| (Some(stamp), doc)),
         });
-        let (stamp, doc, decoded_digest) = match file {
-            Ok((stamp, doc, digest)) => (*stamp, doc.clone(), *digest),
+        let (stamp, doc) = match file {
+            Ok((stamp, doc)) => (*stamp, doc.clone()),
             Err(e) => {
                 out.failed.push(format!("{}: {e}", path.display()));
                 continue;
@@ -2054,7 +2059,7 @@ pub(crate) fn targets_while(reply: &Value, limit: usize, encoding: Encoding, pro
             continue;
         };
         let hit = hit_at(&path, &doc, start, end);
-        out.found.push(Target { path, stamp, doc, hit, at: start, decoded_digest });
+        out.found.push(Target { path, stamp, doc, hit, at: start, decoded_digest: None });
     }
     out
 }
@@ -2167,6 +2172,55 @@ fn add_trigger_file(options: &mut Value, uri: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn request_target_contexts_replace_per_lane_and_retire_on_cancel_reply_and_exit() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut semantics = Semantics::new(dir.path().join("providers.json"), dir.path().join("cache"), IDLE, Arc::new(std::time::Instant::now));
+        let doc = Arc::new(Document::decode(PathBuf::from("/project/b.rs"), 1, b"fn target() {}\n"));
+        let session = semantics.queue(Key { provider: 0, root: "/project".into(), launch: Launch { executable: "/nonexistent".into(), args: Vec::new(), env: Vec::new() } }, doc.source().to_path_buf());
+        let server = &mut semantics.servers[0];
+        server.status = Status::Ready;
+        server.open.insert(doc.source().to_path_buf(), doc.clone());
+        server.desired = server.open.clone();
+        let weak = Arc::weak_count(doc.source_meta());
+        for request in 1..=32 {
+            semantics.cancel_lane(Lane::Foreground);
+            semantics.servers[0].request(Question::Definition, json!({}), request).unwrap();
+            assert_eq!(semantics.servers[0].pending.len(), 1);
+            assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1, "unanswered replaced requests cannot accumulate identity maps");
+        }
+        semantics.servers[0].request(Question::IncomingCalls, json!({}), 40).unwrap();
+        semantics.servers[0].request(Question::Hover, json!({}), 41).unwrap();
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 2, "only foreground and hierarchy retain target contexts");
+        assert!(semantics.servers[0].pending[&Lane::Hover].sources.is_empty());
+        semantics.cancel_lane(Lane::Foreground);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1);
+        semantics.cancel_lane(Lane::Hierarchy);
+        semantics.cancel_lane(Lane::Hover);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+        let next = Arc::new(Document::decode(doc.source().to_path_buf(), 2, b"fn newer() {}\n"));
+        semantics.servers[0].desired.insert(next.source().to_path_buf(), next.clone());
+        for request in 50..=81 { semantics.servers[0].request(Question::Definition, json!({}), request).unwrap(); }
+        assert_eq!(semantics.servers[0].deferred.len(), 1);
+        assert!(semantics.servers[0].pending.is_empty());
+        assert_eq!(Arc::weak_count(next.source_meta()), 0, "deferred requests capture no pre-admission context");
+        semantics.cancel_lane(Lane::Foreground);
+        semantics.servers[0].desired = semantics.servers[0].open.clone();
+        semantics.servers[0].request(Question::Definition, json!({}), 90).unwrap();
+        let id = semantics.servers[0].next_id;
+        let (tx, _) = async_channel::bounded(8);
+        let outcome = semantics.event(Event::Message { session, message: json!({ "jsonrpc": "2.0", "id": id, "result": null }) }, &tx);
+        assert!(semantics.servers[0].pending.is_empty());
+        assert_eq!(outcome.replies[0].sources.len(), 1);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak + 1, "the reply owns the original map once");
+        drop(outcome);
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+        semantics.servers[0].request(Question::Definition, json!({}), 91).unwrap();
+        drop(semantics.event(Event::Exited { session, reason: "fixture stopped".into() }, &tx));
+        assert!(semantics.servers[0].pending.is_empty() && semantics.servers[0].deferred.is_empty());
+        assert_eq!(Arc::weak_count(doc.source_meta()), weak);
+    }
 
     #[test]
     fn stderr_retains_bounded_raw_head_and_tail_across_arbitrary_chunks() {

@@ -889,7 +889,7 @@ pub enum Completion {
     /// A call-hierarchy level, located: each function with its call site.
     /// `limited`: the usages it was read from stopped at the limit (a syntax-built level may miss children).
     /// `indexing`: the server was still loading or indexing when it answered.
-    HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool },
+    HierarchyLevel { request: u64, level: Vec<(Call, semantics::Target)>, limited: bool, indexing: bool, error: Option<String> },
     /// The kind of results `id`'s hierarchy root, read from its file's declarations.
     HierarchyRootKind { id: u64, kind: highlight::DeclKind },
     /// A checkout (or new branch, named `label`; `made` when it was only created) in the repository at `root` ended.
@@ -4211,7 +4211,7 @@ impl Session {
         let range = serde_json::json!({ "start": semantics::lsp::position(&doc, name.start, encoding), "end": semantics::lsp::position(&doc, name.end, encoding) });
         let text = doc.text()[name.clone()].to_owned();
         let decl = held.as_deref().and_then(|d| root_kind(d, name.start));
-        let root = Call { item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": text }), name: text, kind: 0, decl, calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
+        let root = Call { source: Some(semantics::SourceVersion::new(&doc)), item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": text }), name: text, kind: 0, decl, calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
         let site = semantics::hit_at(doc.source(), &doc, name.start, name.end);
         self.search_seq += 1;
         let id = self.search_seq;
@@ -4508,7 +4508,8 @@ impl Session {
                 if fence.source.as_ref().is_some_and(|source| !state.sources.buffers.get(&source.key.buffer).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| source.matches(snapshot))) { return false; }
                 match lane {
                     semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
-                    semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node)),
+                    semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node
+                        && fence.node.and_then(|node| h.nodes.get(node)).is_some_and(|node| Self::hierarchy_item_current(state, &node.call)))),
                     semantics::Lane::Hover | semantics::Lane::Highlight => false,
                 }
             }
@@ -4527,6 +4528,7 @@ impl Session {
     fn target_source<'a>(state: &'a State, path: &Path) -> Option<&'a Arc<crate::text::TextSnapshot>> {
         state.sources.buffers.iter().find_map(|(buffer, entry)| {
             let source = entry.snapshot.as_ref()?;
+            if !entry.pinned() && !state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && tab.loaded) { return None; }
             (source.source() == path || state.sources.aliases.get(path) == Some(buffer)
                 || state.tabs.iter().any(|tab| tab.buffer == Some(*buffer) && (tab.source == path || tab.canonical.as_deref() == Some(path)))).then_some(source)
         })
@@ -4536,6 +4538,24 @@ impl Session {
         match (target.stamp, Self::target_source(&self.state, &target.path)) {
             (None, Some(source)) => semantics::SourceVersion::new(&target.doc).matches_snapshot(source),
             (Some(_), None) => true,
+            _ => false,
+        }
+    }
+
+    fn result_target_compatible(&self, target: &semantics::Target) -> bool {
+        let Some(results) = &self.state.results else { return true };
+        if let Some(source) = results.captured.get(&target.path) {
+            return source.identity.key.version == target.doc.version()
+                && source.identity.metadata.ptr_eq(&Arc::downgrade(target.doc.source_meta()));
+        }
+        results.disk_sources.get(&target.hit.path).is_none_or(|source| Some(source.stamp) == target.stamp && Some(source.digest) == target.decoded_digest)
+    }
+
+    fn hierarchy_item_current(state: &State, call: &Call) -> bool {
+        let Some(path) = call.item["uri"].as_str().and_then(semantics::lsp::uri_path) else { return call.source.is_none() };
+        match (&call.source, Self::target_source(state, &path)) {
+            (Some(source), Some(current)) => source.matches_snapshot(current),
+            (None, None) => true,
             _ => false,
         }
     }
@@ -4634,12 +4654,13 @@ impl Session {
         let request = asking.request;
         // A hierarchy's root: its place is located as a definition's is.
         if let Ask::CallHierarchy(_) | Ask::TypeHierarchy(_) = ask {
-            let Some(root) = hierarchy::prepare(&value) else {
+            let Some(mut root) = hierarchy::prepare(&value) else {
                 self.state.asking = None;
                 let none = if matches!(ask, Ask::TypeHierarchy(_)) { "Not a type" } else { "No call hierarchy here" };
                 self.state.messages.push(format!("{}: {none}", ask.label()));
                 return Effect { repaint: true, copy: None };
             };
+            root.source = root.item["uri"].as_str().and_then(semantics::lsp::uri_path).and_then(|path| reply.sources.get(&path)).cloned();
             value = serde_json::json!([root.at.clone()]);
             if let Some(a) = self.state.asking.as_mut() {
                 a.root = Some(root);
@@ -4695,11 +4716,12 @@ impl Session {
                         Err(ReadError::Failed(e)) => Err(e),
                     }
                 };
-                let targets = match (ask, asked_doc) {
+                let mut targets = match (ask, asked_doc) {
                     (Ask::FileSymbols, Some(doc)) => semantics::file_symbols_while(&value, &doc, encoding, limit, &|| lease.wanted()),
                     (Ask::FileSymbols, None) => semantics::Targets { failed: vec!["the file is no longer open in the language server; ask again".into()], ..Default::default() },
                     _ => semantics::targets_while(&value, limit, encoding, provider, session, &open, &read, &|| lease.wanted()),
                 };
+                semantics::capture_target_digests(targets.found.iter_mut());
                 lease.send(Completion::Targets { request, session, provider, origin, indexing, targets });
             }
         }).is_err() { return self.result_failed(&fence, "semantic analysis capacity is full".into()); }
@@ -5564,9 +5586,16 @@ impl Session {
                 }
                 Effect { repaint: true, copy: None }
             }
-            Completion::HierarchyLevel { request, level, limited, indexing } => {
+            Completion::HierarchyLevel { request, level, limited, indexing, error } => {
+                let stale = level.iter().any(|(call, target)| !Self::hierarchy_item_current(&self.state, call)
+                    || !self.semantic_target_current(target) || !self.result_target_compatible(target));
                 let Some(h) = self.state.results.as_mut().and_then(|r| r.hierarchy.as_mut()) else { return Effect::default() };
                 let Some(node) = h.loading(request) else { return Effect::default() };
+                if let Some(error) = error.or_else(|| stale.then(|| "Hierarchy target source changed; ask for its hierarchy again".into())) {
+                    h.failed(node, request, error);
+                    if let Some(results) = &mut self.state.results { results.rebuild_hierarchy(); }
+                    return Effect { repaint: true, copy: None };
+                }
                 if limited {
                     self.state.messages.push(format!("Type hierarchy: only the first {} usages of {} were read; this level may be incomplete", semantics::TYPE_LEVEL_LIMIT, h.nodes[node].call.name));
                 }
@@ -5681,7 +5710,7 @@ impl Session {
             return Effect { repaint: true, copy: None };
         }
         targets.found.retain(|target| {
-            let current = self.semantic_target_current(target);
+            let current = self.semantic_target_current(target) && (asked.ask != Ask::Symbols || self.result_target_compatible(target));
             if !current { targets.failed.push(format!("{}: target source changed; ask again", target.path.display())); }
             current
         });
@@ -5815,6 +5844,8 @@ impl Session {
     /// Unfold call-hierarchy node `node`, asking for its level the first time (or again after a failure); fold it
     /// when it is unfolded. One level loads at a time: one still loading is given up (unfolding it asks again).
     fn unfold_call(&mut self, node: usize) -> Effect {
+        let item_current = self.state.results.as_ref().and_then(|r| r.hierarchy.as_ref()).and_then(|h| h.nodes.get(node))
+            .is_some_and(|n| Self::hierarchy_item_current(&self.state, &n.call));
         let Some(r) = self.state.results.as_mut() else { return Effect::default() };
         let Some(h) = r.hierarchy.as_mut() else { return Effect::default() };
         let Some(n) = h.nodes.get_mut(node).filter(|n| !n.recursive) else { return Effect::default() };
@@ -5827,6 +5858,11 @@ impl Session {
                 return Effect { repaint: true, copy: None };
             }
             _ => {}
+        }
+        if !item_current {
+            n.state = hierarchy::Children::Failed("Hierarchy target source changed; ask for its hierarchy again".into());
+            r.rebuild_hierarchy();
+            return Effect { repaint: true, copy: None };
         }
         for other in &mut h.nodes {
             if matches!(other.state, hierarchy::Children::Loading(_)) {
@@ -5895,10 +5931,18 @@ impl Session {
         let latest = self.hierarchy_latest.clone();
         let semantics = &self.state.semantics;
         if self.analysis.request_result(fence.clone(), Priority::Visible, || {
-            let open = semantics.sent(session);
+            let mut open = semantics.sent(session);
+            let sources = reply.sources;
+            let mut blocked: std::collections::HashSet<_> = sources.keys().cloned().collect();
+            open.retain(|path, doc| {
+                let current = sources.get(path).is_some_and(|source| source.matches(doc));
+                if current { blocked.remove(path); } else { blocked.insert(path.clone()); }
+                current
+            });
             move |lease| {
                 let read = |path: &Path| {
                     if !lease.wanted() { return Err("request was cancelled".into()); }
+                    if blocked.contains(path) { return Err("target source changed since the request; ask again".into()); }
                     match read(path) {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
@@ -5913,21 +5957,27 @@ impl Session {
                     let usages = semantics::targets_while(&value, semantics::TYPE_LEVEL_LIMIT, encoding, provider, session, &open, &read, &|| lease.wanted());
                     if !lease.wanted() { return; }
                     let limited = usages.limited;
+                    let error = usages.failed.first().cloned();
                     let current = lease.cancellation();
-                    let level = hierarchy::merge_targets(syntax_level_while(usages.found, direction, encoding, move || current() && latest.load(Ordering::Acquire) == request));
-                    lease.send(Completion::HierarchyLevel { request, level, limited, indexing });
+                    let mut level = hierarchy::merge_targets(syntax_level_while(usages.found, direction, encoding, move || current() && latest.load(Ordering::Acquire) == request));
+                    semantics::capture_target_digests(level.iter_mut().map(|(_, target)| target));
+                    lease.send(Completion::HierarchyLevel { request, level, limited, indexing, error });
                 } else {
                     let types = direction.is_type();
                     let calls = if types { hierarchy::types(&value) } else { hierarchy::calls(&value, direction, &parent) };
                     // Each file is read once for all calls in this admitted result.
                     let files = std::cell::RefCell::new(std::collections::HashMap::new());
                     let read = |path: &Path| files.borrow_mut().entry(path.to_owned()).or_insert_with(|| read(path)).clone();
-                    let level = calls.into_iter().take_while(|_| lease.wanted()).filter_map(|call| {
-                        let t = semantics::targets_while(&serde_json::json!([call.at.clone()]), 1, encoding, provider, session, &open, &read, &|| lease.wanted()).found.pop()?;
-                        Some((call, t))
+                    let mut error = None;
+                    let level = calls.into_iter().take_while(|_| lease.wanted()).filter_map(|mut call| {
+                        call.source = call.item["uri"].as_str().and_then(semantics::lsp::uri_path).and_then(|path| sources.get(&path)).cloned();
+                        let mut targets = semantics::targets_while(&serde_json::json!([call.at.clone()]), 1, encoding, provider, session, &open, &read, &|| lease.wanted());
+                        if error.is_none() { error = targets.failed.into_iter().next(); }
+                        Some((call, targets.found.pop()?))
                     }).collect();
-                    let level = if types { hierarchy::merge_targets(level) } else { level };
-                    lease.send(Completion::HierarchyLevel { request, level, limited: false, indexing });
+                    let mut level = if types { hierarchy::merge_targets(level) } else { level };
+                    semantics::capture_target_digests(level.iter_mut().map(|(_, target)| target));
+                    lease.send(Completion::HierarchyLevel { request, level, limited: false, indexing, error });
                 }
             }
         }).is_err() { return self.result_failed(&fence, "semantic analysis capacity is full".into()); }
@@ -8094,7 +8144,7 @@ fn syntax_level_while(usages: Vec<semantics::Target>, direction: Direction, enco
                 let uri = semantics::lsp::file_uri(&path);
                 let range = serde_json::json!({ "start": semantics::lsp::position(&doc, other.start, encoding), "end": semantics::lsp::position(&doc, other.end, encoding) });
                 let name = doc.text()[other.clone()].to_owned();
-                let call = Call { item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": name }), name, kind: 0, decl: Some(decl), calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
+                let call = Call { source: t.stamp.is_none().then(|| semantics::SourceVersion::new(&doc)), item: serde_json::json!({ "uri": uri, "selectionRange": range, "name": name }), name, kind: 0, decl: Some(decl), calls: 1, at: serde_json::json!({ "uri": uri, "range": range }) };
                 // The row goes to the child's name, on the relation's header.
                 let hit = semantics::hit_at(&path, &doc, other.start, other.end);
                 out.push((call, semantics::Target { path: path.clone(), stamp: t.stamp, doc: doc.clone(), hit, at: other.start, decoded_digest: t.decoded_digest }));
