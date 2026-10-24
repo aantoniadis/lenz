@@ -4,7 +4,7 @@
 
 **Blocked by:** 36: Rename and move open files and folders; 32: Recover unsaved drafts with explicit discard tombstones.
 
-**Status:** ready-for-agent
+**Status:** claimed
 
 - [ ] Protect all affected dirty/shared buffers before deletion and reconcile explorer, watchers and provider state.
 - [ ] Recoverable deletion can be restored where the platform supports it; permanent deletion requires an explicit action/confirmation.
