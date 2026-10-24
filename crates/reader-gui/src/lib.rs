@@ -121,6 +121,8 @@ pub enum Modal {
     /// Checkout Tag or Revision: what is typed so far, and why it was refused.
     /// Checkout Tag or Revision….
     Revision { input: String, error: Option<String> },
+    /// The keymap: its rows' highlight, and whether the next key becomes a shortcut for the highlighted command.
+    Keymap { at: usize, capture: bool },
 }
 
 /// What a details dialog is: plain text, the core's commit popup, or its checkout-problem dialog.
@@ -1016,6 +1018,11 @@ impl ReaderView {
                     self.modal = Some(Modal::LanguageServer { at: 0 });
                     cx.notify();
                 }
+                InterfaceAction::Keymap => {
+                    self.dispatch(Command::CloseDocumentation, cx);
+                    self.modal = Some(Modal::Keymap { at: 0, capture: false });
+                    cx.notify();
+                }
                 InterfaceAction::ServerDetails | InterfaceAction::StatusDetails | InterfaceAction::EditingPreferences => {
                     self.dispatch(Command::CloseDocumentation, cx);
                     self.modal_scroll.set(0);
@@ -1309,18 +1316,14 @@ impl ReaderView {
             cx.notify();
             return;
         }
-        if key=="q" && ctrl && shift && !k.modifiers.alt { return self.run(CommandId::QuitAll,window,cx); }
-        if key == "f2" && shift && !ctrl && !k.modifiers.alt {
-            return self.run(CommandId::StatusDetails, window, cx);
-        }
-        if ctrl && !k.modifiers.alt && ((key == "k" && !shift) || (key == "p" && shift) || (key == "a" && shift)) {
-            return self.run(if key == "k" { CommandId::SearchEverywhere } else { CommandId::FindAction }, window, cx);
-        }
-        if ctrl && shift && key == "n" {
-            return self.run(if k.modifiers.alt { CommandId::FindSymbol } else { CommandId::FindFile }, window, cx);
-        }
-        if (key == "." && ctrl && shift) || (key == ">" && ctrl) {
-            return self.run(CommandId::FocusBreadcrumbs, window, cx);
+        // Semantic commands take their keys from the session's keymap: a preset or an override changes what runs, and
+        // an unavailable command says why instead of vanishing. Typing keys are never bound there.
+        if let Some(id) = self.key_command(ev) {
+            match self.session.disabled(id) {
+                Some(why) => self.dispatch(Command::Notice(why.into()), cx),
+                None => self.run(id, window, cx),
+            }
+            return;
         }
         if let Some((pane, i)) = self.crumb_focus {
             let last = self.crumb_hits.iter().filter(|h| h.pane == pane).filter_map(|h| h.crumb).max().unwrap_or(0);
@@ -1345,9 +1348,6 @@ impl ReaderView {
         }
         if key == "f3" && !ctrl {
             return self.run(if shift { CommandId::PreviousMatch } else { CommandId::NextMatch }, window, cx);
-        }
-        if key == "z" && k.modifiers.alt && !ctrl && !shift {
-            return self.run(CommandId::SoftWrap, window, cx);
         }
         if self.results_focus && self.results_key(key, ctrl, window, cx) {
             return;
@@ -1385,31 +1385,12 @@ impl ReaderView {
         }
         let page = self.rows.max(1);
         match (key, ctrl, shift) {
-            // Folds: Ctrl+- / Ctrl+=, with Shift for all. Linux reports Ctrl+Shift+- / Ctrl+Shift+= as `_` / `+` without
-            // Shift (so the keypad's + there is Expand All too).
-            ("-", true, false) => self.run(CommandId::Collapse, window, cx),
-            ("=", true, false) => self.run(CommandId::Expand, window, cx),
-            ("-" | "_", true, true) | ("_", true, false) => self.run(CommandId::CollapseAll, window, cx),
-            ("=" | "+", true, true) | ("+", true, false) => self.run(CommandId::ExpandAll, window, cx),
             ("v", true, true) => self.run(CommandId::MarkdownSource, window, cx),
             ("tab", true, false) => self.run(CommandId::NextTab, window, cx),
             ("tab", true, true) => self.run(CommandId::PreviousTab, window, cx),
             ("k", true, true) => self.run(CommandId::PinTab, window, cx),
-            // Ctrl+\ splits side by side, Ctrl+Shift+\ one above the other; Ctrl+1 / Ctrl+2 focus a pane.
+            // Ctrl+1 / Ctrl+2 focus a pane; Ctrl+` opens Git Branches.
             ("`", true, true) | ("~", true, _) => self.run(CommandId::GitBranches, window, cx),
-            ("\\", true, false) => self.run(CommandId::SplitRight, window, cx),
-            ("\\", true, true) | ("|", true, _) => self.run(CommandId::SplitDown, window, cx),
-            // Bookmarks (IntelliJ): F11 toggles, Ctrl+F11 picks a key, Shift+F11 lists; Ctrl+Shift+digit sets that key,
-            // Alt+digit goes there. Ctrl+E recent files, Ctrl+Alt+E recent locations.
-            ("f11", true, false) => match self.session.disabled(CommandId::SetBookmarkMnemonic) {
-                // The chooser cannot open: the toggle, disabled for the same reason, says why.
-                Some(_) => self.dispatch(Command::ToggleBookmark, cx),
-                None => self.run(CommandId::SetBookmarkMnemonic, window, cx),
-            },
-            ("f11", false, true) => self.run(CommandId::ShowBookmarks, window, cx),
-            ("f11", false, false) => self.dispatch(Command::ToggleBookmark, cx),
-            ("e", true, false) if k.modifiers.alt => self.run(CommandId::RecentLocations, window, cx),
-            ("e", true, false) => self.run(CommandId::RecentFiles, window, cx),
             // Linux reports Ctrl+Shift+digit as the shifted symbol (US layout) with Shift cleared, macOS as the digit.
             (d, true, true) if d.len() == 1 && d.as_bytes()[0].is_ascii_digit() => self.dispatch(Command::SetMnemonic(d.chars().next().unwrap_or('0')), cx),
             (s, true, _) if s.len() == 1 && ")!@#$%^&*(".contains(s) => self.dispatch(Command::SetMnemonic(char::from(b'0' + ")!@#$%^&*(".find(s).unwrap_or(0) as u8)), cx),
@@ -1426,45 +1407,17 @@ impl ReaderView {
                 self.modal = Some(Modal::Commands { at: 0 });
                 cx.notify();
             }
-            ("o", true, false) => self.run(CommandId::Open, window, cx),
-            // The spec's table: Ctrl+Shift+O outlines the file, Ctrl+T finds declarations (workspace symbols).
-            ("o", true, true) => self.run(CommandId::Outline, window, cx),
-            ("p", true, false) => self.run(CommandId::FindFile, window, cx),
-            ("f", true, true) => self.run(CommandId::SearchProject, window, cx),
-            ("f", true, false) => self.run(CommandId::FindInFile, window, cx),
-            ("d", true, false) => self.run(CommandId::CompareSelected, window, cx),
-            ("d", true, true) => self.run(CommandId::CompareSaved, window, cx),
-            ("g", true, false) => self.run(CommandId::GoToLine, window, cx),
+            // Ctrl+Shift+E shows and focuses the explorer; Ctrl+T finds declarations (workspace symbols).
             ("e", true, true) => {
                 self.tree_focus = self.session.state().has_tree();
                 self.results_focus &= !self.tree_focus;
                 self.tree_shown |= self.tree_focus;
                 cx.notify();
             }
-            // Ctrl+Alt+B implementations, Ctrl+Shift+B the type's definition; Ctrl+B alone shows or hides the explorer.
-            ("b", true, false) if k.modifiers.alt => self.run(CommandId::Implementation, window, cx),
-            ("b", false, false) if k.modifiers.alt => self.run(CommandId::AnnotateBlame, window, cx),
-            ("b", true, true) => self.run(CommandId::TypeDefinition, window, cx),
-            ("h", true, false) if k.modifiers.alt => self.run(CommandId::CallHierarchy, window, cx),
-            ("h", true, false) => self.run(CommandId::TypeHierarchy, window, cx),
-            ("q", true, false) => self.run(CommandId::Documentation, window, cx),
             ("b", true, false) => self.run(CommandId::ToggleExplorer, window, cx),
-            ("s", true, false) => self.run(CommandId::Save, window, cx),
-            ("s", true, true) => self.run(CommandId::SaveAs, window, cx),
-            ("n", true, false) => self.run(CommandId::NewDocument, window, cx),
-            ("r", true, false) | ("f5", _, _) => self.run(CommandId::Reload, window, cx),
-            // Ctrl+W / Ctrl+Shift+W grow and shrink the selection (IntelliJ); Ctrl+F4 closes the tab.
-            ("w", true, false) => self.run(CommandId::ExtendSelection, window, cx),
-            ("w", true, true) => self.run(CommandId::ShrinkSelection, window, cx),
-            ("f4", true, _) => self.run(CommandId::Close, window, cx),
             ("a", true, false) => self.run(CommandId::SelectAll, window, cx),
             ("c", true, false) => self.run(CommandId::Copy, window, cx),
             ("t", true, false) => self.run(CommandId::FindDeclarations, window, cx),
-            // F12 follows a definition, Alt+F12 peeks at it (Option+F12 on macOS).
-            ("f12", false, false) if k.modifiers.alt => self.run(CommandId::PeekDefinition, window, cx),
-            ("f12", false, true) => self.run(CommandId::Usages, window, cx),
-            ("f12", false, false) => self.run(CommandId::Definition, window, cx),
-            ("f2", false, false) => self.run(CommandId::LanguageServer, window, cx),
             ("escape", false, false) if self.session.state().asking().is_some() => self.dispatch(Command::CancelSemantic, cx),
             ("left", false, true) => self.extend(Motion::Left, cx),
             ("right", false, true) => self.extend(Motion::Right, cx),
@@ -1485,6 +1438,19 @@ impl ReaderView {
             }
             _ => {}
         }
+    }
+
+    /// The command the session's keymap gives this key press, if any.
+    fn key_command(&self, ev: &KeyDownEvent) -> Option<CommandId> {
+        let k = &ev.keystroke;
+        let ctrl = k.modifiers.control || k.modifiers.platform;
+        let press = reader_core::keymap::KeyPress::new(&k.key, ctrl, k.modifiers.shift, k.modifiers.alt)?;
+        self.session.key_command(&press)
+    }
+
+    /// The key a menu shows: the session's keymap, or the fixed editing keys this adapter maps itself.
+    pub fn key_hint(&self, id: CommandId) -> Option<String> {
+        self.session.key_hint(id)
     }
 
     /// Accept the open list modal's highlighted row, as Enter does: run the command, pick the theme, open the recent
@@ -1568,7 +1534,7 @@ impl ReaderView {
                     None => self.modal = Some(Modal::Places { list, query, at }),
                 }
             }
-            m @ Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic) => self.modal = m,
+            m @ Some(Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::Keymap { .. }) => self.modal = m,
             None => {}
         }
     }
@@ -1594,6 +1560,10 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
+            Some(Modal::Keymap { at, .. }) => match row.checked_sub(1) {
+                Some(i) if i < self.session.keymap().rows().len() => *at = i,
+                _ => return,
+            },
             Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
@@ -1612,6 +1582,56 @@ impl ReaderView {
             return self.navigation_key(ev, window, cx);
         }
         let key = ev.keystroke.key.as_str();
+        // The keymap: arrows move, Enter captures the next key as the highlighted command's shortcut, Delete restores
+        // its preset chord, Escape leaves a capture or closes. The header row says which state it is in.
+        if let Some(Modal::Keymap { at, capture }) = self.modal.clone() {
+            let rows = self.session.keymap().rows();
+            let at = at.min(rows.len().saturating_sub(1));
+            if capture {
+                if key == "escape" {
+                    self.modal = Some(Modal::Keymap { at, capture: false });
+                    return cx.notify();
+                }
+                let k = &ev.keystroke;
+                let ctrl = k.modifiers.control || k.modifiers.platform;
+                let Some(press) = reader_core::keymap::KeyPress::new(&k.key, ctrl, k.modifiers.shift, k.modifiers.alt) else {
+                    return cx.notify();
+                };
+                let Some(chord) = reader_core::keymap::Chord::from_press(&press) else {
+                    self.dispatch(Command::Notice("A shortcut needs Ctrl, Alt or a function key".into()), cx);
+                    return cx.notify();
+                };
+                self.modal = Some(Modal::Keymap { at, capture: false });
+                if let Some(row) = rows.get(at) {
+                    self.dispatch(Command::SetKeybinding { command: row.command, chord: chord.label() }, cx);
+                }
+                return cx.notify();
+            }
+            self.modal = Some(Modal::Keymap { at, capture: false });
+            match key {
+                "escape" => self.close_modal(cx),
+                "enter" => self.modal = Some(Modal::Keymap { at, capture: true }),
+                "delete" => {
+                    if let Some(row) = rows.get(at) {
+                        self.dispatch(Command::ResetKeybinding(row.command), cx);
+                    }
+                }
+                "up" | "down" | "pageup" | "pagedown" | "home" | "end" => {
+                    let last = rows.len().saturating_sub(1);
+                    let next = match key {
+                        "up" => at.saturating_sub(1),
+                        "down" => (at + 1).min(last),
+                        "home" => 0,
+                        "end" => last,
+                        "pageup" => at.saturating_sub(10),
+                        _ => (at + 10).min(last),
+                    };
+                    self.modal = Some(Modal::Keymap { at: next, capture: false });
+                }
+                _ => {}
+            }
+            return cx.notify();
+        }
         if let Some(Modal::StatusDetails { kind: Details::Checkout, .. }) = &self.modal {
             // s Smart Checkout, f Force, y confirms the discard (another key than f, and never a held one); Escape
             // cancels; Enter takes the first safe choice.
@@ -2035,7 +2055,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. }) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Keymap { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -3237,7 +3257,7 @@ impl ReaderView {
     fn context_layout(&self) -> Option<(Bounds<Pixels>, Vec<MenuRow>)> {
         let Some(Modal::Context { entries, x, y, scroll, .. }) = &self.modal else { return None };
         let label = |e: &MenuEntry| match e {
-            MenuEntry::Command(id) => id.label().chars().count() + key_hint(*id).map_or(0, |k| k.chars().count() + 4),
+            MenuEntry::Command(id) => id.label().chars().count() + self.key_hint(*id).map_or(0, |k| k.chars().count() + 4),
             MenuEntry::Separator => 0,
         };
         let w = ((entries.iter().map(label).max().unwrap_or(0) as f32 + 4.0) * self.char_w).min(self.width.max(0.0));
@@ -4225,6 +4245,19 @@ impl ReaderView {
                 (format!("Current: {}", self.session.theme_source()), None),
             ].into_iter().chain(ids.iter().map(|(_, label)| (label.clone(), None))).collect(),
             Some(Modal::Recent { .. }) => self.session.state().recent().iter().map(|r| (r.display().to_string(), None)).collect(),
+            Some(Modal::Keymap { capture, .. }) => {
+                let hint = if *capture {
+                    "Press the new shortcut (Esc cancels); its command keeps its menu entry either way".to_string()
+                } else {
+                    format!("Keymap: {} · Enter rebinds the selected command · Delete restores its preset key · Esc closes", self.session.keymap().preset().label())
+                };
+                std::iter::once((hint, None))
+                    .chain(self.session.keymap().rows().into_iter().map(|r| {
+                        let note = r.note.map_or_else(String::new, |note| format!(" ({note})"));
+                        (format!("{} — {}{note}", r.label, r.chords), None)
+                    }))
+                    .collect()
+            }
             Some(Modal::Declarations { query, semantic: false }) => {
                 let tab = if self.session.disabled(CommandId::Symbols).is_none() { "; Tab: language server symbols" } else { "" };
                 vec![(format!("› {query}"), None), (format!("Find declarations by name (syntactic candidates) — results below; Enter to browse them{tab}"), None)]
@@ -4668,7 +4701,7 @@ impl Render for ReaderView {
                 .into_iter()
                 .enumerate()
                 .map(|(i, (top, h, e))| match e {
-                    MenuEntry::Command(id) => (top, h, Some((id.label(), key_hint(id), self.session.disabled(id).is_none(), i == at))),
+                    MenuEntry::Command(id) => (top, h, Some((id.label(), self.key_hint(id), self.session.disabled(id).is_none(), i == at))),
                     MenuEntry::Separator => (top, h, None),
                 })
                 .collect();
@@ -5391,9 +5424,6 @@ fn metrics(font: &Font) -> Metrics<'_> {
 type MenuRow = (f32, f32, MenuEntry);
 fn context_row_height(entry: MenuEntry) -> f32 { if matches!(entry, MenuEntry::Separator) { line_h() / 2.0 } else { line_h() } }
 
-/// The key that runs `id`, as the context menu shows it.
-fn key_hint(id: CommandId) -> Option<&'static str> { if id == CommandId::CloseWindow { None } else { id.shortcut() } }
-
 /// The word (letters, digits, `_`) around byte `at` of `text`, as (start, end); the byte itself when none.
 fn word_around(text: &str, at: usize) -> (usize, usize) {
     let word = |c: char| c.is_alphanumeric() || c == '_';
@@ -5443,6 +5473,7 @@ impl Modal {
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,
+            Modal::Keymap { at, .. } => *at + 1,
         }
     }
 }

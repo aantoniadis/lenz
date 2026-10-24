@@ -41,6 +41,7 @@ use lenz_content::{
 mod project_search;
 mod navigation_query;
 
+use crate::keymap::{self, Keymap, KeymapPreset};
 use crate::preferences::{Indent, ProjectPreferences};
 use crate::{
     cache::{INACTIVE_BYTES, InactiveCache, Stamp},
@@ -367,6 +368,11 @@ pub enum Command {
     RebuildIndex,
     /// The open project's own indentation (`None`: EditorConfig and language defaults only); remembered outside it.
     SetProjectIndent(Option<crate::preferences::Indent>),
+    SetKeymapPreset(KeymapPreset),
+    /// Bind `command` to the chord `chord` labels (`Ctrl+Alt+S`); refused when another command runs it.
+    SetKeybinding { command: CommandId, chord: String },
+    ResetKeybinding(CommandId),
+    ResetKeymap,
     /// Whether Save formats the open project's files first (off: formatting is explicit); remembered outside it.
     SetFormatOnSave(bool),
     /// An SVG: switch between its rendering and its source text.
@@ -396,7 +402,7 @@ pub enum Motion {
 }
 
 /// The user-facing commands, as menus list them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CommandId {
     Open,
     OpenFolder,
@@ -570,6 +576,14 @@ pub enum CommandId {
     IndentInherit,
     /// Format on Save for the open project; off by default.
     FormatOnSave,
+    /// Every command's chord, its preset origin and any binding an override displaced.
+    Keymap,
+    /// Follow IntelliJ's chords, the default.
+    KeymapIntelliJ,
+    /// Follow VS Code's chords where VS Code has the same action.
+    KeymapVsCode,
+    /// Forget every per-command override.
+    ResetKeymap,
 }
 
 /// How the file panel is split: side by side, or one pane above the other.
@@ -592,7 +606,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 137] = [
+    pub const ALL: [CommandId; 141] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -730,6 +744,10 @@ impl CommandId {
         Self::IndentFourSpaces,
         Self::IndentInherit,
         Self::FormatOnSave,
+        Self::Keymap,
+        Self::KeymapIntelliJ,
+        Self::KeymapVsCode,
+        Self::ResetKeymap,
     ];
 
     pub fn label(self) -> &'static str {
@@ -744,6 +762,10 @@ impl CommandId {
             Self::IndentFourSpaces => "Project Indentation: 4 Spaces",
             Self::IndentInherit => "Project Indentation: EditorConfig and Language Defaults",
             Self::FormatOnSave => "Format on Save for This Project",
+            Self::Keymap => "Keymap…",
+            Self::KeymapIntelliJ => "Keymap: IntelliJ (Default)",
+            Self::KeymapVsCode => "Keymap: VS Code",
+            Self::ResetKeymap => "Reset All Keybindings",
             Self::Open => "Open File…",
             Self::OpenFolder => "Open Folder…",
             Self::OpenRecent => "Open Recent Folder…",
@@ -924,6 +946,8 @@ pub struct Action {
     pub disabled: Option<&'static str>,
     /// A setting's state (`None`: not a setting).
     pub on: Option<bool>,
+    /// The keys that run it under the session's keymap (or the standard editing keys adapters map themselves).
+    pub shortcut: Option<String>,
 }
 
 /// Results of background work, applied through [`Session::dispatch`].
@@ -2125,6 +2149,8 @@ pub struct Session {
     settings_file: PathBuf,
     settings_saves: Arc<std::sync::Mutex<u64>>,
     settings_seq: u64,
+    /// The preset and overrides resolved once: labels and key dispatch share it.
+    keymap: Keymap,
     runtime_request: u64,
     restore_workspace: bool,
     watcher: Watcher,
@@ -2227,6 +2253,7 @@ impl Session {
     pub fn with_text_input(config: Config, text_input_enabled: bool) -> Self {
         let recent = read_recent(&config.recent);
         let settings = read_settings(&config.settings);
+        let keymap = keymap_from_settings(&settings);
         let mut themes = ThemeService::new_deferred(config.themes, config.overrides, config.dark);
         let messages = themes.take_notices();
         // Bounded: a scan that outruns the UI waits instead of queueing the whole inventory.
@@ -2331,6 +2358,7 @@ impl Session {
             settings_file: config.settings,
             settings_saves: Arc::default(),
             settings_seq: 0,
+            keymap,
             runtime_request: 0,
             restore_workspace: false,
             watcher,
@@ -2442,7 +2470,7 @@ impl Session {
     }
 
     pub fn actions(&self) -> Vec<Action> {
-        CommandId::ALL.iter().map(|&id| Action { id, label: id.label(), disabled: self.disabled(id), on: self.on(id) }).collect()
+        CommandId::ALL.iter().map(|&id| Action { id, label: id.label(), disabled: self.disabled(id), on: self.on(id), shortcut: self.key_hint(id) }).collect()
     }
 
     /// Toggle `id`'s state for the menus (`None`: not a toggle): a setting, or a find option (the session's, which the
@@ -2450,6 +2478,8 @@ impl Session {
     fn on(&self, id: CommandId) -> Option<bool> {
         let o = self.find_options;
         match id {
+            CommandId::KeymapIntelliJ => Some(self.state.settings.keymap == KeymapPreset::IntelliJ),
+            CommandId::KeymapVsCode => Some(self.state.settings.keymap == KeymapPreset::VsCode),
             CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id())).map(|view| view.read_only()),
             CommandId::MatchCase => Some(o.case),
             CommandId::WholeWord => Some(o.word),
@@ -2697,6 +2727,10 @@ impl Session {
                 (Some(d), _) if d.language().and_then(semantics::provider::for_language).is_none() => Some("No language server for this language"),
                 _ => None,
             },
+            CommandId::Keymap => None,
+            CommandId::KeymapIntelliJ => (self.state.settings.keymap == KeymapPreset::IntelliJ).then_some("The IntelliJ keymap is already in use"),
+            CommandId::KeymapVsCode => (self.state.settings.keymap == KeymapPreset::VsCode).then_some("The VS Code keymap is already in use"),
+            CommandId::ResetKeymap => self.keymap.overrides().is_empty().then_some("No shortcut is modified"),
         }
     }
 
@@ -4346,6 +4380,10 @@ impl Session {
             }
             Command::SetProjectIndent(indent) => self.set_project_preferences(|p| p.indent = indent),
             Command::SetFormatOnSave(on) => self.set_project_preferences(|p| p.format_on_save = on),
+            Command::SetKeymapPreset(preset) => self.set_keymap_preset(preset),
+            Command::SetKeybinding { command, chord } => self.set_keybinding(command, &chord),
+            Command::ResetKeybinding(command) => self.reset_keybinding(command),
+            Command::ResetKeymap => self.reset_keymap(),
         }
     }
 
@@ -8032,6 +8070,95 @@ impl Session {
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
+    /// The preset and overrides menus and key dispatch share.
+    pub fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// The keys a menu shows for `id`: its keymap chords, or the fixed editing key adapters map as text input.
+    pub fn key_hint(&self, id: CommandId) -> Option<String> {
+        self.keymap.hint(id).or_else(|| id.input_hint().map(str::to_owned))
+    }
+
+    /// The command this key press runs under the current keymap, if any.
+    pub fn key_command(&self, press: &keymap::KeyPress) -> Option<CommandId> {
+        self.keymap.command(press)
+    }
+
+    fn set_keymap_preset(&mut self, preset: KeymapPreset) -> Effect {
+        if preset == self.state.settings.keymap {
+            return Effect::default();
+        }
+        self.state.settings.keymap = preset;
+        self.keymap = self.keymap.with_preset(preset);
+        self.save_settings();
+        // A preset change can leave an overridden command holding a chord the new preset gives another command:
+        // say so instead of letting the displaced action look bound.
+        let mut lost: Vec<String> = Vec::new();
+        for id in CommandId::ALL {
+            for (chord, winner) in self.keymap.shadowed(id) {
+                lost.push(format!("{} now runs {}; {} stays in the menus", chord.label(), winner.label(), id.label()));
+            }
+        }
+        let mut message = format!("Keymap: {} (your overrides are kept)", preset.label());
+        if !lost.is_empty() {
+            message.push_str(". ");
+            message.push_str(&lost.join(". "));
+        }
+        self.state.messages.push(message);
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    fn set_keybinding(&mut self, command: CommandId, chord: &str) -> Effect {
+        let Some(parsed) = keymap::Chord::parse(chord) else {
+            self.state.messages.push(format!("{}: a shortcut needs Ctrl, Alt or a function key (Shift may be added)", command.label()));
+            return Effect { repaint: true, copy: None, ..Effect::default() };
+        };
+        match self.keymap.bind(command, parsed.clone()) {
+            Err(keymap::BindError::TakenBy(owner)) => self.state.messages.push(format!(
+                "{} already runs {}; reset that shortcut before giving it to {}",
+                parsed.label(),
+                owner.label(),
+                command.label()
+            )),
+            Err(keymap::BindError::Invalid) => self.state.messages.push(format!("{}: that key cannot be a shortcut", command.label())),
+            Ok(keymap) => {
+                self.keymap = keymap;
+                self.store_keybindings();
+                self.state.messages.push(format!("{}: {}", command.label(), parsed.label()));
+            }
+        }
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    fn reset_keybinding(&mut self, command: CommandId) -> Effect {
+        if !self.keymap.overridden(command) {
+            return Effect::default();
+        }
+        self.keymap = self.keymap.reset(command);
+        self.store_keybindings();
+        let restored = self.keymap.labels(command).unwrap_or_else(|| "no shortcut; it stays in the menus".to_string());
+        self.state.messages.push(format!("{}: {restored} ({})", command.label(), self.keymap.preset().label()));
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    fn reset_keymap(&mut self) -> Effect {
+        if self.keymap.overrides().is_empty() {
+            return Effect::default();
+        }
+        let preset = self.keymap.preset();
+        self.keymap = Keymap::new(preset, Default::default());
+        self.store_keybindings();
+        self.state.messages.push(format!("Every shortcut follows the {} keymap again", preset.label()));
+        Effect { repaint: true, copy: None, ..Effect::default() }
+    }
+
+    /// Remember the keymap's overrides with the other settings, by command slug.
+    fn store_keybindings(&mut self) {
+        self.state.settings.keybindings = self.keymap.overrides_for_settings();
+        self.save_settings();
+    }
+
     fn set_project_preferences(&mut self, change: impl FnOnce(&mut ProjectPreferences)) -> Effect {
         let Some(root) = self.state.project.as_ref().map(|p| p.root().to_owned()) else { return Effect::default() };
         let projects = &mut self.state.settings.projects;
@@ -8366,12 +8493,30 @@ struct Settings {
     /// Project root → its own editing preferences (kept here, never in the project).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     projects: std::collections::BTreeMap<PathBuf, ProjectPreferences>,
+    /// The keyboard language menus and bare keys follow.
+    keymap: KeymapPreset,
+    /// Per-command chords that override the preset, by command slug (`none` leaves a command without one).
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    keybindings: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
     }
+}
+
+/// The remembered preset and overrides; commands or chords this version does not know are left out.
+fn keymap_from_settings(settings: &Settings) -> Keymap {
+    let overrides = settings.keybindings.iter().filter_map(|(command, chord)| {
+        let id = keymap::from_slug(command)?;
+        let chord = match chord.as_str() {
+            "none" => None,
+            text => Some(keymap::Chord::parse(text)?),
+        };
+        Some((id, chord))
+    }).collect();
+    Keymap::new(settings.keymap, overrides)
 }
 
 /// Settings from `file` (at most 64 KiB of JSON); missing or unreadable ones are the defaults.

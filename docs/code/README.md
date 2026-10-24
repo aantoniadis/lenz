@@ -20,14 +20,16 @@ cargo test --release -p reader-core -- --ignored --nocapture open_perf
 cargo test --release -p reader-core --test semantics -- --ignored --nocapture   # real rust-analyzer, if installed
 ```
 
-Keys: Ctrl+O open, F5/Ctrl+R reload, Ctrl+F4 close, Ctrl+A select all, Ctrl+C copy, Shift+arrows/Home/End
-select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse / expand, Ctrl+Shift+- /
-Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll, Ctrl+P find file (`name:line`), Ctrl+G go to
-line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search, Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs,
-Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition, Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B
-implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy, Ctrl+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward, F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks,
-Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
-Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition. In the GUI, Close Window
+Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
+all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse /
+expand, Ctrl+Shift+- / Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll,
+Ctrl+P find file (`name:line`), Ctrl+G go to line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search,
+Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs, Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition,
+Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy,
+Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward,
+F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks, Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered
+bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
+Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. In the GUI, Close Window
 is available through the command menu or native window control; Ctrl+Shift+Q requests Quit All.
 
 The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
@@ -36,15 +38,31 @@ back to the groups. **All commands…** and the bottom-right **Commands** button
 F10 retains the plain full command menu. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10
 still available. Menus consume input before the document beneath them.
 
+### Keymaps
+
+**Keymap: IntelliJ (Default)** and **Keymap: VS Code** choose the keyboard language; VS Code's chords are used where
+VS Code has the same action (Ctrl+P find file, Ctrl+Shift+O symbols, Ctrl+Shift+P actions, Ctrl+T search everywhere,
+Ctrl+W close, Alt+Shift+Left/Right shrink/extend, Ctrl+F12 implementations, Alt+Shift+H call hierarchy, Ctrl+Shift+[ / ]
+fold/unfold, F5 reload), and actions VS Code leaves unbound keep no chord there (outline, quick documentation,
+language-server status, collapse/expand all) instead of reusing a key VS Code gives another action. The choice and
+every override are remembered outside the project in the Reader's settings file.
+
+**Keymap…** lists each command with its chords, the preset origin of each override and any binding an override
+displaced. Enter takes the next key as the selected command's shortcut, Delete restores the preset's chord, Esc
+leaves or closes. A chord another command already runs is refused with that command named, so no action silently
+loses its key; the command palette and menus list every action regardless, including ones whose shortcut a
+terminal cannot deliver. Reload, Type Hierarchy (Ctrl+H is Backspace in terminals, so Alt+H is the terminal route)
+and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets.
+
 **Search Everywhere** follows [IntelliJ's name-navigation pattern](https://www.jetbrains.com/help/idea/searching-everywhere.html):
 one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details.
 Double-tap bare **Shift** in the GUI, or press **Ctrl+K**, to search all three categories. Direct shortcuts are:
 
 | Search | Shortcut |
 |---|---|
-| Files by name or path | Ctrl+P or Ctrl+Shift+N |
-| Symbols by name | Ctrl+Alt+Shift+N |
-| Actions by name | Ctrl+Shift+A or Ctrl+Shift+P |
+| Files by name or path | Ctrl+P or Ctrl+Shift+N (VS Code: Ctrl+P) |
+| Symbols by name | Ctrl+Alt+Shift+N (VS Code: Ctrl+Shift+O) |
+| Actions by name | Ctrl+Shift+A or Ctrl+Shift+P (VS Code: Ctrl+Shift+P) |
 
 Tab / Shift+Tab cycles categories while keeping the query. Arrows, Page keys and Home/End select a
 result; the wheel scrolls the popup without changing selection. Enter opens/runs the selected result and Esc returns to reading. Tabs and rows are clickable. File results distinguish

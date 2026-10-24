@@ -2339,3 +2339,92 @@ fn gui_and_terminal_show_the_same_git_status_and_dirty_marks_through_edit_and_sa
         assert_eq!(git(r.path(), &["diff", "--cached", "--name-only"]), "staged.txt\n", "Save leaves the index alone");
     }
 }
+
+#[gpui::test]
+fn keymap_presets_overrides_and_unsupported_delivery_match_across_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keys.txt");
+    let original = "one\ntwo\nthree\n";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |v, _| v.focus_handle());
+    visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |v, _| v.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |v, cx| v.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|w, cx| { let _ = w.draw(cx); });
+        terminal.draw(|f| tui.draw(f)).unwrap();
+    };
+    let same = |visual: &VisualTestContext, tui: &App, why: &str| {
+        let state = snapshot(tui.session.state());
+        assert_eq!(state, gui.read_with(visual, |v, _| snapshot(v.session().state())), "{why}");
+    };
+    draw(&mut visual, &mut tui, &mut terminal);
+    // The same palette route: F10, the "Keymap: VS Code" row, Enter.
+    visual.simulate_keystrokes("f10");
+    let at = gui.read_with(&visual, |v, _| v.modal_rows().iter().position(|r| r.0.starts_with(CommandId::KeymapVsCode.label())).unwrap());
+    for _ in 0..at { visual.simulate_keystrokes("down"); }
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::F(10), KeyModifiers::NONE);
+    let at = tui.choices().iter().position(|c| matches!(c.target, crate::app::ChoiceTarget::Action(CommandId::KeymapVsCode))).unwrap();
+    for _ in 0..at { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    draw(&mut visual, &mut tui, &mut terminal);
+    for preset in [gui.read_with(&visual, |v, _| v.session().keymap().preset()), tui.session.keymap().preset()] {
+        assert_eq!(preset, reader_core::keymap::KeymapPreset::VsCode);
+    }
+    assert_eq!(gui.read_with(&visual, |v, _| v.key_hint(CommandId::FindAction)), tui.session.key_hint(CommandId::FindAction), "menus share the resolved chord");
+    // Ctrl+W closes the tab in both; neither writes the file.
+    visual.simulate_keystrokes("ctrl-w");
+    key(&mut tui, KeyCode::Char('w'), KeyModifiers::CONTROL);
+    draw(&mut visual, &mut tui, &mut terminal);
+    same(&visual, &tui, "Ctrl+W closes the tab under the VS Code keymap in both");
+    assert!(tui.session.state().tabs().is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+    // Reopen the same file through each adapter's Ctrl+E recent files, then rebind Save with the same key.
+    visual.simulate_keystrokes("ctrl-e");
+    key(&mut tui, KeyCode::Char('e'), KeyModifiers::CONTROL);
+    let rows_ready = |s: &State| s.navigation().is_some_and(|n| !n.pending && !n.rows.is_empty());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !rows_ready(tui.session.state()) || !gui.read_with(&visual, |v, _| rows_ready(v.session().state())) {
+        gui.update(&mut visual, |v, cx| v.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline, "recent files did not arrive");
+        std::thread::yield_now();
+    }
+    visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |v, _| v.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |v, cx| v.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline, "the recent file did not reopen");
+        std::thread::yield_now();
+    }
+    visual.simulate_keystrokes("f10"); let at = gui.read_with(&visual, |v, _| v.modal_rows().iter().position(|r| r.0.starts_with(CommandId::Keymap.label())).unwrap()); for _ in 0..at { visual.simulate_keystrokes("down"); } visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::F(10), KeyModifiers::NONE); let at = tui.choices().iter().position(|c| matches!(c.target, crate::app::ChoiceTarget::Action(CommandId::Keymap))).unwrap(); for _ in 0..at { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); } key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let save = gui.read_with(&visual, |v, _| v.session().keymap().rows().iter().position(|r| r.command == CommandId::Save).unwrap());
+    for _ in 0..save { visual.simulate_keystrokes("down"); key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
+    visual.simulate_keystrokes("enter"); key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    visual.simulate_keystrokes("ctrl-alt-s"); key(&mut tui, KeyCode::Char('s'), KeyModifiers::CONTROL | KeyModifiers::ALT);
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(gui.read_with(&visual, |v, _| v.key_hint(CommandId::Save)), Some("Ctrl+Alt+S".to_string()));
+    assert_eq!(tui.session.key_hint(CommandId::Save), Some("Ctrl+Alt+S".to_string()));
+    visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    // A disabled command says why in both adapters instead of vanishing.
+    visual.simulate_keystrokes("alt-h");
+    key(&mut tui, KeyCode::Char('h'), KeyModifiers::ALT);
+    assert!(gui.read_with(&visual, |v, _| v.session().state().notices().iter().any(|n| n == "No language server for this language")), "{:?}", gui.read_with(&visual, |v, _| v.session().state().notices()));
+    assert_eq!(tui.notice.as_deref(), Some("No language server for this language"));
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes());
+}

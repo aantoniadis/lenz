@@ -4,8 +4,8 @@ use reader_core::navigation::{Chosen, Kind, Scope};
 
 const HEADER: f32 = 3.0;
 
-fn navigation_shortcut(row: &reader_core::navigation::Row) -> Option<&'static str> {
-    if row.action() == Some(CommandId::CloseWindow) { None } else { row.shortcut }
+fn navigation_shortcut(row: &reader_core::navigation::Row) -> Option<String> {
+    row.shortcut.clone()
 }
 
 pub(super) struct Frame {
@@ -203,7 +203,7 @@ impl Frame {
                     let width = shortcut.chars().count() as f32 * self.char_w + 16.0;
                     if w > 320.0 {
                         lenz_gpui::fill(window, x + w - width - 8.0, top, width + 8.0, line_h(), if self.first + i == self.at { p.selected_bg } else { bg });
-                        lenz_gpui::text(window, cx, m, x + w - width, top, shortcut, p.dim);
+                        lenz_gpui::text(window, cx, m, x + w - width, top, &shortcut, p.dim);
                     }
                 }
             }
