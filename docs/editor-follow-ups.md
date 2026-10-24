@@ -601,3 +601,27 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Unverified:** native macOS and Wayland GUI editing remain gated, so their key delivery was not exercised; the
   GUI checks ran on the GPUI test platform under an owned display and the terminal checks in a Ratatui test backend,
   not a physical terminal. No performance measurement, stress run or benchmark was made for this ticket.
+
+## Tests that time out under load (2026-10-24)
+
+- **Six tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never
+  arrives, so a failing run takes the full timeout rather than running slowly. Run alone and back to back, as
+  `scripts/ci-local.sh` runs them, the suites were clean in 16 of 20 (`reader-core` lib), 35 of 40 (`reader-gui`
+  lib) and 18 of 20 (`reader-tui` with `gui-test`) runs, so the full gate fails roughly one run in three:
+
+  | Test | Failed |
+  |---|---|
+  | `reader-gui` `tests::outline_and_declaration_search_through_keys` | 5 of 40 |
+  | `reader-core` `session::tests::semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_text` | 2 of 20 |
+  | `reader-core` `semantics::tests::request_target_contexts_replace_per_lane_and_retire_on_cancel_reply_and_exit` | 1 of 20 |
+  | `reader-core` `session::tests::save_as::save_as_moves_every_view_only_after_the_new_file_is_confirmed` | 1 of 20 |
+  | `reader-tui` `app::tests::sql_dialect::the_status_bar_shows_the_chosen_sql_dialect_and_its_details_open_from_that_label` | 1 of 20 |
+  | `reader-tui` `app::tests::followed_rename_invalidates_source_context_hits_without_changing_text_version` | 1 of 20 |
+
+  Running 64 copies of one test at once (`<test binary> --exact <name>` in parallel) raises the rate enough to
+  trace it.
+- **Two causes already found in this class were product bugs, not slow tests:** a check that ran after a rename
+  but before the watcher reported it dropped the file identity the move needed (`42e7fc7`), and a prompt that a
+  render-time layout command settled left both adapters' dialogs stale (`9c4e9de`). Every core dispatch ends by
+  accounting saves and advancing pending work, so an adapter or a test that reads state only after its own
+  dispatches can miss a change. Trace each remaining test before raising a timeout.
