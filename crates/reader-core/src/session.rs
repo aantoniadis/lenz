@@ -3735,6 +3735,9 @@ impl Session {
                 let id = t.id;
                 if self.expanding.is_some_and(|(tab, v, s, ..)| tab == id && v == version && s == from) { return Effect::default(); }
                 let lang = snapshot.language().filter(|_| !snapshot.is_large());
+                if lang.is_none() && let Some(steps) = crate::expand::snapshot_fallback_steps(&snapshot, from.range()) {
+                    return self.start_expansion(id, version, from, steps, reveal);
+                }
                 let request = self.expand_latest.fetch_add(1, Ordering::Relaxed) + 1;
                 self.expanding = Some((id, version, from, request, reveal));
                 let loaded = self.state.sources.buffers[&snapshot.key().buffer].document.clone();
