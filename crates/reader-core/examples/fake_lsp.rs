@@ -201,7 +201,10 @@ impl Fake {
                             continue;
                         }
                         let (a, b) = (self.units(&line[..s]), self.units(&line[..s + name.len()]));
-                        found.push(json!({ "uri": uri, "range": { "start": { "line": l, "character": a }, "end": { "line": l, "character": b } } }));
+                        let target_uri = if env("FAKE_LSP_CANONICAL_URIS").is_some() {
+                            lsp::uri_path(&uri).and_then(|path| std::fs::canonicalize(path).ok()).map(|path| lsp::file_uri(&path)).unwrap_or_else(|| uri.clone())
+                        } else { uri.clone() };
+                        found.push(json!({ "uri": target_uri, "range": { "start": { "line": l, "character": a }, "end": { "line": l, "character": b } } }));
                     }
                 }
             }

@@ -2466,6 +2466,34 @@ fn outgoing_hierarchy_refuses_a_changed_item_even_when_its_call_site_is_unchange
     assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes());
 }
 
+#[cfg(unix)]
+#[test]
+fn semantic_targets_resolve_canonical_provider_uris_from_the_captured_draft_alias() {
+    let d = tempfile::tempdir().unwrap(); let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    write(&root, "Cargo.toml", b"[package]\nname = \"alias-target\"\n");
+    let saved = "pub fn helper() {}\n";
+    let actual = write(d.path(), "external.rs", saved.as_bytes());
+    let alias = root.join("lib.rs"); std::os::unix::fs::symlink(&actual, &alias).unwrap();
+    let a = write(&root, "main.rs", b"fn main() { helper(); }\n");
+    let (mut s, _) = fake_semantic_session_with_env(d.path(), &[("FAKE_LSP_NO_DECOR", "1"), ("FAKE_LSP_CANONICAL_URIS", "1")]);
+    open(&mut s, Command::OpenRetained(alias.clone()), "lib.rs");
+    settle(&mut s, |s| s.state().provider().is_some_and(|provider| provider.status == semantics::Status::Ready));
+    let tab = s.state().active().unwrap().id(); let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "// é😀 shifted\n".into() }], kind: crate::text::EditKind::Paste });
+    let draft = s.state().current_source().unwrap().clone();
+    let doc = analysis_document(&mut s);
+    settle(&mut s, |s| s.state.semantics.session_of(&doc).is_some());
+    let server = s.state.semantics.session_of(&doc).unwrap(); drop(doc);
+    settle(&mut s, |s| s.state.semantics.sent(server).get(&alias).is_some_and(|doc| doc.version() == draft.key().version));
+    open(&mut s, Command::OpenRetained(a.clone()), "main.rs");
+    s.dispatch(Command::Select(Selection { anchor: 12, head: 12 })); s.dispatch(Command::Definition { peek: false });
+    settle(&mut s, |s| s.state().asking().is_none());
+    assert!(Arc::ptr_eq(s.state().current_source().unwrap(), &draft), "canonical target coordinates belong to the same admitted alias draft: {:?}", s.state().notices());
+    assert_eq!(s.dispatch(Command::Copy).copy.as_deref(), Some("helper"));
+    assert_eq!(std::fs::read(&actual).unwrap(), saved.as_bytes()); assert_eq!(std::fs::read(alias).unwrap(), saved.as_bytes());
+    assert_eq!(std::fs::read(a).unwrap(), b"fn main() { helper(); }\n");
+}
+
 #[test]
 fn large_encoded_sources_keep_their_existing_syntax_reduction() {
     let d = tempfile::tempdir().unwrap();
