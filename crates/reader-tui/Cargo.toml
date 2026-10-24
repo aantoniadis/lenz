@@ -28,6 +28,7 @@ reader-gui = { path = "../reader-gui", optional = true, features = ["test-suppor
 gpui = { workspace = true, optional = true, features = ["test-support"] }
 
 [dev-dependencies]
+reader-core = { path = "../reader-core", features = ["test-support"] }
 tempfile = "3"
 # Throwaway git repositories for the blame tests.
 lenz-content = { workspace = true, features = ["git-testing", "write-testing"] }

@@ -60,7 +60,7 @@ impl Session {
     pub(super) fn compare_saved_disabled(&self) -> Option<&'static str> {
         if self.state.comparison.is_some() { return Some("A saved comparison is already open"); }
         let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Some("No loaded file is open") };
-        view.edit_disabled()
+        view.intrinsic_edit_disabled()
     }
     pub(super) fn compare_saved(&mut self) -> Effect {
         if let Some(why) = self.compare_saved_disabled() { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
@@ -82,7 +82,7 @@ impl Session {
         left.selection = left.selection.map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) });
         right.comparison_side = Some(ComparisonSide::Current); right.markdown_source = true;
         let before = Before { active: self.state.active, other: self.state.other, focused: self.state.focused, split: self.state.settings.split };
-        self.state.sources.buffers.insert(buffer, CurrentSource { document: Default::default(), snapshot: Some(Arc::new(baseline.with_buffer(buffer))), stamp: None, saved: None, draft: None, save: Default::default() });
+        self.state.sources.buffers.insert(buffer, CurrentSource { read_only: false, document: Default::default(), snapshot: Some(Arc::new(baseline.with_buffer(buffer))), stamp: None, saved: None, draft: None, save: Default::default() });
         self.comparison_seq += 1;
         self.state.comparison = Some(SavedComparison { saved, current: current_id, buffer, before, baseline: SemanticSource::new(&baseline), baseline_backing: Arc::downgrade(&baseline), text: SemanticSource::new(&current), request: self.comparison_seq, pending: true, submitted: false, changes: Vec::new(), line_endings_differ: false, failure: None });
         self.state.tabs.extend([left, right]);

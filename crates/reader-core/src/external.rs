@@ -24,6 +24,7 @@ impl Choice {
 pub struct Request {
     pub(crate) tab: TabId,
     pub(crate) source: Option<SemanticSource>,
+    pub(crate) permission: Option<&'static str>,
     pub(crate) project: u64,
     pub(crate) path: PathBuf,
     pub(crate) current: Plan,

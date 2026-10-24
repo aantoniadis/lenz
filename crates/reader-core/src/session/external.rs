@@ -19,6 +19,7 @@ impl Session {
         Ok(Command::BeginExternal(Box::new(Request {
             tab: tab.id,
             source: self.state.source(tab.id).map(|source| SemanticSource::new(source)),
+            permission: self.state.view(tab.id).and_then(|view|view.edit_disabled()),
             project: self.project_generation.load(Ordering::Acquire),
             path: tab.source.clone(), current, saved,
         })))
@@ -40,6 +41,7 @@ impl Session {
         !self.closed && self.closing.is_none() && self.state.active == Some(request.tab)
             && self.project_generation.load(Ordering::Acquire) == request.project
             && self.external_tab().is_ok_and(|tab| tab.id == request.tab && tab.source == request.path)
+            && self.state.view(request.tab).and_then(|view|view.edit_disabled()) == request.permission
             && match (&request.source, self.state.source(request.tab)) {
                 (Some(captured), Some(current)) => captured.matches(current),
                 (None, None) => true,

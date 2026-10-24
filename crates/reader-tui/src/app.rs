@@ -657,6 +657,7 @@ impl App {
                 }
                 return;
             }
+            InterfaceAction::Paste => { self.notice = Some("Use terminal Paste (usually Ctrl+Shift+V); bracketed paste inserts one transaction".into()); return; }
             InterfaceAction::CompareWith => {
                 let row = (self.focus == Focus::Tree).then(|| self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone())).flatten();
                 match self.session.compare_source(row.as_deref()) {
@@ -1752,11 +1753,17 @@ impl App {
         }
     }
     #[cfg(test)]
-    pub(crate) fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+    pub(crate) fn enable_draft_input_for_test(&mut self) { self.draft_input = true; self.session.enable_text_input_for_test(); }
+
+    #[cfg(test)]
+    fn draft_context(&self) -> bool {
+        self.draft_input && self.modal.is_none() && self.focus == Focus::Text
+            && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| !matches!(v.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)))
+    }
 
     #[cfg(test)]
     fn draft_target(&self) -> Option<(TabId, SnapshotKey, std::ops::Range<usize>)> {
-        if !self.draft_input || self.modal.is_some() || self.focus != Focus::Text { return None; }
+        if !self.draft_context() { return None; }
         let state = self.session.state();
         let view = state.view(state.active()?.id())?;
         if view.edit_disabled().is_some() || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
@@ -1767,13 +1774,17 @@ impl App {
 
     #[cfg(test)]
     fn replace_draft_input(&mut self, text: &str, kind: EditKind) -> bool {
-        let Some((tab, expected, range)) = self.draft_target() else { return false };
+        let Some((tab, expected, range)) = self.draft_target() else {
+            if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
+            return false;
+        };
         self.dispatch(Command::Edit { tab, expected, edits: vec![TextEdit { range, text: text.into() }], kind });
         true
     }
 
     #[cfg(test)]
     fn draft_key(&mut self, key: KeyEvent) -> bool {
+        if !self.draft_context() { return false; }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let other = key.modifiers.intersects(KeyModifiers::ALT | KeyModifiers::SUPER | KeyModifiers::META);
         match key.code {
@@ -1782,6 +1793,19 @@ impl App {
                 self.run(if key.modifiers.contains(KeyModifiers::SHIFT) { CommandId::Redo } else { CommandId::Undo });
                 true
             }
+            KeyCode::Char('x' | 'v') if control && !other => {
+                if !self.draft_input { return false; }
+                self.run(if key.code == KeyCode::Char('x') { CommandId::Cut } else { CommandId::Paste }); true
+            }
+            KeyCode::Backspace | KeyCode::Delete if !control && !other => {
+                if self.draft_target().is_none() { return false; }
+                self.dispatch(Command::Delete { backward: key.code == KeyCode::Backspace }); true
+            }
+            KeyCode::Enter if !control && !other => {
+                let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
+                self.replace_draft_input(newline, EditKind::Typing)
+            }
+            KeyCode::Tab if !control && !other => self.replace_draft_input("\t", EditKind::Typing),
             KeyCode::Char(character) if !control && !other && !character.is_control() => self.replace_draft_input(&character.to_string(), EditKind::Typing),
             _ => false,
         }

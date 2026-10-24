@@ -2,6 +2,30 @@ use super::*;
 use crate::external::Choice;
 
 #[test]
+fn read_only_or_close_preparation_retires_old_external_consent() {
+    for close in [false, true] {
+        let dir=tempfile::tempdir().unwrap();
+        let (mut s,path,_)=close_fixture(dir.path(),"context-external.txt");
+        let command=s.external_command(&open_host(&[("VISUAL","code")]),None,false).unwrap();
+        s.dispatch(command);
+        let ticket=s.external_prompt().unwrap().ticket;
+        if close {
+            let mut batch=crate::close::CloseCoordinator::default();batch.register(s.id());batch.begin(&mut [&mut s]);
+            assert!(s.external_prompt().is_none(),"core close preparation retires the competing external intent even before another dispatch");
+            let prompt=s.close_prompt().unwrap();
+            s.dispatch(Command::ChooseClose {ticket:prompt.ticket,buffer:prompt.buffer,choice:crate::close::Choice::Cancel});
+            assert_eq!(batch.progress(&mut [&mut s]),crate::close::Progress::Cancelled);
+        } else {
+            s.dispatch(Command::SetReadOnly(true));
+            assert!(s.external_prompt().is_none(),"permission changes retire the old external decision");
+        }
+        assert!(s.dispatch(Command::ChooseExternal {ticket,choice:Choice::OpenSavedVersion}).external.is_none());
+        assert_eq!(std::fs::read(path).unwrap(),b"saved\r\n");
+        assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n");
+    }
+}
+
+#[test]
 fn comparison_actions_identify_saved_disk_inputs_without_changing_paths() {
     let dir = tempfile::tempdir().unwrap();
     let (s, path, _) = close_fixture(dir.path(), "compare.txt");

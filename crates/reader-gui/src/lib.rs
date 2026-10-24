@@ -1019,6 +1019,9 @@ impl ReaderView {
                     self.dispatch(Command::CloseCommit, cx);
                     self.start(launch, None, cx);
                 }
+                InterfaceAction::Paste => {
+                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) { self.dispatch(Command::Paste(text), cx); }
+                }
                 InterfaceAction::CompareWith => {
                     let row = self.tree_focus.then(|| self.tree_sel.clone()).flatten();
                     match self.session.compare_source(row.as_deref()) {
@@ -1175,7 +1178,7 @@ impl ReaderView {
     }
 
     #[cfg(feature = "test-support")]
-    pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+    pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; self.session.enable_text_input_for_test(); }
 
     /// A currently visible result row's click point for real input replays.
     #[cfg(feature = "test-support")]
@@ -1185,8 +1188,14 @@ impl ReaderView {
     }
 
     #[cfg(feature = "test-support")]
+    fn draft_context(&self) -> bool {
+        self.draft_input && self.modal.is_none() && !self.tree_focus && !self.results_focus && self.find_focus.is_none() && self.crumb_focus.is_none()
+            && self.session.state().active().and_then(|t| self.session.state().view(t.id())).is_some_and(|v| !matches!(v.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)))
+    }
+
+    #[cfg(feature = "test-support")]
     fn draft_target(&self) -> Option<(TabId, reader_core::text::SnapshotKey, std::ops::Range<usize>)> {
-        if !self.draft_input || self.modal.is_some() || self.tree_focus || self.results_focus || self.find_focus.is_some() || self.crumb_focus.is_some() { return None; }
+        if !self.draft_context() { return None; }
         let state = self.session.state();
         let view = state.view(state.active()?.id())?;
         if view.edit_disabled().is_some() || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
@@ -1197,21 +1206,34 @@ impl ReaderView {
 
     #[cfg(feature = "test-support")]
     fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
-        let Some((tab, expected, range)) = self.draft_target() else { return false };
+        let Some((tab, expected, range)) = self.draft_target() else {
+            if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
+            return false;
+        };
         self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);
         true
     }
 
     #[cfg(feature = "test-support")]
     fn draft_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.draft_context() { return false; }
         let key = &ev.keystroke;
         let control = key.modifiers.control || key.modifiers.platform;
         if control && !key.modifiers.alt && key.key == "z" {
             if self.draft_target().is_none() { return false; }
             self.run(if key.modifiers.shift { CommandId::Redo } else { CommandId::Undo }, window, cx);
             true
-        } else if control && !key.modifiers.alt && !key.modifiers.shift && key.key == "v" {
-            cx.read_from_clipboard().and_then(|item| item.text()).is_some_and(|text| self.replace_draft_input(&text, reader_core::text::EditKind::Paste, cx))
+        } else if control && !key.modifiers.alt && !key.modifiers.shift && matches!(key.key.as_str(), "x" | "v") {
+            if !self.draft_input { return false; }
+            self.run(if key.key == "x" { CommandId::Cut } else { CommandId::Paste }, window, cx); true
+        } else if !control && !key.modifiers.alt && matches!(key.key.as_str(), "backspace" | "delete") {
+            if self.draft_target().is_none() { return false; }
+            self.dispatch(Command::Delete { backward: key.key == "backspace" }, cx); true
+        } else if !control && !key.modifiers.alt && !key.modifiers.shift && key.key == "enter" {
+            let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
+            self.replace_draft_input(newline, reader_core::text::EditKind::Typing, cx)
+        } else if !control && !key.modifiers.alt && !key.modifiers.shift && key.key == "tab" {
+            self.replace_draft_input("\t", reader_core::text::EditKind::Typing, cx)
         } else if !control && !key.modifiers.alt {
             key.key_char.as_deref().filter(|text| !text.chars().any(char::is_control))
                 .is_some_and(|text| self.replace_draft_input(text, reader_core::text::EditKind::Typing, cx))

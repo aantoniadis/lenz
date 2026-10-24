@@ -84,6 +84,39 @@ fn snapshot(s: &State) -> Snapshot {
 }
 
 #[gpui::test]
+fn editor_input_printables_paste_read_only_and_modal_precedence_match(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("input.txt"); let original = "seed\r\n"; std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx); let focus = gui.read_with(&visual, |v, _| v.focus_handle()); visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |v, _| v.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |v, cx| v.poll(cx)); while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); } assert!(Instant::now() < deadline); std::thread::yield_now();
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| { visual.update(|w, cx| { let _ = w.draw(cx); }); terminal.draw(|f| tui.draw(f)).unwrap(); };
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let check = |visual: &VisualTestContext, tui: &App, expected: &str| { let state = snapshot(tui.session.state()); assert_eq!(state.text.as_deref(), Some(expected)); assert_eq!(state, gui.read_with(visual, |v, _| snapshot(v.session().state()))); };
+    draw(&mut visual, &mut tui, &mut terminal); gui.update(&mut visual, |v, _| v.enable_draft_input_for_test()); tui.enable_draft_input_for_test();
+    let pasted = "e\u{301}👩🏽‍💻\r\nqjk/ ";
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string(pasted.into()))); visual.simulate_keystrokes("ctrl-a ctrl-v"); key(&mut tui, KeyCode::Char('a'), KeyModifiers::CONTROL); tui.handle(Event::Paste(pasted.into())); check(&visual, &tui, pasted);
+    visual.simulate_keystrokes("ctrl-z"); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL); check(&visual, &tui, original);
+    visual.simulate_keystrokes("ctrl-shift-z"); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL | KeyModifiers::SHIFT); check(&visual, &tui, pasted);
+    visual.simulate_keystrokes("q j k / space"); for c in ['q', 'j', 'k', '/', ' '] { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
+    let typed = "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ "; check(&visual, &tui, typed); assert!(!tui.quit && tui.modal.is_none());
+    visual.simulate_keystrokes("enter tab"); key(&mut tui, KeyCode::Enter, KeyModifiers::NONE); key(&mut tui, KeyCode::Tab, KeyModifiers::NONE); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n\t");
+    visual.simulate_keystrokes("backspace ctrl-z"); key(&mut tui, KeyCode::Backspace, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL); check(&visual, &tui, "e\u{301}👩🏽‍💻\r\nqjk/ qjk/ \r\n\t");
+    // Real command menus toggle the same per-buffer permission in both adapters.
+    visual.simulate_keystrokes("f10"); let at = gui.read_with(&visual, |v, _| v.modal_rows().iter().position(|row| row.0.starts_with(CommandId::ReadOnlyMode.label())).unwrap()); for _ in 0..at { visual.simulate_keystrokes("down"); } visual.simulate_keystrokes("enter");
+    key(&mut tui, KeyCode::F(10), KeyModifiers::NONE); let at = tui.choices().iter().position(|choice| matches!(choice.target, crate::app::ChoiceTarget::Action(CommandId::ReadOnlyMode))).unwrap(); for _ in 0..at { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); } key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    for disabled in [CommandId::Cut, CommandId::Paste, CommandId::Delete] { assert_eq!(tui.session.disabled(disabled), Some("Read-only mode is on")); assert_eq!(gui.read_with(&visual, |v, _| v.session().disabled(disabled)), Some("Read-only mode is on")); }
+    let before = snapshot(tui.session.state()); visual.simulate_keystrokes("q delete ctrl-x ctrl-v"); key(&mut tui, KeyCode::Char('q'), KeyModifiers::NONE); key(&mut tui, KeyCode::Delete, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('x'), KeyModifiers::CONTROL); tui.handle(Event::Paste("blocked".into())); assert_eq!(snapshot(tui.session.state()), before); assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), before); assert!(!tui.quit);
+    visual.simulate_keystrokes("shift-f2 ctrl-v ctrl-x delete ctrl-s escape"); key(&mut tui, KeyCode::F(2), KeyModifiers::SHIFT); tui.handle(Event::Paste("blocked".into())); for c in ['x', 's'] { key(&mut tui, KeyCode::Char(c), KeyModifiers::CONTROL); } key(&mut tui, KeyCode::Delete, KeyModifiers::NONE); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE); assert_eq!(snapshot(tui.session.state()), before); assert_eq!(gui.read_with(&visual, |v, _| snapshot(v.session().state())), before);
+    draw(&mut visual, &mut tui, &mut terminal); assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
 fn gated_drafts_share_split_history_and_keep_views_and_sessions_independent(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("draft.txt");

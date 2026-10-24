@@ -6,6 +6,9 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 lenz-content.workspace = true
 lenz-engine = { path = "../engine" }

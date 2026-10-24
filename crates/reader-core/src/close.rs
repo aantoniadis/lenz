@@ -19,6 +19,8 @@ pub enum Intent {
     Tab(TabId),
     Unsplit,
     Session,
+    Reload(TabId),
+    Workspace,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Choice {
@@ -47,7 +49,7 @@ pub struct Prompt {
 impl Prompt {
     pub fn text(&self) -> String {
         let mut text = format!(
-            "Unsaved changes in {}\n\nChoose Save, Discard or Cancel.\nDiscard is applied only after every view approves.\n",
+            "Unsaved changes in {}\n\nChoose Save, Discard or Cancel.\nDiscard is applied only after every affected buffer approves.\n",
             self.path.display()
         );
         if self.waiting {

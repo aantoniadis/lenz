@@ -19,6 +19,831 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn text_input_adjacent_deletion_is_one_undo_group() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "delete.txt", b"abc"); let now = std::time::Instant::now();
+    let mut s = session_clock(d.path(), Arc::new(move || now)); open(&mut s, Command::OpenRetained(path.clone()), "delete.txt"); s.enable_text_input_for_test();
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Delete { backward: true });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "a"); let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), "abc");
+    assert_eq!(std::fs::read(path).unwrap(), b"abc");
+}
+
+#[test]
+fn text_input_deletion_uses_existing_scalar_boundaries_and_keeps_crlf_atomic() {
+    for (original, caret, backward, expected) in [("e\u{301}", 3, true, "e"), ("👩🏽‍💻", 15, true, "👩🏽‍"), ("a\r\nb", 3, true, "ab"), ("a\r\nb", 1, false, "ab")] {
+        let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "boundaries.txt", original.as_bytes()); let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "boundaries.txt"); s.enable_text_input_for_test();
+        s.dispatch(Command::Select(Selection { anchor: caret, head: caret })); s.dispatch(Command::Delete { backward }); assert_eq!(source_text(s.state().current_source().unwrap()), expected);
+        let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), original); assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+    }
+}
+
+#[test]
+fn successful_checkout_keeps_the_displayed_draft_dirty_until_a_matched_disk_read_replaces_it() {
+    use crate::close::Choice;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "feature/x".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let reply = loop {
+        let reply = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(reply, Completion::CheckedOut { .. }) {
+            break reply;
+        }
+        s.dispatch(reply);
+    };
+    s.dispatch(reply);
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert!(
+        active_view(&s).dirty() && active_view(&s).can_undo(),
+        "the old displayed draft must not become a false clean baseline before replacement arrives"
+    );
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(Command::Undo { tab });
+    assert!(active_view(&s).dirty());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn workspace_transitions_resolve_temporary_comparison_tabs_before_deciding_about_the_draft() {
+    use crate::close::Choice;
+    for mode in 0..3 {
+        let d = tempfile::tempdir().unwrap();
+        let root = d.path().join("first");
+        let other = d.path().join("second");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let path = write(&root, "a.txt", b"saved\r\n");
+        let mut s = session(&d.path().join("state"));
+        s.dispatch(Command::OpenRoot(root.clone()));
+        settle(&mut s, scanned);
+        open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+        let ordinary = s.state().active().unwrap().id();
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit {
+            tab: ordinary,
+            expected,
+            edits: vec![crate::text::TextEdit {
+                range: 0..5,
+                text: "draft λ".into(),
+            }],
+            kind: crate::text::EditKind::Replace,
+        });
+        let position = s.state().selection();
+        let buffer = s.state().current_source().unwrap().key().buffer;
+        for choice in [Choice::Cancel, Choice::Discard] {
+            s.dispatch(Command::CompareSaved);
+            if mode == 0 {
+                s.dispatch(Command::FocusPane(0));
+                assert_eq!(
+                    s.disabled(CommandId::Reload),
+                    Some("The last saved version is read-only")
+                );
+                s.dispatch(Command::Reload);
+                assert!(s.state().saved_comparison().is_some());
+                s.dispatch(Command::FocusPane(1));
+            }
+            s.dispatch(if mode < 2 {
+                Command::Reload
+            } else {
+                Command::OpenRoot(other.clone())
+            });
+            assert!(
+                s.state().saved_comparison().is_none(),
+                "temporary owners are resolved before preparation"
+            );
+            let p = s
+                .close_prompt()
+                .expect("the ordinary current draft owns this decision");
+            assert_eq!(p.buffer, buffer);
+            assert_eq!(s.state().active().unwrap().id(), ordinary);
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice,
+            });
+            if choice == Choice::Cancel {
+                assert_eq!(s.state().selection(), position);
+                assert_eq!(
+                    source_text(s.state().current_source().unwrap()),
+                    "draft λ\r\n"
+                );
+                assert_eq!(s.state().project().unwrap().root(), root);
+            }
+        }
+        if mode < 2 {
+            settle(&mut s, |s| s.state().loading().is_none());
+            assert_eq!(s.state().active().unwrap().id(), ordinary);
+            assert_eq!(s.state().current_source().unwrap().key().buffer, buffer);
+            assert_eq!(
+                source_text(s.state().current_source().unwrap()),
+                "saved\r\n"
+            );
+            assert!(!active_view(&s).dirty());
+        } else {
+            assert_eq!(s.state().project().unwrap().root(), other);
+        }
+        assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+    }
+}
+
+#[test]
+fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_without_enabling_production_input() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "input.txt", "e\u{301}👩🏽‍💻\r\n".as_bytes());
+    let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "input.txt");
+    let first = s.state().active().unwrap().id(); s.dispatch(Command::Split(Split::Columns)); let second = s.state().active().unwrap().id();
+    assert_eq!(s.disabled(CommandId::Paste), Some("Text input is gated until the editor safety checkpoint"));
+    s.dispatch(Command::Paste("blocked".into())); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.enable_text_input_for_test(); s.dispatch(Command::SelectAll);
+    assert_eq!(s.disabled(CommandId::Cut), None); assert_eq!(s.disabled(CommandId::Paste), None);
+    s.dispatch(Command::SetReadOnly(true));
+    for id in [first, second] { assert!(s.state().view(id).unwrap().read_only()); }
+    for action in [CommandId::Cut, CommandId::Paste, CommandId::Delete, CommandId::Undo, CommandId::Save] { assert_eq!(s.disabled(action), Some("Read-only mode is on")); }
+    let copy = s.dispatch(Command::Copy); assert_eq!(copy.copy.as_deref(), Some("e\u{301}👩🏽‍💻\r\n"));
+    s.dispatch(Command::Cut); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Paste("blocked".into()));
+    s.dispatch(Command::SetReadOnly(false)); assert_eq!(s.disabled(CommandId::Cut), None);
+    s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
+    s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CompareSaved); s.dispatch(Command::FocusPane(0));
+    assert_eq!(s.disabled(CommandId::ReadOnlyMode), Some("The last saved version is read-only"));
+    s.dispatch(Command::SetReadOnly(false)); s.dispatch(Command::Paste("blocked".into()));
+    assert_eq!(s.disabled(CommandId::Paste), Some("The last saved version is read-only"));
+    assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
+    s.dispatch(Command::CloseSavedComparison);
+    assert_eq!(std::fs::read(path).unwrap(), "e\u{301}👩🏽‍💻\r\n".as_bytes());
+}
+
+#[test]
+fn automatic_refresh_keeps_clean_undo_history_during_index_rebuild() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let path = write(&root, "a.rs", b"fn saved() {}\r\n");
+    let mut s = session(&d.path().join("state"));
+    s.dispatch(Command::OpenRoot(root));
+    settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(path.clone()), "a.rs");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 3..8,
+            text: "draft".into(),
+        }],
+        kind: crate::text::EditKind::Replace,
+    });
+    s.dispatch(Command::Undo { tab });
+    assert!(!active_view(&s).dirty());
+    assert!(active_view(&s).can_redo());
+    let expected = s.state().current_source().unwrap().key();
+    let position = s.state().selection();
+    std::fs::write(&path, b"fn external() {}\r\n").unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().stale_on_disk());
+    s.dispatch(Command::RebuildIndex);
+    settle(&mut s, |s| s.state().index_coverage().complete());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "fn saved() {}\r\n"
+    );
+    assert_eq!(s.state().current_source().unwrap().key(), expected);
+    assert_eq!(s.state().selection(), position);
+    assert!(!active_view(&s).dirty() && active_view(&s).can_redo());
+    assert!(s.status_details().contains("changed on disk"));
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "fn draft() {}\r\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"fn external() {}\r\n");
+}
+
+#[test]
+fn checkout_preparation_is_invalidated_when_the_observed_repository_head_changes() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(Command::NewBranch {
+        name: "not-from-old-context".into(),
+        from: None,
+        checkout: true,
+    });
+    let p = s.close_prompt().unwrap();
+    git(r.path(), &["switch", "-q", "feature/x"]);
+    s.dispatch(Completion::Semantic(crate::semantics::Event::Tick));
+    settle(&mut s, |s| {
+        s.branch_label().as_deref() == Some("⎇ feature/x")
+    });
+    assert!(
+        s.close_prompt().is_none(),
+        "HEAD context changed; the old decision cannot silently choose a different starting point"
+    );
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    assert!(!s.state().checking_out());
+    assert!(
+        !git(r.path(), &["branch", "--list", "not-from-old-context"])
+            .contains("not-from-old-context")
+    );
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn blocked_checkout_retains_discard_consent_as_a_draft_and_requires_a_fresh_retry_decision() {
+    use crate::close::Choice;
+    use lenz_content::branches::{CheckoutChoice, Target};
+    use lenz_content::git::testing::{commit_all, git, write as put};
+    let (r, _wt, mut s) = git_branches::repo_session();
+    git(r.path(), &["switch", "-q", "feature/x"]);
+    put(r.path(), "a.txt", "feature\n");
+    commit_all(r.path(), "feature content");
+    git(r.path(), &["switch", "-q", "main"]);
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    put(r.path(), "a.txt", "external local change\n");
+    s.dispatch(Command::Checkout(Target::Branch("feature/x".into())));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| !s.state().checking_out());
+    assert!(s.state().checkout_problem().is_some());
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    s.dispatch(Command::CheckoutChoice(CheckoutChoice::Smart));
+    let fresh = s.close_prompt().unwrap();
+    assert!(fresh.ticket > p.ticket);
+    assert!(!s.state().checking_out());
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    assert_eq!(s.close_prompt().unwrap().ticket, fresh.ticket);
+    s.dispatch(Command::ChooseClose {
+        ticket: fresh.ticket,
+        buffer: fresh.buffer,
+        choice: Choice::Cancel,
+    });
+    assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+    assert_eq!(std::fs::read(path).unwrap(), b"external local change\n");
+}
+
+#[test]
+fn transition_save_failure_and_uncertainty_never_start_workspace_or_git_changes() {
+    use crate::close::Choice;
+    use crate::save::Status;
+    use lenz_content::git::testing::git;
+    use lenz_content::write::readiness_fault::{Fault, at_path};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        for operation in 0..5 {
+            let (r, wt, mut s) = git_branches::repo_session();
+            let path = r.path().join("a.txt");
+            open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+            let tab = s.state().active().unwrap().id();
+            let expected = s.state().current_source().unwrap().key();
+            s.dispatch(Command::Edit {
+                tab,
+                expected,
+                edits: vec![crate::text::TextEdit {
+                    range: 0..0,
+                    text: "draft λ ".into(),
+                }],
+                kind: crate::text::EditKind::Paste,
+            });
+            let command = match operation {
+                0 => Command::Reload,
+                1 => Command::OpenRoot(wt.path().to_owned()),
+                2 => Command::OpenWorktree(wt.path().join("second")),
+                3 => Command::Checkout(lenz_content::branches::Target::Branch("feature/x".into())),
+                _ => Command::NewBranch {
+                    name: "not-created".into(),
+                    from: None,
+                    checkout: true,
+                },
+            };
+            s.dispatch(command);
+            let p = s.close_prompt().unwrap();
+            let _fault = at_path(&path, fault);
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice: Choice::Save,
+            });
+            settle(&mut s, |s| {
+                matches!(
+                    active_view(s).save_status(),
+                    Status::Rejected(_) | Status::Uncertain(_)
+                )
+            });
+            assert!(s.close_prompt().is_none());
+            s.dispatch(Command::ChooseClose {
+                ticket: p.ticket,
+                buffer: p.buffer,
+                choice: Choice::Discard,
+            });
+            assert!(!s.state().checking_out());
+            assert_eq!(s.state().project().unwrap().root(), r.path());
+            assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+            assert!(!git(r.path(), &["branch", "--list", "not-created"]).contains("not-created"));
+            assert_eq!(
+                source_text(s.state().current_source().unwrap()),
+                "draft λ main\n"
+            );
+            assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+            assert_eq!(
+                std::fs::read(path).unwrap(),
+                if fault == Fault::AfterReplace {
+                    "draft λ main\n".as_bytes()
+                } else {
+                    b"main\n"
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn checkout_failure_and_obsolete_completion_keep_drafts_but_report_actual_git_outcome() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut s) = git_branches::repo_session();
+    let path = r.path().join("a.txt");
+    open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "draft λ ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "does-not-exist".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| !s.state().checking_out());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ main\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+    s.dispatch(Command::Checkout(lenz_content::branches::Target::Branch(
+        "feature/x".into(),
+    )));
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let reply = loop {
+        let reply = s.completions().recv_blocking_timeout().unwrap();
+        if matches!(reply, Completion::CheckedOut { .. }) {
+            break reply;
+        }
+        s.dispatch(reply);
+    };
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    s.dispatch(reply);
+    assert_eq!(
+        git(r.path(), &["branch", "--show-current"]).trim(),
+        "feature/x"
+    );
+    assert_eq!(s.branch_label().as_deref(), Some("⎇ feature/x"));
+    assert!(s.status_details().contains("Checked out feature/x"));
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "newer draft λ main\n"
+    );
+    assert!(active_view(&s).dirty());
+    assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+}
+
+#[test]
+fn checkout_and_new_branch_wait_for_decisions_and_replace_only_after_success() {
+    use crate::close::Choice;
+    use lenz_content::git::testing::git;
+    for new_branch in [false, true] {
+        let (r, _wt, mut s) = git_branches::repo_session();
+        let path = r.path().join("a.txt");
+        open(&mut s, Command::OpenRetained(path.clone()), "a.txt");
+        let tab = s.state().active().unwrap().id();
+        let expected = s.state().current_source().unwrap().key();
+        s.dispatch(Command::Edit {
+            tab,
+            expected,
+            edits: vec![crate::text::TextEdit {
+                range: 0..0,
+                text: "draft λ ".into(),
+            }],
+            kind: crate::text::EditKind::Paste,
+        });
+        let action = || {
+            if new_branch {
+                Command::NewBranch {
+                    name: "draft-guard".into(),
+                    from: None,
+                    checkout: true,
+                }
+            } else {
+                Command::Checkout(lenz_content::branches::Target::Branch("feature/x".into()))
+            }
+        };
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        assert!(!s.state().checking_out());
+        assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(
+            source_text(s.state().current_source().unwrap()),
+            "draft λ main\n"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"main\n");
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        assert!(s.state().checking_out());
+        settle(&mut s, |s| !s.state().checking_out());
+        settle(&mut s, |s| {
+            source_text(s.state().current_source().unwrap()) == "main\n"
+        });
+        assert_eq!(
+            git(r.path(), &["branch", "--show-current"]).trim(),
+            if new_branch {
+                "draft-guard"
+            } else {
+                "feature/x"
+            }
+        );
+        assert!(!active_view(&s).dirty());
+        assert_eq!(std::fs::read(path).unwrap(), b"main\n");
+    }
+}
+
+#[test]
+fn workspace_transition_cancel_retains_all_drafts_and_only_confirmed_saves_persist() {
+    use crate::close::Choice;
+    for worktree in [false, true] {
+        let d = tempfile::tempdir().unwrap();
+        let first = d.path().join("first");
+        let second = d.path().join("second");
+        std::fs::create_dir(&first).unwrap();
+        std::fs::create_dir(&second).unwrap();
+        let a = write(&first, "a.txt", b"saved\r\n");
+        let b = write(&first, "b.txt", b"other\r\n");
+        let mut s = session(&d.path().join("state"));
+        s.dispatch(Command::OpenRoot(first.clone()));
+        settle(&mut s, scanned);
+        let mut tabs = Vec::new();
+        for path in [&a, &b] {
+            open(
+                &mut s,
+                Command::OpenRetained(path.clone()),
+                path.file_name().unwrap().to_str().unwrap(),
+            );
+            let tab = s.state().active().unwrap().id();
+            let expected = s.state().current_source().unwrap().key();
+            s.dispatch(Command::Edit {
+                tab,
+                expected,
+                edits: vec![crate::text::TextEdit {
+                    range: 0..0,
+                    text: "draft λ ".into(),
+                }],
+                kind: crate::text::EditKind::Paste,
+            });
+            tabs.push(tab);
+        }
+        let position = s.state().selection();
+        let action = || {
+            if worktree {
+                Command::OpenWorktree(second.clone())
+            } else {
+                Command::OpenRoot(second.clone())
+            }
+        };
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        let q = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: q.ticket,
+            buffer: q.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(s.state().project().unwrap().root(), first);
+        assert_eq!(s.state().selection(), position);
+        assert!(tabs.iter().all(|tab| s.state().tab_dirty(*tab)));
+        assert_eq!(std::fs::read(&a).unwrap(), b"saved\r\n");
+        assert_eq!(std::fs::read(&b).unwrap(), b"other\r\n");
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        let saved = p.path.clone();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Save,
+        });
+        settle(&mut s, |s| {
+            s.close_prompt().is_some_and(|q| q.buffer != p.buffer)
+        });
+        let q = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: q.ticket,
+            buffer: q.buffer,
+            choice: Choice::Cancel,
+        });
+        assert_eq!(s.state().project().unwrap().root(), first);
+        assert_eq!(
+            std::fs::read(&saved).unwrap(),
+            if saved == a {
+                "draft λ saved\r\n".as_bytes()
+            } else {
+                "draft λ other\r\n".as_bytes()
+            }
+        );
+        assert_eq!(s.state().tabs().len(), 2);
+        assert_eq!(s.state().selection(), position);
+        s.dispatch(action());
+        let p = s.close_prompt().unwrap();
+        s.dispatch(Command::ChooseClose {
+            ticket: p.ticket,
+            buffer: p.buffer,
+            choice: Choice::Discard,
+        });
+        assert_eq!(s.state().project().unwrap().root(), second);
+        assert!(s.close_prompt().is_none());
+        s.dispatch(Command::OpenRoot(first));
+        settle(&mut s, scanned);
+        open(&mut s, Command::OpenRetained(a.clone()), "a.txt");
+        assert_eq!(
+            source_text(s.state().current_source().unwrap()),
+            if saved == a {
+                "draft λ saved\r\n"
+            } else {
+                "saved\r\n"
+            }
+        );
+        assert!(!active_view(&s).dirty());
+    }
+}
+
+#[test]
+fn reload_reply_cannot_discard_an_edit_made_after_the_decision() {
+    use crate::close::Choice;
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "reply.txt");
+    s.watcher = Watcher::new(|_| true);
+    s.dispatch(Command::Reload);
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit {
+        tab,
+        expected,
+        edits: vec![crate::text::TextEdit {
+            range: 0..0,
+            text: "newer ".into(),
+        }],
+        kind: crate::text::EditKind::Paste,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "newer draft λ\r\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert!(s.status_details().contains("Reload cancelled"));
+    assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+}
+
+#[test]
+fn reload_requires_current_decision_and_failed_read_retains_the_draft() {
+    use crate::close::Choice;
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "reload.txt");
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 8 }));
+    s.dispatch(Command::Reload);
+    let first = s
+        .close_prompt()
+        .expect("Reload must ask before replacing a dirty buffer");
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    s.dispatch(Command::ChooseClose {
+        ticket: first.ticket,
+        buffer: first.buffer,
+        choice: Choice::Cancel,
+    });
+    assert_eq!(
+        s.state().selection(),
+        Some(Selection { anchor: 6, head: 8 })
+    );
+    s.dispatch(Command::Reload);
+    let second = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: first.ticket,
+        buffer: first.buffer,
+        choice: Choice::Discard,
+    });
+    assert_eq!(s.close_prompt().unwrap().ticket, second.ticket);
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: second.ticket,
+        buffer: second.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+    assert!(
+        s.last_close().is_none(),
+        "starting a failed replacement never publishes a committed discard disposition"
+    );
+    std::fs::write(&path, b"external\r\n").unwrap();
+    s.dispatch(Command::Reload);
+    let p = s.close_prompt().unwrap();
+    s.dispatch(Command::ChooseClose {
+        ticket: p.ticket,
+        buffer: p.buffer,
+        choice: Choice::Discard,
+    });
+    settle(&mut s, |s| s.state().loading().is_none());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "external\r\n"
+    );
+    assert!(!active_view(&s).dirty() && !active_view(&s).can_undo());
+    assert_eq!(s.state().active().unwrap().id(), tab);
+    assert_eq!(std::fs::read(path).unwrap(), b"external\r\n");
+}
+
+#[test]
+fn automatic_refresh_retains_draft_history_positions_and_reports_external_conflicts() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "refresh.txt");
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 8 }));
+    s.dispatch(Command::ScrollColumn(3));
+    let key = s.state().current_source().unwrap().key();
+    std::fs::write(&path, b"external replacement\r\n").unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().stale_on_disk());
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert_eq!(s.state().current_source().unwrap().key(), key);
+    assert_eq!(
+        s.state().selection(),
+        Some(Selection { anchor: 6, head: 8 })
+    );
+    assert_eq!(s.state().active().unwrap().column(), 3);
+    assert!(s.status_details().contains("changed on disk"));
+    let other = write(d.path(), "other.txt", b"other");
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    s.dispatch(Command::ActivateTab(tab));
+    assert!(
+        s.state().active().unwrap().stale_on_disk(),
+        "reactivating a pinned draft retains the observed conflict"
+    );
+    assert!(s.status_details().contains("changed on disk"));
+    assert!(active_view(&s).can_undo());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "saved\r\n"
+    );
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| {
+        s.state().active().unwrap().unavailable().is_some()
+    });
+    assert_eq!(
+        source_text(s.state().current_source().unwrap()),
+        "draft λ\r\n"
+    );
+    assert!(active_view(&s).can_undo());
+    assert!(!path.exists());
+}
+
+#[test]
 fn a_pending_reload_cannot_replace_the_ordinary_owner_with_a_temporary_comparison_tab() {
     let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "reload.txt", b"saved\n");
     let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "reload.txt");
@@ -1636,7 +2461,7 @@ fn an_empty_session_offers_open_and_explains_the_rest() {
     assert_eq!(disabled(CommandId::ChooseTheme), None);
     assert_eq!(disabled(CommandId::Reload), Some("No file is open"));
     assert_eq!(disabled(CommandId::Copy), Some("No file is open"));
-    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Close Window", "Quit All Windows", "Select All", "Copy", "Undo", "Redo", "Save", "Recheck Saved File", "Confirm Rechecked Save", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare Saved Disk Inputs…", "Compare with Last Saved Version", "Close Saved Comparison", "Compare Selected Saved Disk Inputs", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
+    assert_eq!(actions.iter().map(|a| a.label).collect::<Vec<_>>(), ["Open File…", "Open Folder…", "Open Recent Folder…", "Find File…", "Search in Project…", "Find in File…", "Next Match", "Previous Match", "Close Find", "Find: Match Case", "Find: Whole Word", "Find: Regular Expression", "List All Matches", "Go to Line…", "Soft Wrap", "Sticky Scroll", "Breadcrumbs", "Focus Breadcrumbs", "File Outline", "Find Declaration…", "Rerun Search", "Close Results", "Back", "Forward", "Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…", "Keep Tab Open", "Next Tab", "Previous Tab", "Reload", "Close Tab", "Close Window", "Quit All Windows", "Select All", "Copy", "Cut", "Paste", "Delete", "Read-only Mode", "Undo", "Redo", "Save", "Recheck Saved File", "Confirm Rechecked Save", "Copy Path", "Copy Path:Line", "Open in Editor", "Open with Default App", "Compare Saved Disk Inputs…", "Compare with Last Saved Version", "Close Saved Comparison", "Compare Selected Saved Disk Inputs", "Collapse", "Expand", "Collapse All", "Expand All", "Collapse Comments and Imports", "Extend Selection", "Shrink Selection", "Change theme", "About Lenz Code", "New Window", "Go to Definition", "Peek Definition", "Go to Type Definition", "Go to Implementation", "Find Usages", "Call Hierarchy", "Call Hierarchy: Callers", "Call Hierarchy: Callees", "Type Hierarchy", "Type Hierarchy: Supertypes", "Type Hierarchy: Subtypes", "Quick Documentation", "Documentation on Hover", "File Icons", "Inlay Hints: Types", "Inlay Hints: Parameter Names", "Semantic Highlighting", "Find Symbol (language server)…", "File Symbols (language server)", "Set Workspace Root…", "Language Server Status…", "Server Details…", "Copy Language Server Details", "Choose Language Server Runtime…", "Restart Language Server", "Exclude Ruby Tooling Gems for This Project", "Reset LSP Settings for This Project", "Reuse Saved Declaration Index", "Rebuild Project Index", "Disable Language Server for This Folder", "Enable Language Server for This Folder", "Image Source / Rendered", "Markdown Source / Preview", "Show / Hide Explorer", "Select Opened File in Explorer", "Explorer: Folders First", "Explorer: All by Name", "Git Branches…", "New Branch…", "Checkout Tag or Revision…", "Show Local Changes", "Compare with Branch, Tag or Revision…", "Compare with Base Branch", "Show Changes Since Branch Start", "Compare with Worktree…", "Resolve Conflicts in Lenz Diff", "Annotate with Git Blame", "Close Annotations", "Show Commit…", "Show Diff", "Copy Revision", "Split Right", "Split Down", "Close Split", "Focus Other Pane", "Move Tab to Other Pane", "Search Everywhere…", "Find Symbol…", "Find Action…", "Status details…"]);
     assert_eq!(disabled(CommandId::FoldersFirst), Some("Already sorted this way"));
     assert_eq!(disabled(CommandId::LocateFile), Some("No file is open"));
     assert_eq!(disabled(CommandId::ImageSource), Some("Not an image"));

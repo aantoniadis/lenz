@@ -8,10 +8,14 @@ pub use saved_comparison::{ComparisonSide, SavedComparison};
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
+#[path = "session/text_input.rs"]
+mod text_input;
 #[path = "session/close.rs"]
 mod close_work;
 #[path = "session/external.rs"]
 mod external_work;
+#[path = "session/transition.rs"]
+mod transition_work;
 
 use std::{
     path::{Path, PathBuf},
@@ -79,6 +83,10 @@ pub use crate::native::{NativeReveal, NativeViewport};
 pub enum Command {
     BeginExternal(Box<crate::external::Request>),
     ChooseExternal { ticket: u64, choice: crate::external::Choice },
+    Cut,
+    Paste(String),
+    Delete { backward: bool },
+    SetReadOnly(bool),
     CompareSaved,
     CloseSavedComparison,
     ChooseClose { ticket: u64, buffer: crate::text::BufferId, choice: crate::close::Choice },
@@ -405,6 +413,10 @@ pub enum CommandId {
     QuitAll,
     SelectAll,
     Copy,
+    Cut,
+    Paste,
+    Delete,
+    ReadOnlyMode,
     Undo,
     Redo,
     Save,
@@ -530,7 +542,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 123] = [
+    pub const ALL: [CommandId; 127] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -571,6 +583,10 @@ impl CommandId {
         Self::QuitAll,
         Self::SelectAll,
         Self::Copy,
+        Self::Cut,
+        Self::Paste,
+        Self::Delete,
+        Self::ReadOnlyMode,
         Self::Undo,
         Self::Redo,
         Self::Save,
@@ -702,6 +718,10 @@ impl CommandId {
             Self::QuitAll => "Quit All Windows",
             Self::SelectAll => "Select All",
             Self::Copy => "Copy",
+            Self::Cut => "Cut",
+            Self::Paste => "Paste",
+            Self::Delete => "Delete",
+            Self::ReadOnlyMode => "Read-only Mode",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
             Self::Save => "Save",
@@ -1233,6 +1253,7 @@ struct Sources {
     buffers: std::collections::HashMap<crate::text::BufferId, CurrentSource>,
 }
 struct CurrentSource {
+    read_only: bool,
     document: std::sync::Weak<Document>,
     snapshot: Option<Arc<crate::text::TextSnapshot>>,
     stamp: Option<Stamp>,
@@ -1249,7 +1270,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { read_only: false, document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
         if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -1268,6 +1289,7 @@ pub struct View<'a> {
     tab: &'a Tab,
     snapshot: &'a Arc<crate::text::TextSnapshot>,
     draft: Option<&'a crate::draft::Draft>,
+    read_only: bool,
     save: &'a crate::save::State,
 }
 impl<'a> View<'a> {
@@ -1278,7 +1300,13 @@ impl<'a> View<'a> {
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { !self.tab.is_saved_version() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
-    pub fn edit_disabled(&self) -> Option<&'static str> {
+    /// Existing confirmed ending preference; typing never normalizes the remaining source.
+    pub fn input_newline(&self) -> &'static str {
+        if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) { "\r\n" } else { "\n" }
+    }
+    pub fn read_only(&self) -> bool { self.read_only }
+    pub fn edit_disabled(&self) -> Option<&'static str> { self.intrinsic_edit_disabled().or(self.read_only.then_some("Read-only mode is on")) }
+    fn intrinsic_edit_disabled(&self) -> Option<&'static str> {
         if self.tab.is_saved_version() { Some("The last saved version is read-only") }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
@@ -1486,7 +1514,7 @@ impl State {
         let buffer = tab.buffer?;
         let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
         if !tab.loaded { return None; }
-        Some(View { snapshot, tab, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
+        Some(View { snapshot, tab, read_only: self.sources.buffers.get(&buffer)?.read_only, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
@@ -1673,6 +1701,7 @@ impl State {
         });
         let approximate = tab.filter(|t| t.approximate).map(|_| "Approximate position: the surrounding text changed".to_string());
         let changing = tab.filter(|t| t.changing > 0).map(|_| "Changing on disk: showing the last confirmed content".to_string());
+        let conflict = tab.filter(|t| t.stale_on_disk).map(|_| "File changed on disk: the draft and undo history are retained. Reload to decide whether to replace them.".to_string());
         // A file outside the browsing root (a definition in a dependency): say where it comes from.
         // Source a language server returned: from where, and whether that server session still runs.
         let retrieved = tab.and_then(|t| t.retrieved.as_ref()).map(|v| match self.semantics.has_session(v.session) {
@@ -1686,6 +1715,7 @@ impl State {
             let inside = t.source.starts_with(p.root());
             (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Read-only source from {origin}"))
         });
+        let read_only = tab.and_then(|t| self.view(t.id)).and_then(|view| view.edit_disabled().map(str::to_owned));
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
@@ -1694,7 +1724,7 @@ impl State {
             None if c.pending() => "Comparing with last saved version…".into(),
             None => format!("Saved comparison: {} changed blocks{}; last saved is read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
         });
-        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
+        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(conflict).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(read_only).chain(saving).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette
@@ -1909,6 +1939,7 @@ struct LayoutIntent {
 }
 
 pub struct Session {
+    text_input_enabled: bool,
     comparison_seq: u64,
     id: crate::close::SessionId,
     external_seq: u64,
@@ -1948,6 +1979,9 @@ pub struct Session {
     versions: Arc<AtomicU64>,
     /// The tab the pending load or check is for, and whether it reloads shown content.
     pending: Option<(TabId, bool)>,
+    reload_source: Option<SemanticSource>,
+    checkout_sources: Vec<(crate::text::BufferId, SemanticSource)>,
+    replacements: std::collections::HashMap<crate::text::BufferId, SemanticSource>,
     next_tab: u64,
     /// The current root's generation, for scans and rankings to stop when superseded.
     root_generation: Arc<AtomicU64>,
@@ -2081,6 +2115,7 @@ impl Session {
         });
         let merged = tx.clone();
         Self {
+            text_input_enabled: false,
             comparison_seq: 0,
             id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
@@ -2145,7 +2180,7 @@ impl Session {
             other_current: Arc::new(AtomicU64::new(0)),
             renders: Arc::new(AtomicU64::new(0)),
             versions: Arc::new(AtomicU64::new(0)),
-            pending: None,
+            pending: None, reload_source: None, checkout_sources: Vec::new(), replacements: Default::default(),
             next_tab: 0,
             root_generation: Arc::new(AtomicU64::new(0)),
             project_generation: Arc::new(AtomicU64::new(0)),
@@ -2277,6 +2312,7 @@ impl Session {
     fn on(&self, id: CommandId) -> Option<bool> {
         let o = self.find_options;
         match id {
+            CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id())).map(|view| view.read_only()),
             CommandId::MatchCase => Some(o.case),
             CommandId::WholeWord => Some(o.word),
             CommandId::RegularExpression => Some(o.regex),
@@ -2436,6 +2472,8 @@ impl Session {
                 Some(view) if id == CommandId::Redo && !view.can_redo() => Some("Nothing to redo"),
                 Some(_) => None,
             },
+            CommandId::Cut | CommandId::Paste | CommandId::Delete => self.text_action_disabled(id),
+            CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id)).map_or(Some("No loaded file is open"), |view| view.intrinsic_edit_disabled()),
             CommandId::Copy => match self.state.selection() {
                 _ if !open => Some("No file is open"),
                 // The adapter holds a preview's selection.
@@ -2621,7 +2659,7 @@ impl Session {
         if text {
             entries.extend([CommandId::Definition, CommandId::PeekDefinition, CommandId::TypeDefinition, CommandId::Implementation, CommandId::Usages, CommandId::CallHierarchy, CommandId::TypeHierarchy, CommandId::Documentation].map(C));
             entries.extend([Separator, C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll)]);
-            entries.extend([Separator, C(CommandId::Copy), C(CommandId::CopyPath), C(CommandId::CopyPathLine)]);
+            entries.extend([Separator, C(CommandId::Copy), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode), C(CommandId::CopyPath), C(CommandId::CopyPathLine)]);
         } else {
             if matches!(self.state.rendering(), Some(Rendering::Preview(_))) {
                 entries.push(C(CommandId::Copy));
@@ -2851,14 +2889,14 @@ impl Session {
         let input = input.into();
         // Authorized windows are immutable while platform ownership and metadata cleanup finish.
         if self.closed { return match input { Input::Command(Command::SaveWorkspace) => self.command(Command::SaveWorkspace), _ => Effect::default() }; }
-        if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); }
+        if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
         if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. }
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. }
             | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
             | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
             for entry in self.state.sources.buffers.values_mut() {
@@ -2872,7 +2910,7 @@ impl Session {
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
             Input::Command(_) | Input::Completion(_) => None,
         };
-        let edit_reveal = matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let mut effect = match input {
@@ -2944,7 +2982,6 @@ impl Session {
     fn edit(&mut self, tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind) -> Effect {
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.snapshot().key() != expected || view.edit_disabled().is_some() { return Effect::default(); }
-        if view.edit_disabled().is_some() { return Effect::default(); }
         let current = view.snapshot().clone();
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Some(entry) = self.state.sources.buffers.get_mut(&expected.buffer) else { return Effect::default() };
@@ -2973,6 +3010,8 @@ impl Session {
         // A previously clean, evicted buffer may not have had a snapshot fence when close was prepared.
         self.cancel_close();
         let buffer = next.key().buffer;
+        self.replacements.remove(&buffer);
+        self.checkout_sources.retain(|(id, _)| *id != buffer);
         let transform = |byte| crate::text::edited_byte(byte, edits);
         let paths: std::collections::HashSet<_> = self.state.sources.aliases.iter().filter(|(_, id)| **id == buffer).map(|(path, _)| path.clone())
             .chain(self.state.tabs.iter().filter(|tab| tab.buffer == Some(buffer)).flat_map(|tab| std::iter::once(tab.source.clone()).chain(tab.canonical.clone())))
@@ -3453,11 +3492,7 @@ impl Session {
             },
             Command::SaveWorkspace => { self.checkpoint_workspace(); self.places_saver.flush(); Effect::default() }
             Command::SetExplorer(explorer) => { self.state.explorer = explorer; repaint }
-            Command::OpenRoot(root) => {
-                self.state.tree_marks.clear();
-                self.open_root(root);
-                repaint
-            }
+            Command::OpenRoot(root) => self.prepare_transition(transition_work::Transition::Root(root)),
             Command::ActivateTree { path, retain } => self.activate_tree(path, retain),
             Command::ToggleDir(dir) => {
                 if self.state.libraries.rows().iter().any(|r| r.path.as_ref() == dir) {
@@ -3533,16 +3568,9 @@ impl Session {
                 Effect { repaint: open, copy: None, ..Effect::default() }
             }
             Command::Reload if self.disabled(CommandId::Reload).is_some() => Effect::default(),
-            Command::Reload => match (self.state.active, self.state.current_source().is_some()) {
-                (Some(id), true) => {
-                    // Blamed again even when the bytes are the same: commits may have changed.
-                    if let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) {
-                        b.stamp = None;
-                    }
-                    self.load(id, true);
-                    repaint
-                }
-                _ => Effect::default(),
+            Command::Reload => match self.state.active.filter(|_| self.state.current_source().is_some()) {
+                Some(tab) => self.prepare_transition(transition_work::Transition::Reload(tab)),
+                None => Effect::default(),
             },
             Command::Select(s) => {
                 let Some(doc) = self.state.current() else { return Effect::default() };
@@ -3604,7 +3632,7 @@ impl Session {
                 repaint
             }
             Command::ClearTreeMarks => Effect { repaint: !std::mem::take(&mut self.state.tree_marks).is_empty(), copy: None, ..Effect::default() },
-            Command::Checkout(target) => self.retry(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal),
+            Command::Checkout(target) => self.prepare_transition(transition_work::Transition::Checkout(crate::branches::Retry::Checkout(target), lenz_content::branches::Mode::Normal)),
             Command::CheckoutChoice(choice) => {
                 use crate::branches::CheckoutChoice as C;
                 let Some(p) = self.state.checkout_problem.clone() else { return Effect::default() };
@@ -3615,7 +3643,7 @@ impl Session {
                     C::Cancel => self.state.checkout_problem = None,
                     C::Smart => {
                         self.state.checkout_problem = None;
-                        return self.retry(p.retry, lenz_content::branches::Mode::Smart);
+                        return self.prepare_transition(transition_work::Transition::Checkout(p.retry, lenz_content::branches::Mode::Smart));
                     }
                     C::Force => {
                         let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
@@ -3629,12 +3657,12 @@ impl Session {
                     }
                     C::ConfirmForce => {
                         self.state.checkout_problem = None;
-                        return self.retry(p.retry, lenz_content::branches::Mode::Force);
+                        return self.prepare_transition(transition_work::Transition::Checkout(p.retry, lenz_content::branches::Mode::Force));
                     }
                 }
                 repaint
             }
-            Command::NewBranch { name, from, checkout: true } => self.retry(crate::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal),
+            Command::NewBranch { name, from, checkout: true } => self.prepare_transition(transition_work::Transition::Checkout(crate::branches::Retry::NewBranch { name: name.trim().to_string(), from }, lenz_content::branches::Mode::Normal)),
             Command::NewBranch { name, from, checkout: false } => {
                 let Some(root) = self.writable_repo() else { return repaint };
                 let request = self.begin_checkout();
@@ -3831,6 +3859,10 @@ impl Session {
                 self.state.messages.push(text);
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
+            Command::Cut => self.cut(),
+            Command::Paste(text) => self.paste(text),
+            Command::Delete { backward } => self.delete(backward),
+            Command::SetReadOnly(on) => self.set_read_only(on),
             Command::Copy => {
                 let Some(view) = self.state.active().and_then(|t| self.state.view(t.id)) else { return Effect::default() };
                 let Some(s) = view.tab().selection() else { return Effect::default() };
@@ -4944,6 +4976,12 @@ impl Session {
                 }
                 self.state.loading = None;
                 let reload = self.pending.take().is_some_and(|(_, r)| r);
+                let authorized = self.reload_source.take();
+                if reload && !authorized.as_ref().is_some_and(|source| self.state.source(tab).is_some_and(|now| source.matches(now))) {
+                    self.state.messages.push("Reload cancelled: the source changed while it was being read. The draft is retained.".into());
+                    self.load_other();
+                    return Effect { repaint: true, copy: None, ..Effect::default() };
+                }
                 match result {
                     Ok((stamp, doc, canonical)) => {
                         // Two spellings of one file (a symlink, `..`) are one document: keep the tab already showing it.
@@ -4961,6 +4999,11 @@ impl Session {
                                 }
                             }
                             _ => {
+                                if reload && let Some(buffer) = self.state.source(tab).map(|source| source.key().buffer)
+                                    && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
+                                    entry.draft = None;
+                                    entry.save = Default::default();
+                                }
                                 if let Some(t) = self.tab_mut(tab) {
                                     t.canonical = canonical;
                                 }
@@ -4998,6 +5041,7 @@ impl Session {
                 }
                 self.state.checkout_running = None;
                 let retry = self.pending_checkout.take();
+                if result.is_err() || made { self.checkout_sources.clear(); }
                 // The folder changed meanwhile: what happened there is still said, naming it; nothing here reloads.
                 let here = self.state.repo.as_ref().is_some_and(|r| r.root == root);
                 let place = if here { String::new() } else { format!(" in {}", root.display()) };
@@ -5014,6 +5058,7 @@ impl Session {
                 match result {
                     Ok(_) if made => self.state.messages.push(format!("Created branch {label}{place}")),
                     Ok(outcome) => {
+                        self.finish_checkout_sources(here);
                         self.state.messages.push(format!("Checked out {now}{place}"));
                         if let Some(w) = outcome.warning {
                             self.state.messages.push(format!("Checkout{place}: {w}"));
@@ -6449,7 +6494,10 @@ impl Session {
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
-        let snapshot = self.state.source(id).cloned();
+        let replacement = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer).is_some_and(|buffer| self.replacement_current(buffer));
+        let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer))
+            .and_then(|entry| entry.draft.as_ref().map(|draft| draft.baseline.clone()).or_else(|| entry.snapshot.clone()));
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token;
@@ -6469,7 +6517,14 @@ impl Session {
                     return;
                 }
             }
-            let result = check(&path, stamp, shown.as_ref(), &versions);
+            let result = if replacement {
+                // Approval is not a saved baseline. Return exact read provenance even for equal bytes/stamps.
+                match read(&path) {
+                    Ok((stamp, bytes)) => Refresh::Changed(stamp, Arc::new(decode_read(path.clone(), versions.fetch_add(1, Ordering::Relaxed) + 1, &bytes))),
+                    Err(ReadError::Unstable) => Refresh::Unstable,
+                    Err(ReadError::Failed(why)) => Refresh::Gone(why),
+                }
+            } else { check(&path, stamp, shown.as_ref(), &versions) };
             let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, result });
         });
     }
@@ -6480,8 +6535,23 @@ impl Session {
     }
 
     fn refreshed(&mut self, id: TabId, token: u64, result: Refresh) -> Effect {
+        let Some(tab) = self.state.tabs.iter().find(|t| t.id == id && t.refresh == token) else { return Effect::default(); };
+        let buffer = tab.buffer;
+        let replacement = buffer.is_some_and(|buffer| self.replacement_current(buffer));
+        if let Some(buffer) = buffer {
+            self.replacements.remove(&buffer);
+            if replacement && matches!(result, Refresh::Changed(..))
+                && let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {
+                entry.draft = None;
+                entry.save.status = crate::save::Status::Ready;
+                entry.save.checked = None;
+                entry.save.revalidated = None;
+            }
+        }
         let shown = self.is_shown(id);
         let snapshot = self.state.source(id).cloned();
+        let retained = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer)).is_some_and(CurrentSource::pinned);
         let Some(t) = self.tab_mut(id).filter(|t| t.refresh == token) else { return Effect::default() };
         t.moving = false;
         if !matches!(result, Refresh::Unstable) {
@@ -6496,6 +6566,12 @@ impl Session {
             Refresh::Released => {
                 t.stale_on_disk = true;
                 Effect::default()
+            }
+            Refresh::Changed(_, _) if retained => {
+                // The disk reply describes another version, never replacement authority for a draft/history.
+                t.stale_on_disk = true;
+                t.unavailable = None;
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Refresh::Changed(stamp, doc) => {
                 let here = t.location(snapshot.as_deref());
@@ -7711,6 +7787,7 @@ impl Session {
         let Some(path) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone()) else { return };
         let request = self.next_request();
         self.pending = Some((id, reload));
+        self.reload_source = reload.then(|| self.state.source(id).map(|source| SemanticSource::new(source))).flatten();
         self.state.loading = Some(path.clone());
         let (latest, versions, tx) = (self.latest.clone(), self.versions.clone(), self.tx.clone());
         self.jobs.submit(Priority::Visible, move || {
@@ -7740,17 +7817,20 @@ impl Session {
 
     fn show_snapshot(&mut self, id: TabId, snapshot: Arc<crate::text::TextSnapshot>, stamp: Option<Stamp>, reload: bool) {
         let buffer = snapshot.key().buffer;
+        let retained = !reload && self.state.sources.buffers.get(&buffer).is_some_and(CurrentSource::pinned);
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) { entry.snapshot = Some(snapshot.clone()); }
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.loaded = true;
         t.buffer = Some(buffer);
         t.refresh = token;
-        t.stale_on_disk = false;
-        t.changing = 0;
+        if !retained {
+            t.stale_on_disk = false;
+            t.changing = 0;
+            t.stamp = stamp;
+            t.unavailable = None;
+        }
         t.language = Some(snapshot.language());
-        t.stamp = stamp;
-        t.unavailable = None;
         t.new_content();
         t.selection = t.selection.map(|s| Selection { anchor: snapshot.floor_char_boundary(s.anchor), head: snapshot.floor_char_boundary(s.head) });
         t.top_line = t.top_line.min(snapshot.line_count() - 1);
