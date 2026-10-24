@@ -3,6 +3,8 @@ use super::*;
 mod external;
 #[path = "input_tests/save_as.rs"]
 mod save_as;
+#[path = "input_tests/recovery.rs"]
+mod recovery;
 #[path = "input_tests/keymap.rs"]
 mod keymap;
 #[path = "input_tests/sql_dialect.rs"]
@@ -3788,4 +3790,67 @@ fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
     a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(crossterm::event::MouseButton::Left), column: popup.x + 1, row: popup.y + 1, modifiers: KeyModifiers::NONE }));
     assert_eq!(text(&a), source.replacen("{  }", "{ hello.helper }", 1));
     assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
+fn alt_shift_down_adds_a_caret_and_typing_changes_every_selection() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("carets.txt"); std::fs::write(&path, "aa bb aa\none").unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone())); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);
+    let text = |a: &App| { let source = a.session.state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    let carets = |a: &App| { let mut at: Vec<_> = a.session.state().active().unwrap().selections().filter(|s| s.anchor == s.head).map(|s| s.head).collect(); at.sort_unstable(); at };
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert_eq!(carets(&a), [1, 10], "the next line's column, as the menu command does");
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(text(&a), "axa bb aa\noxne");
+    assert_eq!(carets(&a), [2, 12]);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(carets(&a), [12], "Esc keeps the primary cursor before it leaves the text");
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!(text(&a), "axa bb aa\noxxne", "one caret types again");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), "axa bb aa\noxne");
+    assert_eq!(std::fs::read(&path).unwrap(), b"aa bb aa\none", "the terminal never writes the file");
+}
+
+#[test]
+fn terminal_menu_route_and_modal_precedence_hold_for_several_cursors() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("modal.txt"); std::fs::write(&path, "one\ntwo\n").unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path)); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);
+    let text = |a: &App| { let source = a.session.state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    let at = a.choices().iter().position(|choice| matches!(choice.target, crate::app::ChoiceTarget::Action(CommandId::AddCursorBelow))).unwrap();
+    for _ in 0..at { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(a.session.state().active().unwrap().selections().count(), 2, "the palette reaches the command too");
+    a.run(CommandId::FindAction);
+    assert!(a.modal.is_some());
+    key(&mut a, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
+    assert_eq!((a.session.state().active().unwrap().selections().count(), text(&a)), (2, "one\ntwo\n".to_owned()), "the open dialog takes the keys first");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(a.modal.is_none());
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    assert_eq!(a.session.state().active().unwrap().selections().count(), 1, "then Esc drops the extra cursor");
+}
+
+#[test]
+fn terminal_draws_a_caret_for_every_selection() {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("carets.txt"); std::fs::write(&path, "aa bb aa\none\n").unwrap();
+    let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path)); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    a.run(CommandId::AddCursorBelow);
+    assert_eq!(a.session.state().active().unwrap().selections().count(), 2);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let carets = buffer.content.iter().filter(|cell| cell.modifier.contains(ratatui::style::Modifier::REVERSED)).count();
+    assert!(carets >= 2, "each caret is drawn: {carets}");
+    a.run(CommandId::SelectAll);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 16)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let highlighted = buffer.content.iter().filter(|cell| cell.bg == crate::render::color(a.session.state().palette().sel_bg)).count();
+    assert!(highlighted >= 4, "the selected text is shown: {highlighted}");
 }

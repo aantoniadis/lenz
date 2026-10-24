@@ -20,7 +20,7 @@ impl Presentation {
     pub(super) fn current(&self, state: &State) -> bool {
         state.active == Some(self.tab.id) && state.shown(self.tab.pane).is_some_and(|tab| tab.id == self.tab.id)
             && state.view(self.tab.id).is_some_and(|view| self.base.matches(view.snapshot())
-                && view.tab.selection == self.selection && view.edit_disabled().is_none())
+                && view.tab.selection() == self.selection && view.edit_disabled().is_none())
     }
 }
 impl State {
@@ -43,7 +43,7 @@ impl Session {
     pub(super) fn present_text(&mut self, tab: TabId, base: PresentationSource, base_selection: Option<Selection>, edit: TextEdit, selected: Selection) -> Effect {
         if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
         let Some(view) = self.state.view(tab).filter(|view| self.state.active == Some(tab)
-            && base.matches(view.snapshot()) && view.tab.selection == base_selection) else { return Effect::default() };
+            && base.matches(view.snapshot()) && view.tab.selection() == base_selection) else { return Effect::default() };
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         let Ok(snapshot) = view.snapshot().apply_edits(version, &[edit]) else { return Effect::default() };
         if [selected.anchor, selected.head].iter().any(|byte| *byte > snapshot.len_bytes() || snapshot.floor_char_boundary(*byte) != *byte) {
@@ -51,7 +51,7 @@ impl Session {
         }
         let mut shown = view.tab.duplicate(tab, view.tab.pane);
         shown.new_content(); shown.set_top(view.tab.top_line(), view.tab.top_row()); shown.collapsed.clear(); shown.comparison_side = view.tab.comparison_side; shown.markdown_source = true;
-        shown.selection = Some(selected);
+        shown.place_selection(Some(selected));
         shown.top_line = shown.top_line.min(snapshot.line_count() - 1);
         self.state.presentation = Some(Box::new(Presentation { base: base.0, selection: base_selection, tab: shown, snapshot: Arc::new(snapshot) }));
         self.keep_selection_visible();

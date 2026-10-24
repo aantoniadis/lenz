@@ -61,6 +61,29 @@ and exact line endings (UTF-8 without BOM when untitled). Only a confirmed write
 path; a rejected or uncertain write leaves the document, its original file and its Save state unchanged.
 The original file and its bookmarks stay where they were.
 
+**Recovered unsaved work** is offered when a session starts. While a draft differs from its last confirmed saved
+version, Lenz keeps a private copy of it and of that confirmed baseline under `$XDG_CACHE_HOME/lenz-reader/recovery`
+(directory mode 0700, files 0600), never in the project and never in logs. The record goes when Save confirms, or
+when the draft is explicitly Discarded, Reloaded or replaced from disk; Discard also leaves a tombstone, so a copy
+left behind by an interrupted write cannot be offered again. Nothing here writes the file it shows.
+
+At start the dialog names the recovered file (or the New File document), when it was recorded, and whether the file
+on disk still matches the draft's confirmed baseline. **Restore Draft** (`r`) reopens it as the ordinary draft, with
+its own undo history, and marks the tab `⟲`; the file on disk is not changed. If the file still matches, Save works
+as usual; if it changed, Save stays closed until **Recheck Saved File** compares the current file, and the retained
+draft can still be written elsewhere with Save As, and **Compare with Last Saved Version** shows it against the
+recovered confirmed baseline. A missing file restores the draft only. **Discard Draft** (`d`)
+deletes the private copy. **Later** (Esc) keeps it for this session; **Recover Unsaved Draft…** in the File menu
+offers it again. The GUI uses the same dialog and labels. `r`, `d` and Esc answer this dialog, so they do not follow
+the keymap preset or an override; the File command is the route when the dialog is not open, and the presets give it
+no chord (like Close Window, it stays in the menus and F10).
+
+Records are one per document path, so two windows editing the same file keep only the last record each writes. A
+draft and baseline together over 8 MiB (about a 4 MiB document) are not kept, and an older record is removed rather
+than offered as older work. At most 20 records and 32 MiB of text are read at start, and each is compared with its
+file there. Recovery copies live in the cache: the operating system may clear them, and they are not a substitute
+for Save. Native macOS and Wayland editing remain gated as before.
+
 The checkpoint23 candidate enables basic editor input by default on Linux TUI and Linux X11 GUI.
 The GUI uses its actual backend identity; Wayland and native macOS stay gated. q/j/k/slash/Space type literally, bracketed paste is
 one transaction, and Cut/Copy/Paste/Delete plus Undo/Redo use shared commands. **Read-only Mode** applies to
@@ -75,6 +98,24 @@ that command named, so no action silently loses its key. **Keymap: IntelliJ (Def
 persist with any overrides in the Reader's settings file, never in the project. The terminal keeps Ctrl-Q for closing
 the view: a command rebound to it is warned about here and stays in F10. Flow control (XOFF) can also swallow Ctrl-S
 in some terminals, so Save is in F10 too. The [Reader guide](README.md#keymaps) lists both presets.
+
+**Several selections** (Alt+Shift+Down/Up, which both presets keep, or Ctrl+Alt+Down/Up in the VS Code keymap; also
+**Add Cursor Below** / **Add Cursor Above** in the menus and the palette) put a caret on the next or previous shown
+line at the caret's column and keep the earlier ones. These are ordinary keymap chords, so **Keymap…** can move them;
+terminals that do not report modified arrow keys deliver them as other keys, which is why both commands also sit in
+the palette (F10) and the Selection menu. **Select Next Occurrence** (Alt+J) first selects the word under the caret, then adds the next
+literal occurrence outside the selections already made; overlapping and repeated matches are skipped, and a press
+with none left says so and changes nothing. Typing, Enter, Tab, bracketed paste, Delete, Cut and Paste then change
+every selection as one transaction against the displayed version, and each caret follows its own edit. One Undo
+takes the whole typing group, exactly as with one caret; Undo of a paste or deletion restores the text and puts each
+caret back at its own selection. Delete removes one character per caret (a CRLF pair as one); Cut and Copy take each
+selection's text, one per line, so bare carets copy nothing while several cursors exist. **Collapse to Single Cursor**, Escape (a fixed editing key, like Delete, so not rebindable), a click or any caret
+movement (arrows, Home, End, clicking, Select All, a jump) returns to one selection, so navigation never acts on a stale set. The selections
+belong to the view: a split pane of the same buffer keeps its own, and closing or restoring a workspace keeps only
+the primary one. Read-only mode, an image, a preview, a retrieved or binary source disable all four commands with
+the same reasons as typing, and an open dialog takes the keys first. Several selections that an edit makes identical
+or overlapping are merged into their union; a caret inside a selection is dropped. Only the primary selection is
+composed through an input method, and folding moves a hidden caret to its region's first line.
 
 **Editing Preferences…** (Find Action or the Selection menu, in both adapters) shows the active file's
 indent style, indent size and tab width, each with its source: EditorConfig first, then the open project's
@@ -171,6 +212,7 @@ the Last saved pane remains read-only.
 | Recent files / locations | Ctrl-E / Ctrl-Alt-E |
 | Outline / declarations | Ctrl-Shift-O / Ctrl-T |
 | Keymap preset, rebinding, every chord | F10 → Application: Keymap…, Keymap: IntelliJ (Default), Keymap: VS Code, Reset All Keybindings |
+| Recovered unsaved work | Offered at start; r Restore Draft, d Discard Draft, Esc Later; F10 → File: Recover Unsaved Draft… |
 | SQL dialect default / this file / details | F10 → SQL; click the `SQL:` status label |
 | Definition / peek / usages | F12 / Alt-F12 / Shift-F12 |
 | Type definition / implementations | Ctrl-Shift-B / Ctrl-Alt-B |

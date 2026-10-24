@@ -173,7 +173,8 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   leave reads stopped until the repository changes. Not measured for this ticket.
 - **Git status presentation gaps (ticket65):** folders do not aggregate their children's statuses; paths are
   matched as `/`-separated (Windows separators unhandled); git's stderr is read only after its output ends.
-  Draft recovery has no "recovered" state yet, so only dirty and Git status are shown.
+  A restored draft marks its tab as recovered (`⟲`, ticket 32); explorer rows still show only their own dirty state
+  and Git status, so a recovered file's row has no recovered badge.
 
 ## New File and Save As (ticket 31, 2026-10-24)
 
@@ -218,6 +219,38 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   commands refuse the item. Revisit with ticket 40 (signature help) and 39 (resolve/additional edits).
 - **Outside-click parity:** the GUI closes the popup on any click outside it; the terminal closes it only when
   the click moves the caret (a toolbar click leaves it open). Decide one rule in the core if this matters.
+
+## Draft recovery (ticket 32, 2026-10-24)
+
+- **Suspected cost, unmeasured:** every change burst materializes the draft and its confirmed baseline on the recovery
+  worker and writes them as JSON (up to 8 MiB per record). Replacements release their snapshots at once (one pending
+  version per document), so a burst holds at most one extra snapshot per open draft; include the copy and the write
+  size in the scheduled batch measurements before changing the 500 ms debounce (`recovery::DEBOUNCE`).
+- **Suspected cost, unmeasured:** start reads up to 20 records and 32 MiB of text synchronously in `Session::new` and
+  compares each with its file (up to 64 MiB per file) to say whether the disk still matches. Many or large records delay
+  the first window. Move the comparison off the UI thread and say so in the dialog if this shows up in startup samples.
+- **Size limit:** a draft and baseline together over 8 MiB (roughly a 4 MiB document) are not kept, and the previous
+  record for that file is removed rather than offered as older work. Recovering large documents needs a cheaper
+  representation than two full texts.
+- **One record per path:** two windows editing the same file write the same record; the last writer wins, so only one
+  window's draft is recovered. Keying file records by session instead would recover both at the price of duplicates.
+- **Write order:** tombstones and records are ordered by wall-clock milliseconds so a tombstone outranks records from an
+  earlier run. A clock set backwards could let a record written later have a lower number; a restart after such a change
+  should be exercised before relying on this for adversarial cases.
+- **Cache lifetime:** records live under `$XDG_CACHE_HOME/lenz-reader/recovery`, so a system cache clean removes them.
+  They are not durable storage and no UI claims otherwise.
+- **Prompt delivery:** the GUI syncs the recovery dialog on construction and on every dispatch; `ReaderView::poll` does
+  not sync prompts, so a prompt created while another modal is open appears when that modal closes or the next command
+  runs. The TUI syncs it in `clamp()` each frame.
+- **Unverified:** native macOS and Wayland editing remain gated; their termination route and the recovery dialog were not
+  run there. Wayland GUI and physical terminals were not exercised for this ticket.
+- **No content in diagnostics:** records and prompts never carry source text; `Record`/`Version` `Debug` show identity and
+  sizes only. Keep it that way when adding fields (for example a diff summary) to the dialog.
+- **Observed core-suite flakes (not caused by this ticket):** with draft recovery present, the full `reader-core`
+  suite also timed out once in `semantic_requests_wait_for_the_current_admitted_snapshot_and_preserve_saved_text`
+  (3 of 3 isolated runs passed, and two full runs afterwards passed). The rename watcher test above did the same
+  3 times in 6 full runs while passing 5 of 5 isolated runs. No cause or fix is claimed; the recovery worker adds one
+  idle thread per session, which is not shown to matter.
 
 ## Keymaps (ticket 26, 2026-10-24)
 
@@ -283,3 +316,45 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Narrow layouts:** the SQL label shares the footer with the LSP label, position and branch and can be ellipsized
   below 900 px in the GUI and at small terminal widths. The details dialog remains reachable from the label, the
   palette and the SQL menu; verify the exact cut points if the footer changes.
+
+## Several selections (ticket 29, 2026-10-24)
+
+- **Only one range shape can be created:** Add Cursor Above/Below adds carets at the same column of neighbouring
+  lines, and Select Next Occurrence adds matches of the primary selection's text. There is no command that adds a
+  selection of a different length (or extends one cursor into a selection), so differing-length selections exist in
+  the model and in editing only after an edit collapses them; a shift-click or a second cursor's own extension
+  would need its own command. Until then the model's merge rules for arbitrary overlaps are exercised through
+  occurrence selection and cursor absorption.
+- **Caret motions act on the primary selection only:** arrows, Home/End, Extend/Shrink Selection, clicks and jumps
+  collapse the set (the same rule as Escape), and Up/Down ignore the other carets. Moving every caret, and extending
+  every selection with Shift, is the natural next step; it needs per-caret layout queries for wrapped lines.
+- **Typing merges per caret, deletions do not:** repeated typing at several carets joins one Undo step
+  (`Draft::merge_carets`), as one caret's typing does. Repeated Delete/Backspace at several carets is one transaction
+  per keystroke, unlike the joined single-caret deletion; joining it needs the same per-caret offset bookkeeping in
+  the other direction. Paste, Cut and every explicit edit end the group, as before.
+- **Input-method composition is single-cursor:** the GUI's composition capture places a pending replacement at the
+  primary selection, and its commit is one explicit-range edit, so a composed character changes only that place while
+  the other carets shift with it. Completion acceptance is likewise one explicit edit. Decide whether composition
+  should fan out or drop the extra carets before claiming parity for IME with several cursors.
+- **Multi-cursor chords in the VS Code preset:** VS Code's Ctrl+D selects the next occurrence, but it is Compare
+  Selected here, so Select Next Occurrence keeps Alt+J in both presets instead of displacing an existing action; the
+  add-cursor commands take VS Code's Ctrl+Alt+Down/Up and keep Alt+Shift+Down/Up as aliases so the documented keys
+  work under either preset. Revisit if ticket 27 wants Alt+Shift+Down for duplicate line.
+- **Select Next Occurrence cost, unmeasured:** each press scans the draft one bounded 64 KiB window at a time
+  (`selection::find_from`) from the primary selection to the end and then from the start, so a large file is never
+  assembled whole but the scan is linear in the file per press. It is an explicit user action, like Find; include a
+  large-file occurrence walk in the scheduled batch measurements before optimizing (for example, reusing the find
+  match list).
+- **Several cursors are not persisted:** only the primary selection is saved in the workspace and history, so
+  reopening a project, Back/Forward and a restored view keep one cursor. A split pane copies the set when the view is
+  duplicated, then follows its own.
+- **Terminal modifier delivery:** the add-cursor chords (Alt+Shift+Down/Up in both presets, plus VS Code's
+  Ctrl+Alt+Down/Up) reach Lenz only from terminals that report modified keys (the enhanced keyboard protocol).
+  Otherwise the terminal sends another key; the palette and Selection menu keep both commands reachable, the in-app
+  help says so, and **Keymap…** can move them. Collapse to Single Cursor stays on Escape as a fixed editing key
+  (`CommandId::input_hint`), so it is not rebindable, like Delete and Undo. Native macOS GUI and Wayland GUI editing
+  remain gated by ticket 23/24; the multi-cursor behaviour was verified on the GPUI test platform and the Linux
+  terminal only.
+- **Rendering cost:** the GUI builds one extra selection list per visible row (`projected_row`) and the terminal
+  checks each cell against every selection. Both are proportional to the visible rows times the carets, not the
+  document; measure the many-caret case (for example 50 carets) in the batch before caching anything.

@@ -463,6 +463,8 @@ impl Session {
                 .any(|t| t.buffer == Some(fence.buffer))
             {
                 if fence.consent == Some(Choice::Discard) {
+                    // Explicit Discard: the draft is gone, and its recovery record must not bring it back.
+                    self.forget_recovery(fence.buffer);
                     if let Some(entry) = self.state.sources.buffers.remove(&fence.buffer)
                         && let Some(source) = entry.snapshot
                     {

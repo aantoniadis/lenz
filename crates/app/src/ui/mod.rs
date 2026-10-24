@@ -3409,7 +3409,7 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
                 let first = found.partition_point(|h| h.0 < i);
                 let found = found[first..].iter().take_while(|h| h.0 == i).filter(|h| h.1.start < cut).map(|h| (at(h.1.start)..at(h.1.end), palette.found_bg));
                 let inline = found.chain(inline).collect();
-                let line = lenz_gpui::TextRow { y: r.y, number: i + 1, text, fg: syntax, bg: inline, selected, caret };
+                let line = lenz_gpui::TextRow { y: r.y, number: i + 1, text, fg: syntax, bg: inline, selected, caret, extra: Vec::new() };
                 Painted { y: r.y, line: Some(line), label: String::new(), tint: r.tint, ann: None, thread: false }
             }
             Content::Filler => {

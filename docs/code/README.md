@@ -29,7 +29,7 @@ Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F1
 Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward,
 F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks, Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered
 bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
-Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. In the GUI, Close Window
+Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. Alt+Shift+Down / Alt+Shift+Up add a cursor on the next / previous line (VS Code keymap: Ctrl+Alt+Down / Up; also **Add Cursor Below / Above** in the Selection menu), Alt+J selects the word under the caret and then its next occurrence, and Escape, a click or a caret move returns to one cursor; several selections are edited and undone together ([limits](tui.md)). In the GUI, Close Window
 is available through the command menu or native window control; Ctrl+Shift+Q requests Quit All.
 
 The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
@@ -47,12 +47,18 @@ fold/unfold, F5 reload), and actions VS Code leaves unbound keep no chord there 
 language-server status, collapse/expand all) instead of reusing a key VS Code gives another action. The choice and
 every override are remembered outside the project in the Reader's settings file.
 
+Both presets bind Alt+Shift+Down / Up to Add Cursor Below / Above and Alt+J to Select Next Occurrence; the VS Code
+preset adds VS Code's Ctrl+Alt+Down / Up for the cursors, and keeps Alt+J because VS Code's Ctrl+D (select the next
+occurrence) is Compare Selected here.
+
 **Keymap…** lists each command with its chords, the preset origin of each override and any binding an override
 displaced. Enter takes the next key as the selected command's shortcut, Delete restores the preset's chord, Esc
 leaves or closes. A chord another command already runs is refused with that command named, so no action silently
 loses its key; the command palette and menus list every action regardless, including ones whose shortcut a
 terminal cannot deliver. Reload, Type Hierarchy (Ctrl+H is Backspace in terminals, so Alt+H is the terminal route)
-and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets.
+and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets. A dialog's
+own answers are not chords: the recovered-draft dialog keeps `r`, `d` and Esc in both presets, and its
+**Recover Unsaved Draft…** command stays in the File menu without a preset chord, like Close Window.
 
 ### SQL dialect
 
@@ -152,6 +158,12 @@ readable); with all three off, scrolling CPU and memory as before; with them on,
 reader CPU (+0.1 ms per frame) and the reader holds +5 MiB with `session.rs` and +19 MiB with a 10,000-line file
 (rust-analyzer sends about 6.5 MB of hints for it, decoded straight from the bytes); 100 rounds of toggling and tab
 switching settle at the same memory.
+
+Drafts that were not saved before the reader stopped are offered again at the next start: **Recover Unsaved
+Draft…** in the File menu, or the dialog that opens by itself, names the file or New File document, says whether
+the file on disk still matches the last confirmed save, and offers **Restore Draft** (`r`), **Discard Draft**
+(`d`) or **Later** (Esc). Restored tabs are marked `⟲`; recovery copies stay private, outside the project. See the
+[terminal reader's recovery notes](tui.md) for where they live and their limits.
 
 Code folds like IntelliJ's: a gutter mark (▾ open, ▸ collapsed) on every block, comment run and import run spanning
 lines; a collapsed one shows a boxed `…` and its closing brace, and a click on either opens it. Each pane folds on its

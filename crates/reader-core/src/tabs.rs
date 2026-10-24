@@ -72,7 +72,12 @@ pub struct Tab {
     /// The shown lines last made, with the folds, collapsed generation and line count they were made for (the folds
     /// held, so a new set cannot reuse their address).
     visible: std::sync::Mutex<Option<VisibleCache>>,
-    pub(crate) selection: Option<Selection>,
+    /// The primary selection: the one motions, Cut and Copy without a set of cursors act on. Write it through
+    /// [`Tab::place_selection`] or [`Tab::set_selections`], which keep the others consistent.
+    selection: Option<Selection>,
+    /// Further selections made with Add Cursor Above/Below or Select Next Occurrence: disjoint, in source order, and
+    /// never persisted (a restored view has one selection).
+    extra: Vec<Selection>,
     /// Extend Selection's chain while its last selection is the tab's (dropped with the content it was made for).
     pub(crate) expansion: Option<crate::expand::Expansion>,
     /// In-document find: the query, its matches in this document version and the current one (dropped on close).
@@ -116,6 +121,8 @@ pub struct Tab {
     pub(crate) preview_source: Option<crate::session::SemanticSource>,
     /// Annotate with Git Blame, while on: kept across releases, made again for new content.
     pub(crate) blame: Option<crate::blame::Blame>,
+    /// Shown from a recovered draft: it stays named as recovered until it is saved, discarded or reloaded.
+    pub(crate) recovered: bool,
 }
 
 impl Tab {
@@ -142,6 +149,7 @@ impl Tab {
             collapsed: Default::default(),
             visible: Default::default(),
             selection: None,
+            extra: Vec::new(),
             expansion: None,
             find: None,
             find_latest: Default::default(),
@@ -163,6 +171,7 @@ impl Tab {
             preview: None,
             preview_source: None,
             blame: None,
+            recovered: false,
         }
     }
 
@@ -205,10 +214,13 @@ impl Tab {
     /// still covers the hidden lines), and the top line to the row showing it.
     pub(crate) fn leave_hidden(&mut self, doc: &TextSnapshot) {
         let v = self.visible_for(doc);
-        if let Some(s) = self.selection.filter(|s| s.anchor == s.head && v.hidden(doc.line_of(s.head))) {
+        let moved = |s: Selection| if s.anchor == s.head && v.hidden(doc.line_of(s.head)) {
             let at = doc.reader_line_range(v.shown(doc.line_of(s.head))).end;
-            self.selection = Some(Selection { anchor: at, head: at });
-        }
+            Selection { anchor: at, head: at }
+        } else { s };
+        let primary = self.selection.map(moved);
+        let extra: Vec<_> = std::mem::take(&mut self.extra).into_iter().map(moved).collect();
+        if let Some(primary) = primary { self.set_selections(primary, extra); }
         self.top_line = v.shown(self.top_line);
     }
     /// Keep the selection's head at or below the top line (the adapter keeps it above the bottom).
@@ -249,6 +261,7 @@ impl Tab {
             collapsed: self.collapsed.clone(),
             visible: Default::default(),
             selection: self.selection,
+            extra: self.extra.clone(),
             expansion: None,
             find: None,
             find_latest: Default::default(),
@@ -271,6 +284,7 @@ impl Tab {
             preview_source: self.preview_source.clone(),
             // Its own annotations, blamed for itself once shown.
             blame: self.blame.as_ref().map(|_| crate::blame::Blame::new()),
+            recovered: self.recovered,
         }
     }
     /// The source's identity: absolute and normalized.
@@ -335,12 +349,51 @@ impl Tab {
     pub fn retained(&self) -> bool {
         self.retained
     }
+    /// Whether this view shows work restored from a recovered draft.
+    pub fn recovered(&self) -> bool {
+        self.recovered
+    }
     /// Whether the content is in memory now (an inactive tab's may have been released).
     pub fn loaded(&self) -> bool {
         self.loaded
     }
+    /// The primary selection: what a single caret or selection command sees.
     pub fn selection(&self) -> Option<Selection> {
         self.selection
+    }
+    /// Every selection of this view: the primary first, then the others in source order.
+    pub fn selections(&self) -> impl Iterator<Item = Selection> + '_ {
+        self.selection.into_iter().chain(self.extra.iter().copied())
+    }
+    /// The selections after the primary (empty unless Add Cursor Above/Below or Select Next Occurrence was used).
+    pub fn extra_selections(&self) -> &[Selection] {
+        &self.extra
+    }
+    /// Make `selection` the only one: a click, motion, navigation or jump leaves one place.
+    pub(crate) fn place_selection(&mut self, selection: Option<Selection>) {
+        self.selection = selection;
+        self.extra.clear();
+    }
+    /// Replace the primary and the others with one consistent set (see [`crate::selection::normalize`]).
+    pub(crate) fn set_selections(&mut self, primary: Selection, others: impl IntoIterator<Item = Selection>) {
+        let (primary, extra) = crate::selection::normalize(primary, others);
+        self.selection = Some(primary);
+        self.extra = extra;
+    }
+    /// Drop the secondary selections, keeping the primary.
+    pub(crate) fn collapse_selections(&mut self) {
+        self.extra.clear();
+    }
+    /// Carry every selection through a transaction: caret positions stay where the edit put them, and selections
+    /// that an edit made identical or overlapping are merged.
+    pub(crate) fn edit_selections(&mut self, transform: impl Fn(usize) -> usize, fallback: Option<Selection>) {
+        let carry = |s: Selection| Selection { anchor: transform(s.anchor), head: transform(s.head) };
+        let primary = self.selection.or(fallback).map(carry);
+        let extra: Vec<_> = std::mem::take(&mut self.extra).into_iter().map(carry).collect();
+        match primary {
+            Some(primary) => self.set_selections(primary, extra),
+            None => self.extra.clear(),
+        }
     }
     pub fn top_row(&self) -> usize {
         if self.top_row.0 == self.top_line { self.top_row.1 } else { 0 }
@@ -413,7 +466,7 @@ impl Tab {
         });
         if at.version == doc.key().version {
             self.top_line = at.top_line.min(last);
-            self.selection = selection(at.range.start);
+            self.place_selection(selection(at.range.start));
             self.approximate = false;
             return;
         }
@@ -430,12 +483,12 @@ impl Tab {
                 // Keep the anchor line where it was relative to the top of the view.
                 let shift = line as isize - at.line as isize;
                 self.top_line = (at.top_line as isize + shift).clamp(0, last as isize) as usize;
-                self.selection = selection(start);
+                self.place_selection(selection(start));
                 self.approximate = false;
             }
             None => {
                 self.top_line = at.top_line.min(last);
-                self.selection = None;
+                self.place_selection(None);
                 self.approximate = true;
             }
         }

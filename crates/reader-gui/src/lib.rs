@@ -33,6 +33,7 @@ mod close;
 mod input_method;
 mod external;
 mod save_as;
+mod recovery;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -134,6 +135,7 @@ pub enum Details {
     Close,
     External,
     Replace,
+    Recovered,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -660,6 +662,8 @@ impl ReaderView {
                 view.dispatch(Command::OpenRetained(file), cx);
             }
         }
+        // Recovered work asks before anything else can replace it.
+        view.sync_recovery_prompt();
         view
     }
 
@@ -783,6 +787,7 @@ impl ReaderView {
             Some(Modal::StatusDetails { kind: Details::External, .. }) => self.choose_external(reader_core::external::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Replace, .. }) => self.choose_replace(reader_core::save::ReplaceChoice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
+            Some(Modal::StatusDetails { kind: Details::Recovered, .. }) => self.choose_recovery(reader_core::recovery::Choice::Later,cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
             Some(Modal::StatusDetails { kind: Details::Checkout, .. }) => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel), cx),
@@ -925,6 +930,7 @@ impl ReaderView {
         self.sync_close_prompt();
         self.sync_external_prompt();
         self.sync_replace_prompt();
+        self.sync_recovery_prompt();
         self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
@@ -1251,12 +1257,13 @@ impl ReaderView {
         Some((view.tab().id(), view.snapshot().key(), range))
     }
 
+    /// Typed text replaces every selection of the focused view; the core makes it one transaction.
     fn replace_draft_input(&mut self, text: &str, kind: reader_core::text::EditKind, cx: &mut Context<Self>) -> bool {
-        let Some((tab, expected, range)) = self.draft_target() else {
+        if self.draft_target().is_none() {
             if self.draft_context() && self.session.disabled(CommandId::Paste).is_some() { return true; }
             return false;
-        };
-        self.dispatch(Command::Edit { tab, expected, edits: vec![reader_core::text::TextEdit { range, text: text.into() }], kind }, cx);
+        }
+        self.dispatch(Command::InsertText { text: text.to_owned(), kind }, cx);
         true
     }
 
@@ -1420,6 +1427,9 @@ impl ReaderView {
             ("c", true, false) => self.run(CommandId::Copy, window, cx),
             ("t", true, false) => self.run(CommandId::FindDeclarations, window, cx),
             ("escape", false, false) if self.session.state().asking().is_some() => self.dispatch(Command::CancelSemantic, cx),
+            // Several cursors: Escape goes back to one before it closes anything else. The add-cursor and
+            // next-occurrence chords come from the keymap, above, so a preset or an override moves them.
+            ("escape", false, false) if self.session.disabled(CommandId::CollapseSelections).is_none() => self.run(CommandId::CollapseSelections, window, cx),
             ("left", false, true) => self.extend(Motion::Left, cx),
             ("right", false, true) => self.extend(Motion::Right, cx),
             ("up", false, true) => self.extend(Motion::Up, cx),
@@ -1667,6 +1677,11 @@ impl ReaderView {
             let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
             let choice=match key {"r" if plain=>Some(reader_core::save::ReplaceChoice::Replace),"escape"=>Some(reader_core::save::ReplaceChoice::Cancel),_=>None};
             if let Some(choice)=choice {self.choose_replace(choice,cx);return;}
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Recovered,..})) {
+            let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
+            let choice=match key {"r" if plain=>Some(reader_core::recovery::Choice::Restore),"d" if plain=>Some(reader_core::recovery::Choice::Discard),"escape"=>Some(reader_core::recovery::Choice::Later),_=>None};
+            if let Some(choice)=choice {self.choose_recovery(choice,cx);return;}
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Close,..})) {
             let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
@@ -2321,7 +2336,7 @@ impl ReaderView {
                             .chain(spans.get(n).into_iter().flatten().map(|(sr, c)| (at(sr.start)..at(sr.end), palette.syntax_color(*c))))
                             .collect();
                         let bg = found.into_iter().map(|m| (m, match_bg)).collect();
-                        TextRow { y: n as f32, number: l as u32 + 1, text, fg, bg, selected: None, caret: None }
+                        TextRow { y: n as f32, number: l as u32 + 1, text, fg, bg, selected: None, caret: None, extra: Vec::new() }
                     })
                     .collect()
             }
@@ -2663,6 +2678,7 @@ impl ReaderView {
             Details::Text => vec!["Copy", "Close"],
             Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Replace => reader_core::save::ReplaceChoice::ALL.into_iter().map(|choice|choice.label()).collect(),
+            Details::Recovered => reader_core::recovery::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|self.session.close_prompt().map_or(c.label(), |p|p.label(c))).collect(),
         }
     }
@@ -2982,6 +2998,7 @@ impl ReaderView {
                             (Details::External,Some(i)) => {if let Some(choice)=reader_core::external::Choice::ALL.get(i) {self.choose_external(*choice,cx);}}
                             (Details::Replace,Some(i)) => {if let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) {self.choose_replace(*choice,cx);}}
                             (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
+                            (Details::Recovered,Some(i)) => {if let Some(choice)=reader_core::recovery::Choice::ALL.get(i) {self.choose_recovery(*choice,cx);}}
                             (Details::Checkout, Some(i)) => {
                                 if let Some(&(_, c)) = self.session.checkout_choices().get(i) {
                                     self.dispatch(Command::CheckoutChoice(c), cx);
@@ -4008,10 +4025,18 @@ impl ReaderView {
         }
         let selected = selection.map(|sel| projected.range(sel.range())).filter(|r| !r.is_empty());
         let caret = selection.and_then(|sel| projected.caret(sel.head));
+        // Every other selection, as the part this row shows (an empty one keeps its caret's place).
+        let extra: Vec<_> = if sticky { Vec::new() } else {
+            tab.selections().skip(1).filter_map(|sel| {
+                let caret = sel.range().is_empty().then(|| projected.caret(sel.head)).flatten();
+                let range = if caret.is_some() { 0..0 } else { projected.range(sel.range()) };
+                (caret.is_some() || !range.is_empty()).then_some((range, caret))
+            }).collect()
+        };
         let mut bg: Vec<_> = occurrences.map_or_else(Vec::new, |o| o.ranges.iter().filter_map(|(r, w)| { let r = projected.range(r.clone()); (!r.is_empty()).then_some((r, if *w { write } else { read })) }).collect());
         if !sticky { bg.extend(tab.find().map_or(&[][..], |f| f.in_line(r.line)).iter().filter_map(|(_, r)| { let r = projected.range(range.start + r.start..range.start + r.end); (!r.is_empty()).then_some((r, palette.found_bg)) })); }
         if !transient && self.session.state().comparison_changed_line(tab.id(), r.line) { bg.insert(0, (0..projected.text.len(), palette.block[2])); }
-        let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret };
+        let mut row = TextRow { y, number: if r.index == 0 { r.line as u32 + 1 } else { 0 }, text: projected.text.clone(), fg, bg, selected, caret, extra };
         if let Some((fold, true)) = view.fold_at(r.line) && r.last && projected.complete() {
             let at = row.text.len();
             row.text.push_str(PLACEHOLDER);
@@ -4029,6 +4054,10 @@ impl ReaderView {
             for (range, _) in &mut row.bg { range.start += offset; range.end += offset; }
             if let Some(range) = &mut row.selected { range.start += offset; range.end += offset; }
             if let Some(caret) = &mut row.caret { *caret += offset; }
+            for (range, caret) in &mut row.extra {
+                range.start += offset; range.end += offset;
+                if let Some(caret) = caret { *caret += offset; }
+            }
             for (_, range, _, _) in &mut decor { range.start += offset; range.end += offset; }
         }
         Some((row, decor))
@@ -4502,9 +4531,10 @@ impl Render for ReaderView {
             let mut row: Vec<(TabCell, TabId)> = state.pane_tabs(g.pane).map(|t| {
                 let title = t.title();
                 let (dirty, status) = (state.tab_dirty(t.id()), state.tab_status(t.id()));
-                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 } + if status.is_some() { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
+                let recovered = t.recovered();
+                let w = (title.chars().count() as f32 + 5.0 + if dirty { 2.0 } else { 0.0 } + if recovered { 2.0 } else { 0.0 } + if status.is_some() { 2.0 } else { 0.0 }) * self.char_w + icon_w(state.file_icons());
                 x += w;
-                ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status), t.id())
+                ((title, t.retained(), Some(t.id()) == shown, x - w, x, dirty, status, recovered), t.id())
             }).collect();
             let right = self.preview_button(*g).map_or(g.bar.1, |(b, _)| f32::from(b.left()) - 4.0);
             let shift = row.iter().find(|r| r.0.2).map_or(0.0, |r| (r.0.4 - right).min(r.0.3 - g.bar.0).max(0.0));
@@ -4860,7 +4890,7 @@ impl Render for ReaderView {
                             let tab_end = f.preview_button.as_ref().map_or(bx1, |(b, _)| f32::from(b.left()) - 4.0);
                             let bar = Bounds { origin: gpui::point(px(x0 + bx0), px(y)), size: gpui::size(px((tab_end - bx0).max(0.0)), px(tabs_h)) };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: bar }), |window| {
-                                for (title, retained, shown, tx0, tx1, dirty, status) in &f.tabs {
+                                for (title, retained, shown, tx0, tx1, dirty, status, recovered) in &f.tabs {
                                     if *tx1 < bx0 {
                                         continue; // scrolled off the left
                                     }
@@ -4875,6 +4905,9 @@ impl Render for ReaderView {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, bar, &palette, icons::file(title), x0 + tx0 + char_w, y);
                                     }
                                     let title_x = x0 + tx0 + char_w + icon_w;
+                                    // A recovered draft says so beside its unsaved mark.
+                                    if *recovered { lenz_gpui::text(window, cx, m, title_x, y, "⟲", palette.dim); }
+                                    let title_x = title_x + if *recovered { 2.0 * char_w } else { 0.0 };
                                     if *dirty { lenz_gpui::text(window, cx, m, title_x, y, "●", palette.accent); }
                                     let name_x = title_x + if *dirty { 2.0 * char_w } else { 0.0 };
                                     lenz_gpui::text(window, cx, m, name_x, y, title, color);
@@ -5225,7 +5258,7 @@ fn unshowable_image(view: &reader_core::session::View<'_>) -> Option<String> {
 type PreviewFrame = (Arc<preview::Layout>, f32, Vec<(usize, Arc<gpui::RenderImage>)>, Option<std::ops::Range<usize>>);
 /// A tab in its bar: title, kept, shown, x range, unsaved draft marker.
 /// And its Git status letter.
-type TabCell = (String, bool, bool, f32, f32, bool, Option<lenz_content::branches::FileStatus>);
+type TabCell = (String, bool, bool, f32, f32, bool, Option<lenz_content::branches::FileStatus>, bool);
 
 /// One pane's frame to paint: where it is, its tabs (title, kept, shown, x range), and what it shows.
 /// A piece of a breadcrumb bar to paint.
@@ -5295,6 +5328,11 @@ fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, pal
             bg: row.bg.iter().filter_map(|(r, c)| Some((cut(r)?, *c))).collect(),
             selected: row.selected.as_ref().and_then(cut),
             caret: row.caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start),
+            extra: row.extra.iter().filter_map(|(range, caret)| {
+                let range = cut(range).unwrap_or(0..0);
+                let caret = caret.filter(|at| part.start <= *at && (*at < part.end || i + 1 == parts.len() && *at == part.end)).map(|at| at - part.start);
+                (caret.is_some() || !range.is_empty()).then_some((range, caret))
+            }).collect(),
         };
         debug_assert!(fragment.text.len() <= 6144);
         lenz_gpui::paint_row(window, cx, metrics, palette, bounds, x, width, scroll - origin, &fragment);

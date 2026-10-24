@@ -1331,6 +1331,13 @@ impl App {
                         let text=format!("[{} {key}]",choice.label());let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
                         let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(p.fg,p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
                     }
+                } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Recovered,..}) {
+                    let mut x=content.x;
+                    for (choice,key) in reader_core::recovery::Choice::ALL.into_iter().zip(["r","d","Esc"]) {
+                        let text=format!("[{} {key}]",choice.label());let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
+                        let disabled=self.session.recovery_prompt().is_some_and(|prompt|prompt.disabled(choice).is_some());
+                        let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(if disabled {p.dim} else {p.fg},p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
+                    }
                 } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Close,..}) {
                     let mut x=content.x;
                     for (choice,key) in [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().zip(["s","d","Esc"]) {
@@ -1367,7 +1374,7 @@ impl App {
                     geometry.details_close = Rect::new(content.x + width, content.bottom(), width, 1);
                     line(frame.buffer_mut(), geometry.details_copy, "[Copy Ctrl+C]", style(p.fg, p.selected_bg));
                 }
-                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close | crate::app::Details::External | crate::app::Details::Replace, .. }) {
+                if !matches!(modal.kind, Prompt::Details { kind: crate::app::Details::Checkout | crate::app::Details::Close | crate::app::Details::External | crate::app::Details::Replace | crate::app::Details::Recovered, .. }) {
                     line(frame.buffer_mut(), geometry.details_close, "[Close Esc]", style(p.fg, p.selected_bg));
                 }
             }
@@ -1675,6 +1682,7 @@ fn draw_pane(
             (UnicodeWidthStr::width(tab.title().as_str()) as u16
                 + 4
                 + if state.tab_dirty(tab.id()) { 2 } else { 0 }
+                + if tab.recovered() { 2 } else { 0 }
                 + if state.tab_status(tab.id()).is_some() { 2 } else { 0 }
                 + if app.nerd_icons() { 2 } else { 0 })
             .min(32)
@@ -1695,7 +1703,8 @@ fn draw_pane(
         // The unsaved mark before the name, the Git status letter after it: independent of each other.
         let status = state.tab_status(tab.id());
         let named = format!(
-            " {}{}",
+            " {}{}{}",
+            if tab.recovered() { "⟲ " } else { "" },
             if state.tab_dirty(tab.id()) { "● " } else { "" },
             lenz_content::file_icons::file(&tab.title()).label(app.nerd_icons(), &tab.title()),
         );
@@ -2198,7 +2207,8 @@ fn draw_source_row(
         return;
     }
     let start = source_line.start;
-    let selection = tab.selection();
+    // Every selection of the view: the primary one and the cursors added below or above it.
+    let selections: Vec<_> = tab.selections().collect();
     let find = tab.find();
     let occurrences = (state.active().is_some_and(|a| a.id() == tab.id()))
         .then(|| state.occurrences())
@@ -2231,12 +2241,10 @@ fn draw_source_row(
         {
             st = st.bg(color(p.found_bg));
         }
-        if !hint && selection.is_some_and(|s| s.range().contains(&source)) {
+        if !hint && selections.iter().any(|s| s.range().contains(&source)) {
             st = st.bg(color(p.sel_bg));
         }
-        if selection.is_some_and(|s| s.anchor == s.head && s.head == source)
-            && cell.caret
-        {
+        if selections.iter().any(|s| s.anchor == s.head && s.head == source) && cell.caret {
             st = st.add_modifier(Modifier::REVERSED);
         }
         let x = area.x + indent as u16 + cell.column.saturating_sub(skip) as u16;
@@ -2258,7 +2266,7 @@ fn draw_source_row(
             line: r.line,
             byte: end,
         });
-        if selection.is_some_and(|s| s.anchor == s.head && s.head == start + end) {
+        if selections.iter().any(|s| s.anchor == s.head && s.head == start + end) {
             buf.set_stringn(
                 end_x,
                 y,
@@ -2665,7 +2673,7 @@ pub(crate) fn wrap_text(text: &str, columns: usize) -> Vec<String> {
     rows
 }
 
-const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Insert a tab in editable source; cycle controls outside source input mode\nShift+Tab / click  Cycle or choose explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nCtrl+S  Save draft\nCtrl+Z / Ctrl+Shift+Z  Undo / redo\nTyping / bracketed paste  Edit source on supported input backends\nClick or drag  Select source text (double: word, triple: its syntax group)\nAlt+B  Annotate with Git blame (click an annotation for its commit)\nCtrl+`  Git branches (or click the branch in the status bar)\nSpace in the explorer, then Ctrl+D  Compare two entries\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection (VS Code keymap: Alt+Shift+Right / Left)\nCtrl+Q  Close this view (Ctrl+Shift+Q: all views)\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nThe Application group in F10 holds Keymap… (preset, rebinding, every chord). F10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll, source/preview presentation and the Git comparisons in Lenz Diff.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Independent windows retain their own views.\n\nEditing changes an unsaved draft; Ctrl+S writes it. Closing its last view asks Save, Discard or Cancel. Read-only mode blocks editing. Git checkouts and branches also change your repository.\n\nEsc closes this help.";
+const HELP: &str = "Lenz Reader\n\nF10 opens every shared reader command, including its availability and disabled reason. Type to filter, use arrows to choose, Enter to run.\n\nCtrl+K / Double Shift  Search Everywhere\nCtrl+P / Ctrl+Shift+N  Find file (name:line:column)\nCtrl+Alt+Shift+N  Find symbol\nCtrl+Shift+A / Ctrl+Shift+P  Find action\nTab / Shift+Tab in Search Everywhere  Change scope\nCtrl+O  Open file\nF10 → Open folder  Browse folder\nCtrl+F  Find in file\nF3 / Shift+F3  Next / previous match\nAlt+C / W / R  Find case / word / regex\nCtrl+Shift+F  Search project\nCtrl+G  Go to line\nCtrl+Shift+E  Focus explorer\nTab  Insert a tab in editable source; cycle controls outside source input mode\nShift+Tab / click  Cycle or choose explorer, text and results\nArrows / PageUp / PageDown  Navigate\nShift+arrows  Extend selection\nCtrl+A / Ctrl+C  Select all / copy\nCtrl+S  Save draft\nCtrl+Z / Ctrl+Shift+Z  Undo / redo\nTyping / bracketed paste  Edit source on supported input backends\nClick or drag  Select source text (double: word, triple: its syntax group)\nAlt+B  Annotate with Git blame (click an annotation for its commit)\nCtrl+`  Git branches (or click the branch in the status bar)\nSpace in the explorer, then Ctrl+D  Compare two entries\nRight-click text  Shared context actions\nClick a fold mark  Fold or unfold\nCtrl+F4  Close tab\nCtrl+W / Ctrl+Shift+W  Grow / shrink selection (VS Code keymap: Alt+Shift+Right / Left)\nAlt+Shift+Down / Up  Add a cursor below / above (VS Code keymap: Ctrl+Alt+Down / Up; the palette has both)\nAlt+J  Select the word, then the next occurrence, at every cursor\nEsc  Back to one cursor, then close a dialog or pending request\nCtrl+Q  Close this view (Ctrl+Shift+Q: all views)\nF2  Language server status and recovery\nShift+F2  Full status details (Ctrl+C copies)\nEsc  Close dialog, documentation or cancel a pending request\n\nThe Application group in F10 holds Keymap… (preset, rebinding, every chord). F10 also provides bookmarks, history, results, provider controls, themes, split panes, breadcrumbs, hints, sticky scroll, source/preview presentation and the Git comparisons in Lenz Diff.\n\nTerminal capabilities\nImages use true-color half-block cells; Markdown images fit within 20 terminal rows. Text uses terminal fonts and cell widths; italic, underline and strike depend on the terminal. Markdown is rendered from the same parsed document and local images as the GUI. Source selection keeps UTF-8 coordinates. Clipboard uses OSC 52 and requires terminal support. Double Shift needs modifier key reports from a terminal supporting the enhanced keyboard protocol; Ctrl+K always opens Search Everywhere. Alt+Shift with the arrow keys is reported as such only by terminals that send modified arrows, so Add Cursor Below and Add Cursor Above stay in the palette (F10) and the Selection menu. Independent windows retain their own views.\n\nEditing changes an unsaved draft; Ctrl+S writes it. Closing its last view asks Save, Discard or Cancel. Read-only mode blocks editing. Git checkouts and branches also change your repository.\n\nEsc closes this help.";
 
 #[cfg(test)]
 #[path = "render_tests.rs"]

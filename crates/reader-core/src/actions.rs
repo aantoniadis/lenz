@@ -214,6 +214,7 @@ impl Session {
             // An untitled document has no file yet: Save chooses one.
             CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
             CommandId::NewDocument => Command::NewDocument,
+            CommandId::RecoverDrafts => Command::ShowRecoveredDrafts,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
                 None => return CatalogAction::Disabled("No file is open"),
@@ -230,6 +231,10 @@ impl Session {
             CommandId::CollapseCommentsImports => Command::CollapseCommentsImports,
             CommandId::ExtendSelection => Command::ExtendSelection,
             CommandId::ShrinkSelection => Command::ShrinkSelection,
+            CommandId::AddCursorBelow => Command::AddCursorBelow,
+            CommandId::AddCursorAbove => Command::AddCursorAbove,
+            CommandId::SelectNextOccurrence => Command::SelectNextOccurrence,
+            CommandId::CollapseSelections => Command::CollapseSelections,
             CommandId::Definition => Command::Definition { peek: false },
             CommandId::PeekDefinition => Command::Definition { peek: true },
             CommandId::TypeDefinition => Command::TypeDefinition,
@@ -338,7 +343,7 @@ impl CommandId {
     pub fn group(self) -> CommandGroup {
         use CommandGroup as G;
         match self {
-            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecheckSave | Self::ConfirmRecheckedSave
+            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::SaveAs | Self::NewDocument | Self::RecoverDrafts | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
             | Self::ReadOnlyMode | Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
@@ -361,6 +366,7 @@ impl CommandId {
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
             Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection
+            | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections
             | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
@@ -386,6 +392,8 @@ impl CommandId {
             Self::Delete => Some("Delete"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
+            // Escape is an editing key, not a chord: the adapters give it to this before their own meanings.
+            Self::CollapseSelections => Some("Esc"),
             _ => None,
         }
     }

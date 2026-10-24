@@ -80,10 +80,11 @@ impl Session {
         left.buffer = Some(buffer); left.comparison_side = Some(ComparisonSide::Saved);
         left.stamp = None; left.blame = None; left.markdown_source = true; left.new_content();
         left.top_line = left.top_line.min(baseline.line_count() - 1);
-        left.selection = left.selection.map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) });
+        let clamped = left.selection().map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) });
+        left.place_selection(clamped);
         right.comparison_side = Some(ComparisonSide::Current); right.markdown_source = true;
         let before = Before { active: self.state.active, other: self.state.other, focused: self.state.focused, split: self.state.settings.split };
-        self.state.sources.buffers.insert(buffer, CurrentSource { read_only: false, untitled: false, document: Default::default(), snapshot: Some(Arc::new(baseline.with_buffer(buffer))), stamp: None, saved: None, draft: None, save: Default::default() });
+        self.state.sources.buffers.insert(buffer, CurrentSource { read_only: false, untitled: false, recovery: None, document: Default::default(), snapshot: Some(Arc::new(baseline.with_buffer(buffer))), stamp: None, saved: None, draft: None, save: Default::default() });
         self.comparison_seq += 1;
         self.state.comparison = Some(SavedComparison { saved, current: current_id, buffer, before, baseline: SemanticSource::new(&baseline), baseline_backing: Arc::downgrade(&baseline), text: SemanticSource::new(&current), request: self.comparison_seq, pending: true, submitted: false, changes: Vec::new(), line_endings_differ: false, failure: None });
         self.state.tabs.extend([left, right]);
@@ -124,7 +125,7 @@ impl Session {
             if changed {
                 self.comparison_seq += 1;
                 if let Some(c) = &mut self.state.comparison { c.request = self.comparison_seq; c.baseline = SemanticSource::new(&baseline); c.text = SemanticSource::new(&current); c.pending = true; c.submitted = false; c.changes.clear(); c.line_endings_differ = false; c.failure = None; }
-                if baseline_changed && let Some(t) = self.tab_mut(saved_id) { t.new_content(); t.top_line = t.top_line.min(baseline.line_count() - 1); t.selection = t.selection.map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) }); }
+                if baseline_changed && let Some(t) = self.tab_mut(saved_id) { t.new_content(); t.top_line = t.top_line.min(baseline.line_count() - 1); let clamped = t.selection().map(|s| Selection { anchor: baseline.floor_char_boundary(s.anchor.min(baseline.len_bytes())), head: baseline.floor_char_boundary(s.head.min(baseline.len_bytes())) }); t.place_selection(clamped); }
                 if baseline_changed { self.decorate(saved_id); }
             }
             if let Some(c) = &mut self.state.comparison { c.baseline_backing = Arc::downgrade(&baseline); }

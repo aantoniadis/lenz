@@ -45,7 +45,19 @@ fn keymap_presets_change_live_dispatch_and_the_labels_next_to_commands() {
     assert!(a.session.state().tabs().is_empty(), "Ctrl+W closes the tab under the VS Code keymap");
     assert_eq!(std::fs::read(&path).unwrap(), b"one\ntwo\nthree\n", "closing a clean tab writes nothing");
     draw(&mut a, 80, 24);
-    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(d.path().join("config/settings.json")).unwrap()).unwrap_or(serde_json::Value::Null);
+    // Settings are written by a background worker: wait for that write instead of racing it.
+    let settings = d.path().join("config/settings.json");
+    let until = Instant::now() + Duration::from_secs(5);
+    let saved = loop {
+        match std::fs::read(&settings) {
+            Ok(bytes) => break bytes,
+            Err(e) => {
+                assert!(Instant::now() < until, "the keymap choice was not saved: {e}");
+                std::thread::yield_now();
+            }
+        }
+    };
+    let json: serde_json::Value = serde_json::from_slice(&saved).unwrap_or(serde_json::Value::Null);
     assert!(json.is_null() || json["keymap"] == serde_json::json!("vs_code"), "{json}");
 }
 
