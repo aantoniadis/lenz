@@ -1954,3 +1954,57 @@ fn semantic_draft_targets_keep_peek_and_activation_consistent_in_both_adapters(c
     assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
     assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes()); assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes()); assert_eq!(std::fs::read(other).unwrap(), b"pub fn helper() {}\n");
 }
+
+#[gpui::test]
+fn long_line_split_edits_keep_absolute_unicode_coordinates_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("long-edit.txt");
+    let prefix = "a".repeat(12_000); let tail = "😀e\u{301}\t\x07END\r\n";
+    let original = format!("{prefix}{tail}"); std::fs::write(&path, &original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle()); visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline); std::thread::yield_now();
+    }
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); }); terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    draw(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test()); tui.enable_draft_input_for_test();
+    visual.simulate_keystrokes("ctrl-g 1 : 1 2 0 0 1 enter ctrl-\\ shift-right β");
+    key(&mut tui, KeyCode::Char('g'), KeyModifiers::CONTROL); tui.handle(Event::Paste("1:12001".into()));
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('\\'), KeyModifiers::CONTROL);
+    key(&mut tui, KeyCode::Right, KeyModifiers::SHIFT); key(&mut tui, KeyCode::Char('β'), KeyModifiers::NONE);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(format!("{prefix}βe\u{301}\t\x07END\r\n").as_str()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    assert_eq!(tui.session.state().selection().unwrap().head, 12_002);
+    visual.simulate_keystrokes("ctrl-1 ctrl-z"); key(&mut tui, KeyCode::Char('1'), KeyModifiers::CONTROL); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(original.as_str()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("終😀".into())));
+    visual.simulate_keystrokes("ctrl-v"); tui.handle(Event::Paste("終😀".into()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    let expected = format!("{prefix}😀終😀e\u{301}\t\x07END\r\n");
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(expected.as_str()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        draw(&mut visual, &mut tui, &mut terminal);
+        let shown = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        if shown.contains('終') && gui.read_with(&visual, |view, _| view.visible_rows().iter().any(|row| row.text.contains('終'))) { break; }
+        assert!(Instant::now() < deadline, "the edited Unicode tail must become visible in both split views"); std::thread::yield_now();
+    }
+    for pane in [0, 1] {
+        let state = tui.session.state(); let tab = state.shown(pane).unwrap();
+        assert_eq!(state.view(tab.id()).unwrap().snapshot().copy_range(0..expected.len()).unwrap(), expected);
+    }
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
