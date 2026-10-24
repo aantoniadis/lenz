@@ -4,10 +4,11 @@
     python3 scripts/panic-sites.py            # check against scripts/panic-sites.txt (CI)
     python3 scripts/panic-sites.py --update   # write the current counts as the new baseline
 
-Counts clippy's `unwrap_used`, `expect_used`, `panic`, `unreachable` and `string_slice` over the workspace's
-libraries and binaries (tests excluded), each site once. Linux only: the counts include platform code.
-Use --reader for the imported Reader's separate baseline, preserving the existing Diff budget.
-Use --reader-tui for the Reader terminal adapter's own baseline.
+Counts clippy's `unwrap_used`, `expect_used`, `panic`, `unreachable` and `string_slice` over production
+libraries and binaries (tests excluded), each site once. Linux only: counts include platform code.
+The default Diff budget covers its shared Content, GPUI and Engine dependencies. --reader owns only
+reader-core and reader-gui sites; --reader-tui owns only terminal-adapter sites and takes precedence.
+Shared diagnostics remain in the default budget rather than being counted again as Reader sites.
 """
 import json, pathlib, subprocess, sys
 
@@ -30,8 +31,11 @@ def current(reader=False, reader_tui=False) -> dict[str, int]:
         lint = ((msg.get("code") or {}).get("code") or "").removeprefix("clippy::")
         if lint in sites:
             span = next(s for s in msg["spans"] if s["is_primary"])
-            if reader_tui and not span["file_name"].startswith("crates/reader-tui/"):
-                continue  # Shared dependencies already have their existing budgets.
+            if reader_tui:
+                if not span["file_name"].startswith("crates/reader-tui/"):
+                    continue
+            elif reader and not span["file_name"].startswith(("crates/reader-core/", "crates/reader-gui/")):
+                continue  # Content, GPUI and Engine remain enforced by the Diff budget.
             sites[lint].add((span["file_name"], span["line_start"], span["column_start"]))
     return {lint: len(found) for lint, found in sites.items()}
 
