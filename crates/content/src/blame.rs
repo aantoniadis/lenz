@@ -104,6 +104,20 @@ pub fn blame_worktree(root: &Path, path: &str, current: &dyn Fn() -> bool, mut o
     run_blame(root, &args, None, current, on_hunk)
 }
 
+/// Attribute supplied current text against HEAD without writing the working tree.
+/// `bytes` is borrowed from an already admitted worker document, never reread from disk.
+pub fn blame_contents(root: &Path, path: &str, bytes: &[u8], current: &dyn Fn() -> bool, mut on_hunk: impl FnMut(Hunk)) -> Result<(), String> {
+    if !current() { return Err("cancelled".into()); }
+    if !in_head(root, path) {
+        if !bytes.is_empty() && current() { on_hunk(not_committed(line_count(bytes), path)); }
+        return if current() { Ok(()) } else { Err("cancelled".into()) };
+    }
+    let mut args = vec!["blame".to_string(), "--incremental".to_string()];
+    args.extend(ignore_revs_args(root)?);
+    args.extend(["--contents".into(), "-".into(), "--".into(), path.into()]);
+    run_blame_bytes(root, &args, Some(bytes), current, on_hunk)
+}
+
 /// The configured `blame.ignoreRevsFile`s, when one is missing: git dies on a missing one (still in 2.55),
 /// so the list is replaced by the files that exist. Nothing when all exist: git applies them itself.
 pub fn ignore_revs_args(root: &Path) -> Result<Vec<String>, String> {
@@ -157,6 +171,10 @@ fn now() -> i64 {
 /// Runs `git blame --incremental` with `args`, calling `on_hunk` per run of lines; once `current` turns false (checked
 /// per line git writes) git is ended and the result is `Err("cancelled")`.
 pub fn run_blame(root: &Path, args: &[String], stdin: Option<Vec<u8>>, current: &dyn Fn() -> bool, on_hunk: impl FnMut(Hunk)) -> Result<(), String> {
+    run_blame_bytes(root, args, stdin.as_deref(), current, on_hunk)
+}
+
+fn run_blame_bytes(root: &Path, args: &[String], stdin: Option<&[u8]>, current: &dyn Fn() -> bool, on_hunk: impl FnMut(Hunk)) -> Result<(), String> {
     let mut child = git::command(root)?
         .args(args)
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
@@ -166,7 +184,7 @@ pub fn run_blame(root: &Path, args: &[String], stdin: Option<Vec<u8>>, current: 
         .map_err(|e| format!("lenz: git blame: {e}"))?;
     if let (Some(bytes), Some(mut pipe)) = (stdin, child.stdin.take()) {
         // git reads all of it before writing anything; if it died instead, its stderr says why.
-        let _ = pipe.write_all(&bytes);
+        let _ = pipe.write_all(bytes);
     }
     let parsed = parse(BufReader::new(child.stdout.take().expect("piped stdout")), current, on_hunk);
     if parsed.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::Interrupted) {

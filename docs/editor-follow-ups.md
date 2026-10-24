@@ -49,11 +49,15 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   build before changing the gate; this is an operational observation, not a
   demonstrated product regression. Evidence: the batch gate log under
   `target/perf/editor-implementation/merge-08-10/`.
-- **Draft-aware blame presentation:** saved-file blame currently uses the reader's
-  current line index. Before production typing is enabled, cover inserting and
-  deleting lines in an annotated draft and undoing them; hide or map annotations
-  that no longer describe the current line. The ticket-12 input gate remains off
-  in production, and its focused traces do not claim draft-aware blame support.
+- **Draft-aware blame presentation:** ticket18 now invalidates old annotations and
+  commit actions on draft edits and recomputes against admitted current bytes.
+  Focused core and opt-in GUI/TUI input/render traces cover insertion, newline
+  deletion, Undo and failure. Final acceptance and performance remain pending the
+  11/12/13/16/18 batch; production typing remains gated for21/22.
+  Legacy drafts containing characters their original encoding cannot represent,
+  and lossy-decoded sources, show explicit Failed attribution with commit actions
+  disabled. Representable legacy bytes retain exact attribution; this boundary
+  follows the strict writer encoder rather than substituting invented bytes.
 - **Typing-group allocation:** compact history currently joins inserted/deleted
   group text when adjacent edits coalesce. This copies the group's changed text,
   not the document. Use the scheduled batch measurements before deciding whether
@@ -65,3 +69,9 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   for each tab; include many-tab counts in the planned batch measurements before
   deciding whether to expose a borrowed-tab or iterator form. The draft dirty
   comparison itself is constant time; no text is copied by this lookup.
+
+- **Clock-dependent blame fixtures:** the focused18 run crossed UTC midnight and
+  exposed a status assertion comparing the commit's creation date with a later
+  `today()` call. Preserve the exact attribution assertion and rerun that single
+  case with a fresh fixture for18; deterministic fixture dates remain deferred.
+  Evidence: `target/perf/editor-implementation/18-blame/core-final.log`.

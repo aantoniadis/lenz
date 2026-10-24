@@ -12,7 +12,7 @@ use result::{ResultEntry, ResultTicket};
 enum Owner { Buffer(BufferId), Result(ResultSlot) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Consumer { Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
+pub(crate) enum Consumer { Blame(TabId), Find(TabId), Selection(TabId), RootKind, Syntax, Markdown, Index, Ready, Documentation, Decode(crate::decor::Decor) }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 struct Scope { key: SnapshotKey, source: usize, project: u64 }
@@ -198,6 +198,10 @@ impl Analysis {
             .then(|| entry.group.source.as_ref().and_then(|source| source.document.get().cloned())).flatten()
     }
 
+    pub(crate) fn source_failure(&self, snapshot: &TextSnapshot, project: u64) -> Option<&'static str> {
+        self.conversions.get(&scope(snapshot, project)).and_then(|conversion| conversion.failure)
+    }
+
     fn enqueue(&mut self, id: BufferId) {
         if let Some(entry) = self.entries.get_mut(&id) && !entry.queued {
             entry.queued = true;
@@ -230,6 +234,7 @@ impl Analysis {
     pub(crate) fn release_view(&mut self, id: BufferId, tab: TabId, last: bool) {
         self.cancel_consumer(id, Consumer::Find(tab));
         self.cancel_consumer(id, Consumer::Selection(tab));
+        self.cancel_consumer(id, Consumer::Blame(tab));
         if !last { return; }
         for consumer in [Consumer::Syntax, Consumer::RootKind, Consumer::Markdown, Consumer::Ready, Consumer::Documentation, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
         if let Some(entry) = self.entries.get_mut(&id) {

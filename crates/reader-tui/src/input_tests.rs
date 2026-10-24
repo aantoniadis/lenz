@@ -2855,6 +2855,60 @@ fn annotated_app() -> (tempfile::TempDir, App, String) {
     draw(&mut a, 100, 20);
     (r, a, sha)
 }
+
+#[test]
+fn edited_blame_renders_pending_current_lines_undo_and_failure_without_saving() {
+    use lenz_content::git::testing::git;
+    let (r, mut a, sha) = annotated_app();
+    let gutter = |a: &mut App| {
+        let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 20)).unwrap();
+        terminal.draw(|f| a.draw(f)).unwrap();
+        let g = &a.layout.panes[0];
+        (g.gutter_x..g.gutter_x + g.ann).map(|x| terminal.backend().buffer()[(x, g.text.y)].symbol()).collect::<String>()
+    };
+    a.enable_draft_input_for_test();
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    a.handle(Event::Paste("new\n".into()));
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
+    let tab = a.session.state().active().unwrap().id();
+    assert_eq!(a.session.disabled(CommandId::CopyRevision), Some("Blame pending"));
+    assert!(a.session.annotation(tab, 0).is_none());
+    assert!(gutter(&mut a).contains("Blame pending…"));
+    settle(&mut a, |a| matches!(a.session.state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    assert_eq!(a.session.annotation(tab, 0).unwrap().label, "Not committed");
+    for line in [1, 2] { assert_eq!(a.session.annotation(tab, line).unwrap().commit.sha, sha); }
+    let shown = draw_screen(&mut a, 100, 20);
+    assert!(shown.contains("Not committed") && shown.contains("new"));
+    for _ in 0..4 { key(&mut a, KeyCode::Right, KeyModifiers::SHIFT); }
+    assert_eq!(a.session.state().selection().unwrap().range(), 4..8);
+    a.handle(Event::Paste("λ".into()));
+    assert!(a.session.annotation(tab, 0).is_none());
+    assert!(gutter(&mut a).contains("Blame pending…"));
+    settle(&mut a, |a| matches!(a.session.state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    let source = a.session.state().current_source().unwrap();
+    assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\nλtwo\n");
+    assert_eq!(a.session.annotation(tab, 0).unwrap().label, "Not committed");
+    assert_eq!(a.session.annotation(tab, 1).unwrap().label, "Not committed");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    settle(&mut a, |a| matches!(a.session.state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    let source = a.session.state().current_source().unwrap();
+    assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\none\ntwo\n");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert!(a.session.annotation(tab, 0).is_none());
+    assert!(gutter(&mut a).contains("Blame pending…"));
+    settle(&mut a, |a| matches!(a.session.state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Ready)));
+    assert_eq!(a.session.annotation(tab, 0).unwrap().commit.sha, sha);
+    let source = a.session.state().current_source().unwrap();
+    assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "one\ntwo\n");
+    std::fs::write(r.path().join("bad-revisions"), "not-a-revision\n").unwrap();
+    git(r.path(), &["config", "blame.ignoreRevsFile", "bad-revisions"]);
+    for _ in 0..2 { key(&mut a, KeyCode::Char('b'), KeyModifiers::ALT); }
+    settle(&mut a, |a| matches!(a.session.state().active().unwrap().blame_status(), Some(reader_core::blame::Status::Failed(_))));
+    assert!(gutter(&mut a).contains("Blame failed"));
+    assert!(a.session.annotation(tab, 0).is_none());
+    assert_eq!(a.session.disabled(CommandId::CopyRevision), Some("Blame failed"));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\n");
+}
 struct Pane {
     gutter_x: u16,
     ann: u16,
