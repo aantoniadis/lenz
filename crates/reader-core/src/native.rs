@@ -51,7 +51,8 @@ impl NativeViewport {
     pub(crate) fn tab(&self) -> TabId { self.0.tab }
     pub(crate) fn capture(state: &State, reveals: &Reveals, pane: u8) -> Option<Self> {
         let tab = state.shown(pane)?;
-        let view = state.view(tab.id())?;
+        let view = state.presentation_view(tab.id())?;
+        let tab = view.tab();
         Some(Self(Arc::new(Viewport { pane, tab: tab.id(), identity: view.display_start(tab.top_line())?,
             context: reveals.context(pane)?, epoch: reveals.serial, size: state.text_size(pane)?,
             top: (tab.top_line(), tab.top_row(), tab.column()), visible: view.visible(),
@@ -75,7 +76,7 @@ impl Pending {
         state
             .shown(self.goal.pane)
             .is_some_and(|tab| tab.id() == self.goal.tab)
-            && state.view(self.goal.tab).is_some_and(|view| {
+            && state.presentation_view(self.goal.tab).is_some_and(|view| {
                 self.goal
                     .identity
                     .matches(view.snapshot(), view.inlay_hints())
@@ -116,7 +117,7 @@ impl Reveals {
         }
     }
     pub fn issue(&mut self, state: &State, tab: TabId, source: usize) {
-        let Some(view) = state.view(tab) else { return };
+        let Some(view) = state.presentation_view(tab) else { return };
         let pane = view.tab().pane();
         let Some(context) = self.context(pane) else {
             return;
@@ -149,7 +150,7 @@ impl Reveals {
         self.serial = self.serial.wrapping_add(1);
         let old = self.pending.get_mut(pane as usize).and_then(Option::take);
         if let Some(old) = old.filter(|old| {
-            state.view(old.goal.tab).is_some_and(|view| {
+            state.presentation_view(old.goal.tab).is_some_and(|view| {
                 old.goal
                     .identity
                     .matches(view.snapshot(), view.inlay_hints())
@@ -185,7 +186,7 @@ impl Reveals {
         {
             return None;
         }
-        let view = state.view(goal.tab)?;
+        let view = state.presentation_view(goal.tab)?;
         let old = view.tab().column();
         let column = reveal_column(old, bounds, cols, state.wrap_cols(view.tab()).is_some());
         self.pending[goal.pane as usize] = None;

@@ -8,6 +8,9 @@ pub use saved_comparison::{ComparisonSide, SavedComparison};
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
+#[path = "session/presentation.rs"]
+mod presentation;
+pub use presentation::PresentationSource;
 #[path = "session/text_input.rs"]
 mod text_input;
 #[path = "session/close.rs"]
@@ -81,8 +84,12 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// A transient input-method display, validated against the captured authoritative source.
+    PresentText { tab: TabId, base: PresentationSource, base_selection: Option<Selection>, edit: crate::text::TextEdit, selected: Selection },
+    ClearPresentation,
     BeginExternal(Box<crate::external::Request>),
     ChooseExternal { ticket: u64, choice: crate::external::Choice },
+    TakeExternal { ticket: u64 },
     Cut,
     Paste(String),
     Delete { backward: bool },
@@ -1059,6 +1066,7 @@ pub struct Effect {
 
 /// The state adapters present.
 pub struct State {
+    presentation: Option<Box<presentation::Presentation>>,
     comparison: Option<SavedComparison>,
     sources: Sources,
     tabs: Vec<Tab>,
@@ -1500,6 +1508,17 @@ impl<'a> View<'a> {
     pub fn display_window(&self, cursor: &mut crate::projection::Cursor, work_bytes: usize) -> Option<crate::projection::Window> {
         if !cursor.matches(self.snapshot, self.inlay_hints()) { return None; }
         cursor.window(self.snapshot, work_bytes)
+    }
+}
+
+impl State {
+    fn layout_view(&self, request: &crate::layout::Request) -> Option<View<'_>> {
+        self.presentation_view(request.tab).filter(|view| request.work.matches(view.snapshot(), self.wrap_cols(view.tab()), view.inlay_hints()))
+            .or_else(|| self.view(request.tab).filter(|view| request.work.matches(view.snapshot(), self.wrap_cols(view.tab()), view.inlay_hints())))
+    }
+    fn projection_view(&self, request: &crate::projection::Request) -> Option<View<'_>> {
+        self.presentation_view(request.tab).filter(|view| request.cursor.matches(view.snapshot(), view.inlay_hints()))
+            .or_else(|| self.view(request.tab).filter(|view| request.cursor.matches(view.snapshot(), view.inlay_hints())))
     }
 }
 
@@ -2119,6 +2138,7 @@ impl Session {
             comparison_seq: 0,
             id: crate::close::SessionId::allocate(), external_seq: 0, external_pending: None, close_seq: 0, closing: None, closed: false, last_close: None,
             state: State {
+                presentation: None,
                 comparison: None,
                 sources: Sources::default(),
                 tabs: Vec::new(),
@@ -2892,13 +2912,13 @@ impl Session {
         if matches!(&input,Input::Command(Command::Save {..}|Command::RecheckSave {..}|Command::ConfirmRecheckedSave {..})) { self.cancel_close(); self.replacements.clear(); self.checkout_sources.clear(); }
         // A later semantic input supersedes a cold navigation even if it leaves the visible state unchanged
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
-        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+        if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             self.layout_intents = Default::default();
             self.native.cancel();
         }
         if matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. }
             | Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. }
-            | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. })) {
+            | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             for entry in self.state.sources.buffers.values_mut() {
                 if let Some(draft) = &mut entry.draft { draft.end_group(); }
             }
@@ -2964,6 +2984,9 @@ impl Session {
         if self.state.documentation.is_some() && self.state.documentation().is_none() {
             self.state.documentation = None;
         }
+        if self.state.presentation.as_ref().is_some_and(|p| !p.current(&self.state)) {
+            self.state.presentation = None; effect.repaint = true;
+        }
         for intent in &mut self.layout_intents {
             if intent.as_ref().is_some_and(|intent| !layout_intent_current(&self.state, intent)) { *intent = None; }
         }
@@ -2973,9 +2996,7 @@ impl Session {
         self.layouts.pump(&self.jobs, &self.tx);
         self.projections.invalidate(|r| projection_current(&self.state, r));
         self.projections.pump(&self.jobs, &self.tx);
-        let external_pending = self.external_pending.is_some();
-        effect.external = self.advance_external();
-        effect.repaint |= external_pending && self.external_pending.is_none();
+        effect.repaint |= self.advance_external();
         effect
     }
 
@@ -3089,7 +3110,7 @@ impl Session {
     }
 
     fn defer_layout(&mut self, tab: TabId, work: crate::layout::Work, purpose: LayoutPurpose) -> Effect {
-        let Some(view) = self.state.view(tab) else { return Effect::default() };
+        let Some(view) = self.state.presentation_view(tab) else { return Effect::default() };
         let pane = view.tab().pane();
         let request = crate::layout::Request { pane, tab, work };
         self.layout_intents[pane as usize] = Some(LayoutIntent { request: request.clone(), purpose,
@@ -3099,7 +3120,7 @@ impl Session {
     }
 
     fn prepare_layout(&mut self, request: crate::layout::Request) {
-        if layout_current(&self.state, &request) && let Some(snapshot) = self.state.view(request.tab).map(|view| view.snapshot().clone()) {
+        if layout_current(&self.state, &request) && let Some(snapshot) = self.state.layout_view(&request).map(|view| view.snapshot().clone()) {
             self.layouts.prepare(request, snapshot);
         }
     }
@@ -3112,6 +3133,8 @@ impl Session {
 
         let repaint = Effect { repaint: true, copy: None, ..Effect::default() };
         match command {
+            Command::PresentText { tab, base, base_selection, edit, selected } => self.present_text(tab, base, base_selection, edit, selected),
+            Command::ClearPresentation => Effect { repaint: self.state.presentation.take().is_some(), ..Effect::default() },
             Command::CompareSaved => self.compare_saved(),
             Command::ToggleMarkdownSource if self.state.comparison.is_some() => Effect::default(),
             Command::CloseSavedComparison => match self.state.comparison.as_ref() {
@@ -3134,14 +3157,14 @@ impl Session {
             }
             Command::MeasuredReveal { goal, cols, bounds } => {
                 let Some(column) = self.native.measured(&self.state, &goal, cols, bounds) else { return Effect::default() };
-                match self.state.tabs.iter_mut().find(|tab| tab.id == goal.tab) {
+                match self.state.display_tab_mut(goal.tab) {
                     Some(tab) if tab.column != column => { tab.column = column; repaint }
                     _ => Effect::default(),
                 }
             }
             Command::PrepareProjection(request) => {
                 if projection_current(&self.state, &request)
-                    && let Some(snapshot) = self.state.view(request.tab).map(|v| v.snapshot().clone())
+                    && let Some(snapshot) = self.state.projection_view(&request).map(|v| v.snapshot().clone())
                 {
                     self.projections.prepare(request, snapshot);
                 }
@@ -3254,6 +3277,7 @@ impl Session {
             }
             Command::BeginExternal(request) => self.begin_external(*request),
             Command::ChooseExternal { ticket, choice } => self.choose_external(ticket, choice),
+            Command::TakeExternal { ticket } => self.take_external(ticket),
             Command::ChooseClose { ticket, buffer, choice } => self.choose_close(ticket, buffer, choice),
             Command::PrepareClose { batch, intent } => self.prepare_close(intent,Some(batch)),
             Command::CancelClose { ticket } => { if self.close_ticket()==ticket {self.cancel_close();} repaint }
@@ -3429,7 +3453,7 @@ impl Session {
                         effect.repaint |= resumed.repaint;
                         effect.copy = resumed.copy;
                     } else if let Some(goal) = goal {
-                        let target = self.state.view(goal.tab).map(|view| {
+                        let target = self.state.presentation_view(goal.tab).map(|view| {
                             let line = view.snapshot().line_of(goal.source);
                             (line, goal.source.saturating_sub(view.snapshot().reader_line_range(line).start))
                         });
@@ -3478,7 +3502,7 @@ impl Session {
             Command::ClampColumn { viewport, max } => {
                 if !viewport.current(&self.state, &self.native) { return Effect::default(); }
                 let tab = viewport.tab();
-                match self.state.tabs.iter_mut().find(|t| t.id == tab) {
+                match self.state.display_tab_mut(tab) {
                     Some(t) if t.column > max => { t.column = max; repaint }
                     _ => Effect::default(),
                 }
@@ -4883,7 +4907,7 @@ impl Session {
                     self.state.messages.push("Source layout failed; try the navigation again".into());
                 }
                 let applied = result.and_then(|(request, delta)| delta.map(|delta| (request, delta))).is_some_and(|(request, delta)| {
-                    self.state.tabs.iter().find(|tab| tab.id == request.tab).is_some_and(|tab| tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(delta))
+                    self.state.layout_view(&request).is_some_and(|view| view.tab.layout.lock().unwrap_or_else(std::sync::PoisonError::into_inner).apply(delta))
                 });
                 let mut effect = Effect { repaint: applied || failed, copy: None, ..Effect::default() };
                 if applied && let Some(intent) = self.layout_intents.get_mut(pane).and_then(Option::take).filter(|intent| layout_intent_current(&self.state, intent)) {
@@ -7021,7 +7045,7 @@ impl Session {
     /// Selection grows one row at a time; scroll only enough to keep its head inside the reported viewport.
     fn keep_selection_visible(&mut self) {
         use crate::layout::Query;
-        let Some(view) = self.state.active().and_then(|tab| self.state.view(tab.id())) else { return };
+        let Some(view) = self.state.active().and_then(|tab| self.state.presentation_view(tab.id())) else { return };
         let Some(selection) = view.tab().selection() else { return };
         let (id, pane) = (view.tab().id(), view.tab().pane() as usize);
         let rows = self.state.text_size[pane].1.min(4096);
@@ -7048,15 +7072,15 @@ impl Session {
                 None => (view.visible().step(line, -(rows.saturating_sub(1) as isize)), 0),
             })
         };
-        if let Some((line, row)) = top && let Some(tab) = self.tab_mut(id) { tab.set_top(line, row); }
-        self.clear_of_band(id, line, position.row);
+        if let Some((line, row)) = top && let Some(tab) = self.state.display_tab_mut(id) { tab.set_top(line, row); }
+        if !self.state.presentation.as_ref().is_some_and(|p| p.current(&self.state)) { self.clear_of_band(id, line, position.row); }
         self.native.issue(&self.state, id, head);
     }
 
     /// Bring a line-relative source byte into the reported viewport using exact shared rows.
     fn bring_into_view(&mut self, tab: TabId, line: usize, byte: usize) {
         use crate::layout::Query;
-        let Some(view) = self.state.view(tab) else { return };
+        let Some(view) = self.state.presentation_view(tab) else { return };
         let rows = self.state.text_size[view.tab().pane() as usize].1.min(4096);
         let cols = self.state.wrap_cols(view.tab());
         let range = view.snapshot().reader_line_range(line);
@@ -7078,8 +7102,8 @@ impl Session {
             None => (view.visible().step(line, -3), 0),
             })
         };
-        if let Some(top) = top && let Some(tab) = self.tab_mut(tab) { tab.set_top(top.0, top.1); }
-        self.clear_of_band(tab, line, position.row);
+        if let Some(top) = top && let Some(tab) = self.state.display_tab_mut(tab) { tab.set_top(top.0, top.1); }
+        if !self.state.presentation.as_ref().is_some_and(|p| p.current(&self.state)) { self.clear_of_band(tab, line, position.row); }
         self.native.issue(&self.state, tab, source);
     }
 
@@ -8212,7 +8236,7 @@ fn normalized(path: &Path) -> PathBuf {
 
 /// Where `head` goes by `motion` in `doc`.
 fn layout_intent_current(state: &State, intent: &LayoutIntent) -> bool {
-    layout_current(state, &intent.request) && state.view(intent.request.tab).is_some_and(|view| {
+    layout_current(state, &intent.request) && state.layout_view(&intent.request).is_some_and(|view| {
         view.tab().selection() == intent.selection && (view.tab().top_line(), view.tab().top_row()) == intent.top
             && Arc::ptr_eq(&view.visible(), &intent.visible)
             && (!matches!(intent.purpose, LayoutPurpose::Command(_) | LayoutPurpose::Selection) || state.active().is_some_and(|tab| tab.id() == intent.request.tab))
@@ -8221,12 +8245,12 @@ fn layout_intent_current(state: &State, intent: &LayoutIntent) -> bool {
 
 fn layout_current(state: &State, request: &crate::layout::Request) -> bool {
     state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
-        && state.view(request.tab).is_some_and(|view| request.work.matches(view.snapshot(), state.wrap_cols(view.tab()), view.inlay_hints()))
+        && state.layout_view(request).is_some()
 }
 
 fn projection_current(state: &State, request: &crate::projection::Request) -> bool {
     state.shown(request.pane).is_some_and(|tab| tab.id() == request.tab)
-        && state.view(request.tab).is_some_and(|view| request.cursor.matches(view.snapshot(), view.inlay_hints()))
+        && state.projection_view(request).is_some()
 }
 
 fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize, motion: Motion) -> usize {

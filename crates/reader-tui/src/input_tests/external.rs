@@ -79,3 +79,26 @@ fn external_save_failures_dismiss_the_terminal_decision_without_launching() {
         drop(guard);
     }
 }
+
+#[test]
+fn external_launch_survives_terminal_draw_before_normal_completion_delivery() {
+    for cancel in [false,true] {
+        let dir=tempfile::tempdir().unwrap();let path=dir.path().join("delivery.txt");std::fs::write(&path,b"saved").unwrap();
+        let mut app=app(dir.path());app.dispatch(Command::OpenRetained(path.clone()));settle(&mut app,|a|a.session.state().current_source().is_some());
+        app.enable_draft_input_for_test();draw(&mut app,100,18);
+        key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL);app.handle(Event::Paste("saved draft λ".into()));
+        menu(&mut app,CommandId::OpenWithDefaultApp);let ticket=app.session.external_prompt().unwrap().ticket;
+        let _=app.session.dispatch(Command::ChooseExternal {ticket,choice:reader_core::external::Choice::SaveAndOpen});
+        let until=Instant::now()+Duration::from_secs(10);
+        while matches!(app.session.state().view(app.session.state().active().unwrap().id()).unwrap().save_status(),reader_core::save::Status::Saving|reader_core::save::Status::Rechecking) {
+            assert!(Instant::now()<until);draw(&mut app,100,18);std::thread::yield_now();
+        }
+        assert!(app.launched.is_empty());
+        if cancel {key(&mut app,KeyCode::Esc,KeyModifiers::NONE);}
+        else {assert!(app.apply(reader_core::session::Completion::AnalysisWake),"delivery and modal removal require repaint");}
+        assert_eq!(app.launched.len(),usize::from(!cancel),"draw cannot consume the launch");
+        assert!(app.modal.is_none() && app.session.external_prompt().is_none());
+        app.apply(reader_core::session::Completion::AnalysisWake);draw(&mut app,100,18);
+        assert_eq!(app.launched.len(),usize::from(!cancel));assert_eq!(std::fs::read(path).unwrap(),"saved draft λ".as_bytes());
+    }
+}

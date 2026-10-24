@@ -1,13 +1,14 @@
 //! The core owns consent, Save continuation, and exactly-once launch delivery.
 use super::*;
 use crate::external::{Choice, Prompt, Request};
-use lenz_content::open::{Host, Plan};
+use lenz_content::open::Host;
 
 pub(super) struct Pending {
     ticket: u64,
     request: Request,
     choice: Option<Choice>,
     save: Option<u64>,
+    ready: bool,
 }
 
 impl Session {
@@ -31,9 +32,9 @@ impl Session {
         let busy = self.state.sources.buffers.get(&buffer).is_some_and(|entry| entry.save.status.busy());
         Some(Prompt {
             ticket: pending.ticket, path: pending.request.path.clone(),
-            waiting: pending.save.is_some() || busy,
-            save_disabled: if pending.save.is_some() { Some("Waiting for the submitted Save") } else { self.save_buffer_disabled(buffer) },
-            saved_disabled: if pending.save.is_some() { Some("Waiting for the submitted Save") } else { self.external_saved_disabled(&pending.request) },
+            waiting: !pending.ready && (pending.save.is_some() || busy),
+            save_disabled: if pending.ready { Some("External open is ready; Cancel is available") } else if pending.save.is_some() { Some("Waiting for the submitted Save") } else { self.save_buffer_disabled(buffer) },
+            saved_disabled: if pending.ready { Some("External open is ready; Cancel is available") } else if pending.save.is_some() { Some("Waiting for the submitted Save") } else { self.external_saved_disabled(&pending.request) },
         })
     }
 
@@ -63,7 +64,7 @@ impl Session {
         if !self.external_current(&request) { return Effect::default(); }
         self.external_seq += 1;
         let choice = (!self.state.tab_dirty(request.tab)).then_some(Choice::OpenSavedVersion);
-        self.external_pending = Some(Pending { ticket: self.external_seq, request, choice, save: None });
+        self.external_pending = Some(Pending { ticket: self.external_seq, request, choice, save: None, ready: false });
         Effect { repaint: true, ..Effect::default() }
     }
 
@@ -95,25 +96,52 @@ impl Session {
         }
     }
 
-    pub(super) fn advance_external(&mut self) -> Option<Plan> {
-        let pending = self.external_pending.take()?;
+    /// Remains pending until the adapter explicitly accepts delivery outside render housekeeping.
+    pub fn external_ready(&self) -> Option<u64> {
+        self.external_pending.as_ref().filter(|pending| pending.ready).map(|pending| pending.ticket)
+    }
+
+    fn external_deliverable(&self, pending: &Pending) -> bool {
+        match pending.choice {
+            Some(Choice::OpenSavedVersion) => self.external_saved_disabled(&pending.request).is_none(),
+            Some(Choice::SaveAndOpen) => pending.request.source.as_ref().is_some_and(|source| {
+                self.state.sources.buffers.get(&source.key.buffer).is_some_and(|entry| {
+                    pending.save.is_some_and(|request| entry.save.written.as_ref().is_some_and(|(written, captured)| *written == request && captured == source))
+                })
+            }),
+            None | Some(Choice::Cancel) => false,
+        }
+    }
+
+    pub(super) fn take_external(&mut self, ticket: u64) -> Effect {
+        let Some(pending) = self.external_pending.as_ref() else { return Effect::default() };
+        if pending.ticket != ticket || !pending.ready { return Effect::default(); }
+        if !self.external_current(&pending.request) || !self.external_deliverable(pending) {
+            self.external_pending = None;
+            return Effect { repaint: true, ..Effect::default() };
+        }
+        let Some(pending) = self.external_pending.take() else { return Effect::default() };
+        let plan = match pending.choice {
+            Some(Choice::SaveAndOpen) => pending.request.current,
+            Some(Choice::OpenSavedVersion) => pending.request.saved,
+            None | Some(Choice::Cancel) => return Effect { repaint: true, ..Effect::default() },
+        };
+        Effect { repaint: true, external: Some(plan), ..Effect::default() }
+    }
+
+    pub(super) fn advance_external(&mut self) -> bool {
+        let Some(mut pending) = self.external_pending.take() else { return false };
         if !self.external_current(&pending.request) {
             self.state.messages.push("External open cancelled: the file or context changed. The draft is retained.".into());
-            return None;
+            return true;
         }
-        match pending.choice {
-            Some(Choice::OpenSavedVersion) => Some(pending.request.saved),
-            Some(Choice::SaveAndOpen) => {
-                let source = pending.request.source.as_ref()?;
-                let entry = self.state.sources.buffers.get(&source.key.buffer)?;
-                if pending.save.is_some_and(|request| entry.save.written.as_ref().is_some_and(|(written, captured)| *written == request && captured == source)) {
-                    return Some(pending.request.current);
-                }
-                if entry.save.status.busy() { self.external_pending = Some(pending); }
-                None
-            }
-            None => { self.external_pending = Some(pending); None }
-            Some(Choice::Cancel) => None,
-        }
+        let ready = self.external_deliverable(&pending);
+        let waiting = pending.choice.is_none() || pending.choice == Some(Choice::OpenSavedVersion)
+            || pending.request.source.as_ref().is_some_and(|source| self.state.sources.buffers.get(&source.key.buffer).is_some_and(|entry| entry.save.status.busy()));
+        if !ready && !waiting { return true; }
+        let changed = pending.ready != ready;
+        pending.ready = ready;
+        self.external_pending = Some(pending);
+        changed
     }
 }

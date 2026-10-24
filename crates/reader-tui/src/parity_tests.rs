@@ -1987,3 +1987,91 @@ fn semantic_draft_targets_keep_peek_and_activation_consistent_in_both_adapters(c
     assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
     assert_eq!(std::fs::read(a).unwrap(), a_text.as_bytes()); assert_eq!(std::fs::read(b).unwrap(), b_text.as_bytes()); assert_eq!(std::fs::read(other).unwrap(), b"pub fn helper() {}\n");
 }
+
+#[gpui::test]
+fn long_line_split_edits_keep_absolute_unicode_coordinates_in_both_adapters(cx: &mut TestAppContext) {
+    for (dark, prefix) in [(true, "a".repeat(12_000)), (false, "aé😀e\u{301}\t\x07 ".repeat(80_000))] {
+    let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("long-edit.txt");
+    let column = prefix.chars().count() + 1;
+    let tail = "😀e\u{301}\t\x07END\r\n";
+    let original = format!("{prefix}{tail}"); std::fs::write(&path, &original).unwrap();
+    let mut gc = config(&dir.path().join("gui")); gc.dark = dark;
+    let mut tc = config(&dir.path().join("tui")); tc.dark = dark;
+    let gui = cx.new(|cx| ReaderView::new(Session::new(gc), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle()); visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(tc, Some(path.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline); std::thread::yield_now();
+    }
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); }); terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    let key = |app: &mut App, code, modifiers| { app.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    draw(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test()); tui.enable_draft_input_for_test();
+    let conversions = reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    let query = format!("1:{column}");
+    let keys = query.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+    visual.simulate_keystrokes(&format!("ctrl-g {keys} enter ctrl-\\ shift-right β"));
+    key(&mut tui, KeyCode::Char('g'), KeyModifiers::CONTROL); tui.handle(Event::Paste(query));
+    key(&mut tui, KeyCode::Enter, KeyModifiers::NONE); key(&mut tui, KeyCode::Char('\\'), KeyModifiers::CONTROL);
+    key(&mut tui, KeyCode::Right, KeyModifiers::SHIFT); key(&mut tui, KeyCode::Char('β'), KeyModifiers::NONE);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(format!("{prefix}βe\u{301}\t\x07END\r\n").as_str()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    assert_eq!(tui.session.state().selection().unwrap().head, prefix.len() + 2);
+    visual.simulate_keystrokes("ctrl-1 ctrl-z"); key(&mut tui, KeyCode::Char('1'), KeyModifiers::CONTROL); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(original.as_str()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("終😀".into())));
+    visual.simulate_keystrokes("ctrl-v"); tui.handle(Event::Paste("終😀".into()));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    let expected = format!("{prefix}😀終😀e\u{301}\t\x07END\r\n");
+    assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(expected.as_str()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        draw(&mut visual, &mut tui, &mut terminal);
+        let shown = terminal.backend().buffer().content.iter().map(|cell| cell.symbol()).collect::<String>();
+        if shown.contains('終') && gui.read_with(&visual, |view, _| view.visible_rows().iter().any(|row| row.text.contains('終'))) { break; }
+        assert!(Instant::now() < deadline, "the edited Unicode tail must become visible in both split views"); std::thread::yield_now();
+    }
+    for pane in [0, 1] {
+        let state = tui.session.state(); let tab = state.shown(pane).unwrap();
+        assert_eq!(state.view(tab.id()).unwrap().snapshot().copy_range(0..expected.len()).unwrap(), expected);
+    }
+    // Reuse the actual IME geometry callback for a native source point, then exercise real clicks.
+    let target = expected.find("END").unwrap();
+    let reveal = format!("1:{}", expected[..target].chars().count() + 1);
+    let keys = reveal.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+    visual.simulate_keystrokes(&format!("ctrl-g {keys} enter"));
+    key(&mut tui, KeyCode::Char('g'), KeyModifiers::CONTROL); tui.handle(Event::Paste(reveal)); key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
+    let unit = tui.session.state().current_source().unwrap().byte_to_utf16(target).unwrap();
+    let entity = gui.clone();
+    let mut input = visual.update(|window, cx| gpui::PlatformInputHandler::new(window.to_async(cx), Box::new(gpui::ElementInputHandler::new(gpui::Bounds::default(), entity))));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let point = loop {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        draw(&mut visual, &mut tui, &mut terminal);
+        let hit = tui.layout.panes.iter().find(|pane| pane.pane == tui.session.state().focused_pane()).and_then(|pane| pane.hits.iter().find(|hit| hit.byte == target)).cloned();
+        if let Some(bounds) = input.bounds_for_range(unit..unit) && let Some(hit) = hit {
+            break (gpui::point(bounds.origin.x + gpui::px(0.1), bounds.origin.y + gpui::px(5.0)), hit.x, hit.y);
+        }
+        assert!(Instant::now() < deadline, "tail hit geometry never became current: target={target} GUI={:?} selected={:?} TUI={:?} rows={:?}", input.bounds_for_range(unit..unit), input.selected_text_range(false).map(|s|s.range), tui.layout.panes.iter().map(|p|(p.pane,p.hits.first().map(|h|h.byte),p.hits.last().map(|h|h.byte))).collect::<Vec<_>>(), gui.read_with(&visual, |view,_|view.visible_rows().iter().map(|r|r.text.clone()).collect::<Vec<_>>())); std::thread::yield_now();
+    };
+    visual.simulate_click(point.0, gpui::Modifiers::default());
+    tui.handle(Event::Mouse(crossterm::event::MouseEvent { kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left), column: point.1, row: point.2, modifiers: KeyModifiers::NONE }));
+    visual.simulate_keystrokes("shift-right"); key(&mut tui, KeyCode::Right, KeyModifiers::SHIFT);
+    assert_eq!(copied_selection(tui.session.state()).as_deref(), Some("E"));
+    assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())));
+    assert_eq!(reader_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+    }
+}

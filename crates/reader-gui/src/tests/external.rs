@@ -93,3 +93,37 @@ fn external_save_failures_close_the_decision_without_launching(cx: &mut TestAppC
         drop(guard);
     }
 }
+
+#[gpui::test]
+fn external_launch_survives_housekeeping_before_normal_notification_handling(cx: &mut TestAppContext) {
+    for cancel in [false,true] {
+        let f=fixture(cx,Some(("delivery.txt",b"saved")));
+        let path=f.dir.path().join("delivery.txt");
+        settle(cx,&f,|view|view.session.state().current_source().is_some());
+        let mut v=visual(cx,&f);draw(&mut v);
+        f.view.update(&mut v,|view,_|view.enable_draft_input_for_test());
+        v.write_to_clipboard(ClipboardItem::new_string("saved draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v");
+        menu(&mut v,&f,CommandId::OpenWithDefaultApp);
+        // Hold normal GPUI polling while the existing direct render-command path accounts Save.
+        f.view.update(&mut v,|view,_| {
+            let ticket=view.session.external_prompt().unwrap().ticket;
+            let _=view.session.dispatch(Command::ChooseExternal {ticket,choice:reader_core::external::Choice::SaveAndOpen});
+            let until=std::time::Instant::now()+std::time::Duration::from_secs(10);
+            while matches!(view.session.state().view(view.session.state().active().unwrap().id()).unwrap().save_status(),reader_core::save::Status::Saving|reader_core::save::Status::Rechecking) {
+                assert!(std::time::Instant::now()<until);
+                let (cols,rows)=view.sent_size[0];
+                let _=view.session.dispatch(Command::SetTextSize {pane:0,cols,rows});
+                std::thread::yield_now();
+            }
+            assert!(view.launched.is_empty());
+        });
+        assert_eq!(std::fs::read(&path).unwrap(),"saved draft λ".as_bytes());
+        if cancel {v.simulate_keystrokes("escape");}
+        else {f.view.update(&mut v,|view,cx|view.dispatch(Completion::AnalysisWake,cx));}
+        assert_eq!(f.view.read_with(&v,|view,_|view.launched.len()),usize::from(!cancel),"housekeeping must not consume launch delivery");
+        assert!(f.view.read_with(&v,|view,_|view.modal.is_none() && view.session.external_prompt().is_none()));
+        f.view.update(&mut v,|view,cx|{view.poll(cx);view.dispatch(Completion::AnalysisWake,cx);});draw(&mut v);
+        assert_eq!(f.view.read_with(&v,|view,_|view.launched.len()),usize::from(!cancel),"polling and repaint cannot launch twice");
+        assert_eq!(std::fs::read(path).unwrap(),"saved draft λ".as_bytes());
+    }
+}

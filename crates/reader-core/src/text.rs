@@ -79,6 +79,9 @@ impl Chunk {
 #[derive(Debug, Clone)]
 struct Entry { chunk: Arc<Chunk>, byte: usize, newline: usize, utf16: usize }
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! { static CONVERSION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
 #[derive(Debug, Clone)]
 pub struct TextSnapshot {
     key: SnapshotKey,
@@ -330,8 +333,15 @@ impl TextSnapshot {
         Some(TextWindow { utf16: self.byte_to_utf16(start)?..self.byte_to_utf16(end)?, text: self.range(bytes.clone())?, bytes })
     }
 
+    /// Test-only proof that input/render callbacks did not invoke either full conversion API.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn conversion_calls_on_thread_for_test() -> usize { CONVERSION_CALLS.get() }
+
     /// Explicit full conversion for admitted background analysis; never call from input/render paths.
     pub fn materialize(&self) -> Document {
+        #[cfg(any(test, feature = "test-support"))]
+        CONVERSION_CALLS.set(CONVERSION_CALLS.get() + 1);
         let mut text = String::with_capacity(self.bytes);
         for e in self.chunks.iter() { text.push_str(e.chunk.text()); }
         Document::from_snapshot_parts(self.source.clone(), self.key.version, text.into())
@@ -339,6 +349,8 @@ impl TextSnapshot {
 
     /// Contiguous worker conversion which can be abandoned when its source/context is superseded.
     pub fn materialize_while(&self, current: impl Fn() -> bool) -> Option<Document> {
+        #[cfg(any(test, feature = "test-support"))]
+        CONVERSION_CALLS.set(CONVERSION_CALLS.get() + 1);
         if !current() { return None; }
         let mut text = String::with_capacity(self.bytes);
         let mut lines = Vec::with_capacity(self.newlines + 1);

@@ -7,19 +7,19 @@ fn read_only_or_close_preparation_retires_old_external_consent() {
         let dir=tempfile::tempdir().unwrap();
         let (mut s,path,_)=close_fixture(dir.path(),"context-external.txt");
         let command=s.external_command(&open_host(&[("VISUAL","code")]),None,false).unwrap();
-        s.dispatch(command);
+        dispatch(&mut s, command);
         let ticket=s.external_prompt().unwrap().ticket;
         if close {
             let mut batch=crate::close::CloseCoordinator::default();batch.register(s.id());batch.begin(&mut [&mut s]);
             assert!(s.external_prompt().is_none(),"core close preparation retires the competing external intent even before another dispatch");
             let prompt=s.close_prompt().unwrap();
-            s.dispatch(Command::ChooseClose {ticket:prompt.ticket,buffer:prompt.buffer,choice:crate::close::Choice::Cancel});
+            dispatch(&mut s, Command::ChooseClose {ticket:prompt.ticket,buffer:prompt.buffer,choice:crate::close::Choice::Cancel});
             assert_eq!(batch.progress(&mut [&mut s]),crate::close::Progress::Cancelled);
         } else {
-            s.dispatch(Command::SetReadOnly(true));
+            dispatch(&mut s, Command::SetReadOnly(true));
             assert!(s.external_prompt().is_none(),"permission changes retire the old external decision");
         }
-        assert!(s.dispatch(Command::ChooseExternal {ticket,choice:Choice::OpenSavedVersion}).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal {ticket,choice:Choice::OpenSavedVersion}).external.is_none());
         assert_eq!(std::fs::read(path).unwrap(),b"saved\r\n");
         assert_eq!(source_text(s.state().current_source().unwrap()),"draft λ\r\n");
     }
@@ -47,27 +47,27 @@ fn dirty_external_open_offers_saved_version_or_cancel_without_losing_history() {
         let (mut s, path, tab) = close_fixture(dir.path(), "external.txt");
         assert!(s.editor_plan(&open_host(&[("VISUAL", "code")]), None, default_app).is_err(), "the old raw plan API cannot bypass the shared decision");
         let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, default_app).unwrap();
-        assert!(s.dispatch(command).external.is_none());
+        assert!(dispatch(&mut s, command).external.is_none());
         let prompt = s.external_prompt().unwrap();
         assert_eq!(prompt.path, path);
         assert_eq!(Choice::SaveAndOpen.label(), "Save and Open");
         assert_eq!(Choice::OpenSavedVersion.label(), "Open Saved Version");
         assert_eq!(Choice::Cancel.label(), "Cancel");
-        assert!(s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::Cancel }).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::Cancel }).external.is_none());
         assert!(s.external_prompt().is_none());
         assert!(active_view(&s).dirty() && active_view(&s).can_undo());
         assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
 
         let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, default_app).unwrap();
-        assert!(s.dispatch(command).external.is_none());
+        assert!(dispatch(&mut s, command).external.is_none());
         let prompt = s.external_prompt().unwrap();
-        let plan = s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.unwrap();
+        let plan = dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.unwrap();
         assert_eq!(plan.launch.program, if default_app { "xdg-open" } else { "code" });
         assert_eq!(plan.launch.args, [path.to_string_lossy().into_owned()], "dirty caret coordinates do not describe saved disk text");
-        assert!(s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_none());
         assert!(active_view(&s).dirty() && active_view(&s).can_undo());
         assert_eq!(std::fs::read(&path).unwrap(), b"saved\r\n");
-        s.dispatch(Command::Undo { tab });
+        dispatch(&mut s, Command::Undo { tab });
         assert_eq!(source_text(s.state().current_source().unwrap()), "saved\r\n");
     }
 }
@@ -78,7 +78,7 @@ fn collect_until(s: &mut Session, done: impl Fn(&Session) -> bool) -> Vec<lenz_c
     let mut launches = Vec::new();
     while !done(s) {
         assert!(std::time::Instant::now() < until, "external operation timed out: {}", s.status_message());
-        if let Ok(completion) = rx.recv_blocking_timeout() && let Some(plan) = s.dispatch(completion).external { launches.push(plan); }
+        if let Ok(completion) = rx.recv_blocking_timeout() && let Some(plan) = dispatch(s, completion).external { launches.push(plan); }
     }
     launches
 }
@@ -92,30 +92,30 @@ fn rejected_or_uncertain_external_save_cancels_launch_and_requires_a_fresh_decis
         let (mut s, path, tab) = close_fixture(dir.path(), "failed-external.txt");
         let guard = at_path(&path, fault);
         let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
-        s.dispatch(command);
+        dispatch(&mut s, command);
         let ticket = s.external_prompt().unwrap().ticket;
-        assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
         let launches = collect_until(&mut s, |s| !active_view(s).save_status().busy());
         assert!(launches.is_empty() && s.external_prompt().is_none());
         assert!(active_view(&s).dirty() && active_view(&s).can_undo());
         assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
-        assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::OpenSavedVersion }).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::OpenSavedVersion }).external.is_none());
         drop(guard);
         if fault == Fault::AfterReplace {
             assert!(matches!(active_view(&s).save_status(), Status::Uncertain(_)));
             let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
-            s.dispatch(command);
+            dispatch(&mut s, command);
             let prompt = s.external_prompt().unwrap();
             assert!(prompt.saved_disabled.is_some());
-            assert!(s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_none());
-            s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::Cancel });
-            s.dispatch(Command::RecheckSave { tab });
+            assert!(dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_none());
+            dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::Cancel });
+            dispatch(&mut s, Command::RecheckSave { tab });
             assert!(collect_until(&mut s, |s| matches!(active_view(s).save_status(), Status::Checked(_))).is_empty());
             let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
-            s.dispatch(command);
+            dispatch(&mut s, command);
             let prompt = s.external_prompt().unwrap();
             assert!(prompt.save_disabled.is_some() && prompt.saved_disabled.is_none());
-            assert!(s.dispatch(Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_some());
+            assert!(dispatch(&mut s, Command::ChooseExternal { ticket: prompt.ticket, choice: Choice::OpenSavedVersion }).external.is_some());
             assert!(matches!(active_view(&s).save_status(), Status::Checked(_)), "opening saved bytes does not accept a new baseline");
         } else {
             assert!(matches!(active_view(&s).save_status(), Status::Rejected(_)));
@@ -139,27 +139,27 @@ fn cancellation_edits_or_file_switching_never_resume_a_saved_external_launch() {
         }).collect();
         for _ in &gates { entered_rx.recv_timeout(Duration::from_secs(5)).unwrap(); }
         let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
-        s.dispatch(command);
+        dispatch(&mut s, command);
         let ticket = s.external_prompt().unwrap().ticket;
-        assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
         assert!(s.external_prompt().unwrap().waiting);
         let effect = match change {
-            0 => s.dispatch(Command::ChooseExternal { ticket, choice: Choice::Cancel }),
+            0 => dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::Cancel }),
             1 => {
                 let expected = s.state().current_source().unwrap().key();
-                s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "newer ".into() }], kind: crate::text::EditKind::Paste })
+                dispatch(&mut s, Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "newer ".into() }], kind: crate::text::EditKind::Paste })
             }
             _ => {
                 let other = write(dir.path(), "other.txt", b"other saved");
-                s.dispatch(Command::OpenRetained(other))
+                dispatch(&mut s, Command::OpenRetained(other))
             }
         };
         assert!(effect.external.is_none() && s.external_prompt().is_none());
         for gate in gates { gate.send(()).unwrap(); }
         assert!(collect_until(&mut s, |s| !s.state.sources.buffers[&buffer].save.status.busy()).is_empty());
         assert_eq!(std::fs::read(&path).unwrap(), "draft λ\r\n".as_bytes(), "explicitly requested Save still completes independently");
-        assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
-        s.dispatch(Command::ActivateTab(tab));
+        assert!(dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
+        dispatch(&mut s, Command::ActivateTab(tab));
         assert!(s.state.sources.buffers[&buffer].draft.as_ref().unwrap().can_undo());
         let expected = if change == 1 { "newer draft λ\r\n" } else { "draft λ\r\n" };
         assert_eq!(source_text(s.state().current_source().unwrap()), expected);
@@ -170,25 +170,72 @@ fn cancellation_edits_or_file_switching_never_resume_a_saved_external_launch() {
 fn save_and_external_open_emits_once_only_after_confirmed_bytes_and_keeps_undo() {
     let dir = tempfile::tempdir().unwrap();
     let (mut s, path, tab) = close_fixture(dir.path(), "save-external.txt");
-    s.dispatch(Command::Select(Selection { anchor: 0, head: 0 }));
+    dispatch(&mut s, Command::Select(Selection { anchor: 0, head: 0 }));
     let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
-    assert!(s.dispatch(command).external.is_none());
+    assert!(dispatch(&mut s, command).external.is_none());
     let ticket = s.external_prompt().unwrap().ticket;
-    let mut plan = s.dispatch(Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external;
+    let mut plan = dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external;
     let rx = s.completions();
     let until = std::time::Instant::now() + Duration::from_secs(10);
     while plan.is_none() {
         assert!(std::time::Instant::now() < until, "external Save never finished: {}", s.status_message());
-        if let Ok(completion) = rx.recv_blocking_timeout() { plan = s.dispatch(completion).external; }
+        if let Ok(completion) = rx.recv_blocking_timeout() { plan = dispatch(&mut s, completion).external; }
     }
     assert_eq!(std::fs::read(&path).unwrap(), "draft λ\r\n".as_bytes());
     assert!(!active_view(&s).dirty());
     assert!(s.external_prompt().is_none());
     let plan = plan.unwrap();
     assert_eq!(plan.launch.args, ["--goto".to_owned(), format!("{}:1:1", path.display())]);
-    assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
-    s.dispatch(Command::Undo { tab });
+    assert!(dispatch(&mut s, Command::ChooseExternal { ticket, choice: Choice::SaveAndOpen }).external.is_none());
+    dispatch(&mut s, Command::Undo { tab });
     assert!(active_view(&s).dirty());
     assert_eq!(source_text(s.state().current_source().unwrap()), "saved\r\n");
     assert_eq!(std::fs::read(path).unwrap(), "draft λ\r\n".as_bytes());
+}
+
+fn dispatch(s: &mut Session, input: impl Into<Input>) -> Effect {
+    let mut effect = s.dispatch(input);
+    if let Some(ticket) = s.external_ready() {
+        let delivery = s.dispatch(Command::TakeExternal { ticket });
+        effect.repaint |= delivery.repaint;
+        effect.external = delivery.external.or(effect.external);
+    }
+    effect
+}
+
+#[test]
+fn external_delivery_requires_a_current_ready_ticket_and_is_consumed_once() {
+    for change in 0..5 {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, path, tab) = close_fixture(dir.path(), "delivery.txt");
+        let command = s.external_command(&open_host(&[("VISUAL", "code")]), None, false).unwrap();
+        assert!(s.dispatch(command).external.is_none());
+        let ticket = s.external_prompt().unwrap().ticket;
+        assert!(s.dispatch(Command::TakeExternal { ticket }).external.is_none(), "premature delivery preserves consent");
+        assert!(s.external_prompt().is_some());
+        assert!(s.dispatch(Command::ChooseExternal { ticket, choice: Choice::OpenSavedVersion }).external.is_none());
+        assert_eq!(s.external_ready(), Some(ticket));
+        assert!(s.dispatch(Command::TakeExternal { ticket: ticket + 1 }).external.is_none());
+        assert_eq!(s.external_ready(), Some(ticket));
+        assert!(s.dispatch(Command::SetTextSize { pane: 0, cols: 80, rows: 24 }).external.is_none());
+        assert_eq!(s.external_ready(), Some(ticket));
+        assert!(s.external_prompt().is_some(), "Cancel remains addressable until delivery");
+        match change {
+            0 => {},
+            1 => { s.dispatch(Command::ChooseExternal { ticket, choice: Choice::Cancel }); },
+            2 => { s.dispatch(Command::SetReadOnly(true)); },
+            3 => {
+                let expected = s.state().current_source().unwrap().key();
+                s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "newer ".into() }], kind: crate::text::EditKind::Paste });
+            },
+            _ => {
+                let other = write(dir.path(), "other-delivery.txt", b"other");
+                s.dispatch(Command::OpenRetained(other));
+            },
+        }
+        assert_eq!(s.dispatch(Command::TakeExternal { ticket }).external.is_some(), change == 0);
+        assert!(s.dispatch(Command::TakeExternal { ticket }).external.is_none());
+        assert!(s.external_ready().is_none());
+        assert_eq!(std::fs::read(path).unwrap(), b"saved\r\n");
+    }
 }
