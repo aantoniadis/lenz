@@ -12,8 +12,7 @@ impl Session {
         if self.closed || self.has_close_intent() {
             return Effect {
                 repaint: true,
-                copy: None,
-            };
+                copy: None, ..Effect::default() };
         }
         if self.state.comparison.is_some() {
             let reload_buffer = match &next {
@@ -36,8 +35,7 @@ impl Session {
                 let Some(tab) = ordinary else {
                     return Effect {
                         repaint: true,
-                        copy: None,
-                    };
+                        copy: None, ..Effect::default() };
                 };
                 next = Transition::Reload(tab.id);
             }
@@ -83,8 +81,7 @@ impl Session {
         }
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
     pub(super) fn replacement_current(&self, buffer: BufferId) -> bool {
         self.replacements.get(&buffer).is_some_and(|source| {

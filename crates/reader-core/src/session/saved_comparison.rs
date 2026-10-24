@@ -63,7 +63,7 @@ impl Session {
         view.intrinsic_edit_disabled()
     }
     pub(super) fn compare_saved(&mut self) -> Effect {
-        if let Some(why) = self.compare_saved_disabled() { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None }; }
+        if let Some(why) = self.compare_saved_disabled() { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
         let Some(tab) = self.state.active() else { return Effect::default() };
         let Some(current) = self.state.source(tab.id).cloned() else { return Effect::default() };
         let Some(baseline) = self.state.confirmed_baseline(current.key().buffer).cloned() else { return Effect::default() };
@@ -90,7 +90,7 @@ impl Session {
         self.state.active = Some(current_id); self.state.other = Some(saved);
         self.mark_shown(current_id, current.key().version); self.mark_shown(saved, baseline.key().version);
         self.decorate(current_id); self.decorate(saved);
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn close_saved_comparison(&mut self) -> Effect {
         let Some(comparison) = self.state.comparison.take() else { return Effect::default() };
@@ -104,7 +104,7 @@ impl Session {
         self.other_current.store(self.state.other.and_then(|id| self.state.source(id)).map_or(0, |s| s.key().version), Ordering::Relaxed);
         self.invalidate_result_analysis();
         self.synced = 0;
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn refresh_saved_comparison(&mut self) -> bool {
         let Some(comparison) = self.state.comparison.as_ref() else { return false };

@@ -30,6 +30,7 @@ mod navigation;
 mod search;
 mod source;
 mod close;
+mod external;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -127,6 +128,7 @@ pub enum Details {
     Commit,
     Checkout,
     Close,
+    External,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -649,8 +651,8 @@ impl ReaderView {
 
     /// Open in Editor, or with the system's default app.
     fn open_externally(&mut self, default_app: bool, cx: &mut Context<Self>) {
-        match self.session.editor_plan(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
-            Ok(plan) => self.start(Ok(plan.launch), plan.toast, cx),
+        match self.session.external_command(&lenz_content::open::Host::current(), lenz_content::appearance::editor().as_deref(), default_app) {
+            Ok(command) => self.dispatch(command, cx),
             Err(why) => self.dispatch(Command::Notice(why.into()), cx),
         }
     }
@@ -668,7 +670,7 @@ impl ReaderView {
     pub fn compare(&mut self, left: &std::path::Path, right: &std::path::Path, cx: &mut Context<Self>) {
         let exe = self.exe();
         let launch = self.session.compare_launch(left, right, &exe, false);
-        self.start(launch, None, cx);
+        self.start(launch, Some(reader_core::external::COMPARISON_NOTICE.into()), cx);
     }
 
     /// Starts `launch` detached; a failure, or else `toast`, shows with the core's messages.
@@ -755,6 +757,7 @@ impl ReaderView {
             Some(Modal::Navigation { .. }) => { self.navigation_drawn = None; self.dispatch(Command::CloseSearchEverywhere, cx); },
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
+            Some(Modal::StatusDetails { kind: Details::External, .. }) => self.choose_external(reader_core::external::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
@@ -861,6 +864,7 @@ impl ReaderView {
         if let Some(text) = effect.copy {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+        if let Some(plan) = effect.external { self.start(Ok(plan.launch),plan.toast,cx); }
         // Linux: a new text selection becomes the primary selection (pasted elsewhere with the middle button); showing
         // another tab or pane with its own selection is not a new one.
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -890,6 +894,7 @@ impl ReaderView {
             }
         }
         self.sync_close_prompt();
+        self.sync_external_prompt();
         close::schedule(cx);
         if effect.repaint {
             cx.notify();
@@ -1009,7 +1014,7 @@ impl ReaderView {
                 InterfaceAction::CompareSelected => {
                     let exe = self.exe();
                     let launch = self.session.compare_selected_launch(&exe, false);
-                    self.start(launch, None, cx);
+                    self.start(launch, Some(reader_core::external::COMPARISON_NOTICE.into()), cx);
                 }
                 InterfaceAction::ShowLocalChanges => self.git_diff(&reader_core::branches::GitDiff::LocalChanges, cx),
                 InterfaceAction::ShowBranchChanges => self.git_diff(&reader_core::branches::GitDiff::BranchChanges(None), cx),
@@ -1034,7 +1039,7 @@ impl ReaderView {
                         Ok(left) => {
                             // A folder compares with a folder, a file with a file.
                             let dir = left.is_dir();
-                            let answer = cx.prompt_for_paths(gpui::PathPromptOptions { files: !dir, directories: dir, multiple: false, prompt: Some("Compare".into()) });
+                            let answer = cx.prompt_for_paths(gpui::PathPromptOptions { files: !dir, directories: dir, multiple: false, prompt: Some(CommandId::CompareWith.label().into()) });
                             cx.spawn_in(window, async move |this, cx| {
                                 if let Ok(Ok(Some(paths))) = answer.await
                                     && let Some(right) = paths.into_iter().next()
@@ -1574,6 +1579,16 @@ impl ReaderView {
                 self.dispatch(Command::CheckoutChoice(c), cx);
             }
             return cx.notify();
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::External,..})) {
+            let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
+            let choice=match key {
+                "s" if !ctrl && !ev.keystroke.modifiers.alt=>Some(reader_core::external::Choice::SaveAndOpen),
+                "o" if !ctrl && !ev.keystroke.modifiers.alt=>Some(reader_core::external::Choice::OpenSavedVersion),
+                "escape"=>Some(reader_core::external::Choice::Cancel),
+                _=>None,
+            };
+            if let Some(choice)=choice {self.choose_external(choice,cx);return;}
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Close,..})) {
             let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
@@ -2568,6 +2583,7 @@ impl ReaderView {
             Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
+            Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|c.label()).collect(),
         }
     }
@@ -2834,6 +2850,7 @@ impl ReaderView {
                         let (text, kind) = (text.clone(), *kind);
                         let hit = l.details_buttons(self.char_w, &self.details_labels(kind)).iter().position(|b| b.contains(&ev.position));
                         match (kind, hit) {
+                            (Details::External,Some(i)) => {if let Some(choice)=reader_core::external::Choice::ALL.get(i) {self.choose_external(*choice,cx);}}
                             (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
                             (Details::Checkout, Some(i)) => {
                                 if let Some(&(_, c)) = self.session.checkout_choices().get(i) {
@@ -4579,6 +4596,8 @@ impl Render for ReaderView {
             Some(Modal::StatusDetails { kind, .. }) => self.details_labels(*kind),
             _ => Vec::new(),
         };
+        let external_disabled = matches!(self.modal,Some(Modal::StatusDetails {kind:Details::External,..})).then(|| self.session.external_prompt()).flatten()
+            .map(|prompt| reader_core::external::Choice::ALL.map(|choice|prompt.disabled(choice).is_some()));
         // The hovered annotation's commit, beside the pointer.
         let ann_tip = self.ann_hovered().zip(self.ann_hover).and_then(|((_, t, line), at)| {
             let a = self.session.annotation(t, line).filter(|a| a.shade.is_some())?;
@@ -4914,12 +4933,12 @@ impl Render for ReaderView {
                             let menu = Bounds { origin: gpui::point(px(mx), px(my)), size: l.bounds.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
                                 if details_modal {
-                                    for (b, &label) in l.details_buttons(char_w, &details_buttons).iter().zip(&details_buttons) {
+                                    for (index,(b, &label)) in l.details_buttons(char_w, &details_buttons).iter().zip(&details_buttons).enumerate() {
                                         let (x, y) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y));
                                         let clip = Bounds { origin: gpui::point(px(x), px(y)), size: b.size };
                                         window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                             lenz_gpui::fill(window, x, y, f32::from(b.size.width), f32::from(b.size.height), palette.selected_bg);
-                                            lenz_gpui::text(window, cx, m, x + 8.0, y, label, palette.fg);
+                                            lenz_gpui::text(window, cx, m, x + 8.0, y, label, if external_disabled.is_some_and(|disabled|disabled.get(index).copied().unwrap_or(false)) {palette.dim} else {palette.fg});
                                         });
                                     }
                                 }

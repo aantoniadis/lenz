@@ -1,6 +1,7 @@
 //! Real input through GPUI's test platform: keys, clicks, drags, wheel and resizes reach the session only as
 //! commands, and the file on disk never changes.
 use super::*;
+mod external;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, point, size};
 use reader_core::session::Config;
 use std::path::Path;

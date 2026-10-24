@@ -118,7 +118,7 @@ impl Session {
             && let Some(source) = work.captured.get_mut(&work.root.join(path.as_ref())) { source.snapshot = None; }
         work.best = best;
         self.continue_navigation_query();
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     pub(super) fn navigation_ready(&mut self, request: u64) {
@@ -163,12 +163,12 @@ impl Session {
                 lease.send(Completion::NavigationValidated { request, revision, index, result });
             }).is_err() { return self.result_failed(&fence, "Symbol validation capacity is full".into()); }
         }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     pub(super) fn navigation_refused(&mut self, message: String) -> Effect {
         if let Some(navigation) = &mut self.state.navigation { navigation.pending = false; navigation.message = Some(message); }
-        Effect { repaint: true, copy: None }
+        Effect { repaint: true, copy: None, ..Effect::default() }
     }
 
     pub(super) fn navigation_validated(&mut self, request: u64, revision: u64, index: usize, result: Result<(Option<Stamp>, Arc<Document>), String>) -> Effect {

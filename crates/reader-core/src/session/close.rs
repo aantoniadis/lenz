@@ -127,10 +127,10 @@ impl Session {
         if self.closed || self.closing.is_some() {
             return Effect {
                 repaint: true,
-                copy: None,
-            };
+                copy: None, ..Effect::default() };
         }
         // A new explicit decision supersedes any earlier asynchronous replacement consent.
+        self.external_pending = None;
         self.replacements.clear();
         self.checkout_sources.clear();
         // Temporary comparison owners must not authorize dropping the ordinary draft's last view.
@@ -260,8 +260,7 @@ impl Session {
         self.advance_close();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
     pub(crate) fn cancel_close(&mut self) {
         self.closing = None;
@@ -370,8 +369,7 @@ impl Session {
             self.cancel_close();
             return Effect {
                 repaint: true,
-                copy: None,
-            };
+                copy: None, ..Effect::default() };
         }
         let Some(prompt) = self
             .close_prompt()
@@ -412,8 +410,7 @@ impl Session {
         self.advance_close();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
     pub(super) fn commit_close(&mut self, permit: Permit) -> Effect {
         if permit.session != self.id || !self.close_ready(permit.ticket) {
@@ -479,7 +476,6 @@ impl Session {
         self.release_current();
         Effect {
             repaint: true,
-            copy: None,
-        }
+            copy: None, ..Effect::default() }
     }
 }
