@@ -99,7 +99,7 @@ the Last saved pane remains read-only.
 | Focus tree, reading area and results | Tab / Shift-Tab; click a pane |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
 | Move text cursor | Up/Down/Left/Right (Shift extends selection) |
-| Scroll text | j/k, PageUp/PageDown, Home/End; wheel |
+| Scroll text | PageUp/PageDown, Home/End; wheel (j/k only while text input is gated) |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the status bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
 | Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (a list of branches and tags; type to filter or for any revision), Compare with Base Branch, Show Changes Since Branch Start, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |

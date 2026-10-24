@@ -112,3 +112,27 @@ enumeration and attribute lookup. The driver now ignores only that BadWindow rac
 regression checks both disappearance points and propagation of other errors. Five pure helper checks,
 the existing constructor check and strict GUI default/test-support lint pass. These corrections add no
 polling loop or executor. No stress or timing workload was repeated for them.
+
+
+The private activation candidate supplies one Session input capability at construction. `Session::new`
+remains conservative; the GUI enables it only for Linux and the actual GPUI compositor name `X11`,
+and the terminal enables it on Linux. Existing input/composition handlers now compile normally; adapter
+booleans and compile-only editing gates are removed. Wayland GUI and native macOS stay gated, with no
+user override flag. Legacy reader-shortcut fixtures explicitly choose the unsupported capability;
+a separate ordinary Linux constructor test verifies editing without opt-in.
+
+At runtime source `a815c7d` (including the authorized fresh-Uncertain Discard change), the native driver
+passes `--default-input` without calling the test opt-in. Both ordinary X11 constructors enable input;
+real preedit/Unicode Undo, WM_DELETE decisions, ordinary Ctrl-S saving exact bytes, later dirty typing,
+fresh Discard and normal process exit pass. The standalone ordinary TUI executable also passes real
+PTY typing of q/Unicode, bracketed CRLF paste, exact draft Copy, Save, dirty-close modal isolation,
+Cancel, fresh Discard, unchanged saved bytes and terminal restoration. Evidence is under
+`target/perf/editor-implementation/23-tooling/{native-actual-default,tui-actual-default}/`.
+These are focused correctness checks; neither supplies performance measurements.
+
+Focused constructor/backend policy, conservative core permissions, final whole-chain replay and strict
+affected lint pass; the ordinary GUI also checks without test-support. The whole-chain oracle fences
+exact SnapshotKeys within each Session across modal/cache and independent-session operations. It
+compares semantic outcomes across adapters, since background reads reserve version integers separately.
+The combined cohort gate and release performance campaign remain pending. No native macOS, Wayland,
+physical-display or native-cancellation acceptance is claimed.
