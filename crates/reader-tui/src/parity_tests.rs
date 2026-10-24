@@ -2832,7 +2832,7 @@ fn gui_and_terminal_mark_the_same_changes_against_head_through_edit_save_and_und
 fn structural_edits_replay_the_same_text_and_selections_in_both_adapters(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("edit.rs");
-    let original = "one\r\ntwo\nthree\r\nfour";
+    let original = "é😀\r\nλ two\n三 three\r\nfour";
     std::fs::write(&path, original).unwrap();
     let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
     let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
@@ -2864,30 +2864,40 @@ fn structural_edits_replay_the_same_text_and_selections_in_both_adapters(cx: &mu
     // Tab indents with the file's step at the caret in both adapters; Shift+Tab takes it back.
     visual.simulate_keystrokes("tab");
     key(&mut tui, KeyCode::Tab, KeyModifiers::NONE);
-    check(&visual, &tui, "    one\r\ntwo\nthree\r\nfour");
+    check(&visual, &tui, "    é😀\r\nλ two\n三 three\r\nfour");
     visual.simulate_keystrokes("shift-tab");
     key(&mut tui, KeyCode::BackTab, KeyModifiers::SHIFT);
     check(&visual, &tui, original);
     // Ctrl+Shift+Down moves the caret's line over the next one, keeping every ending where it stands.
     visual.simulate_keystrokes("ctrl-shift-down");
     key(&mut tui, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
-    check(&visual, &tui, "two\r\none\nthree\r\nfour");
+    check(&visual, &tui, "λ two\r\né😀\n三 three\r\nfour");
     // A whole-line selection comments, then Alt+Shift+Down duplicates it.
     visual.simulate_keystrokes("home ctrl-a");
     for key_press in [KeyCode::Home, KeyCode::Char('a')] { key(&mut tui, key_press, if key_press == KeyCode::Home { KeyModifiers::NONE } else { KeyModifiers::CONTROL }); }
     visual.simulate_keystrokes("alt-/");
     key(&mut tui, KeyCode::Char('/'), KeyModifiers::ALT);
-    check(&visual, &tui, "// two\r\n// one\n// three\r\n// four");
+    check(&visual, &tui, "// λ two\r\n// é😀\n// 三 three\r\n// four");
     visual.simulate_keystrokes("alt-shift-down");
     key(&mut tui, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
     let duplicated = gui.read_with(&visual, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
     check(&visual, &tui, &duplicated);
     // Undo takes every action back in both adapters.
-    for expected in ["// two\r\n// one\n// three\r\n// four", "two\r\none\nthree\r\nfour", original] {
+    for expected in ["// λ two\r\n// é😀\n// 三 three\r\n// four", "λ two\r\né😀\n三 three\r\nfour", original] {
         visual.simulate_keystrokes("ctrl-z");
         key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
         check(&visual, &tui, expected);
     }
+    // A multiline selection over Unicode lines moves as one block, with the same selection in both adapters.
+    visual.simulate_keystrokes("down shift-down");
+    for key_press in [(KeyCode::Down, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::SHIFT)] { key(&mut tui, key_press.0, key_press.1); }
+    visual.simulate_keystrokes("ctrl-g 1 enter down shift-down");
+    for key_press in [(KeyCode::Char('g'), KeyModifiers::CONTROL), (KeyCode::Char('1'), KeyModifiers::NONE), (KeyCode::Enter, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::NONE), (KeyCode::Down, KeyModifiers::SHIFT)] {
+        key(&mut tui, key_press.0, key_press.1);
+    }
+    visual.simulate_keystrokes("ctrl-shift-down");
+    key(&mut tui, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    check(&visual, &tui, "é😀\r\n三 three\nλ two\r\nfour");
     draw(&mut visual, &mut tui, &mut terminal);
     assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes(), "neither adapter writes the file");
 }
