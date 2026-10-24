@@ -6640,3 +6640,43 @@ fn text_input_default_policy_requires_validated_linux_x11_backend() {
     assert_eq!(text_input_supported("X11"),cfg!(target_os="linux"));
     for backend in ["Wayland", "", "Test", "x11"] {assert!(!text_input_supported(backend));}
 }
+
+#[gpui::test]
+fn explorer_and_tabs_paint_git_letters_apart_from_the_dirty_mark(cx: &mut TestAppContext) {
+    use lenz_content::branches::FileStatus;
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let r = repo();
+    put(r.path(), "clean.txt", "clean\n");
+    put(r.path(), "edited.txt", "base\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "edited.txt", "edited\n");
+    put(r.path(), "new.txt", "new\n");
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRoot(r.path().to_path_buf()), cx));
+    let marks = |view: &ReaderView| view.tree_lines(usize::MAX).into_iter().map(|l| (l.name, l.status, l.dirty)).collect::<Vec<_>>();
+    settle(cx, &f, |view| marks(view).iter().any(|m| m.1 == Some(FileStatus::Untracked)));
+    f.view.update(&mut v, |view, cx| { view.enable_draft_input_for_test(); view.dispatch(Command::OpenRetained(r.path().join("clean.txt")), cx); });
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    draw(&mut v);
+    let id = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    let width = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let (a, b, _) = view.tab_hits.iter().find(|(_, _, t)| *t == id).unwrap(); b - a });
+    let clean_width = width(&v);
+    v.simulate_keystrokes("x");
+    draw(&mut v);
+    let char_w = f.view.read_with(&v, |view, _| view.char_w);
+    assert_eq!(f.view.read_with(&v, |view, _| marks(view)), [
+        ("clean.txt".to_string(), None, true),
+        ("edited.txt".to_string(), Some(FileStatus::Modified), false),
+        ("new.txt".to_string(), Some(FileStatus::Untracked), false),
+    ], "a dirty draft over a Git-clean file has the mark and no letter");
+    assert!((width(&v) - clean_width - 2.0 * char_w).abs() < 0.01, "only the dirty mark's cells");
+    assert_eq!(f.view.read_with(&v, |view, _| view.painted_badges.clone()), ["●", "●", "M", "U"], "tab mark, then the explorer's");
+    v.simulate_keystrokes("ctrl-s");
+    settle(cx, &f, |view| { let s = view.session().state(); !s.tab_dirty(id) && s.tab_status(id) == Some(FileStatus::Modified) });
+    draw(&mut v);
+    assert!((width(&v) - clean_width - 2.0 * char_w).abs() < 0.01, "only the letter's cells");
+    assert_eq!(f.view.read_with(&v, |view, _| view.painted_badges.clone()), ["M", "M", "M", "U"]);
+    assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
+}

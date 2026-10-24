@@ -179,17 +179,147 @@ pub fn count_changes(list: &mut [Worktree]) {
 
 /// How many paths `git status` lists in `dir`, untracked files included.
 fn dirty(dir: &Path) -> Result<usize, String> {
-    let args = ["status", "--porcelain=v2", "-z", "--untracked-files=all"];
-    let out = git::run(dir, &args)?;
-    let mut entries = out.split(|&b| b == 0).filter(|e| !e.is_empty());
     let mut count = 0;
-    while let Some(entry) = entries.next() {
-        if entry.starts_with(b"2 ") {
-            entries.next(); // a rename's original path
-        }
-        count += 1;
-    }
+    read_status(dir, "--untracked-files=all", &mut |_| { count += 1; true })?;
     Ok(count)
+}
+
+/// A worktree file's state against `HEAD`, staged and unstaged changes together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum FileStatus {
+    Modified,
+    /// New in the index.
+    Added,
+    /// Tracked but gone from the worktree (or staged for removal).
+    Deleted,
+    Renamed,
+    /// Not tracked and not ignored; an untracked folder is listed once, as `dir/`.
+    Untracked,
+    /// Unmerged.
+    Conflicted,
+}
+
+impl FileStatus {
+    /// Its letter: the badge that identifies it without color.
+    pub fn letter(self) -> &'static str {
+        match self {
+            Self::Modified => "M",
+            Self::Added => "A",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Untracked => "U",
+            Self::Conflicted => "C",
+        }
+    }
+    /// Its badge color: the palette's file-status colors (an untracked file is new, as an added one).
+    pub fn color(self, p: &crate::theme::Palette) -> u32 {
+        p.status[match self {
+            Self::Added | Self::Untracked => 0,
+            Self::Deleted => 1,
+            Self::Modified => 2,
+            Self::Renamed => 3,
+            Self::Conflicted => 4,
+        }]
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Modified => "Modified",
+            Self::Added => "Added",
+            Self::Deleted => "Deleted",
+            Self::Renamed => "Renamed",
+            Self::Untracked => "Untracked",
+            Self::Conflicted => "Conflicted",
+        }
+    }
+}
+
+/// What [`status`] read: repository-relative `/` paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Statuses {
+    pub files: Vec<(String, FileStatus)>,
+    /// It stopped at its bound: more paths changed than are listed.
+    pub limited: bool,
+}
+
+/// The changed paths of the worktree at `root`, at most `max`; streamed, so a huge change set is never held whole.
+/// `superseded` is checked between entries and stops git when it holds. Non-UTF-8 paths are left out.
+pub fn status(root: &Path, max: usize, superseded: &dyn Fn() -> bool) -> Result<Statuses, String> {
+    let mut out = Statuses::default();
+    let mut stopped = false;
+    read_status(root, "--untracked-files=normal", &mut |entry| {
+        if superseded() {
+            stopped = true;
+            return false;
+        }
+        if out.files.len() == max {
+            out.limited = true;
+            return false;
+        }
+        if let Some(e) = parse_status(entry) {
+            out.files.push(e);
+        }
+        true
+    })?;
+    if stopped { Err("superseded".into()) } else { Ok(out) }
+}
+
+/// One porcelain v2 entry (a rename's original path already consumed).
+fn parse_status(entry: &[u8]) -> Option<(String, FileStatus)> {
+    let field = |n: usize| entry.splitn(n + 1, |&b| b == b' ').nth(n);
+    let (status, path) = match entry.first()? {
+        b'?' => (FileStatus::Untracked, entry.get(2..)?),
+        b'u' => (FileStatus::Conflicted, field(10)?),
+        kind @ (b'1' | b'2') => {
+            let xy = entry.get(2..4)?;
+            let status = match (xy[0], xy[1]) {
+                (_, b'D') | (b'D', _) => FileStatus::Deleted,
+                (b'R', _) => FileStatus::Renamed,
+                (b'A' | b'C', _) => FileStatus::Added,
+                _ => FileStatus::Modified,
+            };
+            (status, field(if *kind == b'2' { 9 } else { 8 })?)
+        }
+        _ => return None,
+    };
+    Some((git::path_text(path).ok()?.to_string(), status))
+}
+
+/// Runs `git status` and hands each entry to `each` until it returns `false` (git is then stopped).
+fn read_status(dir: &Path, untracked: &str, each: &mut dyn FnMut(&[u8]) -> bool) -> Result<(), String> {
+    use std::io::{BufRead, Read};
+    let mut child = git::command(dir)?
+        .args(["status", "--porcelain=v2", "-z", untracked])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("lenz: git: {e}"))?;
+    let mut out = std::io::BufReader::new(child.stdout.take().ok_or("lenz: git: no output")?);
+    let mut entry = Vec::new();
+    loop {
+        entry.clear();
+        if out.read_until(0, &mut entry).map_err(|e| format!("lenz: git: {e}"))? == 0 {
+            break;
+        }
+        let rename = entry.starts_with(b"2 ");
+        if !each(entry.strip_suffix(b"\0").unwrap_or(&entry)) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(());
+        }
+        if rename {
+            let mut original = Vec::new();
+            let _ = out.read_until(0, &mut original); // a rename's original path
+        }
+    }
+    let mut err = String::new();
+    if let Some(mut e) = child.stderr.take() {
+        let _ = e.read_to_string(&mut err);
+    }
+    match child.wait() {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(err.trim_end().to_string()),
+    }
 }
 
 /// What to check out.
@@ -740,6 +870,44 @@ mod tests {
         checkout(r.path(), &Target::Remote("origin/feature/y".into()), Mode::Normal).unwrap();
         assert_eq!(branch(r.path()).as_deref(), Some("feature/y"));
         assert!(matches!(checkout(r.path(), &Target::Detached("nope".into()), Mode::Normal), Err(CheckoutError::Git(e)) if e == "No commit named \"nope\""));
+    }
+
+    #[test]
+    fn file_statuses_name_each_change_against_head_within_their_bound() {
+        let r = repo();
+        for f in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] { write(r.path(), f, format!("{f}\n")); }
+        commit_all(r.path(), "base");
+        write(r.path(), "a.txt", "edited\n");
+        write(r.path(), "b.txt", "staged\n");
+        git(r.path(), &["add", "b.txt"]);
+        write(r.path(), "new.txt", "added\n");
+        git(r.path(), &["add", "new.txt"]);
+        std::fs::remove_file(r.path().join("c.txt")).unwrap();
+        git(r.path(), &["mv", "d.txt", "moved.txt"]);
+        write(r.path(), "loose/x.txt", "x\n");
+        write(r.path(), "loose/y.txt", "y\n");
+        write(r.path(), "z.txt", "z\n");
+        let mut all = status(r.path(), 100, &|| false).unwrap();
+        all.files.sort();
+        let want: Vec<(String, FileStatus)> = [("a.txt", FileStatus::Modified), ("b.txt", FileStatus::Modified), ("c.txt", FileStatus::Deleted), ("loose/", FileStatus::Untracked), ("moved.txt", FileStatus::Renamed), ("new.txt", FileStatus::Added), ("z.txt", FileStatus::Untracked)]
+            .into_iter().map(|(p, s)| (p.to_string(), s)).collect();
+        assert_eq!((all.files, all.limited), (want, false), "an untracked folder is one entry, not its files");
+        let some = status(r.path(), 2, &|| false).unwrap();
+        assert_eq!((some.files.len(), some.limited), (2, true));
+        assert!(status(r.path(), 100, &|| true).is_err(), "a superseded read stops");
+        assert_eq!(["M", "A", "D", "R", "U", "C"], [FileStatus::Modified, FileStatus::Added, FileStatus::Deleted, FileStatus::Renamed, FileStatus::Untracked, FileStatus::Conflicted].map(FileStatus::letter));
+    }
+
+    #[test]
+    fn a_conflicted_file_is_conflicted() {
+        let r = two_branches();
+        git(r.path(), &["switch", "-q", "-c", "mine"]);
+        write(r.path(), "a.txt", "mine\n");
+        commit_all(r.path(), "mine");
+        assert!(!crate::git::testing::try_git(r.path(), &["merge", "-q", "other"]));
+        let mut files = status(r.path(), 100, &|| false).unwrap().files;
+        files.sort();
+        assert_eq!(files, [("a.txt".to_string(), FileStatus::Conflicted), ("only-other.txt".to_string(), FileStatus::Added)]);
     }
 
     #[test]
