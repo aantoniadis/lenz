@@ -3,6 +3,9 @@
 //! [`Session::actions`]; nothing hands out mutable state.
 
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
+#[path = "session/save.rs"]
+mod save_work;
+
 use std::{
     path::{Path, PathBuf},
     sync::{
@@ -71,6 +74,9 @@ pub enum Command {
     Edit { tab: TabId, expected: crate::text::SnapshotKey, edits: Vec<crate::text::TextEdit>, kind: crate::text::EditKind },
     Undo { tab: TabId },
     Redo { tab: TabId },
+    Save { tab: TabId },
+    RecheckSave { tab: TabId },
+    ConfirmRecheckedSave { tab: TabId },
     PrepareProjection(crate::projection::Request),
     SetNativeContext { pane: u8, context: u64 },
     MeasuredReveal { goal: NativeReveal, cols: usize, bounds: std::ops::Range<usize> },
@@ -384,6 +390,9 @@ pub enum CommandId {
     Copy,
     Undo,
     Redo,
+    Save,
+    RecheckSave,
+    ConfirmRecheckedSave,
     /// Fold regions: the innermost at the caret, the one on the caret's line, all of them, comments and imports.
     Collapse,
     Expand,
@@ -502,7 +511,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 116] = [
+    pub const ALL: [CommandId; 119] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -543,6 +552,9 @@ impl CommandId {
         Self::Copy,
         Self::Undo,
         Self::Redo,
+        Self::Save,
+        Self::RecheckSave,
+        Self::ConfirmRecheckedSave,
         Self::CopyPath,
         Self::CopyPathLine,
         Self::OpenInEditor,
@@ -667,6 +679,9 @@ impl CommandId {
             Self::Copy => "Copy",
             Self::Undo => "Undo",
             Self::Redo => "Redo",
+            Self::Save => "Save",
+            Self::RecheckSave => "Recheck Saved File",
+            Self::ConfirmRecheckedSave => "Confirm Rechecked Save",
             Self::Collapse => "Collapse",
             Self::Expand => "Expand",
             Self::CollapseAll => "Collapse All",
@@ -1191,9 +1206,10 @@ struct CurrentSource {
     stamp: Option<Stamp>,
     saved: Option<SemanticSource>,
     draft: Option<crate::draft::Draft>,
+    save: crate::save::State,
 }
 impl CurrentSource {
-    fn pinned(&self) -> bool { self.draft.as_ref().is_some_and(|draft| draft.dirty() || draft.can_undo() || draft.can_redo()) }
+    fn pinned(&self) -> bool { self.save.status.busy() || self.save.status.blocked() || self.draft.as_ref().is_some_and(|draft| draft.dirty() || draft.can_undo() || draft.can_redo()) }
 }
 impl Sources {
     fn admit(&mut self, source: &Path, previous: Option<crate::text::BufferId>, doc: &Arc<Document>, stamp: Option<Stamp>) -> crate::text::BufferId {
@@ -1201,7 +1217,7 @@ impl Sources {
             self.next += 1;
             crate::text::BufferId(self.next)
         }));
-        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None });
+        let entry = self.buffers.entry(id).or_insert_with(|| CurrentSource { document: Default::default(), snapshot: None, stamp, saved: None, draft: None, save: Default::default() });
         if entry.pinned() || entry.snapshot.as_ref().is_some_and(|snapshot| snapshot.key().version >= doc.version()) {
             return id;
         }
@@ -1209,6 +1225,8 @@ impl Sources {
         entry.document = Arc::downgrade(doc);
         entry.saved = entry.snapshot.as_ref().map(|snapshot| SemanticSource::new(snapshot));
         entry.stamp = stamp;
+        entry.save.read = doc.write_baseline.as_deref().cloned();
+        entry.save.status = crate::save::Status::Ready;
         id
     }
 }
@@ -1218,16 +1236,21 @@ pub struct View<'a> {
     tab: &'a Tab,
     snapshot: &'a Arc<crate::text::TextSnapshot>,
     draft: Option<&'a crate::draft::Draft>,
+    save: &'a crate::save::State,
 }
 impl<'a> View<'a> {
     pub fn tab(&self) -> &'a Tab { self.tab }
     pub fn snapshot(&self) -> &'a Arc<crate::text::TextSnapshot> { self.snapshot }
+    pub fn save_status(&self) -> &'a crate::save::Status { &self.save.status }
+    fn write_path_changed(&self) -> bool { self.save.read.as_ref().is_some_and(|read| read.snapshot.path != self.snapshot.source()) }
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::can_redo) }
     pub fn edit_disabled(&self) -> Option<&'static str> {
         if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
+        else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
+        else if self.snapshot.source_meta().is_lossy() { Some("Lossy text is read-only") }
         else { None }
     }
     /// Reader source rows include the logical final empty line.
@@ -1430,7 +1453,7 @@ impl State {
         let buffer = tab.buffer?;
         let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
         if !tab.loaded { return None; }
-        Some(View { snapshot, tab, draft: self.sources.buffers.get(&buffer)?.draft.as_ref() })
+        Some(View { snapshot, tab, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save })
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
@@ -1630,9 +1653,10 @@ impl State {
             let inside = t.source.starts_with(p.root());
             (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Read-only source from {origin}"))
         });
+        let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
-        doc.into_iter().chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).collect()
+        doc.into_iter().chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette
@@ -1863,6 +1887,7 @@ pub struct Session {
     analysis: crate::analysis::Analysis,
     project_query: Option<project_search::ProjectQuery>,
     navigation_query: Option<navigation_query::NavigationQuery>,
+    save_seq: u64,
     semantic_wait: std::collections::HashMap<semantics::Lane, SemanticWait>,
     themes: ThemeService,
     theme_preview: Option<String>,
@@ -2058,6 +2083,7 @@ impl Session {
             analysis: Default::default(),
             project_query: None,
             navigation_query: None,
+            save_seq: 0,
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
@@ -2338,6 +2364,16 @@ impl Session {
                 None => Some("No file is open"),
                 Some(t) if !t.loaded => Some("No text to point at"),
                 Some(_) => None,
+            },
+            CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match self.state.active() {
+                None => Some("No file is open"),
+                Some(tab) if id == CommandId::Save => self.save_disabled(tab.id),
+                Some(tab) => match self.state.view(tab.id) {
+                    None => Some("No file is open"),
+                    Some(view) if view.save_status().busy() => Some("A save operation is running"),
+                    Some(view) if id == CommandId::ConfirmRecheckedSave => (!matches!(view.save_status(), crate::save::Status::Checked(crate::save::DiskMatch::Baseline | crate::save::DiskMatch::Attempted))).then_some("Recheck must match the baseline or attempted save first"),
+                    Some(view) => (!view.write_path_changed() && !matches!(view.save_status(), crate::save::Status::Uncertain(_) | crate::save::Status::Rejected(_) | crate::save::Status::Checked(_))).then_some("No save outcome needs rechecking"),
+                },
             },
             CommandId::Undo | CommandId::Redo => match self.state.active().and_then(|tab| self.state.view(tab.id)) {
                 None => Some("No file is open"),
@@ -2799,6 +2835,7 @@ impl Session {
         self.sync_semantics();
         effect.repaint |= self.retry_semantic_analysis();
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
+        effect.repaint |= self.account_saves();
         effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
         for reply in self.state.semantics.take_failures() { effect.repaint |= self.semantic_reply(reply).repaint; }
@@ -2960,6 +2997,9 @@ impl Session {
             Command::Edit { tab, expected, edits, kind } => self.edit(tab, expected, edits, kind),
             Command::Undo { tab } => self.undo(tab, false),
             Command::Redo { tab } => self.undo(tab, true),
+            Command::Save { tab } => self.save(tab),
+            Command::RecheckSave { tab } => self.recheck_save(tab),
+            Command::ConfirmRecheckedSave { tab } => self.confirm_rechecked_save(tab),
             Command::PrepareLayout { pane, tab, work } => {
                 if self.layout_intents.get(pane as usize).is_some_and(Option::is_some) { return Effect::default(); }
                 self.prepare_layout(crate::layout::Request { pane, tab, work });
@@ -4622,7 +4662,7 @@ impl Session {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
                             let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                            Ok((stamp, Arc::new(Document::decode(path.to_owned(), version, &bytes))))
+                            Ok((stamp, Arc::new(decode_read(path.to_owned(), version, &bytes))))
                         }
                         Err(ReadError::Unstable) => Err("it is changing on disk".to_string()),
                         Err(ReadError::Failed(e)) => Err(e),
@@ -5831,7 +5871,7 @@ impl Session {
                         Ok((stamp, bytes)) => {
                             if !lease.wanted() { return Err("request was cancelled".into()); }
                             let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                            Ok((stamp, Arc::new(Document::decode(path.to_owned(), version, &bytes))))
+                            Ok((stamp, Arc::new(decode_read(path.to_owned(), version, &bytes))))
                         }
                         Err(ReadError::Unstable) => Err("it is changing on disk".to_string()),
                         Err(ReadError::Failed(e)) => Err(e),
@@ -6153,7 +6193,7 @@ impl Session {
                     let doc = match read(&path) {
                         Ok((stamp, bytes)) => {
                             let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                            let doc = Arc::new(Document::decode(path, version, &bytes));
+                            let doc = Arc::new(decode_read(path, version, &bytes));
                             if disk_source.as_ref().is_some_and(|source| source.stamp != stamp || source.digest != search::decoded_digest(doc.text().as_bytes())) {
                                 Err("the search source changed; rerun the search".into())
                             } else { Ok((stamp, doc)) }
@@ -6198,7 +6238,7 @@ impl Session {
             let checked = match read(&path) {
                     Ok((stamp, bytes)) => {
                         let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                        Ok((Some(stamp), Arc::new(Document::decode(path, version, &bytes))))
+                        Ok((Some(stamp), Arc::new(decode_read(path, version, &bytes))))
                     }
                     Err(ReadError::Unstable) => Err("it is changing on disk".to_string()),
                     Err(ReadError::Failed(e)) => Err(e),
@@ -7493,7 +7533,7 @@ impl Session {
             let result = match read(&path) {
                 Ok((stamp, bytes)) => {
                     let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                    Ok((Some(stamp), Arc::new(Document::decode(path.clone(), version, &bytes)), std::fs::canonicalize(&path).ok()))
+                    Ok((Some(stamp), Arc::new(decode_read(path.clone(), version, &bytes)), Some(bytes.target.canonical.clone())))
                 }
                 Err(ReadError::Unstable) => Err("it kept changing while being read; try Reload".to_string()),
                 Err(ReadError::Failed(e)) => Err(e),
@@ -7726,6 +7766,7 @@ impl Drop for Session {
         self.preview_parse.store(u64::MAX, Ordering::Relaxed);
         self.expand_latest.store(u64::MAX, Ordering::Relaxed);
         self.project_generation.fetch_add(1, Ordering::Relaxed);
+        self.analysis.finish_submitted_writes();
     }
 }
 
@@ -7813,13 +7854,23 @@ fn check(path: &Path, stamp: Option<Stamp>, shown: Option<&Arc<crate::text::Text
             Ok((now, bytes)) if old.image().is_some() && Document::fingerprint(&bytes) == old.source_meta().fingerprint() => Refresh::Same(now),
             Ok((now, bytes)) => {
                 let version = versions.fetch_add(1, Ordering::Relaxed) + 1;
-                let doc = Document::decode(path.to_owned(), version, &bytes);
+                let doc = decode_read(path.to_owned(), version, &bytes);
                 if old.matches_document(&doc) { Refresh::Same(now) } else { Refresh::Changed(now, Arc::new(doc)) }
             }
             Err(ReadError::Unstable) => Refresh::Unstable,
             Err(ReadError::Failed(e)) => Refresh::Gone(e),
         },
     }
+}
+
+/// The same raw read supplies display decoding and exact writer provenance, including result previews.
+fn decode_read(path: PathBuf, version: u64, read: &lenz_content::write::ExactRead) -> Document {
+    let mut doc = Document::decode(path, version, read.bytes());
+    let meta = doc.source_meta();
+    if doc.image().is_some() || meta.is_binary() || meta.is_lossy() { return doc; }
+    let snapshot = read.snapshot(doc.text(), meta.original_encoding(), meta.had_bom(), meta.is_lossy());
+    doc.write_baseline = Some(Arc::new(crate::save::Baseline { snapshot, target: read.target.clone() }));
+    doc
 }
 
 enum ReadError {
@@ -7830,7 +7881,7 @@ enum ReadError {
 
 /// Read a regular file whose stamp is the same before and after the read: a read that races a replacement is
 /// retried, never presented as the confirmed current content.
-fn read(path: &Path) -> Result<(Stamp, Vec<u8>), ReadError> {
+fn read(path: &Path) -> Result<(Stamp, lenz_content::write::ExactRead), ReadError> {
     // A language server's opaque URI is never reinterpreted as a path.
     if is_virtual(path) {
         return Err(ReadError::Failed("it is source a language server returned, not a file".into()));
@@ -7841,9 +7892,9 @@ fn read(path: &Path) -> Result<(Stamp, Vec<u8>), ReadError> {
             return Err(ReadError::Failed("not a regular file".into()));
         }
         let before = Stamp::from(&meta);
-        let bytes = std::fs::read(path).map_err(|e| ReadError::Failed(e.to_string()))?;
-        if Stamp::of(path) == Some(before) {
-            return Ok((before, bytes));
+        let bytes = lenz_content::write::read_exact_bytes(path).map_err(|e| ReadError::Failed(e.to_string()))?;
+        if Stamp::from(bytes.metadata()) == before && Stamp::of(path) == Some(before) {
+            return Ok((Stamp::from(bytes.metadata()), bytes));
         }
         std::thread::sleep(std::time::Duration::from_millis(10 << attempt));
     }

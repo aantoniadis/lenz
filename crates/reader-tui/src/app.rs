@@ -1850,6 +1850,7 @@ impl App {
             (KeyCode::Char('e'), true, false, true) => Some(CommandId::RecentLocations),
             (KeyCode::Char('e'), true, false, false) => Some(CommandId::RecentFiles),
             (KeyCode::Char('b'), true, false, true) => Some(CommandId::Implementation),
+            (KeyCode::Char('s'), true, false, false) => Some(CommandId::Save),
             (KeyCode::Char('b'), false, false, true) => Some(CommandId::AnnotateBlame),
             (KeyCode::Char('`' | '~'), true, _, _) => Some(CommandId::GitBranches),
             (KeyCode::Char('b' | 'B'), true, true, _) => Some(CommandId::TypeDefinition),

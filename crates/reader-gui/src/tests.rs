@@ -121,6 +121,72 @@ fn draw(v: &mut VisualTestContext) {
 }
 
 #[gpui::test]
+fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx: &mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use reader_core::save::{Status, DiskMatch};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let f = fixture(cx, Some(("fault.txt", b"old"))); let path = f.dir.path().join("fault.txt");
+        settle(cx, &f, |view| view.session().state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+        v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("new".into())));
+        v.simulate_keystrokes("ctrl-a ctrl-v");
+        let tab = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+        let guard = at_path(&path, fault); v.simulate_keystrokes("ctrl-s");
+        settle(cx, &f, |view| matches!(view.session().state().view(tab).unwrap().save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+        let disk = std::fs::read(&path).unwrap(); assert_eq!(disk, if fault == Fault::AfterReplace { b"new" } else { b"old" });
+        draw(&mut v);
+        let message = f.view.read_with(&v, |view, _| view.session().status_message());
+        assert!(message.contains(if fault == Fault::AfterReplace { "uncertain" } else { "rejected" }), "{message}");
+        v.simulate_keystrokes("shift-f2");
+        assert!(f.view.read_with(&v, |view, _| view.modal.is_some()));
+        v.simulate_keystrokes("ctrl-s escape"); assert_eq!(std::fs::read(&path).unwrap(), disk);
+        drop(guard);
+        f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::RecheckSave, window, cx));
+        settle(cx, &f, |view| matches!(view.session().state().view(tab).unwrap().save_status(), Status::Checked(_)));
+        let expected = if fault == Fault::AfterReplace { DiskMatch::Attempted } else { DiskMatch::Baseline };
+        assert_eq!(f.view.read_with(&v, |view, _| view.session().state().view(tab).unwrap().save_status().clone()), Status::Checked(expected));
+        assert!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)));
+        v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+        f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::ConfirmRecheckedSave, window, cx));
+        assert_eq!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)), fault != Fault::AfterReplace);
+        assert_eq!(std::fs::read(path).unwrap(), disk);
+    }
+}
+
+#[gpui::test]
+fn save_shortcut_keeps_history_after_actual_cache_eviction(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("save.txt", "\u{feff}α😀\r\nbeta\n".as_bytes())));
+    let path = f.dir.path().join("save.txt");
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let tab = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("é".into())));
+    v.simulate_keystrokes("home shift-right ctrl-v ctrl-s");
+    settle(cx, &f, |view| !view.session().state().tab_dirty(tab));
+    assert_eq!(std::fs::read(&path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+    draw(&mut v);
+    let clean = f.dir.path().join("evicted.txt"); let other = f.dir.path().join("pressure.txt");
+    std::fs::write(&clean, vec![b'a'; 17 << 20]).unwrap(); std::fs::write(&other, vec![b'b'; 17 << 20]).unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(clean.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == clean));
+    draw(&mut v);
+    let weak = f.view.read_with(&v, |view, _| Arc::downgrade(view.session().state().current_source().unwrap()));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(other.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == other));
+    draw(&mut v);
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(path.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == path));
+    draw(&mut v);
+    assert!(weak.upgrade().is_none(), "real inactive-cache pressure released the clean source");
+    v.simulate_keystrokes("ctrl-z"); draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() }), "α😀\r\nbeta\n");
+    assert!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)));
+    assert_eq!(std::fs::read(path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+}
+
+#[gpui::test]
 fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(cx: &mut TestAppContext) {
     let original = "é界\r\nline two\r\n";
     let f = fixture(cx, Some(("draft.txt", original.as_bytes())));

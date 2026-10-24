@@ -179,6 +179,10 @@ impl Session {
             CommandId::Close => Command::Close,
             CommandId::SelectAll => Command::SelectAll,
             CommandId::Copy => Command::Copy,
+            CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
+                Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
+                None => return CatalogAction::Disabled("No file is open"),
+            },
             CommandId::Undo | CommandId::Redo => match state.active() {
                 Some(tab) if id == CommandId::Undo => Command::Undo { tab: tab.id() },
                 Some(tab) => Command::Redo { tab: tab.id() },
@@ -290,7 +294,7 @@ impl CommandId {
     pub fn group(self) -> CommandGroup {
         use CommandGroup as G;
         match self {
-            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload
+            Self::Open | Self::OpenFolder | Self::OpenRecent | Self::NewWindow | Self::Reload | Self::Save | Self::RecheckSave | Self::ConfirmRecheckedSave
             | Self::Close | Self::PinTab | Self::CopyPath | Self::CopyPathLine | Self::OpenInEditor | Self::OpenWithDefaultApp
             | Self::CompareWith | Self::CompareSelected => G::File,
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
@@ -352,6 +356,7 @@ impl CommandId {
             Self::TypeHierarchy => Some("Ctrl+H"),
             Self::Documentation => Some("Ctrl+Q"),
             Self::Copy => Some("Ctrl+C"),
+            Self::Save => Some("Ctrl+S"),
             Self::Undo => Some("Ctrl+Z"),
             Self::Redo => Some("Ctrl+Shift+Z"),
             Self::Close => Some("Ctrl+F4"),

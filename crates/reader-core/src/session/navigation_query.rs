@@ -156,7 +156,7 @@ impl Session {
             let versions = self.versions.clone();
             if self.analysis.request_result(fence.clone(), Priority::Visible, || move |lease: crate::analysis::Lease| {
                 let result = read(&path).map_err(|_| "The symbol file could not be read; search again".to_string()).and_then(|(stamp, bytes)| {
-                    let doc = Arc::new(Document::decode(path, versions.fetch_add(1, Ordering::Relaxed) + 1, &bytes));
+                    let doc = Arc::new(super::decode_read(path, versions.fetch_add(1, Ordering::Relaxed) + 1, &bytes));
                     if source.is_some_and(|source| source.stamp == stamp && source.digest == search::decoded_digest(doc.text().as_bytes())) { Ok((Some(stamp), doc)) }
                     else { Err("This symbol's source changed; search again".into()) }
                 });

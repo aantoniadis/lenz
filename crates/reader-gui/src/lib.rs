@@ -1349,6 +1349,7 @@ impl ReaderView {
             ("h", true, false) => self.run(CommandId::TypeHierarchy, window, cx),
             ("q", true, false) => self.run(CommandId::Documentation, window, cx),
             ("b", true, false) => self.run(CommandId::ToggleExplorer, window, cx),
+            ("s", true, false) => self.run(CommandId::Save, window, cx),
             ("r", true, false) | ("f5", _, _) => self.run(CommandId::Reload, window, cx),
             // Ctrl+W / Ctrl+Shift+W grow and shrink the selection (IntelliJ); Ctrl+F4 closes the tab.
             ("w", true, false) => self.run(CommandId::ExtendSelection, window, cx),

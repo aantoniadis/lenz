@@ -46,3 +46,6 @@ Raw focused evidence is retained under `target/perf/editor-implementation/12-cor
 The user requested one full gate and equivalent release/performance/stress checks
 after batch 11/12/13/16/18. No standalone ticket-12 gate, performance acceptance,
 native macOS or IME verification is claimed here.
+
+The explicit Save continuation and baseline-retirement behavior are documented in
+[Reader explicit Save](reader-explicit-save.md).

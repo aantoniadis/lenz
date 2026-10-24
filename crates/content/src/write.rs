@@ -132,6 +132,9 @@ impl Snapshot {
         Ok(())
     }
 
+    pub fn len_bytes(&self) -> u64 { self.size }
+    pub fn modified(&self) -> Option<SystemTime> { self.mtime }
+
     /// The cheap check (for window activation): size, mtime or existence differ from the read.
     pub fn changed(&self) -> bool {
         match fs::metadata(&self.path) {
@@ -209,6 +212,34 @@ pub enum WriteOutcome {
 /// Reads metadata and baseline bytes from the same opened file. Unlike Diff's
 /// content-only snapshot, this identity also rejects same-content substitutions.
 pub fn read_exact(path: &Path, declared: Option<&str>) -> Result<(Snapshot, TargetIdentity, Decoded), WriteError> {
+    let read = read_exact_bytes(path)?;
+    let decoded = decode(read.bytes(), declared);
+    let snapshot = read.snapshot(&decoded.text, decoded.encoding, decoded.had_bom, decoded.lossy);
+    Ok((snapshot, read.target, decoded))
+}
+
+/// Raw bytes and identity from the same opened file, for callers that already own decoding.
+#[derive(Clone, Debug)]
+pub struct ExactRead {
+    bytes: Vec<u8>,
+    metadata: fs::Metadata,
+    path: PathBuf,
+    pub target: TargetIdentity,
+}
+impl ExactRead {
+    pub fn bytes(&self) -> &[u8] { &self.bytes }
+    pub fn metadata(&self) -> &fs::Metadata { &self.metadata }
+    /// Construct the writer baseline from borrowed facts of this exact decoded read.
+    pub fn snapshot(&self, text: &str, encoding: &'static str, bom: bool, lossy: bool) -> Snapshot {
+        let crlf = text.matches("\r\n").count();
+        Snapshot { path: self.path.clone(), hash: Some(hash(&self.bytes)), size: self.metadata.len(),
+            mtime: self.metadata.modified().ok(), encoding: Encoding::for_label(encoding.as_bytes()).unwrap_or(UTF_8),
+            bom, crlf: crlf > text.matches('\n').count() - crlf, lossy, repository_root: None }
+    }
+}
+impl std::ops::Deref for ExactRead { type Target = [u8]; fn deref(&self) -> &[u8] { self.bytes() } }
+
+pub fn read_exact_bytes(path: &Path) -> Result<ExactRead, WriteError> {
     let canonical = fs::canonicalize(path).map_err(io_err("reading", path))?;
     let mut file = File::open(&canonical).map_err(io_err("reading", path))?;
     let meta = file.metadata().map_err(io_err("reading", path))?;
@@ -216,15 +247,15 @@ pub fn read_exact(path: &Path, declared: Option<&str>) -> Result<(Snapshot, Targ
     file.read_to_end(&mut bytes).map_err(io_err("reading", path))?;
     let target = TargetIdentity::from_metadata(canonical, &meta);
     target.verify(path)?;
-    let decoded = decode(&bytes, declared);
-    let snapshot = Snapshot { hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(), ..Snapshot::like(path, &decoded) };
-    Ok((snapshot, target, decoded))
+    Ok(ExactRead { bytes, metadata: meta, path: path.to_owned(), target })
 }
 
 /// Writes exact text endings, preserving encoding/BOM/mode and existing hard links.
 /// Rechecks the named target immediately before mutation. This is not a filesystem
 /// compare-and-swap: another process may still race the final check and rename.
 pub fn write_exact(snapshot: &Snapshot, expected: &TargetIdentity, text: &str) -> WriteOutcome {
+    #[cfg(any(test, feature = "write-testing"))]
+    let _fault = readiness_fault::enter_path(&snapshot.path);
     use WriteOutcome::{Rejected, Saved, Uncertain};
     let prepare = || -> Result<_, WriteError> {
         if snapshot.lossy { return Err(WriteError::Lossy); }
@@ -591,9 +622,25 @@ fn sync_dir(path: &Path) {
 #[cfg(any(test, feature = "write-testing"))]
 pub mod readiness_fault {
     use std::{cell::Cell, fs::File, io::{self, Write}};
+    use std::{collections::HashMap, path::{Path, PathBuf}, sync::{Mutex, OnceLock}};
     #[derive(Clone, Copy, PartialEq, Eq)]
     pub enum Fault { BeforeReplace, Write, WriteAndRollback, AfterReplace }
     thread_local! { static ACTIVE: Cell<Option<(Fault, usize)>> = const { Cell::new(None) }; }
+    fn paths() -> &'static Mutex<HashMap<PathBuf, Fault>> { static PATHS: OnceLock<Mutex<HashMap<PathBuf, Fault>>> = OnceLock::new(); PATHS.get_or_init(Default::default) }
+    /// Scoped disposable-file faults also reach background writers, without affecting other paths.
+    pub struct AtPath(PathBuf);
+    pub fn at_path(path: &Path, fault: Fault) -> AtPath {
+        assert!(paths().lock().unwrap().insert(path.to_owned(), fault).is_none());
+        AtPath(path.to_owned())
+    }
+    impl Drop for AtPath { fn drop(&mut self) { paths().lock().unwrap().remove(&self.0); } }
+    pub(super) struct PathScope(Option<(Fault, usize)>);
+    impl Drop for PathScope { fn drop(&mut self) { ACTIVE.set(self.0); } }
+    pub(super) fn enter_path(path: &Path) -> PathScope {
+        let previous = ACTIVE.get();
+        if previous.is_none() && let Some(fault) = paths().lock().unwrap().get(path).copied() { ACTIVE.set(Some((fault, 0))); }
+        PathScope(previous)
+    }
     pub fn during<T>(fault: Fault, action: impl FnOnce() -> T) -> T {
         assert!(ACTIVE.get().is_none());
         ACTIVE.set(Some((fault, 0)));

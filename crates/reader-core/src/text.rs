@@ -77,6 +77,7 @@ pub struct TextSnapshot {
     newlines: usize,
     utf16: usize,
     owned_bytes: usize,
+    backing_bytes: usize,
 }
 
 impl TextSnapshot {
@@ -88,6 +89,7 @@ impl TextSnapshot {
         let (mut bytes, mut newlines, mut utf16) = (0, 0, 0);
         let arc_header = 2 * size_of::<usize>();
         let mut owned_bytes = size_of::<Self>() + 2 * arc_header + source.bytes();
+        let mut backing_bytes = 0;
         let mut texts = std::collections::HashSet::new();
         let mut newlines_seen = std::collections::HashSet::new();
         let mut chunks_seen = std::collections::HashSet::new();
@@ -98,12 +100,12 @@ impl TextSnapshot {
             utf16 += entry.chunk.utf16;
             owned_bytes += size_of::<Entry>();
             if chunks_seen.insert(Arc::as_ptr(&entry.chunk)) { owned_bytes += size_of::<Chunk>() + arc_header; }
-            if texts.insert(Arc::as_ptr(&entry.chunk.text)) { owned_bytes += entry.chunk.text.len() + arc_header; }
-            if newlines_seen.insert(Arc::as_ptr(&entry.chunk.newlines)) { owned_bytes += entry.chunk.newlines.len() * size_of::<usize>() + arc_header; }
+            if texts.insert(Arc::as_ptr(&entry.chunk.text)) { backing_bytes += entry.chunk.text.len(); owned_bytes += entry.chunk.text.len() + arc_header; }
+            if newlines_seen.insert(Arc::as_ptr(&entry.chunk.newlines)) { backing_bytes += entry.chunk.newlines.len() * size_of::<usize>(); owned_bytes += entry.chunk.newlines.len() * size_of::<usize>() + arc_header; }
             entry
         }).collect();
         let chunks: Arc<[Entry]> = chunks;
-        Self { key, source, chunks, bytes, newlines, utf16, owned_bytes }
+        Self { key, source, chunks, bytes, newlines, utf16, owned_bytes, backing_bytes }
     }
 
     pub(crate) fn with_source_meta(&self, source: Arc<SourceMeta>) -> Self { Self { owned_bytes: self.owned_bytes - self.source.bytes() + source.bytes(), source, ..self.clone() } }
@@ -121,6 +123,18 @@ impl TextSnapshot {
     /// Retained source/index storage; each shared backing allocation is charged once, including
     /// the full allocation when a chunk retains only a slice. Worker/protocol Documents are separate.
     pub fn storage_bytes(&self) -> usize { self.owned_bytes }
+
+    /// Retirement-boundary work only: a small surviving slice must not pin a retired original file.
+    pub(crate) fn needs_compaction(&self) -> bool {
+        self.backing_bytes > self.bytes.saturating_add(self.newlines.saturating_mul(size_of::<usize>())).saturating_mul(2).saturating_add(64 << 10)
+    }
+    pub(crate) fn compact_backing(&self) -> Self {
+        if !self.needs_compaction() { return self.clone(); }
+        let chunks = self.chunks.iter().map(|entry| {
+            let text = entry.chunk.text(); Chunk::indexed(text.into(), 0..text.len())
+        }).collect();
+        Self::indexed(self.key, self.source.clone(), chunks)
+    }
 
     pub(crate) fn reader_line_range(&self, line: usize) -> Range<usize> {
         self.line_range(line.min(self.line_count() - 1)).unwrap_or(0..0)
