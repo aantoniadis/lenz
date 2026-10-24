@@ -158,6 +158,11 @@ impl Analysis {
         self.running += 1; *background += usize::from(priority == Priority::Background);
         jobs.submit(priority, move || { if lease.wanted() { work(lease); } });
     }
+    pub(super) fn visible_result_dependency_waiting(&self, project: u64) -> bool {
+        self.results.values().any(|entry| entry.running.is_none() && entry.pending.as_ref().is_some_and(|intent|
+            intent.priority == Priority::Visible && intent.tag.fence.project == project
+                && matches!(&intent.work, ResultWork::Document { source, .. } if source.scope.project == project)))
+    }
     pub(super) fn result_background(&self) -> usize { self.results.values().filter(|entry| entry.running.as_ref().is_some_and(|run| run.task.priority == Priority::Background)).count() }
     pub(super) fn close_results(&mut self) {
         for entry in self.results.values_mut() {

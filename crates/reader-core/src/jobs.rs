@@ -24,7 +24,20 @@ struct Queue {
     visible: VecDeque<Job>,
     background: VecDeque<(u64, Job)>,
     next: u64,
+    active: usize,
+    worker_count: usize,
+    visible_reservations: usize,
     stop: bool,
+}
+
+/// Keeps executor capacity for a visible dependency until its consumer has been submitted.
+pub(crate) struct VisibleReservation { shared: Arc<(Mutex<Queue>, Condvar)> }
+impl Drop for VisibleReservation {
+    fn drop(&mut self) {
+        let (queue, wake) = &*self.shared;
+        queue.lock().unwrap_or_else(|e| e.into_inner()).visible_reservations -= 1;
+        wake.notify_all();
+    }
 }
 
 pub struct Jobs {
@@ -35,12 +48,13 @@ pub struct Jobs {
 impl Jobs {
     pub fn new() -> Self {
         let shared: Arc<(Mutex<Queue>, Condvar)> = Arc::default();
-        let workers = (0..MAX_JOBS)
+        let workers: Vec<_> = (0..MAX_JOBS)
             .filter_map(|i| {
                 let shared = shared.clone();
                 std::thread::Builder::new().name(format!("reader-job-{i}")).spawn(move || work(&shared)).ok()
             })
             .collect();
+        shared.0.lock().unwrap_or_else(|e| e.into_inner()).worker_count = workers.len();
         Self { shared, workers }
     }
 
@@ -55,6 +69,13 @@ impl Jobs {
     }
 
     pub(crate) fn has_workers(&self) -> bool { !self.workers.is_empty() }
+
+    pub(crate) fn reserve_visible(&self) -> VisibleReservation {
+        let (queue, wake) = &*self.shared;
+        queue.lock().unwrap_or_else(|e| e.into_inner()).visible_reservations += 1;
+        wake.notify_all();
+        VisibleReservation { shared: self.shared.clone() }
+    }
 
     /// A narrow executor handle: policy and cancellation remain with the submitting owner.
     pub(crate) fn submit_promotable(&self, priority: Priority, job: impl FnOnce() + Send + 'static) -> Option<u64> {
@@ -96,14 +117,18 @@ fn work(shared: &(Mutex<Queue>, Condvar)) {
                 if q.stop {
                     return;
                 }
-                if let Some(job) = q.visible.pop_front().or_else(|| q.background.pop_front().map(|(_, job)| job)) {
-                    break job;
-                }
+                let job = q.visible.pop_front().or_else(|| {
+                    (q.visible_reservations == 0 || q.active + 1 < q.worker_count)
+                        .then(|| q.background.pop_front().map(|(_, job)| job)).flatten()
+                });
+                if let Some(job) = job { q.active += 1; break job; }
                 q = wake.wait(q).unwrap_or_else(|e| e.into_inner());
             }
         };
         // A panicking job loses its result, not the worker.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+        queue.lock().unwrap_or_else(|e| e.into_inner()).active -= 1;
+        wake.notify_all();
     }
 }
 

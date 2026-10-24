@@ -126,6 +126,7 @@ pub(crate) struct Analysis {
     entries: HashMap<BufferId, Entry>, conversions: HashMap<Scope, Conversion>, results: HashMap<ResultSlot, ResultEntry>, writes: HashMap<BufferId, write::WriteEntry>, queue: VecDeque<Owner>, failures: HashMap<ResultSlot, (ResultFence, String)>, running: usize, next: u64,
     pub(crate) revision: u64,
     dirty: bool, project: u64,
+    visible_reservation: Option<crate::jobs::VisibleReservation>,
     #[cfg(test)]
     pub(crate) materializations: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -304,6 +305,7 @@ impl Analysis {
     }
 
     pub(crate) fn close(&mut self) {
+        self.visible_reservation = None;
         for entry in self.entries.values_mut() { entry.group.cancel(); entry.pending = None; }
         self.close_results();
         self.close_writes();
@@ -331,6 +333,9 @@ impl Analysis {
         if let Some(document) = source.document.get() { return SourceReady::Ready(document.clone()); }
         let Some(conversion) = self.conversions.get_mut(&source.scope) else { return SourceReady::Failed("source conversion owner was released"); };
         if let Some(why) = conversion.failure { return SourceReady::Failed(why); }
+        if priority == Priority::Visible && jobs.has_workers() && self.visible_reservation.is_none() {
+            self.visible_reservation = Some(jobs.reserve_visible());
+        }
         if let Some(task) = &mut conversion.materializing {
             if priority == Priority::Visible && task.priority == Priority::Background {
                 if let Some(job) = task.job { jobs.promote(job); }
@@ -434,7 +439,17 @@ impl Analysis {
                 }
             }
             if self.entries.get(&id).is_some_and(|entry| !entry.group.waiting.is_empty()) { self.enqueue(id); }
-
         }
+        // A ready document still needs its Session-thread consumer submission before capacity is released.
+        if self.visible_reservation.is_some() && !self.visible_dependency_waiting(current_project) {
+            self.visible_reservation = None;
+        }
+    }
+
+    fn visible_dependency_waiting(&self, project: u64) -> bool {
+        self.entries.values().any(|entry| entry.pending.is_none() && entry.group.scope.project == project
+            && entry.group.cancel.load(Ordering::Acquire) && entry.group.source.is_some()
+            && entry.group.waiting.iter().any(|(consumer, intent)| intent.priority == Priority::Visible && !entry.group.inflight.contains_key(consumer)))
+            || self.visible_result_dependency_waiting(project) || self.visible_write_dependency_waiting(project)
     }
 }
