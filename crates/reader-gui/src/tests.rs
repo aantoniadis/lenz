@@ -394,12 +394,48 @@ fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &m
 }
 
 #[gpui::test]
+fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket(cx: &mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use reader_core::{close::Choice, save::Status};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let f = fixture_setup(cx, Some(("fresh-close.txt", b"saved")), &[], true);
+        let path = f.dir.path().join("fresh-close.txt");
+        settle(cx, &f, |v| v.session.state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+        v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));
+        v.simulate_keystrokes("ctrl-a ctrl-v ctrl-f4");
+        let old = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+        let tab = f.view.read_with(&v, |v, _| v.session.state().active().unwrap().id());
+        let guard = at_path(&path, fault); v.simulate_keystrokes("s");
+        settle(cx, &f, |v| matches!(v.session.state().view(tab).unwrap().save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+        drop(guard);
+        assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_none()));
+        let disk = std::fs::read(&path).unwrap();
+        assert_eq!(disk, if fault == Fault::AfterReplace { "draft λ".as_bytes() } else { b"saved" });
+        v.simulate_keystrokes("ctrl-f4"); draw(&mut v);
+        let fresh = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+        assert!(fresh.ticket > old.ticket && fresh.discard_disabled.is_none());
+        if fault == Fault::AfterReplace {
+            assert!(f.view.read_with(&v, |v, _| v.details_labels(Details::Close).contains(&"Discard Draft and Close")));
+        }
+        f.view.update(&mut v, |v, cx| v.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Discard }, cx));
+        assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_some_and(|p| p.ticket == fresh.ticket)));
+        assert!(f.view.read_with(&v, |v, _| { let tab = v.session.state().active().unwrap().id(); let source = v.session.state().view(tab).unwrap(); source.dirty() && source.can_undo() }));
+        v.simulate_keystrokes("d");
+        assert!(f.view.read_with(&v, |v, _| v.session.state().active().is_none() && v.modal.is_none()));
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        v.simulate_keystrokes("ctrl-q"); cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
 fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
     use lenz_content::write::readiness_fault::{at_path,Fault};
     use reader_core::save::{DiskMatch,Status};
     for changed in [false,true] {
         let f=fixture_setup(cx,Some(("close.txt",b"saved")),&[],true);let path=f.dir.path().join("close.txt");settle(cx,&f,|v|v.session.state().current_source().is_some());let mut v=visual(cx,&f);draw(&mut v);f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v");let tab=f.view.read_with(&v,|v,_|v.session.state().active().unwrap().id());let guard=at_path(&path,Fault::AfterReplace);v.simulate_keystrokes("ctrl-s");settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Uncertain(_)));
-        v.simulate_keystrokes("ctrl-f4 d");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.discard_disabled.is_some())));v.simulate_keystrokes("escape");drop(guard);
+        v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.discard_disabled.is_none())));v.simulate_keystrokes("escape");drop(guard);
         if changed {std::fs::write(&path,b"external content").unwrap();}let disk=std::fs::read(&path).unwrap();
         v.simulate_keystrokes("f10");let row=f.view.read_with(&v,|v,_|v.modal_rows().iter().position(|r|r.0==CommandId::RecheckSave.label()).unwrap());for _ in 0..row {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
         settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(f.view.read_with(&v,|v,_|v.session.state().view(tab).unwrap().save_status().clone()),Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(f.view.read_with(&v,|v,_|v.session.state().tab_dirty(tab)));
@@ -499,8 +535,8 @@ fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx
         assert!(f.view.read_with(&v, |view, _| view.modal.is_some()));
         v.simulate_keystrokes("ctrl-s escape"); assert_eq!(std::fs::read(&path).unwrap(), disk);
         if fault==Fault::AfterReplace {
-            let before=f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key());v.simulate_keystrokes("ctrl-f4 d s");
-            assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_some())));
+            let before=f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key());v.simulate_keystrokes("ctrl-f4 s");
+            assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_none())));
             assert_eq!(f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key()),before);v.simulate_keystrokes("escape");
         }
         drop(guard);

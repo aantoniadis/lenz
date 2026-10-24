@@ -383,7 +383,7 @@ fn transition_save_failure_and_uncertainty_never_start_workspace_or_git_changes(
                 }],
                 kind: crate::text::EditKind::Paste,
             });
-            let command = match operation {
+            let command = || match operation {
                 0 => Command::Reload,
                 1 => Command::OpenRoot(wt.path().to_owned()),
                 2 => Command::OpenWorktree(wt.path().join("second")),
@@ -394,7 +394,7 @@ fn transition_save_failure_and_uncertainty_never_start_workspace_or_git_changes(
                     checkout: true,
                 },
             };
-            s.dispatch(command);
+            s.dispatch(command());
             let p = s.close_prompt().unwrap();
             let _fault = at_path(&path, fault);
             s.dispatch(Command::ChooseClose {
@@ -414,6 +414,14 @@ fn transition_save_failure_and_uncertainty_never_start_workspace_or_git_changes(
                 buffer: p.buffer,
                 choice: Choice::Discard,
             });
+            if fault == Fault::AfterReplace {
+                s.dispatch(command());
+                let fresh = s.close_prompt().unwrap();
+                assert!(fresh.ticket > p.ticket && fresh.discard_disabled.is_some(), "replacement transitions still require recheck");
+                s.dispatch(Command::ChooseClose { ticket: fresh.ticket, buffer: fresh.buffer, choice: Choice::Discard });
+                assert_eq!(s.close_prompt().unwrap().ticket, fresh.ticket);
+                s.dispatch(Command::ChooseClose { ticket: fresh.ticket, buffer: fresh.buffer, choice: Choice::Cancel });
+            }
             assert!(!s.state().checking_out());
             assert_eq!(s.state().project().unwrap().root(), r.path());
             assert_eq!(git(r.path(), &["branch", "--show-current"]).trim(), "main");
@@ -894,6 +902,56 @@ fn closing_the_ordinary_owner_during_comparison_still_requires_its_dirty_decisio
 }
 
 #[test]
+fn fresh_close_discards_after_unconfirmed_save_without_rechecking_or_reviving_old_consent() {
+    use crate::close::{Choice, CloseCoordinator, Progress};
+    use crate::save::Status;
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        for all_views in [false, true] {
+            let d = tempfile::tempdir().unwrap();
+            let (mut s, path, tab) = close_fixture(d.path(), "fresh-close.txt");
+            let mut coordinator = CloseCoordinator::default();
+            coordinator.register(s.id());
+            if all_views { coordinator.begin(&mut [&mut s]); } else { s.dispatch(Command::CloseTab(tab)); }
+            let old = s.close_prompt().unwrap();
+            let guard = at_path(&path, fault);
+            s.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Save });
+            settle(&mut s, |s| matches!(active_view(s).save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+            assert!(s.close_prompt().is_none());
+            if all_views { assert_eq!(coordinator.progress(&mut [&mut s]), Progress::Cancelled); }
+            drop(guard);
+            let mut disk = std::fs::read(&path).unwrap();
+            assert_eq!(disk, if fault == Fault::AfterReplace { "draft λ\r\n".as_bytes() } else { b"saved\r\n" });
+            if all_views && fault == Fault::AfterReplace {
+                std::fs::write(&path, b"external bytes after uncertain Save").unwrap();
+                disk = std::fs::read(&path).unwrap();
+            }
+            let tab = if all_views { tab } else {
+                s.dispatch(Command::Split(Split::Columns));
+                s.dispatch(Command::Unsplit);
+                assert!(s.close_prompt().is_none());
+                s.state().active().unwrap().id()
+            };
+            assert!(active_view(&s).dirty() && active_view(&s).can_undo());
+            s.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Discard });
+            assert!(s.state().active().is_some() && !s.closed());
+            if all_views { coordinator.begin(&mut [&mut s]); } else { s.dispatch(Command::CloseTab(tab)); }
+            let fresh = s.close_prompt().unwrap();
+            assert!(fresh.ticket > old.ticket && fresh.discard_disabled.is_none());
+            s.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Discard });
+            assert_eq!(s.close_prompt().unwrap().ticket, fresh.ticket);
+            assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+            s.dispatch(Command::ChooseClose { ticket: fresh.ticket, buffer: fresh.buffer, choice: Choice::Discard });
+            if all_views { assert_eq!(coordinator.progress(&mut [&mut s]), Progress::Committed(vec![s.id()])); assert!(s.closed()); }
+            else { assert!(s.state().active().is_none()); }
+            if all_views { assert!(s.last_close().unwrap().discarded.contains(&fresh.buffer)); drop(s); }
+            else { assert!(!s.state.sources.buffers.contains_key(&fresh.buffer), "Discard releases draft and history ownership"); }
+            assert_eq!(std::fs::read(path).unwrap(), disk);
+        }
+    }
+}
+
+#[test]
 fn close_during_saved_backing_compaction_waits_without_demanding_another_save() {
     use crate::save::Status;
     let d=tempfile::tempdir().unwrap();let original="a".repeat(128*1024);let path=write(d.path(),"compact-close.txt",original.as_bytes());let mut s=session(d.path());open(&mut s,Command::OpenRetained(path.clone()),"compact-close.txt");let tab=s.state().active().unwrap().id();let expected=s.state().current_source().unwrap().key();
@@ -908,11 +966,11 @@ fn close_during_saved_backing_compaction_waits_without_demanding_another_save() 
 }
 
 #[test]
-fn close_discard_recheck_receipt_cannot_authorize_a_later_draft_version() {
+fn reload_discard_recheck_receipt_cannot_authorize_a_later_draft_version() {
     use crate::close::Choice;use crate::save::Status;use lenz_content::write::readiness_fault::{at_path,Fault};
     let d=tempfile::tempdir().unwrap();let (mut s,path,tab)=close_fixture(d.path(),"a.txt");let guard=at_path(&path,Fault::AfterReplace);s.dispatch(Command::Save {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Uncertain(_)));drop(guard);
     s.dispatch(Command::RecheckSave {tab});let expected=s.state().current_source().unwrap().key();s.dispatch(Command::Edit {tab,expected,edits:vec![crate::text::TextEdit {range:0..0,text:"newer ".into()}],kind:crate::text::EditKind::Paste});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));
-    s.dispatch(Command::CloseTab(tab));let stale=s.close_prompt().unwrap();assert!(stale.discard_disabled.is_some(),"a recheck captured before the edit is not current consent");s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Discard});assert!(s.state().active().is_some());s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Cancel});
+    s.dispatch(Command::Reload);let stale=s.close_prompt().unwrap();assert!(stale.discard_disabled.is_some(),"a recheck captured before the edit is not current consent for Reload");s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Discard});assert!(s.state().active().is_some());s.dispatch(Command::ChooseClose {ticket:stale.ticket,buffer:stale.buffer,choice:Choice::Cancel});
     s.dispatch(Command::RecheckSave {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));s.dispatch(Command::CloseTab(tab));let fresh=s.close_prompt().unwrap();assert!(fresh.discard_disabled.is_none());assert!(fresh.ticket>stale.ticket);s.dispatch(Command::ChooseClose {ticket:fresh.ticket,buffer:fresh.buffer,choice:Choice::Discard});assert!(s.state().active().is_none());assert_eq!(std::fs::read(path).unwrap(),"draft λ\r\n".as_bytes());
 }
 
@@ -931,7 +989,7 @@ fn close_batch_rejects_new_draft_in_an_initially_evicted_clean_buffer() {
 }
 
 #[test]
-fn close_after_uncertain_save_requires_recheck_then_fresh_discard_without_accepting_a_baseline() {
+fn close_after_uncertain_save_can_still_recheck_then_discard_without_accepting_a_baseline() {
     use crate::close::Choice;
     use crate::save::{DiskMatch,Status};
     use lenz_content::write::readiness_fault::{at_path,Fault};
@@ -940,8 +998,7 @@ fn close_after_uncertain_save_requires_recheck_then_fresh_discard_without_accept
         let guard=at_path(&path,Fault::AfterReplace);s.dispatch(Command::CloseTab(tab));let old=s.close_prompt().unwrap();
         s.dispatch(Command::ChooseClose {ticket:old.ticket,buffer:old.buffer,choice:Choice::Save});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Uncertain(_)));
         assert!(s.close_prompt().is_none(),"uncertain Save cancels the old close continuation");drop(guard);
-        s.dispatch(Command::CloseTab(tab));let before=s.close_prompt().unwrap();assert!(before.save_disabled.is_some() && before.discard_disabled.is_some());
-        s.dispatch(Command::ChooseClose {ticket:before.ticket,buffer:before.buffer,choice:Choice::Discard});assert_eq!(s.close_prompt().unwrap().ticket,before.ticket);
+        s.dispatch(Command::CloseTab(tab));let before=s.close_prompt().unwrap();assert!(before.save_disabled.is_some() && before.discard_disabled.is_none());
         s.dispatch(Command::ChooseClose {ticket:before.ticket,buffer:before.buffer,choice:Choice::Cancel});
         if changed {std::fs::write(&path,b"external disk content").unwrap();}
         let disk=std::fs::read(&path).unwrap();s.dispatch(Command::RecheckSave {tab});settle(&mut s,|s|matches!(active_view(s).save_status(),Status::Checked(_)));

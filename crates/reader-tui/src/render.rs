@@ -1260,7 +1260,8 @@ impl App {
                     }
                 } else if matches!(modal.kind,Prompt::Details {kind:crate::app::Details::Close,..}) {
                     let mut x=content.x;
-                    for (label,key) in [(reader_core::close::Choice::Save.label(),"s"),(reader_core::close::Choice::Discard.label(),"d"),(reader_core::close::Choice::Cancel.label(),"Esc")] {
+                    for (choice,key) in [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().zip(["s","d","Esc"]) {
+                        let label=self.session.close_prompt().map_or(choice.label(),|p|p.label(choice));
                         let text=format!("[{label} {key}]");let width=(lenz_content::wrap::width(&text) as u16).min(content.right().saturating_sub(x));
                         let b=Rect::new(x,content.bottom(),width,1);line(frame.buffer_mut(),b,&text,style(p.fg,p.selected_bg));geometry.details_choices.push(b);x=x.saturating_add(width+1).min(content.right());
                     }
