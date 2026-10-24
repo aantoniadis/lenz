@@ -1029,3 +1029,88 @@ fn the_keymap_dialog_draws_its_rows_and_capture_hint_at_any_size() {
         assert!(a.modal.is_none(), "{w}x{h}");
     }
 }
+
+#[test]
+fn editor_gutter_marks_change_letters_in_their_own_colours_against_head() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    use reader_core::markers::{BaselineKind, LineChange};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(r.path(), "base");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("a.txt")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    let tab = |a: &App| a.session.state().active().unwrap().id();
+    // The debounce thread runs for real here: the markers settle once the draft rests.
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending()));
+    assert_eq!(draw(&mut app, 60, 12)[(app.layout.panes[0].gutter_x, 2)].symbol(), " ", "a committed file: no letter");
+    // Typing at the caret's start changes line 1 of the draft: one modified line against HEAD.
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending() && m.change(0) == Some(LineChange::Modified)));
+    let buffer = draw(&mut app, 60, 12);
+    let pane = &app.layout.panes[0];
+    let rows = |b: &Buffer| (pane.text.y..pane.text.bottom()).map(|y| (0..pane.text.x).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+    let gutters = rows(&buffer);
+    assert!(gutters[0].contains(" M"), "the changed line's letter: {:?}", gutters);
+    assert!(gutters[1].contains("   ") && !gutters[1].contains('M') && !gutters[1].contains('A'), "unchanged lines: {:?}", gutters);
+    // The letter carries the modified colour, distinct from the line numbers' (identified without colour too).
+    let p = app.session.state().palette().clone();
+    let letter_x = pane.gutter_x;
+    assert_eq!(buffer[(letter_x, pane.text.y)].fg, color(LineChange::Modified.color(&p)));
+    assert_ne!(color(LineChange::Added.color(&p)), color(LineChange::Modified.color(&p)));
+    assert!(buffer[(pane.text.x, pane.text.y)].symbol().is_ascii(), "the text starts after the markers");
+    let markers = app.session.state().markers(tab(&app)).unwrap();
+    assert_eq!(markers.drawn_version(), Some(app.session.state().current_source().unwrap().key().version), "the drawn blocks describe the draft version shown");
+    assert_eq!(markers.baseline().map(reader_core::markers::Baseline::kind), Some(BaselineKind::Head));
+    assert_eq!(markers.summary().as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{:?}", markers.summary());
+    assert!(lines_of(&draw(&mut app, 80, 12)).iter().any(|l: &String| l.contains("vs HEAD")), "the status bar names the baseline");
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+}
+
+fn lines_of(buffer: &Buffer) -> Vec<String> {
+    (0..buffer.area.height).map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect()
+}
+
+#[test]
+fn change_letters_share_the_gutter_with_folds_bookmarks_blame_and_line_numbers() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "code.rs", "fn main() {\n    one();\n    two();\n}\n");
+    commit_all(r.path(), "base");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("code.rs")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    app.dispatch(Command::SetAnnotate(true));
+    app.dispatch(Command::ToggleBookmark);
+    let tab = |a: &App| a.session.state().active().unwrap().id();
+    settle(&mut app, |a| {
+        let s = a.session.state();
+        s.active().is_some_and(|t| t.blame_status() == Some(reader_core::blame::Status::Ready) && s.places().bookmark(t.source(), 0).is_some())
+    });
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending() && m.change(0).is_some()));
+    let buffer = draw(&mut app, 100, 16);
+    let pane = &app.layout.panes[0];
+    assert!(pane.ann > 0, "the blame column is drawn beside the markers");
+    let (gx, y) = (pane.gutter_x, pane.text.y);
+    let blame: String = (gx..gx + pane.ann).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(blame.starts_with("Not committed"), "the changed line's blame is left of the markers: {blame:?}");
+    let next: String = (gx..gx + pane.ann).map(|x| buffer[(x, y + 1)].symbol()).collect();
+    assert!(next.starts_with("20"), "an unchanged line keeps its commit's date: {next:?}");
+    let cells: String = (gx + pane.ann..pane.text.x).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(cells.contains('M'), "the change letter: {cells:?}");
+    assert!(cells.contains('●'), "the bookmark: {cells:?}");
+    assert!(cells.contains('1'), "the line number: {cells:?}");
+    assert!(cells.contains('▾'), "the fold mark: {cells:?}");
+    let p = app.session.state().palette().clone();
+    assert_eq!(buffer[(gx + pane.ann, y)].symbol(), "M", "the letter takes the first marker cell");
+    assert_eq!(buffer[(gx + pane.ann, y)].fg, color(reader_core::markers::LineChange::Modified.color(&p)));
+}

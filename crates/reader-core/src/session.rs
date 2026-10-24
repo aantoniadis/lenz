@@ -5,6 +5,8 @@
 #[path = "session/saved_comparison.rs"]
 mod saved_comparison;
 pub use saved_comparison::{ComparisonSide, SavedComparison};
+#[path = "session/markers.rs"]
+mod markers_work;
 pub use crate::breadcrumbs::{Breadcrumbs, Crumb, Sibling, SiblingTarget};
 #[path = "session/save.rs"]
 mod save_work;
@@ -1043,6 +1045,10 @@ pub struct Action {
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
     SavedCompared { request: u64, changes: Vec<lenz_engine::ChangeBlock>, line_endings_differ: bool },
+    /// A shown draft rested: compare it with its baseline again.
+    MarkersDue,
+    /// A draft's change markers for `request`: its named baseline and blocks, or why it has none.
+    Marked { request: u64, buffer: crate::text::BufferId, result: Result<markers_work::Marked, String> },
     /// A bounded analysis consumer's result, fenced by source and request identity.
     Analyzed { ticket: crate::analysis::Ticket, result: Box<Completion> },
     AnalysisWake,
@@ -1170,6 +1176,7 @@ impl Input {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
                 Completion::SavedCompared { .. } => "saved-comparison",
+                Completion::MarkersDue | Completion::Marked { .. } => "change markers",
                 Completion::Analyzed { .. } => "analyzed",
                 Completion::AnalysisWake => "analysis-wake",
                 Completion::Projected(_) => "source projection",
@@ -1300,6 +1307,8 @@ pub struct State {
     pub(crate) repo_answered: Option<PathBuf>,
     /// The repository's file statuses against HEAD, as last read (separate from drafts).
     pub(crate) git_status: Option<crate::branches::Statuses>,
+    /// Each shown draft's change markers, by buffer: its baseline's blocks, what the gutter draws.
+    pub(crate) marker_sets: std::collections::HashMap<crate::text::BufferId, crate::markers::Markers>,
     /// The Git Branches popup's lists, while it is open.
     pub(crate) branches: Option<crate::branches::BranchesView>,
     /// Explorer entries marked for Compare Selected (Ctrl+click), oldest first; at most two.
@@ -2365,6 +2374,10 @@ pub struct Session {
     git_status_again: bool,
     /// What changes when the index or HEAD may have (staging, a commit, a reset): checked on the tick.
     git_status_signal: Vec<Option<std::time::SystemTime>>,
+    /// The drafts' change markers: their requests, the repository read they follow, and the rest after a keystroke.
+    markers_requests: u64,
+    markers_epoch: u64,
+    markers_debounce: crate::markers::Debounce,
     tx: async_channel::Sender<Completion>,
     rx: async_channel::Receiver<Completion>,
 }
@@ -2382,6 +2395,10 @@ pub(crate) fn lenz_diff(exe: &Path, terminal: bool, what: &str) -> Result<String
 }
 
 impl Session {
+    /// How many draft comparisons the shown files' change markers asked for (a test seam: they follow a rest, not a
+    /// keystroke).
+    #[cfg(test)]
+    pub(crate) fn marker_requests(&self) -> u64 { self.markers_requests }
     pub fn native_viewport(&self, pane: u8) -> Option<NativeViewport> { NativeViewport::capture(&self.state, &self.native, pane) }
     pub fn native_context(&self, pane: u8) -> Option<u64> { self.native.context(pane) }
     pub fn native_reveal(&self, pane: u8) -> Option<&NativeReveal> { self.native.goal(pane, &self.state) }
@@ -2412,6 +2429,10 @@ impl Session {
             }
         });
         let merged = tx.clone();
+        // A draft's change markers wait for it to rest, then compare once (one thread per session, like the tick's).
+        let rested = tx.clone();
+        // Blocking: a full inbox means a dispatch is already due, and a dropped wake would leave the markers pending.
+        let markers_debounce = crate::markers::Debounce::new(move || { let _ = rested.send_blocking(Completion::MarkersDue); });
         // Recovered drafts live in the reader's own cache, outside every checkout.
         let recovery_dir = config.cache.join("recovery");
         Self {
@@ -2454,6 +2475,7 @@ impl Session {
                 repo_anchor: None,
                 repo_answered: None,
             git_status: None,
+                marker_sets: Default::default(),
                 branches: None,
                 tree_marks: Vec::new(),
                 checkout_running: None,
@@ -2551,6 +2573,9 @@ impl Session {
             git_status_running: false,
             git_status_again: false,
             git_status_signal: Vec::new(),
+            markers_requests: 0,
+            markers_epoch: 0,
+            markers_debounce,
             tx,
             rx,
         }
@@ -3170,6 +3195,7 @@ impl Session {
         for id in [self.state.active, self.state.other].into_iter().flatten() {
             self.annotate(id);
         }
+        self.markers_moved();
     }
 
     /// Looks up the repository when what it is looked up for changed: the folder, else the active file's folder.
@@ -3184,6 +3210,8 @@ impl Session {
         self.state.git_status = None;
         self.git_status_requests.fetch_add(1, Ordering::Relaxed);
         (self.git_status_running, self.git_status_again) = (false, false);
+        self.markers_epoch += 1;
+        self.state.marker_sets.clear();
         self.state.branches = None;
         self.state.checkout_problem = None;
         self.state.stash_conflicts = None;
@@ -3373,6 +3401,7 @@ impl Session {
         let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. } | Command::InsertText { .. } | Command::AddCursorBelow | Command::AddCursorAbove)) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
+        let markers_due = matches!(input, Input::Completion(Completion::MarkersDue));
         let mut effect = match input {
             Input::Command(c) => self.command(c),
             Input::Completion(Completion::Semantic(semantics::Event::Tick)) => self.tick(),
@@ -3387,6 +3416,8 @@ impl Session {
         effect.repaint |= self.refresh_saved_comparison();
         self.invalidate_result_analysis();
         self.refresh_blame();
+        // A shown draft's change markers follow its text: only a version or baseline that changed is compared again.
+        self.refresh_markers(markers_due);
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
         effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
@@ -5103,6 +5134,8 @@ impl Session {
         use crate::analysis::{ResultSlot, ResultStage};
         match fence.slot {
             ResultSlot::SavedComparison => fence.project == project && state.comparison.as_ref().is_some_and(|comparison| comparison.request == fence.request && comparison.matches(state)),
+            ResultSlot::Markers(buffer) => fence.project == project && state.marker_sets.get(&buffer).is_some_and(|markers| markers.request == fence.request
+                && fence.source.as_ref().is_some_and(|source| state.sources.buffers.get(&buffer).and_then(|entry| entry.snapshot.as_ref()).is_some_and(|snapshot| source.matches(snapshot)))),
             ResultSlot::Search => fence.project == project && state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.id == fence.request
                 && matches!((fence.stage, r.kind), (ResultStage::Search, ResultsKind::Text) | (ResultStage::Outline, ResultsKind::Outline) | (ResultStage::Declarations, ResultsKind::Declarations))),
             ResultSlot::Navigation => fence.project == project && state.navigation.as_ref().is_some_and(|navigation| navigation.request == fence.request
@@ -5191,6 +5224,14 @@ impl Session {
         match fence.slot {
             ResultSlot::SavedComparison => {
                 if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == fence.request) { comparison.pending = false; comparison.failure = Some(why); }
+            }
+            // Newer text replaced the comparison: the next rest compares it again. Nothing is drawn from it meanwhile,
+            // and the last published markers stay drawn, named as pending.
+            ResultSlot::Markers(buffer) => {
+                if let Some(markers) = self.state.marker_sets.get_mut(&buffer).filter(|markers| markers.request == fence.request) {
+                    markers.request = 0;
+                    markers.state = crate::markers::MarkerState::Pending;
+                }
             }
             ResultSlot::Search => {
                 if let Some(r) = self.state.results.as_mut().filter(|r| Some(r.id) == fence.result_set && r.id == fence.request) {
@@ -5376,12 +5417,18 @@ impl Session {
                 if let Some(comparison) = self.state.comparison.as_mut().filter(|c| c.request == request) { comparison.changes = changes; comparison.line_endings_differ = line_endings_differ; comparison.pending = false; }
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
+            Completion::MarkersDue => Effect::default(),
+            Completion::Marked { request, buffer, result } => self.marked(request, buffer, result),
             Completion::AnalysisWake => Effect::default(),
             Completion::Analyzed { ticket, result } => {
                 if let Some(tag) = ticket.result() {
                     if !self.analysis.accepts(&ticket) { return Effect::default(); }
                     let current = Self::result_current(&self.state, &tag.fence, self.project_generation.load(Ordering::Acquire), self.open_seq, self.preview_latest.load(Ordering::Acquire));
-                    let target_buffer = (tag.fence.slot == crate::analysis::ResultSlot::Validate).then(|| tag.fence.source.as_ref().map(|source| source.key.buffer)).flatten();
+                    let target_buffer = match tag.fence.slot {
+                        crate::analysis::ResultSlot::Validate => tag.fence.source.as_ref().map(|source| source.key.buffer),
+                        crate::analysis::ResultSlot::Markers(buffer) => Some(buffer),
+                        _ => None,
+                    };
                     if !self.analysis.acknowledge_result(tag) { return Effect::default(); }
                     return if current { self.complete_source(*result, target_buffer) } else { self.result_failed(&tag.fence, "source or semantic request context changed".into()) };
                 }
@@ -5610,6 +5657,8 @@ impl Session {
                             r.head = head;
                         }
                         self.refresh_git_status();
+                        // A read HEAD is a new baseline for every tracked draft.
+                        self.markers_moved();
                         Effect { repaint: true, copy: None, ..Effect::default() }
                     }
                     None => Effect::default(),
@@ -5624,6 +5673,7 @@ impl Session {
                 self.state.repo_answered = Some(anchor);
                 self.state.repo = result.ok();
                 self.refresh_git_status();
+                self.markers_moved();
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Completion::GitStatus { request, root, anchor, result } => {
@@ -5632,6 +5682,8 @@ impl Session {
                 }
                 self.git_status_running = false;
                 self.state.git_status = result.ok().map(|read| crate::branches::Statuses::new(root, anchor, read));
+                // New statuses: a file may have become new, untracked, or committed since the last read.
+                self.markers_moved();
                 if std::mem::take(&mut self.git_status_again) {
                     self.refresh_git_status();
                 }

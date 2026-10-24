@@ -555,6 +555,19 @@ impl App {
             );
             geometry.controls.push((CommandId::SqlDialect, sql_rect));
         }
+        // The open draft's change-marker baseline: which version its letters are compared against.
+        let baseline = self.session.markers_baseline().map(|b| format!(" vs {} ", b.short())).unwrap_or_default();
+        let baseline_width = if save_notice || area.width < 60 { 0 } else { (baseline.width() as u16).min(available.saturating_sub(lsp_width + sql_width) / 4) };
+        let baseline_rect = Rect::new(sql_rect.right(), area.y, baseline_width, 1);
+        if baseline_width > 0 {
+            line(
+                frame.buffer_mut(),
+                baseline_rect,
+                &reader_core::chrome::ellipsize(&baseline, baseline_width as usize),
+                style(p.fg, p.status_bg),
+            );
+            geometry.controls.push((CommandId::StatusDetails, baseline_rect));
+        }
         let position = match self.independent_view {
             Some((index, count)) => format!(
                 " View {index}/{count} · {} ",
@@ -562,7 +575,7 @@ impl App {
             ),
             None => format!(" {} ", self.session.status_position()),
         };
-        let remainder = available.saturating_sub(lsp_width + sql_width);
+        let remainder = available.saturating_sub(lsp_width + sql_width + baseline_width);
         let position_width = if save_notice { 0 } else { (position.width() as u16).min(remainder / 2) };
         let position_rect = Rect::new(commands_rect.x - position_width, area.y, position_width, 1);
         line(
@@ -585,9 +598,9 @@ impl App {
             geometry.controls.push((CommandId::GitBranches, branch_rect));
         }
         let message_rect = Rect::new(
-            sql_rect.right(),
+            baseline_rect.right(),
             area.y,
-            branch_rect.x.saturating_sub(sql_rect.right()),
+            branch_rect.x.saturating_sub(baseline_rect.right()),
             1,
         );
         let message = self
@@ -1630,12 +1643,24 @@ fn annotation_cells(state: &State, pane: u8, width: u16) -> u16 {
     if text && cells > 1 && width >= digits + cells + 8 { cells } else { 0 }
 }
 
+/// Cells the draft change markers draw in, left of the line numbers: the change letter, then the deletion above.
+const MARKER_CELLS: u16 = 2;
+
+/// Those cells for pane `pane`: a text file has them (it is given a baseline), an image or preview does not.
+fn marker_cells(state: &State, pane: u8) -> u16 {
+    let Some(tab) = state.shown(pane) else { return 0 };
+    let Some(view) = state.view(tab.id()) else { return 0 };
+    let text = (view.snapshot().image().is_none() || tab.image_source())
+        && !matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
+    if text { MARKER_CELLS } else { 0 }
+}
+
 fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let bars = 1 + u16::from(state.breadcrumbs());
     let gutter = state
         .shown(pane)
         .and_then(|t| state.view(t.id()))
-        .map_or(3, |view| number_cells(view.line_count()) + 3)
+        .map_or(3 + MARKER_CELLS, |view| number_cells(view.line_count()) + 3 + marker_cells(state, pane))
         .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
     Rect::new(
@@ -2170,7 +2195,7 @@ fn draw_source_row(
     let fold_mark = fold.map_or(" ", |(_, shut)| if shut { "▸" } else { "▾" });
     // The blame column first: the line's date and author on its commit's age shade (none on wrapped and sticky rows).
     let digits = number_cells(view.line_count()) as usize + 3;
-    let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits) as u16;
+    let ann = (area.x.saturating_sub(gutter_x) as usize).saturating_sub(digits + usize::from(MARKER_CELLS)) as u16;
     if ann > 0 {
         let a = matches!(tab.blame_status(), Some(reader_core::blame::Status::Ready))
             .then(|| tab.annotation(r.line)).flatten().filter(|_| r.index == 0 && !sticky);
@@ -2187,13 +2212,22 @@ fn draw_source_row(
     }
     let gutter_x = gutter_x + ann;
     let gutter = area.x.saturating_sub(gutter_x) as usize;
+    // The draft's change against its baseline: the change's letter, then whether lines above it were deleted.
+    let markers = state.markers(tab.id()).filter(|_| r.index == 0);
+    let change = markers.and_then(|m| m.change(r.line));
+    let deleted = markers.map_or(0, |m| m.deleted_above(r.line));
+    let marker = format!(
+        "{}{}",
+        change.map_or(" ", reader_core::markers::LineChange::letter),
+        if deleted > 0 { reader_core::markers::DELETED } else { " " }
+    );
     let number = if r.index == 0 {
         format!(
-            "{}{:>width$}{}",
+            "{marker}{}{:>width$}{}",
             mark,
             r.line + 1,
             fold_mark,
-            width = gutter.saturating_sub(2)
+            width = gutter.saturating_sub(2 + MARKER_CELLS as usize)
         )
     } else {
         " ".repeat(gutter)
@@ -2211,6 +2245,14 @@ fn draw_source_row(
             p.gutter_bg,
         ),
     );
+    if r.index == 0 && gutter_x.saturating_add(MARKER_CELLS) <= area.x {
+        if let Some(change) = change {
+            buf[(gutter_x, y)].set_fg(color(change.color(p)));
+        }
+        if deleted > 0 {
+            buf[(gutter_x + 1, y)].set_fg(color(reader_core::markers::deleted_color(p)));
+        }
+    }
     let Some(native) = native.as_ref() else {
         line(buf, Rect::new(area.x, y, area.width, 1), "Preparing text…", style(p.dim, base));
         return;
