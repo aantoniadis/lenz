@@ -16,11 +16,15 @@ impl Session {
                 None => Some(path.to_string_lossy().into()),
             }
         };
+        let mut changed = false;
         for (path, snapshot) in &results.captured {
-            if snapshot.identity.key.buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); }
+            if snapshot.identity.key.buffer == current.key().buffer && let Some(path) = key(path) { results.stale.insert(path); changed = true; }
         }
         if let Some(path) = key(current.source()).filter(|path| results.query_paths.contains(path) || results.disk_sources.contains_key(path)) {
             results.stale.insert(path);
+            changed = true;
+        }
+        if changed {
             results.error.get_or_insert_with(|| "Open drafts changed since this search; rerun to update results".into());
         }
     }
