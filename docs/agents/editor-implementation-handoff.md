@@ -110,7 +110,7 @@ skills or plugins from the first machine.
 
 ## Known issues to carry
 
-- Six tests time out at random, so roughly one full gate in three fails: the list, rates
+- Seven tests time out at random, so roughly one full gate in three fails: the list, rates
   and repro are in [editor follow-ups](../editor-follow-ups.md#tests-that-time-out-under-load-2026-10-24).
   Two of the same class were product bugs, now fixed (`42e7fc7` rename identity,
   `9c4e9de` prompts settled during drawing): trace one before raising a timeout, but not

@@ -604,7 +604,7 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 
 ## Tests that time out under load (2026-10-24)
 
-- **Six tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never
+- **Seven tests still fail at random, each waiting out its `settle` deadline:** the event they wait for never
   arrives, so a failing run takes the full timeout rather than running slowly. Run alone and back to back, as
   `scripts/ci-local.sh` runs them, the suites were clean in 16 of 20 (`reader-core` lib), 35 of 40 (`reader-gui`
   lib) and 18 of 20 (`reader-tui` with `gui-test`) runs, so the full gate fails roughly one run in three:
@@ -617,9 +617,15 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   | `reader-core` `session::tests::save_as::save_as_moves_every_view_only_after_the_new_file_is_confirmed` | 1 of 20 |
   | `reader-tui` `app::tests::sql_dialect::the_status_bar_shows_the_chosen_sql_dialect_and_its_details_open_from_that_label` | 1 of 20 |
   | `reader-tui` `app::tests::followed_rename_invalidates_source_context_hits_without_changing_text_version` | 1 of 20 |
+  | `reader-core --test semantics` `dismissed_or_left_completion_is_not_reopened_by_its_late_reply` | 18 of 80 alone, 1 of 15 in its binary |
 
   Running 64 copies of one test at once (`<test binary> --exact <name>` in parallel) raises the rate enough to
   trace it.
+- **The completion late-reply test's third request is sometimes never sent:** after the tab switch and `Back`,
+  `Command::Complete` at the same position leaves the fake server's log at two completion requests, whether or not
+  the caret then moves (checked by waiting for the request before moving it). That may be a real gap (completion not
+  requested after returning to a tab) rather than a test race; it fails more often run alone than with the rest of
+  its binary.
 - **Two causes already found in this class were product bugs, not slow tests:** a check that ran after a rename
   but before the watcher reported it dropped the file identity the move needed (`42e7fc7`), and a prompt that a
   render-time layout command settled left both adapters' dialogs stale (`9c4e9de`). Every core dispatch ends by
