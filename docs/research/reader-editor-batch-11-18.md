@@ -82,7 +82,7 @@ come from the sustained workflows, with their sampling limits stated below.
 
 | Endpoint | Accepted baseline | Candidate |
 | --- | ---: | ---: |
-| Core first text, 56 KB | 0.104 ms | 0.139 ms |
+| Core first text, 50,400 bytes (`56k` fixture) | 0.104 ms | 0.139 ms |
 | Core first text, roughly 1 MiB | 0.954 ms | 1.359 ms |
 | Cached tab switch | 5.02 µs | 6.36 µs |
 | GUI first-content marker | 139.60 ms | 139.55 ms |
