@@ -5610,6 +5610,34 @@ fn bookmark_keys_where_none_can_be_set_say_why() {
 }
 
 #[test]
+fn draft_transactions_move_bookmarks_and_reading_history_with_unicode_text() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project"); std::fs::create_dir(&root).unwrap();
+    let original = "first\r\nα😀 target\r\nlast\r\n";
+    let path = write(&root, "anchors.txt", original.as_bytes());
+    let mut s = session(d.path());
+    open_project(&mut s, &root, "anchors.txt");
+    s.dispatch(Command::GoToLine(LineColumn { line: 2, column: Some(4) }));
+    let marked = s.state().selection().unwrap().head;
+    s.dispatch(Command::SetMnemonic('2'));
+    s.dispatch(Command::GoToLine(LineColumn { line: 3, column: Some(2) }));
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    let inserted = "é😀 new\r\n";
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: inserted.into() }], kind: crate::text::EditKind::Paste });
+    let bookmark = s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap();
+    assert_eq!((bookmark.line, bookmark.offset), (2, marked - "first\r\n".len()));
+    s.dispatch(Command::Back);
+    assert_eq!(s.state().selection().unwrap().head, marked + inserted.len(), "Back follows the edited source anchor rather than its former line/byte");
+    s.dispatch(Command::JumpMnemonic('2'));
+    assert_eq!(s.state().selection().unwrap().head, marked + inserted.len());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(s.state().places().bookmarks().iter().find(|m| m.mnemonic == Some('2')).unwrap().line, 1);
+    assert_eq!(source_text(s.state().current_source().unwrap()), original);
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+#[test]
 fn a_numbered_bookmark_jumps_back_through_history_and_unfolds() {
     let d = tempfile::tempdir().unwrap();
     let (mut s, root) = bookmarked_project(d.path());
