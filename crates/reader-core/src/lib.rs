@@ -16,6 +16,7 @@ pub mod cache;
 pub mod chrome;
 pub mod decor;
 pub mod document;
+mod edit_ops;
 pub mod expand;
 pub mod find;
 pub mod folds;

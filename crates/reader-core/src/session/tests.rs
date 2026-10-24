@@ -3,6 +3,7 @@ mod create;
 mod external;
 mod find_replace;
 mod multi_selection;
+mod structural_edits;
 mod save_as;
 mod preferences;
 mod keymap;

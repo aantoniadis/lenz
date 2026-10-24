@@ -63,6 +63,10 @@ impl Session {
     /// The same text at every selection, as one transaction (typed text, Enter, Tab, bracketed paste).
     pub(super) fn insert_text(&mut self, text: String, kind: EditKind) -> Effect {
         if self.text_action_disabled(CommandId::Paste).is_some() { return Effect::default(); }
+        // One typed delimiter can wrap a selection or open a pair; a paste or a multi-character input is literal.
+        if kind == EditKind::Typing && text.chars().count() == 1
+            && let Some(effect) = self.typed_delimiter(&text)
+        { return effect; }
         let Some((tab, expected, ranges)) = self.selection_ranges() else { return Effect::default() };
         let edits = ranges.into_iter().map(|range| TextEdit { range, text: text.as_str().into() }).collect();
         self.edit(tab, expected, edits, kind)

@@ -241,6 +241,13 @@ impl Session {
             CommandId::AddCursorAbove => Command::AddCursorAbove,
             CommandId::SelectNextOccurrence => Command::SelectNextOccurrence,
             CommandId::CollapseSelections => Command::CollapseSelections,
+            CommandId::IndentSelection => Command::Indent { outdent: false },
+            CommandId::OutdentSelection => Command::Indent { outdent: true },
+            CommandId::ToggleComment => Command::ToggleComment,
+            CommandId::MoveLinesUp => Command::MoveLines { down: false },
+            CommandId::MoveLinesDown => Command::MoveLines { down: true },
+            CommandId::DuplicateLinesUp => Command::DuplicateLines { down: false },
+            CommandId::DuplicateLinesDown => Command::DuplicateLines { down: true },
             CommandId::Definition => Command::Definition { peek: false },
             CommandId::PeekDefinition => Command::Definition { peek: true },
             CommandId::TypeDefinition => Command::TypeDefinition,
@@ -373,6 +380,8 @@ impl CommandId {
             | Self::FileSymbols => G::Find,
             Self::SelectAll | Self::Copy | Self::Cut | Self::Paste | Self::Delete | Self::Undo | Self::Redo | Self::ExtendSelection | Self::ShrinkSelection
             | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections
+            | Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown
+            | Self::DuplicateLinesUp | Self::DuplicateLinesDown
             | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion => G::Selection,
             Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
@@ -400,6 +409,8 @@ impl CommandId {
             Self::Redo => Some("Ctrl+Shift+Z"),
             // Escape is an editing key, not a chord: the adapters give it to this before their own meanings.
             Self::CollapseSelections => Some("Esc"),
+            Self::IndentSelection => Some("Tab"),
+            Self::OutdentSelection => Some("Shift+Tab"),
             _ => None,
         }
     }

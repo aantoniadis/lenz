@@ -230,26 +230,30 @@ fn the_multi_cursor_chords_come_from_the_keymap_preset() {
         let chord = crate::keymap::Chord::parse(text).unwrap();
         s.key_command(&crate::keymap::KeyPress::new(&chord.key, chord.ctrl, chord.shift, chord.alt).unwrap())
     };
-    // The IntelliJ preset the adapters start with runs the commands and names them in the menus.
-    assert_eq!(press(&s, "Alt+Shift+Down"), Some(CommandId::AddCursorBelow));
-    assert_eq!(press(&s, "Alt+Shift+Up"), Some(CommandId::AddCursorAbove));
+    // The IntelliJ preset the adapters start with runs the commands and names them in the menus. VS Code's
+    // Ctrl+Alt+arrows add cursors in both presets; Alt+Shift+arrows duplicate lines there since ticket27.
+    assert_eq!(press(&s, "Ctrl+Alt+Down"), Some(CommandId::AddCursorBelow));
+    assert_eq!(press(&s, "Ctrl+Alt+Up"), Some(CommandId::AddCursorAbove));
+    assert_eq!(press(&s, "Alt+Shift+Down"), Some(CommandId::DuplicateLinesDown), "the arrows left over duplicate lines");
     assert_eq!(press(&s, "Alt+J"), Some(CommandId::SelectNextOccurrence));
-    assert_eq!(s.key_hint(CommandId::AddCursorBelow).as_deref(), Some("Alt+Shift+Down"));
+    assert_eq!(s.key_hint(CommandId::AddCursorBelow).as_deref(), Some("Ctrl+Alt+Down"));
     assert_eq!(s.key_hint(CommandId::CollapseSelections).as_deref(), Some("Esc"), "Escape is a fixed editing key");
     s.dispatch(Command::Select(Selection { anchor: 1, head: 1 }));
-    let Some(CommandId::AddCursorBelow) = press(&s, "Alt+Shift+Down") else { panic!("the keymap chord resolves") };
+    let Some(CommandId::AddCursorBelow) = press(&s, "Ctrl+Alt+Down") else { panic!("the keymap chord resolves") };
     let crate::actions::CatalogAction::Command(add) = s.action(CommandId::AddCursorBelow) else { panic!("a command") };
     s.dispatch(add);
     assert_eq!(carets(&s), [1, 7], "the resolved chord adds the cursor the menu names");
-    // The VS Code preset keeps both adapters' arrows and adds VS Code's own; the menu hint follows the preset.
+    // The VS Code preset keeps VS Code's own cursor chords; the menu hint follows the preset, and its
+    // Alt+Shift+arrows duplicate lines as in VS Code.
     s.dispatch(Command::SetKeymapPreset(crate::keymap::KeymapPreset::VsCode));
     assert_eq!(s.key_hint(CommandId::AddCursorBelow).as_deref(), Some("Ctrl+Alt+Down"));
     assert_eq!(press(&s, "Ctrl+Alt+Down"), Some(CommandId::AddCursorBelow));
-    assert_eq!(press(&s, "Alt+Shift+Down"), Some(CommandId::AddCursorBelow), "the arrows both adapters deliver still work");
+    assert_eq!(press(&s, "Alt+Shift+Down"), Some(CommandId::DuplicateLinesDown));
+    assert_eq!(press(&s, "Alt+Down"), Some(CommandId::MoveLinesDown));
     assert_eq!(press(&s, "Alt+J"), Some(CommandId::SelectNextOccurrence));
     // A rebinding moves the command and its menu line: the preset chord no longer runs it.
     s.dispatch(Command::SetKeybinding { command: CommandId::AddCursorBelow, chord: "Ctrl+Alt+J".into() });
-    assert_eq!(press(&s, "Alt+Shift+Down"), None);
+    assert_eq!(press(&s, "Ctrl+Alt+Down"), None);
     assert_eq!(press(&s, "Ctrl+Alt+J"), Some(CommandId::AddCursorBelow));
     assert_eq!(s.key_hint(CommandId::AddCursorBelow).as_deref(), Some("Ctrl+Alt+J"));
 }

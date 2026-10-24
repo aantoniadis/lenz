@@ -3764,9 +3764,11 @@ fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
     assert_eq!(text(&a), source.replacen("{  }", "{ hello }", 1));
     typed(&mut a, ".he");
     settle(&mut a, |a| a.session.state().completion().is_some());
-    typed(&mut a, "(");
+    // Punctuation is not accepted as a suggestion. (A bracket would also open its pair, so a comma keeps this
+    // test about completion.)
+    typed(&mut a, ",");
     assert!(a.session.state().completion().is_none());
-    assert_eq!(text(&a), source.replacen("{  }", "{ hello.he( }", 1));
+    assert_eq!(text(&a), source.replacen("{  }", "{ hello.he, }", 1));
     // Off: typing opens nothing; Ctrl+Space (or its NUL) still asks.
     a.run(CommandId::AutoCompletion);
     assert!(!a.session.state().auto_completion());
@@ -3800,13 +3802,13 @@ fn completion_popup_takes_only_its_keys_and_fits_a_tiny_terminal() {
 }
 
 #[test]
-fn alt_shift_down_adds_a_caret_and_typing_changes_every_selection() {
+fn ctrl_alt_down_adds_a_caret_and_typing_changes_every_selection() {
     let dir = tempfile::tempdir().unwrap(); let path = dir.path().join("carets.txt"); std::fs::write(&path, "aa bb aa\none").unwrap();
     let mut a = app(dir.path()); a.dispatch(Command::OpenRetained(path.clone())); settle(&mut a, |a| a.session.state().current_source().is_some()); a.enable_draft_input_for_test(); draw(&mut a, 80, 16);
     let text = |a: &App| { let source = a.session.state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
     let carets = |a: &App| { let mut at: Vec<_> = a.session.state().active().unwrap().selections().filter(|s| s.anchor == s.head).map(|s| s.head).collect(); at.sort_unstable(); at };
     key(&mut a, KeyCode::Right, KeyModifiers::NONE);
-    key(&mut a, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::ALT);
     assert_eq!(carets(&a), [1, 10], "the next line's column, as the menu command does");
     key(&mut a, KeyCode::Char('x'), KeyModifiers::NONE);
     assert_eq!(text(&a), "axa bb aa\noxne");
@@ -3860,4 +3862,99 @@ fn terminal_draws_a_caret_for_every_selection() {
     let buffer = terminal.backend().buffer();
     let highlighted = buffer.content.iter().filter(|cell| cell.bg == crate::render::color(a.session.state().palette().sel_bg)).count();
     assert!(highlighted >= 4, "the selected text is shown: {highlighted}");
+}
+
+#[test]
+fn structural_keys_and_the_palette_indent_comment_move_and_duplicate_in_the_terminal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("edit.rs");
+    let original = "one\r\ntwo\r\nthree\r\n";
+    std::fs::write(&path, original).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::OpenRetained(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    a.enable_draft_input_for_test();
+    draw(&mut a, 80, 16);
+    let text = |a: &App| { let source = a.session.state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() };
+    // Tab inserts the file's indentation step; Shift+Tab (BackTab, or Tab with Shift) takes it back.
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "    one\r\ntwo\r\nthree\r\n");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "        one\r\ntwo\r\nthree\r\n", "a second Tab adds a second step");
+    key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Tab, KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "one\r\ntwo\r\nthree\r\n", "Shift+Tab removes one step");
+    // The preset's chords move, duplicate and comment; each is one undo step.
+    key(&mut a, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "two\r\none\r\nthree\r\n");
+    key(&mut a, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "two\r\none\r\none\r\nthree\r\n");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), "one\r\ntwo\r\nthree\r\n");
+    // Ctrl+/ is often Ctrl+_ in a terminal, so Alt+/ is the route that always arrives.
+    a.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: Some(1) }));
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::ALT);
+    assert_eq!(text(&a), "// one\r\ntwo\r\nthree\r\n");
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), "one\r\ntwo\r\nthree\r\n", "Ctrl+/ is the same toggle");
+    // Every action is in the palette with its label, and one of them runs from it.
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    for id in [CommandId::IndentSelection, CommandId::OutdentSelection, CommandId::ToggleComment, CommandId::MoveLinesUp, CommandId::MoveLinesDown, CommandId::DuplicateLinesUp, CommandId::DuplicateLinesDown] {
+        let at = a.choices().iter().position(|choice| matches!(choice.target, crate::app::ChoiceTarget::Action(chosen) if chosen == id));
+        assert!(at.is_some(), "{id:?} is in the palette ({})", id.label());
+        let expected = if id == CommandId::MoveLinesUp { Some("Already on the first line") } else { None };
+        assert_eq!(a.session.disabled(id), expected, "{id:?} availability");
+    }
+    let at = a.choices().iter().position(|choice| matches!(choice.target, crate::app::ChoiceTarget::Action(CommandId::DuplicateLinesDown))).unwrap();
+    for _ in 0..at { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(text(&a), "one\r\none\r\ntwo\r\nthree\r\n", "the palette duplicates the caret's line");
+    key(&mut a, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(text(&a), "one\r\ntwo\r\nthree\r\n");
+    // An open dialog takes the keys first and leaves the draft alone.
+    key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+    assert!(a.modal.is_some());
+    let before = text(&a);
+    for (code, modifiers) in [
+        (KeyCode::Tab, KeyModifiers::NONE),
+        (KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT),
+        (KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT),
+        (KeyCode::Char('/'), KeyModifiers::ALT),
+    ] {
+        key(&mut a, code, modifiers);
+    }
+    assert_eq!(text(&a), before, "the command menu keeps every structural key away from the text");
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // Read-only mode refuses them with the shared reason, and the text stays as it is.
+    a.dispatch(Command::SetReadOnly(true));
+    let frozen = text(&a);
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::ALT);
+    assert_eq!(text(&a), frozen);
+    for id in [CommandId::IndentSelection, CommandId::ToggleComment, CommandId::MoveLinesDown, CommandId::DuplicateLinesDown] {
+        assert_eq!(a.session.disabled(id), Some("Read-only mode is on"), "{id:?}");
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), original.as_bytes(), "the terminal never writes the file");
+    // An empty file: indenting writes the step, and the commands with nothing to do say why and change nothing.
+    let empty = dir.path().join("empty.rs");
+    std::fs::write(&empty, b"").unwrap();
+    a.dispatch(Command::SetReadOnly(false));
+    a.dispatch(Command::OpenRetained(empty));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|d| d.source().ends_with("empty.rs")));
+    draw(&mut a, 80, 16);
+    a.focus = Focus::Text;
+    // The empty document says what it cannot do before the first step writes anything.
+    for (id, reason) in [(CommandId::ToggleComment, "There is no text to comment"), (CommandId::MoveLinesDown, "Already on the last line"), (CommandId::MoveLinesDown, "Already on the last line"), (CommandId::DuplicateLinesDown, "Nothing to duplicate")] {
+        assert_eq!(a.session.disabled(id), Some(reason), "{id:?}");
+    }
+    key(&mut a, KeyCode::Char('/'), KeyModifiers::ALT);
+    key(&mut a, KeyCode::Down, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    key(&mut a, KeyCode::Down, KeyModifiers::ALT | KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "", "an empty document has nothing to comment, move or duplicate");
+    key(&mut a, KeyCode::Tab, KeyModifiers::NONE);
+    assert_eq!(text(&a), "    ", "indenting an empty document writes the file's step");
+    key(&mut a, KeyCode::BackTab, KeyModifiers::SHIFT);
+    assert_eq!(text(&a), "");
 }

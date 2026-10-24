@@ -15,6 +15,8 @@ mod presentation;
 pub use presentation::PresentationSource;
 #[path = "session/text_input.rs"]
 mod text_input;
+#[path = "session/structural.rs"]
+mod structural;
 #[path = "session/completion.rs"]
 mod completion;
 pub use completion::{CompletionTrigger, Suggestion, Suggestions};
@@ -106,6 +108,15 @@ pub enum Command {
     Cut,
     Paste(String),
     Delete { backward: bool },
+    /// Indent (`outdent`: unindent) every line the selections touch by one step of the file's indentation; a caret
+    /// alone inserts that step at itself.
+    Indent { outdent: bool },
+    /// Comment or uncomment the lines the selections touch, in the file's language.
+    ToggleComment,
+    /// Move the lines the selections touch one line down (or up) as one transaction.
+    MoveLines { down: bool },
+    /// Copy the lines the selections touch directly below (or above) themselves.
+    DuplicateLines { down: bool },
     SetReadOnly(bool),
     CompareSaved,
     CloseSavedComparison,
@@ -523,6 +534,20 @@ pub enum CommandId {
     SelectNextOccurrence,
     /// Drop every selection but the primary one.
     CollapseSelections,
+    /// Indent the lines the selections touch by the file's indentation step (Tab).
+    IndentSelection,
+    /// Remove one indentation step from the lines the selections touch (Shift+Tab).
+    OutdentSelection,
+    /// Comment or uncomment the lines (or the span, in markup) the selections touch.
+    ToggleComment,
+    /// Move the lines the selections touch one line up, keeping each line's ending where it stands.
+    MoveLinesUp,
+    /// Move the lines the selections touch one line down.
+    MoveLinesDown,
+    /// Copy the lines the selections touch directly above themselves.
+    DuplicateLinesUp,
+    /// Copy the lines the selections touch directly below themselves.
+    DuplicateLinesDown,
     ChooseTheme,
     /// The application's name, version, platform, licence and project page (the adapter shows it).
     About,
@@ -666,7 +691,7 @@ pub struct Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 157] = [
+    pub const ALL: [CommandId; 164] = [
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
@@ -742,6 +767,13 @@ impl CommandId {
         Self::AddCursorAbove,
         Self::SelectNextOccurrence,
         Self::CollapseSelections,
+        Self::IndentSelection,
+        Self::OutdentSelection,
+        Self::ToggleComment,
+        Self::MoveLinesUp,
+        Self::MoveLinesDown,
+        Self::DuplicateLinesUp,
+        Self::DuplicateLinesDown,
         Self::ChooseTheme,
         Self::About,
         Self::NewWindow,
@@ -916,6 +948,13 @@ impl CommandId {
             Self::AddCursorAbove => "Add Cursor Above",
             Self::SelectNextOccurrence => "Select Next Occurrence",
             Self::CollapseSelections => "Collapse to Single Cursor",
+            Self::IndentSelection => "Indent Selection",
+            Self::OutdentSelection => "Outdent Selection",
+            Self::ToggleComment => "Toggle Comment",
+            Self::MoveLinesUp => "Move Lines Up",
+            Self::MoveLinesDown => "Move Lines Down",
+            Self::DuplicateLinesUp => "Duplicate Lines Up",
+            Self::DuplicateLinesDown => "Duplicate Lines Down",
             Self::ChooseTheme => "Change theme",
             Self::About => crate::chrome::ABOUT_TITLE,
             Self::NewWindow => "New Window",
@@ -2841,6 +2880,8 @@ impl Session {
                 Some(_) => None,
             },
             CommandId::Cut | CommandId::Paste | CommandId::Delete => self.text_action_disabled(id),
+            CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment
+            | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown => self.structural_action_disabled(id),
             CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections => self.selection_action_disabled(id),
             CommandId::ReadOnlyMode => self.state.active().and_then(|t| self.state.view(t.id)).map_or(Some("No loaded file is open"), |view| view.intrinsic_edit_disabled()),
             CommandId::Copy => match self.state.selection() {
@@ -3398,7 +3439,8 @@ impl Session {
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
             Input::Command(_) | Input::Completion(_) => None,
         };
-        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. } | Command::InsertText { .. } | Command::AddCursorBelow | Command::AddCursorAbove)) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
+        let edit_reveal = matches!(&input, Input::Command(Command::Cut | Command::Paste(_) | Command::Delete { .. } | Command::InsertText { .. } | Command::AddCursorBelow | Command::AddCursorAbove
+            | Command::Indent { .. } | Command::ToggleComment | Command::MoveLines { .. } | Command::DuplicateLines { .. })) || matches!(&input, Input::Command(Command::Edit { tab, .. } | Command::Undo { tab } | Command::Redo { tab }) if self.state.active == Some(*tab));
         let reveal_selection = (edit_reveal || matches!(&input, Input::Command(Command::MoveCaret(_) | Command::Extend(_) | Command::ExtendSelection | Command::ShrinkSelection)) || expansion_completion.is_some())
             && !expansion_completion.is_some_and(|request| self.expanding.is_some_and(|e| e.3 == request && !e.4));
         let markers_due = matches!(input, Input::Completion(Completion::MarkersDue));
@@ -4371,6 +4413,10 @@ impl Session {
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::Cut => self.cut(),
+            Command::Indent { outdent } => self.indent_selection(outdent),
+            Command::ToggleComment => self.toggle_comment(),
+            Command::MoveLines { down } => self.move_lines(down),
+            Command::DuplicateLines { down } => self.duplicate_lines(down),
             Command::InsertText { text, kind } => self.insert_text(text, kind),
             Command::AddCursorBelow => self.add_cursor(true),
             Command::AddCursorAbove => self.add_cursor(false),
