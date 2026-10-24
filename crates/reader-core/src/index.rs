@@ -42,7 +42,7 @@ impl Indexed {
 /// What indexing one file found.
 #[derive(Clone)]
 pub enum FileIndex {
-    Done { stamp: Option<Stamp>, items: Arc<[Indexed]>, syntax_errors: bool, fingerprint: Option<[u8; 32]> },
+    Done { stamp: Option<Stamp>, items: Arc<[Indexed]>, syntax_errors: bool, fingerprint: Option<[u8; 32]>, decoded_digest: [u8; 32] },
     /// Over the large-file thresholds: not parsed.
     TooLarge,
     Unreadable,
@@ -70,7 +70,7 @@ impl Coverage {
 }
 
 /// One file's records: the stamp it was read as, its declarations, and whether it had syntax errors.
-type Records = (Option<Stamp>, Arc<[Indexed]>, bool, Option<[u8; 32]>);
+type Records = (Option<Stamp>, Arc<[Indexed]>, bool, Option<[u8; 32]>, [u8; 32], Option<crate::session::SemanticSource>);
 /// Accounted per indexed file beyond its records: the map entry, the path and the shared slice's header.
 const FILE_OVERHEAD: usize = std::mem::size_of::<(Arc<str>, Records)>() + 2 * std::mem::size_of::<usize>();
 /// Ranked declarations (file and record) and how many matched in all.
@@ -151,7 +151,7 @@ impl DeclIndex {
 
     /// Forget `path`'s records (it changed or went) and index it again if it was a candidate and still exists.
     pub fn invalidate(&mut self, path: &Arc<str>, exists: bool) {
-        if let Some((_, items, _, _)) = self.files.remove(path) {
+        if let Some((_, items, _, _, _, _)) = self.files.remove(path) {
             self.bytes -= file_bytes(path, &items);
             self.limited = self.limited && self.bytes >= self.limit;
         }
@@ -181,7 +181,7 @@ impl DeclIndex {
         for rel in &self.known {
             let path = root.join(rel.as_ref());
             if !path.ancestors().any(|p| folders.contains(p)) { continue; }
-            match self.files.get(rel).and_then(|(stamp, _, _, _)| *stamp) {
+            match self.files.get(rel).and_then(|(stamp, _, _, _, _, _)| *stamp) {
                 Some(stamp) => checks.push((path, stamp)),
                 None if !self.queued.contains(rel) => retry.push(rel.clone()),
                 None => {}
@@ -224,7 +224,7 @@ impl DeclIndex {
         self.invalidate(&path, false); // replaced records (re-indexing a visible file) are no longer counted
         self.known.insert(path.clone());
         match result {
-            FileIndex::Done { stamp, items, syntax_errors, fingerprint } => {
+            FileIndex::Done { stamp, items, syntax_errors, fingerprint, decoded_digest } => {
                 let bytes = file_bytes(&path, &items);
                 if self.limited || self.bytes + bytes > self.limit {
                     // Over budget: stop here, keep what fits, and say the index is limited.
@@ -234,7 +234,7 @@ impl DeclIndex {
                     return;
                 }
                 self.bytes += bytes;
-                self.files.insert(path, (stamp, items, syntax_errors, fingerprint));
+                self.files.insert(path, (stamp, items, syntax_errors, fingerprint, decoded_digest, None));
             }
             FileIndex::TooLarge => _ = self.failed.insert(path, true),
             FileIndex::Unreadable => _ = self.failed.insert(path, false),
@@ -258,9 +258,27 @@ impl DeclIndex {
         self.bytes
     }
 
+    pub(crate) fn scoped(&self, path: &str, snapshot: &crate::text::TextSnapshot) -> Option<(Arc<[Indexed]>, bool)> {
+        let record = self.files.get(path)?;
+        record.5.as_ref().filter(|source| source.matches(snapshot))?;
+        Some((record.1.clone(), record.2))
+    }
+
+    pub(crate) fn add_scoped(&mut self, path: Arc<str>, result: FileIndex, source: crate::session::SemanticSource) {
+        let expected = match &result { FileIndex::Done { items, decoded_digest, .. } => Some((items.clone(), *decoded_digest)), _ => None };
+        self.add(path.clone(), result);
+        if let (Some(record), Some((items, digest))) = (self.files.get_mut(&path), expected)
+            && Arc::ptr_eq(&record.1, &items) && record.4 == digest { record.5 = Some(source); }
+    }
+
+    pub(crate) fn source(&self, path: &str) -> Option<crate::search::DiskSource> {
+        let record = self.files.get(path)?;
+        Some(crate::search::DiskSource { stamp: record.0?, digest: record.4 })
+    }
+
     /// The records as they are now, shared, for a ranking job.
     pub fn snapshot(&self) -> Vec<(Arc<str>, Arc<[Indexed]>)> {
-        self.files.iter().map(|(p, (_, items, _, _))| (p.clone(), items.clone())).collect()
+        self.files.iter().map(|(p, (_, items, _, _, _, _))| (p.clone(), items.clone())).collect()
     }
 }
 
@@ -285,6 +303,7 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
     let Ok(bytes) = std::fs::read(&path) else { return FileIndex::Unreadable };
     if !current() || Stamp::of(&path) != stamp { return FileIndex::Unreadable; }
     let doc = crate::document::Document::decode(path, 0, &bytes);
+    let decoded_digest = crate::search::decoded_digest(doc.text().as_bytes());
     let fingerprint = cache.as_ref().and_then(|_| doc.language()).map(|language| {
         use sha2::{Digest, Sha256};
         let mut hash = Sha256::new(); hash.update(format!("{language:?}\0")); hash.update(&bytes);
@@ -305,23 +324,24 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
                 && (i.line as usize) < doc.line_count() && doc.line_range(i.line as usize).start == i.line_start as usize
                 && doc.line_of(d.name_range.start as usize) == i.line as usize
         }) {
-        return FileIndex::Done { stamp, items, syntax_errors, fingerprint };
+        return FileIndex::Done { stamp, items, syntax_errors, fingerprint, decoded_digest };
     }
     let Some((items, syntax_errors)) = declaration_records(&doc, current.clone()) else { return FileIndex::Unreadable };
     if current() && let (Some(cache), Some(key)) = (cache, key) { cache.insert(key, items.clone(), syntax_errors); }
-    FileIndex::Done { stamp, items, syntax_errors, fingerprint }
+    FileIndex::Done { stamp, items, syntax_errors, fingerprint, decoded_digest }
 }
 
 /// Current-buffer declarations reuse the admitted Document and never persist a draft in the disk cache.
 pub(crate) fn index_document(doc: &crate::document::Document, stamp: Option<Stamp>, current: impl Fn() -> bool + Send + Clone + 'static) -> FileIndex {
     if doc.is_large() { return FileIndex::TooLarge; }
+    let decoded_digest = crate::search::decoded_digest(doc.text().as_bytes());
     let Some((items, syntax_errors)) = declaration_records(doc, current.clone()) else { return FileIndex::Unreadable };
     let fingerprint = stamp.filter(|_| !doc.source_meta().had_bom() && !doc.source_meta().is_lossy() && doc.source_meta().original_encoding() == "UTF-8")
         .and_then(|_| doc.language()).map(|language| {
             use sha2::{Digest, Sha256};
             let mut hash = Sha256::new(); hash.update(format!("{language:?}\0")); hash.update(doc.text().as_bytes()); hash.finalize().into()
         });
-    FileIndex::Done { stamp, items, syntax_errors, fingerprint }
+    FileIndex::Done { stamp, items, syntax_errors, fingerprint, decoded_digest }
 }
 
 fn declaration_records(doc: &crate::document::Document, current: impl Fn() -> bool + Send + Clone + 'static) -> Option<(Arc<[Indexed]>, bool)> {
@@ -363,6 +383,18 @@ pub fn rank(files: &[(Arc<str>, Arc<[Indexed]>)], query: &str, current: impl Fn(
     }
     keep_best(&mut hits);
     Some((hits.into_iter().map(|(_, p, i)| (p.clone(), i.clone())).collect(), matched))
+}
+
+/// Merge already-ranked chunks without retaining every draft declaration.
+pub(crate) fn merge_ranked(previous: Ranked, next: Ranked, query: &str) -> Ranked {
+    let matched = previous.1 + next.1;
+    let mut items = previous.0;
+    items.extend(next.0);
+    let lower = query.to_lowercase();
+    let mut scored: Vec<_> = items.iter().filter_map(|(path, item)|
+        lenz_content::fuzzy::score_lowered(&lower, &item.lower, item.decl.name.len()).map(|score| (score, path, item))).collect();
+    keep_best(&mut scored);
+    (scored.into_iter().map(|(_, path, item)| (path.clone(), item.clone())).collect(), matched)
 }
 
 fn keep_best(hits: &mut Vec<(i64, &Arc<str>, &Indexed)>) {

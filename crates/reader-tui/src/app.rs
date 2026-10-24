@@ -831,6 +831,9 @@ impl App {
         let Some(chosen) = self.session.navigation_choice(revision, index) else {
             return;
         };
+        if let Chosen::Command(command @ Command::ActivateNavigation { .. }) = chosen {
+            return self.dispatch(command);
+        }
         self.close_modal();
         self.focus = Focus::Text;
         match chosen {
@@ -2606,6 +2609,10 @@ impl App {
         self.prompt(Prompt::Context { x, y, entries });
     }
     pub(crate) fn clamp(&mut self) {
+        if self.modal.as_ref().is_some_and(|modal| modal.kind == Prompt::Navigation) && self.session.state().navigation().is_none() {
+            self.modal = None;
+            self.focus = Focus::Text;
+        }
         let tree = self.session.state().tree_rows().count();
         clamp_list(
             &mut self.tree_at,

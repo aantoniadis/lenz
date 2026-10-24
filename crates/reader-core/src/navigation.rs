@@ -42,6 +42,7 @@ pub struct Search {
     pub(crate) request: u64,
     pub(crate) dirty: bool,
     pub(crate) matched: usize,
+    pub(crate) message: Option<String>,
 }
 
 pub(crate) struct Snapshot {
@@ -52,6 +53,9 @@ pub(crate) struct Snapshot {
     pub actions: Vec<Action>,
 }
 pub(crate) fn rank(snapshot: Snapshot, scope: Scope, query: &str, current: impl Fn() -> bool) -> Option<(Vec<Row>, usize)> {
+    rank_with_total(snapshot, scope, query, current, None)
+}
+pub(crate) fn rank_with_total(snapshot: Snapshot, scope: Scope, query: &str, current: impl Fn() -> bool, symbol_total: Option<usize>) -> Option<(Vec<Row>, usize)> {
     if !current() { return None; }
     let mut ranked = Vec::new();
     let mut matched = 0;
@@ -98,7 +102,7 @@ pub(crate) fn rank(snapshot: Snapshot, scope: Scope, query: &str, current: impl 
     }
     if matches!(scope, Scope::All | Scope::Symbols) && !query.is_empty() && let Some(root) = &snapshot.root {
         let (symbols, total) = crate::index::rank(&snapshot.symbols, query, &current)?;
-        matched += total;
+        matched += symbol_total.unwrap_or(total);
         for (path, item) in symbols {
             let label = item.decl.name.to_string();
             let score = lenz_content::fuzzy::score(query, &label).unwrap_or(0);

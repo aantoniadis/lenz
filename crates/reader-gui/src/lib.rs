@@ -811,6 +811,13 @@ impl ReaderView {
         let tree_revision = self.session.state().tree_revision();
         let library_read = matches!(&input, reader_core::session::Input::Completion(Completion::LibraryRead { .. }));
         let effect = self.session.dispatch(input);
+        if matches!(self.modal, Some(Modal::Navigation { .. })) && self.session.state().navigation().is_none() {
+            self.modal = None;
+            self.navigation_drawn = None;
+            self.modal_seen.set(None);
+            self.tree_focus = false;
+            self.results_focus = false;
+        }
         if theme_update { self.refresh_theme_entries(cx); }
         self.sync_workspace(workspace);
         if self.session.state().tree_revision() != tree_revision {
@@ -1153,6 +1160,13 @@ impl ReaderView {
 
     #[cfg(feature = "test-support")]
     pub fn enable_draft_input_for_test(&mut self) { self.draft_input = true; }
+
+    /// A currently visible result row's click point for real input replays.
+    #[cfg(feature = "test-support")]
+    pub fn result_point_of(&self, index: usize) -> Option<(f32, f32)> {
+        let row = self.session.state().results()?.row_of_hit(index)?.checked_sub(self.results_scroll)?;
+        (row < self.panel_list_rows).then_some((self.sidebar_w + 16.0, self.panel_list_y + (row as f32 + 0.5) * line_h()))
+    }
 
     #[cfg(feature = "test-support")]
     fn draft_target(&self) -> Option<(TabId, reader_core::text::SnapshotKey, std::ops::Range<usize>)> {

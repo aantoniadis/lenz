@@ -640,7 +640,7 @@ impl App {
             return;
         };
         fill(frame.buffer_mut(), area, style(p.fg, p.sidebar_bg));
-        let title = format!(
+        let title = results.error().map_or_else(|| format!(
             " {} · {} results{}{}",
             results.kind(),
             results.hits().len(),
@@ -654,13 +654,15 @@ impl App {
             } else {
                 ""
             }
-        );
+        ), |error| format!(" {error}"));
         line(
             frame.buffer_mut(),
             area,
             &Icon::Search.label(self.nerd_icons(), &title),
             style(
-                if self.focus == Focus::Results {
+                if results.error().is_some() {
+                    p.error
+                } else if self.focus == Focus::Results {
                     p.accent
                 } else {
                     p.fg
@@ -738,14 +740,6 @@ impl App {
             };
             fill(frame.buffer_mut(), r, style(p.fg, bg));
             line(frame.buffer_mut(), r, &text, style(p.fg, bg));
-        }
-        if let Some(error) = results.error() {
-            line(
-                frame.buffer_mut(),
-                list,
-                error,
-                style(p.error, p.sidebar_bg),
-            );
         }
         if list_width < area.width
             && let Some(preview) = results.preview()

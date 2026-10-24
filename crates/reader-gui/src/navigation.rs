@@ -38,6 +38,9 @@ impl ReaderView {
     pub(super) fn accept_navigation(&mut self, revision: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Modal::Navigation { at }) = self.modal else { return };
         let Some(choice) = self.session.navigation_choice(revision, at) else { return };
+        if let Chosen::Command(command @ Command::ActivateNavigation { .. }) = choice {
+            return self.dispatch(command, cx);
+        }
         self.close_modal(cx);
         match choice {
             Chosen::Command(command) => {
