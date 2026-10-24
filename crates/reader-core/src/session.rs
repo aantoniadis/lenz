@@ -1652,6 +1652,7 @@ impl State {
         });
         let approximate = tab.filter(|t| t.approximate).map(|_| "Approximate position: the surrounding text changed".to_string());
         let changing = tab.filter(|t| t.changing > 0).map(|_| "Changing on disk: showing the last confirmed content".to_string());
+        let conflict = tab.filter(|t| t.stale_on_disk).map(|_| "File changed on disk: the draft and undo history are retained. Reload to decide whether to replace them.".to_string());
         // A file outside the browsing root (a definition in a dependency): say where it comes from.
         // Source a language server returned: from where, and whether that server session still runs.
         let retrieved = tab.and_then(|t| t.retrieved.as_ref()).map(|v| match self.semantics.has_session(v.session) {
@@ -1668,7 +1669,7 @@ impl State {
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
         let memory = semantics::memory_notice(self.semantics.memory());
-        doc.into_iter().chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
+        doc.into_iter().chain(gone).chain(changing).chain(conflict).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(saving).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette
@@ -6307,7 +6308,9 @@ impl Session {
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
-        let snapshot = self.state.source(id).cloned();
+        let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer))
+            .and_then(|entry| entry.draft.as_ref().map(|draft| draft.baseline.clone()).or_else(|| entry.snapshot.clone()));
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token;
@@ -6340,6 +6343,8 @@ impl Session {
     fn refreshed(&mut self, id: TabId, token: u64, result: Refresh) -> Effect {
         let shown = self.is_shown(id);
         let snapshot = self.state.source(id).cloned();
+        let retained = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer)).is_some_and(CurrentSource::pinned);
         let Some(t) = self.tab_mut(id).filter(|t| t.refresh == token) else { return Effect::default() };
         t.moving = false;
         if !matches!(result, Refresh::Unstable) {
@@ -6354,6 +6359,12 @@ impl Session {
             Refresh::Released => {
                 t.stale_on_disk = true;
                 Effect::default()
+            }
+            Refresh::Changed(_, _) if retained => {
+                // The disk reply describes another version, never replacement authority for a draft/history.
+                t.stale_on_disk = true;
+                t.unavailable = None;
+                Effect { repaint: true, copy: None }
             }
             Refresh::Changed(stamp, doc) => {
                 let here = t.location(snapshot.as_deref());

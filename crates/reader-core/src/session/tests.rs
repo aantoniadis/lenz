@@ -18,6 +18,34 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
     (s, path, tab)
 }
 #[test]
+fn automatic_refresh_retains_draft_history_positions_and_reports_external_conflicts() {
+    let d = tempfile::tempdir().unwrap();
+    let (mut s, path, tab) = close_fixture(d.path(), "refresh.txt");
+    s.dispatch(Command::Select(Selection { anchor: 6, head: 8 }));
+    s.dispatch(Command::ScrollColumn(3));
+    let key = s.state().current_source().unwrap().key();
+    std::fs::write(&path, b"external replacement\r\n").unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().stale_on_disk());
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+    assert_eq!(s.state().current_source().unwrap().key(), key);
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 6, head: 8 }));
+    assert_eq!(s.state().active().unwrap().column(), 3);
+    assert!(s.status_details().contains("changed on disk"));
+    assert!(active_view(&s).can_undo());
+    s.dispatch(Command::Undo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "saved\r\n");
+    s.dispatch(Command::Redo { tab });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+    std::fs::remove_file(&path).unwrap();
+    s.dispatch(Command::Recheck);
+    settle(&mut s, |s| s.state().active().unwrap().unavailable().is_some());
+    assert_eq!(source_text(s.state().current_source().unwrap()), "draft λ\r\n");
+    assert!(active_view(&s).can_undo());
+    assert!(!path.exists());
+}
+
+#[test]
 fn close_during_saved_backing_compaction_waits_without_demanding_another_save() {
     use crate::save::Status;
     let d=tempfile::tempdir().unwrap();let original="a".repeat(128*1024);let path=write(d.path(),"compact-close.txt",original.as_bytes());let mut s=session(d.path());open(&mut s,Command::OpenRetained(path.clone()),"compact-close.txt");let tab=s.state().active().unwrap().id();let expected=s.state().current_source().unwrap().key();
