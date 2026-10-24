@@ -22,6 +22,8 @@ pub enum InterfaceAction {
     Open,
     /// Ask for a new path, then dispatch [`crate::session::Command::SaveAs`] for the active tab.
     SaveAs,
+    /// Ask for a name in the explorer's folder, then dispatch [`crate::session::Command::CreateEntry`].
+    Create(crate::create::Kind),
     OpenFolder,
     OpenRecent,
     FindFile,
@@ -216,6 +218,8 @@ impl Session {
             // An untitled document has no file yet: Save chooses one.
             CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
             CommandId::NewDocument => Command::NewDocument,
+            CommandId::NewExplorerFile => return CatalogAction::Interface(InterfaceAction::Create(crate::create::Kind::File)),
+            CommandId::NewExplorerFolder => return CatalogAction::Interface(InterfaceAction::Create(crate::create::Kind::Folder)),
             CommandId::RecoverDrafts => Command::ShowRecoveredDrafts,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },
@@ -351,7 +355,7 @@ impl CommandId {
             Self::StatusDetails | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::Outline
             | Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports
             | Self::DocumentationOnHover | Self::AutoCompletion | Self::FileIcons | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting
-            | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile
+            | Self::ImageSource | Self::MarkdownSource | Self::ToggleExplorer | Self::LocateFile | Self::NewExplorerFile | Self::NewExplorerFolder
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
             Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision | Self::CompareWithBase

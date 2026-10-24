@@ -93,6 +93,8 @@ pub struct Project {
     /// so a whole scan sorts in O(n log n)).
     sorted: Vec<Arc<str>>,
     pending: Vec<Arc<str>>,
+    /// Folders created here that hold no inventoried file yet: they are shown (and watched) all the same.
+    empty: HashSet<Arc<str>>,
     expanded: HashSet<Arc<str>>,
     /// Each folder lists its folders before its files (else all by name).
     folders_first: bool,
@@ -116,6 +118,7 @@ impl Project {
             files: 0,
             sorted: Vec::new(),
             pending: Vec::new(),
+            empty: HashSet::new(),
             expanded: HashSet::new(),
             folders_first,
             rows: Vec::new(),
@@ -177,9 +180,39 @@ impl Project {
         folders(&self.sorted)
     }
 
-    /// The tree's sorted paths (shared, not copied), for work off the UI thread.
+    /// The inventory's paths (shared, not copied) and the known empty folders as `dir/`, sorted: the tree's rows
+    /// and the folders watched come from the same list.
     pub(crate) fn sorted(&self) -> Vec<Arc<str>> {
-        self.sorted.clone()
+        if self.empty.is_empty() { return self.sorted.clone(); }
+        let mut all: Vec<Arc<str>> = self.sorted.iter().cloned().chain(self.empty.iter().map(|d| format!("{d}/").into())).collect();
+        all.sort_unstable();
+        all
+    }
+
+    /// A file found without a rescan (created here): shown at once, its folders open.
+    pub(crate) fn add_file(&mut self, rel: Arc<str>) {
+        if let Some((dir, _)) = rel.rsplit_once('/') {
+            for dir in ancestors(dir) {
+                self.expanded.insert(dir.into());
+            }
+        }
+        if let Err(at) = self.sorted.binary_search(&rel) {
+            self.sorted.insert(at, rel.clone());
+            self.entries.push(Arc::from([Entry::new(&rel)]));
+            self.files += 1;
+            if let Some(f) = &mut self.finder { f.ready = false; }
+        }
+        self.rebuild();
+    }
+
+    /// A folder created here: shown at once, open, and kept until a rescan finds it gone.
+    pub(crate) fn add_folder(&mut self, rel: Arc<str>) {
+        for dir in ancestors(&rel) {
+            self.expanded.insert(dir.into());
+        }
+        if self.empty.insert(rel) {
+            self.rebuild();
+        }
     }
 
     /// `path`'s place in the tree: relative to the root, `/`-separated (`None` outside the root).
@@ -195,10 +228,16 @@ impl Project {
 
     /// Whether folder `rel` (relative, `/`-separated) holds a file of the tree: a binary search.
     pub(crate) fn has_dir(&self, rel: &str) -> bool {
+        if self.empty.contains(rel) { return true; }
         let prefix = format!("{rel}/");
         let i = self.sorted.partition_point(|p| p.as_ref() < prefix.as_str());
         self.sorted.get(i).is_some_and(|p| p.starts_with(&prefix))
     }
+}
+
+/// `rel` and the folders above it (`/`-separated), innermost first.
+fn ancestors(rel: &str) -> impl Iterator<Item = &str> {
+    std::iter::successors(Some(rel), |dir| dir.rsplit_once('/').map(|(up, _)| up))
 }
 
 /// The folders of sorted relative file paths (each ancestor once).
@@ -275,6 +314,8 @@ impl Project {
         self.skipped = skipped + usize::from(error.is_some() && files > 0);
         self.sorted = paths;
         self.pending.clear();
+        let root = self.root.clone();
+        self.empty.retain(|d| root.join(d.as_ref()).is_dir());
         self.coverage = match error {
             Some(e) if files == 0 => Coverage::Unavailable(e),
             _ => Coverage::Complete(files),
@@ -323,6 +364,9 @@ impl Project {
         for p in self.sorted.get(start..).unwrap_or_default().iter().take_while(|p| p.starts_with(&prefix)) {
             let rest = p.get(prefix.len()..).unwrap_or_default();
             let (name, dir) = rest.split_once('/').map_or((rest, false), |(n, _)| (n, true));
+            if name.is_empty() {
+                continue; // a folder known without files stands in for itself
+            }
             if !out.last().is_some_and(|(n, _)| &**n == name) {
                 out.push((name.into(), dir));
             }
@@ -371,7 +415,8 @@ impl Project {
     fn rebuild(&mut self) {
         let mut rows = Vec::new();
         let mut i = 0;
-        walk(&self.sorted, &self.expanded, self.folders_first, "", 0, &mut i, &mut rows);
+        let paths = self.sorted();
+        walk(&paths, &self.expanded, self.folders_first, "", 0, &mut i, &mut rows);
         self.rows = rows;
     }
 }
@@ -381,6 +426,11 @@ impl Project {
 fn walk(sorted: &[Arc<str>], expanded: &HashSet<Arc<str>>, folders_first: bool, prefix: &str, depth: usize, i: &mut usize, rows: &mut Vec<TreeRow>) {
     let mut files = Vec::new();
     while *i < sorted.len() && sorted[*i].starts_with(prefix) {
+        if sorted[*i].as_ref() == prefix {
+            // A folder known without files stands in for itself.
+            *i += 1;
+            continue;
+        }
         let rest = &sorted[*i][prefix.len()..];
         match rest.find('/') {
             Some(slash) => {

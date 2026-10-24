@@ -200,6 +200,15 @@ before files; the command menu's "Explorer: All by Name" switches to plain name 
 capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`. Explorer rows and tabs show the Git status
 letter (M, A, D, R, U, C) apart from the `●` unsaved mark, as in the [terminal reader](tui.md).
 
+**New File in Explorer…** and **New Folder in Explorer…** (an explorer row's right-click menu, or the command menu
+and palette) create inside the highlighted folder; a highlighted file creates beside it, and with nothing highlighted
+they go in the project root. A name is one path segment, and Lenz refuses — before anything is created — a name
+another entry already takes, a folder that has gone, a path outside the project and a folder whose permissions allow
+no new entries. Creating makes only the one entry, never part of a tree. A new file is an empty UTF-8 file that opens
+as that file with its own draft, history and `●` unsaved mark, so Save, Undo and Reload behave as for any file, and
+the explorer reveals and selects it. A new folder shows open in the explorer and is the next create's folder without a
+refresh. Escape cancels either dialog.
+
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
 Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Closing a pane's last tab, or dragging

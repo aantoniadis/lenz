@@ -61,6 +61,17 @@ and exact line endings (UTF-8 without BOM when untitled). Only a confirmed write
 path; a rejected or uncertain write leaves the document, its original file and its Save state unchanged.
 The original file and its bookmarks stay where they were.
 
+**New File in Explorer…** and **New Folder in Explorer…** (right-click an explorer row, or F10 → View) create inside
+the highlighted folder (a highlighted file creates beside it; nothing highlighted means the project root). The
+terminal asks for the name; the GUI uses the same in-window prompt with the same words. The shared rules refuse an
+empty name, `.`/`..`, a path separator, a control character, a name over 255 bytes, a name another entry takes, a
+folder that has gone, a path outside the project, and a folder whose own mode allows no new entries — each with the
+reason in the prompt, and nothing is created. Creating writes exactly one entry. A new file is an empty UTF-8 file
+that opens as that file (its own buffer, draft and history, so Save/Undo/⟲ behave as for any file) and is selected
+in the explorer when the watcher's refresh arrives; it is not an untitled document and leaves no recovered draft. A
+new folder appears open in the explorer at once, and the next create inside it needs no rescan. Escape closes either
+prompt and changes nothing.
+
 **Recovered unsaved work** is offered when a session starts. While a draft differs from its last confirmed saved
 version, Lenz keeps a private copy of it and of that confirmed baseline under `$XDG_CACHE_HOME/lenz-reader/recovery`
 (directory mode 0700, files 0600), never in the project and never in logs. The record goes when Save confirms, or
@@ -185,6 +196,7 @@ the Last saved pane remains read-only.
 | Search Everywhere / files / symbols / actions | Ctrl-K / Ctrl-P or Ctrl-Shift-N / Ctrl-Alt-Shift-N / Ctrl-Shift-A or Ctrl-Shift-P |
 | Open file / go to line | Ctrl-O / Ctrl-G |
 | New file / Save As | Ctrl-N / Ctrl-Shift-S (where the terminal reports it; also F10 → File) |
+| New file or folder in the explorer | Right-click an explorer row, or F10 → View: New File in Explorer… / New Folder in Explorer…; type the name, Enter creates, Esc cancels |
 | Compare two explorer entries | Space on each (or Ctrl+click where the terminal reports it), then Ctrl+D; Esc forgets them |
 | Open in editor / default app, compare with | File menu or right-click: Open in Editor, Open with Default App, Compare Saved Disk Inputs… (a typed path; Lenz Diff's terminal app runs in this terminal until it quits) |
 | Find in file / next / previous | Ctrl-F or `/` / F3 / Shift-F3 |

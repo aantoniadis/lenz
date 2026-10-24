@@ -122,6 +122,9 @@ pub enum Modal {
     /// Checkout Tag or Revision: what is typed so far, and why it was refused.
     /// Checkout Tag or Revision….
     Revision { input: String, error: Option<String> },
+    /// New File / New Folder: the name typed so far in the explorer's folder (`dir`, project-relative), and why it
+    /// was refused.
+    Create { kind: reader_core::create::Kind, dir: String, name: String, error: Option<String> },
     /// The keymap: its rows' highlight, and whether the next key becomes a shortcut for the highlighted command.
     Keymap { at: usize, capture: bool },
 }
@@ -240,6 +243,8 @@ pub struct ReaderView {
     tree_wheel: f32,
     results_wheel: f32,
     tree_reveal: bool,
+    /// The last explorer-reveal ticket applied, so a created entry is selected once.
+    reveal_seen: u64,
     pub tree_focus: bool,
     tree_shown: bool,
     /// What Open in Editor and Compare With started; tests record here instead of starting anything.
@@ -634,7 +639,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, results_scroll: 0, panel_list_y: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), doc_popup: None, completion_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new() };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -742,6 +747,7 @@ impl ReaderView {
     fn activate_row(&mut self, i: usize, retain: bool, cx: &mut Context<Self>) {
         let Some(row) = self.session.state().tree_rows().nth(i).cloned() else { return };
         self.tree_sel = Some(row.path.clone());
+        self.remember_explorer();
         self.tree_reveal = true;
         self.dispatch(Command::ActivateTree { path: row.path, retain }, cx);
         cx.notify();
@@ -759,6 +765,7 @@ impl ReaderView {
     fn tree_move(&mut self, to: usize) {
         self.tree_sel = self.session.state().tree_rows().nth(to.min(self.tree_len().saturating_sub(1))).map(|r| r.path.clone());
         self.tree_reveal = true;
+        self.remember_explorer();
     }
 
     fn theme_ids(&self) -> Vec<(String, String)> {
@@ -885,6 +892,17 @@ impl ReaderView {
         } else if library_read && self.tree_sel == self.session.state().active_in_tree() {
             self.tree_reveal = true;
         }
+        // A created entry: the session says which row to show and select.
+        if let Some((path, ticket)) = self.session.state().tree_reveal()
+            && ticket > self.reveal_seen {
+            self.reveal_seen = ticket;
+            if let Some(i) = self.session.state().tree_rows().position(|r| r.path == path) {
+                self.tree_sel = Some(path);
+                self.tree_shown = true;
+                self.tree_reveal = true;
+                self.tree_scroll = self.tree_scroll.min(i);
+            }
+        }
         #[cfg(feature = "perf-probe")]
         if started.elapsed().as_millis() >= 30 {
             eprintln!("lenz-reader: slow dispatch {kind} {:.1} ms", started.elapsed().as_secs_f64() * 1000.0);
@@ -961,6 +979,14 @@ impl ReaderView {
 
     /// Run a catalog command, unless it is disabled now. Every [`CommandId`] is handled here.
     pub fn run(&mut self, id: CommandId, window: &mut Window, cx: &mut Context<Self>) {
+        // A create acts on the explorer's highlighted row, which only this adapter knows (the first row is drawn
+        // highlighted before anything is picked, as in the terminal).
+        if matches!(id, CommandId::NewExplorerFile | CommandId::NewExplorerFolder) {
+            if self.tree_sel.is_none() {
+                self.tree_sel = self.session.state().tree_rows().nth(self.tree_at()).map(|r| r.path.clone());
+            }
+            self.remember_explorer();
+        }
         match self.session.action(id) {
             CatalogAction::Disabled(_) => {},
             CatalogAction::Command(command) => {
@@ -1056,6 +1082,10 @@ impl ReaderView {
                 InterfaceAction::OpenInEditor => self.open_externally(false, cx),
                 InterfaceAction::OpenWithDefaultApp => self.open_externally(true, cx),
                 InterfaceAction::NewBranch => self.modal = Some(Modal::NewBranch { from: None, name: String::new(), checkout: true, error: None }),
+                InterfaceAction::Create(kind) => match self.session.create_target() {
+                    Some(dir) => self.modal = Some(Modal::Create { kind, dir, name: String::new(), error: None }),
+                    None => self.dispatch(Command::Notice("No folder is open".into()), cx),
+                },
                 InterfaceAction::CheckoutRevision => self.modal = Some(Modal::Revision { input: String::new(), error: None }),
                 InterfaceAction::CompareWithBase => self.git_diff(&reader_core::branches::GitDiff::BaseBranch, cx),
                 InterfaceAction::CompareSelected => {
@@ -1558,7 +1588,7 @@ impl ReaderView {
                 Some(&(_, action)) => self.branch_action(&target, action, window, cx),
                 None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
             },
-            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. }) => self.modal = m,
+            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. }) => self.modal = m,
             Some(Modal::Places { list, query, at }) => {
                 let row = self.session.state().place_rows(list, &query).into_iter().nth(at).filter(|r| !r.missing);
                 match row {
@@ -1604,7 +1634,7 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. }) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -1871,6 +1901,36 @@ impl ReaderView {
             }
             return cx.notify();
         }
+        if let (Some(text), Some(Modal::Create { name, error, .. })) = (&paste, &mut self.modal) {
+            name.push_str(text);
+            *error = None;
+            return cx.notify();
+        }
+        // A new file or folder's name: typing edits it, Enter creates it, Escape cancels.
+        if let Some(Modal::Create { kind, dir, name, error }) = &mut self.modal {
+            match key {
+                "escape" => self.modal = None,
+                "backspace" => {
+                    name.pop();
+                    *error = None;
+                }
+                "enter" => match self.session.create_refusal(dir, name.trim()) {
+                    Some(why) => *error = Some(why),
+                    None => {
+                        let (kind, dir, name) = (*kind, dir.clone(), name.trim().to_string());
+                        self.modal = None;
+                        self.dispatch(Command::CreateEntry { kind, dir: dir.into(), name }, cx);
+                    }
+                },
+                _ => {
+                    if let Some(text) = ev.keystroke.key_char.clone().filter(|t| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !t.chars().any(char::is_control)) {
+                        name.push_str(&text);
+                        *error = None;
+                    }
+                }
+            }
+            return cx.notify();
+        }
         if let Some(Modal::Revision { input, error }) = &mut self.modal {
             match key {
                 "escape" => self.modal = None,
@@ -2092,7 +2152,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Keymap { .. }) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::Context { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::Keymap { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -3261,6 +3321,20 @@ impl ReaderView {
             self.dispatch(Command::CloseDocumentation, cx);
         }
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        // In the explorer: the row under the pointer is highlighted, and its menu offers what can be made there.
+        if self.session.state().has_tree() && x < self.sidebar_w && y >= toolbar_h() + line_h() {
+            let row = ((y - toolbar_h() - line_h()) / line_h()) as usize;
+            let i = self.tree_scroll + row;
+            if let Some(path) = self.session.state().tree_rows().nth(i).map(|r| r.path.clone()) {
+                self.tree_sel = Some(path);
+            }
+            self.tree_focus = true;
+            self.tree_shown = true;
+            self.remember_explorer();
+            let entries = self.session.tree_menu();
+            self.modal = Some(Modal::Context { entries, at: 0, x, y, scroll: 0.0 });
+            return cx.notify();
+        }
         // On the blame column: the caret goes to that line, so the commit commands act on it.
         if let Some((pane, tab, line)) = self.annotation_at(ev.position) {
             if pane != self.session.state().focused_pane() {
@@ -4376,6 +4450,11 @@ impl ReaderView {
                 let start = from.as_deref().map_or("HEAD", reader_core::branches::short_ref);
                 let hint = error.clone().unwrap_or_else(|| format!("New branch from {start} — Enter; Tab: check it out or not"));
                 vec![(format!("› {name}"), None), (format!("[{}] Check out the new branch", if *checkout { "x" } else { " " }), None), (hint, None)]
+            }
+            Some(Modal::Create { kind, dir, name, error }) => {
+                let where_ = if dir.is_empty() { "the project root" } else { dir.as_str() };
+                let hint = error.clone().unwrap_or_else(|| format!("{} in {where_} — Enter creates, Escape cancels", kind.label()));
+                vec![(format!("› {name}"), None), (hint, None)]
             }
             Some(Modal::Revision { input, error }) => {
                 let hint = error.clone().unwrap_or_else(|| "Checkout tag or revision (a tag, branch, commit id or HEAD~2) — Enter".to_string());
@@ -5536,7 +5615,7 @@ impl Modal {
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } => 0,
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,

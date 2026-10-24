@@ -8,6 +8,7 @@ mod analysis;
 mod draft;
 pub mod save;
 pub mod close;
+pub mod create;
 pub mod external;
 pub mod blame;
 pub mod branches;

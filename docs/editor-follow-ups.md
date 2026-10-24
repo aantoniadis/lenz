@@ -398,3 +398,37 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
 - **Rendering cost:** the GUI builds one extra selection list per visible row (`projected_row`) and the terminal
   checks each cell against every selection. Both are proportional to the visible rows times the carets, not the
   document; measure the many-caret case (for example 50 carets) in the batch before caching anything.
+## Explorer creation (ticket 35, 2026-10-24)
+
+- **Suspected cost, unmeasured:** Enter in either name prompt checks the folder and the target with `symlink_metadata`
+  and `metadata` on the UI thread, and a new file is then written there synchronously with the exact writer
+  (`create_exact`: a temp file, `fsync`, a no-clobber rename and a directory sync) before it is opened. Cheap locally,
+  blocking on slow or network file systems. Include a create in the scheduled batch measurements before moving the
+  write to a worker; Save As already submits its write to the write worker.
+- **Only empty folders this session made:** the project inventory is built from files, so a folder that holds no
+  file is kept in the tree only when this session created it (`Project::add_folder`), and it is dropped when a later
+  full rescan finds it gone. A folder made elsewhere (`mkdir` in a terminal, another program) appears once it holds
+  an inventoried file. The knowledge is per session: after a restart an empty folder is not listed until it holds a
+  file, which also means it cannot be highlighted as a create target.
+- **Ignored folders:** a file created inside an ignored folder (for example `build/`) is added to the inventory and
+  tree at once, even though a rescan will not list it; the entry then disappears from the tree while the file stays.
+  Refusing creation in ignored folders would need the ignore matcher in the session, which it does not hold.
+- **Race after the check:** the prompt validates the name when Enter is pressed and the session validates it again
+  immediately before creating, so an entry that appeared meanwhile is never replaced (the exact writer refuses it).
+  That refusal, and an I/O failure the mode bits did not predict, close the prompt and are reported in the status
+  bar rather than in the dialog: the arm's error field is only used for the check at Enter.
+- **Read-only detection:** the folder is called read-only when its own mode bits allow nobody to write; a read-only
+  mount, a full disk or an ACL that denies the user is not predicted and fails at the create instead. Only Unix
+  permissions are inspected.
+- **Names:** one path segment, no `\` or `/`, no control characters, at most 255 bytes, not `.` or `..`. Nothing else
+  is refused, so a name the file system rejects for another reason (for example a Windows reserved name, if that
+  target ever runs) is reported by the failed create. Trailing spaces and dots are not trimmed.
+- **Reveal does not scroll to the row:** the session asks both adapters to select the created entry
+  (`State::tree_reveal`), which sets the highlight and opens the explorer. The GUI only clamps its scroll to the entry
+  and the terminal keeps its top row, so an entry below the visible rows is selected but not scrolled into view.
+- **Finder and dependent views:** a created file is added to the inventory and the finder's results are marked stale
+  rather than re-ranked, so it can be missing from an open file finder until the query changes. The declaration
+  index and Git status pick it up on their next refresh; a created file is untracked until git sees it.
+- **Unverified:** native macOS and Wayland GUI creation were not run (editing remains gated there); the GUI checks
+  ran on the GPUI test platform and the terminal checks in a test backend, so physical terminal layouts and real
+  desktops are unverified for this ticket.

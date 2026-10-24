@@ -13,6 +13,13 @@ Enter replaces the current match and selects the next, and Alt+A replaces every 
 pattern, options and captured document version live in the shared session, so the GUI's box and the terminal's
 prompt show the same state; each replace is one undo step on the draft and never writes a file.
 
+The explorer also creates: **New File in Explorer…** and **New Folder in Explorer…** sit in an explorer row's
+right-click menu and in F10 → View, and name what to create in the highlighted folder through the terminal's prompt
+(the GUI uses its own dialog with the same shared rules and words). A created file opens as that file — its own draft,
+undo history and Save — and is selected in the explorer; a created folder shows open at once. Names another entry
+takes, missing folders, paths outside the project and folders whose permissions refuse new entries are refused with
+their reason before anything is written.
+
 The Reader’s **Compare saved** control and Ctrl+Shift+D open the same in-window saved/current comparison
 in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
 See the [Reader controls](code/tui.md) and [focused verification limits](research/reader-saved-comparison.md).
