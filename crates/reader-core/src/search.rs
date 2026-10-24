@@ -110,9 +110,13 @@ pub struct CallRow {
 pub(crate) struct DiskSource { pub stamp: crate::cache::Stamp, pub digest: [u8; 32] }
 impl DiskSource {
     pub(crate) fn new(stamp: crate::cache::Stamp, text: &[u8]) -> Self {
-        use sha2::{Digest, Sha256};
-        Self { stamp, digest: Sha256::digest(text).into() }
+        Self { stamp, digest: decoded_digest(text) }
     }
+}
+
+pub(crate) fn decoded_digest(text: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text).into()
 }
 
 /// A batch of results for search `id`.
