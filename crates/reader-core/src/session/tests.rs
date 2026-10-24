@@ -1,5 +1,6 @@
 use super::*;
 mod external;
+mod preferences;
 use crate::tabs::TabId;
 use crate::text::TextSnapshot;
 use std::time::Duration;
