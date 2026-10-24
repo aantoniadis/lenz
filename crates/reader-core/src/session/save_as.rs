@@ -200,3 +200,15 @@ fn replace_existing(path: &Path, file: FileIdentity, encoding: &'static str, bom
     let snapshot = raw.snapshot(text, encoding, bom, false);
     lenz_content::write::write_exact(&snapshot, &raw.target, text)
 }
+
+impl Session {
+    /// Where Save As starts and the name it suggests: the active file's folder and name, else the project root,
+    /// else the working directory.
+    pub fn save_as_start(&self) -> (PathBuf, Option<String>) {
+        let file = self.state.active().filter(|t| t.is_file());
+        let dir = file.and_then(|t| t.source.parent().map(Path::to_path_buf))
+            .or_else(|| self.state.project.as_ref().map(|p| p.root().to_owned()))
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        (dir, file.and_then(|t| t.source.file_name()).map(|n| n.to_string_lossy().into_owned()))
+    }
+}

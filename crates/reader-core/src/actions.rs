@@ -193,6 +193,8 @@ impl Session {
             CommandId::Delete => Command::Delete { backward: false },
             CommandId::ReadOnlyMode => Command::SetReadOnly(!state.active().and_then(|t| state.view(t.id())).is_some_and(|view| view.read_only())),
             CommandId::SaveAs => return CatalogAction::Interface(InterfaceAction::SaveAs),
+            // An untitled document has no file yet: Save chooses one.
+            CommandId::Save if state.active().is_some_and(crate::tabs::Tab::untitled) => return CatalogAction::Interface(InterfaceAction::SaveAs),
             CommandId::NewDocument => Command::NewDocument,
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match state.active() {
                 Some(tab) => match id { CommandId::Save => Command::Save { tab: tab.id() }, CommandId::RecheckSave => Command::RecheckSave { tab: tab.id() }, _ => Command::ConfirmRecheckedSave { tab: tab.id() } },

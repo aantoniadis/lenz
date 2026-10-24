@@ -2080,3 +2080,42 @@ fn long_line_split_edits_keep_absolute_unicode_coordinates_in_both_adapters(cx: 
     assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
     }
 }
+
+#[gpui::test]
+fn new_file_save_as_and_replace_decisions_match_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let targets = [dir.path().join("gui"), dir.path().join("tui")].map(|d| { std::fs::create_dir_all(&d).unwrap(); let t = d.join("note.txt"); std::fs::write(&t, b"keep\n").unwrap(); t });
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui-state"))), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx); let focus = gui.read_with(&visual, |v, _| v.focus_handle()); visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&dir.path().join("tui-state")), None);
+    gui.update(&mut visual, |v, _| v.enable_draft_input_for_test()); tui.enable_draft_input_for_test();
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let save_as = |visual: &mut VisualTestContext, tui: &mut App, cx: &mut TestAppContext| {
+        visual.simulate_keystrokes("ctrl-s"); let chosen = targets[0].clone(); cx.simulate_new_path_selection(move |_| Some(chosen)); cx.run_until_parked();
+        key(tui, KeyCode::Char('s'), KeyModifiers::CONTROL); key(tui, KeyCode::Char('u'), KeyModifiers::CONTROL); tui.handle(Event::Paste(targets[1].display().to_string())); key(tui, KeyCode::Enter, KeyModifiers::NONE);
+    };
+    let both = |visual: &VisualTestContext, tui: &App| { let state = snapshot(tui.session.state()); assert_eq!(state, gui.read_with(visual, |v, _| snapshot(v.session().state()))); state };
+    visual.simulate_keystrokes("ctrl-n"); key(&mut tui, KeyCode::Char('n'), KeyModifiers::CONTROL);
+    visual.update(|_, cx| cx.write_to_clipboard(gpui::ClipboardItem::new_string("draft λ\r\n".into()))); visual.simulate_keystrokes("ctrl-v"); tui.handle(Event::Paste("draft λ\r\n".into()));
+    let state = both(&visual, &tui);
+    assert_eq!((state.active.as_deref(), state.text.as_deref()), (Some("Untitled-1"), Some("draft λ\r\n")));
+    save_as(&mut visual, &mut tui, cx);
+    assert!(gui.read_with(&visual, |v, _| v.session().save_as_prompt().is_some()) && tui.session.save_as_prompt().is_some());
+    visual.simulate_keystrokes("escape"); key(&mut tui, KeyCode::Esc, KeyModifiers::NONE);
+    assert!(gui.read_with(&visual, |v, _| v.session().save_as_prompt().is_none()) && tui.session.save_as_prompt().is_none());
+    for target in &targets { assert_eq!(std::fs::read(target).unwrap(), b"keep\n"); }
+    assert_eq!(both(&visual, &tui).active.as_deref(), Some("Untitled-1"));
+    save_as(&mut visual, &mut tui, cx);
+    visual.simulate_keystrokes("r"); key(&mut tui, KeyCode::Char('r'), KeyModifiers::NONE);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let clean = |s: &State| s.active().is_some_and(|t| !t.untitled() && !s.tab_dirty(t.id()));
+    while !gui.read_with(&visual, |v, _| clean(v.session().state())) || !clean(tui.session.state()) {
+        gui.update(&mut visual, |v, cx| v.poll(cx)); while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); } assert!(Instant::now() < deadline); std::thread::yield_now();
+    }
+    assert_eq!(both(&visual, &tui).active.as_deref(), Some("note.txt"));
+    for target in &targets { assert_eq!(std::fs::read(target).unwrap(), "draft λ\r\n".as_bytes()); }
+    visual.simulate_keystrokes("ctrl-z"); key(&mut tui, KeyCode::Char('z'), KeyModifiers::CONTROL);
+    assert_eq!(both(&visual, &tui).text.as_deref(), Some(""));
+    assert!(tui.session.state().tab_dirty(tui.session.state().active().unwrap().id()));
+}

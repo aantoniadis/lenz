@@ -2506,6 +2506,7 @@ impl Session {
                 None => Some("No file is open"),
                 Some(tab) => self.save_as_disabled(tab.id),
             },
+            CommandId::Save if self.state.active().is_some_and(Tab::untitled) => self.state.active().and_then(|tab| self.save_as_disabled(tab.id)),
             CommandId::Save | CommandId::RecheckSave | CommandId::ConfirmRecheckedSave => match self.state.active() {
                 None => Some("No file is open"),
                 Some(tab) if id == CommandId::Save => self.save_disabled(tab.id),

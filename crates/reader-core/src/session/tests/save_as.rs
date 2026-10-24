@@ -23,7 +23,6 @@ fn untitled_document_keeps_identity_history_and_close_protection_without_a_path(
     assert_eq!(s.state().active().unwrap().title(), "Untitled-1");
     assert_eq!(source_text(s.state().current_source().unwrap()), "");
     assert!(!s.state().tab_dirty(tab), "an empty untitled document has nothing to lose");
-    assert!(s.disabled(CommandId::Save).is_some());
     assert!(s.disabled(CommandId::Reload).is_some());
     assert!(s.disabled(CommandId::SaveAs).is_none());
     for id in [CommandId::CopyPath, CommandId::CopyPathLine, CommandId::CompareSaved, CommandId::OpenInEditor, CommandId::AnnotateBlame, CommandId::ToggleBookmark] {
@@ -33,7 +32,9 @@ fn untitled_document_keeps_identity_history_and_close_protection_without_a_path(
     let buffer = s.state().current_source().unwrap().key().buffer;
     type_text(&mut s, tab, "draft λ\n");
     assert!(s.state().tab_dirty(tab));
-    assert_eq!(s.disabled(CommandId::Save), Some("Use Save As to choose where to save this document"));
+    assert_eq!(s.action(CommandId::Save), crate::actions::CatalogAction::Interface(crate::actions::InterfaceAction::SaveAs), "Save chooses a file for an untitled document");
+    s.dispatch(Command::Save { tab });
+    assert!(s.state.messages.iter().any(|m| m == "Use Save As to choose where to save this document"));
     // A second untitled document has its own identity; switching files never reads or evicts the draft.
     let second = new_document(&mut s);
     assert_eq!(s.state().active().unwrap().title(), "Untitled-2");

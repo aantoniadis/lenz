@@ -46,6 +46,8 @@ pub(crate) enum Prompt {
     },
     Open,
     OpenFolder,
+    /// Save As: the destination path for this tab's document.
+    SaveAs(reader_core::tabs::TabId),
     /// Compare With: the other file or folder for this one.
     Compare(PathBuf),
     WorkspaceRoot,
@@ -86,6 +88,7 @@ pub(crate) enum Details {
     Checkout,
     Close,
     External,
+    Replace,
 }
 pub(crate) struct Modal {
     pub kind: Prompt,
@@ -624,6 +627,10 @@ impl App {
             InterfaceAction::CloseWindow => { self.quit = true; return; }
             InterfaceAction::QuitAll => { self.quit_all = true; return; }
             InterfaceAction::Open => Prompt::Open,
+            InterfaceAction::SaveAs => match self.session.state().active() {
+                Some(tab) => Prompt::SaveAs(tab.id()),
+                None => return,
+            },
             InterfaceAction::OpenFolder => Prompt::OpenFolder,
             InterfaceAction::OpenInEditor | InterfaceAction::OpenWithDefaultApp => {
                 let default_app = action == InterfaceAction::OpenWithDefaultApp;
@@ -769,6 +776,10 @@ impl App {
                     .unwrap_or_default()
             }
             Prompt::Places(_) => self.dispatch(Command::CheckPlaces),
+            Prompt::SaveAs(_) => {
+                let (dir, name) = self.session.save_as_start();
+                input = dir.join(name.unwrap_or_default()).display().to_string();
+            }
             _ => {}
         }
         self.modal = Some(Modal {
@@ -859,6 +870,9 @@ impl App {
     fn choose_external(&mut self,choice:reader_core::external::Choice) {
         if let Some(prompt)=self.session.external_prompt() { self.dispatch(Command::ChooseExternal {ticket:prompt.ticket,choice}); }
     }
+    fn choose_replace(&mut self,choice:reader_core::save::ReplaceChoice) {
+        if let Some(prompt)=self.session.save_as_prompt() { self.dispatch(Command::ChooseReplace {ticket:prompt.ticket,choice}); }
+    }
     fn choose_close(&mut self,choice:reader_core::close::Choice) {
         if let Some(p)=self.session.close_prompt() { self.dispatch(Command::ChooseClose {ticket:p.ticket,buffer:p.buffer,choice}); }
     }
@@ -869,6 +883,7 @@ impl App {
                 Prompt::Navigation => self.dispatch(Command::CloseSearchEverywhere),
                 Prompt::ServerRuntime => self.dispatch(Command::CloseServerRuntime),
                 Prompt::Details { kind: Details::External, .. } => self.choose_external(reader_core::external::Choice::Cancel),
+                Prompt::Details { kind: Details::Replace, .. } => self.choose_replace(reader_core::save::ReplaceChoice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(reader_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(reader_core::branches::CheckoutChoice::Cancel)),
@@ -1069,6 +1084,7 @@ impl App {
                 Prompt::Commands => "Commands · type to filter",
                 Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
+                Prompt::SaveAs(_) => "Save As · enter the new file's path",
                 Prompt::OpenFolder => "Open folder · enter path",
                 Prompt::Compare(_) => reader_core::external::COMPARISON_PROMPT,
                 Prompt::WorkspaceRoot => "Workspace root · empty restores discovery",
@@ -1283,6 +1299,14 @@ impl App {
         {
             *checkout = !*checkout;
             return;
+        }
+        if matches!(kind, Prompt::Details {kind:Details::Replace,..}) {
+            let choice=match key.code {
+                KeyCode::Char('r'|'R') if !control && !alt => Some(reader_core::save::ReplaceChoice::Replace),
+                KeyCode::Esc => Some(reader_core::save::ReplaceChoice::Cancel),
+                _=>None,
+            };
+            if let Some(choice)=choice { self.choose_replace(choice); return; }
         }
         if matches!(kind, Prompt::Details {kind:Details::External,..}) {
             let choice=match key.code {
@@ -1593,6 +1617,15 @@ impl App {
                             modal.error = Some(e);
                         }
                     }
+                }
+            }
+            Prompt::SaveAs(tab) => {
+                if input.trim().is_empty() {
+                    if let Some(modal) = self.modal.as_mut() { modal.error = Some("Enter the new file's path".into()); }
+                } else {
+                    let path = self.resolve_path(&input);
+                    self.close_modal();
+                    self.dispatch(Command::SaveAs { tab, path });
                 }
             }
             Prompt::Open | Prompt::OpenFolder => {
@@ -1908,6 +1941,8 @@ impl App {
             (KeyCode::Char('e'), true, false, false) => Some(CommandId::RecentFiles),
             (KeyCode::Char('b'), true, false, true) => Some(CommandId::Implementation),
             (KeyCode::Char('s'), true, false, false) => Some(CommandId::Save),
+            (KeyCode::Char('s' | 'S'), true, true, false) => Some(CommandId::SaveAs),
+            (KeyCode::Char('n'), true, false, false) => Some(CommandId::NewDocument),
             (KeyCode::Char('b'), false, false, true) => Some(CommandId::AnnotateBlame),
             (KeyCode::Char('`' | '~'), true, _, _) => Some(CommandId::GitBranches),
             (KeyCode::Char('b' | 'B'), true, true, _) => Some(CommandId::TypeDefinition),
@@ -2291,6 +2326,10 @@ impl App {
             }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::External,..})) {
                 if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::external::Choice::ALL.get(i) { self.choose_external(*choice); }
+                return;
+            }
+            if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Replace,..})) {
+                if let Some(i)=self.layout.details_choices.iter().position(|b|b.contains(point)) && let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) { self.choose_replace(*choice); }
                 return;
             }
             if matches!(event.kind,MouseEventKind::Down(MouseButton::Left)) && self.modal.as_ref().is_some_and(|m|matches!(m.kind,Prompt::Details {kind:Details::Close,..})) {
@@ -2679,6 +2718,13 @@ impl App {
             (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::External,body,..},..})) => *body=text,
             (Some(body),None) => self.prompt(Prompt::Details {title:"Open file externally",body,logo:false,kind:Details::External}),
             (None,Some(Modal {kind:Prompt::Details {kind:Details::External,..},..})) => self.modal=None,
+            _=>{}
+        }
+        let replace=self.session.save_as_prompt().map(|prompt|prompt.text());
+        match (replace,&mut self.modal) {
+            (Some(text),Some(Modal {kind:Prompt::Details {kind:Details::Replace,body,..},..})) => *body=text,
+            (Some(body),None) => self.prompt(Prompt::Details {title:"Replace existing file?",body,logo:false,kind:Details::Replace}),
+            (None,Some(Modal {kind:Prompt::Details {kind:Details::Replace,..},..})) => self.modal=None,
             _=>{}
         }
         let close=self.session.close_prompt().map(|p|p.text());

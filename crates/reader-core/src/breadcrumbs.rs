@@ -99,6 +99,7 @@ pub(crate) fn build(tab: &Tab, view: Option<&crate::session::View<'_>>, project:
                 at = end + 1;
             }
         }
+        None if tab.untitled() => crumbs.push(Crumb::File { name: tab.title().into() }),
         None => {
             let mut path = std::path::PathBuf::new();
             let parts: Vec<_> = tab.source.components().collect();

@@ -151,3 +151,29 @@ ticket's acceptance remains in that ticket; this file does not waive its checks.
   about 0.676 MiB across eight launches. See the [batch report](research/reader-editor-foundation-batch-14-23.md).
   Memory phase differences require equal-history/allocator attribution before any
   efficiency claim; no new stress or optimization is authorized by this note.
+
+## New File and Save As (ticket 31, 2026-10-24)
+
+- **Suspected cost, unmeasured:** Save As validates its destination with `canonicalize`, `symlink_metadata`
+  and `metadata` on the UI thread before submitting the write (cheap local stats, but blocking on slow or
+  network filesystems). The write itself uses the existing write worker. Include a Save As interaction in the
+  scheduled batch measurements before moving validation off the UI thread.
+- **Suspected cost, unmeasured:** `Tab::untitled()` checks the tab's source prefix and now participates in
+  the repeated `is_file()` filters (watch set, workspace checkpoint, LSP sync, places). This is per-tab string
+  prefix work; measure with the many-tab case before caching it as a field.
+- **Close prompt Save for untitled:** the dirty-close dialog keeps Save disabled with "Use Save As…"; the user
+  cancels, uses Save As, then closes. A chained "Save As then close" continuation is not implemented.
+- **Native GUI save dialog overwrite prompt:** some platform save dialogs ask about overwriting an existing
+  file themselves; Lenz still requires its own Replace decision. Consider passing the platform's answer only
+  if the dialog's confirmation can be verified; GPUI does not report it today.
+- **Untitled recovery and identity:** untitled documents are not restored by workspace checkpoints and are
+  not recovered after a crash (recovery is a later ticket). Their language stays unset until Save As detects
+  it from the chosen name.
+- **Save As copies mode:** a new file gets the default umask mode, not the original file's mode (an
+  executable script saved elsewhere is not executable). Replacing an existing file keeps that file's mode.
+- **Terminal Ctrl-Shift-S:** reported only by terminals with extended keyboard protocols; the palette and
+  Save on an untitled document remain available everywhere.
+- **Save As while uncertain:** Save As stays available while the original file's Save is uncertain, so the
+  draft can be written elsewhere; success moves the buffer to the new file and leaves the old file's
+  uncertain state behind. Review whether the user should be told explicitly that the old file was not
+  rechecked.

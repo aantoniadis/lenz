@@ -32,6 +32,7 @@ mod source;
 mod close;
 mod input_method;
 mod external;
+mod save_as;
 
 static FONTS: std::sync::OnceLock<lenz_content::appearance::FontPreferences> = std::sync::OnceLock::new();
 fn fonts() -> &'static lenz_content::appearance::FontPreferences {
@@ -130,6 +131,7 @@ pub enum Details {
     Checkout,
     Close,
     External,
+    Replace,
 }
 
 /// A drawn breadcrumb: its bounds, pane, crumb (`None`: a shrunk "…"), whether it is the `›` after the crumb, and its
@@ -767,6 +769,7 @@ impl ReaderView {
             Some(Modal::ServerRuntime { .. }) => self.dispatch(Command::CloseServerRuntime, cx),
             Some(Modal::Themes { .. }) => self.dispatch(Command::PreviewTheme(None), cx),
             Some(Modal::StatusDetails { kind: Details::External, .. }) => self.choose_external(reader_core::external::Choice::Cancel,cx),
+            Some(Modal::StatusDetails { kind: Details::Replace, .. }) => self.choose_replace(reader_core::save::ReplaceChoice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(reader_core::close::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
@@ -909,6 +912,7 @@ impl ReaderView {
         }
         self.sync_close_prompt();
         self.sync_external_prompt();
+        self.sync_replace_prompt();
         self.invalidate_input_source(cx);
         close::schedule(cx);
         if effect.repaint {
@@ -974,6 +978,7 @@ impl ReaderView {
                 }
             }
             CatalogAction::Interface(action) => match action {
+                InterfaceAction::SaveAs => self.prompt_save_as(window, cx),
                 InterfaceAction::Open => {
                     let answer = cx.prompt_for_paths(gpui::PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Open".into()) });
                     cx.spawn_in(window, async move |this, cx| {
@@ -1414,6 +1419,8 @@ impl ReaderView {
             ("q", true, false) => self.run(CommandId::Documentation, window, cx),
             ("b", true, false) => self.run(CommandId::ToggleExplorer, window, cx),
             ("s", true, false) => self.run(CommandId::Save, window, cx),
+            ("s", true, true) => self.run(CommandId::SaveAs, window, cx),
+            ("n", true, false) => self.run(CommandId::NewDocument, window, cx),
             ("r", true, false) | ("f5", _, _) => self.run(CommandId::Reload, window, cx),
             // Ctrl+W / Ctrl+Shift+W grow and shrink the selection (IntelliJ); Ctrl+F4 closes the tab.
             ("w", true, false) => self.run(CommandId::ExtendSelection, window, cx),
@@ -1603,6 +1610,11 @@ impl ReaderView {
                 _=>None,
             };
             if let Some(choice)=choice {self.choose_external(choice,cx);return;}
+        }
+        if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Replace,..})) {
+            let plain=!(ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform || ev.keystroke.modifiers.alt);
+            let choice=match key {"r" if plain=>Some(reader_core::save::ReplaceChoice::Replace),"escape"=>Some(reader_core::save::ReplaceChoice::Cancel),_=>None};
+            if let Some(choice)=choice {self.choose_replace(choice,cx);return;}
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Close,..})) {
             let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
@@ -2598,6 +2610,7 @@ impl ReaderView {
             Details::Commit => vec!["Show Diff", "Copy Revision", "Close"],
             Details::Text => vec!["Copy", "Close"],
             Details::External => reader_core::external::Choice::ALL.into_iter().map(|choice|choice.label()).collect(),
+            Details::Replace => reader_core::save::ReplaceChoice::ALL.into_iter().map(|choice|choice.label()).collect(),
             Details::Close => [reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].into_iter().map(|c|self.session.close_prompt().map_or(c.label(), |p|p.label(c))).collect(),
         }
     }
@@ -2868,6 +2881,7 @@ impl ReaderView {
                         let hit = l.details_buttons(self.char_w, &self.details_labels(kind)).iter().position(|b| b.contains(&ev.position));
                         match (kind, hit) {
                             (Details::External,Some(i)) => {if let Some(choice)=reader_core::external::Choice::ALL.get(i) {self.choose_external(*choice,cx);}}
+                            (Details::Replace,Some(i)) => {if let Some(choice)=reader_core::save::ReplaceChoice::ALL.get(i) {self.choose_replace(*choice,cx);}}
                             (Details::Close,Some(i)) => {if let Some(choice)=[reader_core::close::Choice::Save,reader_core::close::Choice::Discard,reader_core::close::Choice::Cancel].get(i) {self.choose_close(*choice,cx);}}
                             (Details::Checkout, Some(i)) => {
                                 if let Some(&(_, c)) = self.session.checkout_choices().get(i) {

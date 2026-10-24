@@ -131,7 +131,7 @@ impl Session {
         }
         state.current_source().map_or_else(
             || "No file open — Ctrl+O file, F10 commands".into(),
-            |d| d.source().display().to_string(),
+            |d| shown_name(state, d),
         )
     }
 
@@ -164,7 +164,7 @@ impl Session {
         let state = self.state();
         let name = match (state.loading(), state.current_source()) {
             (Some(path), _) => format!("Loading {}…", path.display()),
-            (None, Some(document)) => document.source().display().to_string(),
+            (None, Some(document)) => shown_name(state, document),
             (None, None) => "No file open — Ctrl+O file, F10 commands".into(),
         };
         let project = state.project().map(|project| {
@@ -240,6 +240,14 @@ pub fn ellipsize(text: &str, cols: usize) -> String {
         })
         .unwrap_or(text.len());
     format!("{}…", text.get(..end).unwrap_or_default())
+}
+
+/// The active document's path, or an untitled document's name (its identity is not a path).
+fn shown_name(state: &crate::session::State, document: &crate::text::TextSnapshot) -> String {
+    match state.active().filter(|t| t.untitled()) {
+        Some(tab) => tab.title(),
+        None => document.source().display().to_string(),
+    }
 }
 
 #[cfg(test)]
