@@ -305,6 +305,8 @@ impl Tab {
     pub fn annotation_cols(&self) -> usize {
         if self.blame.is_some() { crate::blame::ANNOTATION_COLS } else { 0 }
     }
+    /// Current attribution state while annotations are enabled.
+    pub fn blame_status(&self) -> Option<crate::blame::Status<'_>> { self.blame.as_ref().map(crate::blame::Blame::status) }
     /// Line `line`'s blame annotation, once git has reached it.
     pub fn annotation(&self, line: usize) -> Option<crate::blame::Annotation<'_>> {
         crate::blame::annotation(self.blame.as_ref()?, line)

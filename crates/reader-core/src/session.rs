@@ -2636,6 +2636,8 @@ impl Session {
         }
         let t = self.state.active().ok_or("No file is open")?;
         let b = t.blame.as_ref().ok_or("Annotations are off")?;
+        if b.error.is_some() { return Err("Blame failed"); }
+        if !b.done { return Err("Blame pending"); }
         let line = self.state.source(t.id).zip(t.selection).map(|(d, s)| d.line_of(s.head)).ok_or("No line is selected")?;
         match (b.lines.get(line), &b.root) {
             (Some(Some(c)), _) if !c.is_committed() => Err("This line is not committed"),
@@ -2776,7 +2778,9 @@ impl Session {
         if self.pending_doc.as_ref().is_some_and(|p| !self.is_shown(p.tab) || !self.state.view(p.tab).is_some_and(|v| p.source.matches(v.snapshot()))) { self.cancel_documentation(); }
         if self.project_query.as_ref().is_some_and(|q| self.state.results.as_ref().is_none_or(|r| r.id != q.id)) { self.project_query = None; }
         self.invalidate_result_analysis();
+        self.refresh_blame();
         self.analysis.pump(&self.jobs, &self.tx, &self.project_generation);
+        effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
         if let Some(batch) = self.index_batch.as_ref() && batch.ready()
             && self.tx.try_send(Completion::Indexed { generation: batch.generation, revision: batch.revision, files: Vec::new() }).is_ok()
@@ -2788,6 +2792,7 @@ impl Session {
         self.sync_semantics();
         effect.repaint |= self.retry_semantic_analysis();
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
+        effect.repaint |= self.fail_blame_analysis();
         for (fence, why) in self.analysis.take_result_failures() { effect.repaint |= self.result_failed(&fence, why).repaint; }
         for reply in self.state.semantics.take_failures() { effect.repaint |= self.semantic_reply(reply).repaint; }
         self.sync_repo();
@@ -2879,6 +2884,7 @@ impl Session {
         for tab in changed {
             if self.is_shown(tab) { self.mark_shown(tab, next.key().version); self.decorate(tab); }
             if let Some(query) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.find.as_ref()).map(|f| f.query.clone()) { self.find_in(tab, query, false); }
+            self.annotate(tab);
         }
         self.synced = 0;
         Effect { repaint: true, copy: None }
@@ -3539,13 +3545,14 @@ impl Session {
                 }
                 t.blame = on.then(crate::blame::Blame::new);
                 let id = t.id;
+                if !on && let Some(buffer) = t.buffer { self.analysis.cancel_consumer(buffer, crate::analysis::Consumer::Blame(id)); }
                 self.annotate(id);
                 repaint
             }
             Command::ShowCommitAt { tab, line } => {
                 let Some(doc) = self.state.source(tab).cloned() else { return Effect::default() };
                 let Some(t) = self.tab_mut(tab) else { return Effect::default() };
-                let Some(b) = t.blame.as_ref() else { return Effect::default() };
+                let Some(b) = t.blame.as_ref().filter(|b| b.done && b.error.is_none() && b.matches(&doc)) else { return Effect::default() };
                 let (Some(Some(commit)), Some(root)) = (b.lines.get(line), b.root.clone()) else { return Effect::default() };
                 if !commit.is_committed() {
                     return Effect::default();
@@ -4894,14 +4901,13 @@ impl Session {
                 None => Effect::default(),
             },
             Completion::Blamed { tab, request, root, hunks, done } => {
-                let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request) else { return Effect::default() };
+                let Some(snapshot) = self.state.source(tab).cloned() else { return Effect::default() };
+                let Some(b) = self.tab_mut(tab).and_then(|t| t.blame.as_mut()).filter(|b| b.request == request && b.matches(&snapshot) && b.error.is_none()) else { return Effect::default() };
                 b.apply(root, hunks);
                 match done {
                     Some(Ok(())) => b.done = true,
                     Some(Err(e)) => {
-                        if let Some(t) = self.tab_mut(tab) {
-                            t.blame = None;
-                        }
+                        b.fail(e.clone());
                         self.state.messages.push(format!("Annotate with Git Blame: {e}"));
                     }
                     None => {}
@@ -7159,6 +7165,7 @@ impl Session {
     }
 
     fn release(&mut self, id: TabId) {
+        if let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()).filter(|b| !b.done) { b.suspend(); }
         if let Some(buffer) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| tab.buffer) {
             let last = !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id));
             let dirty = self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty);
@@ -7478,18 +7485,41 @@ impl Session {
         self.annotate(id);
     }
 
+    fn fail_blame_analysis(&mut self) -> bool {
+        let failed: Vec<_> = self.state.tabs.iter().filter(|tab| tab.blame.as_ref().is_some_and(|blame| !blame.done))
+            .filter_map(|tab| self.state.source(tab.id).and_then(|snapshot| self.analysis.source_failure(snapshot, self.project_generation.load(Ordering::Relaxed)))
+                .map(|error| (tab.id, error))).collect();
+        let changed = !failed.is_empty();
+        for (tab, error) in failed { if let Some(blame) = self.tab_mut(tab).and_then(|tab| tab.blame.as_mut()) { blame.fail(error.into()); } }
+        changed
+    }
+
+    /// Any path/disk rebind invalidates attribution even when the draft's byte version is unchanged.
+    fn refresh_blame(&mut self) {
+        let changed: Vec<_> = self.state.tabs.iter().filter(|t| t.blame.as_ref().is_some_and(|b|
+            self.state.source(t.id).is_some_and(|snapshot| !b.of(t.stamp, snapshot) || !b.done && b.project != self.project_generation.load(Ordering::Relaxed)))).map(|t| t.id).collect();
+        for id in changed { self.annotate(id); }
+    }
+
     /// Blames tab `id` when its annotations are on and are not of its content as it is (new, changed or reloaded).
     fn annotate(&mut self, id: TabId) {
         self.blame_requests += 1;
-        let (request, tx) = (self.blame_requests, self.tx.clone());
+        let request = self.blame_requests;
         let Some(doc) = self.state.source(id).cloned() else { return };
+        let project = self.project_generation.load(Ordering::Relaxed);
         let Some(t) = self.tab_mut(id) else { return };
         let Some(b) = t.blame.as_mut() else { return };
-        if b.of(t.stamp) || t.retrieved.is_some() {
+        if b.of(t.stamp, &doc) && (b.done || b.project == project) || t.retrieved.is_some() {
             return;
         }
         let file = t.canonical.clone().unwrap_or_else(|| t.source.clone());
-        b.start(id, file, t.stamp, doc.line_count(), request, tx);
+        b.project = project;
+        let work = b.start(id, file, t.stamp, &doc, request);
+        if self.state.commit.as_ref().is_some_and(|popup| popup.tab == id) { self.state.commit = None; }
+        let loaded = self.state.sources.buffers[&doc.key().buffer].document.clone();
+        let input = crate::analysis::Input::new(doc, loaded, self.project_generation.load(Ordering::Relaxed), self.is_shown(id));
+        if !self.analysis.request(input, crate::analysis::Consumer::Blame(id), request, Priority::Background, work)
+            && let Some(b) = self.tab_mut(id).and_then(|t| t.blame.as_mut()) { b.fail("Background work is busy; retry annotations".into()); }
     }
 
     /// Work derived from the active document: syntax spans, and a Markdown file's preview.

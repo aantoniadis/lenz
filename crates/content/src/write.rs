@@ -312,6 +312,12 @@ pub fn write_text(snapshot: &Snapshot, text: &str) -> Result<Snapshot, WriteErro
     Ok(Snapshot { hash: Some(hash(&bytes)), size: meta.len(), mtime: meta.modified().ok(), ..snapshot.clone() })
 }
 
+/// Encode exact text endings using the writer's strict encoding/BOM policy, without writing a file.
+pub fn encode_exact(text: &str, encoding: &str, bom: bool) -> Result<Vec<u8>, WriteError> {
+    let encoding = Encoding::for_label_no_replacement(encoding.as_bytes()).ok_or_else(|| WriteError::Io(format!("unknown encoding: {encoding}")))?;
+    encode(text, encoding, bom, false)
+}
+
 /// The text in the file's form; the 1-based line of the first character the encoding can't hold.
 fn encode(text: &str, encoding: &'static Encoding, bom: bool, crlf: bool) -> Result<Vec<u8>, WriteError> {
     let text = if crlf { with_crlf(text) } else { text.to_string() };
