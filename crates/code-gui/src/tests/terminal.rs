@@ -540,7 +540,7 @@ fn gui_terminal_wheel_scrolls_history_during_find(cx: &mut TestAppContext) {
     v.simulate_keystrokes("ctrl-f");
     let at = f.view.read_with(&v,|r,_| r.terminal_layout().unwrap().grid.center());
     for _ in 0..10 {
-        v.simulate_event(ScrollWheelEvent { position: at, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: at, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
     }
     drop(v);
     settle(cx,&f,|r| !terminal_text(r).contains("LINE_200"));

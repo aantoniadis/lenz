@@ -20,14 +20,16 @@ lenz-content = { path = "crates/content" }
 lenz-gpui = { path = "crates/gpui" }
 gix-imara-diff = "0.3"
 # One tag for both so a bump moves every gpui reference together.
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.24.2" }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
 
 # Zed's workspace patches don't propagate to dependents; mirror the ones gpui needs.
 [patch.crates-io]
-async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
+async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "015845a19fc31752c02367567d3b8900a406f9da" }
 # Keep GPUI's patched event-loop commit pinned alongside its tag.
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
+# Zed patches khronos-egl (wgpu's EGL loader) from v1.26.
+khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
 
 # Dev and test builds keep line tables (backtraces still show file:line) and drop dependency debug info.
 # Full debug info made each test binary up to 813 MB, and the parallel relink after an edit to a core crate needed

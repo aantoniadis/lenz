@@ -28,7 +28,7 @@ use std::{
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, FocusHandle, Font, Hsla, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, PathBuilder, Pixels, Render, ShapedLine,
-    ScrollDelta, ScrollWheelEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font,
+    ScrollDelta, ScrollEvent, SharedString, TextAlign, TextRun, Window, canvas, div, font,
     point, prelude::*, px, quad, rgb, rgba, size,
 };
 
@@ -3098,7 +3098,7 @@ impl Viewer {
         cx.notify();
     }
 
-    fn on_wheel(&mut self, ev: &ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.discard_modal() || self.checkout_modal() || self.merge.as_ref().is_some_and(|s|s.ask.is_some()) || self.picker_v.as_ref().is_some_and(|s|s.ask.is_some()){return;}
         if self.theme_chooser.is_some()||self.diff_options.is_some(){return;}
         // the palette takes the wheel as row moves; nothing underneath scrolls
@@ -3774,7 +3774,7 @@ impl Render for Viewer {
             )
             .child(toolbar)
             .on_key_down(cx.listener(Self::on_key))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))

@@ -25,7 +25,7 @@ regex = "1.13"
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"
 # Syntax highlighting: runtime + one crate per bundled grammar (see src/highlight.rs).
-xml-rs = "0.8.29"
+xml-rs = "1.0.0"
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"
@@ -56,10 +56,10 @@ tree-sitter-zig = "1.1.2"
 # to compile in either product.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # SVG rasterising (src/image.rs); GUI adapters enable embedded raster data explicitly.
-resvg = { version = "0.48.1", default-features = false }
+resvg = { version = "0.49.0", default-features = false }
 
 # Markdown (src/markdown): parsing only; the exact version Lenz pinned.
-pulldown-cmark = { version = "=0.13.4", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 
 # Themes (src/theme): user theme files, the saved selection, following Omarchy's current theme.
 toml = "1.1.8"

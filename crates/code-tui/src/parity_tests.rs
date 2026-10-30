@@ -1460,7 +1460,7 @@ fn unified_name_search_replays_files_symbols_actions_caret_and_recents_in_both_a
     let top = tui.session.state().top_line();
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(40, 10)).unwrap();
     terminal.draw(|f| tui.draw(f)).unwrap();
-    visual.simulate_event(gpui::ScrollWheelEvent {
+    visual.simulate_event(gpui::ScrollEvent {
         position: gpui::point(gpui::px(400.0), gpui::px(200.0)),
         delta: gpui::ScrollDelta::Lines(gpui::point(0.0, -1.0)),
         ..Default::default()

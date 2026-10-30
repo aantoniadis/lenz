@@ -24,7 +24,7 @@ unicode-segmentation = { version = "1.13.3", optional = true }
 lenz-engine = { path = "../engine" }
 # Decoding, line offsets and syntax highlighting, shared with the code reader.
 lenz-content = { path = "../content" }
-pulldown-cmark = { version = "=0.13.4", default-features = false }
+pulldown-cmark = { version = "=0.13.6", default-features = false }
 gpui = { workspace = true, optional = true }
 # Single-pane text presentation shared with the code reader.
 lenz-gpui = { path = "../gpui", optional = true }
@@ -33,7 +33,7 @@ unicode-width = "0.2"
 # Image decoding (src/images.rs). Same version and a subset of the features gpui already enables, so it unifies: nothing new to compile.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 # SVG rasterising (src/images.rs); embedded raster data is enabled for GUI builds.
-resvg = { version = "0.48.1", default-features = false }
+resvg = { version = "0.49.0", default-features = false }
 # gh JSON and the Viewed Marks file (src/pr.rs); already built for gpui.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -43,7 +43,7 @@ zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 bzip2 = "0.6"
-lzma-rust2 = { version = "0.23", default-features = false, features = ["std", "xz", "optimization"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz", "optimization"] }
 ruzstd = "0.9.1"
 crc32fast = "1.5"
 # Private, exclusively created files for atomic saves and Git merge inputs.
@@ -54,7 +54,7 @@ async-channel = "2.5.0"
 # The in-process memory probe for this crate's tests.
 lenz-content = { path = "../content", features = ["perf-probe", "git-testing", "write-testing"] }
 # XZ archive fixture generation.
-lzma-rust2 = { version = "0.23", default-features = false, features = ["encoder"] }
+lzma-rust2 = { version = "0.24", default-features = false, features = ["encoder"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, optional = true, features = ["font-kit"] }
