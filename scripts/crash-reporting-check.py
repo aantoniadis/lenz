@@ -153,7 +153,7 @@ def main():
                 (root / file).write_text(content)
             probe = Pty([executables['tui'], *command], root, env)
             try:
-                probe.wait(lambda: (b'Lenz' if name == 'comparison' else b'Merge') in probe.output)
+                probe.wait(lambda: (b'details' if name == 'comparison' else b'Merge') in probe.output)
                 if name == 'comparison':
                     probe.wait(lambda: b'NEW_REPORT_FIXTURE' in probe.output)
                     probe.send(b':report last error\r')

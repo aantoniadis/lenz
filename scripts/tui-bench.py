@@ -174,7 +174,8 @@ def main():
                     output.write(f'BENCH_{word}_{i} café 👩‍💻\n' if i % 80 == 0 else f'unchanged line {i}\n')
         probe = TerminalProbe([app, '--no-index', 'left', 'right'], root)
         try:
-            paint = probe.expect(b'Lenz')
+            # the status line's F2 hint is in every frame (the header names the comparison since 0.0.7)
+            paint = probe.expect(b'details')
             ready = probe.expect(b'BENCH_NEW_0')
             probe.quiet(.25)
             baseline = probe.sample()
@@ -217,7 +218,7 @@ def main():
                                         ([app, '--no-index', 'left', 'right'], b'/hello\x03', 0)]:
             probe = TerminalProbe(command, root)
             try:
-                probe.expect(b'Lenz')
+                probe.expect(b'details')
                 if expected == 2:
                     probe.expect(b'absent')
                     probe.quiet(.1)

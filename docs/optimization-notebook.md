@@ -2239,3 +2239,13 @@ Paired release runs against `v0.0.6`; tables and commands are in the
 | Lenz Diff 0.0.7 against 0.0.6 (full suite, two alternating pairs) | **No reproducible regression above a millisecond.** Five of 391 metrics rose 10% or more in both pairs, all under 0.5 ms except one GUI merge-undo outlier (6.4 → 29.7, then 7.5 ms). A 0.0.7 build without `use-dev-tty` measured with the standalone TUI and workflow collectors overlaps 0.0.6 and 0.0.7 on input, resize, startup and RSS; only the history filter stayed about 0.15 ms higher with the new source (inconclusive). The release report has the table. |
 | Attribute GUI startup +18 ms and TUI 100k-line RSS +14 MiB | **Attributed to the integrated-editor branch.** A TUI binary from before the results-panel changes already measured 22.6 ms first content and 50.2 MiB settled. The TUI memory cost was accepted earlier; the startup cost is reported for this release, not bisected across the 726 commits. |
 | GUI edit collector against 0.0.6 | **Not comparable.** 0.0.6 cannot edit, so the collector fails with no paint feedback; 0.0.7 values are recorded alone. |
+
+## 0.0.8 release comparison (2026-10-30)
+
+Paired release runs against `v0.0.7`; the table and commands are in the
+[0.0.8 performance report](code/release-0.0.8-performance.md).
+
+| Experiment | Outcome and evidence |
+|---|---|
+| gpui v1.24.2 → v1.26.2 with the dependency updates (Code and Diff GUI, Code and Diff TUI, two alternating pairs) | **No regression of a millisecond or more.** Code GUI open 158.6–160.8 ms against 159.6–160.0; Diff GUI first paint 252–253 against 250–251.5 ms; Code TUI first feedback +0.7 ms and Diff TUI input +0.3 ms in both pairs, recorded and not pursued; Code GUI edit-run peak RSS +1–3 MiB. |
+| Diff terminal first-paint marker | **Collector fix.** Since 0.0.7 the header names the comparison, so `tui-bench.py`, `markdown-bench.py` and `crash-reporting-check.py` waited for a `Lenz` that never came; they now wait for the status line's `F2 details`. Both builds were measured with it. |
