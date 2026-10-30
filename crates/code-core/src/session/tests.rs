@@ -2977,10 +2977,35 @@ fn replacing_the_root_discards_the_old_scan_and_remembers_roots() {
     let mut s = session(d.path());
     assert_eq!(s.state().recent(), [b.clone(), a.clone()], "kept outside the checkout across sessions");
     // A window with nothing open starts on the file and folder commands, then the recent folders.
-    let start = [StartItem::Command(CommandId::Open), StartItem::Command(CommandId::OpenFolder), StartItem::Recent(b), StartItem::Recent(a.clone())];
+    let start = [StartItem::Command(CommandId::Open), StartItem::Command(CommandId::OpenFolder), StartItem::RecentFolder(b), StartItem::RecentFolder(a.clone())];
     assert_eq!(s.state().start_items(), start);
     s.dispatch(Command::OpenRoot(a));
     assert_eq!(s.state().start_items(), [], "an open folder replaces the start screen");
+}
+
+#[test]
+fn files_opened_without_a_folder_are_recent_on_the_start_screen() {
+    let d = tempfile::tempdir().unwrap();
+    let lone = d.path().join("lone.txt");
+    std::fs::write(&lone, "alone\n").unwrap();
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(lone.clone()));
+    assert_eq!(s.state().recent_alone, std::slice::from_ref(&lone));
+    drop(s);
+    let recent_file = d.path().join("state/lenz-code/recent-files.json");
+    for _ in 0..200 {
+        if read_recent(&recent_file).len() == 1 { break; }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let mut s = session(d.path());
+    let start = [StartItem::Command(CommandId::Open), StartItem::Command(CommandId::OpenFolder), StartItem::RecentFile(lone.clone())];
+    assert_eq!(s.state().start_items(), start, "kept across sessions");
+    // A file opened inside an open folder belongs to that folder's own recent files, not this list.
+    let root = d.path().join("root");
+    tree(&root, &["inside.rs"]);
+    s.dispatch(Command::OpenRoot(root.clone()));
+    s.dispatch(Command::Open(root.join("inside.rs")));
+    assert_eq!(s.state().recent_alone, [lone]);
 }
 
 #[test]

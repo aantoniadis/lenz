@@ -3296,22 +3296,25 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
 }
 
 #[test]
-fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders() {
+fn an_empty_window_starts_on_open_file_open_folder_and_recents() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
     std::fs::create_dir_all(dir.path().join("state")).unwrap();
     std::fs::write(dir.path().join("state/recent.json"), serde_json::to_string(&[&root]).unwrap()).unwrap();
+    let lone = dir.path().join("lone.txt");
+    std::fs::write(&lone, "alone\n").unwrap();
+    std::fs::write(dir.path().join("state/recent-files.json"), serde_json::to_string(&[&lone]).unwrap()).unwrap();
     let mut a = App::with_text_input(config(dir.path()), None, false);
     let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
     terminal.draw(|f| a.draw(f)).unwrap();
     let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
-    for shown in ["Open File…  Ctrl+O", "Open Folder…", "Recent folders", &root.display().to_string()] {
+    for shown in ["Open File…  Ctrl+O", "Open Folder…", "Recent folders", &root.display().to_string(), "Recent files", &lone.display().to_string()] {
         assert!(screen.contains(shown), "{shown} on the start screen");
     }
     let start = a.layout.panes[0].start.clone();
-    assert_eq!(start.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2]);
+    assert_eq!(start.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2, 3]);
     // Open File… and Open Folder… ask for a path; a recent folder opens.
     click(&mut a, start[0].1.x, start[0].1.y);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Open);
@@ -3319,6 +3322,14 @@ fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders() {
     click(&mut a, start[1].1.x, start[1].1.y);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::OpenFolder);
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    // A recent file opens; closing it returns to the start screen.
+    click(&mut a, start[3].1.x, start[3].1.y);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.source() == lone && t.loaded()));
+    draw(&mut a, 100, 24);
+    assert!(a.layout.panes[0].start.is_empty());
+    key(&mut a, KeyCode::F(4), KeyModifiers::CONTROL);
+    draw(&mut a, 100, 24);
+    assert_eq!(a.layout.panes[0].start.len(), 4);
     click(&mut a, start[2].1.x, start[2].1.y);
     settle(&mut a, |a| a.session.state().project().is_some_and(|p| p.root() == root));
     draw(&mut a, 100, 24);

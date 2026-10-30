@@ -1909,21 +1909,23 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     )
 }
 
-/// Nothing open: the start screen's commands, then the recent folders under their heading, each a click target.
+/// Nothing open: the start screen's commands, then each group of recents under its heading, each a click target.
 fn draw_start(frame: &mut ratatui::Frame, app: &App, items: &[StartItem], geometry: &mut PaneGeometry, p: &Palette) {
     let area = geometry.text;
     let area = Rect::new(area.x.saturating_add(2), area.y.saturating_add(1), area.width.saturating_sub(2), area.height.saturating_sub(1));
-    let (mut offset, mut headed) = (0, false);
+    let (mut offset, mut heading) = (0, None);
     for (i, item) in items.iter().enumerate() {
         let label = match item {
             StartItem::Command(id) => app.session.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
-            StartItem::Recent(root) => root.display().to_string(),
+            StartItem::RecentFolder(path) | StartItem::RecentFile(path) => path.display().to_string(),
         };
-        // The recent folders under a blank row and their heading.
-        if matches!(item, StartItem::Recent(_)) && !headed {
-            headed = true;
-            line(frame.buffer_mut(), row(area, offset + 1), "Recent folders", style(p.dim, p.bg));
-            offset += 2;
+        // Each group of recents under a blank row and its heading.
+        if item.heading() != heading {
+            heading = item.heading();
+            if let Some(h) = heading {
+                line(frame.buffer_mut(), row(area, offset + 1), h, style(p.dim, p.bg));
+                offset += 2;
+            }
         }
         let at = row(area, offset);
         let at = Rect { width: at.width.min(label.width() as u16), ..at };

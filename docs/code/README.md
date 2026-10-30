@@ -35,7 +35,8 @@ cargo test --release -p code-core --test semantics -- --ignored --nocapture   # 
 ```
 
 Started with nothing to open (from home or `/`, as a desktop launcher does), a window shows **Open File…**, **Open
-Folder…** and the recent folders; a click runs the command or opens the folder ([terminal](tui.md)).
+Folder…**, the recent folders and the files recently opened without a folder; a click runs the command or opens the
+folder or file ([terminal](tui.md)).
 
 Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
 all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse /

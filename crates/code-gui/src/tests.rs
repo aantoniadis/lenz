@@ -801,13 +801,16 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
 }
 
 #[gpui::test]
-fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders(cx: &mut TestAppContext) {
+fn an_empty_window_starts_on_open_file_open_folder_and_recents(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let one = project(&f.dir.path().join("one"), &["a.rs"]);
+    let lone = f.dir.path().join("lone.txt");
+    std::fs::write(&lone, "alone\n").unwrap();
     let recent = f.dir.path().join("state/lenz-code/recent-roots.json");
     std::fs::create_dir_all(recent.parent().unwrap()).unwrap();
     std::fs::write(&recent, serde_json::to_string(&[&one]).unwrap()).unwrap();
-    // A window opened after the folder was recent, with nothing to open.
+    std::fs::write(recent.with_file_name("recent-files.json"), serde_json::to_string(&[&lone]).unwrap()).unwrap();
+    // A window opened after the folder and the file were recent, with nothing to open.
     let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), None, cx).with_config(f.make.clone()));
     let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
     let f = Fixture { view, window, ..f };
@@ -815,7 +818,7 @@ fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders(cx: &mut T
     v.simulate_resize(size(px(900.0), px(600.0)));
     draw(&mut v);
     let hits = f.view.read_with(&v, |v, _| v.start_hits.clone());
-    assert_eq!(hits.iter().map(|h| h.1).collect::<Vec<_>>(), [0, 1, 2], "Open File…, Open Folder…, the recent folder");
+    assert_eq!(hits.iter().map(|h| h.1).collect::<Vec<_>>(), [0, 1, 2, 3], "Open File…, Open Folder…, the recent folder and file");
     assert!(hits.windows(2).all(|w| w[0].0.origin.y < w[1].0.origin.y), "one row each, top to bottom");
     // Open File… and Open Folder… ask the platform for a file and for a folder.
     v.simulate_click(hits[0].0.center(), Modifiers::default());
@@ -830,6 +833,16 @@ fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders(cx: &mut T
         assert!(options.directories && !options.files);
         None
     });
+    // A recent file opens; closing it returns to the start screen.
+    v.simulate_click(hits[3].0.center(), Modifiers::default());
+    drop(v);
+    settle(cx, &f, active_is("lone.txt"));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.start_hits.is_empty()));
+    v.simulate_keystrokes("ctrl-f4");
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| v.start_hits.len()), 4);
     // A recent folder opens, and the start screen gives way to it.
     v.simulate_click(hits[2].0.center(), Modifiers::default());
     settle(cx, &f, |v| scanned(v) && v.session().state().project().is_some_and(|p| p.root() == one));
