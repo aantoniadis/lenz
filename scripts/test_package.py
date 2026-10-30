@@ -10,7 +10,7 @@ import unittest
 
 
 # Each installed executable and the Cargo executable it is built as.
-SHIPPED = [('lenz', 'lenz-launcher'), ('lenz-code', 'lenz-reader'), ('lenz-code-tui', 'lenz-reader-tui'),
+SHIPPED = [('lenz', 'lenz-launcher'), ('lenz-code', 'lenz-code'), ('lenz-code-tui', 'lenz-code-tui'),
            ('lenz-diff', 'lenz'), ('lenz-diff-tui', 'lenz-tui')]
 
 
@@ -45,7 +45,7 @@ calls.write_text(json.dumps((json.loads(calls.read_text()) if calls.exists() els
 pathlib.Path(os.environ['LENZ_TEST_CALLS']).with_name('flags.json').write_text(json.dumps({k: os.environ.get(k) for k in ('RUSTFLAGS', 'CFLAGS', 'CXXFLAGS', 'CARGO_TARGET_DIR')}))
 package = sys.argv[sys.argv.index('-p') + 1]
 # Cargo names an executable by its bin target, not its package.
-name = {'reader-gui': 'lenz-reader', 'reader-tui': 'lenz-reader-tui'}.get(package, package)
+name = {'code-gui': 'lenz-code', 'code-tui': 'lenz-code-tui'}.get(package, package)
 artifact = pathlib.Path(os.environ['LENZ_TEST_ARTIFACT']).with_name(name)
 artifact.parent.mkdir(parents=True, exist_ok=True)
 artifact.write_bytes(b'fresh ' + name.encode())
@@ -80,7 +80,7 @@ print(json.dumps({'reason': 'build-finished', 'success': True}))''')
                 self.assertEqual(archive.extractfile(f'{name}/{desktop}').read(), f'packaging/{desktop}'.encode())
         calls = json.loads((self.root / 'calls.json').read_text())
         self.assertEqual([args[args.index('-p') + 1] for args in calls],
-                         ['lenz-launcher', 'reader-gui', 'reader-tui', 'lenz', 'lenz-tui'], 'built separately')
+                         ['lenz-launcher', 'code-gui', 'code-tui', 'lenz', 'lenz-tui'], 'built separately')
         for args in calls:
             self.assertEqual(args[args.index('--target') + 1], 'x86_64-test-linux-gnu')
 

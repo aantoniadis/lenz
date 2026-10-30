@@ -1,4 +1,4 @@
-unwrap_used 12
+unwrap_used 11
 expect_used 0
 panic 0
 unreachable 0

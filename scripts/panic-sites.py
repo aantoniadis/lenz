@@ -4,23 +4,24 @@
     python3 scripts/panic-sites.py            # check against scripts/panic-sites.txt (CI)
     python3 scripts/panic-sites.py --update   # write the current counts as the new baseline
 
-Counts clippy's `unwrap_used`, `expect_used`, `panic`, `unreachable` and `string_slice` over the workspace's
-libraries and binaries (tests excluded), each site once. Linux only: the counts include platform code.
-Use --reader for the imported Reader's separate baseline, preserving the existing Diff budget.
-Use --reader-tui for the Reader terminal adapter's own baseline.
+Counts clippy's `unwrap_used`, `expect_used`, `panic`, `unreachable` and `string_slice` over production
+libraries and binaries (tests excluded), each site once. Linux only: counts include platform code.
+The default Diff budget covers its shared Content, GPUI and Engine dependencies. --code owns only
+code-core and code-gui sites; --code-tui owns only terminal-adapter sites and takes precedence.
+Shared diagnostics remain in the default budget rather than being counted again as Lenz Code sites.
 """
 import json, pathlib, subprocess, sys
 
 LINTS = ["unwrap_used", "expect_used", "panic", "unreachable", "string_slice"]
 BASELINE = pathlib.Path(__file__).with_name("panic-sites.txt")
 
-def current(reader=False, reader_tui=False) -> dict[str, int]:
-    packages = ["--workspace", "--exclude", "reader-core", "--exclude", "reader-gui", "--exclude", "reader-tui"]
-    if reader_tui:
-        packages = ["-p", "reader-tui"]
-    elif reader:
-        packages = ["-p", "reader-core", "-p", "reader-gui"]
-    targets = ["--bins"] if reader_tui else ["--lib", "--bins"]
+def current(code=False, code_tui=False) -> dict[str, int]:
+    packages = ["--workspace", "--exclude", "code-core", "--exclude", "code-gui", "--exclude", "code-tui"]
+    if code_tui:
+        packages = ["-p", "code-tui"]
+    elif code:
+        packages = ["-p", "code-core", "-p", "code-gui"]
+    targets = ["--bins"] if code_tui else ["--lib", "--bins"]
     cmd = ["cargo", "clippy", "--locked", *packages, *targets, "--message-format=json", "--"]
     cmd += [f"-Wclippy::{lint}" for lint in LINTS]
     out = subprocess.run(cmd, capture_output=True, text=True, check=True).stdout
@@ -30,17 +31,20 @@ def current(reader=False, reader_tui=False) -> dict[str, int]:
         lint = ((msg.get("code") or {}).get("code") or "").removeprefix("clippy::")
         if lint in sites:
             span = next(s for s in msg["spans"] if s["is_primary"])
-            if reader_tui and not span["file_name"].startswith("crates/reader-tui/"):
-                continue  # Shared dependencies already have their existing budgets.
+            if code_tui:
+                if not span["file_name"].startswith("crates/code-tui/"):
+                    continue
+            elif code and not span["file_name"].startswith(("crates/code-core/", "crates/code-gui/")):
+                continue  # Content, GPUI and Engine remain enforced by the Diff budget.
             sites[lint].add((span["file_name"], span["line_start"], span["column_start"]))
     return {lint: len(found) for lint, found in sites.items()}
 
 def main() -> int:
-    reader = "--reader" in sys.argv
-    reader_tui = "--reader-tui" in sys.argv
-    suffix = "-reader-tui" if reader_tui else "-reader" if reader else ""
+    code = "--code" in sys.argv
+    code_tui = "--code-tui" in sys.argv
+    suffix = "-code-tui" if code_tui else "-code" if code else ""
     baseline_path = BASELINE.with_name(f"panic-sites{suffix}.txt")
-    counts = current(reader, reader_tui)
+    counts = current(code, code_tui)
     if "--update" in sys.argv:
         baseline_path.write_text("".join(f"{lint} {n}\n" for lint, n in counts.items()))
         print(f"wrote {baseline_path}")

@@ -174,12 +174,18 @@ class PerformanceTools(unittest.TestCase):
 
     def test_timeout_kills_owned_descendants(self):
         s = self.support()
+        import time
+        from unittest.mock import patch
         with tempfile.TemporaryDirectory() as tmp:
             marker = Path(tmp)/'leaked-child'
             child = 'import time; from pathlib import Path; time.sleep(.7); Path('+repr(str(marker))+').write_text("leaked")'
             parent = 'import subprocess,sys,time; subprocess.Popen([sys.executable,"-c",'+repr(child)+']); time.sleep(20)'
-            result = s.run([sys.executable,'-c',parent],Path(tmp)/'log',os.environ.copy(),.2)
-            import time
+            original = s.owned_descendants
+            def slow_snapshot(pid):
+                time.sleep(.6)  # A busy /proc must not let timed-out workers continue while ownership is read.
+                return original(pid)
+            with patch.object(s, 'owned_descendants', side_effect=slow_snapshot):
+                result = s.run([sys.executable,'-c',parent],Path(tmp)/'log',os.environ.copy(),.2)
             time.sleep(.8)
             self.assertEqual(result['status'],'timeout')
             self.assertFalse(marker.exists(), 'a timed-out case left a running child')

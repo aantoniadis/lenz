@@ -2,13 +2,13 @@
 """Reader launch and memory acceptance: on Linux an owned private Xvfb display (never the user's desktop); with
 `--native` (macOS) real windows on the Mac's display, memory as physical footprint with resident size beside it.
 
-Needs a release `lenz-reader` built with `--features perf-probe` (benchmark markers on stderr), Xvfb and a CPU
+Needs a release `lenz-code` built with `--features perf-probe` (benchmark markers on stderr), Xvfb and a CPU
 Vulkan driver (Mesa lavapipe: `lvp_icd.json`). Every launch opens the file under the corpus as its root, with its own
 XDG config/state; "warm" reuses one reader cache folder across launches, "fresh" gives each launch an empty one. Mesa's
 shader cache is one warmed folder for both (it is the renderer's, not the reader's). Output: JSON samples and a
 summary.
 
-  scripts/code-launch-bench.py --binary target/release/lenz-reader --file <file> --corpus <dir> --out <dir>
+  scripts/code-launch-bench.py --binary target/release/lenz-code --file <file> --corpus <dir> --out <dir>
 """
 import argparse
 import ctypes
@@ -24,7 +24,7 @@ import subprocess
 import tempfile
 import time
 
-ICD = '/usr/share/vulkan/icd.d/lvp_icd.json'
+ICD = os.environ.get('VK_ICD_FILENAMES', '/usr/share/vulkan/icd.d/lvp_icd.json')
 
 
 class _RusageInfoV4(ctypes.Structure):
@@ -90,7 +90,7 @@ def wait_for(proc, marker, limit=30):
             seen += os.read(proc.stderr.fileno(), 65536).decode(errors='replace')
         except BlockingIOError:
             pass
-        m = re.search(rf'lenz-reader: {marker} ([\d.]+) ms', seen)
+        m = re.search(rf'lenz-(?:code|reader): {marker} ([\d.]+) ms', seen)
         if m:
             return (time.monotonic() - started) * 1000, float(m[1]), seen
         if proc.poll() is not None:

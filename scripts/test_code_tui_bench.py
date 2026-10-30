@@ -12,12 +12,15 @@ bench = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(bench)
 
 CHILD = r'''
-import os, sys, termios, tty
+import os, sys, termios, tty, time
 saved = termios.tcgetattr(0)
 tty.setraw(0)
 try:
     os.write(1, b'\x1b[?1049hREADY')
     if sys.argv[1] == 'error': raise ValueError('fixture error')
+    if sys.argv[1] == 'late':
+        time.sleep(.4)
+        os.write(1, b'MARKERS_READY')
     while os.read(0, 1) != b'q': pass
 finally:
     termios.tcsetattr(0, termios.TCSANOW, saved)
@@ -39,6 +42,19 @@ class CollectorTests(unittest.TestCase):
                 result = bench.identity(Path(sys.executable))
             self.assertEqual(len(result['source_sha256']), 64)
 
+    def test_isolated_environment_preserves_home(self):
+        with patch.dict(bench.os.environ, {'HOME': '/owned-user-home'}):
+            env = bench.isolated_environment(Path('/private-fixture'))
+            self.assertNotIn('HOME', env)
+            self.assertEqual(dict(bench.os.environ, **env)['HOME'], '/owned-user-home')
+            self.assertEqual(env['XDG_CONFIG_HOME'], '/private-fixture/config')
+
+    def test_palette_is_dismissed_before_reader_quit(self):
+        from unittest.mock import Mock, call
+        probe = Mock()
+        bench.finish_from_palette(probe)
+        self.assertEqual(probe.mock_calls, [call.send(b'\x1b'), call.quiet(), call.finish()])
+
     def probe(self, mode='ok'):
         p = bench.TerminalProbe([sys.executable, '-c', CHILD, mode], Path(tempfile.gettempdir()))
         self.addCleanup(p.close)
@@ -50,6 +66,15 @@ class CollectorTests(unittest.TestCase):
         p.finish(b'q')
         self.assertTrue(p.restored)
         self.assertIn(b'\x1b[?1049l', p.output)
+
+    def test_idle_preparation_accounts_for_late_background_output(self):
+        p = self.probe('late')
+        result = bench.prepare_idle(p)
+        self.assertIn(b'MARKERS_READY', p.output)
+        self.assertEqual(result['idle_settle_output_bytes'], len(b'MARKERS_READY'))
+        self.assertGreaterEqual(result['idle_settle_seconds'], 1)
+        self.assertEqual(p.read(.1), b'')
+        p.finish(b'q')
 
     def test_error_exit_still_checks_terminal_restoration(self):
         p = self.probe('error')

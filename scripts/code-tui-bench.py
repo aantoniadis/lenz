@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Owned-PTY reader correctness/performance probe. Latency ends at PTY bytes, not displayed pixels.
 
-  scripts/code-tui-bench.py --binary target/release/lenz-reader-tui --out target/perf/code-tui --lines 100000 --rounds 30 --stress-seconds 10
+  scripts/code-tui-bench.py --binary target/release/lenz-code-tui --out perf-results/code-tui --lines 100000 --rounds 30 --stress-seconds 10
 
-Uses disposable documents and isolated HOME/XDG/provider state. Linux reads /proc; macOS samples ps RSS,
+Uses disposable documents and private XDG/provider state; HOME is inherited. Linux reads /proc; macOS samples ps RSS,
 not physical footprint. Sampled RSS and the process high-water mark do not measure GPU memory or prove no leak.
 """
 import argparse
@@ -294,6 +294,15 @@ def identity(binary):
                 rss_semantics='Linux VmRSS/VmHWM' if sys.platform.startswith('linux') else 'ps resident size; peak is sampled RSS')
 
 
+def prepare_idle(probe):
+    started = time.monotonic()
+    before = len(probe.output)
+    # Reload can still be computing a change-marker baseline after its content frame. Record that work before
+    # measuring idle: one full second without output, bounded by quiet()'s existing five-second deadline.
+    probe.quiet(1)
+    return dict(idle_settle_seconds=time.monotonic() - started, idle_settle_output_bytes=len(probe.output) - before)
+
+
 def exercise(probe, fixture, original, args):
     metrics = {}
     checks = []
@@ -355,7 +364,7 @@ def exercise(probe, fixture, original, args):
     probe.send(b'\x1b[15~')
     probe.expect('READER_RELOADED_000')
     checks.append('reload exposes external file change')
-    probe.quiet(.25)
+    metrics.update(prepare_idle(probe))
     baseline = probe.sample()
     before_bytes = len(probe.output)
     idle_started = time.monotonic()
@@ -396,12 +405,25 @@ def exercise(probe, fixture, original, args):
     if fixture.read_bytes() != updated:
         raise RuntimeError('reader changed fixture bytes after reload/stress')
     checks.append('file bytes preserved before and after intentional external modification')
-    # Ctrl-Q remains global even while a modal owns input.
+    # Dismiss the palette before requesting reader closure (modal-first since ticket14).
     probe.send(b'\x1b[21~')
     probe.expect('Commands')
-    probe.finish()
-    checks.append('Ctrl-Q through modal restores alternate screen and observable termios')
+    finish_from_palette(probe)
+    checks.append('Escape dismisses palette; Ctrl-Q restores alternate screen and observable termios')
     return metrics, checks
+
+
+def isolated_environment(root):
+    # TerminalProbe inherits HOME; isolate application files through XDG only.
+    return dict(XDG_CONFIG_HOME=str(root / 'config'), XDG_STATE_HOME=str(root / 'state'),
+                XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'), PATH='/nonexistent',
+                LENZ_THEME='darcula', LENZ_APPEARANCE='', LENZ_CODE_THEME='', LENZ_CODE_APPEARANCE='', LENZ_READER_THEME='', LENZ_READER_APPEARANCE='', NO_COLOR='')
+
+
+def finish_from_palette(probe):
+    probe.send(b'\x1b')
+    probe.quiet()
+    probe.finish()
 
 
 def main():
@@ -411,27 +433,29 @@ def main():
     parser.add_argument('--lines', type=int, default=100000)
     parser.add_argument('--rounds', type=int, default=30)
     parser.add_argument('--stress-seconds', type=float, default=10)
+    parser.add_argument('--source', help='Commit that built --binary; recorded as a claim alongside the collector tree identity')
     args = parser.parse_args()
     if args.lines < 2 or args.rounds < 1 or args.stress_seconds <= 0:
         parser.error('lines must be >= 2; rounds and stress-seconds must be positive')
     binary = args.binary.resolve(strict=True)
     args.out.mkdir(parents=True, exist_ok=False)
-    result = dict(schema=2, identity=identity(binary), configuration=dict(lines=args.lines, rounds=args.rounds, requested_stress_seconds=args.stress_seconds),
+    result = dict(schema=4, exit_policy='escape-palette-then-ctrl-q', environment_revision='inherited-home-private-xdg-v2', identity=identity(binary), executable_source_claim=args.source,
+                  idle_semantics='one second of consecutive output quiescence (five-second bound), recorded separately before the strict half-second idle interval',
+                  configuration=dict(lines=args.lines, rounds=args.rounds, requested_stress_seconds=args.stress_seconds),
                   latency_semantics='first PTY bytes observed after input/resize; not physical display latency', status='failed')
     probe = None
     try:
-        with tempfile.TemporaryDirectory(prefix='reader-tui-bench-') as directory:
+        with tempfile.TemporaryDirectory(prefix='code-tui-bench-') as directory:
             root = Path(directory)
             fixture = root / 'fixture' / 'reader.txt'
             fixture.parent.mkdir()
             original = ''.join(f'READER_LINE_{i:06d} plain reader fixture {i}\n' for i in range(args.lines)).encode()
             fixture.write_bytes(original)
+            # The folder name both builds read: 0.0.6 uses it as is and later builds move it to lenz-code.
             config = root / 'config' / 'lenz-reader'
             config.mkdir(parents=True)
             (config / 'providers.json').write_text('{"providers": {}}\n')
-            env = dict(HOME=str(root / 'home'), XDG_CONFIG_HOME=str(root / 'config'), XDG_STATE_HOME=str(root / 'state'),
-                       XDG_CACHE_HOME=str(root / 'cache'), XDG_DATA_HOME=str(root / 'data'), PATH='/nonexistent',
-                       LENZ_THEME='darcula', LENZ_APPEARANCE='', LENZ_READER_THEME='', LENZ_READER_APPEARANCE='', NO_COLOR='')
+            env = isolated_environment(root)
             result['fixture'] = dict(original_sha256=sha(fixture), bytes=len(original), lines=args.lines, name=fixture.name, xdg_isolated=True,
                                      providers='plain text document; isolated providers.json; PATH=/nonexistent')
             probe = TerminalProbe([str(binary), str(fixture)], fixture.parent, env)

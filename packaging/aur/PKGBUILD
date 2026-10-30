@@ -2,7 +2,7 @@
 pkgname=lenz-bin
 pkgver=0.0.6
 pkgrel=1
-pkgdesc="Code reader, diff viewer, Git client and merge tool with GUI and terminal frontends"
+pkgdesc="Code editor, diff viewer, Git client and merge tool with GUI and terminal frontends"
 arch=('x86_64' 'aarch64')
 url="https://github.com/aantoniadis/lenz"
 license=('MIT' 'Apache-2.0')
