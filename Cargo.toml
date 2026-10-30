@@ -4,7 +4,7 @@ members = ["crates/engine", "crates/content", "crates/gpui", "crates/app", "crat
 
 [workspace.package]
 edition = "2024"
-version = "0.0.7"
+version = "0.0.8"
 publish = false
 
 # Lints that have no hits today stay at zero. Panic-prone patterns that do have hits are held to a baseline
