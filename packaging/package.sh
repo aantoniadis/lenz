@@ -27,7 +27,8 @@ if [[ $target == *-apple-darwin && -z ${CARGO_TARGET_DIR:-} ]]; then
 fi
 # glibc before 2.38 has no strlcpy, which the PostgreSQL parser's C library expects (see packaging/glibc-strlcpy.h);
 # only that library's make reads CPPFLAGS.
-glibc=$(getconf GNU_LIBC_VERSION 2> /dev/null | sed -n 's/^glibc 2\.\([0-9]*\).*/\1/p')
+# (macOS has no GNU_LIBC_VERSION: getconf fails there, which pipefail would make fatal)
+glibc=$( (getconf GNU_LIBC_VERSION 2> /dev/null || true) | sed -n 's/^glibc 2\.\([0-9]*\).*/\1/p')
 if [[ -n $glibc && $glibc -lt 38 ]]; then
     export CPPFLAGS="${CPPFLAGS:+$CPPFLAGS }-include $PWD/packaging/glibc-strlcpy.h"
 fi
