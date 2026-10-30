@@ -48,6 +48,8 @@ pub struct ComparisonSession {
     pub(crate) banner: Option<String>,
     /// Collapsed folders and the Folder Summary of the File Navigator.
     pub folders: crate::folders::Folders,
+    /// The comparison set has no files (an empty window, a selection without changes): nothing is loading.
+    pub(crate) empty: bool,
 }
 
 impl ComparisonSession {
@@ -55,7 +57,7 @@ impl ComparisonSession {
         Self { current: 0, view, options, collapse: true, press_again: PressAgain::default(), find: None, find_options: Default::default(),
             generation: 0, work_id: Arc::new(()), diffed: 0, refining: false, budget: Budget::default(),
             #[cfg(feature="gui")]
-            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None, folders: Default::default() }
+            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None, folders: Default::default(), empty: false }
     }
     /// The change blocks to refine next: near the viewport in Source; in the Markdown Preview every change, a
     /// batch at a time, since its word outlines show anywhere in the document.
@@ -134,8 +136,11 @@ impl ComparisonSession {
     }
     pub fn edit_disabled(&self, edits: &crate::edit_session::EditSession, doc: Option<&TextDocument>, command: crate::edit_session::EditMenuCommand) -> Option<String> {
         if !matches!(command,crate::edit_session::EditMenuCommand::History|crate::edit_session::EditMenuCommand::Save|crate::edit_session::EditMenuCommand::Discard) && let Some(reason) = self.edit_blocked() { return Some(reason.into()); }
+        if doc.is_none() { return Some(self.absent().into()); }
         edits.disabled(self.current, doc, &self.view, command)
     }
+    /// Why there's no document: none to load, or not loaded yet.
+    pub fn absent(&self) -> &'static str { if self.empty { commands::NOTHING_OPEN } else { "Comparison loading" } }
     pub fn undo_file(&self, edits: &mut crate::edit_session::EditSession, set: &crate::changeset::ChangeSet, index: usize) -> Result<crate::edit_session::Written, crate::edit_session::EditError> {
         if let Some(reason) = self.edit_blocked() { return Err(crate::edit_session::EditError::Unavailable(reason.into())); }
         edits.undo_file(set, index)
@@ -240,7 +245,7 @@ impl ComparisonSession {
         match mode {
             crate::markdown::PresentationMode::Source => None,
             crate::markdown::PresentationMode::Rendered => match doc {
-                None => Some("Comparison loading"),
+                None => Some(self.absent()),
                 Some(doc) if !crate::markdown::eligible(doc) => Some("Not a Markdown comparison"),
                 Some(_) => None,
             },

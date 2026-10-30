@@ -65,6 +65,8 @@ pub struct Picker {
     pub want: Option<String>,
     /// Which branches the log walks.
     pub branches: Branches,
+    /// The CLI's path scope, kept across streamed refreshes and applied to picked comparisons.
+    pub paths: Vec<String>,
     /// How many sidebar rows fit, as last painted.
     pub sources_visible_rows: f32,
     /// Pick the wanted commit's Change Set once it arrives.
@@ -565,6 +567,7 @@ impl Picker {
             pick_generation: 0,
             want: None,
             branches: Branches::All,
+            paths: Vec::new(),
             sources_visible_rows: 20.0,
             pick_on_want: false,
             filter: String::new(),
@@ -613,6 +616,13 @@ impl Picker {
             .matches
             .as_ref()
             .map_or(self.log.len(), |m| m.len() as u32)
+    }
+
+    /// Human-readable scope shared by both history headers; Git's literal-path marker is not a filename.
+    pub fn history_path_label(&self) -> Option<String> {
+        let name = |path: &str| path.strip_prefix(":(literal)").unwrap_or(path).to_string();
+        if let Some((path, _)) = &self.file_paths { return Some(path.clone()); }
+        (!self.paths.is_empty()).then(|| self.paths.iter().map(|path| name(path)).collect::<Vec<_>>().join(", "))
     }
 
     /// Bounded search of the visible history, including rows arriving from the stream.
@@ -726,10 +736,10 @@ impl Picker {
                 .or(self.log_row(self.anchor)),
         ) {
             (Some((current, versions)), Some(row)) => {
-                vec![versions.get(&self.log.id(row)).unwrap_or(current).clone()]
+                vec![history::file_pathspec(versions.get(&self.log.id(row)).unwrap_or(current))]
             }
-            (Some((current, _)), None) => vec![current.clone()],
-            _ => Vec::new(),
+            (Some((current, _)), None) => vec![history::file_pathspec(current)],
+            _ => self.paths.clone(),
         };
         Ok(Spec::Git {
             cached: false,
@@ -765,7 +775,7 @@ impl Picker {
     pub fn start_stream(&mut self) {
         self.started = Some(std::time::Instant::now());
         self.paused = false;
-        match history::stream_limited(&self.root, &self.branches, self.demand(0.0)) {
+        match history::stream_limited_paths(&self.root, &self.branches, self.demand(0.0), &self.paths) {
             Ok(stream) => {
                 self.stream = Some(stream);
                 self.loading = true;
@@ -1310,8 +1320,23 @@ pub fn initial_repository_comparison(root:&Path)->Result<(ChangeSet,Spec,Option<
 pub fn initial_log_branches(spec:&Spec)->Branches{
     match spec{Spec::Git{revs,..}=>revs.last().map_or(Branches::All,|revision|Branches::One(revision.clone())),_=>Branches::All}
 }
+pub fn log_paths(spec:&Spec)->Vec<String>{match spec{Spec::Git{paths,..}=>paths.clone(),_=>Vec::new()}}
 /// Local changes take precedence; a clean log starts at the requested revision's pinned tip.
 pub fn initial_log_comparison(root:&Path,requested:&Spec)->Result<(ChangeSet,Spec,Option<String>),String>{
+    if let Spec::Git{paths,..}=requested && !paths.is_empty(){
+        let mut local=local_spec();
+        if let Spec::Git{paths:scope,..}=&mut local{*scope=paths.clone();}
+        let set=repo::local_changes_paths(root,false,paths)?;
+        if !set.comparisons.is_empty(){return Ok((set,local,None));}
+        let head=match history::latest_path_commit(root,&initial_log_branches(requested),paths){
+            Err(_) if matches!(requested,Spec::Git{revs,..} if revs.is_empty()) && crate::git::run(root,&["rev-parse","--verify","HEAD^{commit}"]).is_err()=>None,
+            result=>result?,
+        };
+        let Some(head)=head else{return Ok((set,local,None));};
+        let base=crate::blame::parent_or_empty_tree(root,&head)?;
+        let spec=Spec::Git{cached:false,revs:vec![base,head.clone()],paths:paths.clone(),untracked:false};
+        return Ok((ChangeSet::load(&spec,root)?,spec,Some(head)));
+    }
     let local=repo::local_changes(root,false)?;
     if !local.comparisons.is_empty(){return Ok((local,local_spec(),None));}
     let revision=match requested{Spec::Git{revs,..}=>revs.last().map_or("HEAD",String::as_str),_=>"HEAD"};
@@ -1337,7 +1362,8 @@ pub fn read_refresh_comparison(root:&Path,mut spec:Spec,selected_commit:Option<&
             branch_comparison(&crate::blame::parent_or_empty_tree(root,commit)?,commit,false)
         }else{local_spec()};
     }
-    let set=if spec==local_spec(){repo::local_changes(root,false)?}
+    let set=if let Spec::Git{cached:false,revs,paths,untracked:true}=&spec
+        && (revs.is_empty()||revs==&["HEAD"]){repo::local_changes_paths(root,false,paths)?}
         else if let Spec::Git{cached:false,revs,paths,..}=&spec
             && stash&&paths.is_empty()&&revs.len()==2&&revs[0]==format!("{}^1",revs[1]){
             repo::stash_changes(root,&revs[1])?
@@ -1427,7 +1453,8 @@ impl RepositorySession {
             _ => None,
         };
         let branches = matches!(request.launch, Launch::Log { .. }).then(|| initial_log_branches(&request.spec));
-        let mut state = Self::start(cwd, !matches!(request.launch, Launch::Diff), branches, follow);
+        let paths = if matches!(request.launch, Launch::Log { follow: None }) { log_paths(&request.spec) } else { Vec::new() };
+        let mut state = Self::start(cwd, !matches!(request.launch, Launch::Diff), branches, follow, paths);
         if let Launch::Pr(target) = &request.launch {
             state.execute(RepositoryCommand::OpenPr(target.clone()));
         } else if state.picker.shown {
@@ -1443,8 +1470,9 @@ impl RepositorySession {
     }
 
     /// The picker for `cwd` and, when it is shown, the sidebar inventory in the background.
-    fn start(cwd: PathBuf, shown: bool, branches: Option<Branches>, follow: Option<String>) -> Self {
+    fn start(cwd: PathBuf, shown: bool, branches: Option<Branches>, follow: Option<String>, paths: Vec<String>) -> Self {
         let mut picker = Picker::new(cwd.clone(), shown);
+        picker.paths = paths;
         if let Some(branches) = branches {
             picker.branches = branches;
         }
@@ -1572,7 +1600,11 @@ impl RepositorySession {
     }
 
     pub fn open_loaded(root: PathBuf, shown: bool, branches: Option<Branches>, follow: Option<String>, set: std::sync::Arc<ChangeSet>, spec: Spec) -> Self {
-        let mut state = Self::start(root, shown, branches, follow);
+        Self::open_loaded_with_paths(root, shown, branches, follow, Vec::new(), set, spec)
+    }
+
+    pub(crate) fn open_loaded_with_paths(root: PathBuf, shown: bool, branches: Option<Branches>, follow: Option<String>, paths: Vec<String>, set: std::sync::Arc<ChangeSet>, spec: Spec) -> Self {
+        let mut state = Self::start(root, shown, branches, follow, paths);
         if shown {
             state.stream_first();
         }
@@ -1985,8 +2017,10 @@ impl RepositorySession {
         self.pending_refresh = false;
         self.new_pick();
         let root = self.picker.root.clone();
+        let mut spec = local_spec();
+        if let Spec::Git { paths, .. } = &mut spec { *paths = self.picker.paths.clone(); }
         self.pending = Some(submit(&self.pick_token, move || {
-            repo::local_changes(&root, false).map(|set| (set, local_spec()))
+            read_refresh_comparison(&root, spec, None, false)
         }));
     }
     fn pick(&mut self) {
@@ -3123,6 +3157,68 @@ mod session_tests {
             let Spec::Git{revs,paths,..}=spec else{panic!()};assert_eq!(revs.last(),Some(&first));assert_eq!(paths,["followed"]);
             assert_eq!(set.comparisons.len(),1);assert_eq!(set.comparisons[0].path,PathBuf::from("followed"));
         }
+    }
+    #[test]
+    fn initial_directory_log_uses_literal_paths_and_keeps_its_scope_after_refresh(){
+        let root=repo();write(root.path(),"project space/dir[one]/a.txt","one\n");commit_all(root.path(),"Inside");
+        let inside=git(root.path(),&["rev-parse","HEAD"]).trim().to_string();
+        write(root.path(),"project space/dirone/decoy.txt","decoy\n");commit_all(root.path(),"Decoy");
+        write(root.path(),"outside.txt","outside\n");commit_all(root.path(),"Outside");
+        let path=":(literal)project space/dir[one]";
+        let request=crate::cli::parse(&["log".into(),"--".into(),path.into()],root.path()).unwrap();
+        for loaded_gui in [false,true]{
+            let mut state=if loaded_gui{
+                let(set,spec,_)=initial_log_comparison(root.path(),&request.spec).unwrap();
+                RepositorySession::open_loaded_with_paths(root.path().into(),true,Some(initial_log_branches(&request.spec)),None,log_paths(&request.spec),std::sync::Arc::new(set),spec)
+            }else{RepositorySession::open(&request,root.path().into())};
+            settle(&mut state);
+            assert_eq!(state.picker.log.len(),1,"the directory log excludes siblings and files outside it");
+            assert_eq!(state.picker.history_path_label().as_deref(),Some("project space/dir[one]"));
+            let Spec::Git{revs,paths,..}=state.current_spec.as_ref().unwrap() else{panic!()};assert_eq!(revs.last(),Some(&inside));assert_eq!(paths,&[path]);
+            let set=state.set.as_ref().unwrap();assert_eq!(set.comparisons.len(),1);assert_eq!(set.comparisons[0].path,PathBuf::from("project space/dir[one]/a.txt"));
+            write(root.path(),"outside.txt","changed outside\n");
+            state.execute(RepositoryCommand::RefreshRepository);settle(&mut state);
+            assert_eq!(state.picker.log.len(),1);
+            state.execute(RepositoryCommand::SelectRow{row:1,extend:false,two:false});settle(&mut state);
+            assert!(matches!(state.current_spec.as_ref().unwrap(),Spec::Git{paths,..} if paths==&[path]));
+        }
+    }
+    #[test]
+    fn initial_literal_file_history_follows_renames_without_matching_other_files(){
+        let root=repo();write(root.path(),"old name.txt","one\n");commit_all(root.path(),"Original");
+        let original=git(root.path(),&["rev-parse","HEAD"]).trim().to_string();
+        git(root.path(),&["mv","--","old name.txt",":(glob)*.txt"]);commit_all(root.path(),"Rename");
+        let renamed=git(root.path(),&["rev-parse","HEAD"]).trim().to_string();
+        write(root.path(),"other.txt","other\n");commit_all(root.path(),"Other");
+        let request=crate::cli::parse(&["log".into(),"--follow".into(),":(glob)*.txt".into()],root.path()).unwrap();
+        let mut state=RepositorySession::open(&request,root.path().into());settle(&mut state);
+        let versions=&state.picker.file_paths.as_ref().unwrap().1;
+        assert_eq!(versions.len(),2);assert_eq!(versions[&original],"old name.txt");assert_eq!(versions[&renamed],":(glob)*.txt");
+        assert_eq!(state.picker.history_path_label().as_deref(),Some(":(glob)*.txt"));
+        assert_eq!(state.picker.log.id(state.picker.log_row(state.picker.anchor).unwrap()),renamed);
+        let(set,spec)=state.take_change_set().unwrap();assert_eq!(set.comparisons.len(),1);assert_eq!(set.comparisons[0].path,":(glob)*.txt");
+        assert!(matches!(spec,Spec::Git{paths,..} if paths==[":(literal):(glob)*.txt"]));
+    }
+    #[test]
+    fn initial_directory_log_scopes_staged_and_untracked_changes_and_allows_empty_history(){
+        let root=repo();std::fs::create_dir(root.path().join("empty")).unwrap();
+        let empty=crate::cli::parse(&["log".into(),"--".into(),":(literal)empty".into()],root.path()).unwrap();
+        let(set,_,selected)=initial_log_comparison(root.path(),&empty.spec).unwrap();assert!(set.comparisons.is_empty()&&selected.is_none());
+        write(root.path(),"dir space/staged","base\n");commit_all(root.path(),"Base");
+        write(root.path(),"dir space/staged","staged\n");git(root.path(),&["add","dir space/staged"]);
+        write(root.path(),"dir space/staged","base\n");
+        write(root.path(),"dir space/untracked","untracked\n");write(root.path(),"outside","outside\n");
+        let request=crate::cli::parse(&["log".into(),"--".into(),":(literal)dir space".into()],root.path()).unwrap();
+        let(set,spec,selected)=initial_log_comparison(root.path(),&request.spec).unwrap();
+        assert!(selected.is_none());assert_eq!(set.comparisons.len(),3);assert!(set.comparisons.iter().all(|c|c.path.starts_with("dir space/")));
+        assert!(matches!(&spec,Spec::Git{paths,..} if paths==&[":(literal)dir space"]));
+        let(refreshed,refreshed_spec)=read_refresh_comparison(root.path(),spec.clone(),None,false).unwrap();
+        assert_eq!(refreshed_spec,spec);assert_eq!(refreshed.comparisons.len(),3);assert_eq!(refreshed.groups,set.groups,"refresh preserves staged and unstaged changes even when they cancel against HEAD");
+        let mut picker=Picker::new(root.path().into(),true);picker.paths=log_paths(&request.spec);
+        let mut state=RepositorySession::with_picker(picker);state.showing(std::sync::Arc::new(set.clone()),spec.clone());
+        state.execute(RepositoryCommand::Source(SourceAction::Local));settle(&mut state);
+        let(local,local_spec)=state.take_change_set().unwrap();assert_eq!(local_spec,spec);assert_eq!(local.groups,set.groups);
+        assert_eq!(local.comparisons.len(),3);assert!(local.comparisons.iter().all(|c|c.path.starts_with("dir space/")),"sidebar Local retains the history window's scope");
     }
     #[test]
     fn a_commit_opens_on_its_own_and_compares_with_each_branch(){

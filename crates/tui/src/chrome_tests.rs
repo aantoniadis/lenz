@@ -392,7 +392,12 @@ fn standalone_about_opens_outside_git_and_closes_to_an_empty_view(){
     assert!(text(&draw(&mut app,100,30)).contains("MIT; engine Apache-2.0"));
     key(&mut app,KeyCode::Esc);assert!(app.about.is_none());
     assert!(!app.failed());assert!(app.session.comparisons().is_empty());
-    assert!(!text(&draw(&mut app,100,30)).contains("About Lenz"));
+    let empty=text(&draw(&mut app,100,30));
+    assert!(!empty.contains("About Lenz")&&!empty.contains("Side by side")&&empty.contains(lenz::commands::NOTHING_OPEN),"{empty}");
+    // nothing is loading: commands say there's no comparison
+    let loading:Vec<_>=lenz::catalog::entries(&lenz::catalog::Scope::comparison()).into_iter().filter(|e|lenz::catalog::Availability::disabled(&app,e.action).is_some_and(|r|r.to_lowercase().contains("loading"))).map(|e|e.label).collect();
+    assert!(loading.is_empty(),"{loading:?}");
+    assert_eq!(lenz::catalog::Availability::disabled(&app,lenz::catalog::Action::Interaction(lenz::commands::Interaction::Reload)).as_deref(),Some(lenz::commands::NOTHING_OPEN));
 }
 
 fn discard_app()->(tempfile::TempDir,App){
@@ -413,7 +418,9 @@ fn tui_file_right_click_discard_is_modal_preserves_index_and_undo_survives_refre
     key(&mut app,KeyCode::Esc);assert!(app.session.file_actions().confirmation().is_none());
     file_context(&mut app,FileAction::Discard);key(&mut app,KeyCode::Enter);action_ready(&mut app);ready(&mut app);
     assert_eq!(std::fs::read(&path).unwrap(),b"indexed\r\n");assert_eq!(lenz::git::run(dir.path(),&["show",":file.txt"]).unwrap(),b"indexed\r\n");assert_eq!(app.session.comparisons().len(),1);
+    assert_eq!(app.session.notice(),Some("Discarded changes to file.txt — Undo Git discard restores them"));
     file_context(&mut app,FileAction::UndoDiscard);ready(&mut app);assert_eq!(std::fs::read(&path).unwrap(),b"working\n");
+    assert_eq!(app.session.notice(),Some("Restored file.txt as it was before Discard"));
 }
 #[test]
 fn tui_text_context_preserves_selection_and_never_leaks_menu_navigation(){
@@ -1039,7 +1046,7 @@ fn markdown_tui_actual_empty_constructor_lists_all_commands_and_stays_source() {
     let dir=tempfile::tempdir().unwrap();let req=lenz::cli::parse(&["--about".into()],dir.path()).unwrap();let mut app=App::open(req,dir.path().into());ready(&mut app);key(&mut app,KeyCode::Esc);draw(&mut app,32,12);key(&mut app,KeyCode::Char(':'));
     let rows=app.command_palette.as_ref().unwrap().rows().map(|r|r.entry.action).collect::<Vec<_>>();
     for command in lenz::commands::ALL.iter().filter(|c|!matches!(c,lenz::commands::Command::CycleScroll|lenz::commands::Command::CycleWhitespace|lenz::commands::Command::CycleHighlight)) {assert!(rows.contains(&lenz::catalog::Action::Comparison(*command)),"{command:?}");}
-    assert_eq!(app.session.disabled(lenz::commands::Command::SetPresentation(lenz::markdown::PresentationMode::Rendered)),Some("Comparison loading"));
+    assert_eq!(app.session.disabled(lenz::commands::Command::SetPresentation(lenz::markdown::PresentationMode::Rendered)),Some(lenz::commands::NOTHING_OPEN));
     key(&mut app,KeyCode::Esc);modified_key(&mut app,KeyCode::Char('z'),KeyModifiers::CONTROL);key(&mut app,KeyCode::F(5));ready(&mut app);draw(&mut app,1,1);
     assert!(app.session.document().is_none()&&!app.session.markdown_loading()&&app.session.markdown_projection().is_none());
 }
@@ -1122,6 +1129,9 @@ fn pending_edits_toolbar_save_discard_and_quit_guard_use_actual_keys_and_disk() 
     draw(&mut app,240,36);assert!(!toolbar_row(&mut app,240).contains("⤓"));
     assert!(app.session.edit_disabled(Edit::Revert).is_some());modified_key(&mut app,KeyCode::Right,KeyModifiers::ALT|KeyModifiers::SHIFT);ready(&mut app);assert!(app.session.dirty());assert_eq!(app.session.document().unwrap().text(lenz::view::Side::Right),"old text\n");assert_eq!(std::fs::read_to_string(&path).unwrap(),"new text\n");
     modified_key(&mut app,KeyCode::Char('q'),KeyModifiers::CONTROL);assert!(!app.quit);assert!(app.session.notice().unwrap().contains("Unsaved changes"));assert_eq!(std::fs::read_to_string(&path).unwrap(),"new text\n");
+    // another key cancels; quitting twice in a row closes without saving
+    key(&mut app,KeyCode::Down);modified_key(&mut app,KeyCode::Char('q'),KeyModifiers::CONTROL);assert!(!app.quit);assert_eq!(app.session.notice(),Some(lenz::edit_session::QUIT_QUESTION));
+    modified_key(&mut app,KeyCode::Char('q'),KeyModifiers::CONTROL);assert!(app.quit);assert!(app.session.dirty());assert_eq!(std::fs::read_to_string(&path).unwrap(),"new text\n");app.quit=false;
     key(&mut app,KeyCode::Char(':'));typed(&mut app,"discard unsaved");let painted=draw(&mut app,240,36);click(&mut app,locate(&painted,"  Discard unsaved"));ready(&mut app);assert!(!app.session.dirty());assert_eq!(app.session.document().unwrap().text(lenz::view::Side::Right),"new text\n");assert_eq!(std::fs::read_to_string(&path).unwrap(),"new text\n");
     app.edit_menu(Edit::ApplyRight);ready(&mut app);assert!(app.session.dirty());modified_key(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);ready(&mut app);assert!(!app.session.dirty());assert_eq!(std::fs::read_to_string(&path).unwrap(),"old text\n");
     modified_key(&mut app,KeyCode::Char('z'),KeyModifiers::CONTROL);ready(&mut app);assert!(app.session.dirty());assert_eq!(std::fs::read_to_string(&path).unwrap(),"old text\n");modified_key(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);ready(&mut app);assert_eq!(std::fs::read_to_string(&path).unwrap(),"new text\n");
@@ -1408,6 +1418,8 @@ fn tui_toolbar_is_lean_and_its_menus_come_from_the_catalog() {
     // narrower: everything still fits, so no ⋯; it comes back when buttons have to fold (see the narrow-toolbar test)
     let narrow = text(&draw(&mut app, 50, 20));
     assert!(!narrow.contains("⋯") && narrow.contains("☰") && narrow.contains("?"));
+    // previous/next file stay on a narrow bar, and fold into ⋯ only when they don't fit
+    assert!(narrow.contains("←") && narrow.contains("→"), "{narrow}");
 }
 
 fn alt(app: &mut App, c: char) { assert!(app.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::ALT)))); }
@@ -2342,4 +2354,28 @@ fn the_bottom_bar_spans_the_window_under_the_files_panel() {
     let bar = [app.palette.status_bg, app.palette.selected_bg].map(crate::chrome::color);
     assert!((0..w).all(|x| bar.contains(&screen[(x, h - 1)].bg)), "one bar across the window (the shown panel's switch selected)");
     assert!(row(h - 2).starts_with('╰'), "the Files panel ends above the bar: {:?}", row(h - 2));
+}
+
+#[test]
+fn the_header_names_what_a_command_line_comparison_compares(){
+    let (_dir,mut app)=pair("old\n","new\n");ready(&mut app);
+    let header=text(&draw(&mut app,100,20));assert!(header.contains(" left.txt ⟷ right.txt  1/1"),"{header}");
+}
+
+#[test]
+fn several_views_are_named_in_the_footer_without_covering_its_keys(){
+    let (_dir,mut app)=pair("old\n","new\n");ready(&mut app);
+    app.views=Some("view 2/2 · F8/Shift-F8 switch · Ctrl-Q close view".into());
+    let screen=text(&draw(&mut app,200,20)).chars().collect::<Vec<_>>();
+    let footer=screen.chunks(200).last().unwrap().iter().collect::<String>();
+    assert!(footer.contains("Files")&&footer.contains("view 2/2 · F8/Shift-F8 switch · Ctrl-Q close view · n/p changes")&&footer.trim_end().ends_with("q quit"),"{footer:?}");
+}
+
+#[test]
+fn a_multiline_paste_into_find_keeps_its_lines_apart(){
+    let (_dir,mut app)=pair("old\n","new\n");ready(&mut app);
+    key(&mut app,KeyCode::Char('/'));assert_eq!(app.prompt,Some(crate::app::Prompt::Search));
+    app.handle(Event::Paste("first\r\nsecond\n".into()));assert_eq!(app.input,"first second");
+    key(&mut app,KeyCode::Esc);key(&mut app,KeyCode::Char(':'));
+    app.handle(Event::Paste("discard\nunsaved\n".into()));assert_eq!(app.command_palette.as_ref().unwrap().query(),"discard unsaved");
 }

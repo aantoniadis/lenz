@@ -9,7 +9,7 @@ pub fn paths_from_env() -> ThemePaths {
     ThemePaths::shared()
 }
 
-/// Shared overrides: LENZ_THEME > LENZ_APPEARANCE > LENZ_READER_THEME > LENZ_READER_APPEARANCE.
+/// Shared overrides: LENZ_THEME > LENZ_APPEARANCE > LENZ_CODE_THEME > LENZ_CODE_APPEARANCE > LENZ_READER_*.
 pub fn overrides_from_env() -> ThemeOverrides {
     ThemeOverrides::shared_from_env()
 }

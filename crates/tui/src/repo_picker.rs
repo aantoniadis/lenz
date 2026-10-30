@@ -42,7 +42,7 @@ impl View {
                 }
             }
             Event::Paste(text) => {
-                for c in text.chars().filter(|c| !c.is_control()) { self.core.execute(PickerCommand::Insert(c)); }
+                for c in lenz::document::one_line(text).chars() { self.core.execute(PickerCommand::Insert(c)); }
                 Outcome::None
             }
             Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
@@ -76,10 +76,17 @@ impl View {
         y += 1;
         line(frame, y, &format!("Not inside a Git repository: {}", self.core.cwd().display()), base);
         y += 2;
-        line(frame, y, &format!("Path: {}▏", self.core.input), base.bg(color(palette.status_bg)));
+        line(frame, y, &crate::visual::input_line("Path: ", &self.core.input, usize::from(width)), base.bg(color(palette.status_bg)));
         y += 1;
-        if let Some(error) = &self.core.error { line(frame, y, error, base.fg(color(palette.error))); }
-        y += 2;
+        // an error wraps (up to three rows), so a long path isn't cut off
+        let error = self.core.error.as_deref().unwrap_or("");
+        let starts = lenz::wrap::wrap_starts(error, usize::from(width));
+        let ends = starts.iter().copied().chain(std::iter::once(error.len()));
+        for (start, end) in std::iter::once(0).chain(starts.iter().copied()).zip(ends).take(3) {
+            line(frame, y, error.get(start..end).unwrap_or_default().trim_end(), base.fg(color(palette.error)));
+            y += 1;
+        }
+        y += 1;
         let matches: Vec<String> = self.core.matches().iter().map(|p| p.display().to_string()).collect();
         line(frame, y, if matches.is_empty() { "No recent repositories" } else { "Recent repositories" }, accent);
         y += 1;
@@ -125,6 +132,10 @@ mod tests {
         view.handle(&key(KeyCode::Tab));
         assert!(matches!(view.handle(&key(KeyCode::Enter)), Outcome::None));
         assert!(screen(&mut view, 80, 12).contains("Not a Git repository"));
+        // a narrow terminal wraps the error instead of cutting it off
+        let narrow = screen(&mut view, 24, 12);
+        let rows = narrow.lines().skip_while(|l| !l.contains("Not a Git")).take_while(|l| !l.trim().is_empty()).count();
+        assert!(rows > 1, "{narrow}");
         for _ in 0.."plain/".len() { view.handle(&key(KeyCode::Backspace)); }
         view.handle(&Event::Paste("project".into()));
         match view.handle(&key(KeyCode::Enter)) {

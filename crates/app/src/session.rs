@@ -24,6 +24,8 @@ pub struct Session {
     place: Place,
     diff_started: Option<Instant>,
     notice: Option<String>,
+    /// A file action's message, shown again once the reload it started has replaced the Change Set.
+    reloaded_notice: Option<String>,
     failed: bool,
     writes: EditSession,
     file_actions:crate::file_actions::FileActions,
@@ -36,7 +38,7 @@ impl Session {
         let spec=request.spec;let load=spec.clone();let load_cwd=cwd.clone();
         let opening=Some(work::submit(Arc::downgrade(&state.work_id),move||ChangeSet::load(&load,&load_cwd)));
         Self{state,set:None,spec,opening,opening_preserve:false,reading:None,diffing:None,refining_job:None,document:None,image:None,name:request.name,cwd,
-            place:request.line.map_or(Place::FirstChange,|n|Place::Line(Side::Right,n)),diff_started:None,notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()}
+            place:request.line.map_or(Place::FirstChange,|n|Place::Line(Side::Right,n)),diff_started:None,notice:None,reloaded_notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()}
     }
     pub fn from_set(set:Arc<ChangeSet>,spec:Spec,options:Options,mode:ScrollMode)->Self{
         Self::from_set_named(set,spec,options,mode,None,None)
@@ -45,7 +47,7 @@ impl Session {
         let cwd=set.git_root().map(PathBuf::from).unwrap_or_else(||std::env::current_dir().unwrap_or_default());
         let mut state=ComparisonSession::new(View::new(0,0,&[],24.0),options);state.view.start_in(mode);
         let mut session=Self{state,set:Some(set),spec,opening:None,opening_preserve:false,reading:None,diffing:None,refining_job:None,document:None,image:None,
-            name,cwd,place:Place::FirstChange,diff_started:None,notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()};
+            name,cwd,place:Place::FirstChange,diff_started:None,notice:None,reloaded_notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()};
         let start=session.change_set().map_or(0,|set|session.adopt(&set));
         session.load(start,line.map_or(Place::FirstChange,|n|Place::Line(Side::Right,n)),false,false);session
     }
@@ -72,11 +74,11 @@ impl Session {
     pub fn poll(&mut self)->bool{
         let mut changed=false;
         if let Some(set)=self.set.clone(){changed|=self.state.folders.poll(&set);}
-        if let Some(result)=self.file_actions.poll(){changed=true;match result{Ok(Some(_))=>{self.reload_set();self.notice=Some("File updated".into());},Ok(None)=>{},Err(error)=>self.notice=Some(format!("Nothing written: {error}"))}}
+        if let Some(result)=self.file_actions.poll(){changed=true;match result{Ok(Some((_,message)))=>{self.reload_set();self.notice=Some(message.clone());self.reloaded_notice=Some(message);},Ok(None)=>{},Err(error)=>self.notice=Some(format!("Nothing written: {error}"))}}
 
         if let Some(rx)=&self.opening{
             match rx.try_recv(){
-                Ok(Some(Ok(set)))=>{self.opening=None;if self.opening_preserve{self.opening_preserve=false;self.replace_set(Arc::new(set),self.spec.clone(),true);}else{let set=Arc::new(set);let start=self.adopt(&set);self.set=Some(set);self.load(start,self.place,false,false);}changed=true;},
+                Ok(Some(Ok(set)))=>{self.opening=None;if self.opening_preserve{self.opening_preserve=false;self.replace_set(Arc::new(set),self.spec.clone(),true);if let Some(message)=self.reloaded_notice.take(){self.notice=Some(message);}}else{let set=Arc::new(set);let start=self.adopt(&set);self.set=Some(set);self.load(start,self.place,false,false);}changed=true;},
                 Ok(Some(Err(e)))=>{self.opening=None;self.recover_failure(e);changed=true;},
                 Ok(None)=>{self.opening=None;self.recover_failure("Comparison loading was interrupted".into());changed=true;},
                 Err(TryRecvError::Disconnected)=>{self.opening=None;self.interrupted();changed=true;},
@@ -138,12 +140,12 @@ impl Session {
         false
     }
     /// Adopts a new Change Set's folders (archives collapsed); the file to start on.
-    fn adopt(&mut self,set:&Arc<ChangeSet>)->usize{if self.state.folders.sync(set){self.state.folders.start(set)}else{self.state.current}}
+    fn adopt(&mut self,set:&Arc<ChangeSet>)->usize{self.state.empty=set.comparisons.is_empty();if self.state.folders.sync(set){self.state.folders.start(set)}else{self.state.current}}
     fn error(&mut self,e:String){crate::diagnostics::comparison_failure(&e);self.notice=Some(format!("{e} — check inputs, then reload; Report last error opens diagnostics"));self.failed=true;}
     fn paths(&self,index:usize)->(PathBuf,PathBuf){let c=&self.comparisons()[index];let name=self.name.as_deref().filter(|n|!n.is_empty());
         (PathBuf::from(name.unwrap_or(&c.old_path)),PathBuf::from(name.unwrap_or(&c.path)))}
     fn load(&mut self,index:usize,place:Place,force:bool,reuse:bool){
-        let Some(set)=self.set.clone().filter(|s|index<s.comparisons.len())else{if self.comparisons().is_empty(){self.notice=Some("No differences".into());}return;};
+        let Some(set)=self.set.clone().filter(|s|index<s.comparisons.len())else{if self.comparisons().is_empty(){self.notice=Some(if matches!(self.spec,Spec::Empty){crate::commands::NOTHING_OPEN}else{"No differences"}.into());}return;};
         if index!=self.state.current && let Some(doc)=&self.document{self.state.remember_position(doc);}
         // a file on screen has its row in Files; one behind a Folder Summary stays in its collapsed folder
         if self.state.folders.summary().is_none(){self.state.folders.reveal(&set.comparisons,index);}
@@ -229,11 +231,14 @@ impl Session {
     }
     pub fn edit_disabled(&self,command:crate::edit_session::EditMenuCommand)->Option<String>{if command==crate::edit_session::EditMenuCommand::Revert && !matches!(&self.spec,Spec::Git{cached,revs,..} if crate::changeset::right_is_worktree(*cached,revs)){return Some("Revert hunk requires a working-tree comparison".into());}self.state.edit_disabled(&self.writes,self.document(),command)}
     pub fn move_caret(&mut self,selection:crate::selection::Selection,command:crate::selection::CaretCommand,extend:bool)->crate::selection::Selection{let Some(doc)=self.document.clone()else{return selection;};self.state.move_source_caret(&doc,selection,command,extend)}
-    pub fn copy_disabled(&self,command:crate::commands::Interaction,selection:Option<crate::selection::Selection>,side:Side)->Option<&'static str>{let Some(set)=self.set.as_ref()else{return Some("Comparison loading");};let Some(doc)=self.document()else{return Some("Comparison loading");};self.state.copy_disabled(command,crate::commands::CopyContext{set,index:self.current(),doc,view:self.view(),selection,side,path_label:self.name.as_deref()})}
-    pub fn copy_text(&self,command:crate::commands::Interaction,selection:Option<crate::selection::Selection>,side:Side)->Result<String,&'static str>{let set=self.set.as_ref().ok_or("Comparison loading")?;let doc=self.document().ok_or("Comparison loading")?;self.state.copy_text(command,crate::commands::CopyContext{set,index:self.current(),doc,view:self.view(),selection,side,path_label:self.name.as_deref()})}
+    pub fn copy_disabled(&self,command:crate::commands::Interaction,selection:Option<crate::selection::Selection>,side:Side)->Option<&'static str>{let Some(set)=self.set.as_ref()else{return Some("Comparison loading");};let Some(doc)=self.document()else{return Some(self.state.absent());};self.state.copy_disabled(command,crate::commands::CopyContext{set,index:self.current(),doc,view:self.view(),selection,side,path_label:self.name.as_deref()})}
+    pub fn copy_text(&self,command:crate::commands::Interaction,selection:Option<crate::selection::Selection>,side:Side)->Result<String,&'static str>{let set=self.set.as_ref().ok_or("Comparison loading")?;let doc=self.document().ok_or(self.state.absent())?;self.state.copy_text(command,crate::commands::CopyContext{set,index:self.current(),doc,view:self.view(),selection,side,path_label:self.name.as_deref()})}
     pub fn dirty(&self)->bool{self.writes.dirty(self.current())}
     pub fn dirty_at(&self,index:usize)->bool{self.writes.dirty(index)}
     pub fn has_dirty(&self)->bool{self.writes.has_dirty()}
+    /// See [`EditSession::quit`].
+    pub fn quit_edits(&mut self)->bool{self.writes.quit()}
+    pub fn keep_open(&mut self){self.writes.keep_open()}
     pub fn dirty_files(&self)->Vec<usize>{self.writes.dirty_files()}
     pub fn has_file_undo(&self,index:usize)->bool{self.writes.has_undo(index)}
     pub fn undo_file(&mut self,index:usize)->Result<std::path::PathBuf,String>{let set=self.set.clone().ok_or("No comparison loaded")?;self.state.undo_file(&mut self.writes,&set,index).map(|written|written.path).map_err(|e|e.to_string())}
@@ -350,7 +355,7 @@ impl Session {
         let mut view=doc.view(&doc.line_diff(&Options::default()),24.0);view.start_in(ScrollMode::Aligned);view.set_collapsed(true);
         let fold_y=view.frame().left.iter().find(|r|matches!(r.content,Content::Fold{..})).unwrap().y;view.scroll_by(fold_y+0.5,Side::Left);let before=view.frame();
         assert!(before.left.iter().any(|r|r.y<0.0&&matches!(r.content,Content::Fold{..})));
-        let state=ComparisonSession::new(view,Options::default());let mut session=Session{state,set:None,spec:Spec::Plain{left:"left".into(),right:"right".into()},opening:None,opening_preserve:false,reading:None,diffing:None,refining_job:None,document:Some(Arc::new(doc)),image:None,name:None,cwd:PathBuf::new(),place:Place::Top,diff_started:None,notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()};
+        let state=ComparisonSession::new(view,Options::default());let mut session=Session{state,set:None,spec:Spec::Plain{left:"left".into(),right:"right".into()},opening:None,opening_preserve:false,reading:None,diffing:None,refining_job:None,document:Some(Arc::new(doc)),image:None,name:None,cwd:PathBuf::new(),place:Place::Top,diff_started:None,notice:None,reloaded_notice:None,failed:false,writes:EditSession::default(),file_actions:Default::default()};
         session.expand(Side::Left,0);assert_eq!(session.view().frame(),before);
     }
 }

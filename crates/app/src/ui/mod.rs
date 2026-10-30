@@ -814,7 +814,7 @@ impl Viewer {
         let start = viewer.comparison.folders.start(&viewer.set);
         viewer.sync_nav();
         viewer.layout.set_files(viewer.set.comparisons.len() > 1);
-        if !viewer.set.comparisons.is_empty(){viewer.loaded.insert(0, Loaded::new(doc, 0));}else{viewer.nothing=Some("No comparison open".into());}
+        if !viewer.set.comparisons.is_empty(){viewer.loaded.insert(0, Loaded::new(doc, 0));}else{viewer.nothing=Some(commands::NOTHING_OPEN.into());viewer.comparison.empty=true;}
         viewer.ensure_blame(cx);
         if start != 0 { viewer.open(start, Place::FirstChange, cx); }
         viewer.poll_folders(cx);
@@ -927,6 +927,7 @@ impl Viewer {
         self.applied_scroll = 0.0;
         let empty = set.comparisons.is_empty();
         self.nothing = empty.then(|| "No changes in this selection".into());
+        self.comparison.empty = empty;
         self.set = set;
         // the session indexes Viewed Marks and review threads into the comparison on screen
         if let Some(r) = self.repo.as_mut() { r.showing(self.set.clone(), self.spec.clone()); }
@@ -970,6 +971,7 @@ impl Viewer {
             if let Some(t) = r.selection_title() { return format!("{} — {repo} — Lenz", t.text); }
             if r.picker.shown { return format!("{repo} — {} — Lenz", r.picker.title_branch); }
         }
+        if self.set.comparisons.is_empty() { return "Lenz".into(); }
         let l = self.labels(self.comparison.current);
         let mut title = if l.left == l.right { l.right } else { format!("{} ⟷ {}", l.left, l.right) };
         if self.set.comparisons.len() > 1 {
@@ -1204,7 +1206,7 @@ impl Viewer {
         let side=if self.markdown_active(){self.diff_focus}else{self.sel.map_or(Side::Right,|s|s.side)};
         let mapped=self.comparison.markdown_inspection_position(side);
         if matches!(command,commands::Interaction::Editor|commands::Interaction::DefaultApp|commands::Interaction::InspectBlame) && let Err(reason)=mapped { return Some(reason); }
-        let line=mapped.ok().flatten().map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(doc)=self.doc()&&let Some(reason)=self.comparison.copy_disabled(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.doc().is_some(),text:self.image_doc().is_none()&&self.doc().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.sel.is_some_and(|s|!s.is_empty()),repository:self.set.git_root().is_some(),annotation:self.blame_key(side).and_then(|k|self.blames.get(&k)).and_then(|b|b.line(line)).is_some()})}
+        let line=mapped.ok().flatten().map_or_else(||self.sel.map_or(self.comparison.view.anchor_line_on(side)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(doc)=self.doc()&&let Some(reason)=self.comparison.copy_disabled(command,commands::CopyContext{set:&self.set,index:self.comparison.current,doc,view:&self.comparison.view,selection:self.sel,side,path_label:self.name.as_deref()}){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.doc().is_some(),text:self.image_doc().is_none()&&self.doc().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.sel.is_some_and(|s|!s.is_empty()),empty:self.set.comparisons.is_empty(),repository:self.set.git_root().is_some(),annotation:self.blame_key(side).and_then(|k|self.blames.get(&k)).and_then(|b|b.line(line)).is_some()})}
     fn report_last_error(&mut self, cx: &mut Context<Self>) {
         match self.report_request.start() {
             Ok(false) => return,
@@ -2010,6 +2012,8 @@ impl Viewer {
             bounds: Bounds::default(), toggles: [(FindOption::Case, Bounds::default()); 3],
             on: [o.case, o.word, o.regex], query: f.query.clone(), counter: f.counter(),
             error: f.error().is_some(), focused: self.modal() == Some(Modal::Find),
+            // Diff's find bar searches the comparison; it has no replace.
+            show_replace: false, replace_label: String::new(), replace: String::new(), replace_focused: false, replace_row: Bounds::default(),
         }.layout(pane, line_h(), self.text_char_w()))
     }
     #[cfg(all(test, feature = "gui-test"))]
@@ -2862,6 +2866,8 @@ impl Viewer {
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.panes.drag=None;
+        // a key other than a quit cancels a quit refused for unsaved changes
+        if !matches!(ev.keystroke.key.as_str(),"q"|"w"){self.edits.keep_open();}
         if self.discard_modal(){match ev.keystroke.key.as_str(){"escape"=>self.file_actions.cancel(),"enter" if !self.file_actions.busy()=>self.confirm_discard(cx),_=>{}}cx.notify();return;}
         if self.checkout_key(ev,cx)||self.git_prompt_key(ev,cx){return;}
         if self.theme_key(ev,cx) { return; }
@@ -3409,7 +3415,7 @@ fn resolve(palette: &theme::Palette, rows: &[Row], raw: &[String], parsed: Optio
                 let first = found.partition_point(|h| h.0 < i);
                 let found = found[first..].iter().take_while(|h| h.0 == i).filter(|h| h.1.start < cut).map(|h| (at(h.1.start)..at(h.1.end), palette.found_bg));
                 let inline = found.chain(inline).collect();
-                let line = lenz_gpui::TextRow { y: r.y, number: i + 1, text, fg: syntax, bg: inline, selected, caret };
+                let line = lenz_gpui::TextRow { y: r.y, number: i + 1, text, fg: syntax, bg: inline, selected, caret, extra: Vec::new() };
                 Painted { y: r.y, line: Some(line), label: String::new(), tint: r.tint, ann: None, thread: false }
             }
             Content::Filler => {

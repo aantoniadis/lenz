@@ -665,14 +665,15 @@ pub(crate) fn list_git(
     diff.extend(&pathspec);
     let raw = fields(&git::run(cwd, &diff)?)?;
 
+    let on_disk = |mode: &str, path: &str| if mode == "120000" { Content::Symlink(root.join(path)) } else { Content::File(root.join(path)) };
     let side = |mode: &str, sha: &str, path: &str| match mode {
         "000000" => Content::Empty,
         "160000" => Content::Submodule(sha.to_string()),
-        _ if sha.bytes().all(|b| b == b'0') && mode == "120000" => Content::Symlink(root.join(path)),
-        _ if sha.bytes().all(|b| b == b'0') => Content::File(root.join(path)),
+        _ if sha.bytes().all(|b| b == b'0') => on_disk(mode, path),
         _ => Content::Blob(sha.to_string()),
     };
     let mode = |m: &str| u32::from_str_radix(m, 8).unwrap_or(0);
+    let worktree = right_is_worktree(cached, revs);
     let mut list = Vec::new();
     let mut unmerged = BTreeSet::new();
     // Working-tree files whose mode changed: same content as `old sha`?
@@ -700,7 +701,8 @@ pub(crate) fn list_git(
             }
             _ => (old.clone(), side(old_mode, old_sha, &old), Status::Modified),
         };
-        let right = side(new_mode, new_sha, &new);
+        // against the working tree, git lists a file that matches the index by its index blob: it's still the file
+        let right = if worktree && !matches!(new_mode, "000000" | "160000") { on_disk(new_mode, &new) } else { side(new_mode, new_sha, &new) };
         if old_mode != new_mode && status == Status::Modified {
             let mode_only = Status::ModeChanged { old: mode(old_mode), new: mode(new_mode) };
             if old_sha == new_sha {
@@ -724,7 +726,7 @@ pub(crate) fn list_git(
         }
     }
 
-    if right_is_worktree(cached, revs) {
+    if worktree {
         let untracked_files = if untracked { "--untracked-files=all" } else { "--untracked-files=no" };
         let mut args = vec!["status", "--porcelain=v2", "-z", untracked_files];
         args.extend(&pathspec);
@@ -1301,6 +1303,21 @@ mod tests {
         assert_eq!(texts(&worktree, 0), pair("ABD\0\n", "XYZ\n"));
         // the stored bytes stay readable
         assert_eq!(worktree.read(&worktree.comparisons[0].right).unwrap(), b"xyz\n");
+    }
+
+    #[test]
+    fn a_commit_against_the_working_tree_reads_clean_files_from_disk() {
+        // `git diff --raw <rev>` names a file that matches the index by its blob; it's still the working-tree file
+        let r = repo();
+        write(r.path(), "a.txt", "one\n");
+        commit_all(r.path(), "1");
+        let first = git::run(r.path(), &["rev-parse", "HEAD"]).map(|o| String::from_utf8(o).unwrap().trim().to_string()).unwrap();
+        write(r.path(), "a.txt", "two\n");
+        commit_all(r.path(), "2");
+        let set = load(r.path(), git_spec(false, &[&first], &[], true));
+        assert_eq!(set.comparisons.len(), 1);
+        assert_eq!(set.comparisons[0].right, Content::File(r.path().join("a.txt")));
+        assert!(matches!(set.comparisons[0].left, Content::Blob(_)));
     }
 
     #[test]

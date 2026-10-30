@@ -64,7 +64,7 @@ impl Viewer {
                 if files {self.file_search.set_query(String::new());}
                 else {self.repo.as_mut().map(|r| &mut r.picker).unwrap().pane_search.set_query(String::new());}
             } else if let Some(text)=cx.read_from_clipboard().and_then(|c|c.text()) {
-                let text:String=text.lines().next().unwrap_or_default().chars().filter(|c|!c.is_control()).collect();
+                let text=crate::document::one_line(&text);
                 if files {self.file_search.append(&text);}
                 else {self.repo.as_mut().map(|r| &mut r.picker).unwrap().pane_search.append(&text);}
             }

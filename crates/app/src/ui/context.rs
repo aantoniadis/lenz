@@ -91,7 +91,7 @@ impl Viewer {
         }
         cx.notify();
     }
-    pub(super) fn file_changed(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+    pub(super) fn file_changed(&mut self, path: std::path::PathBuf, message: String, cx: &mut Context<Self>) {
         let mut current_changed = false;
         for (index, c) in self.set.comparisons.iter().enumerate() {
             if self
@@ -118,7 +118,7 @@ impl Viewer {
             );
         }
         self.refresh_repository(cx);
-        self.toast("File updated".into(), cx);
+        self.toast(message, cx);
     }
     pub(super) fn poll_file_actions(&mut self, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
@@ -127,7 +127,7 @@ impl Viewer {
                     .update(cx, |viewer, cx| {
                         if let Some(result) = viewer.file_actions.poll() {
                             match result {
-                                Ok(Some(path)) => viewer.file_changed(path, cx),
+                                Ok(Some((path, message))) => viewer.file_changed(path, message, cx),
                                 Ok(None) => {}
                                 Err(error) => viewer.toast(format!("Nothing written: {error}"), cx),
                             }

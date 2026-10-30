@@ -54,12 +54,16 @@ pub fn unified_disabled(image: bool, rendered: bool) -> Option<&'static str> {
     if image { Some("Images have no Unified view") } else if rendered { Some("Switch the Preview back to Source first") } else { None }
 }
 
+/// Why commands that need a document are off in an empty window or a selection without changes.
+pub const NOTHING_OPEN: &str = "No comparison open";
+
 pub fn disabled(command: Command, view: &View, loading: bool, current: usize, count: usize, large: bool) -> Option<&'static str> {
     match command {
         Command::SetDiffLayout(_) => None,
         // Presentation switches are read-only even while a diff is pending. Their
         // document eligibility is validated by ComparisonSession::presentation_disabled.
         Command::SetPresentation(_) | Command::SetMarkdownLayout(_) | Command::Preview(_) => None,
+        _ if count == 0 => Some("no comparison open"),
         Command::PreviousFile if current == 0 => Some("first file"),
         Command::NextFile if current + 1 >= count => Some("last file"),
         Command::PreviousFile | Command::NextFile => None,
@@ -138,12 +142,14 @@ pub fn scroll_name(mode: ScrollMode) -> &'static str {
 #[derive(Debug,Clone,Copy,PartialEq,Eq)]
 pub enum Interaction { Find, FindSet, FindCase, FindWord, FindRegex, GoToLine, Copy, CopyMarkdownSource, CopyPath, CopyReference, CopyLeftChange, CopyRightChange, SelectAll, Editor, DefaultApp, Blame, InspectBlame, Reload, ReportLastError, About, ChangeTheme, ScrollLeft, ScrollRight, ResetPaneSizes, StickyScroll }
 #[derive(Default)] pub struct InteractionContext {pub document:bool,pub text:bool,pub selection:bool,pub repository:bool,pub annotation:bool,
+    /// The comparison set has no files: [`NOTHING_OPEN`] rather than loading.
+    pub empty:bool,
     /// A find or Change Set search input is open (the find option toggles apply to it).
     pub find_open:bool}
 impl Interaction {
     pub const ALL:&'static [Self]=&[Self::Find,Self::FindSet,Self::FindCase,Self::FindWord,Self::FindRegex,Self::GoToLine,Self::Copy,Self::CopyMarkdownSource,Self::CopyPath,Self::CopyReference,Self::CopyLeftChange,Self::CopyRightChange,Self::SelectAll,Self::Editor,Self::DefaultApp,Self::Blame,Self::InspectBlame,Self::Reload,Self::ReportLastError,Self::About,Self::ChangeTheme,Self::ScrollLeft,Self::ScrollRight,Self::ResetPaneSizes,Self::StickyScroll];
     pub const fn label(self)->&'static str{match self{Self::ResetPaneSizes=>"Reset pane sizes",Self::StickyScroll=>"View: Sticky Scroll",Self::ScrollLeft=>"Scroll focused text pane left",Self::ScrollRight=>"Scroll focused text pane right",Self::Find=>"Find in focused side",Self::FindSet=>"Find in Change Set",Self::FindCase=>"Find: Match Case",Self::FindWord=>"Find: Whole Word",Self::FindRegex=>"Find: Regular Expression",Self::GoToLine=>"Go to line or line:column",Self::Copy=>"Copy selection",Self::CopyMarkdownSource=>"Copy Markdown source",Self::CopyPath=>"Copy file path",Self::CopyReference=>"Copy reference (path:line)",Self::CopyLeftChange=>"Copy left change",Self::CopyRightChange=>"Copy right change",Self::SelectAll=>"Select all on focused side",Self::Editor=>"Open focused side in editor",Self::DefaultApp=>"Open focused side with default app",Self::Blame=>"Toggle blame annotations",Self::InspectBlame=>"Inspect annotated commit",Self::ReportLastError=>"Report last error",Self::About=>crate::about::TITLE,Self::ChangeTheme=>"Change theme",Self::Reload=>"Reload comparison from disk"}}
-    pub fn disabled(self,c:&InteractionContext)->Option<&'static str>{match self{Self::FindCase|Self::FindWord|Self::FindRegex if !c.find_open=>Some("No find is open"),Self::FindCase|Self::FindWord|Self::FindRegex=>None,Self::About|Self::ReportLastError|Self::ChangeTheme|Self::ResetPaneSizes|Self::StickyScroll=>None,Self::ScrollLeft|Self::ScrollRight|Self::Find|Self::GoToLine|Self::Copy|Self::CopyReference|Self::CopyLeftChange|Self::CopyRightChange|Self::SelectAll|Self::Blame|Self::InspectBlame if c.document&&!c.text=>Some("Not a text comparison"),Self::Copy if !c.selection=>Some("No selected text"),Self::Blame if !c.repository=>Some("Not a repository comparison"),Self::InspectBlame if !c.annotation=>Some("No annotation at selected line"),_ if !c.document=>Some("Comparison loading"),_=>None}}
+    pub fn disabled(self,c:&InteractionContext)->Option<&'static str>{match self{Self::FindCase|Self::FindWord|Self::FindRegex if !c.find_open=>Some("No find is open"),Self::FindCase|Self::FindWord|Self::FindRegex=>None,Self::About|Self::ReportLastError|Self::ChangeTheme|Self::ResetPaneSizes|Self::StickyScroll=>None,Self::ScrollLeft|Self::ScrollRight|Self::Find|Self::GoToLine|Self::Copy|Self::CopyReference|Self::CopyLeftChange|Self::CopyRightChange|Self::SelectAll|Self::Blame|Self::InspectBlame if c.document&&!c.text=>Some("Not a text comparison"),Self::Copy if !c.selection=>Some("No selected text"),Self::Blame if !c.repository=>Some("Not a repository comparison"),Self::InspectBlame if !c.annotation=>Some("No annotation at selected line"),_ if !c.document&&c.empty=>Some(NOTHING_OPEN),_ if !c.document=>Some("Comparison loading"),_=>None}}
     /// The find option a toggle flips.
     pub const fn find_option(self)->Option<lenz_content::find::FindOption>{use lenz_content::find::FindOption as O;match self{Self::FindCase=>Some(O::Case),Self::FindWord=>Some(O::Word),Self::FindRegex=>Some(O::Regex),_=>None}}
 }

@@ -286,10 +286,16 @@ pub fn open_files(
             |n| n.to_string_lossy().into_owned(),
         )
     };
+    let stages = match (&root, &rel) {
+        (Some(root), Some(rel)) => conflicts::has_base(root, rel),
+        _ => Ok(None),
+    };
+    // a MERGED git doesn't list as unmerged (files merged by hand in a work tree) is taken as given, as outside git
+    let rel = rel.filter(|_| stages != Ok(None));
     let setup = match (&root, &rel) {
         (Some(root), Some(rel)) => Setup {
             labels: operation_labels(root),
-            has_base: conflicts::has_base(root, rel).unwrap_or(true),
+            has_base: stages.ok().flatten().unwrap_or(true),
             style: conflicts::conflict_style(root),
             marker_size: conflicts::marker_size(root, rel),
         },
@@ -1617,6 +1623,32 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn files_merged_by_hand_in_a_work_tree_keep_their_base() {
+        // MERGED isn't unmerged in git (here a tracked copy of LOCAL): git has no stages to say there's no base
+        let dir = repo();
+        let d = dir.path();
+        let p = |n: &str, text: &str| {
+            write(d, n, text);
+            d.join(n)
+        };
+        let (b, o, t) = (
+            p("base.txt", "a\nb\nc\nd\ne\nf\ng\n"),
+            p("local.txt", "a\nL\nc\nd\ne\nX\ng\n"),
+            p("remote.txt", "a\nb\nc\nR\ne\nY\ng\n"),
+        );
+        let m = p("merged.txt", "a\nL\nc\nd\ne\nX\ng\n");
+        commit_all(d, "files");
+        let opened = open_files(&b, &o, &t, &m, d).unwrap();
+        assert!(opened.result.has_base());
+        assert_eq!((opened.result.unresolved(), opened.git_output), (1, None));
+        assert!(opened.notices.is_empty(), "{:?}", opened.notices);
+        let mut m = opened.result;
+        let i = (0..m.blocks().len()).find(|&i| m.is_conflict(i)).unwrap();
+        m.accept_both(i);
+        assert_eq!(m.lines().join("\n"), "a\nL\nc\nR\ne\nX\nY\ng\n");
+    }
+
     const BASE: &str = "one\ntwo\nthree\nfour\n";
 
     #[test]
@@ -2120,7 +2152,7 @@ impl MergeSession {
     }
     pub fn type_find(&mut self, text: &str) {
         if let Some(f) = &mut self.find {
-            for c in text.chars().filter(|c| !c.is_control()) {
+            for c in crate::document::one_line(text).chars() {
                 if f.search.query.len() + c.len_utf8() > 4096 {
                     break;
                 }

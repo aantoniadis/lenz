@@ -446,14 +446,14 @@ impl Repository {
                 // A name or revision is one line: its first.
                 match self.prompt {
                     Some(Prompt::NewBranch { .. } | Prompt::Revision) => self.input.push_str(text.lines().next().unwrap_or_default().trim()),
-                    _ => self.input.push_str(&text.replace(['\n', '\r'], " ")),
+                    _ => self.input.push_str(&lenz::document::one_line(&text)),
                 }
                 if self.prompt == Some(Prompt::Filter) {
                     self.execute(Command::Filter(self.input.clone()));
                 }
                 true
             }
-            Event::Paste(text) if !self.modal()&&self.core.picker.shown&&self.core.picker.focus==Pane::Log=>{self.begin_log_search();self.core.picker.pane_search.append(&text.replace(['\n','\r']," "));self.core.picker.poll_pane_search();self.reveal_log_search();true}
+            Event::Paste(text) if !self.modal()&&self.core.picker.shown&&self.core.picker.focus==Pane::Log=>{self.begin_log_search();self.core.picker.pane_search.append(&lenz::document::one_line(&text));self.core.picker.poll_pane_search();self.reveal_log_search();true}
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 self.manual_scroll = [false; 2];
                 let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -789,6 +789,11 @@ impl Repository {
         if let Some(pr)=self.core.pr.as_mut().filter(|p|p.details().is_some()){self.pr_dialog.draw(frame,pr,Rect::new(diff.x,diff.y.saturating_add(2),diff.width,diff.height.saturating_sub(4)),crate::chrome::initial_palette());}
         self.draw_popup(frame,area,crate::chrome::initial_palette());
     }
+    /// What the comparison's status line says for the repository: PR loading, the last notice, a history error.
+    pub(crate) fn status(&self)->Option<String>{
+        if let Some(loading)=self.core.pr_loading(){return Some(format!("◌ {}",safe_label(loading)));}
+        self.core.notice.as_deref().or(self.core.picker.error.as_deref()).map(safe_label)
+    }
     pub fn modal(&self)->bool {self.prompt.is_some()||self.core.overlay.is_some()||self.core.checkout_problem().is_some()}
     pub fn render_in(&mut self, frame: &mut Frame, area:Rect,palette:&lenz::theme::Palette) {
         self.resizer.grips.clear();
@@ -946,9 +951,11 @@ impl Repository {
                     lines.push(crate::pane_search::line(safe_label(&text),&picker.pane_search,style,palette));
                 }
                 let title = if picker.pane_search.active(){crate::pane_search::status(&picker.pane_search,picker.rows()as usize)}else{pr_title.clone().unwrap_or_else(|| {
+                    let scope=picker.history_path_label();
                     format!(
-                        "Log {}{}",
-                        safe_label(&picker.title_branch),
+                        "Log {}{}{}",
+                        if scope.is_some(){"of "}else{""},
+                        safe_label(scope.as_deref().unwrap_or(&picker.title_branch)),
                         match picker.more_label() {
                             Some(more) => format!(" · {more}"),
                             None if picker.loading => " · loading".into(),
@@ -968,20 +975,6 @@ impl Repository {
                     log,
                 );
             }
-        }
-        if let Some(notice) = self
-            .core
-            .pr_loading()
-            .or(self.core.notice.as_deref())
-            .or(self.core.picker.error.as_deref())
-        {
-            let message = if self.core.pr_loading().is_some() { format!("◌ {}", safe_label(notice)) }
-                else { format!("F2 details · {}", safe_label(notice)) };
-            frame.render_widget(
-                Paragraph::new(message)
-                    .style(crate::chrome::style_with(palette).fg(crate::chrome::color(palette.accent)).bg(crate::chrome::color(palette.status_bg))),
-                Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-            );
         }
         self.resizer.draw(frame.buffer_mut(),palette);
     }
@@ -1025,7 +1018,8 @@ impl Repository {
                 }
                 Prompt::Revision => "Checkout tag or revision".to_string(),
             };
-            let mut lines = vec![Line::from(format!("{label}: {}▏", safe_label(&self.input)))];
+            // the popup's inner width: the caret end of a long input stays in view
+            let mut lines = vec![Line::from(crate::visual::input_line(&format!("{label}: "), &safe_label(&self.input), usize::from(area.width.saturating_sub(4))))];
             lines.extend(self.prompt_error.as_deref().map(|e| Line::from(safe_label(e))));
             let popup = Rect::new(
                 area.x + 1,

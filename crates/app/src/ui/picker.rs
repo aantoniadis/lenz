@@ -390,6 +390,7 @@ impl Viewer {
         self.spec=spec;self.set=Arc::new(set);self.loaded.clear();self.comparison.cache=DiffCache::default();
         self.blames.clear();self.nav=navigator::grouped_rows(&self.set.comparisons,&self.set.groups);
         self.sel=None;self.comparison.find=None;self.popup=None;self.search=None;self.switcher=None;self.menu=None;self.command_palette=None;self.diff_options=None;self.iview=ImageView::fresh();
+        self.comparison.empty=self.set.comparisons.is_empty();
         if self.set.comparisons.is_empty(){self.nothing=Some("No changes in this selection".into());self.comparison.current=0;let rows=self.comparison.view.viewport_rows();let mode=self.comparison.view.mode();self.comparison.view=View::new(0,0,&[],rows);self.comparison.view.set_mode(mode);self.comparison.begin();}
         else{self.nothing=None;self.comparison.current=index;self.load(index,Place::Anchor(anchor),false,cx);self.ensure_blame(cx);self.reveal_in_nav();}
         // files kept for their edits are part of what the session refreshes next
@@ -658,8 +659,8 @@ impl Viewer {
                 None => format!("History — {} commits", p.log.len()),
             },
         };
-        if let Some((path, _)) = &p.file_paths {
-            status = format!("History of {path} — {} commits   (Esc to leave)", p.rows() - 1);
+        if let Some(path) = p.history_path_label() {
+            status = format!("History of {path} — {} commits{}", p.rows() - 1, if p.file_paths.is_some() { "   (Esc to leave)" } else { "" });
         }
         if let Some((branch, three_dot)) = &p.compare {
             let short = branch.trim_start_matches("refs/heads/").trim_start_matches("refs/remotes/");
@@ -960,6 +961,27 @@ mod refresh_gui_tests {
             assert_eq!(row.sha.len(),8);assert!((0..p.log.len()).any(|i|p.log.id(i).starts_with(&row.sha)));
             let (date,time)=row.date.split_once(' ').expect("date and time");
             assert_eq!(date.len(),10);assert_eq!(time.len(),5);assert_eq!(&time[2..3],":");
+        });
+    }
+
+    #[test]
+    fn gui_directory_log_startup_shows_the_shared_scope_and_only_its_changes(){
+        let mut cx=TestAppContext::single();let(dir,viewer)=fixture(&mut cx);let root=dir.path();
+        std::fs::create_dir(root.join("dir space")).unwrap();std::fs::write(root.join("dir space/a.txt"),"inside\n").unwrap();
+        git(root,&["add","."]);git(root,&["commit","-qm","Inside directory"]);
+        std::fs::write(root.join("outside"),"outside\n").unwrap();git(root,&["add","outside"]);git(root,&["commit","-qm","Outside directory"]);
+        let request=crate::cli::parse(&["log".into(),"--".into(),":(literal)dir space".into()],root).unwrap();
+        let(set,spec,_)=crate::repository_session::initial_log_comparison(root,&request.spec).unwrap();
+        viewer.update(&mut cx,|v,cx|{
+            let set=Arc::new(set);
+            let session=crate::repository_session::RepositorySession::open_loaded_with_paths(root.into(),true,Some(crate::repository_session::initial_log_branches(&request.spec)),None,crate::repository_session::log_paths(&request.spec),set.clone(),spec.clone());
+            v.spec=spec;v.show_change_set(set,cx);v.with_session(session,cx);
+        });
+        pump(&mut cx,&viewer,|v|v.repo.as_ref().is_some_and(|r|!r.busy())&&v.doc().is_some());
+        viewer.read_with(&cx,|v,_|{
+            let p=&v.repo.as_ref().unwrap().picker;assert_eq!(p.log.len(),1);assert_eq!(p.log.subject(0),"Inside directory");
+            assert!(v.log_frame().unwrap().status.starts_with("History of dir space — 1 commits"));
+            assert_eq!(v.set.comparisons.len(),1);assert_eq!(v.set.comparisons[0].path,"dir space/a.txt");
         });
     }
 

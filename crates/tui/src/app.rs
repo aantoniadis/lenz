@@ -28,6 +28,8 @@ pub struct App {
     pub(crate) resizer:crate::panes::Resizer,
     pub palette:std::sync::Arc<lenz::theme::Palette>,
     pub theme_revision:u64,
+    /// Which of several independent views this is, for the footer (set by the window before each frame).
+    pub views:Option<String>,
     pub theme_request:bool,
     pub session: Session,
     pub(crate) context:crate::context::Menu,
@@ -92,7 +94,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { command_palette:None,views:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -287,7 +289,7 @@ impl App {
         self.navigator.focused=false;if let Some(repo)=&mut self.repository{repo.quit=false;repo.core.execute(lenz::repository_session::RepositoryCommand::Focus(lenz::repository_session::Pane::Diff));}
         self.quit=false;self.session.set_notice("Unsaved changes — Save (Ctrl-S) or Discard unsaved changes before closing or changing comparisons");true
     }
-    fn request_quit(&mut self){if !self.guard_pending_edits(){self.quit=true;}}
+    fn request_quit(&mut self){if self.session.quit_edits(){self.quit=true;}else{self.guard_pending_edits();self.session.set_notice(lenz::edit_session::QUIT_QUESTION);}}
     pub(crate) fn edit_menu(&mut self,command:lenz::edit_session::EditMenuCommand){
         if let Some(reason)=self.session.edit_disabled(command){self.session.set_notice(reason);}
         else if command==lenz::edit_session::EditMenuCommand::History{self.prompt=Some(Prompt::Applied);self.selected=0;}
@@ -361,7 +363,7 @@ impl App {
     pub(crate) fn interaction_disabled(&self,command:commands::Interaction)->Option<&'static str>{
         let mapped=self.session.markdown_inspection_position(self.focus);
         if matches!(command,commands::Interaction::Editor|commands::Interaction::DefaultApp|commands::Interaction::InspectBlame) && let Err(reason)=mapped {return Some(reason);}
-        if matches!(command,commands::Interaction::Copy|commands::Interaction::CopyMarkdownSource) && (self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered || command==commands::Interaction::CopyMarkdownSource) {return self.session.copy_disabled(command,self.selection,self.focus);}let line=mapped.ok().flatten().map_or_else(||self.selection.filter(|s|s.side==self.focus).map_or(self.session.view().anchor_line_on(self.focus)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(reason)=self.session.copy_disabled(command,self.selection,self.focus){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.session.document().is_some(),text:self.visual.image().is_none()&&self.session.document().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.selection.is_some_and(|s|!s.is_empty()),repository:self.session.change_set().is_some_and(|s|s.git_root().is_some()),annotation:self.visual.annotation(self.focus,line).is_some()})}
+        if matches!(command,commands::Interaction::Copy|commands::Interaction::CopyMarkdownSource) && (self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered || command==commands::Interaction::CopyMarkdownSource) {return self.session.copy_disabled(command,self.selection,self.focus);}let line=mapped.ok().flatten().map_or_else(||self.selection.filter(|s|s.side==self.focus).map_or(self.session.view().anchor_line_on(self.focus)as usize,|s|s.head.line as usize),|p|p.line as usize);if matches!(command,commands::Interaction::CopyLeftChange|commands::Interaction::CopyRightChange)&&let Some(reason)=self.session.copy_disabled(command,self.selection,self.focus){return Some(reason);}command.disabled(&commands::InteractionContext{find_open:self.find_open(),document:self.session.document().is_some(),text:self.visual.image().is_none()&&self.session.document().is_some_and(|d|d.placeholder_kind().is_none()),selection:self.selection.is_some_and(|s|!s.is_empty()),empty:self.session.change_set().is_some_and(|s|s.comparisons.is_empty()),repository:self.session.change_set().is_some_and(|s|s.git_root().is_some()),annotation:self.visual.annotation(self.focus,line).is_some()})}
     pub(crate) fn reload(&mut self){if let Some(repo)=&mut self.repository{repo.core.execute(lenz::repository_session::RepositoryCommand::RefreshRepository);self.session.reload_set();}else{self.session.reload();}}
     /// A find prompt or Change Set search input is open: the find option toggles apply to it.
     /// The 1-based line and character column a Line prompt asks for (column 1 when none is given).
@@ -403,7 +405,7 @@ impl App {
     }
     fn search_input(&mut self){let selected=if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered {self.session.markdown_selection().and_then(|s|self.session.markdown_projection()?.source_selection(s))}else{self.selection};let from=selected.filter(|s|s.side==self.focus).map_or_else(||lenz::selection::Pos::new(self.session.view().anchor_line_on(self.focus)as u32,0),|s|s.ordered().0);self.session.search_at(self.input.clone(),self.focus,from);if self.session.markdown_edit_disabled().is_none() && let Some(selection)=self.session.find_selection(){self.selection=Some(selection);}}
     fn type_text(&mut self, text: &str) {
-        for ch in text.chars().filter(|c| !c.is_control()) {
+        for ch in lenz::document::one_line(text).chars() {
             if self.input.len() >= 4096 { break; }
             self.input.push(ch);
         }
@@ -427,7 +429,7 @@ impl App {
         Some(Item::new("⚙",Palette).choices(rows))
     }
     /// Focus: navigation, editing, ⚙ (as in the Overview), ≡ Unchanged, Files and ? — the GUI's Focus toolbar.
-    fn focus_toolbar_items(&self,width:u16,scope:&lenz::catalog::Scope)->Vec<crate::chrome::Item<ToolbarAction>> {
+    fn focus_toolbar_items(&self,scope:&lenz::catalog::Scope)->Vec<crate::chrome::Item<ToolbarAction>> {
         use crate::chrome::Item;use ToolbarAction::*;
         use lenz::catalog::{Action,HelpAction};use lenz::layout::LayoutCommand as L;
         let item=|label:std::borrow::Cow<'static,str>,action:Action|{let mut item=Item::new(label,Run(action));item.disabled=lenz::catalog::Availability::disabled(self,action);item};
@@ -441,7 +443,7 @@ impl App {
         // a PR's reading tab hides the diff: its controls wait for Files changed, as in the GUI
         if scope.pr_tab.is_none() {
             items.extend([item("↑".into(),Action::Comparison(Command::PreviousChange)),item("↓".into(),Action::Comparison(Command::NextChange))]);
-            if width>=100 {items.extend([item("←".into(),Action::Comparison(Command::PreviousFile)),item("→".into(),Action::Comparison(Command::NextFile))]);}
+            items.extend([item("←".into(),Action::Comparison(Command::PreviousFile)),item("→".into(),Action::Comparison(Command::NextFile))]);
             if self.visual.image().is_none() && let Some(diff)=self.diff_menu_item(scope){items.push(diff);}
         }
         items.push(item("?".into(),Action::Help(HelpAction::Shortcuts)).right());
@@ -451,13 +453,13 @@ impl App {
         items
     }
 
-    fn toolbar_items(&self,width:u16)->Vec<crate::chrome::Item<ToolbarAction>> {
+    fn toolbar_items(&self)->Vec<crate::chrome::Item<ToolbarAction>> {
         use crate::chrome::Item;use ToolbarAction::*;
         use lenz::catalog::{Action,RepoAction};use lenz::layout::LayoutCommand as L;
         let item=|label:std::borrow::Cow<'static,str>,action:Action|{let mut item=Item::new(label,Run(action));item.disabled=lenz::catalog::Availability::disabled(self,action);item};
         let entries=|entries:Vec<lenz::catalog::Entry>|entries.into_iter().map(|e|item(e.label,e.action).active(e.current)).collect::<Vec<_>>();
         let scope=self.scope();
-        if self.layout.shows_focus(self.repository.as_ref().map(|r|&r.core)) {return self.focus_toolbar_items(width,&scope);}
+        if self.layout.shows_focus(self.repository.as_ref().map(|r|&r.core)) {return self.focus_toolbar_items(&scope);}
         let mut app_menu=entries(lenz::catalog::app_menu());app_menu.push(Item::new("Nerd Font icons (Mono)",Icons).active(self.icons.nerd()));
         // ☰, then Focus where Focus shows Overview
         let mut items=vec![Item::new("☰",Palette).choices(app_menu)];
@@ -465,7 +467,7 @@ impl App {
         if self.repository.is_some(){items.push(item(" Focus  ".into(),Action::Layout(L::ToggleFocus)));}
         if self.repository.is_some(){items.extend([item("◀".into(),Action::Repository(RepoAction::Back)),item("▶".into(),Action::Repository(RepoAction::Forward))]);}
         items.extend([item("↑".into(),Action::Comparison(Command::PreviousChange)),item("↓".into(),Action::Comparison(Command::NextChange))]);
-        if width>=100 {items.extend([item("←".into(),Action::Comparison(Command::PreviousFile)),item("→".into(),Action::Comparison(Command::NextFile))]);}
+        items.extend([item("←".into(),Action::Comparison(Command::PreviousFile)),item("→".into(),Action::Comparison(Command::NextFile))]);
         if let Some(diff)=self.diff_menu_item(&scope){items.push(diff);}
         items.push(item("?".into(),Action::Help(lenz::catalog::HelpAction::Shortcuts)).right());
         items.push(Item::new("⋯",Palette).overflow());
@@ -651,6 +653,10 @@ impl App {
         if matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.code==KeyCode::F(2)&&k.modifiers.is_empty())&&self.about.is_none()&&!self.visual.commit_visible()&&matches!(self.prompt,None|Some(Prompt::Files|Prompt::Applied))&&self.set_search.as_ref().is_none_or(|s|!s.model.editing())&&self.repository.as_ref().is_none_or(|r|!r.modal()) {
             self.message=Some(crate::help::Message::new(self.details_text(),self.popup_area));return true;
         }
+        // a repository notice lasts until the next key, as the GUI's toast does; F2 above still shows it
+        if matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release)&&let Some(repository)=&mut self.repository{repository.core.notice=None;}
+        // a key other than a quit cancels a quit refused for unsaved changes
+        if matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&!matches!(k.code,KeyCode::Char('q'|'c'))){self.session.keep_open();}
         if !matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::CONTROL&&matches!(k.code,KeyCode::Char('q'|'c')))&&crate::palette::input(self,&event){return true;}
         if self.resize_input(&event){return true;}
         let closing=matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::CONTROL&&matches!(k.code,KeyCode::Char('q'|'c')));
@@ -917,7 +923,7 @@ impl App {
         if self.session.markdown_mode()!=lenz::markdown::PresentationMode::Rendered {self.markdown.clear();}
         let palette=self.palette.clone();
         self.popup_area=area;
-        let items=self.toolbar_items(area.width);let body=self.toolbar.draw_with_theme(frame,area,items,&palette,self.theme_revision);
+        let items=self.toolbar_items();let body=self.toolbar.draw_with_theme(frame,area,items,&palette,self.theme_revision);
         // the bottom row is a full-width bar (panel switches and keys), as in the GUI: side panels end above it
         let footer_row=1.min(body.height);
         let panels=ratatui::layout::Rect{height:body.height-footer_row,..body};

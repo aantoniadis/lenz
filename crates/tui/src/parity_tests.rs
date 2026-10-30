@@ -176,6 +176,21 @@ fn tui_recovery_details_scroll_resize_and_dismiss_keep_parent_and_draft() {
 }
 
 #[test]
+fn tui_repository_notice_is_a_status_line_message_until_the_next_key() {
+    let dir = repository();
+    let mut app = open(dir.path(), &["log"]);
+    app.repository.as_mut().unwrap().core.notice = Some("Checked out topic".into());
+    let shown = screen(&draw(&mut app, 120, 30)).chars().collect::<Vec<_>>();
+    let rows = shown.chunks(120).map(|r| r.iter().collect::<String>()).collect::<Vec<_>>();
+    let row = rows.iter().find(|l| l.contains("Checked out topic")).unwrap_or_else(|| panic!("{rows:#?}"));
+    // the comparison's status line, beside the sidebar's intact bottom border
+    assert!(row.starts_with("╰────") && row.contains("╯F2 details · Checked out topic"), "{row:?}");
+    key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    assert!(app.repository.as_ref().unwrap().core.notice.is_none());
+    assert!(!screen(&draw(&mut app, 120, 30)).contains("Checked out topic"));
+}
+
+#[test]
 fn tui_recovery_details_repository_notice_is_reachable_from_log() {
     let dir = repository();
     let mut app = open(dir.path(), &["log"]);
@@ -889,6 +904,19 @@ fn unreadable_comparison_error_is_visible_and_quit_remains_responsive() {
 fn initial_repository_comparison_preserves_name_and_line(){
     let dir=repository();let content=(0..80).map(|i|format!("line {i}\n")).collect::<String>();std::fs::write(dir.path().join("file.rs"),&content).unwrap();git(dir.path(),&["commit","-qam","Long file"]);
     let mut app=open(dir.path(),&["log","--name","named.rs","--line","40"]);draw(&mut app,120,36);assert_eq!(app.session.labels(),("named.rs","named.rs"));assert!(app.session.view().anchor_line_on(Side::Right)>=25.0,"{}",app.session.view().anchor_line_on(Side::Right));
+}
+
+#[test]
+fn directory_log_startup_renders_the_shared_scope_and_only_its_changes(){
+    let dir=repository();let root=dir.path();
+    std::fs::create_dir(root.join("dir space")).unwrap();std::fs::write(root.join("dir space/a.txt"),"inside\n").unwrap();
+    git(root,&["add","."]);git(root,&["commit","-qm","Inside directory"]);
+    std::fs::write(root.join("outside"),"outside\n").unwrap();git(root,&["add","outside"]);git(root,&["commit","-qm","Outside directory"]);
+    let mut app=open(root,&["log","--",":(literal)dir space"]);
+    let picker=&app.repository.as_ref().unwrap().core.picker;assert_eq!(picker.log.len(),1);assert_eq!(picker.log.subject(0),"Inside directory");
+    assert_eq!(app.session.comparisons().len(),1);assert_eq!(app.session.comparisons()[0].path,"dir space/a.txt");
+    let visible=screen(&draw(&mut app,120,36));assert!(visible.contains("Log of dir space"),"{visible}");assert!(!visible.contains("Outside directory"),"{visible}");
+    for (width,height) in [(40,10),(1,1)]{draw(&mut app,width,height);}
 }
 
 #[test]

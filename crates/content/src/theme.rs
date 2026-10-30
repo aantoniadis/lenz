@@ -145,12 +145,12 @@ pub fn syntax_color(&self, capture: crate::highlight::Capture) -> u32 {
     use crate::highlight::Capture;
     let c = &self.syntax;
     match capture {
-        Capture::Keyword | Capture::ConstantBuiltin | Capture::TypeBuiltin | Capture::Escape | Capture::Heading => c.keyword,
+        Capture::Keyword | Capture::ConstantBuiltin | Capture::TypeBuiltin | Capture::Escape | Capture::Heading | Capture::Strong => c.keyword,
         Capture::String => c.string,
         Capture::Comment => c.comment,
         Capture::DocComment => c.doc_comment,
         Capture::Number => c.number,
-        Capture::Constant | Capture::Property => c.constant,
+        Capture::Constant | Capture::Property | Capture::Emphasis => c.constant,
         Capture::Function => c.function,
         Capture::Macro => c.macro_,
         Capture::Type => c.type_,

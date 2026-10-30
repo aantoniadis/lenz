@@ -9,7 +9,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -36,6 +36,18 @@ struct WorkerPanic {
     report: Option<PathBuf>,
 }
 static DOCUMENT_PANIC: OnceLock<WorkerPanic> = OnceLock::new();
+/// A full-screen terminal app is drawing: stderr would print over it, and its notice already says what failed.
+static TERMINAL_OWNED: AtomicBool = AtomicBool::new(false);
+
+/// The terminal adapter owns the screen (`true`) or gave it back (`false`, also before a panic is reported).
+pub fn terminal_owned(owned: bool) {
+    TERMINAL_OWNED.store(owned, Ordering::Relaxed);
+}
+
+/// stderr, unless a terminal app is drawing over it.
+fn stderr() -> Option<io::StderrLock<'static>> {
+    (!TERMINAL_OWNED.load(Ordering::Relaxed)).then(|| io::stderr().lock())
+}
 
 #[derive(Debug)]
 pub struct SavedReport {
@@ -169,7 +181,7 @@ pub fn pull_request_failure(error: &crate::pr::PrError) {
 
 /// A mistake the user fixes (arguments, where to run it): the message and what to do, without a diagnostic report.
 pub fn user_error(error: &str, next_step: &str) {
-    eprintln!("{error}\nNext step: {next_step}");
+    if let Some(mut stderr) = stderr() { let _ = writeln!(stderr, "{error}\nNext step: {next_step}"); }
 }
 
 /// Only a disconnected document-worker receiver should use this association.
@@ -198,7 +210,7 @@ pub fn document_interrupted() {
 fn failure_with_trace(operation: &'static str, error: &str, next_step: &'static str, trace: &str) {
     breadcrumb(operation);
     let message = format!("{operation} failed: {error}\nNext step: {next_step}");
-    let _ = writeln!(io::stderr(), "{}", clean(&message));
+    if let Some(mut stderr) = stderr() { let _ = writeln!(stderr, "{}", clean(&message)); }
     // Library callers/tests do not opt in to persistent application diagnostics.
     if let Some(config) = CONFIG.get() {
         let result = report_dir().and_then(|dir| {
@@ -216,7 +228,7 @@ fn failure_with_trace(operation: &'static str, error: &str, next_step: &'static 
 }
 
 fn print_result(context: &str, result: &io::Result<SavedReport>) {
-    let mut stderr = io::stderr().lock();
+    let Some(mut stderr) = stderr() else { return };
     match result {
         Ok(report) => {
             let _ = writeln!(

@@ -30,6 +30,7 @@ pub fn run() -> ExitCode {
     // the Change Set Picker, when a repository stands behind the Change Set: (root, shown)
     let mut picker: Option<(std::path::PathBuf, bool)> = None;
     let log_branches=matches!(request.launch,cli::Launch::Log{..}).then(||crate::repository_session::initial_log_branches(&request.spec));
+    let log_paths=if matches!(request.launch,cli::Launch::Log{follow:None}){crate::repository_session::log_paths(&request.spec)}else{Vec::new()};
     let (mut opened_pr, mut no_pr) = (None, false);
     let (mut merging, mut picking) = (None, None);
     // the Conflict List to start on, and the paths it's limited to
@@ -141,7 +142,7 @@ pub fn run() -> ExitCode {
         }
         _ => {}
     }
-    if set.comparisons.is_empty() && request.launch!=cli::Launch::About {
+    if set.comparisons.is_empty() && !matches!(request.launch,cli::Launch::About|cli::Launch::Log{..}) {
         if merging.is_some() || picking.is_some() {
             eprintln!("lenz diff merge: nothing to merge, the versions are identical");
             return ExitCode::from(2);
@@ -217,7 +218,7 @@ pub fn run() -> ExitCode {
             // the shared repository session, opened on the comparison loaded above; a followed file is
             // opened by the session once the sidebar inventory has resolved the repository
             let follow = match &request.launch { cli::Launch::Log { follow } => follow.clone(), _ => None };
-            let session = picker.map(|(root, shown)| crate::repository_session::RepositorySession::open_loaded(root, shown, log_branches, follow, set.clone(), request.spec.clone()));
+            let session = picker.map(|(root, shown)| crate::repository_session::RepositorySession::open_loaded_with_paths(root, shown, log_branches, follow, log_paths, set.clone(), request.spec.clone()));
             let viewer = cx.new(|cx| {
                 let mut v = ui::Viewer::new(set, request.spec, request.blame, request.name, doc, view, blocks.is_none(), request.options, font, started, timings, cx);
                 if let Some(session) = session {
@@ -248,7 +249,7 @@ pub fn run() -> ExitCode {
             // the title bar's close button asks first when a merge has unsaved (or, under mergetool, un-Done) work
             let closing = viewer.clone();
             window.on_window_should_close(cx, move |_, cx| {
-                closing.update(cx, |v, cx| v.edits_may_close(cx) && v.merge_may_close(cx) && v.picker_v_may_close(cx) && v.conflicts_may_close(cx))
+                closing.update(cx, |v, cx| v.may_quit(cx))
             });
             // the palette follows the system's light/dark setting live
             viewer.update(cx, |_, cx| cx.observe_window_appearance(window, |_, window, cx| {
@@ -325,6 +326,15 @@ fn choose_repository(args: &[String]) -> Option<ExitCode> {
             let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
             cx.update_global::<ui::themes::GuiThemes, _>(|g, _| { g.0.execute(crate::theme::ThemeCommand::NativeAppearance(dark)); });
             let chooser = cx.new(|cx| ui::repo_chooser::RepoChooser::new(crate::repo_picker::RepoPicker::new(cwd), font, cx));
+            // as the main window: the system's light/dark setting (on Linux it can arrive after the window opens)
+            // and live theme changes repaint the chooser
+            chooser.update(cx, |_, cx| {
+                cx.observe_window_appearance(window, |_, window, cx| {
+                    let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
+                    cx.update_global::<ui::themes::GuiThemes, _>(|g, _| { g.0.execute(crate::theme::ThemeCommand::NativeAppearance(dark)); });
+                }).detach();
+                cx.observe_global::<ui::themes::GuiThemes>(|_, cx| cx.notify()).detach();
+            });
             let focus = chooser.read(cx).focus_handle();
             window.focus(&focus, cx);
             chooser

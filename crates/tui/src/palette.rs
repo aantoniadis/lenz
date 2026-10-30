@@ -233,7 +233,7 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
     frame.render_widget(crate::chrome::pane("",palette,true).style(base), rect);
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     let buf = frame.buffer_mut();
-    crate::visual::safe_text(buf, Rect { height: 1, ..inner }, &format!("Commands: {}▏", p.query()), base.fg(color(palette.accent)));
+    crate::visual::safe_text(buf, Rect { height: 1, ..inner }, &crate::visual::input_line("Commands: ", p.query(), usize::from(inner.width)), base.fg(color(palette.accent)));
     let range = p.window(usize::from(inner.height.saturating_sub(1)));
     let selected = p.selected();
     if p.is_empty() && inner.height > 1 { crate::visual::safe_text(buf, Rect::new(inner.x, inner.y + 1, inner.width, 1), "No matching commands", base.add_modifier(Modifier::DIM)); }
@@ -283,7 +283,7 @@ pub(crate) fn handle(p: &mut Palette, event: &Event, rect: Rect) -> Input {
             }
             _ => {}
         },
-        Event::Paste(text) => p.command(PaletteCommand::Type(text.chars().filter(|c| !c.is_control()).collect())),
+        Event::Paste(text) => p.command(PaletteCommand::Type(lenz::document::one_line(text))),
         _ => return Input::Ignored,
     }
     Input::Handled
