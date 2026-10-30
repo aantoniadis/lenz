@@ -3735,7 +3735,8 @@ impl ReaderView {
         if let Some(&(_, i)) = self.start_hits.iter().find(|h| h.0.contains(&ev.position)) {
             match self.session.state().start_items().into_iter().nth(i) {
                 Some(StartItem::Command(id)) => self.run(id, window, cx),
-                Some(StartItem::Recent(root)) => self.open_root(root, cx),
+                Some(StartItem::RecentFolder(root)) => self.open_root(root, cx),
+                Some(StartItem::RecentFile(path)) => self.open(path, cx),
                 None => {}
             }
             return cx.notify();
@@ -5649,18 +5650,20 @@ impl Render for ReaderView {
             });
             // Nothing open: the start screen's commands and recent folders, each a click target.
             let items = if tab.is_none() && g.pane == 0 { state.start_items() } else { Vec::new() };
-            let (mut start, mut gap) = (Vec::new(), 0.0);
+            let (mut start, mut row, mut heading) = (Vec::new(), 0.0, None);
             for (i, item) in items.iter().enumerate() {
                 let label = match item {
                     StartItem::Command(id) => self.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
-                    StartItem::Recent(root) => root.display().to_string(),
+                    StartItem::RecentFolder(path) | StartItem::RecentFile(path) => path.display().to_string(),
                 };
-                // The recent folders under a blank row and their heading.
-                if matches!(item, StartItem::Recent(_)) && gap == 0.0 {
-                    gap = 1.0;
-                    start.push((start.len() as f32 + gap, "Recent folders".to_string(), false));
+                // Each group of recents under a blank row and its heading.
+                if item.heading() != heading {
+                    heading = item.heading();
+                    if let Some(h) = heading {
+                        start.push((row + 1.0, h.to_string(), false));
+                        row += 2.0;
+                    }
                 }
-                let row = start.len() as f32 + gap;
                 // Only what the pane shows takes clicks: a row past its edge would cover the panel below.
                 let (top, width) = (24.0 + row * line_h(), (lenz_content::wrap::width(&label) as f32 * self.char_w).min(f32::from(g.text.size.width) - 24.0));
                 if top + line_h() <= f32::from(g.text.size.height) && width > 0.0 {
@@ -5668,6 +5671,7 @@ impl Render for ReaderView {
                     start_hits.push((Bounds { origin: at, size: gpui::size(px(width), px(line_h())) }, i));
                 }
                 start.push((row, label, true));
+                row += 1.0;
             }
             let hint = match tab {
                 Some(t) if state.presentation_view(t.id()).is_some() || state.loading().is_some() => None,

@@ -133,7 +133,7 @@ pub const UNSTABLE_RETRIES: u32 = 8;
 /// Background results waiting for the UI at most; producers block beyond this.
 pub const COMPLETIONS: usize = 64;
 
-/// Recent browsing roots kept.
+/// Recent browsing roots kept, and recent files opened without one.
 pub const RECENT_ROOTS: usize = 10;
 /// How often idle language servers are checked and their memory sampled.
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1427,7 +1427,20 @@ pub enum StartItem {
     /// Open File… or Open Folder…, run as from the menus.
     Command(CommandId),
     /// A recent folder, opened with [`Command::OpenRoot`].
-    Recent(PathBuf),
+    RecentFolder(PathBuf),
+    /// A file recently opened without a folder, opened with [`Command::Open`].
+    RecentFile(PathBuf),
+}
+
+impl StartItem {
+    /// The heading its group sits under, after a blank row (the commands have none).
+    pub fn heading(&self) -> Option<&'static str> {
+        match self {
+            Self::Command(_) => None,
+            Self::RecentFolder(_) => Some("Recent folders"),
+            Self::RecentFile(_) => Some("Recent files"),
+        }
+    }
 }
 
 /// The lists of places the adapter shows.
@@ -1749,6 +1762,8 @@ pub struct State {
     explorer_search: ExplorerSearch,
     workspace_revision: u64,
     recent: Vec<PathBuf>,
+    /// Files recently opened while no folder was, most recent first.
+    recent_alone: Vec<PathBuf>,
     /// The project's bookmarks, recent files and locations (the session's own without a project).
     places: Arc<crate::places::Places>,
     /// Listed files found missing when a list last opened.
@@ -2356,13 +2371,15 @@ impl State {
     pub fn recent(&self) -> &[PathBuf] {
         &self.recent
     }
-    /// The start screen: Open File…, Open Folder…, then the recent folders; empty once a file or folder is open
+    /// The start screen: Open File…, Open Folder…, the recent folders, then the files recently opened without a
+    /// folder; empty once a file or folder is open
     /// (or opening); split panes show it in the first. Adapters resolve a chosen row by its index here at use time.
     pub fn start_items(&self) -> Vec<StartItem> {
         if self.project.is_some() || !self.tabs.is_empty() || self.loading.is_some() {
             return Vec::new();
         }
-        [CommandId::Open, CommandId::OpenFolder].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::Recent)).collect()
+        [CommandId::Open, CommandId::OpenFolder].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::RecentFolder))
+            .chain(self.recent_alone.iter().cloned().map(StartItem::RecentFile)).collect()
     }
     /// The tree lists each folder's folders before its files.
     pub fn folders_first(&self) -> bool {
@@ -2859,6 +2876,10 @@ pub struct Session {
     /// Recent-root saves are numbered; a save older than the last one written is skipped.
     recent_saves: Arc<std::sync::Mutex<u64>>,
     recent_seq: u64,
+    /// Where files opened without a folder are kept, numbered like the roots' saves.
+    recent_alone_file: PathBuf,
+    recent_alone_saves: Arc<std::sync::Mutex<u64>>,
+    recent_alone_seq: u64,
     settings_file: PathBuf,
     settings_saves: Arc<std::sync::Mutex<u64>>,
     settings_seq: u64,
@@ -3004,6 +3025,8 @@ impl Session {
     /// The adapter supplies its validated native input capability once at construction.
     pub fn with_text_input(config: Config, text_input_enabled: bool) -> Self {
         let recent = read_recent(&config.recent);
+        let recent_alone_file = config.recent.with_file_name("recent-files.json");
+        let recent_alone = read_recent(&recent_alone_file);
         let settings = read_settings(&config.settings);
         let keymap = keymap_from_settings(&settings);
         let mut themes = ThemeService::new_deferred(config.themes, config.overrides, config.dark);
@@ -3055,6 +3078,7 @@ impl Session {
             tree_reveal: None,
                 explorer: Default::default(), explorer_search: Default::default(), workspace_revision: 0,
                 recent,
+                recent_alone,
                 places: Default::default(),
                 missing: Default::default(),
                 settings,
@@ -3145,6 +3169,9 @@ impl Session {
             recent_file: config.recent,
             recent_saves: Arc::default(),
             recent_seq: 0,
+            recent_alone_file,
+            recent_alone_saves: Arc::default(),
+            recent_alone_seq: 0,
             settings_file: config.settings,
             settings_saves: Arc::default(),
             settings_seq: 0,
@@ -4636,7 +4663,10 @@ impl Session {
                 let path = path.clone();
                 self.command(Command::ForgetPlace(Place::File(path)))
             }
-            Command::Open(path) => self.navigate(path, false, None, true),
+            Command::Open(path) => {
+                if self.state.project.is_none() && !is_virtual(&path) { self.remember_alone(normalized(&path)); }
+                self.navigate(path, false, None, true)
+            }
             Command::OpenRetained(path) => self.navigate(path, true, None, true),
             Command::ActivateTab(id) => {
                 let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else { return Effect::default() };
@@ -8506,6 +8536,25 @@ impl Session {
         }
     }
 
+    /// Put a file opened without a folder first in its recent list and save the list in the background.
+    fn remember_alone(&mut self, path: PathBuf) {
+        let list = &mut self.state.recent_alone;
+        list.retain(|p| *p != path);
+        list.insert(0, path);
+        list.truncate(RECENT_ROOTS);
+        let (list, file) = (list.clone(), self.recent_alone_file.clone());
+        self.recent_alone_seq += 1;
+        let (seq, saves) = (self.recent_alone_seq, self.recent_alone_saves.clone());
+        self.jobs.submit(Priority::Background, move || {
+            // Two quick opens save from two workers: the newer list wins.
+            let mut written = saves.lock().unwrap_or_else(|e| e.into_inner());
+            if *written < seq {
+                save_json(&file, &list);
+                *written = seq;
+            }
+        });
+    }
+
     fn open_root(&mut self, root: PathBuf) {
         self.cancel_explorer_copy();
         self.command(Command::CloseSearchEverywhere);
@@ -10165,7 +10214,7 @@ fn xdg_state() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).filter(|p| p.is_absolute()).unwrap_or_else(|| home.join(".local/state"))
 }
 
-/// Recent roots from `file`: a JSON array of paths, at most 64 KiB; anything else is no history.
+/// Recent roots (or files opened without one) from `file`: a JSON array of paths, at most 64 KiB; anything else is no history.
 fn read_recent(file: &Path) -> Vec<PathBuf> {
     let Ok(bytes) = lenz_content::theme::read_bounded(file) else { return Vec::new() };
     let paths: Vec<PathBuf> = serde_json::from_slice(&bytes).unwrap_or_default();

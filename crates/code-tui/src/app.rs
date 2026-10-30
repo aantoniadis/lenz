@@ -3311,7 +3311,8 @@ impl App {
                 if !drag && let Some(&(i, _)) = pane.start.iter().find(|(_, r)| r.contains(point)) {
                     match self.session.state().start_items().into_iter().nth(i) {
                         Some(StartItem::Command(id)) => self.run(id),
-                        Some(StartItem::Recent(root)) => self.open_root(root),
+                        Some(StartItem::RecentFolder(root)) => self.open_root(root),
+                        Some(StartItem::RecentFile(path)) => self.dispatch(Command::Open(path)),
                         None => {}
                     }
                     return;
