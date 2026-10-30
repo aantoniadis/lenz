@@ -914,35 +914,35 @@ fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut Test
     let position = f.view.read_with(&v, |r, _| r.text_bounds.unwrap().center());
     let char_w = f.view.read_with(&v, |r, _| r.char_w);
     for _ in 0..8 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-0.25 * char_w), px(-line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(-0.25 * char_w), px(-line_h() * 0.25))), ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 2);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column()), 2);
     v.simulate_keystrokes("home");
     for _ in 0..11 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
     }
     for _ in 0..4 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 1);
     v.simulate_keystrokes("end");
     let last = f.view.read_with(&v, |r, _| r.session().state().top_line());
     for _ in 0..3 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
     }
     for _ in 0..4 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(line_h() * 0.25))), ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), last - 1);
     f.view.update(&mut v, |r, cx| r.scroll_to_x(f32::MAX, cx));
     let right = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column());
     for dx in [-0.25, -0.25, -0.25, 0.25, 0.25, 0.25, 0.25] {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(dx * char_w), px(0.0))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(dx * char_w), px(0.0))), ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().column()), right - 1);
     for _ in 0..3 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
     }
     let other = f.dir.path().join("other.txt");
     std::fs::write(&other, &source).unwrap();
@@ -951,7 +951,7 @@ fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut Test
     settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source() == other));
     let mut v = visual(cx, &f);
     draw(&mut v);
-    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
+    v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().top_line()), 0, "a new tab must not inherit the previous tab's fraction");
     assert_eq!(std::fs::read(f.dir.path().join("main.txt")).unwrap(), source.as_bytes());
 }
@@ -967,7 +967,7 @@ fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppCont
     let (position, char_w, max) = f.view.read_with(&v, |r, _| (r.text_bounds.unwrap().center(), r.char_w, r.max_hscroll()));
     assert!(max > char_w && (max / char_w).fract() > 0.01, "fixture needs a partly visible last column");
     for _ in 0..((max / char_w).ceil() as usize + 1) * 4 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-char_w * 0.25), px(0.0))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(-char_w * 0.25), px(0.0))), ..Default::default() });
         draw(&mut v);
     }
     let offset = f.view.read_with(&v, |r, _| r.hscroll());
@@ -1322,7 +1322,7 @@ fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAp
     v.simulate_keystrokes("end");
     let (top, lines) = f.view.read_with(&v, |v, _| (v.session().state().top_line(), v.session().state().current_source().unwrap().line_count()));
     assert_eq!(top, lines - 1);
-    v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, 10.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { delta: ScrollDelta::Lines(point(0.0, 10.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), lines - 1 - 30);
     v.simulate_keystrokes("ctrl-a ctrl-c");
     assert_eq!(v.read_from_clipboard().and_then(|c| c.text()).as_deref(), Some(source.as_str()));
@@ -1402,11 +1402,11 @@ fn theme_chooser_is_a_direct_menu_action_with_inert_headers_and_scroll(cx: &mut 
         v.simulate_resize(size(px(800.0), px(180.0)));
         draw(&mut v);
         let inside = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().bounds.center());
-        v.simulate_event(ScrollWheelEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| r.modal_layout().unwrap().first > 0));
         assert_eq!(f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.session.state().palette().bg)), preview);
-        v.simulate_event(ScrollWheelEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: inside, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
         draw(&mut v);
         assert_eq!(f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.session.state().palette().bg)), preview);
         for (w, h) in [(120.0, 80.0), (1.0, 1.0)] {
@@ -1677,14 +1677,14 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     v.simulate_click(point(px(2.0), px(2.0)), Modifiers::default());
     assert!(f.view.read_with(&v, |v, _| v.modal.is_none() && v.session().state().navigation().is_none()));
     // The wheel scrolls the tree, and a repaint keeps that scroll.
-    v.simulate_event(ScrollWheelEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Lines(point(0.0, -5.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Lines(point(0.0, -5.0)), ..Default::default() });
     draw(&mut v);
     let scroll = f.view.read_with(&v, |v, _| v.tree_scroll);
     assert_eq!(scroll, 15);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll);
     // A trackpad's small movements add up, as in the text (each alone is under half a row).
-    let pad = |v: &mut gpui::VisualTestContext, dy: f32| v.simulate_event(ScrollWheelEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), ..Default::default() });
+    let pad = |v: &mut gpui::VisualTestContext, dy: f32| v.simulate_event(ScrollEvent { position: point(px(20.0), px(100.0)), delta: ScrollDelta::Pixels(point(px(0.0), px(dy))), ..Default::default() });
     for _ in 0..10 { pad(&mut v, -line_h() / 5.0); }
     assert_eq!(f.view.read_with(&v, |v, _| v.tree_scroll), scroll + 2);
     // At the top, movement beyond the edge is dropped: reversing responds at once.
@@ -1759,7 +1759,7 @@ fn tabs_open_reuse_keep_and_close_through_real_input(cx: &mut TestAppContext) {
     // Horizontal position belongs to the tab: scroll a.rs sideways, switch tabs, come back.
     let mut v = visual(cx, &f);
     draw(&mut v);
-    v.simulate_event(ScrollWheelEvent { position: point(px(600.0), px(200.0)), delta: ScrollDelta::Pixels(point(px(-300.0), px(0.0))), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(600.0), px(200.0)), delta: ScrollDelta::Pixels(point(px(-300.0), px(0.0))), ..Default::default() });
     let column = f.view.read_with(&v, |v, _| v.session().state().column());
     assert!(column > 0);
     v.simulate_keystrokes("ctrl-tab");
@@ -2081,17 +2081,17 @@ fn focus_moves_out_of_the_results_and_the_wheel_scrolls_them(cx: &mut TestAppCon
     draw(&mut v);
     assert!(f.view.read_with(&v, |v, _| v.results_focus));
     let y = f.view.read_with(&v, |v, _| v.panel_list_y + 5.0);
-    v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 12, "kept across a repaint");
     // A trackpad's small movements add up there too.
     for _ in 0..10 {
-        v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() / 5.0))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: point(px(100.0), px(y)), delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() / 5.0))), ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14);
     // The status bar below the panel takes no wheel.
-    v.simulate_event(ScrollWheelEvent { position: point(px(100.0), px(500.0 - status_h() / 2.0)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(100.0), px(500.0 - status_h() / 2.0)), delta: ScrollDelta::Lines(point(0.0, -4.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.results_scroll), 14, "the status bar does not scroll the results");
     // Focusing the tree takes the keys from the results.
     v.simulate_keystrokes("ctrl-shift-e");
@@ -2774,7 +2774,7 @@ fn markdown_reads_as_a_preview_and_switches_to_source_at_the_same_place(cx: &mut
     assert!(top > 6, "{top}");
     let first = f.view.read_with(&v, |r, _| r.preview_rows()[0].0);
     assert_eq!(first, top, "the core holds the preview's first line");
-    v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, -2.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { delta: ScrollDelta::Lines(point(0.0, -2.0)), ..Default::default() });
     show(&mut v);
     let top = f.view.read_with(&v, |r, _| r.session().state().top_line());
     assert_eq!(f.view.read_with(&v, |r, _| r.preview_rows()[0].0), top);
@@ -3820,7 +3820,7 @@ fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     draw(&mut v);
     assert_eq!(numbers(&mut v), vec![1, 6, 9]);
     // The wheel scrolls by shown rows.
-    v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, -1.0 / 3.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { delta: ScrollDelta::Lines(point(0.0, -1.0 / 3.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), 5);
     v.simulate_keystrokes("ctrl-shift-=");
     draw(&mut v);
@@ -5225,7 +5225,7 @@ fn a_preview_with_collapsed_folds_scrolls(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     show(&mut v);
     show(&mut v);
-    v.simulate_event(ScrollWheelEvent { position: point(px(400.0), px(250.0)), delta: ScrollDelta::Lines(point(0.0, -6.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(400.0), px(250.0)), delta: ScrollDelta::Lines(point(0.0, -6.0)), ..Default::default() });
     show(&mut v);
     show(&mut v);
     let top = f.view.read_with(&v, |r, _| r.preview_state().map(|s| s.0));
@@ -5430,8 +5430,8 @@ fn overflowing_context_menu_wheel_moves_viewport_and_keeps_keyboard_selection(cx
     let selected = f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at());
     let old_scroll = f.view.read_with(&v, |r, _| match r.modal { Some(Modal::Context { scroll, .. }) => scroll, _ => unreachable!() });
     let before = f.view.read_with(&v, |r, _| r.session.state().top_line());
-    v.simulate_event(gpui::ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Lines(point(0.0, 3.0)),
-        modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved });
+    v.simulate_event(gpui::ScrollEvent { position: bounds.center(), delta: ScrollDelta::Lines(point(0.0, 3.0)),
+        modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved, ..Default::default() });
     draw(&mut v);
     f.view.read_with(&v, |r, _| {
         assert_eq!(r.session.state().top_line(), before);
@@ -5441,8 +5441,8 @@ fn overflowing_context_menu_wheel_moves_viewport_and_keeps_keyboard_selection(cx
     });
     let old_scroll = f.view.read_with(&v, |r, _| match r.modal { Some(Modal::Context { scroll, .. }) => scroll, _ => unreachable!() });
     for _ in 0..30 {
-        v.simulate_event(gpui::ScrollWheelEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(2.0))),
-            modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved });
+        v.simulate_event(gpui::ScrollEvent { position: bounds.center(), delta: ScrollDelta::Pixels(point(px(0.0), px(2.0))),
+            modifiers: Modifiers::default(), touch_phase: gpui::TouchPhase::Moved, ..Default::default() });
     }
     assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected);
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Context { scroll, .. }) if scroll < old_scroll)), "small trackpad deltas move the viewport");
@@ -5619,10 +5619,10 @@ fn app_menu_wheel_reveals_long_groups_without_scrolling_the_document(cx: &mut Te
     v.simulate_keystrokes("down enter");
     draw(&mut v);
     let selected = f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at());
-    v.simulate_event(ScrollWheelEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at() == selected && r.modal_layout().unwrap().first > 0));
-    v.simulate_event(ScrollWheelEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position: point(px(50.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at() == selected));
     v.simulate_keystrokes("escape escape");
@@ -5892,13 +5892,13 @@ fn navigation_wheel_keeps_enter_target_and_accumulates_trackpad_scroll(cx: &mut 
     let first = f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1);
     let position = f.view.read_with(&v, |r, _| r.navigation_bounds().center());
     for _ in 0..30 {
-        v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-2.0))), ..Default::default() });
+        v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-2.0))), ..Default::default() });
     }
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected);
     assert!(f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1 > first), "small trackpad events accumulate");
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().top_line()), 0);
-    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1 > selected), "the selected command is offscreen");
     v.simulate_keystrokes("enter");
@@ -6037,7 +6037,7 @@ fn wheel_scrolls_theme_place_and_server_dialogs_without_selecting(cx: &mut TestA
         f.view.update_in(&mut v, |r, w, cx| r.run(id, w, cx));
         draw(&mut v);
         let (selected, first) = f.view.read_with(&v, |r, _| (r.modal.as_ref().unwrap().at(), r.modal_layout().unwrap().first));
-        v.simulate_event(ScrollWheelEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
         draw(&mut v);
         assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), selected, "{id:?} keeps its selected option");
         assert!(f.view.read_with(&v, |r, _| r.modal_layout().unwrap().first > first), "{id:?} scrolls its content");
@@ -6048,7 +6048,7 @@ fn wheel_scrolls_theme_place_and_server_dialogs_without_selecting(cx: &mut TestA
             let l = r.modal_layout().unwrap();
             l.lines.iter().skip(l.first).take(l.visible).any(|(row, ..)| *row == r.modal.as_ref().unwrap().at())
         }), "keyboard navigation reveals the first option");
-        v.simulate_event(ScrollWheelEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
+        v.simulate_event(ScrollEvent { position: point(px(60.0), px(40.0)), delta: ScrollDelta::Lines(point(0.0, -1000.0)), ..Default::default() });
         v.simulate_keystrokes("escape");
         f.view.update_in(&mut v, |r, w, cx| r.run(id, w, cx));
         draw(&mut v);

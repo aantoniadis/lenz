@@ -122,10 +122,10 @@ fn gui_csv_pixel_wheel_accumulates_and_native_rejections_preserve_input(cx: &mut
     drop(v); settle(cx, &f, csv_ready); let mut v = visual(cx, &f);
     v.simulate_resize(size(px(600.0),px(300.0))); draw(&mut v);
     let point = f.view.read_with(&v, |r, _| r.panes[0].text.center());
-    for _ in 0..10 { v.simulate_event(ScrollWheelEvent { position: point, delta: ScrollDelta::Pixels(gpui::point(px(0.0),px(-2.0))), ..Default::default() }); }
+    for _ in 0..10 { v.simulate_event(ScrollEvent { position: point, delta: ScrollDelta::Pixels(gpui::point(px(0.0),px(-2.0))), ..Default::default() }); }
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().csv(r.session.state().active().unwrap().id()).unwrap().top), 1);
     let col_w = f.view.read_with(&v, |r, _| 18.0 * r.char_w);
-    for _ in 0..10 { v.simulate_event(ScrollWheelEvent { position: point, delta: ScrollDelta::Pixels(gpui::point(px(-col_w / 10.0),px(0.0))), ..Default::default() }); }
+    for _ in 0..10 { v.simulate_event(ScrollEvent { position: point, delta: ScrollDelta::Pixels(gpui::point(px(-col_w / 10.0),px(0.0))), ..Default::default() }); }
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().csv(r.session.state().active().unwrap().id()).unwrap().left), 1);
     f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
     v.simulate_keystrokes("enter ctrl-a"); draw(&mut v);

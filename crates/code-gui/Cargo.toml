@@ -22,7 +22,7 @@ lenz-gpui.workspace = true
 gpui.workspace = true
 unicode-segmentation = "1.13.3"
 # SVG logos and embedded raster images in Reader content.
-resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
+resvg = { version = "0.49.0", default-features = false, features = ["raster-images"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_platform = { workspace = true, features = ["font-kit"] }

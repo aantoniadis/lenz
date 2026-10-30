@@ -309,7 +309,7 @@ pub(crate) fn index_file_cached(root: &Path, rel: &str, current: impl Fn() -> bo
         let mut hash = Sha256::new(); hash.update(format!("{language:?}\0")); hash.update(&bytes);
         hash.finalize()
     });
-    let key = fingerprint.as_ref().map(|hash| format!("{hash:x}"));
+    let key = fingerprint.as_ref().map(|hash| crate::index_cache::hex(hash));
     let fingerprint = fingerprint.map(Into::into);
     drop(bytes);
     if doc.is_large() {

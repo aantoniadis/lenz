@@ -3001,7 +3001,7 @@ mod tests {
             && v.markdown.horizontal[0] == 0.));
         f.window
             .update(cx, |v, w, cx| {
-                let ev = ScrollWheelEvent {
+                let ev = ScrollEvent {
                     position: point(px(v.diff_x() + 20.), px(v.top() + 40.)),
                     delta: ScrollDelta::Lines(point(-5., 0.)),
                     ..Default::default()

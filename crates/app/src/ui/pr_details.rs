@@ -409,7 +409,7 @@ impl Viewer {
         }
         true
     }
-    pub(super) fn pr_dialog_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+    pub(super) fn pr_dialog_wheel(&mut self, ev: &ScrollEvent, cx: &mut Context<Self>) -> bool {
         if !self.pr_details_shown() || !self.in_pr_pane(ev.position) {
             return false;
         }

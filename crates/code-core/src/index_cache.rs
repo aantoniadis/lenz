@@ -53,7 +53,10 @@ pub(crate) struct Cache {
     clock: u64,
 }
 
-pub(crate) fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+pub(crate) fn digest(bytes: &[u8]) -> String { hex(&Sha256::digest(bytes)) }
+
+/// Lowercase hex, as `{:x}` printed sha2 0.10's digests (the persisted keys keep their form).
+pub(crate) fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }
 
 impl Cache {
     pub fn new(base: &Path, root: &Path) -> Self {

@@ -208,7 +208,7 @@ fn completion_documentation_keeps_full_markdown_and_scrolls_without_editing(cx: 
             let (bounds,layout)=f.view.read_with(&v,|r,_|{let d=r.completion_doc.as_ref().unwrap(); (d.bounds,d.layout.clone())});
             assert!(f32::from(bounds.right())<=w+0.1 && f32::from(bounds.bottom())<=h+0.1,"docs fit: {bounds:?}");
             draw(&mut v); assert!(f.view.read_with(&v,|r,_|Arc::ptr_eq(&layout,&r.completion_doc.as_ref().unwrap().layout)),"idle redraw retains shaped Markdown");
-            v.simulate_event(ScrollWheelEvent{position:bounds.center(),delta:ScrollDelta::Lines(point(0.0,-3.0)),..Default::default()}); draw(&mut v);
+            v.simulate_event(ScrollEvent{position:bounds.center(),delta:ScrollDelta::Lines(point(0.0,-3.0)),..Default::default()}); draw(&mut v);
             assert!(f.view.read_with(&v,|r,_|r.completion_doc.as_ref().unwrap().top)>0.0);
             v.simulate_event(MouseDownEvent{position:bounds.center(),button:MouseButton::Left,..Default::default()});
             assert!(f.view.read_with(&v,|r,_|r.session.state().completion().is_some()));

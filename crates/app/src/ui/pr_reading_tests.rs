@@ -11,11 +11,11 @@ fn gui_pr_reading_wheel_preserves_small_pixel_and_horizontal_input(cx: &mut Test
         let _ = v.render(w, cx);
         let (x, y, _, _) = v.pr_pane();
         for delta in [point(px(-10.), px(0.)), point(px(0.), px(-0.25))] {
-            assert!(v.pr_dialog_wheel(&ScrollWheelEvent { position: point(px(x + 40.), px(y + 60.)), delta: ScrollDelta::Pixels(delta), ..Default::default() }, cx));
+            assert!(v.pr_dialog_wheel(&ScrollEvent { position: point(px(x + 40.), px(y + 60.)), delta: ScrollDelta::Pixels(delta), ..Default::default() }, cx));
             assert_eq!(v.pr_dialog.as_ref().unwrap().scroll, 0, "horizontal and subpixel wheel events must not jump three rows");
         }
         for (lines, expected) in [(-3.,1),(3.,0)] {
-            assert!(v.pr_dialog_wheel(&ScrollWheelEvent { position:point(px(x+40.),px(y+60.)),delta:ScrollDelta::Lines(point(0.,lines)),..Default::default() },cx));
+            assert!(v.pr_dialog_wheel(&ScrollEvent { position:point(px(x+40.),px(y+60.)),delta:ScrollDelta::Lines(point(0.,lines)),..Default::default() },cx));
             assert_eq!(v.pr_dialog.as_ref().unwrap().scroll,expected,"one wheel event scrolls one row even when the platform reports three lines");
         }
     }).unwrap();
@@ -36,7 +36,7 @@ fn gui_pr_trackpad_overscroll_does_not_delay_reversal() {
             let d = v.pr_dialog.as_mut().unwrap();
             d.scroll = start; d.wheel = 0.;
             for delta in [outward, outward, outward, -outward, -outward, -outward, -outward] {
-                v.on_wheel(&ScrollWheelEvent { position: point(px(rect.0 + 40.), px(rect.1 + 60.)), delta: ScrollDelta::Pixels(point(px(0.), px(delta * line_h()))), ..Default::default() }, w, cx);
+                v.on_wheel(&ScrollEvent { position: point(px(rect.0 + 40.), px(rect.1 + 60.)), delta: ScrollDelta::Pixels(point(px(0.), px(delta * line_h()))), ..Default::default() }, w, cx);
             }
             assert_eq!(v.pr_dialog.as_ref().unwrap().scroll, expected);
         }
@@ -196,7 +196,7 @@ fn gui_pr_native_scroll_is_restored_after_a_tab_reflows() {
                 assert!(v.pr_dialog_click(&event, cx));
                 v.pr_dialog_release();
             } else {
-                assert!(v.pr_dialog_wheel(&ScrollWheelEvent { position: point(px(x + 40.), px(y + 60.)), delta: ScrollDelta::Lines(point(0., 1.)), ..Default::default() }, cx));
+                assert!(v.pr_dialog_wheel(&ScrollEvent { position: point(px(x + 40.), px(y + 60.)), delta: ScrollDelta::Lines(point(0., 1.)), ..Default::default() }, cx));
             }
             v.pr_dialog.as_ref().unwrap().scroll
         }).unwrap();

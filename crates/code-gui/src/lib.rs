@@ -7,7 +7,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use gpui::{
     App, AppContext, Bounds, ClipboardItem, Context, FocusHandle, Font, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollWheelEvent, Styled, TitlebarOptions, Window, WindowOptions,
+    MouseMoveEvent, ParentElement, Pixels, Render, ScrollDelta, ScrollEvent, Styled, TitlebarOptions, Window, WindowOptions,
     canvas, div, px, rgb,
 };
 use gpui::InteractiveElement;
@@ -3004,7 +3004,7 @@ impl ReaderView {
         self.dispatch(Command::Extend(motion), cx);
     }
 
-    fn on_wheel(&mut self, ev: &ScrollWheelEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_wheel(&mut self, ev: &ScrollEvent, _window: &mut Window, cx: &mut Context<Self>) {
         self.double_shift.interrupt();
         if let Some(Modal::Navigation { at }) = self.modal {
             let len = self.session.state().navigation().map_or(0, |n| n.rows.len());
@@ -5875,7 +5875,7 @@ impl Render for ReaderView {
                 v.terminal_ui.external_paths = v.modal.is_none().then(|| event.drag(cx).paths().to_vec());
             }))
             .on_key_down(cx.listener(Self::on_key))
-            .on_scroll_wheel(cx.listener(Self::on_wheel))
+            .on_scroll(cx.listener(Self::on_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
             .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))

@@ -30,7 +30,7 @@ grep-matcher = "0.1"
 # File patterns for project search (ripgrep's, already in the tree through `ignore`).
 globset = "0.4"
 # Content validation; already in the workspace dependency graph.
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 
 # Offline PostgreSQL syntax/scopes and source-preserving whitespace formatting.
 sqlparser = { version = "0.63", features = ["visitor", "derive-dialect"] }
@@ -48,7 +48,7 @@ filedescriptor = "0.8.3"
 rustix = { version = "1.1.4", features = ["process", "event", "fs", "pipe"] }
 
 [build-dependencies]
-sha2 = "0.10.9"
+sha2 = "0.11.1"
 
 [dev-dependencies]
 tempfile = "3"

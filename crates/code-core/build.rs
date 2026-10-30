@@ -7,6 +7,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rerun-if-changed={path}");
         hash.update(std::fs::read(path)?);
     }
-    println!("cargo:rustc-env=LENZ_INDEX_EXTRACTOR={:x}", hash.finalize());
+    let hex: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    println!("cargo:rustc-env=LENZ_INDEX_EXTRACTOR={hex}");
     Ok(())
 }

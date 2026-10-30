@@ -655,7 +655,7 @@ fn gui_help_wrapped_pages_render_in_all_themes_and_workflows(cx: &mut TestAppCon
                 visual.simulate_keystrokes("end up");
                 let end = rows.len() - visible;
                 assert_eq!(f.viewer.read_with(cx, |v, _| v.help_scroll), end - 1);
-                visual.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
+                visual.simulate_event(ScrollEvent { delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() });
                 assert_eq!(f.viewer.read_with(cx, |v, _| v.help_scroll), end.saturating_sub(4));
                 visual.simulate_keystrokes("end");
                 let close = window.update(cx, |_, w, _| help_close_bounds(w.viewport_size()).center()).unwrap();
@@ -1130,7 +1130,7 @@ fn gui_wheel_over_log_never_scrolls_diff_horizontally() {
     });
     f.window.update(&mut cx, |v, w, cx| {
         let anchor = v.comparison.view.anchor_line();
-        v.on_wheel(&ScrollWheelEvent { position: point(px(v.diff_x() + 50.), px(toolbar_h() + 10.)),
+        v.on_wheel(&ScrollEvent { position: point(px(v.diff_x() + 50.), px(toolbar_h() + 10.)),
             delta: ScrollDelta::Lines(point(-1., -1.)), ..Default::default() }, w, cx);
         assert_eq!(v.hscroll, [0.;2], "log wheel must never scroll diff text sideways");
         assert_eq!(v.comparison.view.anchor_line(), anchor);
@@ -1162,7 +1162,7 @@ fn gui_prompt_swallows_wheel_before_underlying_panes() {
     key(&mut cx, &f, "g", true, false, false);
     f.window.update(&mut cx, |v, w, cx| {
         let anchor = v.comparison.view.anchor_line();
-        v.on_wheel(&ScrollWheelEvent { position: point(px(v.diff_x() + 50.), px(v.top() + 10.)),
+        v.on_wheel(&ScrollEvent { position: point(px(v.diff_x() + 50.), px(v.top() + 10.)),
             delta: ScrollDelta::Lines(point(0., -1.)), ..Default::default() }, w, cx);
         assert_eq!(v.comparison.view.anchor_line(), anchor);
     }).unwrap();
@@ -1199,11 +1199,11 @@ fn gui_independent_diff_keyboard_and_wheel_use_their_own_pane() {
     assert!((f.viewer.read_with(&cx, |v, _| v.comparison.view.anchor_line_on(Side::Right)) - right - 1.).abs() < 0.0001);
     f.window.update(&mut cx, |v, w, cx| {
         let left = v.comparison.view.anchor_line_on(Side::Left);
-        v.on_wheel(&ScrollWheelEvent { position: point(px(v.diff_x() + 40.), px(v.top() + 10.)),
+        v.on_wheel(&ScrollEvent { position: point(px(v.diff_x() + 40.), px(v.top() + 10.)),
             delta: ScrollDelta::Lines(point(0., -1.)), ..Default::default() }, w, cx);
         assert!((v.comparison.view.anchor_line_on(Side::Left) - left - 3.).abs() < 0.0001);
         let anchors = [v.comparison.view.anchor_line_on(Side::Left), v.comparison.view.anchor_line_on(Side::Right)];
-        v.on_wheel(&ScrollWheelEvent { position: point(px(20.), px(v.top() + 10.)),
+        v.on_wheel(&ScrollEvent { position: point(px(20.), px(v.top() + 10.)),
             delta: ScrollDelta::Lines(point(0., -1.)), ..Default::default() }, w, cx);
         assert!(v.nav_scroll > 0.);
         assert_eq!([v.comparison.view.anchor_line_on(Side::Left), v.comparison.view.anchor_line_on(Side::Right)], anchors);
@@ -1761,7 +1761,7 @@ fn gui_about_scroll_end_then_up_remains_bounded(cx: &mut TestAppContext) {
     assert_eq!(f.viewer.read_with(cx,|v,_|v.about.as_ref().unwrap().scroll),end.saturating_sub(1));
     for _ in 0..100{key(cx,&f,"down",false,false,false);}
     assert_eq!(f.viewer.read_with(cx,|v,_|v.about.as_ref().unwrap().scroll),end);
-    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{delta:ScrollDelta::Lines(point(0.0,1.0)),..Default::default()},w,cx)).unwrap();
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{delta:ScrollDelta::Lines(point(0.0,1.0)),..Default::default()},w,cx)).unwrap();
     assert_eq!(f.viewer.read_with(cx,|v,_|v.about.as_ref().unwrap().scroll),end.saturating_sub(3));
 }
 
@@ -2102,11 +2102,11 @@ fn gui_horizontal_wheel_moves_both_sides_unless_independent(cx: &mut TestAppCont
     f.viewer.update(cx,|v,_|{v.char_w=8.;v.layout.set_files(false);});
     let (lx,rx,y)=f.window.update(cx,|v,w,_|{let width=(f32::from(w.viewport_size().width)-v.diff_x()-GUTTER_W)/2.;(v.diff_x()+num_w()+16.,v.diff_x()+width+GUTTER_W+num_w()+16.,v.top()+line_h()/2.)}).unwrap();
     click(cx,&f,lx,y);let before=f.viewer.read_with(cx,|v,_|v.sel.unwrap());
-    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
     let h=f.viewer.read_with(cx,|v,_|v.hscroll);assert!(h[0]>0.&&h[0]==h[1],"{h:?}");
     click(cx,&f,lx,y);assert!(f.viewer.read_with(cx,|v,_|v.sel.unwrap().head.col)>before.head.col,"the left Side moved under the pointer");
     // The shared position reaches the end of the wider Side, though the pointer is over the shorter one.
-    f.window.update(cx,|v,w,cx|{for _ in 0..200{v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx);}}).unwrap();
+    f.window.update(cx,|v,w,cx|{for _ in 0..200{v.on_wheel(&ScrollEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx);}}).unwrap();
     let end=f.viewer.read_with(cx,|v,_|v.hscroll);assert_eq!(end[0],end[1]);assert!(end[0]>10.*6.*8.,"{end:?}");
     f.window.update(cx,|v,w,cx|{v.comparison.view.set_mode(ScrollMode::Independent);v.hscroll=[0.,16.];v.comparison.view.set_mode(ScrollMode::Shared);let _=v.render(w,cx);}).unwrap();
     let h=f.viewer.read_with(cx,|v,_|v.hscroll);assert_eq!(h[0],h[1]);
@@ -2119,7 +2119,7 @@ fn gui_horizontal_wheel_keeps_the_other_text_panes_hit_positions(cx: &mut TestAp
     f.viewer.update(cx,|v,_|{v.char_w=8.;v.layout.set_files(false);v.comparison.view.set_mode(ScrollMode::Independent);});
     let (lx,rx,y)=f.window.update(cx,|v,w,_|{let width=(f32::from(w.viewport_size().width)-v.diff_x()-GUTTER_W)/2.;(v.diff_x()+num_w()+16.,v.diff_x()+width+GUTTER_W+num_w()+16.,v.top()+line_h()/2.)}).unwrap();
     click(cx,&f,lx,y);let before=f.viewer.read_with(cx,|v,_|v.sel.unwrap());
-    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{position:point(px(rx),px(y)),delta:ScrollDelta::Lines(point(-1.,0.)),..Default::default()},w,cx)).unwrap();
     click(cx,&f,lx,y);assert_eq!(f.viewer.read_with(cx,|v,_|v.sel.unwrap()),before,"right wheel must preserve left hit testing");
     click(cx,&f,rx,y);assert!(f.viewer.read_with(cx,|v,_|v.sel.unwrap().head.col)>before.head.col);
     let caret=f.viewer.read_with(cx,|v,_|v.sel.unwrap());key(cx,&f,"right",true,false,true);
@@ -2138,7 +2138,7 @@ fn gui_horizontal_merge_wheel_keyboard_and_modal_use_separate_panes(cx:&mut Test
     window.update(cx,|v,w,cx|{
         let _=v.render(w,cx);let pane_w=v.merge.as_ref().unwrap().pane_w;
         let pos=point(px(v.diff_x()+pane_w[0]+pane_w[1]+2.0*GUTTER_W+num_w()+30.0),px(v.top()+5.0));
-        let wheel=ScrollWheelEvent{position:pos,delta:ScrollDelta::Pixels(point(px(-40.),px(0.))),..Default::default()};
+        let wheel=ScrollEvent{position:pos,delta:ScrollDelta::Pixels(point(px(-40.),px(0.))),..Default::default()};
         v.on_wheel(&wheel,w,cx);assert_eq!(v.merge.as_ref().unwrap().horizontal,[0.,0.,40.]);
         v.on_key(&event("right",true,false,true),w,cx);let offsets=v.merge.as_ref().unwrap().horizontal;assert!(offsets[1]>0.);assert_eq!(offsets[0],0.);assert_eq!(offsets[2],40.);
         v.merge.as_mut().unwrap().ask=Some(merge_view::Ask::ChangedOnDisk);v.on_wheel(&wheel,w,cx);v.on_key(&event("right",true,false,true),w,cx);assert_eq!(v.merge.as_ref().unwrap().horizontal,offsets);
@@ -2166,7 +2166,7 @@ fn gui_trackpad_diagonal_scroll_keeps_small_movements_in_every_scroll_mode(cx: &
                 let x = v.diff_x() + if side == Side::Left { widths[0] / 2. } else { widths[0] + widths[1] / 2. };
                 let position = point(px(x), px(v.top() + 10.));
                 for _ in 0..4 {
-                    v.on_wheel(&ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-v.char_w * 0.25), px(-line_h() * 0.25))), ..Default::default() }, w, cx);
+                    v.on_wheel(&ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(-v.char_w * 0.25), px(-line_h() * 0.25))), ..Default::default() }, w, cx);
                 }
                 assert!((v.comparison.view.top_line_on(side) - 1.).abs() < 0.001, "{mode:?} {side:?} dropped diagonal vertical movement");
                 assert!((v.hscroll[side as usize] - v.char_w).abs() < 0.001);
@@ -2184,7 +2184,7 @@ fn gui_horizontal_shift_wheel_clamps_tabs_and_unicode_without_moving_the_caret(c
     f.window.update(cx,|v,w,cx|{
         let _=v.render(w,cx);let pos=point(px(f32::from(w.viewport_size().width)-60.),px(v.top()+5.0));
         let anchor=v.comparison.view.anchor_line();
-        let wheel=ScrollWheelEvent{position:pos,delta:ScrollDelta::Pixels(point(px(0.),px(-40.))),modifiers:gpui::Modifiers{shift:true,..Default::default()},..Default::default()};
+        let wheel=ScrollEvent{position:pos,delta:ScrollDelta::Pixels(point(px(0.),px(-40.))),modifiers:gpui::Modifiers{shift:true,..Default::default()},..Default::default()};
         v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll,[40.;2],"both Sides in Shared");assert_eq!(v.comparison.view.anchor_line(),anchor);
         for _ in 0..1000{v.on_wheel(&wheel,w,cx);}let at_end=v.hscroll[1];assert!(at_end>40.);v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll[1],at_end);
         v.menu=Some(Menu{x:0.,y:0.,hover:None,items:vec![("Copy".into(),MenuAction::InteractionCommand(commands::Interaction::Copy))]});v.on_wheel(&wheel,w,cx);assert_eq!(v.hscroll[1],at_end);v.menu=None;
@@ -2236,7 +2236,7 @@ fn gui_pr_details_sections_full_content_wheel_and_close_preserve_the_diff(cx:&mu
     key(cx,&f,"home",false,false,false);
     assert!(page(cx).contains("REFRESHED_COMMENT"));
     let (px_,py_)=f.viewer.read_with(cx,|v,_|{let (x,y,w,h)=v.pr_pane();(x+w/2.,y+h/2.)});
-    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(px_),px(py_)),delta:ScrollDelta::Pixels(point(px(0.0),px(-80.0))),..Default::default()},w,cx)).unwrap();
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{position:point(px(px_),px(py_)),delta:ScrollDelta::Pixels(point(px(0.0),px(-80.0))),..Default::default()},w,cx)).unwrap();
     assert!(f.viewer.read_with(cx,|v,_|v.pr_dialog.as_ref().unwrap().scroll)>0,"the wheel scrolls the tab");
     key(cx,&f,"escape",false,false,false);assert!(!f.viewer.read_with(cx,|v,_|v.pr_details_shown()));
     run(cx,&f,crate::catalog::Action::Pr(crate::catalog::PrAction::Details(DetailsTab::Commits)));
@@ -3288,7 +3288,7 @@ fn gui_palette_typing_filters_and_disabled_rows_explain(cx:&mut TestAppContext) 
 fn gui_palette_and_diff_options_take_the_wheel_from_the_document(cx:&mut TestAppContext) {
     let long:String=(0..400).map(|i|format!("line {i}\n")).collect();
     let f=fixture(cx,&long,&long.replace("line 7\n","line seven\n"));
-    let wheel=|cx:&mut TestAppContext,dy:f32|{f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(v.diff_x()+50.),px(v.top()+10.)),
+    let wheel=|cx:&mut TestAppContext,dy:f32|{f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{position:point(px(v.diff_x()+50.),px(v.top()+10.)),
         delta:ScrollDelta::Lines(point(0.,dy)),..Default::default()},w,cx)).unwrap();};
     key(cx,&f,"p",true,true,false);
     let (anchor,row)=f.viewer.read_with(cx,|v,_|(v.comparison.view.anchor_line(),v.command_palette.as_ref().unwrap().selected()));
@@ -4876,7 +4876,7 @@ fn gui_a_long_summary_scrolls_with_its_keyboard_row_at_every_size_and_esc_leaves
     assert_eq!(selected.as_deref(),Some("M dir/f58.txt"));
     assert!(!rows.contains(&"M dir/f00.txt".to_string()),"{rows:?}");
     // the wheel scrolls away from it, and the next key brings it back
-    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollWheelEvent{position:point(px(rx+60.),px(ry+80.)),delta:ScrollDelta::Lines(point(0.,30.)),..Default::default()},w,cx)).unwrap();
+    f.window.update(cx,|v,w,cx|v.on_wheel(&ScrollEvent{position:point(px(rx+60.),px(ry+80.)),delta:ScrollDelta::Lines(point(0.,30.)),..Default::default()},w,cx)).unwrap();
     let (rows,selected)=summary_rows(cx,&f);
     assert!(rows.contains(&"M dir/f00.txt".to_string())&&selected.is_none(),"{rows:?}");
     key(cx,&f,"up",false,false,false);

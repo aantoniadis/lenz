@@ -20,17 +20,17 @@ fn gui_tab_wheel_scrolls_only_the_hovered_strip_without_switching_files(cx: &mut
         (point(px((g.bar.0 + g.bar.1) / 2.0), px(g.bar.2 + line_h() / 2.0)), [r.session.state().shown(0).unwrap().id(), r.session.state().shown(1).unwrap().id()], r.tab_scroll)
     });
     assert!(offsets[0] > 0.0);
-    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() }); draw(&mut v);
+    v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Lines(point(0.0, 1.0)), ..Default::default() }); draw(&mut v);
     let after = f.view.read_with(&v, |r, _| r.tab_scroll);
     assert!(after[0] < offsets[0]); assert_eq!(after[1], offsets[1]);
-    for _ in 0..3 { v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(-2.0), px(0.0))), ..Default::default() }); }
+    for _ in 0..3 { v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Pixels(point(px(-2.0), px(0.0))), ..Default::default() }); }
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.tab_scroll[0]), after[0] + 6.0, "small horizontal trackpad input is retained");
     assert!(f.view.read_with(&v, |r, _| r.session.state().focused_pane() == 1 && [r.session.state().shown(0).unwrap().id(), r.session.state().shown(1).unwrap().id()] == shown));
     assert!(f.view.read_with(&v, |r, _| r.session.state().tabs().iter().all(|t| t.top_line() == 0 && t.column() == 0)));
     v.simulate_keystrokes("f10");
     let before = f.view.read_with(&v, |r, _| r.tab_scroll);
-    v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, -1.0)), ..Default::default() });
+    v.simulate_event(ScrollEvent { position, delta: ScrollDelta::Lines(point(0.0, -1.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |r, _| r.tab_scroll), before, "the modal owns wheel input");
     v.simulate_keystrokes("escape");
     let first = f.view.read_with(&v, |r, _| r.session.state().pane_tabs(0).next().unwrap().id());

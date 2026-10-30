@@ -335,7 +335,7 @@ fn sha(path: &Path) -> Result<String> {
         }
         hash.update(&buffer[..count]);
     }
-    Ok(format!("{:x}", hash.finalize()))
+    Ok(hex(&hash.finalize()))
 }
 
 fn main() -> Result<()> {
@@ -376,7 +376,7 @@ fn main() -> Result<()> {
     writeln!(
         log,
         "{}",
-        json!({"schema":1,"phase":"identity","source_claim":args[3],"workload_sha256":format!("{:x}",Sha256::digest(include_bytes!("foundation_edit.rs"))),"executable_sha256":sha(&std::env::current_exe()?)?,
+        json!({"schema":1,"phase":"identity","source_claim":args[3],"workload_sha256":hex(&Sha256::digest(include_bytes!("foundation_edit.rs"))),"executable_sha256":sha(&std::env::current_exe()?)?,
         "fixtures":files.iter().map(|p|Ok(json!({"file":p,"sha256":sha(p)?}))).collect::<Result<Vec<_>>>()?,
         "scope":"actual shared Session commands; oracle and observer overhead excluded from edit dispatch samples but included in process RSS; no GUI/IME latency claim; history growth is intentional"})
     )?;
@@ -454,3 +454,5 @@ mod tests {
         );
     }
 }
+
+fn hex(bytes: &[u8]) -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() }

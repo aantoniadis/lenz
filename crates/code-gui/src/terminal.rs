@@ -235,7 +235,7 @@ impl ReaderView {
         cx.stop_propagation(); true
     }
 
-    pub(super) fn terminal_wheel(&mut self, ev: &ScrollWheelEvent, cx: &mut Context<Self>) -> bool {
+    pub(super) fn terminal_wheel(&mut self, ev: &ScrollEvent, cx: &mut Context<Self>) -> bool {
         if !self.terminal_layout().is_some_and(|l| l.bounds.contains(&ev.position)) { return false; }
         self.terminal_ui.wheel += match ev.delta { ScrollDelta::Pixels(p) => f32::from(p.y)/(line_h()*3.0), ScrollDelta::Lines(p) => p.y };
         let lines = self.terminal_ui.wheel.trunc().clamp(-64.0,64.0) as i32;
