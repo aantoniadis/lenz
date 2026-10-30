@@ -80,8 +80,8 @@ In a throwaway repository with a merge conflict in a text file, a binary (PNG) f
 
 Pushing a `v<version>` tag runs `.github/workflows/release.yml`: native runners (Ubuntu 22.04 x86_64 and arm64, macOS 15 Apple Silicon) run `packaging/package.sh` and attach the tarballs and `.sha256` files to a draft release. The tag must match the workspace version. Rerun it for an existing tag from the Actions tab. The steps below also work locally and need Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own.
 
-- [ ] From the unpacked tarball (and, on macOS, through the Homebrew-style symlinks into `Lenz.app`): `lenz --help` lists the commands; `lenz <folder>` opens the Code Reader; `lenz --tui <file>` opens the terminal reader; `lenz diff <left> <right>` and `lenz diff --tui <left> <right>` open the comparisons; `lenz diff --bogus` prints `usage: lenz diff`.
-- [ ] macOS: the Dock shows the Lenz logo from launch to quit for both a Code and a Diff window, launched from Finder (`Lenz.app` opens the Reader) and from a terminal through the symlinks; `codesign -v --strict Lenz.app` passes.
+- [ ] From the unpacked tarball (and, on macOS, through the Homebrew-style symlinks into `Lenz.app`): `lenz --help` lists the commands; `lenz <folder>` opens Lenz Code; `lenz --tui <file>` opens the terminal editor; `lenz diff <left> <right>` and `lenz diff --tui <left> <right>` open the comparisons; `lenz diff --bogus` prints `usage: lenz diff`.
+- [ ] macOS: the Dock shows the Lenz logo from launch to quit for both a Code and a Diff window, launched from Finder (`Lenz.app` opens Lenz Code) and from a terminal through the symlinks; `codesign -v --strict Lenz.app` passes.
 - [ ] Linux: the **Lenz Code** and **Lenz Diff** desktop entries start their apps and group their windows under the right icon.
 
 - [ ] Linux: `packaging/build-linux.sh <version>` builds `x86_64` and `aarch64` tarballs in Ubuntu 22.04 containers (glibc 2.35; `aarch64` runs under qemu-user and is slow). A tarball built directly on a newer distribution needs that distribution's glibc.

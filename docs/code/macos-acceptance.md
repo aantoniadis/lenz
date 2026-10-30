@@ -10,7 +10,7 @@ Linux results are not native evidence. Everything here must run on a Mac; until 
   the Mac on power.
 - Language servers, installed by you (the reader never installs one), named for the tests. GUI apps on macOS do
   not inherit your shell's `PATH`: give the reader explicit `executable`/`env.PATH` in
-  `~/.config/lenz-reader/providers.json` (`$XDG_CONFIG_HOME/lenz-reader/providers.json` when that is set; the same
+  `~/.config/lenz-code/providers.json` (`$XDG_CONFIG_HOME/lenz-code/providers.json` when that is set; the same
   path on macOS as on Linux) and record what was needed.
 
   | Variable | Example |
@@ -32,7 +32,7 @@ scripts/code-macos-acceptance.sh ~/reader-macos-evidence
 ```
 
 It records identity (macOS, model, CPU, memory, displays/GPU, toolchain, revisions), builds `--locked`, checks that
-`reader-core` has no GPUI dependency, runs the suites three times, every real-provider and real GUI test that is
+`code-core` has no GPUI dependency, runs the suites three times, every real-provider and real GUI test that is
 configured, the pinned corpora workloads, launch and memory (`launch-bench.py --native`: physical footprint with
 resident size beside it), the scroll frame-pacing probe, and the 15-minute stress (physical footprint through
 `proc_pid_rusage`). Raw output for each step is kept in the evidence folder; `run.log` summarizes.
@@ -62,7 +62,7 @@ The shared crates changed (`e6218d2`): run Lenz's own gate and its native UI wor
 git clone https://github.com/aantoniadis/lenz && cd lenz
 scripts/ci-local.sh
 cargo test -p lenz --features gui-test gui_
-python3 scripts/perf-suite.py --profile full --ui native --output target/perf/mac-native
+python3 scripts/perf-suite.py --profile full --ui native --output perf-results/mac-native
 ```
 
 There is no earlier native macOS baseline for Lenz, so these are absolute results; compare a before/after pair on

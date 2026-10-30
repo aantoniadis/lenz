@@ -1,4 +1,7 @@
-# Reader measurements
+# Lenz Code measurements
+
+Lenz Reader is now **Lenz Code**. The measurements below retain their original build names and markers;
+current builds produce `lenz-code` and `lenz-code-tui`. See the [current guide](README.md).
 
 The [2026-10-21 release validation](../release-validation.md) has the latest
 paired startup/scrolling, Rails checkout recovery, cross-language, Libraries and
@@ -15,12 +18,12 @@ another editor or an optimization claim.
 | Ten kept tabs, settled process RSS | 164 MiB | — |
 
 The ten-tab run's process high-water mark was also 164 MiB, rounded to the nearest
-MiB. [Raw samples and executable identity](reader-measurements.json) include every
+MiB. [Raw samples and executable identity](code-measurements.json) include every
 measured launch, the Reader's internal timing, all memory samples and fixture hashes.
 
 ## Method
 
-- Release build: `cargo build --release --locked -p reader-gui --features perf-probe`.
+- Release build: `cargo build --release --locked -p code-gui --features perf-probe`.
   The probe executable was copied aside, then the ordinary production binary was
   rebuilt without the feature. Screenshots use the production binary.
 - An owned 1920×1200 Xvfb display, X11, Mesa lavapipe software rendering, Catppuccin
@@ -62,12 +65,12 @@ Build a separate probe executable and run the collector against disposable sourc
 files. It selects up to ten Rust files from the corpus for its memory run:
 
 ```sh
-cargo build --release --locked -p reader-gui --features perf-probe
+cargo build --release --locked -p code-gui --features perf-probe
 mkdir -p target/reader-bench
-cp target/release/lenz-reader target/reader-bench/lenz-reader-probe
-cargo build --release --locked -p reader-gui
+cp target/release/lenz-code target/reader-bench/lenz-code-probe
+cargo build --release --locked -p code-gui
 python3 scripts/code-launch-bench.py \
-  --binary "$PWD/target/reader-bench/lenz-reader-probe" \
+  --binary "$PWD/target/reader-bench/lenz-code-probe" \
   --file /path/to/disposable-corpus/module_0.rs \
   --corpus /path/to/disposable-corpus \
   --out target/reader-bench/results --trials 20 --geometry 1920x1200x24
@@ -972,7 +975,7 @@ Two five-second status-dialog stress rounds completed 61 cycles per case, with R
 within each run. Source bytes and terminal restoration are asserted. Frontend timing cases do not run a
 concurrent Rails server; native trackpads and GPU memory remain separate checks.
 
-The full `scripts/ci-local.sh` gate passes on the measured runtime: 337 reader-core unit tests, 91 semantic
+The full `scripts/ci-local.sh` gate passes on the measured runtime: 337 code-core unit tests, 91 semantic
 integration tests, 129 Reader GUI tests and 70 TUI/GUI parity checks, plus workspace/Diff checks, Clippy,
 collector checks and standalone releases. Intentional ignored tests and one optional collector check remain
 skipped. Actual F2 input covers both appearances and narrow layouts, persists opt-outs, toggles exclusions

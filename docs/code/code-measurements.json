@@ -1,7 +1,7 @@
 {
   "source": "9f440be4c0201a9d98ff131dbab0506e371acf24",
   "binary_sha256": "225ada08b67a4868b6f68ba22bdf2b4c30d8ece428689e04110730af6ad9dfee",
-  "build": "cargo build --release --locked -p reader-gui --features perf-probe",
+  "build": "cargo build --release --locked -p code-gui --features perf-probe",
   "platform": "Linux / X11 / Mesa lavapipe",
   "display": "1920x1200x24",
   "theme": "catppuccin",

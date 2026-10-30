@@ -1,47 +1,252 @@
-# Lenz Reader (working name)
+# Lenz Code
 
-A fast code reader (it never edits files; only the Git checkouts and branches you choose change your repository) that shares decoding, syntax highlighting, themes and single-pane text
-presentation with Lenz through local workspace crates `lenz-content` and `lenz-gpui`.
+Previously called Lenz Reader. Launch with `lenz` (desktop), `lenz --tui` (terminal),
+or `lenz-code` / `lenz-code-tui` directly. Settings, recent projects, scratch files, recovery data and
+caches now live in `lenz-code` folders (under `$XDG_CONFIG_HOME`, `$XDG_STATE_HOME` and `$XDG_CACHE_HOME`).
+The first launch moves each existing `lenz-reader` folder there; a folder that cannot be moved keeps
+being used, and an existing `lenz-code` folder is never overwritten.
 
-This is the imported Reader documentation. The proposed product name is **Lenz Code**;
-[the command-family trial](../launcher-trial.md) explains how to launch it as `lenz [file-or-folder]`.
+The Linux [integrated terminal](terminal.md) runs multiple shell sessions in tabs.
+Paste selected draft text with Ctrl+Alt+Enter, or drop a file to paste its quoted
+path. Ctrl+Alt+T shows the panel and Ctrl+Alt+0 returns focus to the editor.
 
-- `crates/reader-core` (`reader-core`): documents, commands and the session. No GPUI.
-- `crates/reader-gui` (`reader-gui`, binary `lenz-reader`): the window.
-- `crates/reader-tui` (`reader-tui`, binary `lenz-reader-tui`): the [terminal reader](tui.md).
+A code editor with project navigation, language assistance and safe saving, with draft editing on Linux X11/Wayland GUI and Linux TUI.
+Native macOS input remains gated pending platform verification. Decoding, syntax highlighting,
+themes and single-pane text presentation are shared with Lenz Diff through local workspace crates
+`lenz-content` and `lenz-gpui`.
+
+Wayland editing is enabled by default. Basic Unicode typing, clipboard, Undo/Redo, Save and modal input capture
+are checked in an isolated Sway session. Live IME composition and input behavior specific to other compositors
+remain unverified.
+
+Lenz Code is the editor in the Lenz command family; [the launcher guide](../launcher-trial.md)
+explains how to launch it as `lenz [file-or-folder]`.
+
+- `crates/code-core` (`code-core`): documents, commands and the session. No GPUI.
+- `crates/code-gui` (`code-gui`, binary `lenz-code`): the window.
+- `crates/code-tui` (`code-tui`, binary `lenz-code-tui`): the [terminal editor](tui.md).
 
 ```sh
-cargo run --release -p reader-gui -- path/to/file.rs   # or a folder; with no argument, the folder it starts in (not ~ or /)
-cargo test -p reader-core
-cargo test -p reader-gui --features test-support     # real input on GPUI's test platform, no display
-cargo test --release -p reader-core -- --ignored --nocapture open_perf
-cargo test --release -p reader-core --test semantics -- --ignored --nocapture   # real rust-analyzer, if installed
+cargo run --release -p code-gui -- path/to/file.rs   # or a folder; with no argument, the folder it starts in (not ~ or /)
+cargo test -p code-core
+cargo test -p code-gui --features test-support     # real input on GPUI's test platform, no display
+cargo test --release -p code-core -- --ignored --nocapture open_perf
+cargo test --release -p code-core --test semantics -- --ignored --nocapture   # real rust-analyzer, if installed
 ```
 
-Keys: Ctrl+O open, F5/Ctrl+R reload, Ctrl+F4 close, Ctrl+A select all, Ctrl+C copy, Shift+arrows/Home/End
-select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse / expand, Ctrl+Shift+- /
-Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll, Ctrl+P find file (`name:line`), Ctrl+G go to
-line, Ctrl+F find, F3 / Shift+F3 next / previous match, Ctrl+Shift+F search, Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs,
-Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition, Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B
-implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy, Ctrl+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward, F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks,
-Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
-Ctrl+Shift+P find action; Escape closes a menu or cancels a pending definition.
+Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
+all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse /
+expand, Ctrl+Shift+- / Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll,
+Ctrl+P find file (`name:line`), Ctrl+G go to line, Ctrl+F find (Tab: replace, Enter replaces, Alt+A replaces all), F3 / Shift+F3 next / previous match, Ctrl+Shift+F search,
+Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs, Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition,
+Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy,
+Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons) back/forward,
+F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks, Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered
+bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
+Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. Ctrl+Alt+Down / Up add a cursor on the next / previous line in both keymaps (also **Add Cursor Below / Above** in the Edit menu), Alt+J selects the word under the caret and then its next occurrence, and Escape, a click or a caret move returns to one cursor; several selections are edited and undone together ([limits](tui.md)). Tab / Shift+Tab indent and outdent the selected lines with the file's EditorConfig or project step, Ctrl+/ (or Alt+/) comments, Ctrl+Shift+Down / Up move lines (VS Code keymap: Alt+Down / Up) and Alt+Shift+Down / Up duplicate them ([structural edits](tui.md)). In the GUI, Close Window
+is available through the command menu or native window control; Ctrl+Shift+Q requests Quit All.
 
-The **☰** button (GUI and terminal) opens File, View, Navigate, Find, Selection and Language Servers menus. They expose the
-existing commands with setting values and disabled reasons; scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go
+The **☰** button (GUI and terminal) opens File, Edit, View, Navigate, Find, Git, Language Servers and SQL menus with task submenus, then All commands… and, below a line, Change theme, About, Keyboard Shortcuts and the window controls. They expose the
+existing commands and setting values. The selected action's disabled reason appears separately below the list;
+unavailable actions keep the menu open. Scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go
 back to the groups. **All commands…** and the bottom-right **Commands** button open searchable Actions.
 F10 retains the plain full command menu. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10
 still available. Menus consume input before the document beneath them.
 
+With the explorer focused (Ctrl+Shift+E), typing searches visible file and folder names without opening them.
+Matches are highlighted; Up/Down cycle, Backspace edits, Enter opens/toggles the candidate, and Escape clears
+the search and restores the earlier selection. Collapsed descendants are not searched; Find File searches the project.
+
+### Keymaps
+
+**Keymap: IntelliJ (Default)** and **Keymap: VS Code** choose the keyboard language; VS Code's chords are used where
+VS Code has the same action (Ctrl+P find file, Ctrl+Shift+O symbols, Ctrl+Shift+P actions, Ctrl+T search everywhere,
+Ctrl+W close, Alt+Shift+Left/Right shrink/extend, Ctrl+F12 implementations, Alt+Shift+H call hierarchy, Ctrl+Shift+[ / ]
+fold/unfold, F5 reload), and actions VS Code leaves unbound keep no chord there (outline, quick documentation,
+language-server status, collapse/expand all) instead of reusing a key VS Code gives another action. The choice and
+every override are remembered outside the project in Lenz Code's settings file.
+
+Both presets bind Ctrl+Alt+Down / Up to Add Cursor Below / Above and Alt+J to Select Next Occurrence; Alt+J stays
+because VS Code's Ctrl+D (select the next occurrence) is Compare Selected here. Tab and Shift+Tab are fixed editing
+keys, like Delete, and the structural edits take chords: Ctrl+/ and Alt+/ for Toggle Comment, Ctrl+Shift+Down / Up for
+Move Lines (Alt+Down / Up in the VS Code preset, which is VS Code's own chord), and Alt+Shift+Down / Up for Duplicate
+Lines in both presets—IntelliJ's own Alt+Shift+arrows move a line and its Ctrl+D duplicates one, so Move Lines takes
+IntelliJ's Move Statement arrows and Duplicate takes the chord VS Code uses for it.
+
+**Keymap…** lists each command with its chords, the preset origin of each override and any binding an override
+displaced. Enter takes the next key as the selected command's shortcut, Delete restores the preset's chord, Esc
+leaves or closes. A chord another command already runs is refused with that command named, so no action silently
+loses its key; the command palette and menus list every action regardless, including ones whose shortcut a
+terminal cannot deliver. Reload, Type Hierarchy (Ctrl+H is Backspace in terminals, so Alt+H is the terminal route)
+and the language status (F2, with Shift+F2 for the full details) keep separate chords in both presets. A dialog's
+own answers are not chords: the recovered-draft dialog keeps `r`, `d` and Esc in both presets, and its
+**Recover Unsaved Draft…** command stays in the File menu without a preset chord, like Close Window.
+
+### Vim editing and relative line numbers
+
+**Vim Editing** (Edit → Editing Preferences, or F10) enables built-in Normal, Insert, Visual and linewise Visual modes;
+the status bar shows the current mode and pending command. It is off by default and remembered independently
+of the IntelliJ/VS Code shortcut preset. Escape returns to Normal; `i/a/I/A` insert, `o/O` open a line,
+`h/j/k/l`, `w/b/e`, `0/^/$`, `gg/G` move, and counts prefix motions and `d/c/y` operators.
+`dd/cc/yy`, `diw/ciw/yiw`, `x/s`, `D/C/Y`, `r`, `p/P`, `v/V`, `u` and Ctrl+R cover routine editing.
+An Insert/change session undoes as one group, including typing, deletion, indentation and paste; Save,
+caret navigation and switching tabs end the group. `:w`, `:q`, `:wq`/`:x` and `:q!` use Lenz's existing
+save/close protections; `:q` asks about a dirty draft, `:q!` explicitly discards it. `/text` uses the existing
+find engine and `n/N` step matches. This is a built-in subset: macros, named registers, plugins, mappings and
+a Neovim process are not included. Dialogs, explorer search and completion keep their own input contexts.
+
+**Relative Line Numbers** (View → Editor Appearance, or F10) shows distance from each pane's caret, with the caret's own
+absolute line number. Wrapped continuation rows stay blank; clicking numbers and diagnostic positions still
+use the actual source line. The setting is independent of Vim and persists. Vim also accepts `:set rnu`
+and `:set nornu`.
+
+### JSON formatting
+
+**Format Document** (Ctrl+Alt+L) formats JSON offline using the file's resolved indentation, without a server
+or external tool. It changes only whitespace: key order, duplicate keys, numeric spellings, string escapes,
+line-ending choices and the presence of a final newline remain intact. Invalid JSON stays unchanged.
+Formatting is one Undo operation; project **Format on Save** uses the same formatter before writing.
+Object keys, string values, escapes, numbers, literals and structural punctuation have distinct syntax captures.
+
+### SQL dialect
+
+**Project SQL Dialect: PostgreSQL / DuckDB / Not Set** in the SQL menu sets the open project's default;
+**SQL Dialect for This File: PostgreSQL / DuckDB / Follow Project Default** overrides it for one file, and is
+the only source for a file outside the open folder. Both adapters show the active choice in the status bar
+for SQL files — `SQL: PostgreSQL (this file)`, `SQL: DuckDB (project)` or `SQL: not set` — and
+**SQL Dialect…** (or clicking that label) shows the effective choice, its source, the project default and
+the offline assistance this build provides. An unset dialect stays visibly unset; Lenz never assumes
+PostgreSQL. Choices persist in Lenz Code settings file outside the checkout, and opening a file or choosing
+a dialect writes no document, starts no process and connects to no database, DuckDB file or metadata source.
+A selected dialect enables its available editing assistance; SQL Dialect details lists the active provider
+and offered capabilities. Metadata access is configured and connected explicitly.
+
+For table and column suggestions, open **SQL dialect** from the status label, then **SQL menu** (or press `M`).
+Choose **Configure SQL Metadata…**: the GUI offers a file chooser for an existing DuckDB database; the terminal
+asks for its absolute path. PostgreSQL asks for an existing libpq service name. Then choose **Connect SQL Metadata**
+from the SQL menu. Choosing a source alone never connects or executes your SQL.
+
+### Environment files
+
+Lenz treats dotenv-style key/value files as data. A file is one when its name is `.env`, starts with `.env.`
+(`.env.local`, `.env.example`, `.env.production.local`), ends in `.env` (`app.env`, `docker.env`) or is `.flaskenv`;
+an extension that names another language wins (`.env.sh` is Bash, `.env.json` JSON, `.env.d.ts` TypeScript), which is
+how to choose another language for such a file, as for every file type (the name decides first, then a shebang).
+A direnv `.envrc` is a shell script direnv runs, so it is not one (and stays plain text). There is no per-file
+language command for any language yet.
+
+Both adapters highlight it with one lexer in `lenz-content`: a line whose first non-blank character is `#` is a
+comment; an entry is an optional `export`, a key, `=` and a value (a key alone is an entry too); a double-quoted value
+runs to the next unescaped `"`, across lines, and paints each backslash escape; a single-quoted value runs to the next
+`'` with no escapes; an unquoted value runs to a `#` after a blank or the line's end; a quote never closed in the rest
+of the file paints only its own line. `$VAR`, `${VAR}`, `$(…)` and backticks are value text, painted like any other.
+Other lines are left unpainted. Runs of comment lines and multi-line values fold, and Expand Selection grows from a
+quoted value's inside to the value and the whole entry. Comments, quote pairing and literal typing are described in
+the [terminal editor guide](tui.md); Paste, Undo and Save keep every byte (Unicode, CRLF, LF, a missing final newline),
+and the project's format-on-save never formats an environment file.
+
+Nothing in an environment file is expanded, substituted or run, and its text goes to no language server, checker
+or formatter (no provider lists the language), stays out of the saved declaration index, and is never written to
+settings, the workspace checkpoint, or the bookmarks and recent places file: those keep only line numbers for it, so
+after an outside change a bookmark stays on its line number instead of finding its text again (edits in Lenz still
+move it with its line). Language Server Status and Server Details say so without showing any text, and the language
+actions give the same reason in both adapters. The one copy outside the project is an unsaved draft's recovery
+record (the draft and the last saved text, as for any file), kept in Lenz Code's recovery folder (0700) as a 0600 file
+until it is saved or discarded. Project text search and Find read the file within the session like any other.
+
+Enter carries the current line's leading tabs and spaces onto the new line. YAML, Markdown and Haml retain
+their structural indentation rules; pasted text keeps its own whitespace.
+
+The GUI source caret blinks every half second, starts visible after typing or movement, and stays steady
+while a dialog or another control/window has focus. The terminal source caret stays steady.
+
+### XML
+
+XML files have built-in tag, attribute, entity, comment and CDATA highlighting, well-formedness errors and
+multiline folds. XML names are case-sensitive; HTML void-tag rules do not apply. Enter between an opening and
+closing tag creates an indented line, and attribute quotes pair in tag context. Commenting uses `<!-- … -->`
+and refuses content that would make an illegal XML comment. The validator runs locally without resolving external
+entities. Documents declaring internal entities keep highlighting and folding but show an informational validation
+limit; they are not passed to the parser's unbounded entity expander or marked malformed. Save preserves the
+original encoding. This pass provides no schema completion, XML language server or
+formatter; mixed-content whitespace stays under the author's control.
+
+### CSV tables
+
+CSV opens as source. Use the pane header's **Table / Source** control or **CSV: Table / Source** in Find Action
+to show a table. Each pane keeps its own filter, sort and viewport. The first record supplies column headings;
+**CSV: Toggle Header Row** includes it as data instead.
+
+Click a cell and press Enter (or double-click in the GUI) to edit it. Enter commits one undoable draft edit;
+Escape cancels. Finish the field before Save, Save As or closing. Arrow keys move between cells. **Filter Selected
+Column…** (`/`, or Ctrl+F in the GUI) uses a literal substring. **Sort Selected Column** cycles ascending text,
+descending text and original row order. Filters and sorting change the view only, so Save never writes a sorted
+or filtered subset.
+
+**Move Column Left / Right** and **Drop Selected Column** change the draft, including its header, and normal
+Save writes them. Undo restores them. Those whole-column operations require equally wide records; Source remains
+available for irregular rows. Cell edits support quoted commas, quotes and multiline values; unrelated raw fields,
+line endings and the source row order are preserved. Malformed CSV falls back to Source with its reason.
+Tables are bounded at 32 MiB, 200,000 records and 2,000,000 cells; the cell editor accepts up to 64 KiB.
+
+### Markdown
+
+Source colors distinguish headings, bold/emphasized spans, links, inline code and fenced code. The preview
+adds tinted inline code backgrounds; terminal prose wraps at word boundaries while preserving source mapping.
+
+
+Markdown is edited as source; the rendered preview itself stays read-only. In the GUI it uses the available editor
+pane width with a small margin, including in split views; the terminal wraps to its available cells.
+Everything below is Lenz's own help, with
+no language server, and works the same in the GUI and the terminal.
+
+- **Open Markdown Preview to the Side** (View menu, the Markdown source's context menu, Find Action) splits the file
+  panel side by side if needed and shows the active file's preview in the other pane, keeping the caret in the
+  source. The preview follows the draft as it is typed, undone or redone, unsaved: each edited version is rendered
+  off the UI thread, the last preview stays on screen until the new one is ready (it never blanks or shows
+  "Preparing" while typing), and a render of a version that has since been edited again is dropped, never shown
+  over newer text. Images already decoded are reused rather than read again while editing; scrolling of the two
+  panes is not linked.
+- **Show in Source** (the preview's context menu, Navigate menu) puts the caret at the position last clicked in the
+  preview (the reading line when none was), in the pane beside showing that source (focusing it) or by switching
+  the pane to its source. Positions follow the current draft, also while the preview is a version behind the
+  typing. Generated glyphs and normalized text (entities, escapes) go to the start of what was written.
+- **Follow Link** (and Ctrl+click on a link): `#heading` goes to that heading of the current draft, unsaved headings
+  included; a relative path opens the project file in Lenz, at its `#heading` when one is named (an open draft's
+  headings are used); a link without an extension also tries `.md` (Obsidian-style notes). Web links (`https:`,
+  `mailto:`, `//host`) are never opened, and say so; a missing target or heading says so too.
+- **Enter** after a list item's text continues the list with the same indentation, blockquote and bullet, the next
+  number (`9.` → `10.`, the same `.` or `)`) or an open task box (`- [ ] `); text after the caret moves into the new
+  item. A new number moves the same list's following items up by one while they count on (a list numbered `1.`
+  throughout stays so; the renumbering stops at a gap, another delimiter or the list's end). Enter on an item with
+  no text yet removes its marker and indentation, ending the list (a blockquote's `>` stays). Each is one Undo step.
+  Enter is a plain newline before an item's text, with a selection, in a fenced code block (looked for up to 5,000
+  lines above), and in other languages. With several carets each continues its own item, without renumbering.
+- **Completion** in a link destination: typing `](` (or Ctrl+Space inside one) lists the folder's files and folders
+  (in the explorer's order); a chosen folder goes on into it, `/` lists the folder typed, `../` and a leading `/` (the project
+  root) work, and names are escaped (`my%20notes.md`). `#` lists the headings of the file named before it, or of
+  the current draft (with its unsaved headings) when none is named, as GitHub anchors (`## Set up it` →
+  `set-up-it`, a repeat numbered `-1`); they are read off the UI thread, and an answer for a caret or version that
+  has moved on, or for a popup dismissed with Escape, is dropped. Enter or Tab accepts (one Undo step), Escape
+  dismisses, and typing filters. Files are suggested inside an open folder only; outside a link Ctrl+Space says what
+  is suggested. **Completion While Typing** off leaves only Ctrl+Space.
+
+Limits: anchors follow GitHub's rule on the heading as written (its `` ` ``, `*`, `~` and link destinations dropped),
+so headings with HTML, `_emphasis_` or entities may differ from GitHub's; headings inside lists, quotes and HTML are
+not offered; reference-style links and `[[wiki links]]` are not completed; a file's headings are offered up to
+4 MiB; Enter does not outdent a nested empty item (Shift+Tab does); link completion reads the caret's line on each
+keystroke typed in a Markdown file. Native macOS and Wayland, and physical terminals, are unverified.
+
 **Search Everywhere** follows [IntelliJ's name-navigation pattern](https://www.jetbrains.com/help/idea/searching-everywhere.html):
-one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details.
+one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches and secondary paths/details. The All
+tab keeps matches at word starts (`nsr` finds `NewSearchResult`, not `inspector`); a single tab matches any letters in order.
 Double-tap bare **Shift** in the GUI, or press **Ctrl+K**, to search all three categories. Direct shortcuts are:
 
 | Search | Shortcut |
 |---|---|
-| Files by name or path | Ctrl+P or Ctrl+Shift+N |
-| Symbols by name | Ctrl+Alt+Shift+N |
-| Actions by name | Ctrl+Shift+A or Ctrl+Shift+P |
+| Files by name or path | Ctrl+P or Ctrl+Shift+N (VS Code: Ctrl+P) |
+| Symbols by name | Ctrl+Alt+Shift+N (VS Code: Ctrl+Shift+O) |
+| Actions by name | Ctrl+Shift+A or Ctrl+Shift+P (VS Code: Ctrl+Shift+P) |
 
 Tab / Shift+Tab cycles categories while keeping the query. Arrows, Page keys and Home/End select a
 result; the wheel scrolls the popup without changing selection. Enter opens/runs the selected result and Esc returns to reading. Tabs and rows are clickable. File results distinguish
@@ -61,7 +266,7 @@ restarts the project's language servers without changing source files or setting
 [index settings and rebuilding](providers.md#saved-declarations-and-rebuilding).
 
 Ctrl+Shift+N now finds files; **New Window** remains in the app/command menus. These workflows are also in the
-[terminal reader](tui.md), with a portable shortcut when bare Shift cannot be reported.
+[terminal editor](tui.md), with a portable shortcut when bare Shift cannot be reported.
 
 Following a definition into a dependency or standard library reveals it under **Libraries** in the explorer,
 including dependencies excluded by the project's ignore rules. Expand its folders and open sibling files as
@@ -94,8 +299,18 @@ folder as a project of its own, kept outside the folder; nothing is written into
 long as the server's usages plus reading its files (a warm rust-analyzer: 0.1 s for `Default` across this
 repository; its first query of a session takes seconds); launch and memory are unchanged. Resting the pointer on a name shows its
 documentation in a popup (Documentation on Hover in the command menu turns that off), and the other occurrences of the
-name at the caret are tinted. Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
-provider settings live in `$XDG_CONFIG_HOME/lenz-reader/providers.json`. The toolbar keeps navigation and frequent file/search actions above the tabs, with a visible app menu.
+name at the caret are tinted. While editing, typing a name opens the server's completion popup (Ctrl+Space or
+**Code Completion** asks; **Completion While Typing** turns the automatic popup off): Tab or Enter accepts, Escape
+dismisses, punctuation just types ([limits](../research/code-completion.md)).
+Automatic suggestions stay closed after Enter and on empty or indentation-only lines; Ctrl+Space still asks there.
+A snippet suggestion expands with the file's indentation and Tab then visits its placeholders until Escape, a caret move, another tab or Undo ends it
+([snippets](../research/code-snippets.md)). Definitions come from installed language servers (see [provider compatibility](providers.md)); explicit
+provider settings live in `$XDG_CONFIG_HOME/lenz-code/providers.json`.
+Completion rows show their kinds, separate adjacent kind groups and emphasize matching text while preserving
+the server's ranking. Their documentation renders Markdown and syntax-highlighted code, with scrolling instead
+of a short truncated excerpt. Wheel over the documentation, or use Alt+PageUp/PageDown/Home/End, to read it;
+changing the selected suggestion starts its documentation at the top.
+The toolbar keeps navigation and the branch selector above the tabs, with a visible app menu. Find and comparison actions live in their menus and shortcuts.
 The footer separates language-server status, the current message, cursor position and Commands.
 Long messages end with an ellipsis; click the message or use **Status details…** (Shift+F2)
 for a wrapped, scrollable snapshot. Ctrl+C copies the complete snapshot. Routine server-memory
@@ -104,9 +319,32 @@ samples stay in details so they do not continually change the footer.
 Click the LSP footer status or press F2
 for Restart/Enable actions and **Server Details…**, a scrollable diagnostic popup with Copy and Close buttons. Java and Pyright also offer in-app runtime selection. Ruby projects offer an opt-in **Exclude Ruby Tooling Gems for This Project** action; **Reset LSP Settings for This Project** restores inherited settings. See [project settings](providers.md#project-language-server-settings) for scope and navigation limits, and [status and recovery](providers.md#status-and-recovery).
 
+**Problems…** opens a navigable list across known files, combining built-in syntax recovery and available
+language-server reports. Tabs show `!N` errors, with `?` while a previous check is pending; explorer entries with
+known errors use red names and a separate `•`, including containing directories, without changing their names.
+The most serious problem starting on a line appears after its text, with `(+N)` for additional problems on that
+line. Long annotations clip to the available space; Problems and the caret's status retain the full message.
+Annotations are presentation only: selection, Copy and Save use source text. Underlines and inline messages
+always describe the exact draft checked. The parser works without a server, but
+does not replace compilation or semantic validation. Unopened files are not scanned automatically; servers may
+publish workspace problems. Closed-file reports say “last reported” until rechecked. The list reports its coverage;
+use **Rerun Search** to refresh it. Parser recovery is capped at 256 errors per file, and retained reports at 1,024
+files per server and for parser locations.
+
+**Check Project Syntax** explicitly checks unopened files from the project's current inventory as well as captured
+open drafts. It respects the inventory's exclusions, starts no language servers and writes no files. Results show
+errors across files with progress and coverage; **Status details…** shows the full summary in narrow windows.
+**Cancel Project Syntax Check** or closing the results stops it; **Rerun Search** starts a fresh check. Checks use
+one bounded background file at a time, skip files over 5 MiB or 100,000 lines, and stop listing at 10,000 findings.
+Unsupported languages, unreadable/changed files, validation limits and inventory skips are counted explicitly.
+SQL keeps its configured dialect's existing checker. Syntax checking does not replace a compiler, schema or
+semantic project validation.
+
 The language servers also add inlay hints and semantic colours to the text panes (sticky lines included). Type and
 parameter-name hints are drawn inline and dim (cut at 30 characters); semantic tokens recolour names over the syntax
-colours, underline mutable ones and strike deprecated ones through. Hints are display only: the caret steps over
+colours, underline mutable ones and strike deprecated ones through. While a draft is being rechecked, unchanged
+tokens keep their previous semantic colour; changed tokens wait for the current result. Semantic modifiers and
+navigation always require current results. Hints are display only: the caret steps over
 them, a click on one lands at its place, and selection, copy, find and links use the source text. Search snippets,
 the peek list, large files, images, Markdown previews and sources a server returned get none. The command menu's
 "Inlay Hints: Types", "Inlay Hints: Parameter Names" and "Semantic Highlighting" (on by default, remembered in
@@ -117,6 +355,12 @@ readable); with all three off, scrolling CPU and memory as before; with them on,
 reader CPU (+0.1 ms per frame) and the reader holds +5 MiB with `session.rs` and +19 MiB with a 10,000-line file
 (rust-analyzer sends about 6.5 MB of hints for it, decoded straight from the bytes); 100 rounds of toggling and tab
 switching settle at the same memory.
+
+Drafts that were not saved before the reader stopped are offered again at the next start: **Recover Unsaved
+Draft…** in the File menu, or the dialog that opens by itself, names the file or New File document, says whether
+the file on disk still matches the last confirmed save, and offers **Restore Draft** (`r`), **Discard Draft**
+(`d`) or **Later** (Esc). Restored tabs are marked `⟲`; recovery copies stay private, outside the project. See the
+[terminal editor's recovery notes](tui.md) for where they live and their limits.
 
 Code folds like IntelliJ's: a gutter mark (▾ open, ▸ collapsed) on every block, comment run and import run spanning
 lines; a collapsed one shows a boxed `…` and its closing brace, and a click on either opens it. Each pane folds on its
@@ -130,27 +374,74 @@ line; a selection over collapsed code copies the hidden source too; on Linux eve
 selection (middle-click paste). In a Markdown preview, drag, double-click, Shift-click and Ctrl+A select the rendered
 text and Ctrl+C copies it.
 
-Choose **Change theme** directly from the ☰ app menu (or Find Action). The chooser works like Diff: arrows and Page/Home/End preview a theme, Enter or a click selects it, and Escape or an outside click restores the current theme. Scrolling moves the list without changing the highlighted theme.
+Choose **Change theme** from ☰ (or Find Action). The chooser works like Diff: arrows and Page/Home/End preview a theme, Enter or a click selects it, and Escape or an outside click restores the current theme. Scrolling moves the list without changing the highlighted theme.
 
-**About Lenz Code**, below Change theme in the ☰ app menu (or Find Action), shows the version, platform, licence and project page shared with Lenz Diff's About, with the Lenz logo when the dialog has room (a half-block logo in the terminal). Copy copies the text; Escape, Enter or an outside click closes it. The logo is decoded only while About is open.
+**About Lenz Code**, in ☰ (or Find Action), shows the version, platform, licence and project page shared with Lenz Diff's About, with the Lenz logo when the dialog has room (a half-block logo in the terminal). Copy copies the text; Escape, Enter or an outside click closes it. The logo is decoded only while About is open.
 
-**File Icons** in the View menu shows or hides file-type icons beside file names in the explorer, tabs and results; the choice is remembered and shared with the terminal reader, where the icons are Nerd Font glyphs.
+**File Icons** in the View menu shows or hides file-type icons beside file names in the explorer, tabs and results; the choice is remembered and shared with the terminal editor, where the icons are Nerd Font glyphs.
 
-The reader never writes the files it shows (a Git checkout you choose changes them as `git switch` would). It shares Diff's theme choice in
+Text edits stay in drafts until Save; explicit file operations and Git checkout can change files on disk. Lenz Code shares Diff's theme choice in
 `$XDG_CONFIG_HOME/lenz/appearance.json`, user themes in `lenz/themes`, and font preferences
 (`[gui] font_family`, `font_size`, `reading_font`) in `lenz/settings.toml`.
-`LENZ_THEME` overrides `LENZ_APPEARANCE`, followed by the compatibility variables
-`LENZ_READER_THEME` and `LENZ_READER_APPEARANCE`. Old Reader appearance files and user themes
-remain read-only fallbacks when the canonical files are absent; invalid canonical files produce a notice.
+`LENZ_THEME` overrides `LENZ_APPEARANCE`, followed by `LENZ_CODE_THEME` and `LENZ_CODE_APPEARANCE`,
+then the compatibility variables `LENZ_READER_THEME` and `LENZ_READER_APPEARANCE`. Lenz Code's old
+appearance files and user themes (in `lenz-code`, then `lenz-reader`) remain read-only fallbacks when the
+canonical files are absent; invalid canonical files produce a notice.
 Saved appearance and font changes reach other processes on their next launch; Omarchy following remains live.
-See [Themes](../themes.md) for the full precedence and format. Reader's other settings remain independent.
+See [Themes](../themes.md) for the full precedence and format. Lenz Code's other settings remain independent.
 Files over 5 MiB or 100,000 lines open in large-file mode: read in full, without syntax highlighting.
 
 The explorer is its own panel left of the files panel (the tabs sit over the text). The toolbar's first button, or
 Ctrl+B, shows and hides it; Ctrl+Shift+E focuses it. Its target button selects the opened file, opening the folders
 above it. Opening a folder whose only entry is a folder opens that one too, down to a folder with more. Folders list
 before files; the command menu's "Explorer: All by Name" switches to plain name order ("Explorer: Folders First" back) (bytewise:
-capitals first), saved in `$XDG_CONFIG_HOME/lenz-reader/settings.json`.
+capitals first), saved in `$XDG_CONFIG_HOME/lenz-code/settings.json`. Explorer rows and tabs show the Git status
+letter (M, A, D, R, U, C) apart from the `●` unsaved mark, as in the [terminal editor](tui.md).
+
+A single click selects a directory. Click its arrow or double-click its name to expand or collapse it;
+keyboard Left/Right and Enter remain available in both frontends.
+
+**New File** (Ctrl+N) asks for a name inside Lenz and creates in the highlighted explorer folder when a project
+is open. Without a project it starts an untitled document; the first Save asks for its path inside Lenz.
+**Save As…** also uses an in-app path prompt, followed by a separate Replace decision for an existing file.
+Escape cancels without writing.
+
+**New Scratch File…** and **Scratch Files…** in the File menu create and reopen durable personal files outside
+projects. Their in-app name prompt uses the extension to choose the language. They use ordinary Save and draft recovery, remain available
+across projects and restarts, and live in `$XDG_STATE_HOME/lenz-code/scratch-files` (default
+`~/.local/state/lenz-code/scratch-files`). Closing a tab keeps its file; there are no scratch run/debug controls.
+Right-click a tab for **Close All Tabs**, **Close Other Tabs**, **Close Tabs to Left** and **Close Tabs to Right**
+(the File menu uses the active tab). The group follows that pane's visible order and approves every affected
+draft before closing any tab. Cancel or a failed Save keeps the group, and split views retain shared drafts.
+When a comparison side is the anchor, Other/Left/Right keep both sides and the ordinary source owner they need.
+
+**New File in Explorer…** and **New Folder in Explorer…** (an explorer row's right-click menu, or the command menu
+and palette) create inside the highlighted folder; a highlighted file creates beside it, and with nothing highlighted
+they go in the project root. A name is one path segment, and Lenz refuses — before anything is created — a name
+another entry already takes, a folder that has gone, a path outside the project and a folder whose permissions allow
+no new entries. Creating makes only the one entry, never part of a tree. A new file is an empty UTF-8 file that opens
+as that file with its own draft, history and `●` unsaved mark, so Save, Undo and Reload behave as for any file, and
+the explorer reveals and selects it. A new folder shows open in the explorer and is the next create's folder without a
+refresh. Escape cancels either dialog.
+
+The explorer’s right-click menu also offers **Copy File Name**, **Copy Full Path** and
+**Copy Project-Relative Path**, all for the highlighted entry rather than the active editor. **Copy File / Folder**
+and **Paste File / Folder…** (Ctrl+C / Ctrl+V while the explorer has focus) copy saved disk contents. Paste asks
+for a name in the highlighted folder, or beside the highlighted file; Ctrl+A replaces the suggested name in the
+GUI and clears it in the terminal. Existing entries are never overwritten. Unsaved drafts stay unchanged;
+save first to include them in a copy. Copies run in the background, with **Cancel File Copy** available, and
+publish only after the complete copy succeeds. Symbolic links, special files and more than 256 nested folders
+are refused; ordinary file and folder permissions are preserved.
+
+On Linux, Copy also puts a file URI on the desktop clipboard, for pasting into a file manager. It needs
+`wl-copy` on Wayland (`wl-clipboard`) or `xclip` on X11; a missing helper is reported and tree Paste still works.
+A terminal must share that local desktop environment for desktop copying; OSC 52 only carries text, so it cannot
+publish files. Desktop file clipboard support on other platforms is not implemented. Tree Paste uses this window’s
+last explorer Copy, rather than importing arbitrary files from another app’s clipboard.
+
+**Show File / Folder Git History** opens Lenz Diff’s history for the highlighted entry: files follow renames,
+folders constrain the history and comparisons to that folder. Clearing a typed history filter retains this scope.
+Rename, Move, trash/delete and Restore remain in the same menu, with their existing confirmations and draft protection.
 
 Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (also "Split Right", "Split Down"
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
@@ -171,7 +462,7 @@ takes over the terminal until you quit it. Lenz Diff must sit beside Lenz Code, 
 the second one, or press Space on each; marked entries show a ✓. Escape in the explorer, or a plain click, forgets
 them.
 
-**Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the status bar) lists **New Branch…**,
+**Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the top bar) lists **New Branch…**,
 **Checkout Tag or Revision…**, then the **Recent**, **Local**, **Remote** and **Tags** branches and, with more than one,
 the **Worktrees**; typing filters. Enter checks out the highlighted branch (a remote one as a local branch tracking it,
 a tag or revision on a detached HEAD) or opens the highlighted worktree as the folder; → or a right-click lists a row's
@@ -180,7 +471,7 @@ would be overwritten, a dialog lists the files: **Smart Checkout** stashes them,
 conflict keeps the stash, and **Resolve Conflicts in Lenz Diff** opens Lenz Diff on it); **Force Checkout** first lists
 every uncommitted change it discards, then discards them on a second confirmation; untracked files in the way must be
 moved or deleted first. After a checkout the open files reload (removed ones show as unavailable), the explorer and
-index refresh and annotations blame again. The status bar shows the branch (or the detached commit) and follows a
+index refresh and annotations blame again. The top bar shows the branch (or the detached commit) and follows a
 switch made elsewhere within a few seconds. Checkouts run git as your terminal would, with the repository's hooks and
 filters; everything else Lenz Code asks git keeps them off.
 
@@ -193,6 +484,41 @@ only what the branch changes, not the base's later updates; **Compare with Workt
 Branches… add **Compare with Working Tree** (branches, tags and worktrees) and **Show Changes Since Branching from
 Here** (other branches). Folder comparisons inside a repository skip what git ignores (`target/`, `node_modules/`); submodules and nested
 repositories are compared by their own ignore rules.
+
+The gutter also marks the draft's own changes. Left of the line numbers, a line the draft modifies shows **M** in the
+modified-file blue and a line it adds shows **A** in the added-file green; a second cell shows **D** where the draft
+deleted lines just above, with their count in **Status details…**. The letters are the identification, so a terminal
+without colour, or `NO_COLOR`, loses nothing. The baseline is named and never guessed: tracked files are compared
+against **HEAD**'s version of the file (`vs HEAD (main · a1b2c3c)`, in the status bar and in Status details), new and
+untracked files against nothing — every line is added, labelled `new file (untracked)` or `new file (added to Git)` —
+and files outside Git against the last confirmed save. Unsaved edits count, so saving a tracked file leaves its
+repository markers and only a new HEAD clears them; outside Git, Save becomes the new baseline. The caret's line names
+its change in the status line (`Modified from HEAD (main · a1b2c3c)`), except while blame annotates that line, whose
+commit it names instead. The comparison runs in the background once the
+draft rests, a fraction of a second after the last keystroke, and only for the files on screen; while it catches up
+the last result stays drawn and Status details says `updating…`. Added lines are recognised within a replaced block
+only where the diff pairs the block's lines by place, so a rewritten run shows as **M** even where a line or two
+arrive; the block's letter is what the diff can defend. Pinned (sticky) lines carry their letters too. Large files
+(over 5 MiB or 100,000 lines) keep the markers.
+
+Click a change letter, or place the caret on a changed line and use **Inspect Marked Change**
+(Alt+Shift+C, also in the Git command menu). The inspector names HEAD's commit, the last save or the
+new-file baseline and shows prior content. **Show Diff** (`D`) opens that captured baseline read-only
+beside the existing editable draft; edits and Undo share the original history. Close Saved Comparison
+returns to the original view. The captured baseline stays fixed while that comparison is open.
+
+**Revert This Change** (`R`) restores just the inspected block as one undoable draft edit. It leaves the
+file and Git index alone; **Save** writes the draft. Edits, file/baseline changes and repository refreshes
+invalidate old inspection coordinates. Revert also rechecks HEAD in the background before applying a
+repository change. A deletion at EOF is reachable on the last visible line. Prior previews stop at
+64 KiB; reverting a block with over 4 MiB of prior text is refused with a reason, and Show Diff remains
+available. Markers follow the existing line comparison: line-ending-only and final-newline-only changes
+can be inspected through Compare with Last Saved Version and its line-ending notice rather than a gutter block.
+
+Drag the boundary between annotations and line numbers to resize the gutter in either frontend. The width is
+remembered across tabs and restarts; a wider gutter reveals more of the author name. **Narrow Annotation Gutter**
+and **Widen Annotation Gutter** in View provide the same adjustment without a mouse. Very narrow panes hide the
+annotations to keep text usable.
 
 **Annotate with Git Blame** (View menu, right-click, Alt+B) shows, left of the line numbers, the date and author of
 the commit that last changed each line, tinted by age (newest strongest); lines not committed yet say so. It is per
@@ -208,6 +534,16 @@ selected (at most 10,000 are listed); Enter / Shift+Enter or F3 / Shift+F3 step,
 results panel, Escape closes. Alt+C, Alt+W and Alt+R (or the box's Aa, W and .* toggles) match case, whole words or a
 regular expression; the options are shared with project search while the reader runs. A match never spans lines. Go to
 Line (Ctrl+G) takes `line`, `line:column` or `line,column`, and the file finder opens `name:line[:column]` there.
+
+The box's **Replace** row is the replacement text: Tab (or a click on that row) gives it the keys, Shift-Tab goes
+back to the query, Enter replaces the current match and selects the next one, and Alt+A replaces every listed match at
+once. **Replace** and **Replace All**
+are also in the Find menu and the command list. The replacement is literal (a regular expression's `$1` groups are not
+expanded) and an empty one deletes the match; a match never spans lines, so its line ending stays. Each replace is one
+undo step and changes only the current draft: nothing is written until Save. Replace waits for a settled search for the
+text on screen; an invalid expression, a read-only file or a preview says why instead of changing anything. Replace All
+refuses a search capped at 10,000 matches, where it cannot know the rest; Replace still changes the current one.
+
 Soft Wrap (Alt+Z, remembered) wraps long lines at the pane's width; continuation rows are indented like their line and
 carry no number. Large files, images and previews do not wrap.
 
@@ -232,7 +568,7 @@ back. It shares Find Files' icons, secondary paths and fuzzy name/path matching,
 heading. Recent Locations (Ctrl+Alt+E) lists where navigation went from and to, and where a file was left (a place
 within five lines of a listed one replaces it). In each list, typing filters, Enter or a click goes there (a history step), Delete
 removes the entry, and files that no longer exist show "missing". The reader keeps 50 recent files and 30 recent
-locations per folder and every bookmark, in `$XDG_STATE_HOME/lenz-reader/projects/` (one file per folder, at most 4 MiB,
+locations per folder and every bookmark, in `$XDG_STATE_HOME/lenz-code/projects/` (one file per folder, at most 4 MiB,
 saved a second after the last change and at exit); without a folder they last until the reader closes. Two windows
 on one folder merge their places when either saves; a window shows the other's changes after its own next save. A
 places file from another reader version is left as it is, and places are then not saved. An unreadable file is kept
@@ -255,21 +591,89 @@ cannot make bookmarks unreadable.
 
 Project search (Ctrl+Shift+F) opens a centered dialog that takes the same options (literal and case-insensitive by
 default); a click on a field focuses it and a click on an option toggles it, and an invalid regular expression is
-shown there and not searched. Tab moves to its files field:
+shown there and not searched. It reopens with the last query selected, so typing replaces it; Ctrl+A selects a
+field, Backspace clears a selection and Ctrl+Backspace (Ctrl+W in a terminal) drops the last word. Tab moves to its files field:
 comma-separated
 globs, any case, `!` to exclude (`*.rs, src/, !*.test.ts`); a name without `/` matches at any depth, a path with `/`
-from the root, and a folder means everything in it. Matches list as a tree of folders, files and lines, coloured by
-the file's language with the match emphasized; a click or Left/Right folds a folder or file. A line's colours come
-from that line alone, so one inside a multi-line comment or string may read differently than in the file.
+from the root, and a folder means everything in it. Matches list as a tree in the explorer's order (folders before
+files while the explorer lists them so): folders
+nest with their counts, a chain of folders that only leads on shares one row (`src/ui/`), and each file lists its
+lines by number, without their indentation, coloured by the file's language with every match on the line emphasized
+(several matches on one line share its row); a line too long for the panel starts shortly before its match, after
+`…`. A click or Left/Right folds a file or folder, and Left on a folded one moves to the folder holding it. A line's colours come from
+that line alone, so one inside a multi-line comment or string may read differently than in the file.
+
+Usages, definitions, implementations and type definitions list the same way, sorted by folder, file and line, with
+paths relative to the project. The panel's heading names what was asked (**Usages of `name`**, the query and its options),
+then how many were found in how many files and by which language server, the keys, and its buttons: **Stop** while a
+project search runs, **Rerun**, **Collapse** (every folder and file; **Expand** once all are folded; also **Collapse /
+Expand All Results**), **Hide** and **×** (Close Results); a heading too long for its row ends in `…` before them. The preview names its file and line; in a window at least 900 px
+wide it sits beside the list, else below it (the terminal editor puts it beside the list from 64 columns).
+
+**Next Result** (F4) and **Previous Result** (Shift+F4) open the following or preceding result in the text from
+anywhere, wrapping at the list's ends, while the panel shows or hides. A new search or lookup keeps the list it
+replaces: **Previous Results** and **Next Results** (Alt+Left / Alt+Right in the panel, or its **‹** **›** buttons)
+go back and forth through the last eight lists with their selections. Asking the same again, or typing further in a
+live search, replaces the list; a search still running when replaced is kept as stopped. Opening another folder
+forgets them.
+
+**Show / Hide Results** (Ctrl+J; the IntelliJ keymap also Ctrl+Shift+F12) hides the panel and keeps its results,
+selection and folds; the same command shows it again with the keys in it. Escape in the panel first stops a project
+search that is still running (**Stop Search**, keeping what it found so far), then hides the panel. While it
+is hidden the status bar shows **Results (N)**; a click there shows it again. A new search or usages list shows
+itself, and **Close Results** discards the results.
 
 Markdown files open as their source. **Preview / Source** sits at the right edge of each file pane's header
 and controls that pane's document, including in split views. Ctrl+Shift+V and the command menu remain available
 when the pane is too narrow for the button. Switching preserves the reading line, and a file switched to its
 preview opens that way again. The preview shows local raster images only: inside the
 browsing root, or beside the Markdown file when it is outside the root, resolved through symlinks, at most 64 per
-document and 64 MiB each. Remote, missing and outside images say why in place. Links are not followed and folded
-callouts are shown open.
+document and 64 MiB each. Remote, missing and outside images say why in place. Folded callouts are shown open. A
+click in the preview tells **Show in Source** and **Follow Link** where to act, and Ctrl+click (Cmd+click on macOS)
+goes there at once; web links are never opened (see [Markdown](#markdown)).
 
-The Reader uses the local `lenz-content` and `lenz-gpui` crates from this workspace.
+Lenz Code uses the local `lenz-content` and `lenz-gpui` crates from this workspace.
 
-The [terminal reader](tui.md) presents the same core session and commands, with terminal-specific controls and display limits.
+The [terminal editor](tui.md) presents the same core session and commands, with terminal-specific controls and display limits.
+
+
+### Application menus
+
+The top bar holds the menu, explorer toggle, Back/Forward and the current Git branch selector.
+Find File, Search in Project and comparisons are available through their shortcuts and menus.
+The menu uses task submenus shared by GUI and TUI:
+
+- **File:** New, Tabs, Compare, Explorer, File Location and Save Recovery; Open and Save remain directly accessible.
+- **Edit:** ordinary editing, Selections and Cursors, Lines and Indentation, Editing Preferences.
+- **View:** Layout, Editor Appearance, Folding, Code Hints and CSV Table.
+- **Navigate:** Code Navigation, Bookmarks and Problems.
+- **Find:** searches and replacements, with Find Options together.
+- **Git:** Branches, Compare Revisions, Marked Changes and Annotations.
+- **Language Servers:** status/recovery and Setup and Indexing.
+- **SQL:** Dialect and Metadata Connection.
+
+Below **All commands…** and a line, the menu itself holds the application's commands: **Change theme**, **About Lenz
+Code**, **Keyboard Shortcuts ›**, **Close Window** and **Quit All Windows**. The arrow keys pass over the line.
+
+Right or Enter opens a submenu; Left or Escape returns to its parent. Enter runs a command.
+All Commands and Find Action search every command directly. Disabled commands retain their reasons.
+
+### Dialogs and popups
+
+File operations use labelled forms with an explicit action and Cancel. Validation appears below the field;
+Enter submits and Escape cancels. Delete confirmations describe the affected entry and distinguish the destructive
+button. Clicking a field, including Go to Line, keeps its dialog open.
+
+The branch picker keeps its filter above the results. Details keep their heading and action buttons visible while
+the body scrolls; Copy retains the complete snapshot. Narrow windows stack the buttons. Server controls separate
+recovery actions, setup and indexing, and command menus align shortcuts separately from action labels.
+
+### Activity Log
+
+**Logs (N)** in the bottom bar opens a pane for session notices, warnings and SQL metadata connection
+progress/failures. It starts collapsed; **View → Layout → Show / Hide Activity Log** also toggles it.
+Use the wheel or Up/Down, Page Up/Down, Home/End while the pane has focus. **Copy** (Ctrl+C) copies
+its retained text, **Clear** removes it, and **Hide** or Escape collapses the pane. Tab returns keyboard
+input to the editor. The latest 256 entries are kept in memory, up to 8 KiB each, with UTC timestamps;
+they survive file switches but are not saved between sessions. New entries follow the bottom when
+scrolled there. This is application activity, not an unrestricted capture of every child process's output.
