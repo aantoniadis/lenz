@@ -3,6 +3,7 @@
 //! location to the core, and switching to the source keeps the place. Layouts are shaped off the UI thread.
 
 use std::{ops::Range, sync::Arc};
+use unicode_segmentation::UnicodeSegmentation;
 
 use gpui::{App, Bounds, Pixels, ShapedLine, TextAlign, Window, point, px};
 use lenz_content::{
@@ -10,7 +11,7 @@ use lenz_content::{
     theme::Palette,
 };
 use lenz_gpui::markdown::{ReadingStyle, indent, quotes, shape};
-use reader_core::markdown::Preview;
+use code_core::markdown::Preview;
 
 /// Space around the reading column.
 pub const PAD: f32 = 24.0;
@@ -58,13 +59,24 @@ pub struct Layout {
 impl Layout {
     /// Lay `preview` out for a view `width` wide; `line_of` maps a source byte to its line.
     pub fn new(preview: Arc<Preview>, width: f32, style: Arc<ReadingStyle>, palette: Arc<Palette>, line_of: &dyn Fn(usize) -> usize, ts: &gpui::WindowTextSystem) -> Self {
-        let column = (width - 2.0 * PAD).min(style.column).max(40.0);
+        Self::build(preview, width, style, palette, line_of, ts, false, &|| true)
+    }
+
+    /// Documentation wraps code as well as prose so narrow popups retain every character.
+    pub fn popup(preview: Arc<Preview>, width: f32, style: Arc<ReadingStyle>, palette: Arc<Palette>, ts: &gpui::WindowTextSystem, current: &dyn Fn() -> bool) -> Self {
+        Self::build(preview, width, style, palette, &|_| 0, ts, true, current)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(preview: Arc<Preview>, width: f32, style: Arc<ReadingStyle>, palette: Arc<Palette>, line_of: &dyn Fn(usize) -> usize, ts: &gpui::WindowTextSystem, wrap_code: bool, current: &dyn Fn() -> bool) -> Self {
+        let column = (width - 2.0 * PAD).max(if wrap_code {1.0} else {40.0});
         let left = ((width - column) / 2.0).max(PAD.min(width / 4.0));
         let mut l = Layout { preview: preview.clone(), width, style: style.clone(), palette: palette.clone(), left, column, rows: Vec::new(), height: PAD };
         let doc = &preview.doc;
         let s = &*style;
         let mut previous: Option<&BlockKind> = None;
         for (b, block) in doc.blocks.iter().enumerate() {
+            if !current() { break; }
             l.height += s.space_before(&block.kind, previous);
             previous = Some(&block.kind);
             let x = indent(s, left, block);
@@ -96,14 +108,29 @@ impl Layout {
                     let fence = usize::from(matches!(block.kind, BlockKind::Code { .. }) && doc.source[block.source.clone()].trim_start().starts_with(['`', '~']));
                     let mut at = block.text.start;
                     for (i, text) in doc.text[block.text.clone()].split('\n').enumerate() {
+                        if !current() { break; }
                         let range = at..at + text.len();
                         at = range.end + 1;
                         if range.is_empty() && range.end >= block.text.end && i > 0 {
                             break; // the final line ending
                         }
-                        let shaped = shape(doc, block, range.clone(), s.size - 2.0, s, &palette, ts, syntax, None);
-                        l.push(b, first + fence + i, s.line * 0.85, RowKind::Code, vec![Piece { x: x + 8.0, range, shaped }]);
+                        if wrap_code {
+                            for (range, shaped) in popup_flow(doc, block, range, s.size - 2.0, s, &palette, ts, syntax, (right-x-8.0).max(1.0), current) {
+                                l.push(b, first + fence + i, s.line * 0.85, RowKind::Code, vec![Piece { x: x + 8.0, range, shaped }]);
+                            }
+                        } else {
+                            let shaped = shape(doc, block, range.clone(), s.size - 2.0, s, &palette, ts, syntax, None);
+                            l.push(b, first + fence + i, s.line * 0.85, RowKind::Code, vec![Piece { x: x + 8.0, range, shaped }]);
+                        }
                     }
+                }
+                BlockKind::TableRow { cells, header, .. } if wrap_code => {
+                    for cell in cells {
+                        for (range, shaped) in popup_flow(doc, block, cell.clone(), s.size, s, &palette, ts, &[], right-x, current) {
+                            l.push(b, first, s.line, RowKind::Text, vec![Piece{x,range,shaped}]);
+                        }
+                    }
+                    if *header { l.push(b, first, 2.0, RowKind::Rule, Vec::new()); }
                 }
                 BlockKind::TableRow { cells, header, .. } => {
                     let n = cells.len().max(1) as f32;
@@ -122,7 +149,9 @@ impl Layout {
                         _ => s.size,
                     };
                     let height = (size * 1.6).max(s.line);
-                    for (i, (range, shaped)) in flow(doc, block, size, s, &palette, ts, right - x).into_iter().enumerate() {
+                    let rows = if wrap_code {popup_flow(doc, block, block.text.clone(), size, s, &palette, ts, &[], right-x, current)}
+                        else {flow(doc, block, block.text.clone(), size, s, &palette, ts, &[], right-x)};
+                    for (i, (range, shaped)) in rows.into_iter().enumerate() {
                         // Lines of a wrapped paragraph: the source line its text starts on.
                         let line = if i == 0 { first } else { source_byte(doc, range.start).map_or(first, line_of) };
                         l.push(b, line, height, RowKind::Text, vec![Piece { x, range, shaped }]);
@@ -218,6 +247,14 @@ impl Layout {
                     _ => None,
                 };
                 let at = point(px(x0 + piece.x), px(y));
+                if let Some((a, b)) = cell {
+                    let mask = Bounds { origin: point(px(x0 + a), px(y)), size: gpui::size(px(b - a), px(row.h)) };
+                    window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
+                        let _ = piece.shaped.paint_background(at, px(row.h), TextAlign::Left, None, window, cx);
+                    });
+                } else {
+                    let _ = piece.shaped.paint_background(at, px(row.h), TextAlign::Left, None, window, cx);
+                }
                 if let Some(sel) = selection.as_ref().filter(|s| s.start < piece.range.end && s.end > piece.range.start) {
                     let (a, b) = (sel.start.max(piece.range.start) - piece.range.start, sel.end.min(piece.range.end) - piece.range.start);
                     let (xa, xb) = (f32::from(piece.shaped.x_for_index(a)), f32::from(piece.shaped.x_for_index(b)));
@@ -258,16 +295,16 @@ fn decorate(window: &mut Window, s: &ReadingStyle, p: &Palette, block: &Block, l
 
 /// A block's text wrapped at word boundaries into rows `width` wide: each row's range and shaped text.
 #[allow(clippy::too_many_arguments)]
-fn flow(doc: &lenz_content::markdown::MarkdownDocument, block: &Block, size: f32, s: &ReadingStyle, p: &Palette, ts: &gpui::WindowTextSystem, width: f32) -> Vec<(Range<usize>, ShapedLine)> {
+fn flow(doc: &lenz_content::markdown::MarkdownDocument, block: &Block, range: Range<usize>, size: f32, s: &ReadingStyle, p: &Palette, ts: &gpui::WindowTextSystem, syntax: &[(Range<usize>, lenz_content::highlight::Capture)], width: f32) -> Vec<(Range<usize>, ShapedLine)> {
     let mut rows = Vec::new();
-    let mut at = block.text.start;
+    let mut at = range.start;
     // ponytail: reshapes the rest of a line per wrapped row (quadratic in a line's rows); index glyphs as Lenz's
     // WrapLookup does if very long paragraphs show up in profiles.
-    while at <= block.text.end {
-        let end = doc.text[at..block.text.end].find('\n').map_or(block.text.end, |n| at + n);
+    while at <= range.end {
+        let end = doc.text[at..range.end].find('\n').map_or(range.end, |n| at + n);
         let mut a = at;
         loop {
-            let shaped = shape(doc, block, a..end, size, s, p, ts, &[], None);
+            let shaped = shape(doc, block, a..end, size, s, p, ts, syntax, None);
             if f32::from(shaped.width) <= width || a >= end {
                 rows.push((a..end, shaped));
                 break;
@@ -283,10 +320,85 @@ fn flow(doc: &lenz_content::markdown::MarkdownDocument, block: &Block, size: f32
             if stop == 0 {
                 stop = text.chars().next().map_or(text.len(), char::len_utf8);
             }
-            rows.push((a..a + stop, shape(doc, block, a..a + stop, size, s, p, ts, &[], None)));
+            rows.push((a..a + stop, shape(doc, block, a..a + stop, size, s, p, ts, syntax, None)));
             a += stop;
         }
         at = end + 1;
+    }
+    rows
+}
+
+/// Shape each source line once to choose wrap boundaries, then only its visible-sized pieces.
+#[allow(clippy::too_many_arguments)]
+fn popup_flow(doc: &lenz_content::markdown::MarkdownDocument, block: &Block, range: Range<usize>, size: f32, s: &ReadingStyle, p: &Palette, ts: &gpui::WindowTextSystem, syntax: &[(Range<usize>, lenz_content::highlight::Capture)], width: f32, current: &dyn Fn() -> bool) -> Vec<(Range<usize>, ShapedLine)> {
+    let mut rows=Vec::new(); let mut at=range.start;
+    while at<=range.end && current() {
+        // Bound shaping to 4 KiB except one oversized grapheme, which must remain whole.
+        let mut boundaries=vec![0]; let mut newline=0;
+        let mut graphemes=doc.text.get(at..range.end).unwrap_or_default().grapheme_indices(true);
+        while current() {
+            let Some((offset,grapheme))=graphemes.next() else {break};
+            if !current() {return rows;}
+            if grapheme.contains('\n') {newline=grapheme.len();break;}
+            let end=offset+grapheme.len();
+            if end>4096&&offset>0 {break;}
+            boundaries.push(end);
+            if end>=4096 {break;}
+        }
+        if !current() {return rows;}
+        let end=at+boundaries.last().copied().unwrap_or(0);
+        let continued=newline==0&&end<range.end;
+        let mut consumed=end;
+        let text=doc.text.get(at..end).unwrap_or_default();
+        let whole=shape(doc,block,at..end,size,s,p,ts,syntax,None);
+        if f32::from(whole.width)<=width || text.is_empty() {rows.push((at..end,whole));}
+        else {
+            // GPUI's coordinate helpers scan glyphs; prefix maxima make repeated wraps logarithmic.
+            let (mut index,mut x)=(0, f32::NEG_INFINITY);
+            let glyphs:Vec<_>=whole.runs.iter().flat_map(|run|&run.glyphs).map(|glyph|{
+                let gx=f32::from(glyph.position.x); index=index.max(glyph.index); x=x.max(gx); (index,x,glyph.index,gx)
+            }).collect();
+            let x_at=|byte|glyphs.get(glyphs.partition_point(|g|g.0<byte)).map_or(f32::from(whole.width),|g|g.3);
+            let byte_at=|x:f32|{
+                let i=glyphs.partition_point(|g|g.1<x);
+                let Some(g)=glyphs.get(i) else{return text.len()};
+                let (previous,px)=i.checked_sub(1).and_then(|i|glyphs.get(i)).map_or((0,0.0),|g|(g.2,g.3));
+                if g.3-x<x-px {g.2}else{previous}
+            };
+            let mut start=0;
+            while start<text.len() && current() {
+                let limit=x_at(start)+width.max(0.0);
+                let target=byte_at(limit).min(text.len()).max(start);
+                let mut boundary=boundaries.partition_point(|b|*b<=target).saturating_sub(1);
+                let mut stop=boundaries.get(boundary).copied().unwrap_or(start);
+                while stop>start&&x_at(stop)>limit {boundary=boundary.saturating_sub(1);stop=boundaries.get(boundary).copied().unwrap_or(start);}
+                if let Some(space)=text.get(start..stop).unwrap_or_default().rfind(' ').filter(|&n|n>0) {
+                    stop=boundaries.get(boundaries.partition_point(|b|*b<=start+space+1).saturating_sub(1)).copied().unwrap_or(start);
+                }
+                if stop<=start {stop=boundaries.get(boundaries.partition_point(|b|*b<=start)).copied().unwrap_or(text.len());}
+                // Shape the unfinished last wrap with its continuation in the next bounded chunk.
+                if continued && stop==text.len() && start>0 {consumed=at+start;break;}
+                let mut part=at+start..at+stop;
+                let mut shaped=shape(doc,block,part.clone(),size,s,p,ts,syntax,None);
+                if f32::from(shaped.width)>width {
+                    // Standalone shaping can change kerning or bidi advances at a wrap boundary.
+                    let mut low=boundaries.partition_point(|b|*b<=start);
+                    let mut high=boundaries.partition_point(|b|*b<=stop).saturating_sub(1);
+                    while low<high&&current() {
+                        let mid=low+(high-low).div_ceil(2);
+                        let end=boundaries.get(mid).copied().unwrap_or(stop);
+                        let trial=shape(doc,block,at+start..at+end,size,s,p,ts,syntax,None);
+                        if f32::from(trial.width)<=width {low=mid;} else {high=mid-1;}
+                    }
+                    stop=boundaries.get(low).copied().unwrap_or(stop);
+                    part=at+start..at+stop;
+                    shaped=shape(doc,block,part.clone(),size,s,p,ts,syntax,None);
+                }
+                rows.push((part,shaped));
+                start=stop;
+            }
+        }
+        if newline>0 {at=end+newline;} else if consumed<range.end {at=consumed;} else {break;}
     }
     rows
 }

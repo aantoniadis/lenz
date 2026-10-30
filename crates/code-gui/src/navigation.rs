@@ -1,8 +1,12 @@
 //! Pixel layout and input for the core's unified navigation search.
 use super::*;
-use reader_core::navigation::{Chosen, Kind, Scope};
+use code_core::navigation::{Chosen, Kind, Scope};
 
 const HEADER: f32 = 3.0;
+
+fn navigation_shortcut(row: &code_core::navigation::Row) -> Option<String> {
+    row.shortcut.clone()
+}
 
 pub(super) struct Frame {
     bounds: Bounds<Pixels>,
@@ -12,7 +16,7 @@ pub(super) struct Frame {
     scope: Scope,
     query: String,
     status: String,
-    rows: Vec<reader_core::navigation::Row>,
+    rows: Vec<code_core::navigation::Row>,
 }
 
 impl ReaderView {
@@ -38,6 +42,9 @@ impl ReaderView {
     pub(super) fn accept_navigation(&mut self, revision: u64, window: &mut Window, cx: &mut Context<Self>) {
         let Some(Modal::Navigation { at }) = self.modal else { return };
         let Some(choice) = self.session.navigation_choice(revision, at) else { return };
+        if let Chosen::Command(command @ Command::ActivateNavigation { .. }) = choice {
+            return self.dispatch(command, cx);
+        }
         self.close_modal(cx);
         match choice {
             Chosen::Command(command) => {
@@ -151,7 +158,7 @@ impl ReaderView {
         let Some(search) = self.session.state().navigation() else { return Vec::new() };
         let heading = if search.scope == Scope::Recent { search.scope.label().to_string() } else { Scope::ALL.iter().map(|s| if *s == search.scope { format!("[{}]", s.label()) } else { s.label().to_string() }).collect::<Vec<_>>().join("  ") };
         let mut rows = vec![(heading, None), (format!("Search › {}", search.query), None), (self.session.navigation_status(), None)];
-        rows.extend(search.rows.iter().map(|r| (format!("{}{} — {}{}", r.label, match r.on { Some(true) => " (on)", Some(false) => " (off)", None => "" }, r.detail, r.shortcut.map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
+        rows.extend(search.rows.iter().map(|r| (format!("{}{} — {}{}", r.label, match r.on { Some(true) => " (on)", Some(false) => " (off)", None => "" }, r.detail, navigation_shortcut(r).map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
         rows
     }
 }
@@ -174,7 +181,16 @@ impl Frame {
             let input_y = y + 4.0 + line_h();
             lenz_gpui::fill(window, x + 6.0, input_y, (w - 12.0).max(0.0), line_h(), p.bg);
             let query = tail(&self.query, ((w - 36.0) / self.char_w).max(1.0) as usize);
-            lenz_gpui::text(window, cx, m, x + 12.0, input_y, &format!("› {query}│"), p.fg);
+            let input = format!("› {query}");
+            let input = lenz_content::display::cap_marks(&input);
+            let input = lenz_content::display::show_bidi(&input).into_owned();
+            let run = gpui::TextRun { len: input.len(), font: m.font.clone(), color: lenz_gpui::color(p.fg), background_color: None, underline: None, strikethrough: None };
+            let line = window.text_system().shape_line(input.into(), px(m.font_size), &[run], None);
+            let tx = (x + 12.0).min(x + w - 14.0 - f32::from(line.width));
+            window.with_content_mask(Some(lenz_gpui::clip(bounds, x + 6.0, w - 12.0)), |window| {
+                let _ = line.paint(gpui::point(px(tx), px(input_y)), px(m.line_h), gpui::TextAlign::Left, None, window, cx);
+                lenz_gpui::fill(window, tx + f32::from(line.width), input_y + 1.0, 2.0, line_h() - 2.0, p.caret);
+            });
             let hint = if self.scope == Scope::Recent { format!("{} · Enter open · Esc close", self.status) } else if self.query.is_empty() { format!("{} · Tab category · Enter open · Esc close", self.status) } else { self.status.clone() };
             lenz_gpui::text(window, cx, m, x + 12.0, input_y + line_h(), &hint, p.dim);
             for (i, row) in self.rows.iter().enumerate() {
@@ -192,11 +208,11 @@ impl Frame {
                 lenz_gpui::colored_text(window, cx, m, color, x + 34.0, top, &label, &matched, &[]);
                 let detail = match row.disabled { Some(why) => format!("{} · {why}", row.detail), None => row.detail.clone() };
                 lenz_gpui::text(window, cx, m, x + 34.0, top + line_h(), &detail, p.dim);
-                if let Some(shortcut) = row.shortcut {
+                if let Some(shortcut) = navigation_shortcut(row) {
                     let width = shortcut.chars().count() as f32 * self.char_w + 16.0;
                     if w > 320.0 {
                         lenz_gpui::fill(window, x + w - width - 8.0, top, width + 8.0, line_h(), if self.first + i == self.at { p.selected_bg } else { bg });
-                        lenz_gpui::text(window, cx, m, x + w - width, top, shortcut, p.dim);
+                        lenz_gpui::text(window, cx, m, x + w - width, top, &shortcut, p.dim);
                     }
                 }
             }

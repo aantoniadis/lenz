@@ -18,6 +18,7 @@ pub(super) struct Layout {
     query: String,
     files: String,
     in_files: bool,
+    selected: bool,
     on: [bool; 3],
     char_w: f32,
 }
@@ -28,7 +29,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 
 impl ReaderView {
     pub(super) fn search_layout(&self) -> Option<Layout> {
-        let Some(Modal::Search { query, files, in_files, .. }) = &self.modal else { return None };
+        let Some(Modal::Search { query, files, in_files, selected, .. }) = &self.modal else { return None };
         let (lh, cw) = (line_h(), self.char_w);
         let w = (self.width - 16.0).clamp(0.0, 640.0);
         let x = (self.width - w) / 2.0;
@@ -37,7 +38,7 @@ impl ReaderView {
         let refused = self.session.search_refusal(query);
         let hint = match &refused {
             Some(e) => format!("{e} — fix the expression to search"),
-            None => "Enter search · Tab switch field · Alt+C/W/R options · Esc close".to_string(),
+            None => "Enter search · Tab switch field · Ctrl+A select · Alt+C/W/R options · Esc close".to_string(),
         };
         let hint = wrap(&hint, self.columns(w - 2.0 * PAD).max(1));
         // Rows from the dialog's top: title, the two fields, the toggles (wrapping when narrow), the hint.
@@ -69,6 +70,7 @@ impl ReaderView {
             query: query.clone(),
             files: files.clone(),
             in_files: *in_files,
+            selected: *selected,
             on: [o.case, o.word, o.regex],
             char_w: cw,
         })
@@ -83,9 +85,10 @@ impl ReaderView {
         if let Some((option, _)) = l.toggles.iter().find(|(_, b)| b.contains(&point)) {
             self.dispatch(Command::ToggleFindOption(*option), cx);
         } else if let Some(i) = l.fields.iter().position(|b| b.contains(&point))
-            && let Some(Modal::Search { in_files, .. }) = &mut self.modal
+            && let Some(Modal::Search { in_files, selected, .. }) = &mut self.modal
         {
             *in_files = i == 1;
+            *selected = false;
         }
         cx.notify();
     }
@@ -114,6 +117,9 @@ impl Layout {
                     if value.is_empty() {
                         lenz_gpui::text(window, cx, m, fx + 8.0, fy + 4.0, placeholder, p.dim);
                     } else {
+                        if active && self.selected {
+                            lenz_gpui::fill(window, fx + 8.0, fy + 3.0, lenz_content::wrap::width(&shown) as f32 * self.char_w, fh - 6.0, p.sel_bg);
+                        }
                         lenz_gpui::text(window, cx, m, fx + 8.0, fy + 4.0, &shown, p.fg);
                     }
                     if active {

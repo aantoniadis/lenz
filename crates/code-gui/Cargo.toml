@@ -1,25 +1,26 @@
 [package]
-name = "reader-gui"
-description = "The Lenz code reader's GPUI window"
+name = "code-gui"
+description = "Lenz Code's GPUI window"
 license = "MIT"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "lenz-reader"
+name = "lenz-code"
 path = "src/main.rs"
 
 [features]
-test-support = ["gpui/test-support"]
+test-support = ["gpui/test-support", "code-core/test-support"]
 # Benchmark markers on stderr; never in release builds that ship.
 perf-probe = []
 
 [dependencies]
-reader-core = { path = "../reader-core" }
+code-core = { path = "../code-core" }
 lenz-content.workspace = true
 lenz-gpui.workspace = true
 gpui.workspace = true
+unicode-segmentation = "1.13.3"
 # SVG logos and embedded raster images in Reader content.
 resvg = { version = "0.48.1", default-features = false, features = ["raster-images"] }
 
@@ -31,7 +32,7 @@ gpui_platform = { workspace = true, features = ["wayland", "x11"] }
 
 [dev-dependencies]
 # Throwaway git repositories for the blame tests.
-lenz-content = { workspace = true, features = ["git-testing"] }
+lenz-content = { workspace = true, features = ["git-testing", "write-testing"] }
 gpui = { workspace = true, features = ["test-support"] }
 tempfile = "3"
 serde_json = "1"
@@ -39,3 +40,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true
+
+[[example]]
+name = "foundation-native"
+path = "examples/foundation_native.rs"
+required-features = ["test-support"]
