@@ -1,8 +1,41 @@
 use super::*;
 
 #[test]
+fn markdown_prose_wraps_at_words_and_keeps_every_grapheme() {
+    let source = "alpha beta gamma e\u{301}👩🏽‍💻 delta";
+    let ranges = wrap_ranges(source, 12);
+    assert_eq!(ranges.iter().map(|r| &source[r.clone()]).collect::<Vec<_>>(),
+        ["alpha beta ", "gamma e\u{301}👩🏽‍💻 ", "delta"]);
+    assert_eq!(ranges.iter().map(|r| &source[r.clone()]).collect::<String>(), source);
+    for cols in [1, 2, 5, 12] {
+        let ranges = wrap_ranges(source, cols);
+        assert_eq!(ranges.iter().map(|r| &source[r.clone()]).collect::<String>(), source);
+        assert!(ranges.iter().all(|r| r.start < r.end));
+    }
+}
+
+#[test]
+fn markdown_inline_code_has_its_own_foreground_in_both_appearances() {
+    for dark in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        open(&mut a, dir.path(), "code.md", b"Plain `code` text.\n");
+        a.dispatch(Command::ToggleMarkdownSource);
+        settle(&mut a, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+        let buffer = draw(&mut a, 40, 16);
+        let palette = a.session.state().palette();
+        let layout = a.layout.panes[0].markdown.as_ref().unwrap();
+        let at = layout.preview.doc.text.find("code").unwrap();
+        let hit = a.layout.panes[0].hits.iter().find(|h| h.byte == at).unwrap();
+        assert_eq!(buffer[(hit.x, hit.y)].fg, color(palette.syntax.string));
+        assert_eq!(buffer[(hit.x, hit.y)].bg, color(palette.gutter_bg));
+        assert_eq!(std::fs::read(dir.path().join("code.md")).unwrap(), b"Plain `code` text.\n");
+    }
+}
+
+#[test]
 fn terminal_cells_preserve_source_bytes_through_tabs_wide_and_combining_text() {
-    let shown = reader_core::shown::shown_line("\té界e\u{301}", &[]);
+    let shown = code_core::shown::shown_line("\té界e\u{301}", &[]);
     let cells = source_cells(&shown, 0..shown.text.len(), 0, 20);
     assert_eq!(
         cells
@@ -23,7 +56,7 @@ fn terminal_cells_preserve_source_bytes_through_tabs_wide_and_combining_text() {
 
 #[test]
 fn horizontal_clipping_never_draws_half_a_wide_character() {
-    let shown = reader_core::shown::shown_line("a界b", &[]);
+    let shown = code_core::shown::shown_line("a界b", &[]);
     let cells = source_cells(&shown, 0..shown.text.len(), 2, 2);
     assert_eq!(
         cells.iter().map(|c| (c.x, c.text)).collect::<Vec<_>>(),
@@ -35,7 +68,7 @@ fn app(dir: &std::path::Path, dark: bool) -> App {
     use lenz_content::theme::{ThemeOverrides, ThemePaths};
     let providers = dir.join("providers.json");
     let settings: serde_json::Map<String, serde_json::Value> =
-        reader_core::semantics::provider::PROVIDERS
+        code_core::semantics::provider::PROVIDERS
             .iter()
             .map(|p| {
                 (
@@ -50,8 +83,8 @@ fn app(dir: &std::path::Path, dark: bool) -> App {
     )
     .unwrap();
     App::new(
-        reader_core::session::Config {
-            themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-reader"),
+        code_core::session::Config {
+            themes: ThemePaths::under(&dir.join("config"), &dir.join("state"), "lenz-code"),
             recent: dir.join("recent.json"),
             settings: dir.join("settings.json"),
             providers,
@@ -95,7 +128,7 @@ fn open(app: &mut App, dir: &std::path::Path, name: &str, bytes: &[u8]) {
     let path = dir.join(name);
     std::fs::write(&path, bytes).unwrap();
     app.dispatch(Command::Open(path));
-    settle(app, |a| a.session.state().document().is_some());
+    settle(app, |a| a.session.state().current_source().is_some());
 }
 
 #[test]
@@ -109,7 +142,7 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
         .to_owned();
     let mut build =
         std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-    build.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]);
+    build.args(["build", "-q", "-p", "code-core", "--example", "fake_lsp"]);
     if profile.ends_with("release") {
         build.arg("--release");
     }
@@ -124,17 +157,17 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
         )
         .unwrap();
         let mut app = App::new(
-            reader_core::session::Config {
+            code_core::session::Config {
                 themes: lenz_content::theme::ThemePaths::under(
                     &base.join("config"),
                     &base.join("state"),
-                    "lenz-reader",
+                    "lenz-code",
                 ),
                 recent: base.join("recent.json"),
                 settings: base.join("settings.json"),
                 providers: base.join("providers.json"),
                 cache: base.join("cache"),
-                idle: reader_core::semantics::IDLE,
+                idle: code_core::semantics::IDLE,
                 clock: std::sync::Arc::new(std::time::Instant::now),
                 overrides: Default::default(),
                 dark,
@@ -151,9 +184,9 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
             a.session
                 .state()
                 .provider()
-                .is_some_and(|p| p.status == reader_core::semantics::Status::Ready)
+                .is_some_and(|p| p.status == code_core::semantics::Status::Ready)
         });
-        app.apply(reader_core::session::Completion::Semantic(reader_core::semantics::Event::Message {
+        app.apply(code_core::session::Completion::Semantic(code_core::semantics::Event::Message {
                 session: 1,
                 message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
             }));
@@ -177,7 +210,7 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog() {
             ));
         }
         // An error it logs: marked first in the footer (kept when narrow), its words in the details.
-        app.apply(reader_core::session::Completion::Semantic(reader_core::semantics::Event::Message {
+        app.apply(code_core::session::Completion::Semantic(code_core::semantics::Event::Message {
                 session: 1,
                 message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
             }));
@@ -235,7 +268,7 @@ fn nerd_reader_icons_preserve_tab_mouse_targets_and_source_bytes() {
             "file icons keep their own color"
         );
         assert!(text(&buffer).contains("Menu"));
-        assert!(text(&buffer).contains("F10 Commands"));
+        assert!(text(&buffer).contains("F10"));
         let (id, tab) = app.layout.panes[0].tabs[0];
         app.handle(Event::Mouse(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
@@ -304,6 +337,9 @@ fn actual_empty_constructor_renders_dark_light_narrow_and_zero_and_closes_scroll
             draw(&mut app, width, height);
         }
         app.handle(Event::Key(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE)));
+        assert!(matches!(app.modal.as_ref().unwrap().kind, Prompt::Help));
+        let help = text(&draw(&mut app, 100, 40));
+        assert!(help.contains("Ctrl+S") && help.contains("Ctrl+Z") && help.contains("bracketed paste"));
         draw(&mut app, 24, 9);
         app.handle(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
         draw(&mut app, 24, 9);
@@ -426,13 +462,13 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         &mut app,
         dir.path(),
         "fold.rs",
-        b"fn main() {\n  let x = 1;\n  let y = 2;\n}\n",
+        b"fn main() {\n  let x_with_a_much_longer_name = 1;\n  let y = 2;\n}\n",
     );
     settle(&mut app, |a| {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.folds().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.folds().is_some()))
     });
     app.dispatch(Command::ToggleFold(0));
     let buffer = draw(&mut app, 70, 16);
@@ -449,16 +485,20 @@ fn source_folds_and_sticky_rows_keep_source_hits() {
         a.session
             .state()
             .active()
-            .is_some_and(|t| t.declarations().is_some())
+            .is_some_and(|t| a.session.state().view(t.id()).is_some_and(|view| view.declarations().is_some()))
     });
     app.dispatch(Command::Scroll(1));
-    draw(&mut app, 70, 16);
+    let buffer = draw(&mut app, 70, 16);
     assert!(
         app.layout.panes[0]
             .rows
             .iter()
             .any(|(_, line, _)| *line == 0)
     );
+    // The pinned line covers the longer scrolled line beneath it entirely.
+    let y = app.layout.panes[0].rows.iter().find(|(_, line, _)| *line == 0).unwrap().0;
+    let row: String = (0..70).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(row.contains("fn main() {") && !row.contains("name"), "{row}");
 }
 
 #[test]
@@ -470,7 +510,7 @@ fn raster_image_and_markdown_preview_use_shared_decoded_content() {
         .unwrap();
     let mut app = app(dir.path(), true);
     app.dispatch(Command::Open(image_path));
-    settle(&mut app, |a| a.session.state().document().is_some());
+    settle(&mut app, |a| a.session.state().current_source().is_some());
     assert!(text(&draw(&mut app, 50, 15)).contains('▀'));
     app.dispatch(Command::Close);
     open(&mut app, dir.path(), "tiny.svg", br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>"##);
@@ -510,8 +550,8 @@ fn raster_image_and_markdown_preview_use_shared_decoded_content() {
     let tab = app.session.state().active().unwrap();
     app.preview_selection = Some((
         tab.id(),
-        tab.version(),
-        reader_core::session::Selection { anchor: 0, head: 7 },
+        crate::app::PreviewSource::new(&app.session.state().view(tab.id()).unwrap()),
+        code_core::session::Selection { anchor: 0, head: 7 },
     ));
     let selected = draw(&mut app, 50, 15);
     assert!(
@@ -595,7 +635,8 @@ fn tall_local_markdown_images_keep_layout_metadata_bounded_on_resize() {
         &|| true,
     )
     .unwrap();
-    let preview = Arc::new(reader_core::markdown::Preview {
+    let preview = Arc::new(code_core::markdown::Preview {
+        version: 0,
         doc: Arc::new(doc),
         syntax: Arc::default(),
         images: Some(std::collections::HashMap::from([(
@@ -606,9 +647,10 @@ fn tall_local_markdown_images_keep_layout_metadata_bounded_on_resize() {
         )])),
     });
     let source_doc =
-        reader_core::document::Document::decode("tall.md".into(), 1, source.as_bytes());
+        code_core::document::Document::decode("tall.md".into(), 1, source.as_bytes());
+    let source_snapshot = code_core::text::TextSnapshot::from_document(code_core::text::BufferId(1), &source_doc);
     for width in [160, 18, 1000, 1, 160] {
-        let layout = MarkdownLayout::new(preview.clone(), width, &source_doc);
+        let layout = MarkdownLayout::new(preview.clone(), width, &source_snapshot);
         assert!(
             layout.rows.len() <= 21,
             "image layout rows: {}",
@@ -701,7 +743,7 @@ fn navigation_files_show_distinct_paths_and_disabled_actions_explain_why() {
         a.session
             .state()
             .project()
-            .is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_)))
+            .is_some_and(|p| matches!(p.coverage(), code_core::project::Coverage::Complete(_)))
     });
     a.run(CommandId::FindFile);
     a.handle(crossterm::event::Event::Paste("NPE".into()));
@@ -741,7 +783,7 @@ fn navigation_files_show_distinct_paths_and_disabled_actions_explain_why() {
         ),
     ));
     assert!(a.modal.is_some());
-    assert!(a.session.state().document().is_none());
+    assert!(a.session.state().current_source().is_none());
 }
 
 #[test]
@@ -822,7 +864,7 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
         let mut a = app(dir.path(), dark);
         open(&mut a, dir.path(), "sample.txt", b"hello\n");
         a.independent_view = Some((2, 3));
-        a.notice = Some("界e\u{301} diagnostic\n".repeat(30));
+        a.dispatch(Command::Notice("界e\u{301} diagnostic\n".repeat(30)));
         for (width, height) in [(120, 26), (60, 18), (28, 10), (8, 5), (1, 1), (0, 0), (120, 26)] {
             let buffer = draw(&mut a, width, height);
             for (_, rect) in &a.layout.controls {
@@ -836,10 +878,11 @@ fn chrome_reserves_menu_position_commands_and_ellipsizes_unicode_status() {
             if width >= 60 {
                 let top: String = (0..width).map(|x| buffer[(x, 0)].symbol()).collect();
                 assert!(top.contains("Menu"), "top: {top:?}");
-                assert!(top.contains("Find file") && !top.contains("Open"), "top: {top:?}");
+                assert!(!top.contains("Find file") && !top.contains("Search") && !top.contains("Compare"), "top: {top:?}");
                 let footer: String = (0..width).map(|x| buffer[(x, height - 1)].symbol()).collect();
-                assert!(footer.contains("F10 Commands"));
+                assert!(footer.contains("F10"));
                 assert!(footer.contains("View 2/3"));
+                assert!(footer.starts_with(&format!(" {}", a.session.status_position())), "{footer}");
                 assert!(footer.contains('…'));
                 assert!(a.layout.panes[0].tabs.iter().all(|(_, rect)| rect.y == 1));
                 let (_, message) = a.layout.controls.iter().find(|(id, _)| *id == CommandId::StatusDetails).unwrap();
@@ -900,7 +943,7 @@ fn search_dialog_shows_labelled_fields_toggles_and_refusal_in_both_appearances_a
 fn breadcrumbs_separate_crumbs_shrink_outer_ones_and_keep_the_focused_one_in_both_appearances() {
     use crate::app::{Focus, Prompt};
     use crossterm::event::{Event, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-    use reader_core::breadcrumbs::Crumb;
+    use code_core::breadcrumbs::Crumb;
     for dark in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("proj");
@@ -957,4 +1000,293 @@ fn breadcrumbs_separate_crumbs_shrink_outer_ones_and_keep_the_focused_one_in_bot
         }
         assert_eq!(std::fs::read(root.join("crates/reader/src/ui/widgets.rs")).unwrap(), source);
     }
+}
+
+#[test]
+fn explorer_and_tabs_show_git_letters_apart_from_the_dirty_mark() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::branches::FileStatus;
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "clean.txt", "clean\n");
+    put(r.path(), "edited.txt", "base\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "edited.txt", "edited\n");
+    put(r.path(), "new.txt", "new\n");
+    put(r.path(), "a_really_long_untracked_name.txt", "new\n");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    let row = |a: &App, p: &str| a.session.state().tree_rows().find(|r| &*r.path == p).cloned();
+    settle(&mut app, |a| row(a, "new.txt").is_some_and(|r| a.session.state().row_status(&r) == Some(FileStatus::Untracked)));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("clean.txt")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    draw(&mut app, 60, 12);
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    let lines = |b: &Buffer| (0..b.area.height).map(|y| (0..b.area.width).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+    let rows = lines(&draw(&mut app, 60, 12));
+    let tree = app.layout.tree;
+    let explorer = |name: &str| rows[usize::from(tree.y)..usize::from(tree.bottom())].iter()
+        .map(|l| l.chars().skip(usize::from(tree.x)).take(usize::from(tree.width)).collect::<String>())
+        .find(|l| l.contains(name)).unwrap().trim_end().to_string();
+    assert!(explorer("clean.txt").ends_with(" ●") && !explorer("clean.txt").contains(" M"), "{rows:#?}");
+    assert!(explorer("edited.txt").ends_with(" M"), "{rows:#?}");
+    assert!(explorer("new.txt").ends_with(" U"), "{rows:#?}");
+    // A name longer than the explorer stops a blank cell before its letter, and nothing of it follows the letter.
+    assert!(explorer("a_really").ends_with(" U"), "{rows:#?}");
+    assert!(rows[1].contains(" ● clean.txt  "), "dirty draft over a Git-clean file: the mark, no letter: {:?}", rows[1]);
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)));
+    settle(&mut app, |a| a.session.state().active().is_some_and(|t| !a.session.state().tab_dirty(t.id()) && a.session.state().tab_status(t.id()) == Some(FileStatus::Modified)));
+    let rows = lines(&draw(&mut app, 60, 12));
+    assert!(rows[1].contains(" clean.txt M ") && !rows[1].contains("●"), "{:?}", rows[1]);
+    assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
+}
+
+#[test]
+fn the_keymap_dialog_draws_its_rows_and_capture_hint_at_any_size() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    a.run(CommandId::Keymap);
+    let screen = text(&draw(&mut a, 100, 30));
+    assert!(screen.contains("Keymap: IntelliJ"), "the preset heads the dialog");
+    assert!(screen.contains("Save — Ctrl+S"), "rows name their chords");
+    assert!(screen.contains("Enter rebinds"), "the footer explains the keys");
+    // Capture: the title says what the next key does.
+    a.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    let screen = text(&draw(&mut a, 100, 30));
+    assert!(screen.contains("press the new shortcut"), "{screen}");
+    a.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    // Tiny terminals keep the dialog drawable, scrollable and dismissible.
+    for (w, h) in [(40, 8), (20, 4), (1, 1)] {
+        a.run(CommandId::Keymap);
+        draw(&mut a, w, h);
+        for _ in 0..3 {
+            a.handle(Event::Key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE)));
+            a.handle(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)));
+            draw(&mut a, w, h);
+        }
+        a.handle(Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(a.modal.is_none(), "{w}x{h}");
+    }
+}
+
+#[test]
+fn editor_gutter_marks_change_letters_in_their_own_colours_against_head() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    use code_core::markers::{BaselineKind, LineChange};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(r.path(), "base");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("a.txt")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    let tab = |a: &App| a.session.state().active().unwrap().id();
+    // The debounce thread runs for real here: the markers settle once the draft rests.
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending()));
+    assert_eq!(draw(&mut app, 60, 12)[(app.layout.panes[0].gutter_x, 2)].symbol(), " ", "a committed file: no letter");
+    // Typing at the caret's start changes line 1 of the draft: one modified line against HEAD.
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending() && m.change(0) == Some(LineChange::Modified)));
+    let buffer = draw(&mut app, 60, 12);
+    let pane = &app.layout.panes[0];
+    let rows = |b: &Buffer| (pane.text.y..pane.text.bottom()).map(|y| (0..pane.text.x).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
+    let gutters = rows(&buffer);
+    assert!(gutters[0].contains(" M"), "the changed line's letter: {:?}", gutters);
+    assert!(gutters[1].contains("   ") && !gutters[1].contains('M') && !gutters[1].contains('A'), "unchanged lines: {:?}", gutters);
+    // The letter carries the modified colour, distinct from the line numbers' (identified without colour too).
+    let p = app.session.state().palette().clone();
+    let letter_x = pane.gutter_x;
+    assert_eq!(buffer[(letter_x, pane.text.y)].fg, color(LineChange::Modified.color(&p)));
+    assert_ne!(color(LineChange::Added.color(&p)), color(LineChange::Modified.color(&p)));
+    assert!(buffer[(pane.text.x, pane.text.y)].symbol().is_ascii(), "the text starts after the markers");
+    let markers = app.session.state().markers(tab(&app)).unwrap();
+    assert_eq!(markers.drawn_version(), Some(app.session.state().current_source().unwrap().key().version), "the drawn blocks describe the draft version shown");
+    assert_eq!(markers.baseline().map(code_core::markers::Baseline::kind), Some(BaselineKind::Head));
+    assert_eq!(markers.summary().as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{:?}", markers.summary());
+    assert!(lines_of(&draw(&mut app, 80, 12)).iter().any(|l: &String| l.contains("vs HEAD")), "the status bar names the baseline");
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+}
+
+fn lines_of(buffer: &Buffer) -> Vec<String> {
+    (0..buffer.area.height).map(|y| (0..buffer.area.width).map(|x| buffer[(x, y)].symbol()).collect::<String>()).collect()
+}
+
+#[test]
+fn change_letters_share_the_gutter_with_folds_bookmarks_blame_and_line_numbers() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let state = tempfile::tempdir().unwrap();
+    let r = repo();
+    put(r.path(), "code.rs", "fn main() {\n    one();\n    two();\n}\n");
+    commit_all(r.path(), "base");
+    let mut app = app(state.path(), true);
+    app.dispatch(Command::OpenRoot(r.path().to_path_buf()));
+    app.enable_draft_input_for_test();
+    app.dispatch(Command::OpenRetained(r.path().join("code.rs")));
+    settle(&mut app, |a| a.session.state().current_source().is_some());
+    app.dispatch(Command::SetAnnotate(true));
+    app.dispatch(Command::ToggleBookmark);
+    let tab = |a: &App| a.session.state().active().unwrap().id();
+    settle(&mut app, |a| {
+        let s = a.session.state();
+        s.active().is_some_and(|t| t.blame_status() == Some(code_core::blame::Status::Ready) && s.places().bookmark(t.source(), 0).is_some())
+    });
+    app.handle(Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE)));
+    settle(&mut app, |a| a.session.state().markers(tab(a)).is_some_and(|m| !m.pending() && m.change(0).is_some()));
+    let buffer = draw(&mut app, 100, 16);
+    let pane = &app.layout.panes[0];
+    assert!(pane.ann > 0, "the blame column is drawn beside the markers");
+    let (gx, y) = (pane.gutter_x, pane.text.y);
+    let blame: String = (gx..gx + pane.ann).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(blame.starts_with("Not committed"), "the changed line's blame is left of the markers: {blame:?}");
+    let next: String = (gx..gx + pane.ann).map(|x| buffer[(x, y + 1)].symbol()).collect();
+    assert!(next.starts_with("20"), "an unchanged line keeps its commit's date: {next:?}");
+    let cells: String = (gx + pane.ann..pane.text.x).map(|x| buffer[(x, y)].symbol()).collect();
+    assert!(cells.contains('M'), "the change letter: {cells:?}");
+    assert!(cells.contains('●'), "the bookmark: {cells:?}");
+    assert!(cells.contains('1'), "the line number: {cells:?}");
+    assert!(cells.contains('▾'), "the fold mark: {cells:?}");
+    let p = app.session.state().palette().clone();
+    assert_eq!(buffer[(gx + pane.ann, y)].symbol(), "M", "the letter takes the first marker cell");
+    assert_eq!(buffer[(gx + pane.ann, y)].fg, color(code_core::markers::LineChange::Modified.color(&p)));
+}
+
+#[test]
+fn short_dialogs_keep_errors_and_consequences_above_the_actions() {
+    for dark in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut a = app(dir.path(), dark);
+        a.run(CommandId::NewScratch);
+        a.modal.as_mut().unwrap().error = Some("That name is already in use".into());
+        draw(&mut a, 18, 8);
+        assert!(a.layout.modal_rows.height > 0);
+        assert!(a.layout.form_buttons.unwrap().iter().all(|b| b.y >= a.layout.modal_rows.bottom()));
+
+    }
+}
+
+#[test]
+fn selected_empty_lines_show_their_line_endings_without_changing_text() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    for original in ["\n\nend\n", "\r\n\r\nend\r\n"] {
+        for dark in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut a = app(dir.path(), dark);
+            open(&mut a, dir.path(), "selection.txt", original.as_bytes());
+            let key = |a: &mut App, code, modifiers| { a.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+            draw(&mut a, 80, 16);
+            key(&mut a, KeyCode::Home, KeyModifiers::CONTROL);
+            key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+            key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+            for width in [80, 16] {
+                let buffer = draw(&mut a, width, 16);
+                let area = a.layout.panes[0].text;
+                let p = a.session.state().palette();
+                for line in 0..2 {
+                    assert_eq!(buffer[(area.x, area.y + line)].bg, color(p.sel_bg), "each selected empty line needs a visible cell");
+                    assert_eq!(buffer[(area.x + 1, area.y + line)].bg, color(p.bg), "newline selection occupies one cell");
+                }
+                assert_eq!(buffer[(area.x, area.y + 2)].bg, color(p.bg), "the exclusive endpoint does not select the next line");
+                assert_eq!(buffer[(area.x, area.y + 3)].bg, color(p.bg), "the final empty line has no newline to select");
+            }
+            key(&mut a, KeyCode::Home, KeyModifiers::CONTROL);
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+            key(&mut a, KeyCode::End, KeyModifiers::NONE);
+            key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+            let buffer = draw(&mut a, 80, 16);
+            let area = a.layout.panes[0].text;
+            let p = a.session.state().palette();
+            for x in 0..3 { assert_eq!(buffer[(area.x + x, area.y + 2)].bg, color(p.bg)); }
+            assert_eq!(buffer[(area.x + 3, area.y + 2)].bg, color(p.sel_bg), "a newline-only selection leaves preceding text alone");
+            key(&mut a, KeyCode::Home, KeyModifiers::CONTROL);
+            key(&mut a, KeyCode::Down, KeyModifiers::SHIFT);
+            key(&mut a, KeyCode::Char('j'), KeyModifiers::ALT);
+            let buffer = draw(&mut a, 80, 16);
+            let area = a.layout.panes[0].text;
+            let p = a.session.state().palette();
+            for y in 0..2 { assert_eq!(buffer[(area.x, area.y + y)].bg, color(p.sel_bg), "secondary selections show line endings too"); }
+            key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+            let buffer = draw(&mut a, 80, 16);
+            let area = a.layout.panes[0].text;
+            let p = a.session.state().palette();
+            for x in 0..4 { assert_eq!(buffer[(area.x + x, area.y + 2)].bg, color(p.sel_bg)); }
+            assert_eq!(buffer[(area.x + 4, area.y + 2)].bg, color(p.bg));
+            assert_eq!(buffer[(area.x, area.y + 3)].bg, color(p.bg));
+            assert_eq!(a.session.state().selected_text().as_deref(), Some(original));
+            assert_eq!(std::fs::read(dir.path().join("selection.txt")).unwrap(), original.as_bytes());
+        }
+    }
+}
+
+#[test]
+fn project_results_nest_folders_share_a_line_row_and_title_the_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn main() {\n        let needle = needle + 1;\n}\n").unwrap();
+    let mut a = app(dir.path(), true);
+    a.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut a, |a| a.session.state().project().is_some_and(|p| matches!(p.coverage(), code_core::project::Coverage::Complete(_))));
+    a.dispatch(Command::Search { query: "needle".into(), scope: code_core::session::SearchIn::Project });
+    settle(&mut a, |a| a.session.state().results().is_some_and(|r| r.done() && r.hits().len() == 2 && r.preview().is_some()));
+    let buffer = draw(&mut a, 100, 30);
+    let rows: Vec<String> = text(&buffer).chars().collect::<Vec<_>>().chunks(100).map(|row| row.iter().collect()).collect();
+    let header = rows.iter().position(|row| row.contains("“needle”")).expect("the header names the query");
+    assert!(rows[header].contains("2 matches") && rows[header].contains("Rerun  Collapse  Hide  ×"), "{}", rows[header]);
+    assert!(rows[header + 1].contains(" ▾ src/  2"), "{}", rows[header + 1]);
+    assert!(rows[header + 2].contains("   ▾ a.rs  2"), "the file nests in its folder: {}", rows[header + 2]);
+    // Both matches share their line's row: its number, the text without indentation, each match emphasized.
+    assert!(rows[header + 3].contains("2  let needle = needle + 1;"), "{}", rows[header + 3]);
+    let list = a.layout.results;
+    let in_list = |row: &String| row.chars().skip(list.x as usize).take(list.width as usize).collect::<String>();
+    assert!(rows[header + 4..].iter().all(|row| !in_list(row).contains("let needle")), "one row for the line");
+    assert!(rows[header + 1].contains("src/a.rs:2"), "the preview names its file and line: {}", rows[header + 1]);
+    let found = a.session.state().palette().found_bg;
+    let emphasized = (list.x..list.right()).filter(|&x| buffer[(x, header as u16 + 3)].bg == color(found)).count();
+    assert_eq!(emphasized, 12, "both matches are emphasized");
+    assert_eq!(std::fs::read(root.join("src/a.rs")).unwrap(), b"fn main() {\n        let needle = needle + 1;\n}\n");
+}
+
+#[test]
+fn the_number_column_keeps_its_background_past_the_last_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    open(&mut a, dir.path(), "short.rs", b"fn main() {}\nfn other() {}\n");
+    let buffer = draw(&mut a, 80, 20);
+    let pane = &a.layout.panes[0];
+    let gutter = a.session.state().palette().gutter_bg;
+    // Every row below the text, across the number column, has the column's background and no digits.
+    let lines = a.session.state().current_source().unwrap().line_count() as u16;
+    for y in pane.text.y + lines..pane.text.bottom() {
+        for x in pane.gutter_x..pane.text.x {
+            let cell = &buffer[(x, y)];
+            assert_eq!(cell.bg, color(gutter), "({x}, {y})");
+            assert!(!cell.symbol().chars().any(|c| c.is_ascii_digit()));
+        }
+    }
+}
+
+#[test]
+fn markdown_lists_show_each_marker_once_and_keep_tight_items_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app(dir.path(), false);
+    open(&mut app, dir.path(), "lists.md", b"- a\n- b\n\n1. one\n2. two\n\n- [ ] task\n- [x] done\n");
+    app.dispatch(Command::ToggleMarkdownSource);
+    settle(&mut app, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    let buffer = draw(&mut app, 50, 20);
+    let rows: Vec<String> = (0..20).map(|y| (0..50).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()).collect();
+    let shown = |s: &str| rows.iter().position(|r| r.ends_with(s)).unwrap_or_else(|| panic!("{s:?} not in {rows:#?}"));
+    for (row, marker) in [("a", "•"), ("one", "1."), ("task", "☐"), ("done", "☑")] {
+        let r = &rows[shown(row)];
+        assert_eq!(r.matches(marker).count(), 1, "{r:?}");
+        assert!(!r.contains("[ ]") && !r.contains("[x]"), "{r:?}");
+    }
+    assert_eq!(shown("b"), shown("a") + 1, "tight items are not separated by a blank row");
 }

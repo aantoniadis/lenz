@@ -1,36 +1,41 @@
 [package]
-name = "reader-tui"
-description = "The Lenz code reader's terminal adapter"
+name = "code-tui"
+description = "Lenz Code's terminal adapter"
 license = "MIT"
 edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
 [[bin]]
-name = "lenz-reader-tui"
+name = "lenz-code-tui"
 path = "src/main.rs"
 
 [features]
 # Combined adapter replay only; the standalone TUI build does not link GPUI.
-gui-test = ["dep:reader-gui", "dep:gpui"]
+gui-test = ["dep:code-gui", "dep:gpui"]
 
 [dependencies]
-reader-core = { path = "../reader-core" }
+code-core = { path = "../code-core" }
 lenz-content.workspace = true
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
-crossterm = { version = "0.29.0", features = ["event-stream"] }
+# `use-dev-tty`: level-triggered poll(2); the default mio source reads 1 KiB per edge and leaves a longer burst
+# unread until the next key arrives.
+crossterm = { version = "0.29.0", features = ["event-stream", "use-dev-tty"] }
+# Already built for crossterm: restores the terminal on SIGTERM/SIGHUP.
+signal-hook = "0.3.18"
 futures-lite = "2.6.1"
 async-io = "2.6.0"
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"
 base64 = "0.23.1"
-reader-gui = { path = "../reader-gui", optional = true, features = ["test-support"] }
+code-gui = { path = "../code-gui", optional = true, features = ["test-support"] }
 gpui = { workspace = true, optional = true, features = ["test-support"] }
 
 [dev-dependencies]
+code-core = { path = "../code-core", features = ["test-support"] }
 tempfile = "3"
 # Throwaway git repositories for the blame tests.
-lenz-content = { workspace = true, features = ["git-testing"] }
+lenz-content = { workspace = true, features = ["git-testing", "write-testing"] }
 serde_json = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
