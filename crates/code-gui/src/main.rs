@@ -23,7 +23,7 @@ fn main() -> ExitCode {
         [a] => return usage(&format!("unknown option {}", a.to_string_lossy())),
         _ => return usage("one file or folder at most"),
     };
-    reader_gui::run(path);
+    code_gui::run(path);
     ExitCode::SUCCESS
 }
 

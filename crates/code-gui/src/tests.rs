@@ -1,14 +1,37 @@
 //! Real input through GPUI's test platform: keys, clicks, drags, wheel and resizes reach the session only as
 //! commands, and the file on disk never changes.
 use super::*;
+mod create;
+mod activity;
+#[cfg(target_os = "linux")]
+mod terminal;
+mod explorer;
+mod server_install;
+mod external;
+mod reconcile;
+mod save_as;
+mod presentation;
+mod selection;
+mod results_bench;
+mod problems;
+mod inline_diagnostics;
+mod project_syntax;
+#[cfg(target_os = "linux")]
+mod composition_probe;
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, WindowHandle, point, size};
-use reader_core::session::Config;
+use code_core::session::Config;
 use std::path::Path;
 
 struct Fixture {
     dir: tempfile::TempDir,
     view: Entity<ReaderView>,
     window: WindowHandle<ReaderView>,
+    /// The same settings for a second window: a restart over the same private state.
+    make: std::rc::Rc<dyn Fn(bool) -> Config>,
+}
+
+fn copied_selection(state: &code_core::session::State) -> Option<String> {
+    state.view(state.active()?.id())?.copy_selection()
 }
 
 fn fixture(cx: &mut TestAppContext, file: Option<(&str, &[u8])>) -> Fixture {
@@ -23,6 +46,9 @@ fn fixture_with(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, server: &P
 /// A window whose providers `(id, executable, PATH, settings JSON)` are these; every other provider is pointed
 /// nowhere.
 fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, servers: &[(&str, &Path, Option<&str>, Option<&str>)]) -> Fixture {
+    fixture_setup(cx,file,servers,false)
+}
+fn fixture_setup(cx: &mut TestAppContext,file:Option<(&str,&[u8])>,servers:&[(&str,&Path,Option<&str>,Option<&str>)],production:bool)->Fixture {
     let dir = tempfile::tempdir().unwrap();
     let path = file.map(|(name, bytes)| {
         let p = dir.path().join(name);
@@ -30,11 +56,11 @@ fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, serve
         p
     });
     // Never a real language server: the settings name one that does not exist.
-    let providers = dir.path().join("config/lenz-reader/providers.json");
+    let providers = dir.path().join("config/lenz-code/providers.json");
     std::fs::create_dir_all(providers.parent().unwrap()).unwrap();
     // Every other provider is pointed nowhere, so no installed server ever runs in a test.
     let mut all = serde_json::Map::new();
-    for p in reader_core::semantics::provider::PROVIDERS.iter() {
+    for p in code_core::semantics::provider::PROVIDERS.iter() {
         let mut entry = serde_json::json!({ "executable": format!("/nonexistent/{}", p.id) });
         if let Some((_, exe, path, settings)) = servers.iter().find(|(id, ..)| *id == p.id) {
             // An empty executable keeps the provider's own (and its fallbacks).
@@ -50,36 +76,42 @@ fn fixture_providers(cx: &mut TestAppContext, file: Option<(&str, &[u8])>, serve
     }
     std::fs::write(&providers, serde_json::json!({ "providers": all }).to_string()).unwrap();
     let config = Config {
-        themes: lenz_content::theme::ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-reader"),
-        recent: dir.path().join("state/lenz-reader/recent-roots.json"),
-        settings: dir.path().join("state/lenz-reader/settings.json"),
+        themes: lenz_content::theme::ThemePaths::under(&dir.path().join("config"), &dir.path().join("state"), "lenz-code"),
+        recent: dir.path().join("state/lenz-code/recent-roots.json"),
+        settings: dir.path().join("state/lenz-code/settings.json"),
         providers: providers.clone(),
 
         cache: dir.path().join("cache"),
-        idle: reader_core::semantics::IDLE,
+        idle: code_core::semantics::IDLE,
         clock: std::sync::Arc::new(std::time::Instant::now),
         overrides: Default::default(),
         dark: true,
     };
     let base = dir.path().to_owned();
     let make: std::rc::Rc<dyn Fn(bool) -> Config> = std::rc::Rc::new(move |dark| Config {
-        themes: lenz_content::theme::ThemePaths::under(&base.join("config"), &base.join("state"), "lenz-reader"),
-        recent: base.join("state/lenz-reader/recent-roots.json"),
-        settings: base.join("state/lenz-reader/settings.json"),
+        themes: lenz_content::theme::ThemePaths::under(&base.join("config"), &base.join("state"), "lenz-code"),
+        recent: base.join("state/lenz-code/recent-roots.json"),
+        settings: base.join("state/lenz-code/settings.json"),
         providers: providers.clone(),
 
         cache: base.join("cache"),
-        idle: reader_core::semantics::IDLE,
+        idle: code_core::semantics::IDLE,
         clock: std::sync::Arc::new(std::time::Instant::now),
         overrides: Default::default(),
         dark,
     });
-    let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make));
-    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
-    Fixture { dir, view, window }
+    let (view,window)=if production {
+        let window=cx.update(|cx|open_reader_window(cx,make.clone(),path)).unwrap();
+        let view=window.root(cx).unwrap();(view,window)
+    } else {
+        let view = cx.new(|cx| ReaderView::new(Session::new(config), path, cx).with_config(make.clone()));
+        let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();(view,window)
+    };
+    Fixture { dir, view, window, make }
 }
 
 /// Run the executor until `done` for up to `seconds` (real language servers), letting worker threads finish.
+#[track_caller]
 fn settle_for(cx: &mut TestAppContext, f: &Fixture, seconds: u64, done: &dyn Fn(&ReaderView) -> bool) {
     let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
     while !f.view.read_with(cx, |v, _| done(v)) {
@@ -90,9 +122,12 @@ fn settle_for(cx: &mut TestAppContext, f: &Fixture, seconds: u64, done: &dyn Fn(
     }
 }
 
-/// Run the executor until `done`, letting the reader's worker threads finish.
+/// Run the executor until `done`, letting the reader's worker threads finish: up to ten seconds of wall time, so a
+/// loaded machine (parallel tests, the pre-push gate) does not shorten it. A timeout names the caller's line.
+#[track_caller]
 fn settle(cx: &mut TestAppContext, f: &Fixture, done: impl Fn(&ReaderView) -> bool) {
-    for _ in 0..500 {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < until {
         cx.run_until_parked();
         f.view.update(cx, |v, cx| v.poll(cx));
         if f.view.read_with(cx, |v, _| done(v)) {
@@ -100,7 +135,23 @@ fn settle(cx: &mut TestAppContext, f: &Fixture, done: impl Fn(&ReaderView) -> bo
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    panic!("timed out: {}", f.view.read_with(cx, |v, _| v.status()));
+    panic!("timed out: {}", f.view.read_with(cx, |v, _| {
+        let results = v.session().state().results().map(|r| (r.query().to_owned(), r.done(), r.selected(), r.preview().map(|p| p.index)));
+        format!("modal {} · focus results {} tree {} find {} · results {results:?}\n{}", v.modal.is_some(), v.results_focus, v.tree_focus, v.find_focus.is_some(), v.status())
+    }));
+}
+
+/// Run until `done`, polling `view`'s own session (a window opened beside a fixture).
+fn settle_view(cx: &mut TestAppContext, view: &Entity<ReaderView>, done: impl Fn(&ReaderView) -> bool) {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        view.update(cx, |v, cx| v.poll(cx));
+        if view.read_with(cx, |v, _| done(v)) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("timed out: {}", view.read_with(cx, |v, _| v.status()));
 }
 
 fn visual(cx: &mut TestAppContext, f: &Fixture) -> VisualTestContext {
@@ -110,10 +161,643 @@ fn visual(cx: &mut TestAppContext, f: &Fixture) -> VisualTestContext {
     v
 }
 
+fn choose_menu_command(v: &mut VisualTestContext, f: &Fixture, id: CommandId) {
+    v.simulate_keystrokes("f10");
+    let at = f.view.read_with(v, |view, _| view.modal_rows().iter().position(|row| row.0 == id.label()).unwrap());
+    for _ in 0..at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+}
+
 fn draw(v: &mut VisualTestContext) {
     v.update(|w, cx| {
         let _ = w.draw(cx);
     });
+}
+
+#[gpui::test]
+fn unicode_delete_and_cut_paste_use_shared_transactions(cx: &mut TestAppContext) {
+    let original = "é😀\r\nsecond";
+    let f = fixture(cx, Some(("typing.txt", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    v.simulate_keystrokes("right delete"); assert_eq!(text(&v), original, "ordinary constructors keep writing gated");
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("delete"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), original);
+    v.simulate_keystrokes("backspace"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-a ctrl-x"); assert_eq!(text(&v), "");
+    assert_eq!(v.read_from_clipboard().unwrap().text().as_deref(), Some("é\r\nsecond"));
+    v.simulate_keystrokes("ctrl-v"); assert_eq!(text(&v), "é\r\nsecond");
+    v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), "");
+    v.simulate_keystrokes("ctrl-shift-z"); assert_eq!(text(&v), "é\r\nsecond");
+    assert_eq!(std::fs::read(f.dir.path().join("typing.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn several_cursors_edit_together_and_escape_returns_to_one(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("carets.txt", b"aa bb aa\none")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    let carets = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let mut at: Vec<_> = view.session().state().active().unwrap().selections().filter(|s| s.anchor == s.head).map(|s| s.head).collect(); at.sort_unstable(); at });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right");
+    // This line is the file's last one: the menu command adds a cursor there and the shortcut then has nowhere to go.
+    choose_menu_command(&mut v, &f, CommandId::AddCursorBelow);
+    assert_eq!(carets(&v), [1, 10]);
+    v.simulate_keystrokes("ctrl-alt-down");
+    assert_eq!(carets(&v), [1, 10], "there is no line below the last one");
+    v.simulate_keystrokes("x");
+    assert_eq!(text(&v), "axa bb aa\noxne", "typing replaces every selection");
+    assert_eq!(carets(&v), [2, 12]);
+    // Both carets are shown: each of their rows carries one.
+    let shown = f.view.read_with(&v, |view, _| view.visible_rows().iter().filter(|row| row.caret.is_some() || row.extra.iter().any(|(_, caret)| caret.is_some())).count());
+    assert_eq!(shown, 2);
+    v.simulate_keystrokes("escape");
+    assert_eq!(carets(&v), [12], "Escape keeps the primary cursor");
+    assert_eq!(std::fs::read(f.dir.path().join("carets.txt")).unwrap(), b"aa bb aa\none", "typing never writes the file");
+}
+
+#[gpui::test]
+fn alt_j_selects_the_next_occurrence_and_one_undo_changes_both_back(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("occurrences.txt", b"aa bb aa\n")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    let ranges = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let mut ranges: Vec<_> = view.session().state().active().unwrap().selections().map(|s| s.range()).collect(); ranges.sort_by_key(|r| (r.start, r.end)); ranges });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-g 1 enter");
+    v.simulate_keystrokes("alt-j");
+    assert_eq!(ranges(&v), vec![0..2], "a caret first selects the word under it");
+    v.simulate_keystrokes("alt-j");
+    assert_eq!(ranges(&v), [0..2, 6..8]);
+    // Both selections are drawn: the second one has its own background on the same row.
+    let extra = f.view.read_with(&v, |view, _| view.visible_rows().first().map(|row| row.extra.clone()).unwrap_or_default());
+    assert_eq!(extra, vec![(0..2, None)], "the row carries the other selection");
+    v.simulate_keystrokes("y");
+    assert_eq!(text(&v), "y bb y\n", "the same change in both places");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "aa bb aa\n", "one undo reverses both");
+    assert_eq!(std::fs::read(f.dir.path().join("occurrences.txt")).unwrap(), b"aa bb aa\n");
+}
+
+#[gpui::test]
+fn several_cursor_keys_wait_for_a_closed_modal(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("modal.txt", b"one\ntwo\n")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right");
+    v.simulate_keystrokes("f10");
+    v.simulate_keystrokes("alt-shift-down x");
+    let (carets, text) = f.view.read_with(&v, |view, _| {
+        (view.session().state().active().unwrap().selections().count(), view.session().state().current_source().unwrap().copy_range(0..6).unwrap())
+    });
+    assert_eq!((carets, text.as_str()), (1, "one\ntw"), "the open menu takes the keys and the text stays as it was");
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |view, _| view.session().state().active().unwrap().selections().count()) == 1);
+}
+
+#[gpui::test]
+fn draft_refresh_and_reload_use_real_focus_keys_and_preserve_modal_precedence(
+    cx: &mut TestAppContext,
+) {
+    let f = fixture_setup(cx, Some(("refresh.txt", b"saved\r\n")), &[], true);
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let path = f.dir.path().join("refresh.txt");
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view
+        .update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v");
+    let position = f.view.read_with(&v, |v, _| v.session.state().selection());
+    let ordinary = f
+        .view
+        .read_with(&v, |v, _| v.session.state().active().unwrap().id());
+    v.simulate_keystrokes("ctrl-shift-d");
+    settle(cx, &f, |v| {
+        v.session
+            .state()
+            .saved_comparison()
+            .is_some_and(|c| !c.pending())
+    });
+    draw(&mut v);
+    v.simulate_keystrokes("f5");
+    assert!(
+        f.view
+            .read_with(&v, |v, _| v.session.close_prompt().is_some()
+                && v.session.state().saved_comparison().is_none()
+                && v.session.state().active().unwrap().id() == ordinary)
+    );
+    v.simulate_keystrokes("escape");
+    assert_eq!(
+        f.view.read_with(&v, |v, _| v.session.state().selection()),
+        position
+    );
+    v.deactivate_window();
+    std::fs::write(&path, b"external\r\n").unwrap();
+    v.update(|w, _| w.activate_window());
+    settle(cx, &f, |v| {
+        v.session.state().active().unwrap().stale_on_disk()
+    });
+    draw(&mut v);
+    assert!(
+        f.view
+            .read_with(&v, |v, _| v.status().contains("changed on disk"))
+    );
+    assert_eq!(
+        f.view.read_with(&v, |v, _| v.session.state().selection()),
+        position
+    );
+    v.simulate_keystrokes("f5");
+    assert!(
+        f.view
+            .read_with(&v, |v, _| v.session.close_prompt().is_some())
+    );
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| {
+        v.modal_rows()
+            .iter()
+            .any(|row| row.0.contains("Choose Save"))
+    }));
+    v.simulate_keystrokes("ctrl-s ctrl-v end up escape");
+    assert_eq!(std::fs::read(&path).unwrap(), b"external\r\n");
+    assert_eq!(
+        f.view.read_with(&v, |v, _| v.session.state().selection()),
+        position
+    );
+    assert!(f.view.read_with(&v, |v, _| {
+        let s = v.session.state().current_source().unwrap();
+        s.copy_range(0..s.len_bytes()).as_deref() == Some("draft λ\r\n")
+    }));
+    for (w, h) in [(1.0, 1.0), (220.0, 100.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        v.simulate_keystrokes("f5 end up");
+        draw(&mut v);
+        v.simulate_keystrokes("escape");
+    }
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    v.simulate_keystrokes("f5 d");
+    settle(cx, &f, |v| v.session.state().loading().is_none());
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| {
+        let s = v.session.state().current_source().unwrap();
+        s.copy_range(0..s.len_bytes()).as_deref() == Some("external\r\n")
+    }));
+    assert!(f.view.read_with(&v, |v, _| {
+        v.modal.is_none()
+            && !v
+                .session
+                .state()
+                .tab_dirty(v.session.state().active().unwrap().id())
+    }));
+    assert_eq!(std::fs::read(path).unwrap(), b"external\r\n");
+    choose_menu_command(&mut v, &f, CommandId::CloseWindow);
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn draft_workspace_changes_use_real_folder_branch_and_new_branch_controls(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::git;
+    let (f, wt) = branches_fixture(cx);
+    let path = f.dir.path().join("a.txt");
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    f.view
+        .update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v");
+    let position = f.view.read_with(&v, |v, _| v.session.state().selection());
+    v.simulate_keystrokes("f10");
+    let row = f.view.read_with(&v, |v, _| {
+        v.modal_rows()
+            .iter()
+            .position(|r| r.0 == CommandId::OpenFolder.label())
+            .unwrap()
+    });
+    for _ in 0..row {
+        v.simulate_keystrokes("down");
+    }
+    v.simulate_keystrokes("enter");
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.directories && !options.files);
+        Some(vec![wt.path().join("second")])
+    });
+    settle(cx, &f, |v| v.session.close_prompt().is_some());
+    draw(&mut v);
+    v.simulate_keystrokes("escape");
+    assert_eq!(
+        f.view.read_with(&v, |v, _| v
+            .session
+            .state()
+            .project()
+            .unwrap()
+            .root()
+            .to_owned()),
+        f.dir.path()
+    );
+    assert_eq!(
+        f.view.read_with(&v, |v, _| v.session.state().selection()),
+        position
+    );
+    for new_branch in [false, true] {
+        v.simulate_keystrokes("ctrl-shift-`");
+        settle(cx, &f, |v| {
+            v.session.state().branches().is_some_and(|b| !b.loading)
+        });
+        draw(&mut v);
+        if new_branch {
+            type_text(&mut v, "new");
+            v.simulate_keystrokes("enter");
+            assert!(
+                f.view
+                    .read_with(&v, |v, _| matches!(v.modal, Some(Modal::NewBranch { .. })))
+            );
+            type_text(&mut v, "draft-guard");
+            v.simulate_keystrokes("enter");
+        } else {
+            type_text(&mut v, "other");
+            v.simulate_keystrokes("enter");
+        }
+        assert!(
+            f.view
+                .read_with(&v, |v, _| v.session.close_prompt().is_some()),
+            "new_branch={new_branch}, modal={:?}",
+            f.view.read_with(&v, |v, _| v.modal.clone())
+        );
+        draw(&mut v);
+        assert_eq!(
+            git(f.dir.path(), &["branch", "--show-current"]).trim(),
+            "main"
+        );
+        v.simulate_keystrokes("escape");
+        assert_eq!(
+            f.view.read_with(&v, |v, _| v.session.state().selection()),
+            position
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"main\n");
+    }
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle(cx, &f, |v| {
+        v.session.state().branches().is_some_and(|b| !b.loading)
+    });
+    draw(&mut v);
+    type_text(&mut v, "other");
+    v.simulate_keystrokes("enter d");
+    settle(cx, &f, |v| {
+        !v.session.state().checking_out()
+            && v.session
+                .state()
+                .current_source()
+                .is_some_and(|s| s.copy_range(0..s.len_bytes()).as_deref() == Some("other\n"))
+    });
+    draw(&mut v);
+    assert_eq!(
+        git(f.dir.path(), &["branch", "--show-current"]).trim(),
+        "other"
+    );
+    assert_eq!(std::fs::read(path).unwrap(), b"other\n");
+    assert!(f.view.read_with(&v, |v, _| v.modal.is_none()));
+}
+
+#[gpui::test]
+fn saved_comparison_uses_real_keys_shared_history_and_read_only_rendering(cx: &mut TestAppContext) {
+    let original = "α saved\r\nsecond\n";
+    let f = fixture(cx, Some(("comparison.txt", original.as_bytes())));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let ordinary = f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id());
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("α draft\r\nsecond\n".into())));
+    v.simulate_keystrokes("ctrl-a ctrl-v shift-f2 ctrl-shift-d");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()), "modal consumes comparison shortcut");
+    v.simulate_keystrokes("escape ctrl-shift-d");
+    settle(cx, &f, |v| v.session().state().saved_comparison().is_some_and(|c| !c.pending()));
+    v.simulate_keystrokes("ctrl-g 1 enter"); draw(&mut v);
+    let (saved, current) = f.view.read_with(&v, |v, _| { let c = v.session().state().saved_comparison().unwrap(); (c.saved_tab(), c.current_tab()) });
+    assert!(f.view.read_with(&v, |v, _| v.tab_hits.iter().any(|(_, _, id)| *id == saved)));
+    assert!(f.view.read_with(&v, |v, _| v.visible_rows().iter().any(|r| r.bg.iter().any(|(_, color)| *color == v.session().state().palette().block[2]))));
+    for theme in ["github-light", "darcula"] {
+        f.view.update(&mut v, |view, cx| view.dispatch(Command::Theme(ThemeCommand::Select(lenz_content::theme::ThemeSelection::from_id(theme).unwrap())), cx)); draw(&mut v);
+        assert!(f.view.read_with(&v, |view, _| view.visible_rows().iter().any(|r| r.bg.iter().any(|(_, c)| *c == view.session().state().palette().block[2]))));
+    }
+    v.simulate_keystrokes("ctrl-z ctrl-shift-z");
+    let saved_point = f.view.read_with(&v, |view, _| { let (from, to, _) = view.tab_hits.iter().find(|(_, _, id)| *id == saved).unwrap(); let pane = view.panes.iter().find(|pane| pane.pane == 0).unwrap(); point(px((from + to) / 2.0), px(pane.bar.2 + line_h() / 2.0)) });
+    v.simulate_click(saved_point, Modifiers::default());
+    assert!(f.view.read_with(&v, |view, _| view.session().state().saved_comparison().is_some() && view.session().state().active().unwrap().id() == saved));
+    v.simulate_keystrokes("ctrl-a ctrl-v ctrl-z ctrl-s"); draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state().view(saved).unwrap().snapshot(); s.copy_range(0..s.len_bytes()).unwrap() }), original);
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::FocusPane(1), cx));
+    v.simulate_keystrokes("ctrl-s");
+    settle(cx, &f, |v| !v.session().state().view(current).unwrap().dirty() && !v.session().state().saved_comparison().unwrap().pending());
+    assert_eq!(std::fs::read(f.dir.path().join("comparison.txt")).unwrap(), "α draft\r\nsecond\n".as_bytes());
+    v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+    v.simulate_keystrokes("ctrl-f4"); draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session().state().saved_comparison().is_none()));
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().active().unwrap().id()), ordinary);
+    v.simulate_keystrokes("ctrl-z");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().tab_dirty(ordinary)));
+}
+
+#[gpui::test]
+fn fresh_discard_and_close_after_save_fault_keeps_disk_and_rejects_old_ticket(cx: &mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use code_core::{close::Choice, save::Status};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let f = fixture_setup(cx, Some(("fresh-close.txt", b"saved")), &[], true);
+        let path = f.dir.path().join("fresh-close.txt");
+        settle(cx, &f, |v| v.session.state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+        v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));
+        v.simulate_keystrokes("ctrl-a ctrl-v ctrl-f4");
+        let old = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+        let tab = f.view.read_with(&v, |v, _| v.session.state().active().unwrap().id());
+        let guard = at_path(&path, fault); v.simulate_keystrokes("s");
+        settle(cx, &f, |v| matches!(v.session.state().view(tab).unwrap().save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+        drop(guard);
+        assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_none()));
+        let disk = std::fs::read(&path).unwrap();
+        assert_eq!(disk, if fault == Fault::AfterReplace { "draft λ".as_bytes() } else { b"saved" });
+        v.simulate_keystrokes("ctrl-f4"); draw(&mut v);
+        let fresh = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+        assert!(fresh.ticket > old.ticket && fresh.discard_disabled.is_none());
+        if fault == Fault::AfterReplace {
+            assert!(f.view.read_with(&v, |v, _| v.details_labels(Details::Close).contains(&"Discard Draft and Close")));
+        }
+        f.view.update(&mut v, |v, cx| v.dispatch(Command::ChooseClose { ticket: old.ticket, buffer: old.buffer, choice: Choice::Discard }, cx));
+        assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_some_and(|p| p.ticket == fresh.ticket)));
+        assert!(f.view.read_with(&v, |v, _| { let tab = v.session.state().active().unwrap().id(); let source = v.session.state().view(tab).unwrap(); source.dirty() && source.can_undo() }));
+        v.simulate_keystrokes("d");
+        assert!(f.view.read_with(&v, |v, _| v.session.state().active().is_none() && v.modal.is_none()));
+        assert_eq!(std::fs::read(&path).unwrap(), disk);
+        choose_menu_command(&mut v, &f, CommandId::CloseWindow); cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn rendering_drops_a_close_dialog_the_core_settled_outside_the_views_dispatch(cx: &mut TestAppContext) {
+    use code_core::close::Choice;
+    let f = fixture_setup(cx, Some(("settled.txt", b"saved")), &[], true);
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v ctrl-f4");
+    let p = f.view.read_with(&v, |v, _| v.session.close_prompt().unwrap());
+    assert!(f.view.read_with(&v, |v, _| matches!(v.modal, Some(Modal::StatusDetails { kind: Details::Close, .. }))));
+    // Render-time layout commands reach the core directly, and any core dispatch can settle a prompt.
+    f.view.update(&mut v, |v, _| { v.session.dispatch(Command::ChooseClose { ticket: p.ticket, buffer: p.buffer, choice: Choice::Cancel }); });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_none() && v.modal.is_none()));
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(&v, |v, _| v.session.close_prompt().is_some_and(|fresh| fresh.ticket > p.ticket)));
+    assert_eq!(std::fs::read(f.dir.path().join("settled.txt")).unwrap(), b"saved");
+}
+
+#[gpui::test]
+fn checked_save_allows_fresh_discard_after_current_recheck_without_changing_disk(cx:&mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path,Fault};
+    use code_core::save::{DiskMatch,Status};
+    for changed in [false,true] {
+        let f=fixture_setup(cx,Some(("close.txt",b"saved")),&[],true);let path=f.dir.path().join("close.txt");settle(cx,&f,|v|v.session.state().current_source().is_some());let mut v=visual(cx,&f);draw(&mut v);f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v");let tab=f.view.read_with(&v,|v,_|v.session.state().active().unwrap().id());let guard=at_path(&path,Fault::AfterReplace);v.simulate_keystrokes("ctrl-s");settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Uncertain(_)));
+        v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.discard_disabled.is_none())));v.simulate_keystrokes("escape");drop(guard);
+        if changed {std::fs::write(&path,b"external content").unwrap();}let disk=std::fs::read(&path).unwrap();
+        v.simulate_keystrokes("f10");let row=f.view.read_with(&v,|v,_|v.modal_rows().iter().position(|r|r.0==CommandId::RecheckSave.label()).unwrap());for _ in 0..row {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
+        settle(cx,&f,|v|matches!(v.session.state().view(tab).unwrap().save_status(),Status::Checked(_)));assert_eq!(f.view.read_with(&v,|v,_|v.session.state().view(tab).unwrap().save_status().clone()),Status::Checked(if changed {DiskMatch::Changed}else{DiskMatch::Attempted}));assert!(f.view.read_with(&v,|v,_|v.session.state().tab_dirty(tab)));
+        v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|v,_|v.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_none())));draw(&mut v);v.simulate_keystrokes("d");assert!(f.view.read_with(&v,|v,_|v.session.state().active().is_none() && v.modal.is_none()));assert_eq!(std::fs::read(path).unwrap(),disk);
+        choose_menu_command(&mut v, &f, CommandId::CloseWindow);cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn production_empty_close_and_dirty_tab_decisions_remain_modal_safe_at_tiny_sizes(cx:&mut TestAppContext) {
+    let empty=fixture_setup(cx,None,&[],true);let mut e=visual(cx,&empty);e.simulate_keystrokes("ctrl-z f5 f10 end up");
+    for (w,h) in [(1.0,1.0),(120.0,40.0)] {e.simulate_resize(size(px(w),px(h)));draw(&mut e);}
+    e.simulate_keystrokes("ctrl-q");assert!(empty.view.read_with(cx,|v,_|v.modal.is_some()));e.simulate_keystrokes("escape");
+    assert!(!empty.view.update(cx,|v,cx|v.window_should_close(cx)));cx.run_until_parked();assert!(cx.update(|cx|cx.windows().is_empty()));
+    let f=fixture_setup(cx,Some(("dirty.txt",b"saved")),&[],true);settle(cx,&f,|v|v.session.state().current_source().is_some());let mut v=visual(cx,&f);draw(&mut v);
+    f.view.update(&mut v,|v,_|v.enable_draft_input_for_test());v.write_to_clipboard(ClipboardItem::new_string("draft λ".into()));v.simulate_keystrokes("ctrl-a ctrl-v ctrl-\\ f10");
+    let unsplit=f.view.read_with(&v,|view,_|view.modal_rows().iter().position(|row|row.0==CommandId::Unsplit.label()).unwrap());
+    for _ in 0..unsplit {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v,|view,_|view.session.state().split().is_none() && view.session.state().tabs().len()==1 && view.session.state().tab_dirty(view.session.state().active().unwrap().id())));
+    let before=f.view.read_with(&v,|view,_|(view.session.state().current_source().unwrap().key(),view.session.state().selection()));
+    choose_menu_command(&mut v,&f,CommandId::CloseWindow);cx.run_until_parked();
+    assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some() && !view.session.closed()));
+    v.simulate_keystrokes("escape");cx.run_until_parked();
+    assert_eq!(f.view.read_with(&v,|view,_|(view.session.state().current_source().unwrap().key(),view.session.state().selection())),before);
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(cx,|v,_|v.session.close_prompt().is_some()));
+    for (w,h) in [(1.0,1.0),(120.0,40.0)] {v.simulate_resize(size(px(w),px(h)));v.simulate_keystrokes("end up");draw(&mut v);}
+    v.simulate_keystrokes("ctrl-s ctrl-q escape");assert!(f.view.read_with(cx,|v,_|v.modal.is_none() && v.session.state().active().is_some()));
+    assert_eq!(std::fs::read(f.dir.path().join("dirty.txt")).unwrap(),b"saved");v.simulate_keystrokes("ctrl-f4 d");
+    assert!(f.view.read_with(cx,|v,_|v.session.state().active().is_none()));assert_eq!(std::fs::read(f.dir.path().join("dirty.txt")).unwrap(),b"saved");
+}
+
+#[gpui::test]
+fn production_quit_all_prepares_both_windows_before_discard_or_explicit_save(cx:&mut TestAppContext) {
+    for first in ["d","s"] {
+        let a=fixture_setup(cx,Some(("a.txt",b"saved\r\n")),&[],true);
+        let b=fixture_setup(cx,Some(("b.txt",b"saved\r\n")),&[],true);
+        for f in [&a,&b] {
+            settle(cx,f,|v|v.session.state().current_source().is_some());
+            let mut visual=visual(cx,f);draw(&mut visual);
+            f.view.update(&mut visual,|v,_|v.enable_draft_input_for_test());
+            visual.write_to_clipboard(ClipboardItem::new_string("draft λ\r\n".into()));visual.simulate_keystrokes("ctrl-a ctrl-v");
+            draw(&mut visual);
+        }
+        let positions:Vec<_>=[&a,&b].into_iter().map(|f|f.view.read_with(cx,|v,_|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line()))).collect();
+        let mut av=visual(cx,&a);av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();
+        assert_eq!(cx.update(|cx|cx.windows().len()),2);
+        assert!(a.view.read_with(cx,|v,_|v.modal_rows().iter().any(|r|r.0.contains("Unsaved changes") || r.0.contains("Choose Save"))));
+        av.simulate_keystrokes("ctrl-shift-q ctrl-s");av.write_to_clipboard(ClipboardItem::new_string("ignored".into()));av.simulate_keystrokes("ctrl-v");
+        assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),b"saved\r\n");
+        av.simulate_keystrokes(first);cx.run_until_parked();
+        settle(cx,&b,|v|matches!(v.modal,Some(Modal::StatusDetails {kind:Details::Close,..})));
+        assert_eq!(cx.update(|cx|cx.windows().len()),2,"early consent cannot remove its window");
+        let mut bv=visual(cx,&b);bv.simulate_keystrokes("end up escape");cx.run_until_parked();
+        for (i,f) in [&a,&b].into_iter().enumerate() {
+            assert_eq!(f.view.read_with(cx,|v,_|(v.session.id(),v.session.state().selection(),v.session.state().active().unwrap().top_line())),positions[i]);
+            assert_eq!(f.view.read_with(cx,|v,_| {let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).unwrap()}),"draft λ\r\n");
+            assert!(f.view.read_with(cx,|v,_|v.modal.is_none() && !v.session.closed()));
+        }
+        assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),if first=="s" {"draft λ\r\n".as_bytes()} else {b"saved\r\n"});
+        assert_eq!(std::fs::read(b.dir.path().join("b.txt")).unwrap(),b"saved\r\n");
+        if first=="d" {
+            // A prepared clean window remains editable while the other window asks. New work cancels the batch.
+            bv.simulate_keystrokes("ctrl-z");assert!(b.view.read_with(cx,|v,_|!v.session.state().tab_dirty(v.session.state().active().unwrap().id())));
+            av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();assert!(b.view.read_with(cx,|v,_|v.modal.is_none()));
+            bv.write_to_clipboard(ClipboardItem::new_string("new work in prepared window".into()));bv.simulate_keystrokes("ctrl-a ctrl-v");cx.run_until_parked();
+            assert_eq!(cx.update(|cx|cx.windows().len()),2);assert!(a.view.read_with(cx,|v,_|v.modal.is_none() && !v.session.closed()));
+            assert_eq!(b.view.read_with(cx,|v,_|{let s=v.session.state().current_source().unwrap();s.copy_range(0..s.len_bytes()).unwrap()}),"new work in prepared window");
+            assert_eq!(std::fs::read(a.dir.path().join("a.txt")).unwrap(),b"saved\r\n");assert_eq!(std::fs::read(b.dir.path().join("b.txt")).unwrap(),b"saved\r\n");
+        }
+        // Call the exact callback installed by production setup: it vetoes before asynchronous preparation.
+        assert!(!b.view.update(cx,|v,cx|v.window_should_close(cx)));cx.run_until_parked();
+        assert_eq!(cx.update(|cx|cx.windows().len()),2);
+        bv.simulate_keystrokes("escape");cx.run_until_parked();
+        // Authorize the final batch; effects occur only after both shared commits. The draft is recorded first.
+        fn records(dir:&Path,found:&mut Vec<PathBuf>) { for e in std::fs::read_dir(dir).into_iter().flatten().flatten() { let p=e.path(); if p.is_dir() { records(&p,found); } else if p.parent().is_some_and(|d|d.ends_with("recovery")) && p.extension().is_some_and(|x|x=="json") && !p.ends_with("tombstones.json") { found.push(p); } } }
+        settle(cx,&b,|_|{let mut found=Vec::new();records(b.dir.path(),&mut found);!found.is_empty()});
+        av.simulate_keystrokes("ctrl-shift-q");cx.run_until_parked();
+        if a.view.read_with(cx,|v,_|v.session.close_prompt().is_some()) {av.simulate_keystrokes("d");cx.run_until_parked();}
+        bv.simulate_keystrokes("d");cx.run_until_parked();
+        assert!(cx.update(|cx|cx.windows().is_empty()));
+        // Discarded at quit: no recovery record brings the draft back on the next start.
+        let until=std::time::Instant::now()+std::time::Duration::from_secs(5);
+        loop { let mut found=Vec::new(); records(b.dir.path(),&mut found); if found.is_empty() { break; } assert!(std::time::Instant::now()<until,"{found:?}"); std::thread::sleep(std::time::Duration::from_millis(20)); }
+    }
+}
+
+#[gpui::test]
+fn save_rejection_uncertainty_and_explicit_recheck_are_visible_and_modal_safe(cx: &mut TestAppContext) {
+    use lenz_content::write::readiness_fault::{at_path, Fault};
+    use code_core::save::{Status, DiskMatch};
+    for fault in [Fault::BeforeReplace, Fault::AfterReplace] {
+        let f = fixture(cx, Some(("fault.txt", b"old"))); let path = f.dir.path().join("fault.txt");
+        settle(cx, &f, |view| view.session().state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+        v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("new".into())));
+        v.simulate_keystrokes("ctrl-a ctrl-v");
+        let tab = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+        let guard = at_path(&path, fault); v.simulate_keystrokes("ctrl-s");
+        settle(cx, &f, |view| matches!(view.session().state().view(tab).unwrap().save_status(), Status::Rejected(_) | Status::Uncertain(_)));
+        let disk = std::fs::read(&path).unwrap(); assert_eq!(disk, if fault == Fault::AfterReplace { b"new" } else { b"old" });
+        draw(&mut v);
+        let message = f.view.read_with(&v, |view, _| view.session().status_message());
+        assert!(message.contains(if fault == Fault::AfterReplace { "uncertain" } else { "rejected" }), "{message}");
+        v.simulate_keystrokes("shift-f2");
+        assert!(f.view.read_with(&v, |view, _| view.modal.is_some()));
+        v.simulate_keystrokes("ctrl-s escape"); assert_eq!(std::fs::read(&path).unwrap(), disk);
+        if fault==Fault::AfterReplace {
+            let before=f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key());v.simulate_keystrokes("ctrl-f4 s");
+            assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.save_disabled.is_some() && p.discard_disabled.is_none())));
+            assert_eq!(f.view.read_with(&v,|view,_|view.session.state().current_source().unwrap().key()),before);v.simulate_keystrokes("escape");
+        }
+        drop(guard);
+        f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::RecheckSave, window, cx));
+        settle(cx, &f, |view| matches!(view.session().state().view(tab).unwrap().save_status(), Status::Checked(_)));
+        let expected = if fault == Fault::AfterReplace { DiskMatch::Attempted } else { DiskMatch::Baseline };
+        assert_eq!(f.view.read_with(&v, |view, _| view.session().state().view(tab).unwrap().save_status().clone()), Status::Checked(expected));
+        assert!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)));
+        v.simulate_resize(size(px(280.0), px(160.0))); draw(&mut v);
+        if fault==Fault::AfterReplace {
+            v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|view,_|view.session.close_prompt().is_some_and(|p|p.discard_disabled.is_none())));v.simulate_keystrokes("escape");
+        }
+        f.view.update_in(&mut v, |view, window, cx| view.run(CommandId::ConfirmRecheckedSave, window, cx));
+        assert_eq!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)), fault != Fault::AfterReplace);
+        assert_eq!(std::fs::read(path).unwrap(), disk);
+        if fault==Fault::AfterReplace {v.simulate_keystrokes("ctrl-f4");assert!(f.view.read_with(&v,|view,_|view.session.state().active().is_none()));}
+    }
+}
+
+#[gpui::test]
+fn save_shortcut_keeps_history_after_actual_cache_eviction(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("save.txt", "\u{feff}α😀\r\nbeta\n".as_bytes())));
+    let path = f.dir.path().join("save.txt");
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    let tab = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("é".into())));
+    v.simulate_keystrokes("home shift-right ctrl-v ctrl-s");
+    settle(cx, &f, |view| !view.session().state().tab_dirty(tab));
+    assert_eq!(std::fs::read(&path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+    draw(&mut v);
+    let clean = f.dir.path().join("evicted.txt"); let other = f.dir.path().join("pressure.txt");
+    std::fs::write(&clean, vec![b'a'; 17 << 20]).unwrap(); std::fs::write(&other, vec![b'b'; 17 << 20]).unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(clean.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == clean));
+    draw(&mut v);
+    let weak = f.view.read_with(&v, |view, _| Arc::downgrade(view.session().state().current_source().unwrap()));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(other.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == other));
+    draw(&mut v);
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(path.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|s| s.source() == path));
+    draw(&mut v);
+    assert!(weak.upgrade().is_none(), "real inactive-cache pressure released the clean source");
+    v.simulate_keystrokes("ctrl-z"); draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() }), "α😀\r\nbeta\n");
+    assert!(f.view.read_with(&v, |view, _| view.session().state().tab_dirty(tab)));
+    assert_eq!(std::fs::read(path).unwrap(), "\u{feff}é😀\r\nbeta\n".as_bytes());
+}
+
+#[gpui::test]
+fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(cx: &mut TestAppContext) {
+    let original = "é界\r\nline two\r\n";
+    let f = fixture(cx, Some(("draft.txt", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let tab_width = |v: &VisualTestContext, id: TabId| f.view.read_with(v, |view, _| {
+        let (from, to, _) = view.tab_hits.iter().find(|(_, _, tab)| *tab == id).unwrap(); to - from
+    });
+    let id = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    let clean_width = tab_width(&v, id);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| {
+        let source = view.session().state().current_source().unwrap();
+        source.copy_range(0..source.len_bytes()).unwrap()
+    });
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("ignored".into())));
+    v.simulate_keystrokes("λ ctrl-v");
+    assert_eq!(text(&v), original, "ordinary constructors remain read-only");
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("right shift-right");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().range()), 2..5);
+    v.simulate_keystrokes("λ");
+    assert_eq!(text(&v), "éλ\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap()), Selection { anchor: 4, head: 4 });
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| view.visible_rows()[0].text.clone()), "éλ");
+    let char_w = f.view.read_with(&v, |view, _| view.char_w);
+    assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "dirty tab indicator has its own measured cells");
+    assert!(f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    for theme in ["github-light", "darcula"] {
+        f.view.update(&mut v, |view, cx| view.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())), cx));
+        draw(&mut v);
+        assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "dirty indicator remains laid out in {theme}");
+    }
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("👩🏽‍💻".into())));
+    v.simulate_keystrokes("ctrl-v");
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 19);
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "éλ\r\nline two\r\n");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 4);
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), original);
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().head), 5);
+    assert!(!f.view.read_with(&v, |view, _| { let state = view.session().state(); state.view(state.active().unwrap().id()).unwrap().dirty() }));
+    draw(&mut v);
+    assert!((tab_width(&v, id) - clean_width).abs() < 0.01, "undo to clean text removes the dirty indicator");
+    v.simulate_keystrokes("ctrl-shift-z ctrl-shift-z");
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    let other = f.dir.path().join("other.txt");
+    std::fs::write(&other, "other text\n").unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(other.clone()), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|source| source.source() == other));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.session().state().view(id).is_none() && view.session().state().tab_dirty(id)));
+    assert!((tab_width(&v, id) - clean_width - 2.0 * char_w).abs() < 0.01, "inactive dirty tab retains its indicator");
+    v.simulate_keystrokes("ctrl-shift-tab");
+    settle(cx, &f, |view| view.session().state().active().is_some_and(|tab| tab.id() == id && tab.loaded()));
+    draw(&mut v);
+    assert_eq!(text(&v), "éλ👩🏽‍💻\r\nline two\r\n");
+    let before_modal = f.view.read_with(&v, |view, _| view.session().state().current_source().unwrap().key());
+    v.simulate_keystrokes("f10 x ctrl-v ctrl-z");
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().current_source().unwrap().key()), before_modal);
+    v.simulate_keystrokes("escape");
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("draft.txt")).unwrap(), original);
 }
 
 #[gpui::test]
@@ -127,12 +811,14 @@ fn an_empty_window_renders_and_its_menu_explains_disabled_commands(cx: &mut Test
     let reload = rows.iter().position(|r| r.0 == "Reload").unwrap();
     assert_eq!(rows[reload], ("Reload".into(), Some("No file is open")));
     assert_eq!(rows[0].1, None, "Open is always available");
-    // Enter on a disabled row does nothing; the menu closes.
+    // Enter on a disabled row keeps its explanation visible until dismissed.
     for _ in 0..reload {
         v.simulate_keystrokes("down");
     }
     v.simulate_keystrokes("enter");
-    assert!(f.view.read_with(&v, |v, _| v.modal.is_none() && v.session().state().document().is_none()));
+    assert!(f.view.read_with(&v, |v, _| v.modal.is_some() && v.session().state().current_source().is_none()));
+    assert_eq!(f.view.read_with(&v, |v, _| v.modal_layout().unwrap().footer.join(" ")), "No file is open");
+    v.simulate_keystrokes("escape");
     for (w, h) in [(1.0, 1.0), (120.0, 40.0), (800.0, 600.0)] {
         v.simulate_resize(size(px(w), px(h)));
         v.simulate_keystrokes("f10 end up");
@@ -154,17 +840,18 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
         r.open_root(root.into(), cx);
         r.open(path.clone(), cx);
     });
-    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, reader_core::semantics::Status::Missing(_))));
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_))));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP unavailable"));
     v.simulate_keystrokes("ctrl-a");
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
-    v.simulate_click(point(px(20.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
+    let server = f.view.read_with(&v, |r, _| r.status_segments().0.0.center());
+    v.simulate_click(server, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
-    assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 9 && r.server_rows().iter().all(|(_, id)| id.is_some())));
-    let button = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().bounds.origin + point(px(20.0), px(4.0 + line_h() / 2.0)));
+    assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 10 && r.server_rows().iter().all(|(_, id)| id.is_some())));
+    let button = f.view.read_with(&v, |r, _| { let l = r.modal_layout().unwrap(); l.bounds.origin + point(px(20.0), px(l.body_top + line_h() / 2.0)) });
     v.simulate_click(button, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { title: "Server details", .. }))));
     let text = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>().join(""));
@@ -208,7 +895,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::EnableServer);
     drop(v);
-    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, reader_core::semantics::Status::Missing(_))));
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_))));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::RestartServer);
@@ -220,7 +907,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
 fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut TestAppContext) {
     let source = format!("{}\n", "x".repeat(300)).repeat(200);
     let f = fixture(cx, Some(("main.txt", source.as_bytes())));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -261,7 +948,7 @@ fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut Test
     std::fs::write(&other, &source).unwrap();
     f.view.update(&mut v, |r, cx| r.open(other.clone(), cx));
     drop(v);
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source() == other));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source() == other));
     let mut v = visual(cx, &f);
     draw(&mut v);
     v.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.0), px(-line_h() * 0.25))), ..Default::default() });
@@ -273,7 +960,7 @@ fn trackpad_scroll_preserves_small_movements_and_reverses_at_edges(cx: &mut Test
 fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppContext) {
     let source = format!("{}\n", "x".repeat(80));
     let f = fixture(cx, Some(("wide.txt", source.as_bytes())));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(480.0), px(300.0)));
     draw(&mut v);
@@ -288,19 +975,331 @@ fn trackpad_reaches_the_last_partial_column_across_repaints(cx: &mut TestAppCont
 }
 
 #[gpui::test]
+fn source_windows_scroll_and_select_past_the_old_long_line_prefix(cx: &mut TestAppContext) {
+    let source = format!("{}END😀\t\x07{}\r\n", "a".repeat(12_000), "tail ".repeat(1_000));
+    let f = fixture(cx, Some(("long.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(12_000), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (bounds, column, char_w, shown) = f.view.read_with(&v, |r, _| {
+        (r.text_bounds.unwrap(), r.session().state().column(), r.char_w, r.visible_rows()[0].text.clone())
+    });
+    assert!(shown.contains("END"), "the viewport must reach the original tail: {shown:?}");
+    assert!(column > 10_000);
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + (12_000 - column) as f32 * char_w;
+    let y = bounds.origin.y + px(line_h() / 2.0);
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().range()), 12_000..12_003);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("long.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_keep_native_emoji_origins_across_projection_boundaries(cx: &mut TestAppContext) {
+    let prefix = "a".repeat(40) + &"👨‍👩‍👧‍👦".repeat(2_000);
+    let end = prefix.len();
+    let source = prefix.clone() + "END" + &" tail".repeat(500) + "\r\n";
+    let f = fixture(cx, Some(("family.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(300.0)));
+    draw(&mut v);
+    let (font, char_w) = f.view.read_with(&v, |r, _| (r.font.clone(), r.char_w));
+    let native_end = v.update(|window, _| {
+        let measure = |text: &str| {
+            let run = gpui::TextRun { len: text.len(), font: font.clone(), color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+            f32::from(window.text_system().shape_line(text.to_owned().into(), px(font_size()), &[run], None).width)
+        };
+        // A whole-prefix f32 layout accumulates rounding over thousands of glyphs.
+        measure(&"a".repeat(40)) as f64 + 2_000.0 * measure("👨‍👩‍👧‍👦") as f64
+    }) as f32;
+    let column = (native_end / char_w).floor() as usize - 20;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ScrollColumn(column), cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().first().is_some_and(|row| row.text.contains("END"))));
+    let (bounds, column, shown, origin) = f.view.read_with(&v, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        let view = r.session.state().view(r.session.state().active().unwrap().id()).unwrap();
+        let width = (f32::from(bounds.size.width) - num_w() - 16.0).max(1.0);
+        let row = r.source.get(0, &view, 0, r.session.state().column() as f32 * r.char_w, width).unwrap();
+        (bounds, r.session.state().column(), row.text.clone(), row.origin)
+    });
+    let at = shown.find("END").unwrap();
+    let painted_end = v.update(|window, _| {
+        let run = gpui::TextRun { len: shown.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        origin + f32::from(window.text_system().shape_line(shown.into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    assert!((painted_end - native_end).abs() < 1.0, "bounded native advances must retain the family glyph's width");
+    let x = f32::from(bounds.origin.x) + num_w() + 8.0 + painted_end - column as f32 * char_w;
+    let y = bounds.origin.y + px(line_h()/2.0);
+    v.simulate_click(point(px(x+char_w*0.1),y),Modifiers::default());
+    v.simulate_click(point(px(x+char_w*3.1),y),Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r,_| r.session().state().selection().unwrap().range()),end..end+3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item|item.text()).as_deref(),Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("family.txt")).unwrap(),source.as_bytes());
+}
+
+fn native_literal_point(f: &Fixture, v: &mut VisualTestContext, literal: &str) -> Option<(gpui::Point<Pixels>, f32)> {
+    v.update(|window, cx| {
+        let reader = f.view.read(cx);
+        let state = reader.session.state();
+        let tab = state.active()?;
+        if !reader.current_source_geometry(tab) { return None; }
+        let bounds = reader.text_bounds?;
+        let view = state.view(tab.id())?;
+        let logical = view.layout_rows(reader.rows, state.wrap_cols(tab)).rows;
+        let width = f32::from(bounds.size.width) - num_w() - 16.0;
+        for row in reader.visible_rows() {
+            let Some(at) = row.text.find(literal) else { continue };
+            let logical_row = logical.get(row.y as usize)?;
+            reader.ready_source_row(tab, logical_row)?;
+            let parts = reader.source_parts(tab, logical_row, &row, window);
+            let left = native_x(window, reader.metrics(), &row, &parts, at) - reader.hscroll();
+            let right = native_x(window, reader.metrics(), &row, &parts, at + literal.len()) - reader.hscroll();
+            if left >= 0.0 && right <= width {
+                return Some((point(bounds.origin.x + px(num_w() + 8.0 + left), bounds.origin.y + px((row.y + 0.5) * line_h())), reader.char_w));
+            }
+        }
+        None
+    })
+}
+
+fn settle_native_literal(cx: &mut TestAppContext, f: &Fixture, v: &mut VisualTestContext, literal: &str) -> (gpui::Point<Pixels>, f32) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(v, |reader, cx| reader.poll(cx));
+        draw(v);
+        if let Some(point) = native_literal_point(f, v, literal) { return point; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    panic!("native literal {literal:?} remains outside the painted viewport: {:?}", f.view.read_with(v, |r, _| {
+        let state=r.session.state();let tab=state.active().unwrap();let view=state.view(tab.id()).unwrap();
+        let logical=view.layout_rows(r.rows,state.wrap_cols(tab)).rows;
+        (r.status(),state.column(),r.session.native_reveal(tab.pane()).map(|g|(g.request,g.source,g.context)),r.visible_rows().iter().map(|row|(row.y,row.text.find(literal),row.text.len())).collect::<Vec<_>>(),logical.iter().map(|row|r.source_row(tab,row).map(|native|(native.skip(),native.pending(),r.ready_source_row(tab,row).is_some()))).collect::<Vec<_>>())
+    }));
+}
+
+#[gpui::test]
+fn source_windows_native_go_to_and_find_reveal_the_source_before_trailing_spaces(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END" + &" ".repeat(100) + "\n";
+    let f = fixture(cx, Some(("go-to.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(500.0), px(240.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-g 1 : 1 4 0 0 2 enter");
+    let (position, char_w) = settle_native_literal(cx, &f, &mut v, "END");
+    let target = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), target);
+    v.simulate_click(position + point(px(char_w * 0.1), px(0.0)), Modifiers::default());
+    v.simulate_click(position + point(px(char_w * 3.1), px(0.0)), Modifiers::shift());
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), target..target + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    v.simulate_keystrokes("home ctrl-f");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query() == "END"));
+    settle(cx, &f, find_settled);
+    v.simulate_keystrokes("enter");
+    settle_native_literal(cx, &f, &mut v, "END");
+    assert_eq!(std::fs::read(f.dir.path().join("go-to.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_native_wrapped_reveal_pans_wide_rows_and_unwinds_for_short_rows(cx: &mut TestAppContext) {
+    let source = "    ".to_owned() + &"1️⃣".repeat(80) + " END tail\nshort\n";
+    let f = fixture(cx, Some(("wrapped-pan.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(260.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z ctrl-g 1 : 6 5 enter");
+    for _ in 0..400 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().column() > 0 && r.current_source_geometry(r.session.state().active().unwrap())) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().head), 4 + 20 * "1️⃣".len());
+    assert!(f.view.read_with(&v, |r, _| r.session.state().column() > 0), "a native-overwide wrapped row must expose its caret");
+    v.simulate_keystrokes("ctrl-g 2 : 1 enter");
+    settle_native_literal(cx, &f, &mut v, "short");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().column()), 0, "a short wrapped target unwinds the temporary pan");
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped-pan.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_compact_suppressed_source_and_retain_caret_mapping(cx: &mut TestAppContext) {
+    let source = "a".to_owned() + &"\u{200b}".repeat(50_000) + "END\n";
+    let f = fixture(cx, Some(("invisible.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let view = r.session.state().view(tab.id()).unwrap();
+        let logical = view.layout_rows(r.rows, None).rows;
+        let row = r.source_row(tab, &logical[0]).unwrap();
+        assert!(row.text.contains("END"));
+        assert!(row.text.len() < 256);
+        assert!(r.source.retained_windows() <= 64, "suppressed source must not accumulate projected windows: {}", r.source.retained_windows());
+        let middle = 1 + 25_000 * "\u{200b}".len();
+        assert_eq!(row.caret(middle), row.caret(source.find("END").unwrap()), "hidden source retains the displayed boundary for its caret");
+    });
+    assert_eq!(std::fs::read(f.dir.path().join("invisible.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppContext) {
+    let source = "👨‍👩‍👧‍👦".repeat(2_000) + " END tail\r\n";
+    let f = fixture(cx, Some(("wrapped.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(400.0), px(220.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("alt-z end up");
+    for _ in 0..300 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(f.view.read_with(&v, |r, _| r.visible_rows().iter().any(|row| row.text.contains("END"))), "End followed by Up must paint the original tail: {:?}", f.view.read_with(&v, |r, _| { let t=r.session.state().active().unwrap(); let layout=r.session.state().view(t.id()).unwrap().layout_rows(r.rows,r.session.state().wrap_cols(t)); ((t.top_line(),t.top_row()),format!("{:?}",layout.rows),r.visible_rows().iter().map(|r|r.text.clone()).collect::<Vec<_>>()) }));
+    v.simulate_keystrokes("up");
+    for _ in 0..100 {
+        cx.run_until_parked();
+        f.view.update(&mut v, |r, cx| r.poll(cx));
+        draw(&mut v);
+        if f.view.read_with(&v, |r, _| r.session.state().active().unwrap().top_line() == 0) { break; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let (head, tail, first_byte) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let layout = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        (tab.top_row(), r.visible_rows().iter().any(|row| row.text.contains("END")), layout.rows[0].source.start)
+    });
+    assert!(first_byte > 40_000 && tail, "Up must move within the original source tail: row {head}, byte {first_byte}");
+    let (bounds, row, origin, font, char_w) = f.view.read_with(&v, |r, _| {
+        let tab = r.session.state().active().unwrap();
+        let logical = r.session.state().view(tab.id()).unwrap().layout_rows(r.rows, r.session.state().wrap_cols(tab));
+        let row = r.visible_rows().into_iter().find(|r| r.text.contains("END")).unwrap();
+        let origin = r.source_row(tab, &logical.rows[row.y as usize]).unwrap().origin;
+        (r.text_bounds.unwrap(), row, origin, r.font.clone(), r.char_w)
+    });
+    let at = row.text.find("END").unwrap();
+    let x = v.update(|window, _| {
+        let run = gpui::TextRun { len: row.text.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+        f32::from(bounds.origin.x) + num_w() + 8.0 + origin + f32::from(window.text_system().shape_line(row.text.clone().into(), px(font_size()), &[run], None).x_for_index(at))
+    });
+    let y = bounds.origin.y + px((row.y + 0.5) * line_h());
+
+    v.simulate_click(point(px(x + char_w * 0.1), y), Modifiers::default());
+    v.simulate_click(point(px(x + char_w * 3.1), y), Modifiers::shift());
+    let end = source.find("END").unwrap();
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), end..end + 3);
+    v.simulate_keystrokes("ctrl-c");
+    assert_eq!(v.read_from_clipboard().and_then(|item| item.text()).as_deref(), Some("END"));
+    assert_eq!(std::fs::read(f.dir.path().join("wrapped.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_scroll_geometry_until_repaint(cx: &mut TestAppContext) {
+    let source = "same long source row\n".repeat(50);
+    let f = fixture(cx, Some(("stale.txt", source.as_bytes())));
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    // Both lines are cached: the old viewport must still be rejected after scrolling.
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.session.dispatch(Command::Scroll(1));
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 8.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must not reuse the previous painted viewport");
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0));
+    assert!(hit.is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("stale.txt")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn source_windows_reject_font_geometry_until_repaint(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("font.txt", b"source coordinates\n")));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let hit = v.update(|window, cx| f.view.update(cx, |r, _| {
+        let bounds = r.text_bounds.unwrap();
+        r.font.weight = gpui::FontWeight::BOLD;
+        r.byte_at(window, f32::from(bounds.origin.x) + num_w() + 10.0, f32::from(bounds.origin.y) + line_h() / 2.0)
+    }));
+    assert_eq!(hit, None, "input must reject font changes before the native geometry is repainted");
+    draw(&mut v);
+    assert!(v.update(|window, cx| f.view.read(cx).byte_at(window, 100.0, 100.0)).is_some());
+    assert_eq!(std::fs::read(f.dir.path().join("font.txt")).unwrap(), b"source coordinates\n");
+}
+
+#[gpui::test]
+fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("closed.txt", b"owned source")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let metadata = f.view.read_with(&v, |r, _| {
+        let tab = r.session().state().active().unwrap();
+        Arc::downgrade(r.session().state().view(tab.id()).unwrap().snapshot().source_meta())
+    });
+    std::fs::write(f.dir.path().join("closed.txt"), b"replacement source").unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Reload, cx));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|doc| doc.copy_range(0..doc.len_bytes()).as_deref() == Some("replacement source")));
+    draw(&mut v);
+    assert!(metadata.upgrade().is_none(), "a refreshed source view must release obsolete projection metadata");
+    assert_eq!(std::fs::read(f.dir.path().join("closed.txt")).unwrap(), b"replacement source");
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));
     let f = fixture(cx, Some(("main.rs", source.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
-    // Control characters and the long line are shown, not altered: U+FFFD on screen, the cut with its count.
+    // Controls are escaped and long lines use bounded viewport excerpts without changing the source.
     let rows = f.view.read_with(&v, |v, _| v.visible_rows());
     assert_eq!(rows[0].text, "fn café() {}");
     assert!(rows[1].text.contains('\u{FFFD}') && rows[1].text.starts_with("    let"));
-    assert!(rows[2].text.ends_with("  … 5 more characters"));
+    assert!(!rows[2].text.is_empty() && rows[2].text.len() < long.len());
+    assert!(rows[2].text.chars().all(|c| c == 'x'), "the viewport contains source text, without the old truncation label");
     // Click at the start of line 1's text, shift-click further on: a source selection on character boundaries.
     let text = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     let x0 = f32::from(text.origin.x) + num_w() + 8.0;
@@ -321,7 +1320,7 @@ fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAp
     assert!(dragged.anchor == 0 && dragged.head > "fn café() {}\r\n\t".len(), "past the tab on line 1: {dragged:?}");
     // End and the wheel scroll independently of the caret.
     v.simulate_keystrokes("end");
-    let (top, lines) = f.view.read_with(&v, |v, _| (v.session().state().top_line(), v.session().state().document().unwrap().line_count()));
+    let (top, lines) = f.view.read_with(&v, |v, _| (v.session().state().top_line(), v.session().state().current_source().unwrap().line_count()));
     assert_eq!(top, lines - 1);
     v.simulate_event(ScrollWheelEvent { delta: ScrollDelta::Lines(point(0.0, 10.0)), ..Default::default() });
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().top_line()), lines - 1 - 30);
@@ -338,7 +1337,7 @@ fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAp
 #[gpui::test]
 fn encoding_notices_and_unavailable_files_show_in_the_status_bar(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("latin.txt", b"caf\xe9 cr\xe8me br\xfbl\xe9e au lait\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     assert!(f.view.read_with(cx, |v, _| v.status()).contains("Encoding: windows-1252"));
     let missing = f.dir.path().join("missing.txt");
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(missing), cx));
@@ -346,7 +1345,7 @@ fn encoding_notices_and_unavailable_files_show_in_the_status_bar(cx: &mut TestAp
     let empty = f.dir.path().join("empty.txt");
     std::fs::write(&empty, b"").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(empty), cx));
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("empty.txt")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with("empty.txt")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.visible_rows().len()), 1);
@@ -355,11 +1354,11 @@ fn encoding_notices_and_unavailable_files_show_in_the_status_bar(cx: &mut TestAp
 #[gpui::test]
 fn theme_chooser_navigation_previews_without_committing_and_escape_restores(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     draw(&mut v);
     let initial = f.view.read_with(&v, |r, _| (r.session.theme_id().to_string(), r.session.state().palette().bg));
-    let appearance = f.dir.path().join("config/lenz-reader/appearance.json");
+    let appearance = f.dir.path().join("config/lenz-code/appearance.json");
     let persisted = std::fs::read(&appearance).ok();
     f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ChooseTheme, w, cx));
     v.simulate_keystrokes("home down down");
@@ -375,7 +1374,7 @@ fn theme_chooser_navigation_previews_without_committing_and_escape_restores(cx: 
 #[gpui::test]
 fn theme_chooser_is_a_direct_menu_action_with_inert_headers_and_scroll(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     for dark in [true, false] {
         let committed = if dark { "darcula" } else { "github-light" };
@@ -433,7 +1432,7 @@ fn theme_chooser_is_a_direct_menu_action_with_inert_headers_and_scroll(cx: &mut 
 #[gpui::test]
 fn theme_chooser_registry_refresh_retains_ids_and_handles_a_removed_preview(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
-    let themes = f.dir.path().join("config/lenz-reader/themes");
+    let themes = f.dir.path().join("config/lenz-code/themes");
     std::fs::create_dir_all(&themes).unwrap();
     std::fs::write(themes.join("loaded.toml"), include_str!("../../content/src/theme/fixtures/custom.toml")).unwrap();
     let mut v = visual(cx, &f);
@@ -464,7 +1463,7 @@ fn theme_chooser_registry_refresh_retains_ids_and_handles_a_removed_preview(cx: 
 #[gpui::test]
 fn themes_change_through_the_chooser_and_persist_for_the_reader_only(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     draw(&mut v);
     let themes = lenz_content::theme::builtin_entries();
@@ -494,7 +1493,7 @@ fn themes_change_through_the_chooser_and_persist_for_the_reader_only(cx: &mut Te
     }
     settle(cx, &f, |_| true);
     let saved = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
-    let reader = f.dir.path().join("config/lenz-reader/appearance.json");
+    let reader = f.dir.path().join("config/lenz-code/appearance.json");
     let last = &themes.last().unwrap().id;
     for _ in 0..200 {
         if saved(&reader).contains(last) { break; }
@@ -517,7 +1516,7 @@ fn wrapping_keeps_every_character_and_prefers_word_breaks() {
 #[gpui::test]
 fn narrow_windows_cut_the_status_bar_and_wrap_menu_reasons_and_shift_keys_select(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("latin.txt", b"caf\xe9 au lait\nsecond line\nthird\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(160.0), px(300.0)));
     draw(&mut v);
@@ -542,13 +1541,16 @@ fn narrow_windows_cut_the_status_bar_and_wrap_menu_reasons_and_shift_keys_select
     let menu = f.view.read_with(&v, |v, _| v.modal_lines());
     let index = CommandId::ALL.iter().position(|&c| c == CommandId::Reload).unwrap();
     let reload: String = menu.iter().filter(|(i, _, _)| *i == index).map(|(_, l, _)| l.as_str()).collect();
-    assert_eq!(reload, "Reload — No file is open", "the whole reason is shown");
+    assert_eq!(reload, "Reload", "action rows stay concise");
+    for _ in 0..index { v.simulate_keystrokes("down"); }
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal_layout().unwrap().footer.join(" ").split_whitespace().collect::<Vec<_>>().join(" ")), "No file is open", "the selected action's whole reason is shown separately");
     v.simulate_keystrokes("escape");
     // Reopen, then select with shift and the arrows.
     let path = f.dir.path().join("latin.txt");
     f.view.update(&mut v, |view, cx| view.open(path, cx));
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("shift-down shift-right shift-end");
     let s = f.view.read_with(&v, |v, _| v.session().state().selection().unwrap());
@@ -568,7 +1570,7 @@ fn project(dir: &Path, files: &[&str]) -> PathBuf {
 }
 
 fn scanned(v: &ReaderView) -> bool {
-    v.session().state().project().is_some_and(|p| matches!(p.coverage(), reader_core::project::Coverage::Complete(_) | reader_core::project::Coverage::Unavailable(_)))
+    v.session().state().project().is_some_and(|p| matches!(p.coverage(), code_core::project::Coverage::Complete(_) | code_core::project::Coverage::Unavailable(_)))
 }
 
 #[gpui::test]
@@ -582,19 +1584,19 @@ fn the_tree_and_finder_open_files_by_mouse_and_keyboard(cx: &mut TestAppContext)
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
     assert!(f.view.read_with(&v, |v, _| v.status()).contains("proj: 5 files"), "hidden files kept, ignored ones not");
-    // Click the "src" row (rows: src, .env.example, .gitignore, README.md: folders first), then the file inside it.
+    // Click the "src" arrow (folders first), then the file inside it.
     let body = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
     let row_y = |i: f32| body.origin.y + px(i * line_h() + line_h() / 2.0);
-    v.simulate_click(point(px(20.0), row_y(0.0)), Modifiers::default());
+    v.simulate_click(point(px(10.0), row_y(0.0)), Modifiers::default());
     draw(&mut v);
     let rows: Vec<String> = f.view.read_with(&v, |v, _| v.session().state().project().unwrap().rows().iter().map(|r| r.path.to_string()).collect());
     assert_eq!(rows, ["src", "src/ui", "src/main.rs", ".env.example", ".gitignore", "README.md"]);
     v.simulate_click(point(px(20.0), row_y(2.0)), Modifiers::default());
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("src/main.rs")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with("src/main.rs")));
     // Keyboard: the tree has focus after the click; Up, Right expands src/ui, Down, Enter opens its main.rs.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("up right down enter");
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("ui/main.rs")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with("ui/main.rs")));
     // The finder: type, see results over the whole inventory, pick the second.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape ctrl-p m a i n");
@@ -610,7 +1612,7 @@ fn the_tree_and_finder_open_files_by_mouse_and_keyboard(cx: &mut TestAppContext)
     settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "main"));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("down enter");
-    settle(cx, &f, |v| v.modal.is_none() && v.session().state().document().is_some_and(|d| d.source().ends_with("ui/main.rs")));
+    settle(cx, &f, |v| v.modal.is_none() && v.session().state().current_source().is_some_and(|d| d.source().ends_with("ui/main.rs")));
     assert!(f.view.read_with(cx, |v, _| v.session().state().navigation().is_none()));
     assert_eq!(std::fs::read(root.join("src/main.rs")).unwrap(), b"src/main.rs");
 }
@@ -630,11 +1632,16 @@ fn folders_open_through_the_command_menu_recent_list_and_narrow_windows(cx: &mut
     // F10 lists the folder commands; Open Recent shows both roots, newest first, and reopens the missing one.
     v.simulate_keystrokes("f10");
     let menu = f.view.read_with(&v, |v, _| v.modal_rows());
-    assert_eq!(&menu[1..4], &[("Open Folder…".to_string(), None), ("Open Recent Folder…".to_string(), None), ("Find File…".to_string(), None)]);
-    v.simulate_keystrokes("down down enter");
+    for label in ["Open Folder…", "Open Recent Folder…", "Find File…"] {
+        assert!(menu.iter().any(|(text,disabled)| text == label && disabled.is_none()));
+    }
+    let recent_at = menu.iter().position(|(text,_)| text == CommandId::OpenRecent.label()).unwrap();
+    for _ in 0..recent_at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
     let recent = f.view.read_with(&v, |v, _| v.modal_rows());
     assert_eq!(recent.iter().map(|r| r.0.clone()).collect::<Vec<_>>(), [root.display().to_string(), missing.display().to_string()]);
-    v.simulate_keystrokes("escape f10 down down down enter");
+    v.simulate_keystrokes("escape");
+    choose_menu_command(&mut v,&f,CommandId::FindFile);
     assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { .. })), "Find File from the menu");
     v.simulate_keystrokes("escape");
     // Narrow: the tree hides until focused, then takes the width; Escape gives the text back.
@@ -691,7 +1698,7 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     v.simulate_click(point(px(20.0), body.origin.y + px(line_h() / 2.0)), Modifiers::default());
     let chosen = f.view.read_with(&v, |v, _| v.tree_sel.clone().unwrap());
     let generation = f.view.read_with(&v, |v, _| v.session().state().project().unwrap().generation());
-    let batch = reader_core::project::Batch { paths: vec!["a0.rs".into(), "a1.rs".into()], done: true, ..Default::default() };
+    let batch = code_core::project::Batch { paths: vec!["a0.rs".into(), "a1.rs".into()], done: true, ..Default::default() };
     f.view.update(&mut v, |v, cx| v.dispatch(Completion::Scanned { generation, batch }, cx));
     draw(&mut v);
     let (at, row) = f.view.read_with(&v, |v, _| (v.tree_at(), v.session().state().project().unwrap().rows()[v.tree_at()].path.clone()));
@@ -705,7 +1712,7 @@ fn dismissal_scrolling_and_arrivals_keep_the_tree_and_finder_consistent(cx: &mut
     assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Navigation { at: 0, .. })));
     v.simulate_keystrokes("end enter");
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("f01.rs")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with("f01.rs")));
 }
 
 fn tab_titles(v: &ReaderView) -> Vec<String> {
@@ -714,7 +1721,7 @@ fn tab_titles(v: &ReaderView) -> Vec<String> {
 }
 
 fn active_is(name: &'static str) -> impl Fn(&ReaderView) -> bool {
-    move |v| v.session().state().document().is_some_and(|d| d.source().ends_with(name)) && v.session().state().loading().is_none()
+    move |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with(name)) && v.session().state().loading().is_none()
 }
 
 #[gpui::test]
@@ -785,7 +1792,7 @@ fn tabs_open_reuse_keep_and_close_through_real_input(cx: &mut TestAppContext) {
     assert!(f.view.read_with(&v, |v, _| v.session().state().tabs().is_empty() && v.session().state().can_back()));
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     for (w, h) in [(1.0, 1.0), (180.0, 80.0)] {
         let mut v = visual(cx, &f);
         v.simulate_resize(size(px(w), px(h)));
@@ -838,7 +1845,7 @@ fn history_keys_and_menu_go_back_and_forward(cx: &mut TestAppContext) {
         let p = f.dir.path().join(format!("tab-number-{i}.txt"));
         std::fs::write(&p, b"x\n").unwrap();
         f.view.update(cx, |v, cx| v.dispatch(Command::OpenRetained(p.clone()), cx));
-        settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source() == p) && v.session().state().loading().is_none());
+        settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source() == p) && v.session().state().loading().is_none());
     }
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(300.0), px(200.0)));
@@ -870,10 +1877,10 @@ fn a_new_window_has_its_own_session(cx: &mut TestAppContext) {
     for _ in 0..500 {
         cx.run_until_parked();
         other_view.update(cx, |v, cx| v.poll(cx));
-        if other_view.read_with(cx, |v, _| v.session().state().document().is_some()) { break; }
+        if other_view.read_with(cx, |v, _| v.session().state().current_source().is_some()) { break; }
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
-    assert!(other_view.read_with(cx, |v, _| v.session().state().document().is_some()));
+    assert!(other_view.read_with(cx, |v, _| v.session().state().current_source().is_some()));
     assert!(f.view.read_with(cx, |v, _| v.session().state().tabs().is_empty()));
 }
 
@@ -885,7 +1892,7 @@ fn external_changes_show_up_and_deletions_keep_the_last_content(cx: &mut TestApp
     let temp = f.dir.path().join("live.tmp");
     std::fs::write(&temp, b"fn after() {}\nfn more() {}\n").unwrap();
     std::fs::rename(&temp, &path).unwrap();
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.line_count() == 3));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.line_count() == 3));
     let mut v = visual(cx, &f);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.visible_rows()[0].text.clone()), "fn after() {}");
@@ -928,15 +1935,15 @@ fn project_search_takes_a_file_pattern_and_its_tree_folds_by_click_and_keys(cx: 
     let mut v = visual(cx, &f);
     draw(&mut v);
     let labels = |v: &mut VisualTestContext| f.view.update(v, |v, _| v.panel_contents(10, 0).0.into_iter().map(|r| r.label).collect::<Vec<_>>());
-    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "1: needle", "b.rs  1", "1: needle"]);
+    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "   1  needle", "b.rs  1", "   1  needle"]);
     let status = f.view.read_with(&v, |v, _| v.results_status().unwrap());
-    assert!(status.starts_with("Text matches for “needle” in 2 files matching “src”: 2 in 2 files"), "{status}");
+    assert!(status.starts_with("“needle” in “src” — 2 matches in 2 files · 2 files searched"), "{status}");
     // A click on a file folds it, on a folder folds everything in it; the main area and files stay as they were.
     let row_y = |v: &VisualTestContext, row: usize| f.view.read_with(v, |v, _| v.panel_list_y + row as f32 * line_h() + line_h() / 2.0);
     let y = row_y(&v, 1);
     v.simulate_click(point(px(120.0), px(y)), Modifiers::default());
     draw(&mut v);
-    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "b.rs  1", "1: needle"]);
+    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "b.rs  1", "   1  needle"]);
     let y = row_y(&v, 0);
     v.simulate_click(point(px(120.0), px(y)), Modifiers::default());
     draw(&mut v);
@@ -945,7 +1952,7 @@ fn project_search_takes_a_file_pattern_and_its_tree_folds_by_click_and_keys(cx: 
     assert!(f.view.read_with(&v, |v, _| v.results_focus));
     v.simulate_keystrokes("right");
     draw(&mut v);
-    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "1: needle", "b.rs  1", "1: needle"]);
+    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "   1  needle", "b.rs  1", "   1  needle"]);
     v.simulate_keystrokes("left");
     draw(&mut v);
     assert_eq!(labels(&mut v).len(), 4);
@@ -957,12 +1964,12 @@ fn project_search_takes_a_file_pattern_and_its_tree_folds_by_click_and_keys(cx: 
     assert_eq!(labels(&mut v), ["src/  2"]);
     v.simulate_keystrokes("right");
     draw(&mut v);
-    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "b.rs  1", "1: needle"], "Right shows the selection, a.rs stays folded");
+    assert_eq!(labels(&mut v), ["src/  2", "a.rs  1", "b.rs  1", "   1  needle"], "Right shows the selection, a.rs stays folded");
     // The search box opens again with the same files.
     v.simulate_keystrokes("ctrl-shift-f");
     assert_eq!(f.view.read_with(&v, |v, _| v.modal_rows()[1].0.clone()), "Files › src");
     v.simulate_keystrokes("escape");
-    assert!(f.view.read_with(&v, |v, _| v.session().state().document().is_none()));
+    assert!(f.view.read_with(&v, |v, _| v.session().state().current_source().is_none()));
     for name in ["top.rs", "src/a.rs", "src/b.rs", "web/c.ts"] {
         assert_eq!(std::fs::read(root.join(name)).unwrap(), b"needle\n");
     }
@@ -986,7 +1993,7 @@ fn search_previews_in_the_panel_and_opens_on_enter(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     draw(&mut v);
     let status = f.view.read_with(&v, |v, _| v.results_status().unwrap());
-    assert!(status.starts_with("Text matches for “café” in 3 files: 2"), "{status}");
+    assert!(status.starts_with("“café” — 2 matches in 2 files · 3 files searched"), "{status}");
     // A tree: the folder, each file with its count, each match's line number and text, coloured once the core has
     // made the lines' colours (asked for by showing them).
     f.view.update(&mut v, |v, _| v.panel_contents(6, 5));
@@ -995,9 +2002,9 @@ fn search_previews_in_the_panel_and_opens_on_enter(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     let (list, _) = f.view.update(&mut v, |v, _| v.panel_contents(6, 5));
     let labels: Vec<_> = list.iter().map(|r| r.label.as_str()).collect();
-    assert_eq!(labels, ["proj/  2", "a.rs  1", "2: let café = 1;", "b.rs  1", "1: // Café notes"]);
-    let (row, palette) = (&list[2], f.view.read_with(&v, |v, _| **v.session().state().palette()));
-    let found = row.highlight.clone().unwrap();
+    assert_eq!(labels, ["a.rs  1", "   2  let café = 1;", "b.rs  1", "   1  // Café notes"]);
+    let (row, palette) = (&list[1], f.view.read_with(&v, |v, _| **v.session().state().palette()));
+    let found = row.highlights[0].clone();
     assert_eq!(&row.label[found.clone()], "café", "the match is emphasized on its line");
     assert_eq!(row.fg[0], (found, super::match_colors(&palette).1), "over the syntax colours");
     assert!(row.fg.iter().any(|(r, c)| &row.label[r.clone()] == "let" && *c == palette.syntax_color(lenz_content::highlight::Capture::Keyword)), "{:?}", row.fg);
@@ -1008,7 +2015,7 @@ fn search_previews_in_the_panel_and_opens_on_enter(cx: &mut TestAppContext) {
     v.simulate_keystrokes(if first == Some(a) { "down up" } else { "down" });
     drop(v);
     settle(cx, &f, |v| v.session().state().results().unwrap().preview().is_some_and(|p| p.doc.source().ends_with("a.rs") && p.highlights().is_some()));
-    assert!(f.view.read_with(cx, |v, _| v.session().state().document().unwrap().source().ends_with("notes.md")));
+    assert!(f.view.read_with(cx, |v, _| v.session().state().current_source().unwrap().source().ends_with("notes.md")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     let (_, preview) = f.view.update(&mut v, |v, _| v.panel_contents(5, 5));
@@ -1020,7 +2027,7 @@ fn search_previews_in_the_panel_and_opens_on_enter(cx: &mut TestAppContext) {
     v.simulate_keystrokes("enter");
     drop(v);
     settle(cx, &f, active_is("a.rs"));
-    let picked = f.view.read_with(cx, |v, _| { let s = v.session().state(); s.selection().map(|x| s.document().unwrap().text()[x.range()].to_string()) });
+    let picked = f.view.read_with(cx, |v, _| { let s = v.session().state(); s.selection().map(|x| s.current_source().unwrap().copy_range(x.range()).unwrap()) });
     assert_eq!(picked.as_deref(), Some("café"));
     assert!(f.view.read_with(cx, |v, _| v.session().state().can_back()));
     let mut v = visual(cx, &f);
@@ -1043,7 +2050,7 @@ fn result_rows_open_on_double_click_and_say_when_nothing_matched(cx: &mut TestAp
     v.simulate_keystrokes("ctrl-f n o n e alt-enter");
     drop(v);
     settle(cx, &f, search_done);
-    assert!(f.view.read_with(cx, |v, _| v.results_status().unwrap().ends_with("no matches")));
+    assert!(f.view.read_with(cx, |v, _| v.results_status().unwrap().ends_with("no matches — Esc hides")));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-f backspace backspace backspace backspace n e e d l e alt-enter");
     drop(v);
@@ -1112,14 +2119,14 @@ fn outline_and_declaration_search_through_keys(cx: &mut TestAppContext) {
     settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done()));
     let mut v = visual(cx, &f);
     draw(&mut v);
-    assert!(f.view.read_with(&v, |v, _| v.results_status().unwrap()).starts_with("Outline (syntactic candidates) of lib.rs: 5 declarations"));
+    assert!(f.view.read_with(&v, |v, _| v.results_status().unwrap()).starts_with("Outline of lib.rs — 5 declarations (syntactic)"));
     let (rows, _) = f.view.update(&mut v, |v, _| v.panel_contents(6, 3));
     let labels: Vec<String> = rows.iter().map(|r| r.label.clone()).collect();
     assert_eq!(labels, ["module shapes  :1", "  type Circle  :2", "  impl Circle  :3", "    method area  :3", "function main  :5"]);
-    assert_eq!(&rows[1].label[rows[1].highlight.clone().unwrap()], "Circle");
+    assert_eq!(&rows[1].label[rows[1].highlights[0].clone()], "Circle");
     v.simulate_keystrokes("down down down enter");
     drop(v);
-    settle(cx, &f, |v| v.session().state().selection().is_some_and(|s| { let d = v.session().state().document().unwrap(); &d.text()[s.range()] == "area" }));
+    settle(cx, &f, |v| v.session().state().selection().is_some_and(|s| { let d = v.session().state().current_source().unwrap(); d.copy_range(s.range()).as_deref() == Some("area") }));
     // Ctrl+T: declarations across the project, live as typed; Enter browses, Enter opens.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-t c i r c l e");
@@ -1127,8 +2134,17 @@ fn outline_and_declaration_search_through_keys(cx: &mut TestAppContext) {
     settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.query() == "circle"));
     let mut v = visual(cx, &f);
     let status = f.view.read_with(&v, |v, _| v.results_status().unwrap());
-    assert!(status.starts_with("Declarations (syntactic candidates) for “circle”: 2; indexed 2 of 2 files"), "{status}");
-    v.simulate_keystrokes("enter down enter");
+    assert!(status.starts_with("Declarations “circle” — 2 declarations (syntactic) · indexed 2 of 2 files"), "{status}");
+    // Each key waits for the one before: under load a preview read off the UI thread can land between them.
+    v.simulate_keystrokes("enter");
+    drop(v);
+    settle(cx, &f, |v| v.results_focus && v.session().state().results().is_some_and(|r| r.selected() == Some(0) && r.preview().is_some()));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("down");
+    drop(v);
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.selected() == Some(1) && r.preview().is_some_and(|p| p.index == 1)));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("enter");
     drop(v);
     settle(cx, &f, active_is("app.py"));
     for (w, h) in [(1.0, 1.0), (220.0, 90.0)] {
@@ -1153,7 +2169,7 @@ fn declaration_search_follows_a_coarse_checkout_through_keys(cx: &mut TestAppCon
     drop(window);
     settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().len() == 1));
     std::fs::write(&path, "class WatchOmega; end\n").unwrap();
-    f.view.update(cx, |v, cx| v.dispatch(Completion::Changed(reader_core::watch::Change { paths: [root.join("app")].into(), ..Default::default() }), cx));
+    f.view.update(cx, |v, cx| v.dispatch(Completion::Changed(code_core::watch::Change { paths: [root.join("app")].into(), ..Default::default() }), cx));
     settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().first().is_some_and(|h| &*h.text == "WatchOmega")));
     let mut window = visual(cx, &f);
     for (w, h) in [(220., 90.), (900., 500.)] {
@@ -1165,7 +2181,7 @@ fn declaration_search_follows_a_coarse_checkout_through_keys(cx: &mut TestAppCon
     assert!(!rows.iter().any(|r| r.label.contains("WatchAlpha")));
     window.simulate_keystrokes("enter enter");
     drop(window);
-    settle(cx, &f, |v| v.session().state().selected_text() == Some("WatchOmega"));
+    settle(cx, &f, |v| copied_selection(v.session().state()).as_deref() == Some("WatchOmega"));
     assert_eq!(std::fs::read_to_string(path).unwrap(), "class WatchOmega; end\n");
 }
 
@@ -1207,7 +2223,7 @@ fn definitions_follow_f12_alt_f12_and_ctrl_click_but_never_a_plain_click(cx: &mu
     std::fs::write(&main, "fn main() { helper(); }\n").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(main.clone()), cx));
-    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Starting));
+    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Starting));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -1242,7 +2258,7 @@ fn definitions_follow_f12_alt_f12_and_ctrl_click_but_never_a_plain_click(cx: &mu
     assert_eq!(link(&mut v), Some((0, 12..18)));
     v.simulate_mouse_move(point(x(9.5), y), None, Modifiers::control());
     assert_eq!(link(&mut v), None, "a space is not a name");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     v.simulate_mouse_move(point(x(0.5), y), None, Modifiers::control());
     assert_eq!(link(&mut v), None, "a keyword leads nowhere");
     v.simulate_mouse_move(point(x(4.5), y), None, Modifiers::control());
@@ -1280,7 +2296,7 @@ fn fake_lsp() -> PathBuf {
     static BUILD: std::sync::Once = std::sync::Once::new();
     BUILD.call_once(|| {
         let mut cargo = std::process::Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
-        cargo.args(["build", "-q", "-p", "reader-core", "--example", "fake_lsp"]).current_dir(env!("CARGO_MANIFEST_DIR"));
+        cargo.args(["build", "-q", "-p", "code-core", "--example", "fake_lsp"]).current_dir(env!("CARGO_MANIFEST_DIR"));
         if profile.ends_with("release") {
             cargo.arg("--release");
         }
@@ -1293,8 +2309,8 @@ fn fake_lsp() -> PathBuf {
 fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestAppContext) {
     let f = fixture_with(cx, Some(("main.rs", b"fn main() {}\n")), &fake_lsp());
     std::fs::write(f.dir.path().join("Cargo.toml"), "[package]\nname='progress'\nversion='0.1.0'\n").unwrap();
-    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
-    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
+    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
         session: 1,
         message: serde_json::json!({"jsonrpc":"2.0", "method":"$/progress", "params":{"token":"ruby-index", "value":{"kind":"begin", "title":"Indexing Ruby files", "percentage":42}}}),
     }), cx));
@@ -1302,13 +2318,14 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestA
     for (w, h) in [(900.0, 500.0), (480.0, 300.0)] {
         v.simulate_resize(size(px(w), px(h)));
         draw(&mut v);
-        assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).contains("42%"));
+        let label = f.view.read_with(&v, |r, _| r.status_segments().0.1);
+        assert!(label.contains("42%"), "width {w}: {label:?}");
         v.simulate_keystrokes("f2 enter");
         assert!(f.view.read_with(&v, |r, _| r.modal_lines().iter().any(|(_, text, _)| text.contains("42%"))));
         v.simulate_keystrokes("escape");
     }
     // An error it logs: marked first in the footer (kept when narrow), its words in the details.
-    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(reader_core::semantics::Event::Message {
+    f.view.update(cx, |r, cx| r.dispatch(Completion::Semantic(code_core::semantics::Event::Message {
         session: 1,
         message: serde_json::json!({"jsonrpc":"2.0", "method":"window/logMessage", "params":{"type":1, "message":"Error processing initialized: (Gem::ConflictError)"}}),
     }), cx));
@@ -1333,7 +2350,7 @@ fn definition_candidates_and_peek_preview_in_the_panel_and_open_on_enter(cx: &mu
     }
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(pkg.join("src/main.rs")), cx));
-    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -1348,27 +2365,27 @@ fn definition_candidates_and_peek_preview_in_the_panel_and_open_on_enter(cx: &mu
     let mut v = visual(cx, &f);
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.results_focus));
-    assert_eq!(f.view.read_with(&v, |r, _| r.results_status()).as_deref(), Some("Definitions (rust-analyzer · pkg): 2 — Enter opens, Escape closes"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.results_status()).as_deref(), Some("Definitions of dup — 2 definitions in 2 files · rust-analyzer · pkg — Enter opens · Esc hides"));
     let (rows, preview) = f.view.update(&mut v, |r, _| r.panel_contents(5, 3));
-    assert!(rows[0].label.contains("a.rs:1: fn dup() {}") && rows[1].label.contains("b.rs:2: fn dup() {}"), "{:?}", rows.iter().map(|r| &r.label).collect::<Vec<_>>());
+    assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["src/  2", "a.rs  1", "   1  fn dup() {}", "b.rs  1", "   2  fn dup() {}"]);
     assert!(!preview.is_empty());
-    assert!(f.view.read_with(&v, |r, _| r.session().state().document().unwrap().source().ends_with("main.rs")));
+    assert!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().source().ends_with("main.rs")));
     v.simulate_keystrokes("down enter");
     drop(v);
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("b.rs")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("b.rs")));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape alt-left");
     drop(v);
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("main.rs")) && r.session().state().results().is_none());
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("main.rs")) && r.session().state().results().is_none());
     // Alt+F12 on `single`: a peek previews it below; Escape closes it; the file never changes.
     let mut v = visual(cx, &f);
     draw(&mut v);
     v.simulate_click(at(13.5, 2.0), Modifiers::default());
     v.simulate_keystrokes("alt-f12");
     drop(v);
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Peek && x.preview().is_some()));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Peek && x.preview().is_some()));
     let mut v = visual(cx, &f);
-    assert!(f.view.read_with(&v, |r, _| r.session().state().document().unwrap().source().ends_with("main.rs")));
+    assert!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().source().ends_with("main.rs")));
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| r.session().state().results().is_none()));
     assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), "fn main() { dup(); }\nfn single() {}\nfn call() { single(); }\n");
@@ -1384,7 +2401,7 @@ fn usages_symbols_and_server_controls_through_keys_and_the_menu(cx: &mut TestApp
     }
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(pkg.join("src/main.rs")), cx));
-    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -1394,31 +2411,31 @@ fn usages_symbols_and_server_controls_through_keys_and_the_menu(cx: &mut TestApp
     // Shift+F12: usages in the panel, labelled with their provider.
     v.simulate_keystrokes("shift-f12");
     drop(v);
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Usages && x.hits().len() == 2));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Usages && x.hits().len() == 2));
     let mut v = visual(cx, &f);
-    assert_eq!(f.view.read_with(&v, |r, _| r.results_status()).as_deref(), Some("Usages (rust-analyzer · pkg): 2 — Enter opens, Escape closes"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.results_status()).as_deref(), Some("Usages of helper — 2 usages · rust-analyzer · pkg — Enter opens · Esc hides"));
     v.simulate_keystrokes("escape");
     // Ctrl+T, then Tab: the language server's symbols instead of syntactic declarations.
     v.simulate_keystrokes("ctrl-t tab h e l p");
     assert!(f.view.read_with(&v, |r, _| r.modal_rows()[1].0.starts_with("Find symbols (language server)")));
     drop(v);
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Symbols && x.done() && x.hits().len() == 1));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Symbols && x.done() && x.hits().len() == 1));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("tab");
     drop(v);
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Declarations));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Declarations));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape escape");
     // The outline's Tab: the language server's file symbols, and back.
     v.simulate_keystrokes("ctrl-shift-o");
-    assert!(f.view.read_with(&v, |r, _| r.results_status()).unwrap().contains("(Tab: language server symbols)"));
+    assert!(f.view.read_with(&v, |r, _| r.results_status()).unwrap().contains("Tab: language server symbols"));
     v.simulate_keystrokes("tab");
     drop(v);
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::FileSymbols));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::FileSymbols));
     let mut v = visual(cx, &f);
-    assert!(f.view.read_with(&v, |r, _| r.results_status()).unwrap().starts_with("File symbols (rust-analyzer · pkg) of main.rs: "));
+    assert!(f.view.read_with(&v, |r, _| r.results_status()).unwrap().starts_with("Symbols in main.rs — "));
     v.simulate_keystrokes("tab");
-    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().results().map(|x| x.results_kind())), Some(reader_core::search::ResultsKind::Outline));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().results().map(|x| x.results_kind())), Some(code_core::search::ResultsKind::Outline));
     v.simulate_keystrokes("escape");
     // The menu disables it for this folder (reading continues), then enables it again.
     let run = |v: &mut VisualTestContext, label: &str| {
@@ -1438,11 +2455,11 @@ fn usages_symbols_and_server_controls_through_keys_and_the_menu(cx: &mut TestApp
     let mut v = visual(cx, &f);
     run(&mut v, "Enable Language Server for This Folder");
     drop(v);
-    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     run(&mut v, "Restart Language Server");
     drop(v);
-    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |v| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), "fn main() { helper(); helper(); }\n");
 }
 
@@ -1458,7 +2475,7 @@ fn real_pyright_through_the_window(cx: &mut TestAppContext) {
         return;
     };
     let f = fixture_providers(cx, None, &[("pyright", &exe, path.as_deref(), None)]);
-    let root = tempfile::Builder::new().prefix("reader-gui-py-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-py-").tempdir().unwrap();
     let pkg = root.path().join("proj");
     for (name, text) in [("pyproject.toml", "[project]\nname = \"p\"\nversion = \"0\"\n"), ("geo.py", "def make() -> int:\n    return 1\n"), ("app.py", "from geo import make\nprint(make(), make())\n")] {
         std::fs::create_dir_all(pkg.join(name).parent().unwrap()).unwrap();
@@ -1467,7 +2484,7 @@ fn real_pyright_through_the_window(cx: &mut TestAppContext) {
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(pkg.join("app.py")), cx));
     for _ in 0..60 {
-        if f.view.read_with(cx, |v, _| v.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready)) {
+        if f.view.read_with(cx, |v, _| v.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready)) {
             break;
         }
         settle(cx, &f, |v| v.session().state().provider().is_some());
@@ -1481,16 +2498,16 @@ fn real_pyright_through_the_window(cx: &mut TestAppContext) {
     let at = |col: f32, line: f32| point(px(f32::from(text.origin.x) + num_w() + 8.0 + col * char_w), text.origin.y + px(line * line_h() + line_h() / 2.0));
     v.simulate_click(at(7.5, 1.0), Modifiers::control());
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("geo.py")) && r.session().state().selection().is_some());
+    settle_for(cx, &f, 30, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("geo.py")) && r.session().state().selection().is_some());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("shift-f12");
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Usages && x.hits().len() == 3));
+    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Usages && x.hits().len() == 3));
     let mut v = visual(cx, &f);
-    assert!(f.view.read_with(&v, |r, _| r.results_status()).unwrap().starts_with("Usages (Pyright · proj): 3"));
+    assert!(f.view.read_with(&v, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · Pyright · proj") && s.contains(" — 3 usage")));
     v.simulate_keystrokes("escape ctrl-shift-o tab");
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::FileSymbols && !x.hits().is_empty()));
+    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::FileSymbols && !x.hits().is_empty()));
     assert_eq!(std::fs::read_to_string(pkg.join("app.py")).unwrap(), "from geo import make\nprint(make(), make())\n");
 }
 
@@ -1508,7 +2525,7 @@ fn real_typescript_through_the_window(cx: &mut TestAppContext) {
     };
     let settings = std::env::var("READER_TSSERVER").ok().map(|p| serde_json::json!({ "tsserver": { "path": p } }).to_string());
     let f = fixture_providers(cx, None, &[("typescript-language-server", &exe, path.as_deref(), settings.as_deref())]);
-    let root = tempfile::Builder::new().prefix("reader-gui-ts-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-ts-").tempdir().unwrap();
     let pkg = root.path().join("proj");
     for (name, text) in [("package.json", "{}"), ("tsconfig.json", r#"{"compilerOptions":{"jsx":"preserve","strict":true}}"#), ("geo.ts", "export function make(): number {\n  return 1;\n}\n"), ("view.tsx", "import { make } from \"./geo\";\nexport const B = () => <b>{make()}</b>;\n")] {
         std::fs::create_dir_all(pkg.join(name).parent().unwrap()).unwrap();
@@ -1516,7 +2533,7 @@ fn real_typescript_through_the_window(cx: &mut TestAppContext) {
     }
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(pkg.join("view.tsx")), cx));
-    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -1531,12 +2548,12 @@ fn real_typescript_through_the_window(cx: &mut TestAppContext) {
         v.simulate_click(at(col, 1.0), Modifiers::control());
         drop(v);
         settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-        if f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("geo.ts"))) {
+        if f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("geo.ts"))) {
             break;
         }
         assert!(std::time::Instant::now() < until);
         f.view.update(cx, |r, cx| r.dispatch(Command::Open(pkg.join("view.tsx")), cx));
-        settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("view.tsx")));
+        settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("view.tsx")));
         std::thread::sleep(std::time::Duration::from_millis(250));
         v = visual(cx, &f);
         draw(&mut v);
@@ -1547,7 +2564,7 @@ fn real_typescript_through_the_window(cx: &mut TestAppContext) {
         v.simulate_keystrokes("shift-f12");
         drop(v);
         settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none());
-        if f.view.read_with(cx, |r, _| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Usages && x.hits().len() >= 2)) {
+        if f.view.read_with(cx, |r, _| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Usages && x.hits().len() >= 2)) {
             break;
         }
         let (bar, panel) = f.view.read_with(cx, |r, _| (r.status(), r.results_status()));
@@ -1555,7 +2572,7 @@ fn real_typescript_through_the_window(cx: &mut TestAppContext) {
         assert!(std::time::Instant::now() < until && (bar.contains("may still be loading") || panel.is_some_and(|s| s.contains("may be incomplete"))), "{bar}");
         std::thread::sleep(std::time::Duration::from_millis(250));
     }
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (typescript-language-server · proj): "));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · typescript-language-server · proj")));
 }
 
 /// Real Eclipse JDT LS through real input: Ctrl-click on a JDK method opens its source, retrieved from the
@@ -1570,13 +2587,13 @@ fn real_jdtls_through_the_window(cx: &mut TestAppContext) {
         return;
     };
     let f = fixture_providers(cx, None, &[("jdtls", &exe, path.as_deref(), None)]);
-    let root = tempfile::Builder::new().prefix("reader-gui-java-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-java-").tempdir().unwrap();
     let pkg = root.path().join("proj");
     std::fs::create_dir_all(pkg.join("src")).unwrap();
     std::fs::write(pkg.join("src/App.java"), "public class App {\n    public static void main(String[] args) {\n        System.out.println(twice(1) + twice(2));\n    }\n\n    static int twice(int x) {\n        return x * 2;\n    }\n}\n").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(pkg.join("src/App.java")), cx));
-    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(1000.0), px(500.0)));
     draw(&mut v);
@@ -1595,7 +2612,7 @@ fn real_jdtls_through_the_window(cx: &mut TestAppContext) {
     // Back returns to the file; the retrieved tab stays.
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("App.java")));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("App.java")));
     assert!(f.view.read_with(cx, |r, _| tab_titles(r)).iter().any(|t| t.starts_with("PrintStream.java")));
     // Shift+F12 at `twice`'s declaration: both calls, labelled with the provider and project.
     let mut v = visual(cx, &f);
@@ -1605,12 +2622,12 @@ fn real_jdtls_through_the_window(cx: &mut TestAppContext) {
     v.simulate_keystrokes("shift-f12");
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some());
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (Eclipse JDT LS · proj): 2"), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · Eclipse JDT LS · proj") && s.contains(" — 2 usage")), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
     // Ctrl+T, Tab: the server's workspace symbols.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape ctrl-t tab a p p"); // JDT LS lists types (methods are not workspace symbols)
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Symbols && !x.hits().is_empty()));
+    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Symbols && !x.hits().is_empty()));
 }
 
 /// Draw, let background work (an image's texture) finish, and draw again.
@@ -1642,7 +2659,7 @@ fn images_open_in_tabs_fit_the_view_and_release_their_textures(cx: &mut TestAppC
     let open = |cx: &mut TestAppContext, name: &str, retain: bool| {
         let p = dir.join(name);
         f.view.update(cx, |v, cx| v.dispatch(if retain { Command::OpenRetained(p.clone()) } else { Command::Open(p.clone()) }, cx));
-        settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source() == p));
+        settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source() == p));
     };
     open(cx, "a.png", true);
     let mut v = visual(cx, &f);
@@ -1665,7 +2682,7 @@ fn images_open_in_tabs_fit_the_view_and_release_their_textures(cx: &mut TestAppC
     // Back to the kept image tab: shown again.
     v.simulate_keystrokes("ctrl-tab");
     drop(v);
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("a.png")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("a.png")));
     let mut v = visual(cx, &f);
     show(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.image_shown()), Some((40, 30)));
@@ -1795,7 +2812,7 @@ fn markdown_reads_as_a_preview_and_switches_to_source_at_the_same_place(cx: &mut
     let txt = f.dir.path().join("notes.txt");
     std::fs::write(&txt, "plain\n").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(txt.clone()), cx));
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source() == txt));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source() == txt));
     let mut v = visual(cx, &f);
     show(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| (r.preview_state(), r.uploads.len())), (None, 0));
@@ -1836,7 +2853,7 @@ fn history_returns_to_a_markdown_preview_at_its_reading_line(cx: &mut TestAppCon
     let txt = f.dir.path().join("other.txt");
     std::fs::write(&txt, "other\n").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(txt.clone()), cx));
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source() == txt));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source() == txt));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("alt-left");
     drop(v);
@@ -1858,14 +2875,14 @@ fn real_html_and_css_through_the_window(cx: &mut TestAppContext) {
         return;
     };
     let f = fixture_providers(cx, None, &[("vscode-html", Path::new(""), Some(&path), None), ("vscode-css", Path::new(""), Some(&path), None)]);
-    let root = tempfile::Builder::new().prefix("reader-gui-web-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-web-").tempdir().unwrap();
     let site = root.path().join("site");
     std::fs::create_dir_all(&site).unwrap();
     std::fs::write(site.join("index.html"), "<!doctype html>\n<p>𝄞 é</p>\n<script>\nfunction greet(n) { return n; }\nconst é = greet(1); greet(é);\n</script>\n").unwrap();
     std::fs::write(site.join("style.css"), ":root { --accent: red; }\na { color: var(--accent); }\n").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(site.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(site.join("index.html")), cx));
-    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -1878,15 +2895,15 @@ fn real_html_and_css_through_the_window(cx: &mut TestAppContext) {
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
     let (line, word) = f.view.read_with(cx, |r, _| {
         let s = r.session().state();
-        let (doc, sel) = (s.document().unwrap(), s.selection().unwrap());
-        (doc.line_of(sel.head), doc.text()[sel.range()].to_string())
+        let (doc, sel) = (s.current_source().unwrap(), s.selection().unwrap());
+        (doc.line_of(sel.head), doc.copy_range(sel.range()).unwrap())
     });
     assert_eq!((line, word.as_str()), (3, "greet"), "{}", f.view.read_with(cx, |r, _| r.status()));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("shift-f12");
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some());
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (VS Code HTML · site): 3"), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · VS Code HTML · site") && s.contains(" — 3 usage")), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape f10");
     let rows = f.view.read_with(&v, |r, _| r.modal_rows());
@@ -1895,22 +2912,22 @@ fn real_html_and_css_through_the_window(cx: &mut TestAppContext) {
     drop(v);
     // An external edit moves the function: asked again, the new text is what it answers about.
     std::fs::write(site.join("index.html"), "<!doctype html>\n\n\n<p>𝄞 é</p>\n<script>\nfunction greet(n) { return n; }\nconst é = greet(1); greet(é);\n</script>\n").unwrap();
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.line(1).is_empty()));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.line_range(1).is_some_and(|range| range.is_empty())));
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("home");
     draw(&mut v);
     v.simulate_click(at("const é = greet(1); gr".chars().count() as f32, 6.0), Modifiers::control());
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-    assert_eq!(f.view.read_with(cx, |r, _| { let s = r.session().state(); s.document().unwrap().line_of(s.selection().unwrap().head) }), 5);
+    assert_eq!(f.view.read_with(cx, |r, _| { let s = r.session().state(); s.current_source().unwrap().line_of(s.selection().unwrap().head) }), 5);
     // A workspace root set for the page: its server restarts there and still answers.
     let sub = site.join("pages");
     std::fs::create_dir_all(&sub).unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::SetWorkspaceRoot(Some(site.clone())), cx));
-    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready && p.root.as_deref() == Some(site.as_path())));
+    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready && p.root.as_deref() == Some(site.as_path())));
     // The stylesheet in the same folder has its own server.
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(site.join("style.css")), cx));
-    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready && p.name == "VS Code CSS"));
+    settle_for(cx, &f, 30, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready && p.name == "VS Code CSS"));
     let mut v = visual(cx, &f);
     draw(&mut v);
     v.simulate_click(at("a { color: var(--ac".len() as f32, 1.0), Modifiers::control());
@@ -1922,7 +2939,7 @@ fn real_html_and_css_through_the_window(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("index.html")));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("index.html")));
     for name in ["index.html", "style.css"] {
         assert!(std::fs::read(site.join(name)).is_ok_and(|b| !b.is_empty()), "never written");
     }
@@ -1940,7 +2957,7 @@ fn real_ruby_through_the_window(cx: &mut TestAppContext) {
         return;
     };
     let f = fixture_providers(cx, None, &[("ruby-lsp", &exe, path.as_deref(), None)]);
-    let root = tempfile::Builder::new().prefix("reader-gui-rb-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-rb-").tempdir().unwrap();
     let proj = root.path().join("proj");
     for (name, text) in [("Gemfile", "source \"https://rubygems.org\"\n"), ("lib/shapes.rb", "module Shapes\n  class Círculo\n    def área = 1\n  end\nend\n"), ("lib/app.rb", "s = \"𝄞\"\nc = Shapes::Círculo.new\nc.área\nc.área\n")] {
         std::fs::create_dir_all(proj.join(name).parent().unwrap()).unwrap();
@@ -1948,7 +2965,7 @@ fn real_ruby_through_the_window(cx: &mut TestAppContext) {
     }
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(proj.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(proj.join("lib/app.rb")), cx));
-    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -1961,30 +2978,30 @@ fn real_ruby_through_the_window(cx: &mut TestAppContext) {
         v.simulate_click(at("c = Shapes::Cír".chars().count() as f32, 1.0), Modifiers::control());
         drop(v);
         settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-        if f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("shapes.rb"))) {
+        if f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("shapes.rb"))) {
             break;
         }
         assert!(std::time::Instant::now() < until, "{}", f.view.read_with(cx, |r, _| r.status()));
         f.view.update(cx, |r, cx| r.dispatch(Command::Open(proj.join("lib/app.rb")), cx));
-        settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("app.rb")));
+        settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("app.rb")));
         std::thread::sleep(std::time::Duration::from_millis(250));
         v = visual(cx, &f);
         draw(&mut v);
     }
-    let selected = f.view.read_with(cx, |r, _| { let s = r.session().state(); s.document().unwrap().text()[s.selection().unwrap().range()].to_string() });
+    let selected = f.view.read_with(cx, |r, _| { let s = r.session().state(); s.current_source().unwrap().copy_range(s.selection().unwrap().range()).unwrap() });
     assert_eq!(selected, "Círculo");
     // Back, then Shift+F12 on `área` (line 3): the method's usages by name, its declaration included.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("app.rb")));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("app.rb")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     v.simulate_click(at(3.0, 2.0), Modifiers::default());
     v.simulate_keystrokes("shift-f12");
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some());
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (Ruby LSP · proj): 3"), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · Ruby LSP · proj") && s.contains(" — 3 usage")), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
     // The workspace root, typed into the command menu's modal: the server restarts there.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape");
@@ -2000,7 +3017,7 @@ fn real_ruby_through_the_window(cx: &mut TestAppContext) {
     v.simulate_keystrokes("enter");
     drop(v);
     let lib = proj.join("lib");
-    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready && p.root.as_deref() == Some(lib.as_path())));
+    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready && p.root.as_deref() == Some(lib.as_path())));
     assert!(!proj.join(".ruby-lsp").exists() && !proj.join("Gemfile.lock").exists() && !lib.join(".ruby-lsp").exists(), "nothing written into the project");
 }
 
@@ -2019,7 +3036,7 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
         return;
     }
     let f = fixture_providers(cx, None, &[("kotlin-lsp", &exe, None, None)]);
-    let root = tempfile::Builder::new().prefix("reader-gui-kt-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-kt-").tempdir().unwrap();
     let proj = root.path().join("proj");
     let pom = "<project xmlns=\"http://maven.apache.org/POM/4.0.0\"><modelVersion>4.0.0</modelVersion><groupId>f</groupId><artifactId>m</artifactId><version>1</version><dependencies><dependency><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-stdlib</artifactId><version>2.2.21</version></dependency></dependencies><build><plugins><plugin><groupId>org.jetbrains.kotlin</groupId><artifactId>kotlin-maven-plugin</artifactId><version>2.2.21</version><configuration><sourceDirs><sourceDir>src/main/kotlin</sourceDir><sourceDir>src/main/java</sourceDir></sourceDirs></configuration></plugin></plugins></build></project>\n";
     for (name, text) in [("pom.xml", pom), ("src/main/kotlin/geo/Shapes.kt", "package geo\n\nfun make(r: Double) = r * 2\n\nfun useJava() = app.Helper.twice(2)\n"), ("src/main/kotlin/geo/Main.kt", "package geo\n\nfun main() {\n    val s = \"𝄞 é\"; println(make(2.0))\n}\n"), ("src/main/java/app/Helper.java", "package app;\n\npublic class Helper {\n    public static int twice(int x) { return x * 2; }\n}\n")] {
@@ -2029,8 +3046,8 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(proj.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(proj.join("src/main/kotlin/geo/Main.kt")), cx));
     // Its Maven import reports progress (shown as indexing): wait until it has begun and finished.
-    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| matches!(p.status, reader_core::semantics::Status::Indexing(_))));
-    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 60, &|r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Indexing(_))));
+    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -2043,7 +3060,7 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
         v.simulate_click(at("    val s = \"𝄞 é\"; println(ma".chars().count() as f32, 3.0), Modifiers::control());
         drop(v);
         settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-        if f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("Shapes.kt"))) {
+        if f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("Shapes.kt"))) {
             break;
         }
         assert!(std::time::Instant::now() < until, "{}", f.view.read_with(cx, |r, _| r.status()));
@@ -2063,7 +3080,7 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
         v.simulate_click(at("fun useJava() = app.Helper.tw".len() as f32, 4.0), Modifiers::control());
         drop(v);
         settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-        if f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("Helper.java"))) {
+        if f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("Helper.java"))) {
             break;
         }
         assert!(std::time::Instant::now() < until, "{}", f.view.read_with(cx, |r, _| r.status()));
@@ -2073,7 +3090,7 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("Shapes.kt")));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("Shapes.kt")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
@@ -2082,7 +3099,7 @@ fn real_kotlin_through_the_window(cx: &mut TestAppContext) {
     v.simulate_keystrokes("shift-f12");
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some());
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (Kotlin LSP · proj): 1"), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · Kotlin LSP · proj") && s.contains(" — 1 usage")), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
     let mut written = walk(&proj);
     written.sort();
     assert_eq!(written, ["pom.xml", "src/main/java/app/Helper.java", "src/main/kotlin/geo/Main.kt", "src/main/kotlin/geo/Shapes.kt"], "nothing written into the project");
@@ -2112,7 +3129,7 @@ fn real_rust_analyzer_through_the_window(cx: &mut TestAppContext) {
         return;
     };
     let f = fixture_with(cx, None, &exe);
-    let root = tempfile::Builder::new().prefix("reader-gui-rs-").tempdir().unwrap();
+    let root = tempfile::Builder::new().prefix("code-gui-rs-").tempdir().unwrap();
     let ws = root.path().join("ws");
     for (name, text) in [
         ("Cargo.toml", "[workspace]\nmembers = [\"geo\", \"app\"]\nresolver = \"2\"\n"),
@@ -2128,7 +3145,7 @@ fn real_rust_analyzer_through_the_window(cx: &mut TestAppContext) {
     let before = { let mut w = walk(&ws); w.sort(); w };
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(ws.clone()), cx));
     f.view.update(cx, |v, cx| v.dispatch(Command::Open(ws.join("app/src/main.rs")), cx));
-    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle_for(cx, &f, 120, &|r| r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -2142,12 +3159,12 @@ fn real_rust_analyzer_through_the_window(cx: &mut TestAppContext) {
     v.simulate_click(p, Modifiers::control());
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().loading().is_none());
-    assert!(f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("geo/src/lib.rs"))), "{}", f.view.read_with(cx, |r, _| r.status()));
+    assert!(f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("geo/src/lib.rs"))), "{}", f.view.read_with(cx, |r, _| r.status()));
     // Back; Alt+F12 peeks at the same target without moving.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("alt-left");
     drop(v);
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     let p = at(&v, "    println!(\"{s} {x} {}\", geo::ma".len() as f32, 2.0);
@@ -2155,18 +3172,18 @@ fn real_rust_analyzer_through_the_window(cx: &mut TestAppContext) {
     v.simulate_keystrokes("alt-f12");
     drop(v);
     settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some());
-    assert!(f.view.read_with(cx, |r, _| r.session().state().document().is_some_and(|d| d.source().ends_with("main.rs"))), "a peek does not move");
+    assert!(f.view.read_with(cx, |r, _| r.session().state().current_source().is_some_and(|d| d.source().ends_with("main.rs"))), "a peek does not move");
     // Shift+F12: both calls.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape shift-f12");
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Usages));
-    assert!(f.view.read_with(cx, |r, _| r.results_status()).unwrap().starts_with("Usages (rust-analyzer · ws): 2"), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
+    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Usages));
+    assert!(f.view.read_with(cx, |r, _| r.results_status()).is_some_and(|s| s.starts_with("Usages of ") && s.contains(" · rust-analyzer · ws") && s.contains(" — 2 usage")), "{:?}", f.view.read_with(cx, |r, _| r.results_status()));
     // Ctrl+T, Tab: workspace symbols.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("escape ctrl-t tab m a k e");
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Symbols && !x.hits().is_empty()));
+    settle_for(cx, &f, 30, &|r| r.session().state().asking().is_none() && r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Symbols && !x.hits().is_empty()));
     assert!(f.view.read_with(cx, |r, _| r.session().state().results().unwrap().hits().iter().any(|h| h.text.contains("pub fn make"))));
     // Ctrl+Alt+H on `make`: its caller, main (calling it twice); Ctrl+Q: its documentation.
     let main = std::fs::read_to_string(ws.join("app/src/main.rs")).unwrap();
@@ -2176,7 +3193,7 @@ fn real_rust_analyzer_through_the_window(cx: &mut TestAppContext) {
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: make, head: make }), cx));
     v.simulate_keystrokes("ctrl-alt-h");
     drop(v);
-    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == reader_core::search::ResultsKind::Hierarchy && x.hits().len() >= 2));
+    settle_for(cx, &f, 30, &|r| r.session().state().results().is_some_and(|x| x.results_kind() == code_core::search::ResultsKind::Hierarchy && x.hits().len() >= 2));
     let caller = f.view.read_with(cx, |r, _| r.session().state().results().unwrap().call(1).unwrap());
     assert_eq!((caller.name.as_str(), caller.calls), ("main", 2), "{caller:?}");
     let mut v = visual(cx, &f);
@@ -2205,7 +3222,7 @@ fn back_and_forward_buttons_navigate_and_are_disabled_when_there_is_nowhere_to_g
     let (back, enabled) = button(&v, CommandId::Back);
     assert!(!enabled && !button(&v, CommandId::Forward).1);
     v.simulate_click(back, Modifiers::default());
-    assert!(f.view.read_with(&v, |r, _| r.session().state().document().unwrap().source().ends_with("one.txt")));
+    assert!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().source().ends_with("one.txt")));
     // After opening another file, Back is enabled and returns; then Forward goes ahead again.
     f.view.update(&mut v, |view, cx| view.open(two.clone(), cx));
     drop(v);
@@ -2261,7 +3278,7 @@ fn a_folder_given_at_launch_opens_as_the_project(cx: &mut TestAppContext) {
         std::thread::sleep(std::time::Duration::from_millis(5));
     }
     assert_eq!(view.read_with(cx, |v, _| v.session().state().project().map(|p| p.root().to_owned())), Some(proj.clone()));
-    assert!(view.read_with(cx, |v, _| v.session().state().document().is_none()));
+    assert!(view.read_with(cx, |v, _| v.session().state().current_source().is_none()));
 }
 
 fn click_preview(v: &mut VisualTestContext, f: &Fixture, pane: u8) -> &'static str {
@@ -2271,7 +3288,7 @@ fn click_preview(v: &mut VisualTestContext, f: &Fixture, pane: u8) -> &'static s
 }
 
 /// Click the toolbar button for `id` (it must be shown) and return its label before the click.
-fn click_toolbar(v: &mut VisualTestContext, f: &Fixture, id: CommandId) -> &'static str {
+fn click_toolbar(v: &mut VisualTestContext, f: &Fixture, id: CommandId) -> String {
     let (x0, x1, label) = f.view.read_with(v, |r, _| {
         let b = r.nav_buttons().into_iter().find(|b| b.2 == id).unwrap_or_else(|| panic!("no {id:?} button"));
         (b.0, b.1, b.4)
@@ -2338,7 +3355,7 @@ fn the_explorer_hides_by_its_button_and_selects_the_opened_file_by_its_target(cx
     // Open a nested file without the tree: its folders stay closed.
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Open(root.join("src/ui/view.rs")), cx));
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with("view.rs")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with("view.rs")));
     let mut v = visual(cx, &f);
     draw(&mut v);
     let (sidebar, tabs) = f.view.read_with(&v, |r, _| (r.sidebar_w, r.tab_hits.clone()));
@@ -2575,13 +3592,13 @@ fn ctrl_alt_b_and_ctrl_shift_b_ask_for_implementations_and_type_definitions(cx: 
     let at = main.find("c: Circle").unwrap();
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
     v.simulate_keystrokes("ctrl-shift-b");
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("lib.rs")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("lib.rs")));
     v.simulate_keystrokes("alt-left");
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("main.rs")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("main.rs")));
     let at = main.find("Shape =").unwrap();
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
     v.simulate_keystrokes("ctrl-alt-b");
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|r| r.results_kind() == reader_core::search::ResultsKind::Implementations && r.hits().len() == 2));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|r| r.results_kind() == code_core::search::ResultsKind::Implementations && r.hits().len() == 2));
     assert!(f.view.read_with(&v, |r, _| r.results_focus), "keys go to the listed implementations");
     let shown = f.view.read_with(&v, |r, _| r.tree_shown);
     v.simulate_keystrokes("escape escape ctrl-b");
@@ -2637,7 +3654,7 @@ fn occurrences_tint_after_the_caret_rests(cx: &mut TestAppContext) {
     let at = text.find("total + ").unwrap() + 1;
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
     assert_eq!(tinted(&mut v), 0, "nothing before the caret rests");
-    cx.executor().advance_clock(reader_core::session::HIGHLIGHT_REST);
+    cx.executor().advance_clock(code_core::session::HIGHLIGHT_REST);
     settle(cx, &f, |r| r.session().state().occurrences().is_some());
     assert_eq!(tinted(&mut v), 3);
     // Moving off the name clears them at once.
@@ -2650,7 +3667,7 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
     let text = "fn main() { helper(); }\nfn helper() {}\n";
     let f = fixture_with(cx, None, &fake_lsp());
     let pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -2658,11 +3675,25 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
     let char_w = f.view.read_with(&v, |r, _| r.char_w);
     let at = |col: f32| point(px(f32::from(tb.origin.x) + num_w() + 8.0 + col * char_w), tb.origin.y + px(line_h() / 2.0));
     let shown = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().state().documentation().is_some());
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    let hint = |id| f.view.read_with(&v, |r, _| r.key_hint(id));
+    assert_eq!(hint(CommandId::Documentation).as_deref(), Some("Ctrl+Q"));
+    assert_eq!(hint(CommandId::CloseWindow), None, "closing a window is a menu action in the GUI");
+    assert_eq!(hint(CommandId::QuitAll).as_deref(), Some("Ctrl+Shift+Q"));
+    let unchanged = |r: &ReaderView| {
+        let state=r.session.state();let view=state.view(state.active().unwrap().id()).unwrap();
+        (view.snapshot().key(), view.copy_selection(), view.tab().selection(), view.dirty(), view.can_undo(), view.can_redo())
+    };
     // Ctrl+Q at the caret: a popup below the name.
     v.simulate_click(at(14.5), Modifiers::default());
+    let before = f.view.read_with(&v, |r, _| unchanged(r));
     v.simulate_keystrokes("ctrl-q");
     settle(cx, &f, |r| r.session().state().documentation().is_some());
     draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |r, _| unchanged(r)), before);
+    assert!(f.view.read_with(&v, |r, _| !r.session.closed() && r.session.close_prompt().is_none()));
+    assert_eq!(std::fs::read(pkg.join("src/main.rs")).unwrap(), text.as_bytes());
     let b = f.view.read_with(&v, |r, _| r.doc_popup_bounds()).expect("a popup is drawn");
     assert!(b.origin.y >= tb.origin.y + px(line_h()), "below the name: {b:?}");
     v.simulate_keystrokes("escape");
@@ -2706,11 +3737,17 @@ fn documentation_opens_on_ctrl_q_and_on_rest_closes_and_lets_go(cx: &mut TestApp
         draw(&mut v);
         assert!(f.view.read_with(&v, |r, _| r.doc_popup_bounds().is_none() && r.doc_popup.is_none()));
     }
+    v.simulate_keystrokes("ctrl-shift-a");type_text(&mut v,"CloseWindow");
+    settle(cx,&f,|r|r.session.state().navigation().is_some_and(|n|!n.pending && n.rows.iter().any(|row|row.action()==Some(CommandId::CloseWindow))));
+    draw(&mut v);
+    assert!(f.view.read_with(&v,|r,_|r.modal_rows().iter().any(|row|row.0.starts_with("Close Window") && !row.0.contains("Ctrl+Q"))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::CloseWindow)), None, "no key claims Ctrl+Q here; the terminal closes a view with it");
+    v.simulate_keystrokes("escape");
     // Another tab closes it too.
     v.simulate_keystrokes("ctrl-q");
     settle(cx, &f, |r| r.session().state().documentation().is_some());
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Open(pkg.join("Cargo.toml")), cx));
-    settle(cx, &f, |r| r.session().state().document().is_some_and(|d| d.source().ends_with("Cargo.toml")));
+    settle(cx, &f, |r| r.session().state().current_source().is_some_and(|d| d.source().ends_with("Cargo.toml")));
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.doc_popup_bounds().is_none()));
 }
@@ -2720,7 +3757,7 @@ fn documentation_on_rest_shows_in_either_pane_and_never_under_a_menu(cx: &mut Te
     let text = "fn main() { helper(); }\nfn helper() {}\n";
     let f = fixture_with(cx, None, &fake_lsp());
     fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(1000.0), px(400.0)));
     draw(&mut v);
@@ -2753,7 +3790,7 @@ fn documentation_on_rest_shows_in_either_pane_and_never_under_a_menu(cx: &mut Te
 fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     let src = "fn f() {\n    if x {\n        y();\n    }\n}\nfn g() {\n    z();\n}\n";
     let f = fixture(cx, Some(("a.rs", src.as_bytes())));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.folds().is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -2801,8 +3838,8 @@ fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
     v.simulate_keystrokes("ctrl-+");
     draw(&mut v);
     assert_eq!(numbers(&mut v), vec![6, 7, 8, 9]);
-    assert_eq!(key_hint(CommandId::Collapse), Some("Ctrl+-"));
-    assert_eq!(key_hint(CommandId::ExpandAll), Some("Ctrl+Shift+="));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Collapse)).as_deref(), Some("Ctrl+-"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ExpandAll)).as_deref(), Some("Ctrl+Shift+="));
     for (w, h) in [(1.0, 1.0), (60.0, 30.0)] {
         v.simulate_resize(size(px(w), px(h)));
         draw(&mut v);
@@ -2814,7 +3851,7 @@ fn folds_by_keys_gutter_and_placeholder_in_both_panes(cx: &mut TestAppContext) {
 fn ctrl_w_extends_ctrl_shift_w_shrinks_and_ctrl_f4_closes(cx: &mut TestAppContext) {
     let src = "fn f() {\n    g(\"hello world\");\n}\n";
     let f = fixture(cx, Some(("a.rs", src.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     let at = src.find("world").unwrap() + 1;
     f.view.update(&mut v, |v, cx| v.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
@@ -2828,9 +3865,9 @@ fn ctrl_w_extends_ctrl_shift_w_shrinks_and_ctrl_f4_closes(cx: &mut TestAppContex
     assert_eq!(sel(&mut v), "hello world");
     v.simulate_keystrokes("ctrl-shift-w");
     assert_eq!(sel(&mut v), "world");
-    assert_eq!(key_hint(CommandId::Close), Some("Ctrl+F4"));
-    assert_eq!(key_hint(CommandId::ExtendSelection), Some("Ctrl+W"));
-    assert_eq!(key_hint(CommandId::ShrinkSelection), Some("Ctrl+Shift+W"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Close)).as_deref(), Some("Ctrl+F4"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ExtendSelection)).as_deref(), Some("Ctrl+W"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ShrinkSelection)).as_deref(), Some("Ctrl+Shift+W"));
     v.simulate_keystrokes("ctrl-f4");
     assert!(f.view.read_with(&v, |v, _| v.session().state().active().is_none()));
 }
@@ -2839,7 +3876,7 @@ fn ctrl_w_extends_ctrl_shift_w_shrinks_and_ctrl_f4_closes(cx: &mut TestAppContex
 fn selections_reach_the_primary_selection_and_ctrl_c_copies_the_caret_line(cx: &mut TestAppContext) {
     let src = "first line\nsecond\n";
     let f = fixture(cx, Some(("a.txt", src.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -2924,10 +3961,10 @@ fn preview_selection_with_only_an_image(cx: &mut TestAppContext) {
 #[gpui::test]
 fn focusing_the_other_pane_leaves_the_primary_selection_alone(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.txt", b"first line\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     f.view.update(cx, |v, cx| {
         v.dispatch(Command::Select(Selection { anchor: 0, head: 5 }), cx);
-        v.dispatch(Command::Split(reader_core::session::Split::Columns), cx);
+        v.dispatch(Command::Split(code_core::session::Split::Columns), cx);
         v.dispatch(Command::Select(Selection { anchor: 6, head: 10 }), cx);
     });
     cx.update(|cx| cx.write_to_primary(ClipboardItem::new_string("elsewhere".into())));
@@ -2965,7 +4002,7 @@ fn find_settled(v: &ReaderView) -> bool {
 #[gpui::test]
 fn ctrl_f_finds_as_you_type_with_toggles_f3_and_list_all(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"Foo foo\nfood foo\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-f f o o");
     drop(v);
@@ -3004,7 +4041,7 @@ fn ctrl_f_finds_as_you_type_with_toggles_f3_and_list_all(cx: &mut TestAppContext
 #[gpui::test]
 fn the_find_box_fits_narrow_panes_and_keys_go_back_to_the_text_on_click(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"foo\nfoo\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(180.0), px(200.0)));
     v.simulate_keystrokes("ctrl-f f o o");
@@ -3013,7 +4050,9 @@ fn the_find_box_fits_narrow_panes_and_keys_go_back_to_the_text_on_click(cx: &mut
     assert!(b.toggles.iter().all(|(_, t)| t.size.width == px(0.0)), "toggles hidden below 200 px");
     assert!(f32::from(b.bounds.size.width) <= 180.0);
     let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
-    v.simulate_click(point(text.origin.x + px(90.0), text.origin.y + px(50.0)), Modifiers::default());
+    // Below the box's two rows (query and replacement).
+    let below = text.origin.y + px(line_h() * 4.0);
+    v.simulate_click(point(text.origin.x + px(90.0), below), Modifiers::default());
     assert_eq!(f.view.read_with(&v, |r, _| r.find_focus), None);
     drop(v);
     settle(cx, &f, find_settled);
@@ -3024,9 +4063,90 @@ fn the_find_box_fits_narrow_panes_and_keys_go_back_to_the_text_on_click(cx: &mut
 }
 
 #[gpui::test]
+fn the_find_box_replaces_current_and_all_from_its_replacement_field(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"Foo foo\nfood foo\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f f o o");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    assert_eq!(find_counter(&v, &f), "1/4");
+    // Tab gives the keys to the replacement field; typing there changes neither the query nor the text.
+    v.simulate_keystrokes("tab b a r");
+    assert_eq!(find_counter(&v, &f), "1/4");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().find().unwrap().query().to_owned()), "foo");
+    v.simulate_keystrokes("enter");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| r.session().state().current_source().map(|d| d.copy_range(0..d.len_bytes()).unwrap()).unwrap());
+    assert_eq!(text(&v), "bar foo\nfood foo\n", "the current match is replaced, and the next is selected");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "bar");
+    assert_eq!(find_counter(&v, &f), "1/3");
+    // Alt+A replaces every remaining match as one action.
+    v.simulate_keystrokes("alt-a");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    assert_eq!(text(&v), "bar bar\nbard bar\n");
+    assert_eq!(find_counter(&v, &f), "No matches");
+    // One Undo takes the whole Replace All.
+    v.simulate_keystrokes("escape ctrl-z");
+    assert_eq!(text(&v), "bar foo\nfood foo\n");
+    let file = f.dir.path().join("a.rs");
+    assert_eq!(std::fs::read(&file).unwrap(), b"Foo foo\nfood foo\n", "replace never writes the file");
+}
+
+#[gpui::test]
+fn a_click_on_the_replace_row_gives_it_the_keys_and_a_modal_keeps_the_text(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"needle\r\nneedle\r\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f n e e d l e");
+    draw(&mut v);
+    let row = f.view.read_with(&v, |r, _| r.find_box(&r.panes[0]).unwrap().replace_row);
+    assert!(row.size.height > px(0.0), "the replacement row is drawn");
+    v.simulate_click(row.center(), Modifiers::default());
+    v.simulate_keystrokes("x");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "x");
+    // A command menu owns the keys: typing there changes neither the replacement nor the document.
+    v.simulate_keystrokes("f10 a b");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().replace_text().to_owned()), "x");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..14).unwrap()), "needle\r\nneedle");
+    v.simulate_keystrokes("escape escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().active().unwrap().find().is_none()), "Escape closes the box after the menu");
+}
+
+#[gpui::test]
+fn read_only_mode_refuses_replace_and_says_why(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("a.rs", b"foo\n")));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    f.view.update(cx, |v, cx| {
+        v.dispatch(Command::SetReadOnly(true), cx);
+        v.dispatch(Command::SetReplaceText("bar".into()), cx);
+    });
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-f f o o");
+    drop(v);
+    settle(cx, &f, find_settled);
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("tab enter");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..4).unwrap()), "foo\n");
+    // The read-only indicator follows it in the status; Details keep both.
+    let details = f.view.read_with(&v, |r, _| r.session().status_details());
+    assert!(details.lines().any(|line| line == "Replace: Read-only mode is on"), "{details}");
+    assert_eq!(std::fs::read(f.dir.path().join("a.rs")).unwrap(), b"foo\n");
+}
+
+#[gpui::test]
 fn ctrl_g_goes_to_a_line_and_keeps_the_box_open_on_bad_input(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"a\nbb\nccc\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-g x enter");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::GoTo { error: Some(e), .. }) if e == "expected line or line:column")));
@@ -3063,7 +4183,7 @@ fn project_search_takes_the_find_options_and_refuses_a_bad_expression(cx: &mut T
 fn alt_z_wraps_long_lines_into_unnumbered_indented_rows(cx: &mut TestAppContext) {
     let text = format!("    {}\nshort\n", "word ".repeat(60));
     let f = fixture(cx, Some(("a.txt", text.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(400.0), px(300.0)));
     draw(&mut v);
@@ -3085,7 +4205,7 @@ fn alt_z_wraps_long_lines_into_unnumbered_indented_rows(cx: &mut TestAppContext)
 fn clicks_on_wrapped_rows_land_on_their_bytes(cx: &mut TestAppContext) {
     let text = "\tab 日本語 ".repeat(20) + "\n";
     let f = fixture(cx, Some(("a.txt", text.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(300.0), px(300.0)));
     draw(&mut v);
@@ -3094,7 +4214,9 @@ fn clicks_on_wrapped_rows_land_on_their_bytes(cx: &mut TestAppContext) {
     let (text_b, char_w, row1) = f.view.read_with(&v, |r, _| {
         let s = r.session().state();
         let t = s.active().unwrap();
-        (r.text_bounds.unwrap(), r.char_w, t.rows(3, s.wrap_cols(t))[1].clone())
+        let layout = s.view(t.id()).unwrap().layout_rows(3, s.wrap_cols(t));
+        assert!(layout.pending.is_none(), "the rendered short fixture has complete shared rows");
+        (r.text_bounds.unwrap(), r.char_w, layout.rows[1].clone())
     });
     assert_eq!(row1.index, 1, "the line wrapped");
     // The first character of the second row, just right of its indent.
@@ -3111,7 +4233,7 @@ fn sticky_fixture(cx: &mut TestAppContext) -> (Fixture, VisualTestContext) {
     let path = f.dir.path().join("a.rs");
     std::fs::write(&path, format!("mod m {{\n    fn f() {{\n{}    }}\n}}\n", "        a;\n".repeat(60))).unwrap();
     f.view.update(cx, |v, cx| v.open(path.clone(), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.declarations().is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.declarations().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -3133,7 +4255,7 @@ fn sticky_headers_draw_over_the_text_and_a_click_jumps(cx: &mut TestAppContext) 
     draw(&mut v);
     let line = f.view.read_with(&v, |v, _| {
         let s = v.session().state();
-        s.document().unwrap().line_of(s.selection().unwrap().head)
+        s.current_source().unwrap().line_of(s.selection().unwrap().head)
     });
     assert_eq!(line, 1, "the caret on fn f");
 }
@@ -3169,7 +4291,7 @@ fn the_find_box_takes_a_click_over_a_sticky_line(cx: &mut TestAppContext) {
 fn each_pane_draws_its_own_sticky_lines(cx: &mut TestAppContext) {
     let (f, mut v) = sticky_fixture(cx);
     f.view.update(&mut v, |v, cx| {
-        v.dispatch(Command::Split(reader_core::session::Split::Columns), cx);
+        v.dispatch(Command::Split(code_core::session::Split::Columns), cx);
         v.dispatch(Command::Scroll(30), cx);
     });
     draw(&mut v);
@@ -3189,7 +4311,7 @@ fn crumbs_fixture(cx: &mut TestAppContext, width: f32) -> (Fixture, VisualTestCo
     f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
     settle(cx, &f, scanned);
     f.view.update(cx, |v, cx| v.open(root.join("src/ui/a.rs"), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.declarations().is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.declarations().is_some())));
     let at = CRUMBS_SRC.find("a;").unwrap();
     f.view.update(cx, |v, cx| v.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
     let mut v = visual(cx, &f);
@@ -3217,7 +4339,7 @@ fn the_breadcrumb_bar_reveals_jumps_and_lists_what_is_inside(cx: &mut TestAppCon
     assert_eq!(crumb_labels(&f, &v), ["src", "ui", "a.rs", "m", "f"]);
     v.simulate_click(crumb(&f, &v, "m", false), Modifiers::default());
     draw(&mut v);
-    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.document().unwrap().line_of(s.selection().unwrap().head) }), 0, "the caret on mod m");
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.current_source().unwrap().line_of(s.selection().unwrap().head) }), 0, "the caret on mod m");
     v.simulate_click(crumb(&f, &v, "ui", false), Modifiers::default());
     draw(&mut v);
     let rows: Vec<String> = f.view.read_with(&v, |v, _| v.session().state().project().unwrap().rows().iter().map(|r| r.path.to_string()).collect());
@@ -3282,7 +4404,7 @@ fn bookmarks_fixture(cx: &mut TestAppContext) -> (Fixture, VisualTestContext, Pa
 
 fn caret_to(f: &Fixture, v: &mut VisualTestContext, line: usize) {
     f.view.update(v, |view, cx| {
-        let at = view.session().state().document().unwrap().line_range(line).start;
+        let at = view.session().state().current_source().unwrap().line_range(line).unwrap().start;
         view.dispatch(Command::Select(Selection { anchor: at, head: at }), cx);
     });
 }
@@ -3300,7 +4422,7 @@ fn bookmark_keys_reach_their_commands(cx: &mut TestAppContext) {
     assert_eq!(f.view.read_with(&v, |v, _| v.bookmark_marks()), [(2, None), (4, Some('3'))]);
     caret_to(&f, &mut v, 0);
     v.simulate_keystrokes("alt-3");
-    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.document().unwrap().line_of(s.selection().unwrap().head) }), 4);
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.current_source().unwrap().line_of(s.selection().unwrap().head) }), 4);
     v.simulate_keystrokes("shift-f11");
     assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Places { list: PlaceList::Bookmarks, .. })));
     v.simulate_keystrokes("escape ctrl-f11");
@@ -3336,7 +4458,7 @@ fn a_gutter_mark_follows_its_line_after_the_file_changes(cx: &mut TestAppContext
     std::fs::write(root.join("a.rs"), "new\n0\n1\n2\n3\n4\n5\n").unwrap();
     f.view.update(&mut v, |v, cx| v.dispatch(Command::Reload, cx));
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.line_count() == 8));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.line_count() == 8));
     let mut v = visual(cx, &f);
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |v, _| v.bookmark_marks()), [(4, None)]);
@@ -3349,8 +4471,8 @@ fn bookmark_entries_show_in_the_command_menu_with_their_keys(cx: &mut TestAppCon
     for l in ["Toggle Bookmark", "Set Bookmark Mnemonic…", "Show Bookmarks…", "Next Bookmark", "Previous Bookmark", "Recent Files…", "Recent Locations…"] {
         assert!(labels.iter().any(|x| x == l), "{l}");
     }
-    assert_eq!(key_hint(CommandId::ToggleBookmark), Some("F11"));
-    assert_eq!(key_hint(CommandId::RecentLocations), Some("Ctrl+Alt+E"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::ToggleBookmark)).as_deref(), Some("F11"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::RecentLocations)).as_deref(), Some("Ctrl+Alt+E"));
 }
 
 fn modal_lines(f: &Fixture, v: &VisualTestContext) -> Vec<String> {
@@ -3371,7 +4493,7 @@ fn the_bookmark_list_filters_jumps_and_deletes(cx: &mut TestAppContext) {
     assert_eq!(modal_lines(&f, &v).len(), 3, "filtered to line 5");
     v.simulate_keystrokes("enter");
     assert!(f.view.read_with(&v, |v, _| v.modal.is_none()));
-    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.document().unwrap().line_of(s.selection().unwrap().head) }), 4);
+    assert_eq!(f.view.read_with(&v, |v, _| { let s = v.session().state(); s.current_source().unwrap().line_of(s.selection().unwrap().head) }), 4);
     v.simulate_keystrokes("shift-f11 delete");
     assert_eq!(f.view.read_with(&v, |v, _| v.session().state().places().bookmarks().len()), 1);
 }
@@ -3478,7 +4600,10 @@ fn ctrl_shift_digit_sets_a_numbered_bookmark_as_linux_reports_it(cx: &mut TestAp
 const HINTED: &str = "fn main() {\n    let v = add(1);\n}\nfn old_add(a: i32) -> i32 { a }\n";
 
 fn hinted(r: &ReaderView) -> bool {
-    r.session().state().active().is_some_and(|t| t.hints().is_some_and(|h| !h.is_empty()) && t.tokens().is_some())
+    let state = r.session().state();
+    state.active().and_then(|tab| state.view(tab.id())).is_some_and(|view| {
+        view.inlay_hints().is_some_and(|hints| !hints.is_empty()) && view.tokens().is_some()
+    })
 }
 
 #[gpui::test]
@@ -3537,8 +4662,8 @@ fn mutable_and_deprecated_tokens_are_underlined_and_struck(cx: &mut TestAppConte
     draw(&mut v);
     let marks = f.view.read_with(&v, |r, _| r.marks_drawn.clone());
     let v_at = "    let mut ".len();
-    assert!(marks.iter().any(|(y, r, _, m)| *y == 1.0 && *r == (v_at..v_at + 1) && *m == reader_core::decor::MUTABLE), "{marks:?}");
-    assert!(marks.iter().any(|(y, r, _, m)| *y == 3.0 && *r == (3..10) && *m == reader_core::decor::DEPRECATED), "{marks:?}");
+    assert!(marks.iter().any(|(y, r, _, m)| *y == 1.0 && *r == (v_at..v_at + 1) && *m == code_core::decor::MUTABLE), "{marks:?}");
+    assert!(marks.iter().any(|(y, r, _, m)| *y == 3.0 && *r == (3..10) && *m == code_core::decor::DEPRECATED), "{marks:?}");
 }
 
 #[gpui::test]
@@ -3557,7 +4682,7 @@ fn the_toggles_run_from_the_command_menu_and_show_their_state(cx: &mut TestAppCo
         label
     };
     assert_eq!(menu(&mut v, CommandId::InlayTypes), "Inlay Hints: Types (on)");
-    settle(cx, &f, |r| r.session().state().active().and_then(|t| t.hints()).is_some_and(|h| h.line(1).iter().all(|h| h.kind == reader_core::decor::HintKind::Parameter) && !h.is_empty()));
+    settle(cx, &f, |r| r.session().state().active().and_then(|tab| r.session().state().view(tab.id())).is_some_and(|view| view.inlay_hints().is_some_and(|h| h.line(1).iter().all(|h| h.kind == code_core::decor::HintKind::Parameter) && !h.is_empty())));
     draw(&mut v);
     assert_eq!(f.view.read_with(&v, |r, _| r.visible_rows()[1].text.clone()), "    let v = add(a: 1);");
     assert_eq!(menu(&mut v, CommandId::InlayParameters), "Inlay Hints: Parameter Names (on)");
@@ -3576,7 +4701,7 @@ fn hinted_lines_show_in_both_panes_and_in_sticky_lines(cx: &mut TestAppContext) 
     let text = format!("mod m {{\n    fn f() {{ let head = add(2); }}\n    fn g() {{ let top = 1;\n{body}    }}\n}}\nfn add(a: i32) -> i32 {{ a }}\n");
     let f = fixture_with(cx, None, &fake_lsp());
     fake_package(cx, &f, &[("src/main.rs", &text)], "src/main.rs");
-    settle(cx, &f, |r| hinted(r) && r.session().state().active().is_some_and(|t| t.declarations().is_some()));
+    settle(cx, &f, |r| hinted(r) && r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.declarations().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -3590,8 +4715,8 @@ fn hinted_lines_show_in_both_panes_and_in_sticky_lines(cx: &mut TestAppContext) 
     assert!(sticky.iter().any(|t| t == "    fn g() { let top: i32 = 1;"), "{sticky:?}");
     // The other pane shares the snapshot and its hints.
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(0), cx));
-    f.view.update(&mut v, |r, cx| r.dispatch(Command::Split(reader_core::session::Split::Columns), cx));
-    settle(cx, &f, |r| r.session().state().shown(1).is_some_and(|t| t.hints().is_some()));
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Split(code_core::session::Split::Columns), cx));
+    settle(cx, &f, |r| r.session().state().shown(1).is_some_and(|tab| r.session().state().view(tab.id()).is_some_and(|view| view.inlay_hints().is_some())));
     let other = f.view.read_with(&v, |r, _| {
         let t = r.session().state().shown(1).unwrap();
         r.tab_rows(t, 5).0[1].text.clone()
@@ -3613,7 +4738,13 @@ fn hinted_lines_wrap_and_clicks_land_on_their_bytes(cx: &mut TestAppContext) {
     let (rows, shown) = f.view.read_with(&v, |r, _| {
         let s = r.session().state();
         let t = s.active().unwrap();
-        (t.rows(8, s.wrap_cols(t)), t.shown_line(1).text)
+        let view = s.view(t.id()).unwrap();
+        let layout = view.layout_rows(8, s.wrap_cols(t));
+        assert!(layout.pending.is_none(), "the rendered hinted fixture has complete shared rows");
+        let mut cursor = view.display_start(1).unwrap();
+        let projected = view.display_window(&mut cursor, code_core::projection::WINDOW_WORK).unwrap();
+        assert!(projected.complete, "the short hinted line fits a bounded projection");
+        (layout.rows, projected.shown.text)
     });
     let line1: Vec<_> = rows.iter().filter(|r| r.line == 1).cloned().collect();
     assert!(line1.len() >= 2, "{rows:?}");
@@ -3623,7 +4754,8 @@ fn hinted_lines_wrap_and_clicks_land_on_their_bytes(cx: &mut TestAppContext) {
     let x = f32::from(text_b.origin.x) + num_w() + 8.0 + (line1[1].indent as f32 + 0.3) * char_w;
     v.simulate_click(point(px(x), px(f32::from(text_b.origin.y) + line_h() * (i as f32 + 0.5))), Modifiers::default());
     let start = text.find("    let head").unwrap();
-    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().head), start + line1[1].source.start);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection().unwrap().head), line1[1].source.start);
+    assert!(line1[1].source.start >= start, "shared row source ranges are absolute UTF8 bytes");
 }
 
 #[gpui::test]
@@ -3644,7 +4776,7 @@ fn ctrl_h_opens_the_type_hierarchy_and_tab_enter_and_menus_work(cx: &mut TestApp
     settle(cx, &f, |r| r.session().state().results().is_some_and(|r| r.kind().starts_with("Subtypes of Shape") && r.hits().len() == 3));
     v.simulate_keystrokes("down enter");
     // The first child goes to its name on an `impl Shape for …` line (lines 3 and 4).
-    let line = |r: &ReaderView| r.session().state().document().zip(r.session().state().selection()).map(|(d, s)| d.line_of(s.head));
+    let line = |r: &ReaderView| r.session().state().current_source().zip(r.session().state().selection()).map(|(d, s)| d.line_of(s.head));
     settle(cx, &f, |r| matches!(line(r), Some(3 | 4)));
     // The menus offer it.
     let rows = f.view.read_with(&v, |r, _| r.session().actions().into_iter().map(|a| a.label).collect::<Vec<_>>());
@@ -3653,7 +4785,7 @@ fn ctrl_h_opens_the_type_hierarchy_and_tab_enter_and_menus_work(cx: &mut TestApp
     let at = lib.find("Circle;").unwrap();
     f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
     v.simulate_keystrokes("ctrl-h");
-    settle(cx, &f, |r| r.session().state().results().is_some_and(|r| r.kind().starts_with("Subtypes of Circle") && r.call(0).is_some_and(|c| c.fold == reader_core::search::Fold::Leaf)));
+    settle(cx, &f, |r| r.session().state().results().is_some_and(|r| r.kind().starts_with("Subtypes of Circle") && r.call(0).is_some_and(|c| c.fold == code_core::search::Fold::Leaf)));
     let labels = f.view.update(&mut v, |r, _| r.panel_contents(10, 0).0.into_iter().map(|row| row.label).collect::<Vec<_>>());
     assert!(labels.iter().any(|l| l.contains("Circle") && l.contains("No subtypes")), "{labels:?}");
     assert_eq!(std::fs::read_to_string(pkg.join("src/lib.rs")).unwrap(), lib);
@@ -3664,17 +4796,18 @@ fn ctrl_h_opens_the_type_hierarchy_and_tab_enter_and_menus_work(cx: &mut TestApp
 fn click_modal_row(f: &Fixture, v: &mut VisualTestContext, row: usize) {
     draw(v);
     let p = f.view.read_with(v, |r, _| {
+        if let Some(form) = r.form_layout() { return form.field.unwrap_or(form.bounds).center(); }
         let l = r.modal_layout().unwrap();
         let j = l.lines.iter().position(|(i, ..)| *i == row).unwrap();
         assert!((l.first..l.first + l.visible).contains(&j), "row {row} is drawn: first {}, visible {}, line {j}", l.first, l.visible);
-        point(l.bounds.center().x, l.bounds.origin.y + px(4.0 + (j - l.first) as f32 * line_h() + line_h() / 2.0))
+        point(l.bounds.center().x, l.bounds.origin.y + px(l.body_top + (j - l.first) as f32 * line_h() + line_h() / 2.0))
     });
     v.simulate_click(p, Modifiers::default());
     draw(v);
 }
 
 fn caret_line(f: &Fixture, v: &VisualTestContext) -> usize {
-    f.view.read_with(v, |v, _| { let s = v.session().state(); s.document().unwrap().line_of(s.selection().unwrap().head) })
+    f.view.read_with(v, |v, _| { let s = v.session().state(); s.current_source().unwrap().line_of(s.selection().unwrap().head) })
 }
 
 #[gpui::test]
@@ -3743,7 +4876,7 @@ fn a_click_in_a_scrolled_finder_opens_the_clicked_file(cx: &mut TestAppContext) 
     let name = f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().rows[first].label.clone());
     click_navigation_row(&f, &mut v, first);
     drop(v);
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.source().ends_with(name.as_str())));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.source().ends_with(name.as_str())));
 }
 
 #[gpui::test]
@@ -3833,7 +4966,30 @@ fn search_dialog_is_centered_and_its_fields_and_toggles_take_clicks(cx: &mut Tes
 }
 
 #[gpui::test]
-fn clicks_inside_input_modals_keep_them_and_go_to_line_still_closes(cx: &mut TestAppContext) {
+fn a_reopened_search_selects_its_old_query_so_typing_replaces_it(cx: &mut TestAppContext) {
+    let (f, mut v, _root) = bookmarks_fixture(cx);
+    let field = |v: &mut VisualTestContext| match f.view.read_with(v, |r, _| r.modal.clone()) {
+        Some(Modal::Search { query, selected, .. }) => (query, selected),
+        other => panic!("{:?}", other.is_some()),
+    };
+    v.simulate_keystrokes("ctrl-shift-f 1 enter");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().results().is_some()));
+    v.simulate_keystrokes("ctrl-shift-f");
+    assert_eq!(field(&mut v), ("1".into(), true));
+    v.simulate_keystrokes("2");
+    assert_eq!(field(&mut v), ("2".into(), false), "typing replaces the selected query");
+    v.simulate_keystrokes("space 3 ctrl-backspace");
+    assert_eq!(field(&mut v), ("2 ".into(), false), "Ctrl+Backspace drops the last word");
+    v.simulate_keystrokes("ctrl-a");
+    assert_eq!(field(&mut v), ("2 ".into(), true));
+    v.simulate_keystrokes("backspace");
+    assert_eq!(field(&mut v), (String::new(), false), "Backspace clears a selection");
+    v.simulate_keystrokes("4 shift-home 5");
+    assert_eq!(field(&mut v), ("5".into(), false), "Shift+Home selects to the start");
+}
+
+#[gpui::test]
+fn clicks_inside_input_modals_keep_them_including_go_to_line(cx: &mut TestAppContext) {
     let (f, mut v, root) = bookmarks_fixture(cx);
     v.simulate_resize(size(px(900.0), px(600.0)));
     let caret = f.view.read_with(&v, |r, _| r.session().state().selection());
@@ -3858,7 +5014,8 @@ fn clicks_inside_input_modals_keep_them_and_go_to_line_still_closes(cx: &mut Tes
         cx.notify();
     });
     click_modal_row(&f, &mut v, 0);
-    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "Go to Line is unchanged: a click closes it");
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::GoTo { .. }))), "clicking the line field keeps the dialog open");
+    v.simulate_keystrokes("escape");
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().selection()), caret, "and goes nowhere");
     assert_eq!(std::fs::read_to_string(root.join("a.rs")).unwrap(), "0\n1\n2\n3\n4\n5\n");
 }
@@ -3924,7 +5081,7 @@ fn sticky_lines_carry_mutable_and_deprecated_marks(cx: &mut TestAppContext) {
     let text = format!("mod m {{\n    fn old_g() {{ let mut top = 1;\n{body}    }}\n}}\n");
     let f = fixture_with(cx, None, &fake_lsp());
     let pkg = fake_package(cx, &f, &[("src/main.rs", &text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.tokens().is_some() && t.declarations().is_some()));
+    settle(cx, &f, |r| r.session().state().active().and_then(|tab| r.session().state().view(tab.id())).is_some_and(|view| view.tokens().is_some() && view.declarations().is_some()));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -3934,8 +5091,8 @@ fn sticky_lines_carry_mutable_and_deprecated_marks(cx: &mut TestAppContext) {
     let y = rows.iter().find(|(l, _)| *l == 1).map(|(_, row)| row.y).unwrap();
     let name = "    fn ".len().."    fn old_g".len();
     let top = "    fn old_g() { let mut ".len();
-    assert!(marks.iter().any(|(ry, r, _, m)| *ry == y && *r == name && *m == reader_core::decor::DEPRECATED), "{marks:?}");
-    assert!(marks.iter().any(|(ry, r, _, m)| *ry == y && *r == (top..top + 3) && *m == reader_core::decor::MUTABLE), "{marks:?}");
+    assert!(marks.iter().any(|(ry, r, _, m)| *ry == y && *r == name && *m == code_core::decor::DEPRECATED), "{marks:?}");
+    assert!(marks.iter().any(|(ry, r, _, m)| *ry == y && *r == (top..top + 3) && *m == code_core::decor::MUTABLE), "{marks:?}");
     assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), text);
 }
 
@@ -3947,7 +5104,7 @@ fn sticky_lines_draw_their_fold_marks_over_the_rows_under_them(cx: &mut TestAppC
     let text = format!("mod m {{\n    fn f() {{\n{}    }}\n}}\n", "        if a {\n            b;\n        }\n".repeat(20));
     std::fs::write(&path, &text).unwrap();
     f.view.update(cx, |v, cx| v.open(path.clone(), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.declarations().is_some() && t.fold_at(11).is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|tab| v.session().state().view(tab.id()).is_some_and(|view| view.declarations().is_some() && view.fold_at(11).is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -3963,7 +5120,7 @@ fn sticky_lines_draw_their_fold_marks_over_the_rows_under_them(cx: &mut TestAppC
 #[gpui::test]
 fn every_toggle_shows_on_or_off_in_the_command_menu(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("a.rs", b"fn a() {}\n")));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(600.0)));
     draw(&mut v);
@@ -4055,13 +5212,13 @@ fn a_tree_click_selects_the_row_drawn_there(cx: &mut TestAppContext) {
 fn a_preview_with_collapsed_folds_scrolls(cx: &mut TestAppContext) {
     let source = (0..40).map(|i| format!("# Section {i}\n\n{}\n\n", "Some words here. ".repeat(8))).collect::<String>();
     let f = fixture(cx, Some(("a.md", source.as_bytes())));
-    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)) && v.session().state().active().is_some_and(|t| t.folds().is_some()));
+    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)) && v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.folds().is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(500.0)));
     show(&mut v);
     v.simulate_keystrokes("ctrl-shift--");
     show(&mut v);
-    assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().visible().hidden(2)), "precondition: sections collapsed");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().view(r.session().state().active().unwrap().id()).unwrap().visible().hidden(2)), "precondition: sections collapsed");
     v.simulate_keystrokes("ctrl-shift-v");
     drop(v);
     settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Preview(p)) if p.images.is_some()));
@@ -4085,7 +5242,7 @@ fn a_preview_with_collapsed_folds_scrolls(cx: &mut TestAppContext) {
 fn selecting_down_through_wrapped_lines_keeps_the_caret_shown(cx: &mut TestAppContext) {
     let text = format!("{}\n", "word ".repeat(80)).repeat(40);
     let f = fixture(cx, Some(("a.txt", text.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(400.0), px(300.0)));
     draw(&mut v);
@@ -4165,7 +5322,7 @@ fn a_right_click_cancels_documentation_waiting_on_the_pointer(cx: &mut TestAppCo
     let text = "fn main() { helper(); }\nfn helper() {}\n";
     let f = fixture_with(cx, None, &fake_lsp());
     let _pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.highlights().is_some()) && r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())) && r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -4193,7 +5350,7 @@ fn a_menu_or_dialog_closes_documentation_shown_or_on_its_way(cx: &mut TestAppCon
     let text = "fn main() { helper(); }\nfn helper() {}\n";
     let f = fixture_with(cx, None, &fake_lsp());
     let _pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.highlights().is_some()) && r.session().state().provider().is_some_and(|p| p.status == reader_core::semantics::Status::Ready));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())) && r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -4307,11 +5464,11 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document(cx: &mut Tes
     use std::os::unix::fs::PermissionsExt;
     let source = "class Main {}\n";
     let f = fixture(cx, Some(("Main.java", source.as_bytes())));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let java = f.dir.path().join("java with spaces");
     std::fs::write(&java, "#!/bin/sh\ntest \"$1\" = -version\n").unwrap();
     std::fs::set_permissions(&java, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let settings = f.dir.path().join("config/lenz-reader/providers.json");
+    let settings = f.dir.path().join("config/lenz-code/providers.json");
     let original = std::fs::read(&settings).unwrap();
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
@@ -4351,7 +5508,7 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document(cx: &mut Tes
 fn app_menu_groups_existing_actions_and_keeps_clicks_modal(cx: &mut TestAppContext) {
     let source = b"first\nsecond\n";
     let f = fixture(cx, Some(("note.txt", source)));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     draw(&mut v);
@@ -4361,7 +5518,19 @@ fn app_menu_groups_existing_actions_and_keeps_clicks_modal(cx: &mut TestAppConte
     assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows()[0].0.clone()), "File ›");
     v.simulate_keystrokes("down enter"); // View
     draw(&mut v);
+    let appearance = f.view.read_with(&v, |r, _| r.modal_rows().iter().position(|(label, _)| label == "Editor Appearance ›").unwrap());
+    v.simulate_keystrokes("home");
+    for _ in 0..appearance { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("right");
+    draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(label, _)| label == "Soft Wrap (off)")));
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::CommandGroup { group: CommandGroup::View, .. }))));
+    v.simulate_keystrokes("right");
+    let wrap = f.view.read_with(&v, |r, _| r.modal_rows().iter().position(|(label, _)| label == "Soft Wrap (off)").unwrap());
+    v.simulate_keystrokes("home");
+    for _ in 0..wrap { v.simulate_keystrokes("down"); }
+
     v.simulate_keystrokes("enter"); // Soft Wrap
     assert!(f.view.read_with(&v, |r, _| r.session().state().soft_wrap()));
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
@@ -4375,7 +5544,7 @@ fn app_menu_groups_existing_actions_and_keeps_clicks_modal(cx: &mut TestAppConte
 }
 
 #[gpui::test]
-fn footer_commands_opens_catalog_while_left_status_keeps_server_details(cx: &mut TestAppContext) {
+fn footer_commands_opens_catalog_while_server_status_keeps_details(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
@@ -4383,9 +5552,10 @@ fn footer_commands_opens_catalog_while_left_status_keeps_server_details(cx: &mut
     v.simulate_click(point(px(860.0), px(490.0)), Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
     settle(cx, &f, |r| r.session.state().navigation().is_some_and(|s| !s.pending));
-    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope), reader_core::navigation::Scope::Actions);
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().scope), code_core::navigation::Scope::Actions);
     v.simulate_keystrokes("escape");
-    v.simulate_click(point(px(20.0), px(490.0)), Modifiers::default());
+    let server = f.view.read_with(&v, |r, _| r.status_segments().0.0.center());
+    v.simulate_click(server, Modifiers::default());
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
 }
 
@@ -4418,7 +5588,10 @@ fn menu_groups_support_pointer_back_disabled_actions_and_tiny_appearances(cx: &m
         v.simulate_keystrokes("escape");
         v.simulate_click(button, Modifiers::default());
         click_row(&mut v, "Language Servers");
-        v.simulate_keystrokes("escape end enter");
+        // Up from the end passes over the line between the application's commands and All commands.
+        v.simulate_keystrokes("escape end up up up up up");
+        assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows()[r.modal.as_ref().unwrap().at()].0.clone()), "All commands…");
+        v.simulate_keystrokes("enter");
         assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Navigation { .. }))));
         v.simulate_keystrokes("escape");
         for (w, h) in [(180.0, 90.0), (120.0, 40.0), (1.0, 1.0)] {
@@ -4438,7 +5611,7 @@ fn menu_groups_support_pointer_back_disabled_actions_and_tiny_appearances(cx: &m
 fn app_menu_wheel_reveals_long_groups_without_scrolling_the_document(cx: &mut TestAppContext) {
     let source = "reader line\n".repeat(100);
     let f = fixture(cx, Some(("note.txt", source.as_bytes())));
-    settle(cx, &f, |r| r.session().state().document().is_some());
+    settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(180.0), px(90.0)));
     draw(&mut v);
@@ -4471,10 +5644,10 @@ fn click_navigation_row(f: &Fixture, v: &mut VisualTestContext, row: usize) {
 
 #[gpui::test]
 fn unified_search_switches_categories_preserving_query_and_runs_actions(cx: &mut TestAppContext) {
-    use reader_core::navigation::Scope;
+    use code_core::navigation::Scope;
     let source = b"fn sample() {}\n";
     let f = fixture(cx, Some(("main.rs", source)));
-    settle(cx, &f, |r| r.session.state().document().is_some());
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     v.simulate_keystrokes("ctrl-k s o f t");
@@ -4523,7 +5696,7 @@ fn unified_search_opens_syntactic_symbols_without_a_language_server_and_file_pos
     assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|(s, _)| s.to_lowercase().contains("syntactic"))));
     v.simulate_keystrokes("enter");
     drop(v);
-    settle(cx, &f, |r| r.modal.is_none() && r.session.state().document().is_some());
+    settle(cx, &f, |r| r.modal.is_none() && r.session.state().current_source().is_some());
     let mut v = visual(cx, &f);
     assert_eq!(caret_line(&f, &v), 2);
     v.simulate_keystrokes("ctrl-shift-n m a i n : 2 : 1");
@@ -4537,9 +5710,26 @@ fn unified_search_opens_syntactic_symbols_without_a_language_server_and_file_pos
 }
 
 #[gpui::test]
+fn a_ctrl_tap_then_one_shift_tap_is_not_double_shift(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("note.txt", b"first\n")));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.update(|w, _| w.activate_window());
+    for modifiers in [Modifiers { control: true, ..Default::default() }, Modifiers { alt: true, ..Default::default() }] {
+        v.simulate_modifiers_change(modifiers);
+        v.simulate_modifiers_change(Modifiers::default());
+        v.simulate_modifiers_change(Modifiers { shift: true, ..Default::default() });
+        v.simulate_modifiers_change(Modifiers::default());
+        assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "{modifiers:?} then one Shift tap");
+        v.simulate_keystrokes("x");
+    }
+}
+
+#[gpui::test]
 fn double_shift_opens_unified_search_but_typing_and_other_modals_interrupt_it(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("note.txt", b"first\nsecond\n")));
-    settle(cx, &f, |r| r.session.state().document().is_some());
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
     let mut v = visual(cx, &f);
     draw(&mut v);
     v.update(|w, _| w.activate_window());
@@ -4574,8 +5764,44 @@ fn double_shift_opens_unified_search_but_typing_and_other_modals_interrupt_it(cx
 }
 
 #[gpui::test]
+fn unified_search_caret_starts_at_the_shaped_query_end(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    for theme in ["darcula", "github-light"] {
+        f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())), cx));
+        for width in [900.0, 180.0] {
+            v.simulate_resize(size(px(width), px(400.0)));
+            for query in [String::new(), "résumé e\u{301} 終 👨‍👩‍👧‍👦".into(), format!("a{}\u{202e}", "\u{301}".repeat(100)), "long/path/".repeat(40)] {
+                v.simulate_keystrokes("ctrl-k");
+                v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(query.clone())));
+                v.simulate_keystrokes("ctrl-v");
+                draw(&mut v);
+                let (bounds, char_w, font, caret) = f.view.read_with(&v, |r, _| (r.navigation_bounds(), r.char_w, r.font.clone(), r.session.state().palette().caret));
+                let shown = format!("› {}", navigation::tail(&query, ((f32::from(bounds.size.width) - 36.0) / char_w).max(1.0) as usize));
+                let shown = lenz_content::display::show_bidi(&lenz_content::display::cap_marks(&shown)).into_owned();
+                v.update(|window, _| {
+                    let run = gpui::TextRun { len: shown.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
+                    let end = window.text_system().shape_line(shown.into(), px(font_size()), &[run], None).width;
+                    let scale = window.scale_factor();
+                    let x = (f32::from(bounds.origin.x + end) + 12.0).min(f32::from(bounds.right()) - 14.0) * scale;
+                    let y = (f32::from(bounds.origin.y) + 4.0 + line_h() + 1.0) * scale;
+                    assert!(window.painted_quads().iter().any(|q|
+                        (q.bounds.origin.x.0 - x).abs() <= 0.5
+                            && (q.bounds.origin.y.0 - y).abs() <= 0.5
+                            && (q.bounds.size.width.0 - 2.0 * scale).abs() < 0.01
+                            && (q.bounds.size.height.0 - (line_h() - 2.0) * scale).abs() < 0.01
+                            && q.background == lenz_gpui::color(caret).into()
+                    ), "search needs a solid caret at ({x}, {y}), query {query:?}, width {width}; bars: {:?}", window.painted_quads().iter().filter(|q| q.bounds.size.width.0 <= 3.0 * scale).map(|q| (q.bounds, q.background)).collect::<Vec<_>>());
+                });
+                v.simulate_keystrokes("escape");
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn unified_search_empty_constructor_paste_tabs_resize_and_appearances(cx: &mut TestAppContext) {
-    use reader_core::navigation::Scope;
+    use code_core::navigation::Scope;
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-p");
@@ -4616,7 +5842,7 @@ fn unified_search_empty_constructor_paste_tabs_resize_and_appearances(cx: &mut T
 
 #[gpui::test]
 fn unified_search_rejects_stale_mouse_rows_and_disabled_actions(cx: &mut TestAppContext) {
-    use reader_core::navigation::Scope;
+    use code_core::navigation::Scope;
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
@@ -4717,7 +5943,7 @@ fn plain_arrows_move_unicode_caret_and_reveal_without_editing(cx: &mut TestAppCo
 fn plain_arrows_follow_wrapped_and_folded_visible_rows(cx: &mut TestAppContext) {
     let text = format!("fn folded() {{\n{}\n}}\nfn next() {{}}\n", "    word word word word word word word word word word;\n".repeat(30));
     let f = fixture(cx, Some(("folded.rs", text.as_bytes())));
-    settle(cx, &f, |r| r.session.state().active().is_some_and(|t| t.fold_at(0).is_some()));
+    settle(cx, &f, |r| r.session.state().active().is_some_and(|tab| r.session.state().view(tab.id()).is_some_and(|view| view.fold_at(0).is_some())));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(360.0), px(240.0)));
     draw(&mut v);
@@ -4873,7 +6099,7 @@ fn status_message_click_opens_full_snapshot_and_keeps_document_input_modal(cx: &
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
-    // The message has its own target, separate from server recovery on the left.
+    // The message has its own target, separate from the position and server recovery cells.
     v.simulate_click(point(px(350.0), px(400.0 - status_h() / 2.0)), Modifiers::default());
     let rows = f.view.read_with(&v, |r, _| r.modal_rows());
     assert!(rows.iter().any(|(s, _)| s.contains("Status details")), "{rows:?}");
@@ -4897,10 +6123,11 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, g, c) = r.status_segments();
-                assert!(a.0.right() <= b.0.left() && b.0.right() <= g.0.left() && g.0.right() <= c.0.left());
-                assert!(c.0.right() <= px(w));
-                for (bounds, text) in [a, b, g, c] {
+                let (a, b, c, sql, markers) = r.status_segments();
+                assert_eq!(c.0.left(), px(STATUS_PAD.min(w / 2.0)));
+                assert!(c.0.right() <= a.0.left() && a.0.right() <= sql.0.left() && sql.0.right() <= markers.0.left() && markers.0.right() <= b.0.left());
+                assert!(b.0.right() <= px(w));
+                for (bounds, text) in [a, b, c, sql, markers] {
                     assert!(lenz_content::wrap::width(&text) as f32 * r.char_w <= f32::from(bounds.size.width) + 0.01);
                 }
                 assert!(r.nav_buttons().iter().all(|b| b.0 >= 0.0 && b.1 <= w));
@@ -4994,7 +6221,7 @@ fn about_shows_the_shared_text_and_releases_its_logo_on_close(cx: &mut TestAppCo
 fn gui_double_and_triple_click_select_word_and_group(cx: &mut TestAppContext) {
     let src = "fn f() { g(\"hello world\", 1); }\n";
     let f = fixture(cx, Some(("a.rs", src.as_bytes())));
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
@@ -5026,13 +6253,78 @@ fn blame_fixture(cx: &mut TestAppContext) -> (Fixture, String) {
     std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
     commit_all(f.dir.path(), "First line");
     let sha = git(f.dir.path(), &["rev-parse", "HEAD"]).trim().to_string();
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     (f, sha)
 }
 
 fn annotated(v: &ReaderView) -> bool {
     let s = v.session();
     s.state().active().is_some_and(|t| s.annotation(t.id(), 1).is_some())
+}
+
+#[gpui::test]
+fn edited_blame_renders_pending_current_lines_undo_and_failure_without_saving(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::git;
+    let (f, sha) = blame_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    v.simulate_keystrokes("alt-b");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Ready)));
+    v.simulate_keystrokes("home");
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("new\n".into())));
+    v.simulate_keystrokes("ctrl-v home");
+    // Keep the caret on the next line while showing the inserted first line and its annotation.
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::Scroll(0), cx));
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().disabled(CommandId::CopyRevision)), Some("Blame pending"));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Ready)));
+    draw(&mut v);
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        assert_eq!(view.session().annotation(tab, 0).unwrap().label, "Not committed");
+        for line in [1, 2] { assert_eq!(view.session().annotation(tab, line).unwrap().commit.sha, sha); }
+        assert!(view.painted_annotations.iter().any(|label| label == "Not committed"));
+        assert!(view.visible_rows().iter().any(|row| row.text == "new"));
+    });
+    v.simulate_keystrokes("shift-right shift-right shift-right shift-right");
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().state().selection().unwrap().range()), 4..8);
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("λ".into())));
+    v.simulate_keystrokes("ctrl-v");
+    f.view.read_with(&v, |view, _| { let source = view.session().state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\nλtwo\n", "selected replacement deletes the old newline"); });
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Ready)));
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        let source = view.session().state().current_source().unwrap();
+        assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "new\nλtwo\n");
+        assert_eq!(view.session().annotation(tab, 0).unwrap().label, "Not committed");
+        assert_eq!(view.session().annotation(tab, 1).unwrap().label, "Not committed");
+    });
+    v.simulate_keystrokes("ctrl-z");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Ready)));
+    v.simulate_keystrokes("ctrl-z");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame pending…")));
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Ready)));
+    draw(&mut v);
+    f.view.read_with(&v, |view, _| {
+        let tab = view.session().state().active().unwrap().id();
+        assert_eq!(view.session().annotation(tab, 0).unwrap().commit.sha, sha);
+        let source = view.session().state().current_source().unwrap();
+        assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "one\ntwo\n");
+    });
+    std::fs::write(f.dir.path().join("bad-revisions"), "not-a-revision\n").unwrap();
+    git(f.dir.path(), &["config", "blame.ignoreRevsFile", "bad-revisions"]);
+    v.simulate_keystrokes("alt-b alt-b");
+    settle(cx, &f, |view| matches!(view.session().state().active().unwrap().blame_status(), Some(code_core::blame::Status::Failed(_))));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |view, _| view.painted_annotations.iter().any(|label| label == "Blame failed")));
+    assert_eq!(f.view.read_with(&v, |view, _| view.session().disabled(CommandId::CopyRevision)), Some("Blame failed"));
+    assert_eq!(std::fs::read_to_string(f.dir.path().join("a.txt")).unwrap(), "one\ntwo\n");
 }
 
 #[gpui::test]
@@ -5046,7 +6338,7 @@ fn gui_annotation_column_shifts_text_and_click_opens_the_commit(cx: &mut TestApp
     settle(cx, &f, annotated);
     draw(&mut v);
     let (g, char_w) = f.view.read_with(&v, |r, _| (r.panes[0], r.char_w));
-    assert_eq!(g.ann, reader_core::blame::ANNOTATION_COLS as f32 * char_w + 12.0);
+    assert_eq!(g.ann, code_core::blame::ANNOTATION_COLS as f32 * char_w + 12.0);
     assert_eq!(g.text.origin.x, before + px(g.ann), "the text moves right of the column");
     // A click on the first line's annotation opens its commit.
     let at = point(g.text.origin.x - px(g.ann / 2.0), g.text.origin.y + px(line_h() * 1.5));
@@ -5116,7 +6408,7 @@ fn gui_the_column_beside_a_sticky_line_belongs_to_that_line(cx: &mut TestAppCont
     git(f.dir.path(), &["init", "-q", "-b", "main"]);
     std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.rs\n!.gitignore\n").unwrap();
     commit_all(f.dir.path(), "First line");
-    settle(cx, &f, |v| v.session().state().document().is_some_and(|d| d.language().is_some()));
+    settle(cx, &f, |v| v.session().state().current_source().is_some_and(|d| d.language().is_some()));
     f.view.update(cx, |v, cx| v.dispatch(Command::SetStickyScroll(true), cx));
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(400.0)));
@@ -5124,7 +6416,7 @@ fn gui_the_column_beside_a_sticky_line_belongs_to_that_line(cx: &mut TestAppCont
     v.simulate_keystrokes("alt-b");
     settle(cx, &f, annotated);
     f.view.update(cx, |v, cx| v.dispatch(Command::Scroll(40), cx));
-    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| t.highlights().is_some()));
+    settle(cx, &f, |v| v.session().state().active().is_some_and(|t| v.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
     draw(&mut v);
     draw(&mut v);
     let (g, band) = f.view.read_with(&v, |r, _| (r.panes[0], r.sticky_hits.first().map(|h| (h.0, h.2))));
@@ -5143,7 +6435,7 @@ fn gui_the_hovered_annotation_follows_a_scroll(cx: &mut TestAppContext) {
     git(f.dir.path(), &["init", "-q", "-b", "main"]);
     std::fs::write(f.dir.path().join(".gitignore"), "*\n!a.txt\n!.gitignore\n").unwrap();
     commit_all(f.dir.path(), "First line");
-    settle(cx, &f, |v| v.session().state().document().is_some());
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
@@ -5176,7 +6468,7 @@ fn branches_fixture(cx: &mut TestAppContext) -> (Fixture, tempfile::TempDir) {
     let wt = tempfile::tempdir().unwrap();
     git(d, &["worktree", "add", "-q", "-b", "side", &wt.path().join("second").to_string_lossy()]);
     f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(d.to_path_buf()), cx));
-    settle_for(cx, &f, 10, &|v| v.session().branch_label().is_some() && v.session().state().document().is_some());
+    settle_for(cx, &f, 10, &|v| v.session().branch_label().is_some() && v.session().state().current_source().is_some());
     (f, wt)
 }
 fn branch_of(v: &ReaderView) -> Option<String> {
@@ -5189,14 +6481,14 @@ fn type_text(v: &mut VisualTestContext, text: &str) {
 }
 
 #[gpui::test]
-fn gui_the_status_branch_opens_the_popup_and_enter_checks_out(cx: &mut TestAppContext) {
+fn gui_the_toolbar_branch_opens_the_popup_and_enter_checks_out(cx: &mut TestAppContext) {
     let (f, _wt) = branches_fixture(cx);
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(400.0)));
     draw(&mut v);
-    let (bounds, text) = f.view.read_with(&v, |r, _| r.status_branch());
+    let (left, right, text) = f.view.read_with(&v, |r, _| r.toolbar_branch().unwrap());
     assert_eq!(text, "⎇ main");
-    v.simulate_click(bounds.center(), Modifiers::default());
+    v.simulate_click(point(px((left + right) / 2.0), px(toolbar_h() / 2.0)), Modifiers::default());
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { .. }))));
@@ -5209,11 +6501,11 @@ fn gui_the_status_branch_opens_the_popup_and_enter_checks_out(cx: &mut TestAppCo
     settle_for(cx, &f, 10, &|r| !r.session().state().checking_out());
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)).as_deref(), Some("⎇ other"));
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
-    settle_for(cx, &f, 10, &|r| r.session().state().document().is_some_and(|d| d.text().as_ref() == "other\n"));
-    // Narrow: no branch cell.
+    settle_for(cx, &f, 10, &|r| r.session().state().current_source().is_some_and(|d| d.copy_range(0..d.len_bytes()).as_deref() == Some("other\n")));
+    // Narrow: the branch still fits in the simplified toolbar.
     v.simulate_resize(size(px(400.0), px(300.0)));
     draw(&mut v);
-    assert_eq!(f.view.read_with(&v, |r, _| r.status_branch().1), "");
+    assert!(f.view.read_with(&v, |r, _| r.toolbar_branch().is_some()));
 }
 
 #[gpui::test]
@@ -5477,4 +6769,1160 @@ fn gui_ctrl_click_marks_two_entries_and_ctrl_d_compares_them(cx: &mut TestAppCon
     v.simulate_keystrokes("ctrl-d");
     assert_eq!(f.view.read_with(&v, |r, _| r.launched.len()), 1);
     assert_eq!(f.view.read_with(&v, |r, _| r.session().disabled(CommandId::CompareSelected)), Some("Mark two files or folders in the explorer (Ctrl+click, or Space)"));
+}
+
+
+fn ime_handler(f: &Fixture, v: &mut VisualTestContext) -> gpui::PlatformInputHandler {
+    let view = f.view.clone(); let bounds = f.view.read_with(v, |view, _| view.text_bounds.unwrap());
+    v.update(|window, cx| gpui::PlatformInputHandler::new(window.to_async(cx), Box::new(gpui::ElementInputHandler::new(bounds, view))))
+}
+
+#[gpui::test]
+fn native_composition_projects_unicode_without_mutating_the_buffer_then_unmark_accepts_once(cx: &mut TestAppContext) {
+    for wrapped in [false, true] {
+    let original = format!("{}😀suffix\r\nlast\r\n", "a".repeat(12_000));
+    let f = fixture(cx, Some(("composition.txt", original.as_bytes())));
+    settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    if wrapped { v.simulate_keystrokes("alt-z"); }
+    v.simulate_keystrokes("ctrl-g 1 : 1 2 0 0 1 enter ctrl-\\ shift-right"); draw(&mut v);
+    let (tab, base, selected) = f.view.read_with(&v, |r, _| (r.session.state().active().unwrap().id(), r.session.state().current_source().unwrap().clone(), r.session.state().selection()));
+    let mut input = ime_handler(&f, &mut v);
+    let conversions = code_core::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    input.replace_and_mark_text_in_range(None, "界😀\nβ", Some(0..1));
+    assert_eq!(input.marked_text_range(), Some(12_000..12_005));
+    assert_eq!(input.selected_text_range(false).unwrap().range, 12_000..12_001);
+    f.view.read_with(&v, |r, _| {
+        assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base));
+        assert_eq!(r.session.state().selection(), selected);
+        assert!(!r.session.state().view(tab).unwrap().can_undo());
+        assert!(Arc::ptr_eq(r.session.state().presentation_view(r.session.state().shown(0).unwrap().id()).unwrap().snapshot(), &base));
+    });
+    let mut adjusted = None;
+    let length = input.text_length_utf16().unwrap();
+    let around = input.text_for_range(0..length, &mut adjusted).unwrap();
+    assert!(around.len() <= 4096); assert!(around.contains("界😀\nβ")); assert!(adjusted.unwrap().start > 9_000);
+    let mut unchanged = None;
+    assert!(input.text_for_range(12_002..12_003, &mut unchanged).is_none(), "a surrogate interior must be rejected before clipping");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let caret = loop {
+        cx.run_until_parked(); f.view.update(&mut v, |r, cx| r.poll(cx)); draw(&mut v);
+        if let Some(caret) = input.bounds_for_range(12_000..12_000) { break caret; }
+        assert!(std::time::Instant::now() < deadline, "candidate geometry must use the projected row, wrapped={wrapped}: {:?}", f.view.read_with(&v, |r, _| {
+            let state=r.session.state();let tab=state.active().unwrap();let shown=state.presentation_view(tab.id()).unwrap();
+            (shown.tab().top_line(),shown.tab().top_row(),shown.tab().column(),state.text_size(tab.pane()),r.session.native_reveal(tab.pane()).map(|goal|(goal.source,goal.context)),r.visible_rows().iter().map(|row|(row.y,row.text.find('界'))).collect::<Vec<_>>())
+        }));
+        std::thread::yield_now();
+    };
+    assert_eq!(input.character_index_for_point(caret.origin), Some(12_000));
+    assert_eq!(code_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
+    input.unmark_text(); input.unmark_text();
+    let expected = format!("{}界😀\nβsuffix\r\nlast\r\n", "a".repeat(12_000));
+    f.view.read_with(&v, |r, _| {
+        let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), expected);
+        assert!(r.session.state().view(tab).unwrap().can_undo());
+    });
+    v.simulate_keystrokes("ctrl-1 ctrl-z");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("composition.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_partial_replacement_cancel_and_painted_commits_use_one_coordinate_frame(cx: &mut TestAppContext) {
+    let original = "a😀suffix\r\n";
+    let f = fixture(cx, Some(("partial.txt", original.as_bytes()))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
+    v.simulate_keystrokes("right shift-right"); draw(&mut v);
+    let base = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone());
+    let mut input = ime_handler(&f, &mut v);
+    input.replace_and_mark_text_in_range(None, "界😀tail", None);
+    let relative = 1..3;
+    #[cfg(target_os = "macos")] let replacement = relative;
+    #[cfg(not(target_os = "macos"))] let replacement = relative.start + 1..relative.end + 1;
+    input.replace_and_mark_text_in_range(Some(replacement), "β", Some(1..1));
+    assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().unwrap().1), "界βtail");
+    assert_eq!(input.selected_text_range(false).unwrap().range, 3..3);
+    // Invalid selected surrogate endpoints and unsupported replacement expansion are atomic refusals.
+    input.replace_and_mark_text_in_range(None, "😀", Some(1..1));
+    input.replace_and_mark_text_in_range(Some(100..101), "bad", None);
+    assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().unwrap().1), "界βtail");
+    // Native XKB emits this non-character event after setMarkedText; it must preserve preedit.
+    let mut dead = gpui::Keystroke::parse("a").unwrap(); dead.key = "dead_acute".into(); dead.key_char = None;
+    v.simulate_event(gpui::KeyDownEvent { keystroke: dead, is_held: false, prefer_character_input: false });
+    assert!(input.marked_text_range().is_some());
+    v.simulate_keystrokes("escape");
+    assert!(input.marked_text_range().is_none()); assert!(f.view.read_with(&v, |r, _| r.marked_text_for_test().is_none()));
+    input.replace_text_in_range(None, "late",); // an old terminal callback cannot become ordinary typing
+    f.view.read_with(&v, |r, _| { assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base)); assert!(!r.session.state().view(r.session.state().active().unwrap().id()).unwrap().can_undo()); });
+    // A fresh real key establishes a new input boundary. After paint, use the platform fallback,
+    // proving registration rather than only constructing the callback wrapper above.
+    draw(&mut v); v.simulate_input("é");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), "aésuffix\r\n"); });
+    v.simulate_keystrokes("ctrl-z");
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("partial.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn native_composition_rejects_delayed_commit_after_source_selection_permission_modal_or_resize_changes(cx: &mut TestAppContext) {
+    for change in [0, 1, 2, 3, 4] {
+        let original = "a😀suffix\r\n"; let f = fixture(cx, Some(("stale-ime.txt", original.as_bytes())));
+        settle(cx, &f, |r| r.session.state().current_source().is_some()); let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); v.simulate_keystrokes("right shift-right"); draw(&mut v);
+        let tab = f.view.read_with(&v, |r, _| r.session.state().active().unwrap().id()); let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "pending", None);
+        match change {
+            0 => f.view.update(&mut v, |r, cx| {
+                let expected = r.session.state().current_source().unwrap().key();
+                r.dispatch(Command::Edit { tab, expected, edits: vec![code_core::text::TextEdit { range: 0..0, text: "changed ".into() }], kind: code_core::text::EditKind::Paste }, cx);
+                r.dispatch(Command::Undo { tab }, cx);
+            }),
+            1 => f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: 0, head: 0 }), cx)),
+            2 => f.view.update(&mut v, |r, cx| r.dispatch(Command::SetReadOnly(true), cx)),
+            3 => { v.simulate_keystrokes("f10"); },
+            4 => { v.simulate_resize(size(px(500.0), px(200.0))); draw(&mut v); },
+            _ => unreachable!(),
+        }
+        let before = f.view.read_with(&v, |r, _| (r.session.state().current_source().unwrap().clone(), r.session.state().selection()));
+        input.replace_and_mark_text_in_range(None, "obsolete preedit", None);
+        input.replace_text_in_range(None, "obsolete"); input.unmark_text();
+        f.view.read_with(&v, |r, _| {
+            assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &before.0), "stale composition case {change}");
+            assert_eq!(r.session.state().selection(), before.1); assert!(r.marked_text_for_test().is_none());
+        });
+        assert_eq!(std::fs::read(f.dir.path().join("stale-ime.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_explicit_partial_commit_and_linux_cancel_preserve_the_pending_splice(cx: &mut TestAppContext) {
+    for cancel in [false, true] {
+        let original = "a😀suffix\r\n"; let f = fixture(cx, Some(("terminal-ime.txt", original.as_bytes())));
+        settle(cx, &f, |r| r.session.state().current_source().is_some()); let mut v = visual(cx, &f); draw(&mut v);
+        f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); v.simulate_keystrokes("right shift-right"); draw(&mut v);
+        let base = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone()); let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "界😀tail", None);
+        if cancel {
+            #[cfg(not(target_os = "macos"))] { let range = input.marked_text_range().unwrap(); input.replace_text_in_range(Some(range), ""); }
+            #[cfg(target_os = "macos")] v.simulate_keystrokes("escape");
+            input.unmark_text(); input.replace_text_in_range(None, "late");
+            f.view.read_with(&v, |r, _| { assert!(Arc::ptr_eq(r.session.state().current_source().unwrap(), &base)); assert!(!r.session.state().view(r.session.state().active().unwrap().id()).unwrap().can_undo()); });
+        } else {
+            #[cfg(not(target_os = "macos"))] let range = 2..4;
+            #[cfg(target_os = "macos")] let range = 1..3;
+            input.replace_text_in_range(Some(range), "終😀"); input.unmark_text();
+            #[cfg(not(target_os = "macos"))] let expected = "a界終😀tailsuffix\r\n";
+            #[cfg(target_os = "macos")] let expected = "a終😀suffix\r\n";
+            f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), expected); });
+            v.simulate_keystrokes("ctrl-z");
+            f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+        }
+        assert_eq!(std::fs::read(f.dir.path().join("terminal-ime.txt")).unwrap(), original.as_bytes());
+    }
+}
+
+#[gpui::test]
+fn native_composition_surrounding_text_rejects_surrogates_before_clipping_a_distant_query(cx: &mut TestAppContext) {
+    let original = "😀".to_owned() + &"a".repeat(20_000);
+    let f = fixture(cx, Some(("surrounding.txt", original.as_bytes()))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-g 1 : 2 0 0 0 2 enter"); draw(&mut v);
+    let mut input = ime_handler(&f, &mut v); let length = input.text_length_utf16().unwrap();
+    let conversions = code_core::text::TextSnapshot::conversion_calls_on_thread_for_test();
+    let mut actual = None; let text = input.text_for_range(0..length, &mut actual).unwrap();
+    assert!(text.len() <= 4096); assert!(actual.unwrap().start > 16_000);
+    let mut rejected = None; assert!(input.text_for_range(1..length, &mut rejected).is_none()); assert!(rejected.is_none());
+    input.replace_and_mark_text_in_range(Some(1..2), "invalid", None);
+    assert!(input.marked_text_range().is_none());
+    assert_eq!(code_core::text::TextSnapshot::conversion_calls_on_thread_for_test(), conversions);
+    f.view.read_with(&v, |r, _| { let source = r.session.state().current_source().unwrap(); assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), original); });
+    assert_eq!(std::fs::read(f.dir.path().join("surrounding.txt")).unwrap(), original.as_bytes());
+}
+
+#[gpui::test]
+fn native_composition_can_begin_again_before_the_next_dead_key_without_reviving_old_terminals(cx: &mut TestAppContext) {
+    for accept in [false, true] {
+        let f = fixture(cx, Some(("repeat-ime.txt", b"base"))); settle(cx, &f, |r| r.session.state().current_source().is_some());
+        let mut v = visual(cx, &f); draw(&mut v); f.view.update(&mut v, |r, _| r.enable_draft_input_for_test()); draw(&mut v);
+        let mut input = ime_handler(&f, &mut v);
+        input.replace_and_mark_text_in_range(None, "´", None);
+        if accept { input.replace_text_in_range(None, "é"); } else { v.simulate_keystrokes("escape"); }
+        let after_first = f.view.read_with(&v, |r, _| r.session.state().current_source().unwrap().clone());
+        input.replace_text_in_range(None, "late"); input.unmark_text();
+        assert!(f.view.read_with(&v, |r, _| Arc::ptr_eq(r.session.state().current_source().unwrap(), &after_first)));
+        // Pinned X11 delivers setMarkedText before this next dead-key KeyDown.
+        input.replace_and_mark_text_in_range(None, "`", None);
+        assert_eq!(f.view.read_with(&v, |r, _| r.marked_text_for_test().map(|(_, text)|text)), Some("`".into()));
+        let mut dead = gpui::Keystroke::parse("a").unwrap(); dead.key = "dead_grave".into(); dead.key_char = None;
+        v.simulate_event(gpui::KeyDownEvent { keystroke: dead, is_held: false, prefer_character_input: false });
+        assert!(input.marked_text_range().is_some());
+        assert!(f.view.read_with(&v, |r, _| Arc::ptr_eq(r.session.state().current_source().unwrap(), &after_first)));
+        input.replace_text_in_range(None, "ò"); input.unmark_text();
+        let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| { let source=r.session.state().current_source().unwrap();source.copy_range(0..source.len_bytes()).unwrap() });
+        assert_eq!(text(&v), if accept { "éòbase" } else { "òbase" });
+        v.simulate_keystrokes("ctrl-z"); assert_eq!(text(&v), if accept { "ébase" } else { "base" });
+        assert_eq!(std::fs::read(f.dir.path().join("repeat-ime.txt")).unwrap(), b"base");
+    }
+}
+
+#[test]
+fn text_input_default_policy_enables_linux_desktop_backends() {
+    for backend in ["X11", "Wayland"] {
+        assert_eq!(text_input_supported(backend), cfg!(target_os = "linux"), "{backend}");
+    }
+    for backend in ["", "Test", "x11", "wayland", "Mac"] { assert!(!text_input_supported(backend)); }
+}
+
+#[gpui::test]
+fn explorer_and_tabs_paint_git_letters_apart_from_the_dirty_mark(cx: &mut TestAppContext) {
+    use lenz_content::branches::FileStatus;
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    let r = repo();
+    put(r.path(), "clean.txt", "clean\n");
+    put(r.path(), "edited.txt", "base\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "edited.txt", "edited\n");
+    put(r.path(), "new.txt", "new\n");
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRoot(r.path().to_path_buf()), cx));
+    let marks = |view: &ReaderView| view.tree_lines(usize::MAX).into_iter().map(|l| (l.name, l.status, l.dirty)).collect::<Vec<_>>();
+    settle(cx, &f, |view| marks(view).iter().any(|m| m.1 == Some(FileStatus::Untracked)));
+    f.view.update(&mut v, |view, cx| { view.enable_draft_input_for_test(); view.dispatch(Command::OpenRetained(r.path().join("clean.txt")), cx); });
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    draw(&mut v);
+    let id = f.view.read_with(&v, |view, _| view.session().state().active().unwrap().id());
+    let width = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let (a, b, _) = view.tab_hits.iter().find(|(_, _, t)| *t == id).unwrap(); b - a });
+    let clean_width = width(&v);
+    v.simulate_keystrokes("x");
+    draw(&mut v);
+    let char_w = f.view.read_with(&v, |view, _| view.char_w);
+    assert_eq!(f.view.read_with(&v, |view, _| marks(view)), [
+        ("clean.txt".to_string(), None, true),
+        ("edited.txt".to_string(), Some(FileStatus::Modified), false),
+        ("new.txt".to_string(), Some(FileStatus::Untracked), false),
+    ], "a dirty draft over a Git-clean file has the mark and no letter");
+    assert!((width(&v) - clean_width - 2.0 * char_w).abs() < 0.01, "only the dirty mark's cells");
+    assert_eq!(f.view.read_with(&v, |view, _| view.painted_badges.clone()), ["●", "●", "M", "U"], "tab mark, then the explorer's");
+    v.simulate_keystrokes("ctrl-s");
+    settle(cx, &f, |view| { let s = view.session().state(); !s.tab_dirty(id) && s.tab_status(id) == Some(FileStatus::Modified) });
+    draw(&mut v);
+    assert!((width(&v) - clean_width - 2.0 * char_w).abs() < 0.01, "only the letter's cells");
+    assert_eq!(f.view.read_with(&v, |view, _| view.painted_badges.clone()), ["M", "M", "M", "U"]);
+    assert_eq!(std::fs::read_to_string(r.path().join("clean.txt")).unwrap(), "xclean\n");
+}
+
+#[gpui::test]
+fn completion_popup_opens_by_typing_and_ctrl_space_and_takes_only_its_keys(cx: &mut TestAppContext) {
+    let text = "fn main() {  }\nfn helper() {}\nfn hello() {}\n";
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    let current = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    let labels = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect::<Vec<_>>()));
+    let at = text.find("{  }").unwrap() + 2;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
+    // Typing a name opens it under the name; Down and Enter accept the second suggestion.
+    type_text(&mut v, "he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    draw(&mut v);
+    assert_eq!(labels(&mut v).unwrap(), ["hello", "helper"]);
+    let tb = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let b = f.view.read_with(&v, |r, _| r.completion_bounds()).expect("a popup is drawn");
+    assert!(b.origin.y >= tb.origin.y + px(line_h()), "below the caret's line: {b:?}");
+    v.simulate_keystrokes("down");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().completion().unwrap().selected()), 1);
+    v.simulate_keystrokes("enter");
+    draw(&mut v);
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ helper }", 1));
+    assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ he }", 1), "one Undo restores the typed name");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), text);
+    // Escape dismisses without changing the text; Tab accepts; punctuation types and closes.
+    type_text(&mut v, "he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("escape");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none() && r.completion_bounds().is_none()));
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ he }", 1));
+    type_text(&mut v, "l");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello }", 1));
+    type_text(&mut v, ".he");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    // Punctuation is not accepted as a suggestion. (A bracket would also open its pair, so a comma keeps this
+    // test about completion.)
+    type_text(&mut v, ",");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none()));
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.he, }", 1));
+    // Off: typing opens nothing; Ctrl+Space still asks. A modal takes the keys first and leaves the draft as it is.
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetAutoCompletion(false), cx));
+    v.simulate_keystrokes("backspace");
+    type_text(&mut v, "l");
+    drain(cx, &f, 300);
+    assert!(f.view.read_with(&v, |r, _| r.session.state().completion().is_none()));
+    v.simulate_keystrokes("ctrl-space");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    assert_eq!(labels(&mut v).unwrap(), ["hello", "helper"]);
+    let before = current(&mut v);
+    v.simulate_keystrokes("ctrl-shift-a");
+    type_text(&mut v, "zz");
+    v.simulate_keystrokes("enter");
+    v.simulate_keystrokes("escape");
+    assert_eq!(current(&mut v), before, "the modal kept every key");
+    assert_eq!(std::fs::read(pkg.join("src/main.rs")).unwrap(), text.as_bytes());
+    // A narrow window keeps the popup inside it; a click on a row accepts it.
+    if f.view.read_with(&v, |r, _| r.session.state().completion().is_none()) {
+        v.simulate_keystrokes("ctrl-space");
+        settle(cx, &f, |r| r.session().state().completion().is_some());
+    }
+    v.simulate_resize(size(px(160.0), px(120.0)));
+    draw(&mut v);
+    let b = f.view.read_with(&v, |r, _| r.completion_bounds()).expect("drawn when narrow");
+    assert!(b.origin.x >= px(0.0) && b.origin.x + b.size.width <= px(160.0) && b.origin.y + b.size.height <= px(120.0), "{b:?}");
+    v.simulate_click(point(b.origin.x + px(8.0), b.origin.y + px(2.0 + line_h() * 1.5)), Modifiers::default());
+    assert_eq!(current(&mut v), text.replacen("{  }", "{ hello.helper }", 1));
+    // Opening and closing repeatedly retains no popup.
+    for _ in 0..10 {
+        v.simulate_keystrokes("ctrl-space");
+        settle(cx, &f, |r| r.session().state().completion().is_some());
+        draw(&mut v);
+        v.simulate_keystrokes("escape");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.completion_bounds().is_none()));
+    }
+}
+
+/// A second window over the same private state: the next start of the reader.
+fn restart_window(cx: &mut TestAppContext, f: &Fixture) -> (Entity<ReaderView>, VisualTestContext) {
+    let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), None, cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let mut v = VisualTestContext::from_window(window.into(), cx);
+    let focus = view.read_with(&v, |view, _| view.focus_handle());
+    v.update(|window, cx| focus.focus(window, cx));
+    (view, v)
+}
+
+fn recovered_dialog(view: &Entity<ReaderView>, v: &VisualTestContext) -> bool {
+    view.read_with(v, |view, _| matches!(view.modal, Some(Modal::StatusDetails { kind: Details::Recovered, .. })))
+}
+
+fn text_of(view: &Entity<ReaderView>, v: &VisualTestContext) -> String {
+    view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() })
+}
+
+#[gpui::test]
+fn a_recovered_draft_is_offered_restored_and_saved_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, Some(("recover.txt", b"saved\n")), &[], true);
+    let path = f.dir.path().join("recover.txt");
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("recovered λ\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.session.interrupt_recovery_for_test());
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n", "recovery never writes the original file");
+
+    let (second, mut w) = restart_window(cx, &f);
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the dialog opens at start");
+    assert_eq!(second.read_with(&w, |v, _| v.details_labels(Details::Recovered)), ["Restore Draft", "Discard Draft", "Later"]);
+    second.update(&mut w, |v, cx| v.dispatch(Command::OpenRetained(path.clone()), cx));
+    let second_probe = second.clone();
+    settle_view(cx, &second, |v| v.session.state().current_source().is_some());
+    let text = |v: &VisualTestContext| second_probe.read_with(v, |view, _| { let s = view.session().state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    // The dialog owns input: a printable key edits nothing behind it.
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert_eq!(text(&w), "saved\n");
+    assert!(recovered_dialog(&second, &w));
+    // Tiny windows keep the dialog dismissable and its choices reachable.
+    for (width, height) in [(1.0, 1.0), (150.0, 60.0)] {
+        w.simulate_resize(size(px(width), px(height))); draw(&mut w);
+        w.simulate_keystrokes("end up"); draw(&mut w);
+    }
+    assert!(recovered_dialog(&second, &w));
+    w.simulate_keystrokes("r"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    assert_eq!(text(&w), "recovered λ\n");
+    assert!(second.read_with(&w, |v, _| v.session.state().active().unwrap().recovered()), "the tab says it is recovered");
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n", "Restore does not write");
+    w.simulate_keystrokes("ctrl-s");
+    settle_view(cx, &second, |v| v.session.state().active().is_some_and(|t| !v.session.state().tab_dirty(t.id())));
+    assert_eq!(std::fs::read(&path).unwrap(), "recovered λ\n".as_bytes());
+    assert!(!second.read_with(&w, |v, _| v.session.state().active().unwrap().recovered()));
+    second.update(&mut w, |v, _| v.session.interrupt_recovery_for_test());
+    let (third, mut t) = restart_window(cx, &f);
+    draw(&mut t);
+    assert!(!recovered_dialog(&third, &t), "saved work has nothing to recover");
+    assert!(third.read_with(&t, |v, _| v.session.recovered_drafts().is_empty()));
+}
+
+#[gpui::test]
+fn later_keeps_the_offer_and_discard_removes_it_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, Some(("decide.txt", b"saved\n")), &[], true);
+    let path = f.dir.path().join("decide.txt");
+    settle(cx, &f, |v| v.session.state().current_source().is_some());
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("kept draft\n".into()));
+    v.simulate_keystrokes("ctrl-a ctrl-v"); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.session.interrupt_recovery_for_test());
+    let (second, mut w) = restart_window(cx, &f);
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w));
+    second.update(&mut w, |v, cx| v.dispatch(Command::OpenRetained(path.clone()), cx));
+    settle_view(cx, &second, |v| v.session.state().current_source().is_some());
+    // A keymap preset changes semantic chords, not the dialog's answers: under VS Code's keymap Ctrl+W closes a tab,
+    // but with the dialog open it reaches nothing behind it.
+    second.update(&mut w, |v, cx| v.dispatch(Command::SetKeymapPreset(code_core::keymap::KeymapPreset::VsCode), cx));
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "a preset change does not dismiss the dialog");
+    w.simulate_keystrokes("ctrl-w"); draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the dialog takes the key before the keymap");
+    assert_eq!(text_of(&second, &w), "saved\n");
+    w.simulate_keystrokes("escape"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w), "Later dismisses the dialog");
+    assert_eq!(second.read_with(&w, |v, _| v.session.recovered_drafts().len()), 1);
+    // The File menu keeps the recovery reachable: its command reopens the dialog.
+    w.simulate_keystrokes("f10");
+    let at = second.read_with(&w, |v, _| v.modal_rows().iter().position(|row| row.0 == CommandId::RecoverDrafts.label()).unwrap());
+    for _ in 0..at { w.simulate_keystrokes("down"); }
+    w.simulate_keystrokes("enter");
+    draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the File command offers it again");
+    // A stale decision (another offer's ticket) decides nothing; this one is discarded.
+    w.simulate_keystrokes("d"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    assert!(second.read_with(&w, |v, _| v.session.recovered_drafts().is_empty()));
+    second.update(&mut w, |v, _| v.session.interrupt_recovery_for_test());
+    assert_eq!(std::fs::read(&path).unwrap(), b"saved\n");
+    let (third, mut t) = restart_window(cx, &f);
+    draw(&mut t);
+    assert!(!recovered_dialog(&third, &t), "a discarded draft stays discarded");
+    assert!(third.read_with(&t, |v, _| v.session.recovered_drafts().is_empty()));
+}
+
+/// The next start of the reader on a project folder, over the same private state.
+fn restart_project(cx: &mut TestAppContext, f: &Fixture, root: &Path) -> (Entity<ReaderView>, VisualTestContext) {
+    let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), Some(root.to_owned()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let mut v = VisualTestContext::from_window(window.into(), cx);
+    let focus = view.read_with(&v, |view, _| view.focus_handle());
+    v.update(|window, cx| focus.focus(window, cx));
+    (view, v)
+}
+
+/// Each tab's file, pane, selection and top line.
+fn arrangement(view: &Entity<ReaderView>, v: &VisualTestContext) -> Vec<(PathBuf, u8, Option<code_core::session::Selection>, usize)> {
+    view.read_with(v, |view, _| view.session.state().tabs().iter().map(|t| (t.source().to_owned(), t.pane(), t.selection(), t.top_line())).collect())
+}
+
+#[gpui::test]
+fn an_interrupted_project_reopens_around_its_recovered_draft_through_real_input(cx: &mut TestAppContext) {
+    let f = fixture_setup(cx, None, &[], true);
+    let root = f.dir.path().join("project");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.txt"), "alpha\n".repeat(60)).unwrap();
+    let saved = "beta λ\n".repeat(60);
+    std::fs::write(root.join("b.txt"), &saved).unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(root.clone()), cx));
+    settle(cx, &f, |v| v.session.state().project().is_some());
+    for file in ["a.txt", "b.txt"] {
+        f.view.update(cx, |v, cx| v.dispatch(Command::OpenRetained(root.join(file)), cx));
+        settle(cx, &f, |v| v.session.state().current_source().is_some_and(|s| s.source().ends_with(file)) && v.session.state().loading().is_none());
+    }
+    f.view.update(cx, |v, cx| v.dispatch(Command::Split(code_core::session::Split::Columns), cx));
+    settle(cx, &f, |v| v.session.state().shown(1).is_some_and(|t| t.loaded()));
+    let mut v = visual(cx, &f); draw(&mut v);
+    f.view.update(&mut v, |v, _| v.enable_draft_input_for_test());
+    v.write_to_clipboard(ClipboardItem::new_string("draft ✓\n".into()));
+    v.simulate_keystrokes("ctrl-v"); draw(&mut v);
+    let draft = text_of(&f.view, &v);
+    assert!(draft.starts_with("draft ✓\n"), "{draft:?}");
+    f.view.update(&mut v, |v, cx| v.dispatch(Command::FocusPane(0), cx));
+    f.view.update(&mut v, |v, _| v.session.flush_recovery_for_test());
+    // Another window while this one runs: the live draft is this window's own, not recovered work.
+    let (other, mut o) = restart_window(cx, &f);
+    draw(&mut o);
+    assert!(!recovered_dialog(&other, &o) && other.read_with(&o, |v, _| v.session.recovered_drafts().is_empty()));
+    let before = arrangement(&f.view, &v);
+    f.view.update(&mut v, |v, _| { v.session.interrupt_recovery_for_test(); let _ = v.session.workspace_saved().recv_timeout(std::time::Duration::from_secs(5)); });
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved, "recovery never writes the file");
+
+    let (second, mut w) = restart_project(cx, &f, &root);
+    draw(&mut w);
+    assert!(!recovered_dialog(&second, &w), "the dialog waits for the project's last tabs");
+    settle_view(cx, &second, |v| matches!(v.modal, Some(Modal::StatusDetails { kind: Details::Recovered, .. })));
+    settle_view(cx, &second, |v| (0..2).all(|pane| v.session.state().shown(pane).is_some_and(|t| t.loaded())) && v.session.state().loading().is_none());
+    assert_eq!(arrangement(&second, &w), before, "tabs, panes and places come back first");
+    assert_eq!(second.read_with(&w, |v, _| v.session.state().split()), Some(code_core::session::Split::Columns));
+    // The dialog owns input in tiny windows too, and nothing behind it is edited.
+    for (width, height) in [(1.0, 1.0), (150.0, 60.0)] {
+        w.simulate_resize(size(px(width), px(height))); draw(&mut w);
+        w.simulate_keystrokes("end up x"); draw(&mut w);
+    }
+    w.simulate_resize(size(px(900.0), px(600.0))); draw(&mut w);
+    assert!(recovered_dialog(&second, &w));
+    // Later: the file shows its saved text and is not edited until the draft is decided.
+    w.simulate_keystrokes("escape"); draw(&mut w);
+    assert!(!recovered_dialog(&second, &w));
+    second.update(&mut w, |v, cx| v.dispatch(Command::FocusPane(1), cx));
+    second.update(&mut w, |v, _| v.enable_draft_input_for_test());
+    draw(&mut w);
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert_eq!(text_of(&second, &w), saved, "an undecided draft's file is not edited");
+    assert!(second.read_with(&w, |v, _| v.session.disabled(CommandId::Paste).is_some_and(|why| why.starts_with("A recovered draft of this file is undecided"))));
+    w.simulate_keystrokes("f10");
+    let at = second.read_with(&w, |v, _| v.modal_rows().iter().position(|row| row.0 == CommandId::RecoverDrafts.label()).unwrap());
+    for _ in 0..at { w.simulate_keystrokes("down"); }
+    w.simulate_keystrokes("enter"); draw(&mut w);
+    assert!(recovered_dialog(&second, &w), "the File command offers it again");
+    w.simulate_keystrokes("r"); draw(&mut w);
+    settle_view(cx, &second, |v| v.session.state().shown(0).is_some_and(|t| t.loaded()) && v.session.state().shown(1).is_some_and(|t| t.loaded()));
+    assert!(!recovered_dialog(&second, &w));
+    assert_eq!(arrangement(&second, &w), before, "restoring keeps every tab where it was");
+    // Both panes show the file: one draft, marked recovered in each.
+    for pane in [0, 1] {
+        let (b, text, recovered) = second.read_with(&w, |v, _| {
+            let state = v.session.state();
+            let tab = state.shown(pane).unwrap();
+            let view = state.view(tab.id()).unwrap();
+            (tab.source().ends_with("b.txt"), view.snapshot().copy_range(0..view.snapshot().len_bytes()).unwrap(), tab.recovered())
+        });
+        assert!(b && recovered, "pane {pane}");
+        assert_eq!(text, draft, "pane {pane} shows the restored draft");
+    }
+    assert!(second.read_with(&w, |v, _| v.session.state().tabs().iter().filter(|t| t.source().ends_with("a.txt")).all(|t| !t.recovered())));
+    w.simulate_keystrokes("x"); draw(&mut w);
+    assert!(text_of(&second, &w).contains('x'), "a restored draft is edited normally");
+    assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), saved, "Restore does not write");
+}
+
+#[gpui::test]
+fn keymap_presets_change_what_keys_run_and_what_menus_show(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("keys.rs", b"fn main() {}\nfn other() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    let hint = |v: &VisualTestContext, id| f.view.read_with(v, |r, _| r.key_hint(id));
+    assert_eq!(hint(&v, CommandId::FindAction).as_deref(), Some("Ctrl+Shift+A"));
+    assert_eq!(hint(&v, CommandId::Close).as_deref(), Some("Ctrl+F4"));
+    // IntelliJ's Ctrl+W extends the selection; the same key closes the tab under VS Code's keymap.
+    let text = |v: &VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state(); s.current_source().map(|d| d.copy_range(0..d.len_bytes())) });
+    v.simulate_keystrokes("ctrl-w");
+    assert_eq!(text(&v).flatten().as_deref(), Some("fn main() {}\nfn other() {}\n"), "Ctrl+W changes no text here");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_some()));
+    f.view.update_in(&mut v, |r, window, cx| r.run(CommandId::KeymapVsCode, window, cx));
+    assert_eq!(hint(&v, CommandId::FindAction).as_deref(), Some("Ctrl+Shift+P"));
+    assert_eq!(hint(&v, CommandId::Close).as_deref(), Some("Ctrl+W"));
+    assert_eq!(hint(&v, CommandId::LanguageServer), None, "F2 is Rename in VS Code; the status stays in the menu");
+    v.simulate_keystrokes("ctrl-f4");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_some()), "Ctrl+F4 is not bound under VS Code");
+    v.simulate_keystrokes("ctrl-w");
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_none()), "Ctrl+W closes the tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().keymap().preset()), code_core::keymap::KeymapPreset::VsCode);
+}
+
+#[gpui::test]
+fn the_keymap_dialog_binds_refuses_a_taken_chord_and_restores_the_preset(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("dialog.rs", b"fn main() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    let path = f.dir.path().join("dialog.rs");
+    let bytes = std::fs::read(&path).unwrap();
+    f.view.update_in(&mut v, |r, window, cx| r.run(CommandId::Keymap, window, cx));
+    draw(&mut v);
+    let lines = modal_lines(&f, &v);
+    assert!(lines[0].contains("Keymap: IntelliJ"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "Save — Ctrl+S"), "{lines:?}");
+    // Typing in the dialog neither edits nor saves the document behind it; narrow windows still draw it.
+    v.simulate_keystrokes("s");
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    for (w, h) in [(160.0, 120.0), (60.0, 40.0)] {
+        v.simulate_resize(size(px(w), px(h)));
+        draw(&mut v);
+        v.simulate_keystrokes("end up up pagedown");
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| !r.modal_rows().is_empty()), "{w}x{h}");
+    }
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    v.simulate_keystrokes("home");
+    draw(&mut v);
+    let at = f.view.read_with(&v, |r, _| r.session().keymap().rows().iter().position(|row| row.command == CommandId::Save).unwrap());
+    for _ in 0..at { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+    draw(&mut v);
+    assert!(modal_lines(&f, &v)[0].contains("Press the new shortcut"), "{:?}", modal_lines(&f, &v)[0]);
+    // A bare typing key is refused and the capture stays open.
+    v.simulate_keystrokes("x");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().notices().iter().any(|n| n == "A shortcut needs Ctrl, Alt or a function key")), "{:?}", f.view.read_with(&v, |r, _| r.session.state().notices()));
+    v.simulate_keystrokes("ctrl-alt-s");
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+Alt+S"));
+    assert!(modal_lines(&f, &v).iter().any(|l| l == "Save — Ctrl+Alt+S (your choice)"), "{:?}", modal_lines(&f, &v));
+    // A chord another command runs is refused with the owner named; the binding that exists stays.
+    v.simulate_keystrokes("enter ctrl-k");
+    assert!(f.view.read_with(&v, |r, _| r.session.state().notices().iter().any(|n| n.starts_with("Ctrl+K already runs"))));
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+Alt+S"));
+    // Delete restores the preset's chord.
+    v.simulate_keystrokes("delete");
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::Save)).as_deref(), Some("Ctrl+S"));
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+}
+
+#[gpui::test]
+fn a_keymap_override_persists_and_reaches_the_palette_label(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("persist.rs", b"fn main() {}\n")));
+    settle(cx, &f, |v| v.session().state().active().is_some());
+    let mut v = visual(cx, &f);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetKeybinding { command: CommandId::FindFile, chord: "Ctrl+Alt+F".into() }, cx));
+    settle(cx, &f, |r| r.session().keymap().overrides().len() == 1);
+    // Menus name the new key, and the old chord runs nothing.
+    assert_eq!(f.view.read_with(&v, |r, _| r.key_hint(CommandId::FindFile)).as_deref(), Some("Ctrl+Alt+F"));
+    v.simulate_keystrokes("ctrl-shift-n");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()), "the preset's chord no longer opens the file finder");
+    v.simulate_keystrokes("ctrl-alt-f");
+    assert!(matches!(f.view.read_with(&v, |r, _| r.modal.clone()), Some(Modal::Navigation { .. })));
+    v.simulate_keystrokes("escape");
+}
+
+#[gpui::test]
+fn gutter_paints_change_letters_in_their_own_colours_against_head(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::{commit_all, repo, write as put};
+    use code_core::markers::{BaselineKind, LineChange};
+    let r = repo();
+    put(r.path(), "a.txt", "one\ntwo\nthree\n");
+    commit_all(r.path(), "base");
+    put(r.path(), "other.txt", "untracked\n");
+    let f = fixture(cx, None);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRoot(r.path().to_path_buf()), cx));
+    settle(cx, &f, |view| view.session().state().tree_rows().any(|row| view.session().state().row_status(row) == Some(lenz_content::branches::FileStatus::Untracked)));
+    f.view.update(&mut v, |view, cx| { view.enable_draft_input_for_test(); view.dispatch(Command::OpenRetained(r.path().join("a.txt")), cx); });
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let tab = |view: &ReaderView| view.session().state().active().unwrap().id();
+    // The debounce thread runs for real: the markers settle once the draft rests.
+    settle(cx, &f, |view| view.session().state().markers(tab(view)).is_some_and(|m| !m.pending()));
+    assert_eq!(f.view.read_with(&v, |view, _| view.marker_letters()), Vec::<(char, u32)>::new(), "a committed file shows no letter");
+    v.simulate_keystrokes("x");
+    settle(cx, &f, |view| view.session().state().markers(tab(view)).is_some_and(|m| !m.pending() && m.change(0) == Some(LineChange::Modified)));
+    draw(&mut v);
+    let (palette, letters) = f.view.read_with(&v, |view, _| (view.session().state().palette().clone(), view.marker_letters()));
+    assert_eq!(letters, vec![('M', LineChange::Modified.color(&palette))], "the changed line's letter, in the modified colour");
+    assert_ne!(LineChange::Added.color(&palette), LineChange::Modified.color(&palette));
+    let (kind, summary) = f.view.read_with(&v, |view, _| {
+        let markers = view.session().state().markers(tab(view)).unwrap();
+        (markers.baseline().map(code_core::markers::Baseline::kind), markers.summary())
+    });
+    assert_eq!(kind, Some(BaselineKind::Head));
+    assert_eq!(summary.as_deref().map(|s| s.starts_with("vs HEAD (main · ")), Some(true), "{summary:?}");
+    assert!(f.view.read_with(&v, |view, _| view.status_markers().1.clone()).contains("vs HEAD"), "the status bar names the baseline");
+    // Blame and a bookmark take their own gutter places beside the letters.
+    f.view.update(&mut v, |view, cx| { view.dispatch(Command::SetAnnotate(true), cx); view.dispatch(Command::ToggleBookmark, cx); });
+    settle(cx, &f, |view| view.session().state().active().is_some_and(|t| t.blame_status() == Some(code_core::blame::Status::Ready)));
+    draw(&mut v);
+    assert!(!f.view.read_with(&v, |view, _| view.painted_annotations.clone()).is_empty(), "the blame column is painted");
+    assert_eq!(f.view.read_with(&v, |view, _| view.marker_letters()).iter().map(|(glyph, _)| *glyph).collect::<Vec<_>>(), vec!['M'], "the change letter stays painted beside both");
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "one\ntwo\nthree\n");
+}
+
+#[gpui::test]
+fn structural_keys_and_menus_indent_comment_move_and_duplicate_in_the_window(cx: &mut TestAppContext) {
+    let original = "one\r\ntwo\r\nthree\r\n";
+    let f = fixture(cx, Some(("edit.rs", original.as_bytes())));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let text = |v: &VisualTestContext| f.view.read_with(v, |view, _| { let source = view.session().state().current_source().unwrap(); source.copy_range(0..source.len_bytes()).unwrap() });
+    f.view.update(&mut v, |view, _| view.enable_draft_input_for_test());
+    // Tab inserts the file's indentation step at a caret; Shift+Tab takes it back.
+    v.simulate_keystrokes("tab");
+    assert_eq!(text(&v), "    one\r\ntwo\r\nthree\r\n");
+    v.simulate_keystrokes("shift-tab");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    // Ctrl+Shift+Down moves the first line over the second, and Alt+Shift+Down duplicates it.
+    v.simulate_keystrokes("ctrl-shift-down");
+    assert_eq!(text(&v), "two\r\none\r\nthree\r\n");
+    v.simulate_keystrokes("alt-shift-down");
+    assert_eq!(text(&v), "two\r\none\r\none\r\nthree\r\n");
+    v.simulate_keystrokes("ctrl-z ctrl-z");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n", "each action was its own undo step");
+    // Alt+/ comments the line (Ctrl+/ is the same chord; terminals may not deliver it).
+    v.simulate_keystrokes("ctrl-g 1 enter home");
+    v.simulate_keystrokes("alt-/");
+    assert_eq!(text(&v), "// one\r\ntwo\r\nthree\r\n");
+    v.simulate_keystrokes("alt-/");
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    // The same actions are in the Selection menu both adapters show, with their labels.
+    v.simulate_keystrokes("ctrl-a");
+    choose_menu_command(&mut v, &f, CommandId::IndentSelection);
+    assert_eq!(text(&v), "    one\r\n    two\r\n    three\r\n");
+    choose_menu_command(&mut v, &f, CommandId::OutdentSelection);
+    assert_eq!(text(&v), "one\r\ntwo\r\nthree\r\n");
+    choose_menu_command(&mut v, &f, CommandId::ToggleComment);
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n");
+    choose_menu_command(&mut v, &f, CommandId::DuplicateLinesDown);
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n// one\r\n// two\r\n// three\r\n");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(text(&v), "// one\r\n// two\r\n// three\r\n");
+    // A dialog takes the keys first and leaves the draft alone.
+    v.simulate_keystrokes("f10");
+    let before = text(&v);
+    v.simulate_keystrokes("tab alt-shift-down ctrl-shift-down alt-/");
+    assert_eq!(text(&v), before, "an open menu keeps every structural key away from the text");
+    v.simulate_keystrokes("escape");
+    // Read-only mode refuses them too, with the shared reason.
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::SetReadOnly(true), cx));
+    v.simulate_keystrokes("ctrl-z");
+    let frozen = text(&v);
+    v.simulate_keystrokes("tab alt-shift-down ctrl-shift-down alt-/");
+    assert_eq!(text(&v), frozen);
+    let disabled = f.view.read_with(&v, |view, _| [CommandId::IndentSelection, CommandId::ToggleComment, CommandId::MoveLinesDown, CommandId::DuplicateLinesDown].map(|id| view.session().disabled(id)));
+    assert_eq!(disabled, [Some("Read-only mode is on"); 4]);
+    assert_eq!(std::fs::read(f.dir.path().join("edit.rs")).unwrap(), original.as_bytes(), "the keys never write the file");
+    // An empty file: indenting writes the step, and the commands with nothing to do say why and change nothing.
+    let empty = f.dir.path().join("empty.rs");
+    std::fs::write(&empty, b"").unwrap();
+    f.view.update(&mut v, |view, cx| view.dispatch(Command::OpenRetained(empty), cx));
+    settle(cx, &f, |view| view.session().state().current_source().is_some_and(|d| d.source().ends_with("empty.rs")));
+    draw(&mut v);
+    // The empty document says what it cannot do before the first step writes anything.
+    let reasons = f.view.read_with(&v, |view, _| [CommandId::ToggleComment, CommandId::MoveLinesDown, CommandId::DuplicateLinesDown].map(|id| view.session().disabled(id)));
+    assert_eq!(reasons, [Some("There is no text to comment"), Some("Already on the last line"), Some("Nothing to duplicate")]);
+    v.simulate_keystrokes("alt-/ ctrl-shift-down alt-shift-down");
+    assert_eq!(text(&v), "", "an empty document has nothing to comment, move or duplicate");
+    v.simulate_keystrokes("tab");
+    assert_eq!(text(&v), "    ", "indenting an empty document writes the file's step");
+    v.simulate_keystrokes("shift-tab");
+    assert_eq!(text(&v), "");
+}
+
+#[gpui::test]
+fn a_snippet_completion_expands_in_order_and_tab_visits_its_placeholders(cx: &mut TestAppContext) {
+    let text = "fn main() {  }\n";
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = fake_package(cx, &f, &[("src/main.rs", text)], "src/main.rs");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|view| view.highlights().is_some())));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    f.view.update(&mut v, |r, cx| { r.enable_draft_input_for_test(); cx.notify(); });
+    draw(&mut v);
+    let current = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() });
+    let selected = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| { let s = r.session.state(); let doc = s.current_source().unwrap(); s.selection().map(|sel| doc.copy_range(sel.range()).unwrap()).unwrap_or_default() });
+    let status = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().status_message());
+    let hint_painted = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.status_segments().1.1.clone());
+    let at = text.find("{  }").unwrap() + 2;
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Select(Selection { anchor: at, head: at }), cx));
+    type_text(&mut v, "snippet");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    draw(&mut v);
+    let labels = f.view.read_with(&v, |r, _| r.session.state().completion().map(|c| c.rows().map(|r| r.label.clone()).collect::<Vec<_>>()));
+    assert_eq!(labels.unwrap(), ["snippet_block", "snippet_call", "snippet_import", "snippet_nested", "snippet_repeat"]);
+    // Tab accepts the suggestion: the body replaces the typed name, its tab the file's four spaces.
+    v.simulate_keystrokes("tab");
+    draw(&mut v);
+    assert_eq!(current(&mut v), "fn main() { if cond {\n    body();\n} }\n");
+    assert_eq!(selected(&mut v), "body", "the first numbered placeholder is selected, not the one written first");
+    assert_eq!(status(&mut v), "Snippet: placeholder 1 of 3 · Tab next · Esc done");
+    assert!(hint_painted(&mut v).contains("Snippet: placeholder 1 of 3"), "the status bar paints it: {:?}", hint_painted(&mut v));
+    // Tab now visits the placeholders instead of indenting.
+    v.simulate_keystrokes("tab");
+    assert_eq!(selected(&mut v), "cond");
+    assert!(status(&mut v).contains("placeholder 2 of 3"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().selection().unwrap().range()), 35..35, "then the final caret");
+    assert!(status(&mut v).contains("Tab ends"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { if cond {\n    body();\n} }\n", "the last Tab only ends the snippet");
+    assert!(!status(&mut v).starts_with("Snippet:"), "{:?}", status(&mut v));
+    // One Undo takes the whole expansion back and nothing is written.
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(current(&mut v), "fn main() { snippet }\n");
+    assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), text);
+
+    // A repeated placeholder: accepting it selects every occurrence, and typing changes them in one step.
+    v.simulate_keystrokes("ctrl-space");
+    settle(cx, &f, |r| r.session().state().completion().is_some());
+    v.simulate_keystrokes("down down down down");
+    draw(&mut v);
+    let repeat = f.view.read_with(&v, |r, _| r.session.state().completion().map(|c| c.rows().nth(c.selected()).map(|r| r.label.clone())));
+    assert_eq!(repeat.flatten().as_deref(), Some("snippet_repeat"));
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { sum + sum = sum }\n");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().selections().count()), 3, "one stop selects all three");
+    v.simulate_keystrokes("x");
+    assert_eq!(current(&mut v), "fn main() { x + x = x }\n", "one typing transaction changes every occurrence");
+    // Escape ends the snippet and leaves the text alone; Tab indents again afterwards.
+    v.simulate_keystrokes("escape");
+    assert!(!status(&mut v).starts_with("Snippet:"), "Escape ends it: {:?}", status(&mut v));
+    assert_eq!(current(&mut v), "fn main() { x + x = x }\n");
+    v.simulate_keystrokes("tab");
+    assert_eq!(current(&mut v), "fn main() { x     + x = x }\n", "Tab at the caret inserts the step it would insert");
+    v.simulate_keystrokes("ctrl-z");
+    assert_eq!(std::fs::read_to_string(pkg.join("src/main.rs")).unwrap(), text, "the file is never written");
+}
+
+#[gpui::test]
+fn duckdb_metadata_configuration_chooses_a_file_without_opening_it_and_rejects_stale_picks(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("query.sql", b"SELECT 1;\n")));
+    settle(cx, &f, active_is("query.sql"));
+    let mut v = visual(cx, &f);
+    let database = f.dir.path().join("example.duckdb");
+    std::fs::write(&database, b"not opened during configuration").unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetSqlDialect(Some(code_core::sql_dialect::Dialect::DuckDb)), cx));
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ConfigureSqlMetadata, w, cx));
+    assert!(cx.did_prompt_for_paths(), "DuckDB configuration should offer the native file chooser");
+    cx.simulate_path_prompt_response(|_| None);
+    cx.run_until_parked();
+    assert!(f.view.read_with(&v, |r, _| r.session().sql_metadata_source().is_empty()));
+    v.simulate_resize(size(px(900.0), px(500.0))); draw(&mut v);
+    let button = f.view.read_with(&v, |r, _| r.modal_layout().unwrap().details_buttons(r.char_w, &r.details_labels(Details::Sql))[0].center());
+    v.simulate_click(button, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::CommandGroup { group: CommandGroup::Sql, .. }))));
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ConfigureSqlMetadata, w, cx));
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files && !options.directories && !options.multiple);
+        Some(vec![database.clone()])
+    });
+    settle(cx, &f, |r| r.session().sql_metadata_source() == database.to_str().unwrap());
+    assert!(f.view.read_with(&v, |r, _| r.session().sql_metadata_details().contains("configured; disconnected")));
+    f.view.read_with(&v, |r, _| {
+        let Some(Modal::CommandGroup { group, at }) = r.modal else { panic!("expected metadata menu") };
+        assert_eq!(group, CommandGroup::Metadata);
+        assert_eq!(r.session.menu(Some(group))[at].target, MenuTarget::Run(CommandId::ConnectSqlMetadata));
+    });
+    assert_eq!(std::fs::read(&database).unwrap(), b"not opened during configuration");
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ConfigureSqlMetadata, w, cx));
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::SetSqlDialect(Some(code_core::sql_dialect::Dialect::PostgreSql)), cx));
+    cx.simulate_path_prompt_response(|_| Some(vec![database.clone()]));
+    cx.run_until_parked();
+    assert!(f.view.read_with(&v, |r, _| r.session().sql_metadata_source().is_empty()));
+    assert!(f.view.read_with(&v, |r, _| r.session().state().activity_log().back().unwrap().contains("changed while choosing")));
+    f.view.update_in(&mut v, |r, w, cx| r.run(CommandId::ConfigureSqlMetadata, w, cx));
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::SqlMetadata { .. }))), "PostgreSQL retains its service prompt");
+    assert_eq!(std::fs::read(f.dir.path().join("query.sql")).unwrap(), b"SELECT 1;\n");
+}
+#[cfg(unix)]
+#[gpui::test]
+fn sql_metadata_chooser_connect_menu_loads_catalog_and_logs_the_result(cx: &mut TestAppContext) {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture(cx, Some(("query.sql", b"select * from users;")));
+    settle(cx, &f, active_is("query.sql"));
+    let mut v = visual(cx, &f);
+    let database = f.dir.path().join("app.db");
+    std::fs::write(&database, b"SQLite format 3\0fixture").unwrap();
+    let tool = f.dir.path().join("duckdb-fixture");
+    std::fs::write(&tool, r#"#!/bin/sh
+cat >/dev/null
+printf '%s\n' '[{"catalog":{"relations":[{"name":"main.users","columns":[{"name":"id","data_type":"INTEGER"}]}],"functions":[]}}]'
+"#).unwrap();
+    std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o700)).unwrap();
+    f.view.update(&mut v, |r, cx| {
+        r.dispatch(Command::SetDuckDbExecutable(Some(tool)), cx);
+        r.dispatch(Command::SetSqlDialect(Some(code_core::sql_dialect::Dialect::DuckDb)), cx);
+    });
+    choose_menu_command(&mut v, &f, CommandId::ConfigureSqlMetadata);
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|_| Some(vec![database.clone()]));
+    settle(cx, &f, |r| !r.session().sql_metadata_source().is_empty());
+    draw(&mut v);
+    let connect = f.view.read_with(&v, |r, _| {
+        let row = r.modal_rows().iter().position(|r| r.0 == CommandId::ConnectSqlMetadata.label()).expect("Connect is visible after choosing a database");
+        let l = r.modal_layout().unwrap();
+        point(l.bounds.center().x, l.bounds.origin.y + px(l.body_top + (row - l.first) as f32 * line_h() + line_h() / 2.0))
+    });
+    v.simulate_click(connect, Modifiers::default());
+    settle(cx, &f, |r| r.session().sql_metadata_details().contains("snapshot loaded"));
+    f.view.read_with(&v, |r, _| {
+        let log = r.session().state().activity_log();
+        assert!(log.iter().any(|line| line.contains("SQL metadata: connecting…")));
+        assert!(log.iter().any(|line| line.contains("SQL metadata: connected; 1 relations")));
+    });
+    assert_eq!(std::fs::read(&database).unwrap(), b"SQLite format 3\0fixture");
+    assert_eq!(std::fs::read(f.dir.path().join("query.sql")).unwrap(), b"select * from users;");
+}
+
+mod xml;
+#[path = "tests/tab_wheel.rs"]
+mod tab_wheel;
+mod csv;
+mod tree_errors;
+
+#[gpui::test]
+fn project_results_share_a_line_row_with_every_match_emphasized(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["src/a.rs"]);
+    std::fs::write(root.join("src/a.rs"), "fn main() {\n        let needle = needle + 1;\n}\n").unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx));
+    settle(cx, &f, search_done);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let (list, _) = f.view.update(&mut v, |v, _| v.panel_contents(6, 3));
+    assert_eq!(list.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["src/  2", "a.rs  2", "   2  let needle = needle + 1;"]);
+    assert_eq!(list.iter().map(|r| r.depth).collect::<Vec<_>>(), [0, 1, 2], "folders nest");
+    let row = &list[2];
+    assert_eq!(row.highlights.iter().map(|m| &row.label[m.clone()]).collect::<Vec<_>>(), ["needle", "needle"]);
+    assert!(row.selected, "the line's row is selected with its first match");
+    // Down has nowhere else to go: the second match shares the row.
+    v.simulate_keystrokes("down");
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().unwrap().selected()), Some(0));
+    assert_eq!(std::fs::read(root.join("src/a.rs")).unwrap(), b"fn main() {\n        let needle = needle + 1;\n}\n");
+}
+
+#[gpui::test]
+fn results_panel_hides_on_escape_and_shows_again_with_its_selection(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["src/a.rs", "src/b.rs"]);
+    for name in ["src/a.rs", "src/b.rs"] { std::fs::write(root.join(name), "needle\n").unwrap(); }
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx));
+    settle(cx, &f, search_done);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |v, _| v.results_focus = true);
+    v.simulate_keystrokes("down");
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().unwrap().selected()), Some(1));
+    // Escape hides the panel and gives the keys back to the text; the results stay.
+    v.simulate_keystrokes("escape");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_none() && !v.results_focus && v.panel_top == f32::MAX));
+    assert!(f.view.read_with(&v, |v, _| v.session().disabled(CommandId::ToggleResults).is_none()));
+    // The status bar says they are waiting; a click there shows them again.
+    let (button, label) = f.view.read_with(&v, |v, _| v.results_button()).unwrap();
+    assert_eq!(label, "Results (2)");
+    v.simulate_click(button.center(), Modifiers::default());
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_some() && v.results_button().is_none()));
+    v.simulate_keystrokes("escape");
+    // Ctrl+J (and IntelliJ's Ctrl+Shift+F12) shows them again with their selection, and they take the keys.
+    v.simulate_keystrokes("ctrl-j");
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.results_focus && v.panel_top < f32::MAX));
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().map(|r| (r.hits().len(), r.selected()))), Some((2, Some(1))));
+    v.simulate_keystrokes("ctrl-shift-f12");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_none()));
+    v.simulate_keystrokes("ctrl-shift-f12");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_some()));
+    for name in ["src/a.rs", "src/b.rs"] { assert_eq!(std::fs::read(root.join(name)).unwrap(), b"needle\n"); }
+}
+
+#[gpui::test]
+fn escape_stops_a_running_search_before_it_hides_the_panel(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let names: Vec<String> = (0..40).map(|i| format!("f{i:02}.txt")).collect();
+    let root = project(f.dir.path(), &names.iter().map(String::as_str).collect::<Vec<_>>());
+    for name in &names { std::fs::write(root.join(name), "needle\n".repeat(50)).unwrap(); }
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |v, cx| { v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx); v.results_focus = true; });
+    assert!(f.view.read_with(&v, |v, _| v.session().disabled(CommandId::StopSearch).is_none()));
+    // The first Escape stops the search and keeps its panel; the second hides it.
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_some_and(|r| r.done()) && v.session().disabled(CommandId::StopSearch).is_some()));
+    assert!(f.view.read_with(&v, |v, _| v.results_status().unwrap().contains("stopped after")));
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |v, _| v.session().state().results().is_none() && v.results_button().is_some()));
+}
+
+#[gpui::test]
+fn wide_results_preview_beside_the_list_and_heading_buttons_run(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["src/a.rs", "src/b.rs"]);
+    for name in ["src/a.rs", "src/b.rs"] { std::fs::write(root.join(name), "needle\n").unwrap(); }
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx));
+    settle(cx, &f, search_done);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(1200.0), px(700.0)));
+    draw(&mut v);
+    // Wide: the list keeps the left part; a click on the preview beside it selects nothing.
+    let (list_w, list_y) = f.view.read_with(&v, |v, _| (v.panel_list_w, v.panel_list_y));
+    assert!(list_w < 1200.0);
+    v.simulate_click(point(px(list_w + 40.0), px(list_y + line_h() * 3.5)), Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().unwrap().selected()), Some(0));
+    // The heading's buttons: Collapse folds the tree, Expand unfolds it, × closes.
+    let button = |v: &mut VisualTestContext, label: &str| f.view.read_with(v, |v, _| v.results_buttons().into_iter().find(|(_, _, l)| *l == label).unwrap().0.center());
+    let at = button(&mut v, "Collapse");
+    v.simulate_click(at, Modifiers::default());
+    draw(&mut v);
+    assert_eq!(f.view.update(&mut v, |v, _| v.panel_contents(10, 0).0.len()), 1, "only the folder row");
+    let at = button(&mut v, "Expand");
+    v.simulate_click(at, Modifiers::default());
+    draw(&mut v);
+    assert_eq!(f.view.update(&mut v, |v, _| v.panel_contents(10, 0).0.len()), 5);
+    let at = button(&mut v, "×");
+    v.simulate_click(at, Modifiers::default());
+    assert!(f.view.read_with(&v, |v, _| v.session().disabled(CommandId::ToggleResults).is_some()), "closed, not hidden");
+    // Narrow: the preview goes below the list again.
+    f.view.update(&mut v, |v, cx| v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx));
+    drop(v);
+    settle(cx, &f, search_done);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(600.0)));
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| v.panel_list_w), f32::MAX);
+}
+
+#[gpui::test]
+fn a_long_result_line_starts_shortly_before_its_match(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["a.rs"]);
+    std::fs::write(root.join("a.rs"), format!("    {}needle tail\n", "x".repeat(180))).unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: "needle".into(), scope: SearchIn::Project }, cx));
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().len() == 1));
+    let rows = f.view.update(cx, |v, _| v.panel_contents(5, 0).0);
+    let row = rows.iter().find(|r| r.hit == Some(0)).unwrap();
+    assert!(row.label.contains("…") && row.label.contains("needle tail"), "{}", row.label);
+    assert!(row.label.len() < 150, "the row no longer starts at the line's start: {}", row.label);
+    let hl = &row.highlights[0];
+    assert_eq!(&row.label[hl.clone()], "needle", "the emphasis follows the shift");
+}
+
+#[gpui::test]
+fn f4_steps_through_results_and_earlier_lists_come_back_by_keys_and_buttons(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["a.rs", "src/b.rs"]);
+    std::fs::write(root.join("a.rs"), "needle\nother\n").unwrap();
+    std::fs::write(root.join("src/b.rs"), "x\nneedle\n").unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let search = |cx: &mut TestAppContext, q: &str| {
+        f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: q.into(), scope: SearchIn::Project }, cx));
+        settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.query() == q && r.preview().is_some()));
+    };
+    search(cx, "needle");
+    // F4 from the text opens the next result there, Shift+F4 the one before (src/b.rs lists first, as in the
+    // explorer).
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |v, _| v.results_focus = false);
+    v.simulate_keystrokes("f4");
+    drop(v);
+    settle(cx, &f, active_is("a.rs"));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("shift-f4");
+    drop(v);
+    settle(cx, &f, active_is("b.rs"));
+    search(cx, "other");
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    // Alt+Left in the panel shows the earlier list with its selection; the › button the later one again.
+    f.view.update(&mut v, |v, _| v.results_focus = true);
+    v.simulate_keystrokes("alt-left");
+    draw(&mut v);
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().map(|r| (r.query().to_owned(), r.selected()))), Some(("needle".to_owned(), Some(0))));
+    // The list shown again gets its line colours back.
+    drop(v);
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.line_spans(0).is_some()));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let next = f.view.read_with(&v, |v, _| v.results_buttons().into_iter().find(|(_, _, l)| *l == "›").unwrap().0.center());
+    v.simulate_click(next, Modifiers::default());
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().unwrap().query().to_owned()), "other");
+    v.simulate_keystrokes("alt-left alt-right");
+    assert_eq!(f.view.read_with(&v, |v, _| v.session().state().results().unwrap().query().to_owned()), "other");
+    assert_eq!(std::fs::read(root.join("a.rs")).unwrap(), b"needle\nother\n");
+}
+
+#[gpui::test]
+fn keyboard_shortcuts_returns_to_the_menu_root_by_left_escape_and_its_back_row(cx: &mut TestAppContext) {
+    use code_core::{actions::CommandGroup, chrome::MenuTarget};
+    let f = fixture(cx, Some(("keep.txt", b"keep\n")));
+    settle(cx, &f, active_is("keep.txt"));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let shortcuts = f.view.read_with(&v, |r, _| r.session().menu(None).iter().position(|row| row.target == MenuTarget::Group(CommandGroup::Keybindings)).unwrap());
+    for leave in ["left", "escape", "enter"] {
+        let menu = f.view.read_with(&v, |r, _| r.app_menu_button().center());
+        v.simulate_click(menu, Modifiers::default());
+        f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::AppMenu { at: shortcuts }); cx.notify(); });
+        v.simulate_keystrokes("enter");
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::CommandGroup { group: CommandGroup::Keybindings, .. }))));
+        // The Back row is the group's first row; Enter there goes back like Left and Escape.
+        if leave == "enter" { f.view.update(&mut v, |r, _| if let Some(Modal::CommandGroup { at, .. }) = &mut r.modal { *at = 0 }); }
+        v.simulate_keystrokes(leave);
+        assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::AppMenu { at }) if at == shortcuts)), "{leave}");
+        v.simulate_keystrokes("escape");
+    }
+    // Down from All commands passes over the line to the application's first command.
+    let all = f.view.read_with(&v, |r, _| r.session().menu(None).iter().position(|row| row.target == MenuTarget::AllCommands).unwrap());
+    f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::AppMenu { at: all }); cx.notify(); });
+    v.simulate_keystrokes("down");
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal.as_ref().unwrap().at()), all + 2);
+}
+
+#[gpui::test]
+fn a_clicked_explorer_file_opens_and_keeps_the_explorers_keys(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["a.rs", "b.rs"]);
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    let row = f.view.read_with(&v, |r, _| r.session().state().tree_rows().position(|row| &*row.path == "b.rs").unwrap() - r.tree_scroll);
+    let y = toolbar_h() + line_h() * (row as f32 + 1.5);
+    v.simulate_click(point(px(40.0), px(y)), Modifiers::default());
+    drop(v);
+    settle(cx, &f, active_is("b.rs"));
+    let mut v = visual(cx, &f);
+    assert!(f.view.read_with(&v, |r, _| r.tree_focus && !r.results_focus));
+    // Arrows move in the explorer; typing searches it rather than editing the file.
+    v.simulate_keystrokes("up a");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().explorer_search().query().to_owned()), "a");
+    assert_eq!(std::fs::read(root.join("b.rs")).unwrap(), b"b.rs");
+}
+
+#[gpui::test]
+fn results_heading_stop_rerun_hide_and_back_buttons_run(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let names: Vec<String> = (0..40).map(|i| format!("f{i:02}.txt")).collect();
+    let root = project(f.dir.path(), &names.iter().map(String::as_str).collect::<Vec<_>>());
+    for name in &names { std::fs::write(root.join(name), "needle\n".repeat(50)).unwrap(); }
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let search = |cx: &mut TestAppContext, q: &str| f.view.update(cx, |v, cx| v.dispatch(Command::Search { query: q.into(), scope: SearchIn::Project }, cx));
+    let press = |cx: &mut TestAppContext, label: &str| {
+        let mut v = visual(cx, &f);
+        v.simulate_resize(size(px(1200.0), px(700.0)));
+        draw(&mut v);
+        let at = f.view.read_with(&v, |v, _| v.results_buttons().into_iter().find(|(_, _, l)| *l == label).unwrap().0.center());
+        v.simulate_click(at, Modifiers::default());
+    };
+    // Stop while the search runs keeps what it found.
+    search(cx, "needle");
+    press(cx, "Stop");
+    assert!(f.view.read_with(cx, |v, _| v.results_status().unwrap().contains("stopped after")));
+    // Rerun asks again and finishes.
+    press(cx, "Rerun");
+    settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.hits().len() == 2000));
+    // Another search, then ‹ goes back to this one; Hide leaves "Results (N)" in the status bar.
+    for q in ["absent", "needle", "need"] {
+        search(cx, q);
+        settle(cx, &f, |v| v.session().state().results().is_some_and(|r| r.done() && r.query() == q));
+    }
+    press(cx, "‹");
+    assert_eq!(f.view.read_with(cx, |v, _| v.session().state().results().unwrap().query().to_owned()), "needle");
+    press(cx, "Hide");
+    assert!(f.view.read_with(cx, |v, _| v.session().state().results().is_none() && v.results_button().is_some()));
 }

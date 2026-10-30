@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 #[test]
 fn version_prints_the_name_and_version_and_starts_nothing() {
     for flag in ["--version", "-V"] {
-        let out = Command::new(env!("CARGO_BIN_EXE_lenz-reader")).arg(flag).stdin(Stdio::null()).output().unwrap();
+        let out = Command::new(env!("CARGO_BIN_EXE_lenz-code")).arg(flag).stdin(Stdio::null()).output().unwrap();
         assert!(out.status.success(), "{flag}: {out:?}");
         assert_eq!(String::from_utf8_lossy(&out.stdout), format!("lenz-code {}\n", env!("CARGO_PKG_VERSION")), "{flag}");
     }
@@ -12,7 +12,7 @@ fn version_prints_the_name_and_version_and_starts_nothing() {
 
 #[test]
 fn help_and_unknown_options_never_open_a_window() {
-    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_lenz-reader")).args(args).stdin(Stdio::null()).output().unwrap();
+    let run = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_lenz-code")).args(args).stdin(Stdio::null()).output().unwrap();
     let help = run(&["--help"]);
     assert!(help.status.success() && String::from_utf8_lossy(&help.stdout).starts_with("Usage: lenz-code"), "{help:?}");
     let unknown = run(&["--bogus"]);
