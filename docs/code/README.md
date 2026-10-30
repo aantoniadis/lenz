@@ -10,8 +10,8 @@ The Linux [integrated terminal](terminal.md) runs multiple shell sessions in tab
 Paste selected draft text with Ctrl+Alt+Enter, or drop a file to paste its quoted
 path. Ctrl+Alt+T shows the panel and Ctrl+Alt+0 returns focus to the editor.
 
-A code editor with project navigation, language assistance and safe saving, with draft editing on Linux X11/Wayland GUI and Linux TUI.
-Native macOS input remains gated pending platform verification. Decoding, syntax highlighting,
+A code editor with project navigation, language assistance and safe saving, with draft editing in the GUI on Linux X11/Wayland and
+macOS and in the terminal on Linux and macOS. Decoding, syntax highlighting,
 themes and single-pane text presentation are shared with Lenz Diff through local workspace crates
 `lenz-content` and `lenz-gpui`.
 

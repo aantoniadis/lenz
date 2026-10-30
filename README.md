@@ -385,7 +385,7 @@ records a fresh complete CI pass, 62 available-provider checks, native SQL/X11/P
 completed Linux measurement campaign. Final 180-second Lenz Code PTY settled RSS was **45.70→40.00 MiB**;
 ordinary GUI editing repeats measured **162.69→207.71 MiB** settled RSS. Cached operations and
 other memory/throughput costs are detailed in the report. **The single cost decision remains pending**;
-this is not complete native release acceptance. macOS remains unverified and gated.
+this is not complete native release acceptance. Editing on macOS (window and terminal) is enabled from 0.0.8.
 
 The [final Linux validation on 2026-10-21](docs/release-validation.md) passed the
 full suite: **133 cases, 394 metrics**, plus ten live language-server lifecycle

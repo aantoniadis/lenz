@@ -236,7 +236,7 @@ pub(crate) struct App {
 }
 impl App {
     pub fn new(config: Config, path: Option<PathBuf>) -> Self {
-        Self::with_text_input(config, path, cfg!(target_os = "linux"))
+        Self::with_text_input(config, path, cfg!(any(target_os = "linux", target_os = "macos")))
     }
     fn with_text_input(config: Config, path: Option<PathBuf>, enabled: bool) -> Self {
         let mut app = Self {

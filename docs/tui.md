@@ -6,7 +6,7 @@ Lenz Code also offers optional **Vim Editing**, independent **Relative Line Numb
 richer Markdown source/preview styling, and explorer type-to-search in both adapters. See the
 [editor controls](code/tui.md) for enabling and using them.
 
-Lenz Code draft editing and Undo/Redo input are enabled by default in the Linux terminal and the Linux X11/Wayland GUI. The GUI checks its actual backend; native macOS remains gated pending platform verification. Checkpoint23 activation remains a private candidate until the combined gate and performance acceptance. See the [Unicode composition limits](research/code-unicode-composition.md). Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
+Lenz Code draft editing and Undo/Redo input are enabled by default in the terminal on Linux and macOS, in the Linux X11/Wayland GUI and in the macOS GUI. The Linux GUI checks its actual backend; other platforms stay read-only. Checkpoint23 activation remains a private candidate until the combined gate and performance acceptance. See the [Unicode composition limits](research/code-unicode-composition.md). Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
 
 Lenz Code editing also covers several selections: Ctrl+Alt+Down / Up and **Select Next Occurrence** (Alt+J) add
 cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. Tab indents and
