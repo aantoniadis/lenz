@@ -6968,11 +6968,12 @@ fn native_composition_can_begin_again_before_the_next_dead_key_without_reviving_
 }
 
 #[test]
-fn text_input_default_policy_enables_linux_desktop_backends() {
+fn text_input_default_policy_enables_linux_desktop_backends_and_macos() {
     for backend in ["X11", "Wayland"] {
-        assert_eq!(text_input_supported(backend), cfg!(target_os = "linux"), "{backend}");
+        assert_eq!(text_input_supported(backend), cfg!(any(target_os = "linux", target_os = "macos")), "{backend}");
     }
-    for backend in ["", "Test", "x11", "wayland", "Mac"] { assert!(!text_input_supported(backend)); }
+    // macOS has one native backend, whatever it calls itself; elsewhere only the verified names
+    for backend in ["", "Test", "x11", "wayland", "Mac"] { assert_eq!(text_input_supported(backend), cfg!(target_os = "macos"), "{backend}"); }
 }
 
 #[gpui::test]

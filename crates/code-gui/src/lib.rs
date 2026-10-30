@@ -472,7 +472,9 @@ pub fn open_acceptance_window_for_test(
 ) -> Result<gpui::WindowHandle<ReaderView>, String> {
     open_reader_window(cx, make_config, path)
 }
-fn text_input_supported(compositor: &str) -> bool { cfg!(target_os = "linux") && matches!(compositor, "X11" | "Wayland") }
+/// Native text input (typing and input methods through `EntityInputHandler`) on the verified backends: Linux X11 and
+/// Wayland, and macOS.
+fn text_input_supported(compositor: &str) -> bool { cfg!(target_os = "macos") || cfg!(target_os = "linux") && matches!(compositor, "X11" | "Wayland") }
 
 fn open_reader_window(cx: &mut App, make_config: std::rc::Rc<dyn Fn(bool)->Config>,path:Option<PathBuf>)->Result<gpui::WindowHandle<ReaderView>,String> {
     let options = WindowOptions {
