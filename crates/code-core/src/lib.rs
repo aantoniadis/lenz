@@ -1,0 +1,70 @@
+//! Lenz Code's headless core: immutable versioned documents, the reloadable-content cache and the
+//! session that owns every semantic state transition. Free of GPUI; adapters translate input into commands
+//! and present the state snapshot.
+#![deny(unsafe_code)]
+
+pub mod actions;
+mod analysis;
+mod draft;
+pub mod save;
+pub mod close;
+pub mod create;
+pub mod relocate;
+pub mod trash;
+pub mod external;
+mod explorer_copy;
+pub mod blame;
+pub mod branches;
+pub mod cache;
+pub mod chrome;
+pub mod decor;
+pub mod csv;
+pub mod document;
+mod edit_ops;
+pub mod expand;
+pub mod find;
+pub mod folds;
+pub mod index;
+mod index_work;
+mod index_cache;
+pub mod jobs;
+pub mod keymap;
+pub mod libraries;
+pub mod markdown;
+pub mod markdown_authoring;
+pub mod markers;
+pub mod places;
+pub mod preferences;
+pub mod recovery;
+pub mod reconcile;
+pub mod project;
+pub mod postgres_assistance;
+pub mod search;
+pub mod selection;
+pub mod semantics;
+mod snippet;
+pub mod session;
+pub mod shown;
+pub mod breadcrumbs;
+pub mod tabs;
+pub mod template;
+pub mod watch;
+
+pub mod workspace;
+
+pub mod navigation;
+
+pub mod text;
+
+mod sql_assistance;
+mod sql_process;
+pub mod sql_metadata;
+pub mod sql_dialect;
+pub mod duckdb_assistance;
+pub mod projection;
+mod projection_jobs;
+pub mod layout;
+mod layout_jobs;
+
+pub mod native;
+pub mod terminal;
