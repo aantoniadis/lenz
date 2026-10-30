@@ -96,7 +96,8 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     // what is compared, then the file's place in the Change Set
     // in Focus, Files' title names the selection while it shows
     let in_files = app.layout.focused(app.repository.as_ref().map(|r| &r.core)) && app.navigator.shown();
-    let named = app.repository.as_ref().and_then(|r| r.core.selection_title()).filter(|_| !in_files).map_or_else(|| "Lenz".into(), |t| t.text);
+    // a comparison the repository didn't open (command line revisions, folders, files) is named from its own spec
+    let named = (!in_files).then(|| app.repository.as_ref().and_then(|r| r.core.selection_title()).or_else(|| lenz::selection_title::title(app.session.spec(), None, &[], None))).flatten().map_or_else(|| "Lenz".into(), |t| t.text);
     let title = format!(" {named}  {}/{}",app.session.current()+usize::from(!app.session.comparisons().is_empty()),app.session.comparisons().len());
     label(palette,frame, Rect::new(area.x, area.y, area.width, 1), &title, base(palette).fg(color(palette.accent)).add_modifier(Modifier::BOLD));
     if area.height < 4 { return; }
@@ -247,7 +248,9 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         x+=width;
     }
     app.panel_switch=cells_drawn;
-    let keys=footer.trim_start();
+    // several views: which one, ahead of the keys (they give way at the right first)
+    let keys=app.views.as_ref().map_or_else(||footer.trim_start().to_string(),|v|format!("{v} · {}",footer.trim_start()));
+    let keys=keys.as_str();
     let room=area.right().saturating_sub(x+2);
     let at=area.right().saturating_sub((unicode_width::UnicodeWidthStr::width(keys) as u16).min(room)+1);
     label(palette,frame, Rect::new(at, y, area.right().saturating_sub(at), 1), keys, base(palette).bg(color(palette.status_bg)).fg(color(palette.dim)));
@@ -272,6 +275,7 @@ pub(crate) fn status_text(app:&App)->String {
             format!("Find{} {}  {tail}", option_marks(app.session.find_options()), app.input)
         } else { format!("Line: {}", app.input) }
     } else if let Some(notice) = app.session.notice().or_else(||app.visual.notice()) { notice.into() }
+    else if let Some(notice) = app.repository.as_ref().and_then(|r|r.status()) { notice }
     else if let Some(find) = app.session.find() { format!("Find: {}  {}", find.query(), find.counter()) }
     else if !app.session.applied().is_empty(){format!("{} applied records · A history / Undo · Ctrl-Z undo · Alt-Shift-←/→ apply",app.session.applied().len())}
     else if let Some(doc) = app.session.document() {
@@ -296,6 +300,8 @@ fn header_switch(app:&mut App,frame:&mut ratatui::Frame,row:Option<Rect>,palette
     app.header_switch.clear();
     let Some(row)=row else{return;};
     let mut entries=lenz::catalog::header_switch(&app.scope());
+    // nothing open: no presentation to switch (the palette still lists the commands, disabled)
+    if app.session.comparisons().is_empty(){entries.retain(|e|matches!(e.action,lenz::catalog::Action::Pr(_)));}
     let total=|es:&[lenz::catalog::Entry]|es.iter().map(|e|e.label.width() as u16+3).sum::<u16>();
     // too narrow: the PR tabs give way first, then everything; the palette still lists them
     if total(&entries)+12>row.width{entries.retain(|e|!matches!(e.action,lenz::catalog::Action::Pr(_)));}

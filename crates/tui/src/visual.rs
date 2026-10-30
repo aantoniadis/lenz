@@ -686,6 +686,20 @@ pub fn syntax_style(palette:&lenz::theme::Palette,capture: Capture) -> Style {
         _ => style,
     }
 }
+/// A one-line input, `label` then its text and the caret at its end, in `cols` cells: text too long to fit shows
+/// its tail after `…`, so the caret and what is being typed stay in view.
+pub fn input_line(label: &str, text: &str, cols: usize) -> String {
+    let full = format!("{label}{text}▏");
+    if full.width() <= cols { return full; }
+    let room = cols.saturating_sub(label.width() + 2);
+    let (mut start, mut used) = (text.len(), 0);
+    for (i, grapheme) in text.grapheme_indices(true).rev() {
+        used += grapheme.width();
+        if used > room { break; }
+        start = i;
+    }
+    format!("{label}…{}▏", text.get(start..).unwrap_or_default())
+}
 pub fn safe_text(buf: &mut Buffer, area: Rect, text: &str, style: Style) {
     if area.width == 0 || area.height == 0 {
         return;
@@ -715,6 +729,14 @@ pub fn safe_text(buf: &mut Buffer, area: Rect, text: &str, style: Style) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_long_input_keeps_its_caret_end_in_view() {
+        assert_eq!(input_line("Find: ", "abc", 20), "Find: abc▏");
+        assert_eq!(input_line("Find: ", "abcdefghij", 12), "Find: …ghij▏");
+        // wide characters count their cells
+        assert_eq!(input_line("F: ", "日本語テキスト", 10), "F: …スト▏");
+        assert_eq!(input_line("Find: ", "abc", 3), "Find: …▏");
+    }
     fn image_visual() -> Visual {
         let old = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#ff0000"/></svg>"##;
         let new = br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#0000ff"/></svg>"##;

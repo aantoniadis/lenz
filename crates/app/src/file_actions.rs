@@ -193,8 +193,9 @@ impl FileActions {
         ));
         Ok(())
     }
-    /// Returns a changed path for adapters to invalidate and refresh; preparation only opens confirmation.
-    pub fn poll(&mut self) -> Option<Result<Option<PathBuf>, String>> {
+    /// Returns a changed path for adapters to invalidate and refresh, with what to tell the user; preparation only
+    /// opens confirmation.
+    pub fn poll(&mut self) -> Option<Result<Option<(PathBuf, String)>, String>> {
         let rx = self.job.as_ref()?;
         let result = match rx.try_recv() {
             Err(TryRecvError::Empty) => return None,
@@ -209,6 +210,7 @@ impl FileActions {
             }
             ResultItem::Discarded(undo, comparison) => {
                 let path = undo.path.clone();
+                let message = format!("Discarded changes to {} — Undo Git discard restores them", undo.relative);
                 self.undo.insert(
                     path.clone(),
                     Record {
@@ -216,11 +218,11 @@ impl FileActions {
                         comparison,
                     },
                 );
-                Some(path)
+                Some((path, message))
             }
             ResultItem::Undone(path) => {
-                self.undo.remove(&path);
-                Some(path)
+                let name = self.undo.remove(&path).map_or_else(|| path.display().to_string(), |r| r.undo.relative.clone());
+                Some((path, format!("Restored {name} as it was before Discard")))
             }
         }))
     }

@@ -895,6 +895,8 @@ impl MergeWorkspace {
         let Some(root) = &self.root else { return };
         match reopen(root, path) {
             Ok(()) => {
+                // as the GUI's toast; the last Mark resolved notice is out of date
+                self.notice = Some(format!("Re-opened {path}"));
                 self.file = None;
                 self.refresh();
             }

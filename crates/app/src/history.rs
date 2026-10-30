@@ -124,8 +124,14 @@ pub fn stream(cwd: &Path, branches: &Branches) -> Result<Stream, String> {
 
 /// Starts the log of `branches`, reading `limit` commits until [`Stream::want`] asks for more.
 pub fn stream_limited(cwd: &Path, branches: &Branches, limit: u64) -> Result<Stream, String> {
+    stream_limited_paths(cwd, branches, limit, &[])
+}
+
+/// Starts the same bounded stream limited to the CLI's Git pathspecs.
+pub fn stream_limited_paths(cwd: &Path, branches: &Branches, limit: u64, paths: &[String]) -> Result<Stream, String> {
     let mut args = vec!["log", "-z", "--topo-order", "--parents", "--format=%H %P%x1f%an%x1f%ae%x1f%ct %ci%x1f%s"];
     args.extend(branches.args());
+    if !paths.is_empty() { args.push("--"); args.extend(paths.iter().map(String::as_str)); }
     let mut child = git::command(cwd)?
         .args(&args)
         .stdin(Stdio::null())
@@ -582,6 +588,15 @@ pub fn path_commits(cwd: &Path, branches: &Branches, path: &str) -> Result<Vec<S
     ids(cwd, &args)
 }
 
+/// The first commit the path-limited stream will show, without reading the rest of its history.
+pub fn latest_path_commit(cwd: &Path, branches: &Branches, paths: &[String]) -> Result<Option<String>, String> {
+    let mut args = vec!["log", "--topo-order", "-1", "--format=%H"];
+    args.extend(branches.args());
+    args.push("--");
+    args.extend(paths.iter().map(String::as_str));
+    Ok(ids(cwd, &args)?.into_iter().next())
+}
+
 /// Ids of the commits on `branches` whose full message contains `text`, ignoring case, newest first.
 /// ponytail: waits for the whole walk (~9 s on Linux); stream like [`stream`] if first matches should show early.
 pub fn grep_commits(cwd: &Path, branches: &Branches, text: &str) -> Result<Vec<String>, String> {
@@ -594,7 +609,7 @@ pub fn grep_commits(cwd: &Path, branches: &Branches, text: &str) -> Result<Vec<S
 /// The commits on `branches` that changed `path`, following renames, newest first, each with the file's path in
 /// that commit.
 pub fn file_history(cwd: &Path, branches: &Branches, path: &str) -> Result<Vec<(String, String)>, String> {
-    let mut args = vec!["log", "-z", "--follow", "--name-only", "--format=%H"];
+    let mut args = vec!["--literal-pathspecs", "log", "-z", "--follow", "--name-only", "--format=%H"];
     args.extend(branches.args());
     args.extend(["--", path]);
     let out = git::run(cwd, &args)?;
@@ -609,6 +624,11 @@ pub fn file_history(cwd: &Path, branches: &Branches, path: &str) -> Result<Vec<(
         }
     }
     Ok(list)
+}
+
+/// A filename from Git becomes a pathspec only when loading its comparison; preserve special names literally.
+pub(crate) fn file_pathspec(path: &str) -> String {
+    if path.starts_with(':') || path.contains(['*', '?', '[', '\\']) { format!(":(literal){path}") } else { path.to_string() }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

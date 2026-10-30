@@ -10,11 +10,13 @@ publish.workspace = true
 # In-process memory probe for benchmark and test targets; never in shipping binaries.
 perf-probe = []
 # `git::testing` repositories and `git::trust`, for dependent crates' tests; never in shipping binaries.
-git-testing = ["dep:tempfile"]
+git-testing = []
+# Filesystem fault injection for dependent crates’ tests; never in shipping binaries.
+write-testing = []
 
 [dependencies]
-# Throwaway repositories for `git::testing` (feature `git-testing` only).
-tempfile = { version = "3", optional = true }
+# Private save temporaries and test repositories.
+tempfile = "3"
 # Zero-width detection for the combining-mark cap (src/display.rs).
 unicode-width = "0.2"
 # In-document find (src/find.rs); already linked through tree-sitter.
@@ -23,6 +25,7 @@ regex = "1.13"
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"
 # Syntax highlighting: runtime + one crate per bundled grammar (see src/highlight.rs).
+xml-rs = "0.8.29"
 tree-sitter = "0.27"
 tree-sitter-bash = "0.25.1"
 tree-sitter-c = "0.24.2"

@@ -49,7 +49,12 @@ pub struct EditSession {
     histories: HashMap<usize, History>,
     pub(crate) edited: HashSet<PathBuf>,
     next_id: u64,
+    /// The last input was a quit refused for unsaved drafts: quitting again closes without them.
+    quit_asked: bool,
 }
+
+/// What a quit with unsaved drafts says, in both adapters.
+pub const QUIT_QUESTION: &str = "Unsaved changes — Save keeps them; quit again to close without saving";
 #[derive(Default)]
 struct History { edits: moves::Edits, applied: Vec<Applied>, undo: Vec<(u64, bool)>, redo: Vec<(u64, bool)>, pending: Option<Pending>, saved_steps: Option<Checkpoint> }
 struct Pending { current: [Arc<str>; 2], saved: [Arc<str>; 2], snapshots: [Result<write::Snapshot, &'static str>; 2], targets:[Option<PathBuf>;2], encodings:[Option<String>;2], notes:Vec<String> }
@@ -66,6 +71,11 @@ impl Pending {
 impl EditSession {
     pub fn dirty(&self,index:usize)->bool {self.histories.get(&index).and_then(|h|h.pending.as_ref()).is_some_and(|p|p.dirty(Side::Left)||p.dirty(Side::Right))}
     pub fn has_dirty(&self)->bool {self.histories.keys().any(|&i|self.dirty(i))}
+    /// A quit request: true when nothing is unsaved, or this repeats a refused quit (as the Merge View's second
+    /// Esc). The first asks with [`QUIT_QUESTION`].
+    pub fn quit(&mut self)->bool {let again=std::mem::take(&mut self.quit_asked);if !self.has_dirty()||again{return true;}self.quit_asked=true;false}
+    /// Any other input: a following quit asks again.
+    pub fn keep_open(&mut self) {self.quit_asked=false;}
     pub fn dirty_files(&self)->Vec<usize> {let mut files=self.histories.keys().copied().filter(|&i|self.dirty(i)).collect::<Vec<_>>();files.sort_unstable();files}
     /// Rehydrate pending text after switching files, refresh or cache eviction.
     pub fn overlay(&self,index:usize,doc:&TextDocument,paths:[&Path;2])->Option<TextDocument> {
@@ -451,6 +461,25 @@ mod tests {
         let external=dir.path().join("external");std::fs::write(&external,"disk\n").unwrap();std::fs::remove_file(&r).unwrap();std::os::unix::fs::symlink(&external,&r).unwrap();
         assert!(history.execute(0,&doc,&view,EditCommand::Save,[&l,&r]).is_err());assert!(history.has_dirty());assert_eq!(std::fs::read_to_string(&external).unwrap(),"disk\n");
         let doc=history.execute(0,&doc,&view,EditCommand::Discard,[&l,&r]).unwrap().document;assert!(doc.writable[1].is_err());assert!(!history.has_dirty());
+    }
+
+    #[test]
+    fn readiness_uncertain_save_retains_draft_history_and_confirmed_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let (left, right) = (dir.path().join("left"), dir.path().join("right"));
+        let document = doc("draft\n", "disk\n", &left, &right);
+        let mut history = EditSession::default();
+        let view = document.view(&document.line_diff(&Options::default()), 20.0);
+        let draft = history.execute(0, &document, &view, EditCommand::Apply { block: 0, onto: Side::Right }, [&left, &right]).unwrap().document;
+        let result = write::readiness_fault::during(write::readiness_fault::Fault::AfterReplace,
+            || history.execute(0, &draft, &view, EditCommand::Save, [&left, &right]));
+        assert!(result.is_err());
+        assert!(history.has_dirty() && history.has_undo(0));
+        let pending = history.histories[&0].pending.as_ref().unwrap();
+        assert_eq!(&*pending.current[1], "draft\n");
+        assert_eq!(&*pending.saved[1], "disk\n");
+        assert_eq!(std::fs::read_to_string(&right).unwrap(), "draft\n");
+        assert!(matches!(history.execute(0, &draft, &view, EditCommand::Save, [&left, &right]), Err(EditError::Write(WriteError::ChangedOnDisk))));
     }
 
     #[test]

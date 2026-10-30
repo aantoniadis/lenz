@@ -1,7 +1,7 @@
 //! Content shared by Lenz and its code reader: decoding, line offsets, display transforms, syntax highlighting,
 //! themes, fuzzy file-path ranking, in-document find, go to line and soft wrap. Free of either product's sessions,
 //! workflow commands and GPUI; declares no global allocator.
-#![deny(unsafe_code)] // audited FFI only: `highlight.rs`, `syntax_arena.rs` and the test-only `memory_probe.rs`
+#![deny(unsafe_code)] // audited FFI only: `highlight.rs`, `syntax_arena.rs`, `write::rename_noclobber`, `file_clipboard::publish` and the test-only `memory_probe.rs`
 #[cfg(test)]
 #[path = "../../../benches/support.rs"]
 pub mod perf;
@@ -15,6 +15,7 @@ pub mod display;
 pub mod encoding;
 pub mod find;
 pub mod file_icons;
+pub mod file_clipboard;
 pub mod fuzzy;
 pub mod git;
 pub mod goto;
@@ -28,3 +29,4 @@ pub mod select;
 mod syntax_arena;
 pub mod theme;
 pub mod wrap;
+pub mod write;

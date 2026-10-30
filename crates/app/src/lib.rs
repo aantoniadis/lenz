@@ -11,7 +11,7 @@ pub mod blame;
 pub mod changeset;
 pub mod cli;
 pub mod conflicts;
-pub use lenz_content::{encoding, highlight, icons, file_icons};
+pub use lenz_content::{encoding, highlight, icons, file_icons, wrap};
 pub mod document;
 pub mod find;
 /// Go-to-line input, from the shared content crate.

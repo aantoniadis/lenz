@@ -1786,6 +1786,16 @@ fn inline_interleaves_removed_and_inserted_words_in_place() {
 }
 
 #[test]
+fn inline_marks_words_whose_styling_changed() {
+    let (p, shown) = inline("Keep *this* word.\n", "Keep **this** word.\n");
+    assert_eq!(shown[0], "Keep -[this]+[this] word.");
+    assert_eq!(p.inline[0].change, Some(Kind::Modified));
+    // a link target alone keeps the block's marker only
+    let (p, shown) = inline("[a](x)\n", "[a](y)\n");
+    assert_eq!((shown[0].as_str(), p.inline[0].change), ("a", None));
+}
+
+#[test]
 fn inline_shows_added_and_removed_blocks_whole() {
     let (p, shown) = inline("One.\n\nGone paragraph.\n", "One.\n\nNew paragraph here.\n\nAnd more.\n");
     assert!(p.inline.iter().any(|b| b.change == Some(Kind::Inserted) && b.side == Side::Right));

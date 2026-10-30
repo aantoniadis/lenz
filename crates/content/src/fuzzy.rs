@@ -43,6 +43,21 @@ pub fn score_lowered(q: &str, p: &str, path_len: usize) -> Option<i64> {
     Some(substring + s * 100 - path_len as i64)
 }
 
+/// Whether `query` matches `text` at word starts only: each character continues the previous match or begins a word
+/// (after a separator, a lowercase-to-uppercase step or a digit run), so `nsr` finds `NewSearchResult` and
+/// `new_search` but not `inspector`. Case-insensitive; for mixed lists where scattered letters are noise.
+pub fn word_starts(query: &str, text: &str) -> bool {
+    let q: Vec<char> = query.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase).collect();
+    let t: Vec<char> = text.chars().collect();
+    let start = |j: usize| j == 0 || !t[j - 1].is_alphanumeric() || (t[j].is_uppercase() && t[j - 1].is_lowercase()) || (t[j].is_ascii_digit() && !t[j - 1].is_ascii_digit());
+    // ponytail: backtracking, fine for labels and paths; a DP would bound pathological inputs.
+    fn go(q: &[char], t: &[char], from: usize, joined: bool, start: &dyn Fn(usize) -> bool) -> bool {
+        let Some(&c) = q.first() else { return true };
+        (from..t.len()).any(|j| t[j].to_lowercase().eq(std::iter::once(c)) && ((joined && j == from) || start(j)) && go(&q[1..], t, j + 1, true, start))
+    }
+    go(&q, &t, 0, false, &start)
+}
+
 /// Indices of `paths` matching `query`, best first (ties keep the given order).
 pub fn rank(query: &str, paths: &[&str]) -> Vec<usize> {
     let mut hits: Vec<(i64, usize)> = paths.iter().enumerate().filter_map(|(i, p)| score(query, p).map(|s| (s, i))).collect();
@@ -61,6 +76,16 @@ mod tests {
         assert_eq!(order, ["src/main.rs", "src/old_main.rs", "main/src/lib.rs", "m/a/i/n.rs"]);
         assert_eq!(score("zz", "src/main.rs"), None);
         assert_eq!(score("", "anything"), Some(0));
+    }
+
+    #[test]
+    fn word_starts_take_humps_separators_and_runs_but_not_scattered_letters() {
+        for (q, t) in [("nsr", "NewSearchResult"), ("nsr", "new_search_result"), ("main", "src/main.rs"), ("sw", "Soft Wrap"), ("soft wr", "Soft Wrap"), ("v2", "parse_v2"), ("", "x")] {
+            assert!(word_starts(q, t), "{q} {t}");
+        }
+        for (q, t) in [("nsr", "inspector"), ("sftwrp", "Soft Wrap"), ("ae", "Save")] {
+            assert!(!word_starts(q, t), "{q} {t}");
+        }
     }
 
     #[test]

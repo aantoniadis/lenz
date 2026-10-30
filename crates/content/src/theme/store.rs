@@ -17,23 +17,30 @@ pub struct ThemePaths {
     legacy: Option<Box<ThemePaths>>,
 }
 impl ThemePaths {
-    /// Canonical Lenz appearance with Reader's old paths as read-only fallbacks.
+    /// Canonical Lenz appearance with Lenz Code's old paths as read-only fallbacks: its `lenz-code` folder, then the
+    /// `lenz-reader` folder it had as Lenz Reader until it first runs and moves it.
     pub fn shared() -> Self {
         let mut paths = Self::xdg("lenz");
-        paths.legacy = Some(Box::new(Self::xdg("lenz-reader")));
+        let mut code = Self::xdg("lenz-code");
+        code.legacy = Some(Box::new(Self::xdg("lenz-reader")));
+        paths.legacy = Some(Box::new(code));
         paths
     }
     pub fn shared_under(config_home: &Path, state_home: &Path) -> Self {
         let mut paths = Self::under(config_home, state_home, "lenz");
-        paths.legacy = Some(Box::new(Self::under(config_home, state_home, "lenz-reader")));
+        let mut code = Self::under(config_home, state_home, "lenz-code");
+        code.legacy = Some(Box::new(Self::under(config_home, state_home, "lenz-reader")));
+        paths.legacy = Some(Box::new(code));
         paths
     }
+    /// The first saved selection along the fallbacks; the canonical path when none is saved.
     fn selection_path(&self) -> &Path {
-        if !present(&self.selection) && let Some(legacy) = &self.legacy {
-            &legacy.selection
-        } else {
-            &self.selection
+        let mut at = self;
+        while !present(&at.selection) && let Some(legacy) = &at.legacy {
+            if present(&legacy.selection) { return &legacy.selection; }
+            at = legacy;
         }
+        &self.selection
     }
 
     /// The XDG layout for `app`: `$XDG_CONFIG_HOME/<app>/themes`, `$XDG_CONFIG_HOME/<app>/appearance.json`, and
@@ -64,10 +71,13 @@ impl ThemePaths {
         id.strip_prefix("user:")
             .filter(|_| valid_id(id))
             .map(|stem| {
-                let canonical = self.themes.join(format!("{stem}.toml"));
-                if !present(&canonical) && let Some(legacy) = &self.legacy {
-                    legacy.themes.join(format!("{stem}.toml"))
-                } else { canonical }
+                let file = format!("{stem}.toml");
+                let canonical = self.themes.join(&file);
+                std::iter::successors(self.legacy.as_deref(), |p| p.legacy.as_deref())
+                    .map(|p| p.themes.join(&file))
+                    .find(|path| present(path))
+                    .filter(|_| !present(&canonical))
+                    .unwrap_or(canonical)
             })
     }
 }
@@ -86,12 +96,14 @@ impl Default for ThemeOverrides {
     }
 }
 impl ThemeOverrides {
-    /// LENZ_THEME > LENZ_APPEARANCE > LENZ_READER_THEME > LENZ_READER_APPEARANCE.
+    /// LENZ_THEME > LENZ_APPEARANCE > LENZ_CODE_THEME > LENZ_CODE_APPEARANCE > LENZ_READER_THEME >
+    /// LENZ_READER_APPEARANCE (Lenz Code's names from when it was Lenz Reader).
     /// An invalid higher-priority override is reported, never hidden by a legacy value.
     pub fn shared_from_env() -> Self {
-        let shared = Self::from_env("LENZ_THEME", "LENZ_APPEARANCE");
-        if shared.theme.is_some() || shared.appearance.is_some() { shared }
-        else { Self::from_env("LENZ_READER_THEME", "LENZ_READER_APPEARANCE") }
+        [("LENZ_THEME", "LENZ_APPEARANCE"), ("LENZ_CODE_THEME", "LENZ_CODE_APPEARANCE")].into_iter()
+            .map(|(theme, appearance)| Self::from_env(theme, appearance))
+            .find(|o| o.theme.is_some() || o.appearance.is_some())
+            .unwrap_or_else(|| Self::from_env("LENZ_READER_THEME", "LENZ_READER_APPEARANCE"))
     }
 
     /// The overrides in the environment variables `theme_var` and `appearance_var`, labelled by their names.
@@ -220,7 +232,7 @@ pub fn discover_themes(paths: &ThemePaths) -> (Vec<ThemeEntry>, Vec<String>) {
     let mut notices = Vec::new();
     let mut truncated = false;
     // Canonical filenames reserve their ID even when their contents are invalid.
-    for dir in std::iter::once(&paths.themes).chain(paths.legacy.iter().map(|p| &p.themes)) {
+    for dir in std::iter::successors(Some(paths), |p| p.legacy.as_deref()).map(|p| &p.themes) {
         let iter = match std::fs::read_dir(dir) {
             Ok(iter) => iter,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,

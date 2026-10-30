@@ -27,6 +27,8 @@ pub struct Merger {
     comparison_ratio:f32,comparison_applied_height:Option<f32>,comparison_search_height:Option<f32>,
     pub palette:Arc<lenz::theme::Palette>,
     pub theme_revision:u64,
+    /// See [`crate::app::App::views`].
+    pub views:Option<String>,
     pub theme_request:bool,
     pub workspace: MergeWorkspace,
     pub quit: bool,
@@ -62,7 +64,7 @@ impl Merger {
     fn new(workspace: MergeWorkspace) -> Self {
         Self {
             icons:crate::icons::Icons::from_env(),resizer:Default::default(),pane_ratios:[1.0/3.0,2.0/3.0],files_width:None,version_height:None,comparison_ratio:0.5,comparison_applied_height:None,comparison_search_height:None,
-            palette:Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,
+            palette:Arc::new(*crate::chrome::initial_palette()),theme_revision:1,views:None,theme_request:false,
             workspace,
             quit: false,
             back: false,
@@ -457,7 +459,7 @@ impl Merger {
             }
             self.open_menu();return true;
         }
-        if self.menu.is_some()&&let Event::Paste(text)=&event{self.menu_query.push_str(&text.replace(['\n','\r']," "));self.menu=Some(self.menu_matches().first().copied().unwrap_or(0));return true;}
+        if self.menu.is_some()&&let Event::Paste(text)=&event{self.menu_query.push_str(&lenz::document::one_line(text));self.menu=Some(self.menu_matches().first().copied().unwrap_or(0));return true;}
         if let Event::Mouse(mouse)=event&&self.menu.is_some(){
             match mouse.kind{
                 MouseEventKind::ScrollUp=>self.menu_step(-3),MouseEventKind::ScrollDown=>self.menu_step(3),
@@ -481,7 +483,7 @@ impl Merger {
                 self.files_focused=target==P::Files;app.navigator.focused=false;if let Some(search)=&mut app.set_search{search.focused=target==P::Results;}
                 match target{P::Left=>app.focus=Side::Left,P::Right=>app.focus=Side::Right,P::Files|P::Results=>{},P::Sources|P::Log|P::Middle=>unreachable!("picker preview pane cycle")};return true;
             }
-            if self.files_focused&&let Event::Paste(text)=&event{self.begin_files_search();self.files_search.append(&text.replace(['\n','\r']," "));self.poll_files_search();return true;}
+            if self.files_focused&&let Event::Paste(text)=&event{self.begin_files_search();self.files_search.append(&lenz::document::one_line(text));self.poll_files_search();return true;}
             if self.files_focused&&let Event::Key(k)=event&&k.kind!=KeyEventKind::Release{
                 if self.files_search_key(k){return true;}
                 let max=self.workspace.rows.len().saturating_sub(1);let index=match k.code{KeyCode::Up=>Some(self.workspace.current.saturating_sub(1)),KeyCode::Down=>Some((self.workspace.current+1).min(max)),KeyCode::Home=>Some(0),KeyCode::End=>Some(max),KeyCode::PageUp=>Some(self.workspace.current.saturating_sub(usize::from(self.files_area.height))),KeyCode::PageDown=>Some((self.workspace.current+usize::from(self.files_area.height)).min(max)),KeyCode::Left|KeyCode::Right if !k.modifiers.contains(KeyModifiers::ALT|KeyModifiers::SHIFT)=>return true,KeyCode::Esc|KeyCode::Enter=>{self.files_focused=false;return true;},_=>None};if let Some(index)=index{self.open_index(index);return true;}
@@ -1118,7 +1120,7 @@ impl Merger {
                 );
             }
         }
-        let footer = [question.map(|text|format!("F2 details · {text}")).unwrap_or_default(),format!("F2 details · {}",self.workspace.notice.clone().unwrap_or_else(||match &self.workspace.file {Some(FileView::Merge(m))=>m.notices().join(" · "),_=>String::new()})),"1–5 choose · n/p changes · N/P conflicts · [/] files · Ctrl-s Save · Ctrl-Enter Done · M stage · R reopen · c/C copy commands · : merge commands · F4 comparison commands · q quit".into()];
+        let footer = [question.map(|text|format!("F2 details · {text}")).unwrap_or_default(),format!("F2 details · {}",self.workspace.notice.clone().unwrap_or_else(||match &self.workspace.file {Some(FileView::Merge(m))=>m.notices().join(" · "),_=>String::new()})),format!("{}1–5 choose · n/p changes · N/P conflicts · [/] files · Ctrl-s Save · Ctrl-Enter Done · M stage · R reopen · c/C copy commands · : merge commands · F4 comparison commands · q quit",self.views.as_ref().map_or(String::new(),|v|format!("{v} · ")))];
         frame.render_widget(
             Paragraph::new(
                 footer
@@ -1891,9 +1893,12 @@ mod tests {
         assert!(lenz::conflicts::list(d).unwrap().is_empty());
         assert!(screen(&mut app).contains("All resolved"));
         assert_eq!(std::fs::read(d.join("f.txt")).unwrap(), b"theirs\n");
+        assert!(screen(&mut app).contains("Marked f.txt resolved"));
         key(&mut app, KeyCode::Char('R'), KeyModifiers::SHIFT);
         settle(&mut app);
         assert_eq!(lenz::conflicts::list(d).unwrap().len(), 1);
+        let reopened = screen(&mut app);
+        assert!(reopened.contains("Re-opened f.txt") && !reopened.contains("Marked f.txt resolved"), "{reopened}");
         assert!(
             std::fs::read_to_string(d.join("f.txt"))
                 .unwrap()

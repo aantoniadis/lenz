@@ -31,8 +31,12 @@ pub struct Metrics<'a> {
     pub num_w: f32,
 }
 
+/// One cell of the monospace font, as a gutter mark counts it.
+pub fn cell_w(font_size: f32) -> f32 { font_size * 0.6 }
+
 /// One numbered source row, already in display coordinates ([`display::display_line`]): `fg` colours text, `bg`
-/// fills behind it (later entries in `bg` lose to earlier ones), `selected` and `caret` are display offsets.
+/// fills behind it (later entries in `bg` lose to earlier ones), `selected` and `caret` are display offsets. A reader
+/// editing several selections at once lists the rest in `extra`, painted as the selection and caret do.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TextRow {
     /// Row offset from the pane's top, in rows (fractional while scrolling).
@@ -44,6 +48,9 @@ pub struct TextRow {
     pub bg: Vec<(Range<usize>, u32)>,
     pub selected: Option<Range<usize>>,
     pub caret: Option<usize>,
+    /// The other selections on this row: the part of each one's display range, and the caret of an empty one (a
+    /// selection crossing rows contributes a range to each row it covers).
+    pub extra: Vec<(Range<usize>, Option<usize>)>,
 }
 
 /// Families tried in order when none is configured or the configured one is missing.
@@ -160,10 +167,12 @@ pub fn paint_row(window: &mut Window, cx: &mut App, m: Metrics, palette: &Palett
     }
     window.with_content_mask(Some(clip(bounds, x + m.num_w + 4.0, w - m.num_w - 4.0)), |window| {
         let tx = text_x(m, x, hscroll);
-        let bg: Vec<_> = row.selected.iter().map(|r| (r.clone(), palette.sel_bg)).chain(row.bg.iter().cloned()).collect();
+        let bg: Vec<_> = row.selected.iter().chain(row.extra.iter().map(|(range, _)| range).filter(|range| !range.is_empty()))
+            .map(|range| (range.clone(), palette.sel_bg)).chain(row.bg.iter().cloned()).collect();
         let shaped = colored_text(window, cx, m, palette.fg, tx, y, &row.text, &row.fg, &bg);
-        if let Some(at) = row.caret {
-            let cx_ = shaped.map_or(0.0, |l| f32::from(l.x_for_index(at)));
+        let carets = row.caret.iter().chain(row.extra.iter().filter_map(|(_, caret)| caret.as_ref()));
+        for at in carets {
+            let cx_ = shaped.as_ref().map_or(0.0, |l| f32::from(l.x_for_index(*at)));
             fill(window, tx + cx_, y + 1.0, 2.0, m.line_h - 2.0, palette.caret);
         }
     });

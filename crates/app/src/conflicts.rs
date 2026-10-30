@@ -259,11 +259,13 @@ pub fn read_stage(root: &Path, path: &str, n: u8) -> Result<Vec<u8>, String> {
 }
 
 /// Does `path` (from `root`, or absolute, e.g. mergetool's `$MERGED`) have a Base, stage 1? Not when added on both
-/// sides — never guess that from mergetool's empty `$BASE`.
-pub fn has_base(root: &Path, path: &str) -> Result<bool, String> {
+/// sides — never guess that from mergetool's empty `$BASE`. `None` when `path` isn't unmerged: git says nothing
+/// about the files given, so they're taken as they are.
+pub fn has_base(root: &Path, path: &str) -> Result<Option<bool>, String> {
     let out = git::run(root, &["--literal-pathspecs", "ls-files", "-u", "-z", "--", path])?;
     // <mode> <sha> <stage>\t<path>
-    Ok(out.split(|&b| b == 0).any(|e| e.split(|&b| b == b'\t').next().is_some_and(|h| h.ends_with(b" 1"))))
+    let mut stages = out.split(|&b| b == 0).filter_map(|e| e.split(|&b| b == b'\t').next()).filter(|h| !h.is_empty()).peekable();
+    Ok(stages.peek().is_some().then(|| stages.any(|h| h.ends_with(b" 1"))))
 }
 
 /// `merge.conflictStyle`.
@@ -707,9 +709,10 @@ mod tests {
         assert!(read_stage(d, "added.txt", 1).is_err());
 
         // mergetool's no-base check
-        assert_eq!(has_base(d, "text.txt"), Ok(true));
-        assert_eq!(has_base(d, "added.txt"), Ok(false));
-        assert_eq!(has_base(d, d.join("text.txt").to_str().unwrap()), Ok(true));
+        assert_eq!(has_base(d, "text.txt"), Ok(Some(true)));
+        assert_eq!(has_base(d, "added.txt"), Ok(Some(false)));
+        assert_eq!(has_base(d, d.join("text.txt").to_str().unwrap()), Ok(Some(true)));
+        assert_eq!(has_base(d, ".gitattributes"), Ok(None)); // not unmerged: the files as given
     }
 
     #[test]
@@ -873,8 +876,8 @@ mod tests {
         mark_resolved(d, "a*.txt", false).unwrap();
         let files = list(d).unwrap();
         assert_eq!(files.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["a b.txt"]);
-        assert_eq!(has_base(d, "a*.txt"), Ok(false)); // resolved, and the glob doesn't reach `a b.txt`
-        assert_eq!(has_base(d, "a b.txt"), Ok(true));
+        assert_eq!(has_base(d, "a*.txt"), Ok(None)); // resolved, and the glob doesn't reach `a b.txt`
+        assert_eq!(has_base(d, "a b.txt"), Ok(Some(true)));
     }
 
     #[test]

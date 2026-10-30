@@ -120,8 +120,9 @@ impl Screens {
     fn render(&mut self,frame:&mut ratatui::Frame){let mut snapshot=self.themes.snapshot();
         // the picker shows the highlighted theme live; a distinct revision refreshes cached drawing
         if let Some((selected,palette))=self.chooser.as_ref().and_then(|c|c.highlighted().and_then(|id|self.themes.preview(id)).map(|p|(c.selected(),p))){snapshot.palette=palette;snapshot.revision=u64::MAX-selected as u64;}
-        let palette=&snapshot.palette;match &mut self.views[self.active]{Screen::Diff(a)=>{a.palette=palette.clone();a.theme_revision=snapshot.revision;a.render(frame)},Screen::Merge{controller,..}=>{controller.palette=palette.clone();controller.theme_revision=snapshot.revision;controller.render(frame)}}
-        if self.views.len()>1{let title=format!(" Lenz · view {}/{} · F8/Shift-F8 switch · Ctrl-Q close view",self.active+1,self.views.len());let area=frame.area();frame.render_widget(ratatui::widgets::Paragraph::new(title).style(chrome::style_with(palette).fg(chrome::color(palette.accent))),ratatui::layout::Rect::new(area.x,area.bottom().saturating_sub(1),area.width,1));}
+        // several views: the footer says which, instead of a bar drawn over its keys
+        let views=(self.views.len()>1).then(||format!("view {}/{} · F8/Shift-F8 switch · Ctrl-Q close view",self.active+1,self.views.len()));
+        let palette=&snapshot.palette;match &mut self.views[self.active]{Screen::Diff(a)=>{a.palette=palette.clone();a.theme_revision=snapshot.revision;a.views=views;a.render(frame)},Screen::Merge{controller,..}=>{controller.palette=palette.clone();controller.theme_revision=snapshot.revision;controller.views=views;controller.render(frame)}}
         if let Some(chooser)=&mut self.chooser{chooser.draw(frame,&self.themes,palette);}
         let logo=if self.chooser.is_some(){ratatui::layout::Rect::default()}else{match &self.views[self.active]{Screen::Diff(app)=>app.about.as_ref().map_or(ratatui::layout::Rect::default(),|about|about.logo_rect),Screen::Merge{controller,..}=>controller.about_logo()}};
         if self.kitty && !logo.is_empty() {
@@ -163,7 +164,23 @@ impl Drop for Restore {
     fn drop(&mut self) {
         restore_input_modes();
         ratatui::restore();
+        lenz::diagnostics::terminal_owned(false);
     }
+}
+
+/// SIGTERM or SIGHUP: give the terminal back, as quitting does, instead of leaving it in the alternate screen with
+/// mouse reporting on. One idle thread; a handler can't take the stdout lock.
+fn restore_on_signal() {
+    use signal_hook::consts::{SIGHUP, SIGTERM};
+    let Ok(mut signals) = signal_hook::iterator::Signals::new([SIGTERM, SIGHUP]) else { return };
+    std::thread::spawn(move || {
+        if let Some(signal) = signals.forever().next() {
+            // held to exit: no frame is drawn after the terminal is restored
+            let _stdout = io::stdout().lock();
+            restore_input_modes(); ratatui::restore();
+            std::process::exit(128 + signal);
+        }
+    });
 }
 
 fn restore_input_modes() {
@@ -190,14 +207,17 @@ fn init_terminal() -> io::Result<ratatui::DefaultTerminal> {
     // Destructors do not run with panic=abort. Clear our extra terminal modes,
     // then let Ratatui restore raw/alternate-screen state before diagnostics.
     let previous = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| { restore_input_modes(); previous(info); }));
+    std::panic::set_hook(Box::new(move |info| { restore_input_modes(); lenz::diagnostics::terminal_owned(false); previous(info); }));
     execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)?;
+    // operational errors show as notices; on stderr they would print over the screen
+    lenz::diagnostics::terminal_owned(true);
     Ok(terminal)
 }
 
 fn run(args: &[String], mut request: Request, mut cwd: std::path::PathBuf) -> io::Result<u8> {
     let _restore = Restore;
     let mut terminal = init_terminal()?;
+    restore_on_signal();
     if lenz::repo_picker::needed(&request,&cwd) {
         let Some(root)=choose_repository(&mut terminal,cwd)? else { return Ok(0) };
         std::env::set_current_dir(&root)?;

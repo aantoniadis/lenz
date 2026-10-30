@@ -16,8 +16,12 @@ pub struct SelectionTitle {
     pub detail: String,
 }
 
-/// The title of a comparison, or `None` for plain files (their file labels say it already).
+/// The title of a comparison: revisions by their names, two folders or files by theirs; `None` for nothing open.
 pub fn title(spec: &Spec, refs: Option<&Refs>, stashes: &[Stash], pr: Option<(u64, &str)>) -> Option<SelectionTitle> {
+    if let Spec::Plain { left, right } = spec {
+        let base = |p: &std::path::Path| p.file_name().map_or_else(|| p.display().to_string(), |n| n.to_string_lossy().into_owned());
+        return Some(SelectionTitle { text: format!("{} ⟷ {}", base(left), base(right)), detail: format!("{} ⟷ {}", left.display(), right.display()) });
+    }
     let Spec::Git { cached, revs, .. } = spec else { return None };
     let detail = revs.join(" ");
     let done = |text: String| Some(SelectionTitle { text, detail: detail.clone() });
@@ -155,7 +159,7 @@ mod tests {
 
     #[test]
     fn plain_files_and_empty_have_no_title() {
-        assert_eq!(title(&Spec::Plain { left: "a".into(), right: "b".into() }, None, &[], None), None);
+        assert_eq!(title(&Spec::Plain { left: "x/a".into(), right: "/y/b".into() }, None, &[], None).map(|t| t.text).as_deref(), Some("a ⟷ b"));
         assert_eq!(title(&Spec::Empty, None, &[], None), None);
     }
 }

@@ -98,7 +98,7 @@ impl Search {
     }
     fn type_text(&mut self, text: &str) {
         let mut query = self.model.query().to_string();
-        for character in text.chars().filter(|character| !character.is_control()) {
+        for character in lenz::document::one_line(text).chars() {
             if query.len() >= 4096 {
                 break;
             }

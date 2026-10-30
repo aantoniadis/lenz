@@ -8,7 +8,7 @@ fn additional_presets_are_available_and_readable() {
         assert!(contrast(p.fg, p.bg) >= 4.5, "{id}: body text must remain readable");
         assert!(contrast(p.syntax.comment, p.bg) >= 3.0, "{id}: comments must remain readable");
         use crate::highlight::Capture::*;
-        for capture in [Keyword, String, Number, Comment, Function, Type, Macro, Constant, Attribute] {
+        for capture in [Keyword, String, Number, Comment, Function, Type, Macro, Constant, Attribute, Strong, Emphasis] {
             assert!(contrast(p.syntax_color(capture), p.bg) >= 3.0, "{id}: {capture:?} must remain readable");
         }
         assert_ne!(p.selected_bg, p.sidebar_bg, "{id}: selected files must stand out");
@@ -796,6 +796,24 @@ fn shared_appearance_falls_back_read_only_and_canonical_wins() {
 }
 
 #[test]
+fn shared_appearance_falls_back_to_lenz_code_before_lenz_reader() {
+    let d = tempfile::tempdir().unwrap();
+    let p = ThemePaths::shared_under(d.path(), d.path());
+    let (code, reader) = (ThemePaths::under(d.path(), d.path(), "lenz-code"), ThemePaths::under(d.path(), d.path(), "lenz-reader"));
+    for (at, theme) in [(&reader, "gruvbox"), (&code, "light")] {
+        std::fs::create_dir_all(&at.themes).unwrap();
+        std::fs::write(&at.selection, format!(r#"{{"version":1,"theme":"{theme}"}}"#)).unwrap();
+    }
+    std::fs::write(reader.themes.join("old.toml"), CUSTOM).unwrap();
+    // Lenz Code's moved folder wins over one it has not moved yet; themes are found in either.
+    assert_eq!(read_selection(&p, &ThemeOverrides::default()).0.id(), "light");
+    assert_eq!(p.theme_path("user:old"), Some(reader.themes.join("old.toml")));
+    assert!(discover_themes(&p).0.iter().any(|e| e.id == "user:old"));
+    std::fs::remove_file(&code.selection).unwrap();
+    assert_eq!(read_selection(&p, &ThemeOverrides::default()).0.id(), "gruvbox");
+}
+
+#[test]
 fn shared_appearance_preserves_unknown_canonical_fields() {
     let d = tempfile::tempdir().unwrap();
     let p = ThemePaths::shared_under(d.path(), d.path());
@@ -841,11 +859,14 @@ fn shared_override_environment_priority_and_notice_sources() {
         (&[("LENZ_APPEARANCE", "dark"), ("LENZ_READER_THEME", "light")], "darcula"),
         (&[("LENZ_THEME", "catppuccin"), ("LENZ_APPEARANCE", "light"), ("LENZ_READER_THEME", "gruvbox")], "catppuccin"),
         (&[("LENZ_THEME", "broken"), ("LENZ_READER_THEME", "light")], "system"),
+        (&[("LENZ_CODE_APPEARANCE", "light"), ("LENZ_READER_THEME", "gruvbox")], "light"),
+        (&[("LENZ_CODE_THEME", "catppuccin"), ("LENZ_READER_APPEARANCE", "light")], "catppuccin"),
+        (&[("LENZ_APPEARANCE", "light"), ("LENZ_CODE_THEME", "gruvbox")], "light"),
     ];
     for (vars, expected) in cases {
         let mut child = std::process::Command::new(std::env::current_exe().unwrap());
         child.args(["--exact", "theme::tests::shared_override_environment_priority_and_notice_sources", "--nocapture"]);
-        for name in ["LENZ_THEME", "LENZ_APPEARANCE", "LENZ_READER_THEME", "LENZ_READER_APPEARANCE"] { child.env_remove(name); }
+        for name in ["LENZ_THEME", "LENZ_APPEARANCE", "LENZ_CODE_THEME", "LENZ_CODE_APPEARANCE", "LENZ_READER_THEME", "LENZ_READER_APPEARANCE"] { child.env_remove(name); }
         let output = child.envs(vars.iter().copied()).env(EXPECTED, expected).output().unwrap();
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     }

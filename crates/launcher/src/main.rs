@@ -10,10 +10,10 @@ Usage: lenz [file-or-folder]
        lenz diff --tui [comparison arguments]
 
 Use lenz diff --help for comparison options.
-With no path, lenz opens the code reader in the current directory.
+With no path, lenz opens the Lenz Code editor in the current directory.
 Use lenz diff log and lenz diff merge for repository and merge workflows.
 Existing difftool/mergetool commands must add the diff prefix, or use lenz-diff directly.
-To read a file or folder named diff, use lenz ./diff.
+To open a file or folder named diff, use lenz ./diff.
 After --, all arguments are passed unchanged (including a file named --tui).";
 
 fn main() -> ExitCode {

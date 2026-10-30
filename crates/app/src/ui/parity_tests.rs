@@ -1047,7 +1047,9 @@ fn gui_file_typing_reserves_plain_actions_and_modified_text_is_not_a_query() {
     key(&mut cx,&f,"a",true,false,false);
     cx.update(|cx|cx.write_to_clipboard(ClipboardItem::new_string("CAFÉ\nignored".into())));
     key(&mut cx,&f,"v",true,false,false);
-    assert_eq!(f.viewer.read_with(&cx,|v,_|v.file_search.query().to_owned()),"CAFÉ");
+    // lines join with a space, as in the terminal app
+    assert_eq!(f.viewer.read_with(&cx,|v,_|v.file_search.query().to_owned()),"CAFÉ ignored");
+    for _ in 0.." ignored".len() {key(&mut cx,&f,"backspace",false,false,false);}
     key(&mut cx,&f,"backspace",false,false,false);
     assert_eq!(f.viewer.read_with(&cx,|v,_|v.file_search.query().to_owned()),"CAF");
     key(&mut cx,&f,"f",true,true,false);key(&mut cx,&f,"q",false,false,false);
@@ -1470,6 +1472,11 @@ fn gui_dirty_draft_survives_switch_eviction_refresh_and_blocks_replacement_or_cl
     let before=f.viewer.read_with(cx,|v,_|v.set.clone());let empty=ChangeSet::load(&Spec::Empty,f.dir.path()).unwrap();
     f.viewer.update(cx,|v,cx|{v.show_change_set(empty,cx);assert!(!v.edits_may_close(cx));});
     f.viewer.read_with(cx,|v,_|{assert!(Arc::ptr_eq(&v.set,&before));assert!(v.edits.has_dirty());assert!(v.write_error.as_ref().unwrap().contains("Unsaved"));});
+    // quit asks; another key cancels; quitting twice in a row closes without saving
+    key(cx,&f,"q",false,false,false);
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.write_error.clone()).as_deref(),Some(crate::edit_session::QUIT_QUESTION));
+    key(cx,&f,"down",false,false,false);
+    f.viewer.update(cx,|v,cx|{assert!(!v.may_quit(cx),"another key cancels");assert!(v.may_quit(cx));assert!(v.edits.has_dirty());});
     assert_eq!(std::fs::read(&path).unwrap(),bytes);
     run(cx,&f,crate::catalog::Action::Edit(crate::edit_session::EditMenuCommand::Discard));
     assert!(f.viewer.update(cx,|v,cx|v.edits_may_close(cx)));
@@ -1768,6 +1775,13 @@ fn gui_about_empty_view_remains_usable_after_close(cx:&mut TestAppContext){
         *v=Viewer::new(Arc::new(empty),Spec::Empty,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);
     });
     assert!(f.viewer.read_with(cx,|v,_|v.nothing.is_some()),"the empty launcher must not show a perpetual loading state");
+    f.viewer.read_with(cx,|v,_|{
+        use crate::catalog::Availability;
+        let loading:Vec<_>=crate::catalog::entries(&crate::catalog::Scope::comparison()).into_iter().filter(|e|v.disabled(e.action).is_some_and(|r|r.to_lowercase().contains("loading"))).map(|e|e.label).collect();
+        assert!(loading.is_empty(),"{loading:?}");
+        assert_eq!(v.disabled(crate::catalog::Action::Interaction(commands::Interaction::Reload)).as_deref(),Some(commands::NOTHING_OPEN));
+        assert_eq!(v.title(),"Lenz");
+    });
     f.window.update(cx,|v,w,cx|{v.tool(Tool::About,0.0,w,cx);let _=v.render(w,cx);}).unwrap();
     assert!(f.viewer.read_with(cx,|v,_|v.about.is_some()));
     key(cx,&f,"escape",false,false,false);
@@ -1994,9 +2008,11 @@ fn gui_file_context_discard_confirmation_preserves_staging_and_exposes_undo(cx:&
     key(cx,&f,"escape",false,false,false);assert_eq!(text(&f),"working\n");
     run(cx,&f,crate::catalog::Action::File(FileAction::Discard));wait_file_action(cx,&f);key(cx,&f,"enter",false,false,false);wait_file_action(cx,&f);
     assert_eq!(std::fs::read(f.dir.path().join("right.txt")).unwrap(),b"indexed\r\n");assert_eq!(crate::git::run(f.dir.path(),&["show",":right.txt"]).unwrap(),b"indexed\n");
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.toast.as_ref().map(|t|t.0.clone())).as_deref(),Some("Discarded changes to right.txt — Undo Git discard restores them"));
     let spec=f.viewer.read_with(cx,|v,_|v.spec.clone());let refreshed=ChangeSet::load(&spec,f.dir.path()).unwrap();f.viewer.update(cx,|v,cx|v.accept_repository_refresh(refreshed,spec,cx));cx.executor().run_until_parked();
     assert_eq!(f.viewer.read_with(cx,|v,_|v.set.comparisons.len()),1,"the discarded file must stay visible for undo after refresh");
     run(cx,&f,crate::catalog::Action::File(FileAction::UndoDiscard));wait_file_action(cx,&f);assert_eq!(text(&f),"working\n");
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.toast.as_ref().map(|t|t.0.clone())).as_deref(),Some("Restored right.txt as it was before Discard"));
 }
 #[gpui::test]
 fn gui_discard_refuses_file_changed_after_confirmation(cx:&mut TestAppContext){
@@ -2657,7 +2673,7 @@ fn gui_markdown_actual_empty_constructor_lists_all_presentation_commands(cx:&mut
     let f=fixture_named(cx,"# Before\n","# After\n","md");let set=Arc::new(ChangeSet::load(&Spec::Empty,f.dir.path()).unwrap());
     f.viewer.update(cx,|v,cx|{let doc=Arc::new(Doc::new("","",Path::new(""),Path::new("")));let view=doc.view(&[],20.);*v=Viewer::new(set,Spec::Empty,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);});
     key(cx,&f,":",false,false,false);
-    f.viewer.read_with(cx,|v,_|{let p=v.command_palette.as_ref().unwrap();for &command in commands::ALL {let cycle=matches!(command,Command::CycleScroll|Command::CycleWhitespace|Command::CycleHighlight);assert!(cycle||p.rows().any(|r|r.entry.action==crate::catalog::Action::Comparison(command)),"{command:?}");}assert_eq!(v.comparison.presentation_disabled(crate::markdown::PresentationMode::Rendered,None),Some("Comparison loading"));});
+    f.viewer.read_with(cx,|v,_|{let p=v.command_palette.as_ref().unwrap();for &command in commands::ALL {let cycle=matches!(command,Command::CycleScroll|Command::CycleWhitespace|Command::CycleHighlight);assert!(cycle||p.rows().any(|r|r.entry.action==crate::catalog::Action::Comparison(command)),"{command:?}");}assert_eq!(v.comparison.presentation_disabled(crate::markdown::PresentationMode::Rendered,None),Some(commands::NOTHING_OPEN));});
     key(cx,&f,"escape",false,false,false);key(cx,&f,"z",true,false,false);run(cx,&f,crate::catalog::Action::Interaction(commands::Interaction::Reload));
     f.window.update(cx,|v,w,cx|{let _=v.render(w,cx);assert!(v.markdown_frame(w,cx).is_none());assert!(v.comparison.markdown_projection().is_none());assert!(!v.comparison.markdown_loading());}).unwrap();
 }

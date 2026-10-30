@@ -33,15 +33,24 @@ impl Viewer {
     /// Replacement and app close never silently drop drafts. The focused draft
     /// retains its Save / Discard controls; cancelling means staying in this view.
     pub fn edits_may_close(&mut self,cx:&mut Context<Self>)->bool {
+        self.edits_ask("Unsaved changes retained — Save (Ctrl/Cmd+S) or Discard unsaved changes before changing comparisons or closing.",cx)
+    }
+
+    /// Shows the first unsaved draft and says why the view stays.
+    fn edits_ask(&mut self,message:&str,cx:&mut Context<Self>)->bool {
         if !self.edits.has_dirty() {return true;}
         if let Some(index)=self.edits.dirty_files().into_iter().find(|&i|i<self.set.comparisons.len()) && index!=self.comparison.current {self.open(index,Place::Top,cx);}
-        let message="Unsaved changes retained — Save (Ctrl/Cmd+S) or Discard unsaved changes before changing comparisons or closing. Cancel keeps this view.";
         self.write_error=Some(message.into());self.toast(message.into(),cx);
         false
     }
 
+    /// Quit, the close button and Ctrl/Cmd+W: unsaved drafts ask first, and a second quit closes without them.
+    pub fn may_quit(&mut self,cx:&mut Context<Self>)->bool {
+        (self.edits.quit()||self.edits_ask(crate::edit_session::QUIT_QUESTION,cx)) && self.merge_may_close(cx) && self.picker_v_may_close(cx) && self.conflicts_may_close(cx)
+    }
+
     pub(super) fn quit_if_ready(&mut self,cx:&mut Context<Self>) {
-        if self.edits_may_close(cx) && self.merge_may_close(cx) && self.picker_v_may_close(cx) && self.conflicts_may_close(cx) {cx.quit();}
+        if self.may_quit(cx) {cx.quit();}
     }
 
     pub(super) fn install_file_undo(&mut self,index:usize,written:crate::edit_session::Written,cx:&mut Context<Self>) {

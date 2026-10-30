@@ -29,9 +29,11 @@
 //! | YAML | [tree-sitter-yaml 0.7.2](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT | bundled |
 //! | TOML | [tree-sitter-toml-ng 0.7.0](https://github.com/tree-sitter-grammars/tree-sitter-toml) | MIT | bundled |
 //! | SQL | [tree-sitter-sequel 0.3.11](https://github.com/derekstride/tree-sitter-sql) | MIT | bundled |
-//! | Markdown | [tree-sitter-md 0.5.3](https://github.com/tree-sitter-grammars/tree-sitter-markdown) | MIT | block only |
+//! | Markdown | [tree-sitter-md 0.5.3](https://github.com/tree-sitter-grammars/tree-sitter-markdown) | MIT | blocks + paragraph inline offsets |
 //! | Dockerfile | [tree-sitter-containerfile 0.9.2](https://github.com/wharflab/tree-sitter-containerfile) | MIT | bundled |
 //! | Makefile | [tree-sitter-make 1.1.1](https://github.com/tree-sitter-grammars/tree-sitter-make) | MIT | bundled |
+//! | XML | `xml-rs 0.8.29` validator and [`xml`] lexer | MIT | local |
+//! | Environment files | none: [`env`]'s line lexer | — | — |
 //!
 //! Kotlin uses ast-grep's maintained fork of fwcd's grammar because `tree-sitter-kotlin` (0.3.8)
 //! pins `tree-sitter < 0.23` and `tree-sitter-kotlin-ng` ships no highlight query.
@@ -39,12 +41,18 @@
 //! 0.2.0 pins `tree-sitter 0.20`).
 //!
 //! Not done yet: injections (HTML/JS/CSS inside PHP, HTML `<script>`/`<style>`, code in Markdown
-//! fences), the Markdown inline grammar (emphasis, code spans, links in paragraphs), and
-//! `locals` queries.
+//! fences), and `locals` queries.
 
 use std::{cmp::Reverse, ops::{ControlFlow, Range}, path::Path, sync::{mpsc, Arc, OnceLock}};
 
 use tree_sitter::{ParseOptions, Parser, Query, QueryCursor, StreamingIterator, Tree};
+
+mod env;
+mod markdown;
+mod json;
+mod xml;
+
+const HIGHLIGHT_CHUNK: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Language {
@@ -66,6 +74,7 @@ pub enum Language {
     TypeScript,
     Tsx,
     Html,
+    Xml,
     Css,
     Json,
     Yaml,
@@ -74,10 +83,12 @@ pub enum Language {
     Markdown,
     Dockerfile,
     Makefile,
+    /// Dotenv-style `KEY=value` files (`.env`, `.env.local`, `app.env`…), highlighted by [`env`]'s lexer, not a grammar.
+    Env,
 }
 
 impl Language {
-    pub const ALL: [Language; 25] = [
+    pub const ALL: [Language; 27] = [
         Self::Rust,
         Self::C,
         Self::Cpp,
@@ -95,6 +106,7 @@ impl Language {
         Self::TypeScript,
         Self::Tsx,
         Self::Html,
+        Self::Xml,
         Self::Css,
         Self::Json,
         Self::Yaml,
@@ -103,6 +115,7 @@ impl Language {
         Self::Markdown,
         Self::Dockerfile,
         Self::Makefile,
+        Self::Env,
     ];
 }
 
@@ -138,6 +151,8 @@ pub enum Capture {
     Module,
     Heading,
     Link,
+    Strong,
+    Emphasis,
 }
 
 /// One document's highlights. No syntax tree or duplicate source text survives the background job.
@@ -159,8 +174,12 @@ struct SyntaxTree<'a> {
     /// [`crate::lines::line_starts`] of `text`.
     line_starts: Vec<usize>,
     tree: Tree,
+    markdown: Vec<markdown::Inline>,
 }
 
+/// A file's language: by its name, else by its shebang. An extension that names a language wins over an environment
+/// file's name, so `.env.sh` is Bash and `.env.json` JSON; any other `.env.*` name (`.env.local`, `.env.example`,
+/// `.env.production.local`), `.env` itself, `*.env` and `.flaskenv` are environment files.
 pub fn detect(path: &Path, first_line: &str) -> Option<Language> {
     by_name(&path.file_name()?.to_string_lossy()).or_else(|| by_shebang(first_line))
 }
@@ -177,36 +196,47 @@ fn by_name(name: &str) -> Option<Language> {
         "gemfile" | "rakefile" | "guardfile" | "podfile" | "vagrantfile" | "brewfile" => Ruby,
         "pkgbuild" | "apkbuild" | ".bashrc" | ".bash_profile" | ".bash_aliases" | ".bash_logout" | ".profile"
         | ".zshrc" | ".zshenv" | ".zprofile" => Bash,
+        ".flaskenv" => Env,
         _ if name.starts_with("dockerfile.") || name.starts_with("containerfile.") => Dockerfile,
-        _ => match name.rsplit_once('.')?.1 {
-            "rs" => Rust,
-            "c" => C,
-            // `.h` as C++: its grammar parses C headers too, C's can't parse C++ ones.
-            "h" | "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ipp" | "inl" | "tpp" => Cpp,
-            "go" => Go,
-            "zig" | "zon" => Zig,
-            "java" => Java,
-            "kt" | "kts" => Kotlin,
-            "cs" | "csx" => CSharp,
-            "py" | "pyi" | "pyw" => Python,
-            "rb" | "rake" | "gemspec" | "ru" => Ruby,
-            "php" | "phtml" => Php,
-            "lua" => Lua,
-            "sh" | "bash" | "zsh" | "ksh" => Bash,
-            "js" | "mjs" | "cjs" | "jsx" => JavaScript,
-            "ts" | "mts" | "cts" => TypeScript,
-            "tsx" => Tsx,
-            "html" | "htm" | "xhtml" => Html,
-            "css" => Css,
-            "json" | "jsonc" | "geojson" | "webmanifest" => Json,
-            "yaml" | "yml" => Yaml,
-            "toml" => Toml,
-            "sql" => Sql,
-            "md" | "markdown" | "mdown" | "mkd" => Markdown,
-            "dockerfile" | "containerfile" => Dockerfile,
-            "mk" | "mak" | "make" => Makefile,
-            _ => return None,
-        },
+        // `.env.local`, `.env.example`…: an environment file unless its last extension names a language.
+        _ if name.starts_with(".env.") => return by_extension(&name).or(Some(Env)),
+        _ => return by_extension(&name),
+    })
+}
+
+/// The language a file name's last extension names (`env` included: `.env`, `app.env`).
+fn by_extension(name: &str) -> Option<Language> {
+    use Language::*;
+    Some(match name.rsplit_once('.')?.1 {
+        "rs" => Rust,
+        "c" => C,
+        // `.h` as C++: its grammar parses C headers too, C's can't parse C++ ones.
+        "h" | "cc" | "cpp" | "cxx" | "c++" | "hpp" | "hh" | "hxx" | "h++" | "ipp" | "inl" | "tpp" => Cpp,
+        "go" => Go,
+        "zig" | "zon" => Zig,
+        "java" => Java,
+        "kt" | "kts" => Kotlin,
+        "cs" | "csx" => CSharp,
+        "py" | "pyi" | "pyw" => Python,
+        "rb" | "rake" | "gemspec" | "ru" => Ruby,
+        "php" | "phtml" => Php,
+        "lua" => Lua,
+        "sh" | "bash" | "zsh" | "ksh" => Bash,
+        "js" | "mjs" | "cjs" | "jsx" => JavaScript,
+        "ts" | "mts" | "cts" => TypeScript,
+        "tsx" => Tsx,
+        "html" | "htm" => Html,
+        "xml" | "xhtml" | "xsd" | "xsl" | "xslt" | "xaml" | "config" | "plist" | "props" | "targets" | "resx" | "csproj" | "fsproj" | "vbproj" => Xml,
+        "css" => Css,
+        "json" | "jsonc" | "geojson" | "webmanifest" => Json,
+        "yaml" | "yml" => Yaml,
+        "toml" => Toml,
+        "sql" => Sql,
+        "md" | "markdown" | "mdown" | "mkd" => Markdown,
+        "dockerfile" | "containerfile" => Dockerfile,
+        "mk" | "mak" | "make" => Makefile,
+        "env" => Env,
+        _ => return None,
     })
 }
 
@@ -237,10 +267,11 @@ struct Config {
     captures: Vec<Option<Option<Capture>>>,
 }
 
-/// The grammar and its compiled highlight query, built once per language (tens of ms).
-fn config(lang: Language) -> &'static Config {
+/// The grammar and its compiled highlight query, built once per language (tens of ms); `None` for a language
+/// without a grammar (environment and XML files, lexed locally).
+fn config(lang: Language) -> Option<&'static Config> {
     use Language::*;
-    static CONFIGS: [OnceLock<Config>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
+    static CONFIGS: [OnceLock<Option<Config>>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
     crate::syntax_arena::install();
     CONFIGS[lang as usize].get_or_init(|| {
         let (language, queries): (tree_sitter::Language, &[&str]) = match lang {
@@ -279,19 +310,20 @@ fn config(lang: Language) -> &'static Config {
             ),
             Html => (tree_sitter_html::LANGUAGE.into(), &[tree_sitter_html::HIGHLIGHTS_QUERY]),
             Css => (tree_sitter_css::LANGUAGE.into(), &[tree_sitter_css::HIGHLIGHTS_QUERY]),
-            Json => (tree_sitter_json::LANGUAGE.into(), &[tree_sitter_json::HIGHLIGHTS_QUERY]),
+            Json => (tree_sitter_json::LANGUAGE.into(), &[tree_sitter_json::HIGHLIGHTS_QUERY, json::QUERY]),
             Yaml => (tree_sitter_yaml::LANGUAGE.into(), &[tree_sitter_yaml::HIGHLIGHTS_QUERY]),
             Toml => (tree_sitter_toml_ng::LANGUAGE.into(), &[tree_sitter_toml_ng::HIGHLIGHTS_QUERY]),
             Sql => (tree_sitter_sequel::LANGUAGE.into(), &[tree_sitter_sequel::HIGHLIGHTS_QUERY]),
-            Markdown => (tree_sitter_md::LANGUAGE.into(), &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK]),
+            Markdown => (tree_sitter_md::LANGUAGE.into(), &[tree_sitter_md::HIGHLIGHT_QUERY_BLOCK, "(code_fence_content) @text.literal"]),
             Dockerfile => (tree_sitter_containerfile::LANGUAGE.into(), &[tree_sitter_containerfile::HIGHLIGHTS_QUERY]),
             Makefile => (tree_sitter_make::LANGUAGE.into(), &[tree_sitter_make::HIGHLIGHTS_QUERY]),
+            Env | Xml => return None,
         };
         let query =
             Query::new(&language, &queries.join("\n")).unwrap_or_else(|e| panic!("{lang:?} highlight query: {e}"));
         let captures = query.capture_names().iter().map(|name| capture(name)).collect();
-        Config { language, query, captures }
-    })
+        Some(Config { language, query, captures })
+    }).as_ref()
 }
 
 /// Map a tree-sitter capture name (`keyword.return`, `string.escape`…) onto the closed set.
@@ -359,11 +391,22 @@ pub struct Want {
     pub declarations: bool,
 }
 
+/// One syntax problem in document byte coordinates. No parser tree is retained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxError {
+    pub range: Range<usize>,
+    pub message: String,
+    /// A checker resource/capability limit, not evidence that the document is malformed.
+    pub limited: bool,
+}
+
 /// One parse's results: the spans, and what [`Want`] asked for.
 pub struct Syntax {
     pub parsed: Parsed,
     pub folds: Option<Folds>,
     pub declarations: Option<Declarations>,
+    /// `None` when syntax checking is unsupported; an empty list means checked and clean.
+    pub errors: Option<Vec<SyntaxError>>,
 }
 
 /// As [`parse_while`], also returning what `want` asks for, found in the same tree.
@@ -420,26 +463,34 @@ fn release_freed_memory() {
 
 fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, want: Want) -> Option<Syntax> {
     if !current() { return None; }
-    let language = &config(lang).language; // compiled outside the arena: queries outlive every parse
+    if lang == Language::Xml { return xml::parse(text, current, want); }
+    // Environment files have no grammar, no tree and no declarations: their lexer gives the spans and folds.
+    let Some(config) = config(lang) else {
+        let lexed = env::lex(text, current)?;
+        return Some(Syntax { parsed: lexed.parsed, folds: want.folds.then_some(lexed.folds), declarations: None, errors: None });
+    };
+    let language = &config.language; // compiled outside the arena: queries outlive every parse
     let tags = if want.declarations { tags(lang) } else { None }; // the same, for the tags query
     // Declared before the parser, tree and query cursors, so it is dropped after all of them.
     let _arena = crate::syntax_arena::Scope::begin(text.len());
     let mut parser = Parser::new();
     parser.set_language(language).expect("grammar ABI is checked by tests");
+    let json_pluses = if lang == Language::Json { json::exponent_pluses(text, current)? } else { Vec::new() };
     let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
     let tree = parser.parse_with_options(
-        &mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(),
+        &mut |offset, _| if lang == Language::Json { json::input(text, &json_pluses, offset) } else { text.as_bytes().get(offset..).unwrap_or_default() },
         None,
         Some(ParseOptions::new().progress_callback(&mut progress)),
     )?;
     let line_starts = crate::lines::line_starts(text);
-    let syntax = SyntaxTree { lang, text, line_starts, tree };
+    let markdown = if lang == Language::Markdown { markdown::inline(text, &line_starts, &tree, current)? } else { Vec::new() };
+    let syntax = SyntaxTree { lang, text, line_starts, tree, markdown };
     let n = syntax.line_starts.len();
     let mut parsed = Parsed { offsets: Vec::with_capacity(n + 1), spans: Vec::new() };
     // Bound temporary query captures and per-byte paint; a full-file query can dwarf the tree.
-    for start in (0..n).step_by(256) {
+    for start in (0..n).step_by(HIGHLIGHT_CHUNK) {
         if !current() { return None; }
-        for line in syntax.spans(start..(start + 256).min(n)) {
+        for line in syntax.spans(start..(start + HIGHLIGHT_CHUNK).min(n)) {
             parsed.offsets.push(parsed.spans.len());
             parsed.spans.extend(line.into_iter().map(|(r, capture)| Span { start: r.start as u32, end: r.end as u32, capture }));
         }
@@ -450,14 +501,25 @@ fn parse_now(lang: Language, text: &str, current: &dyn Fn() -> bool, want: Want)
         Some(tags) => Some(declarations_in(tags, lang, text, &syntax.tree, current)?),
         None => None,
     };
+    // CommonMark has no invalid documents: an error node there is the grammar's limit (an empty `- ` item), not the text's.
+    let errors = Some(if lang == Language::Markdown { Vec::new() } else { syntax.errors(current)? });
     drop(syntax);
     parsed.spans.shrink_to_fit();
-    Some(Syntax { parsed, folds, declarations })
+    Some(Syntax { parsed, folds, declarations, errors })
 }
 
 impl Parsed {
     pub fn bytes(&self) -> usize {
         self.offsets.capacity() * size_of::<usize>() + self.spans.capacity() * size_of::<Span>()
+    }
+
+    /// A capture at one line-relative byte, without cloning the line's span list.
+    pub fn capture_at(&self, line: usize, byte: usize) -> Option<Capture> {
+        let from = *self.offsets.get(line)?;
+        let to = *self.offsets.get(line.checked_add(1)?)?;
+        let spans = self.spans.get(from..to)?;
+        let at = spans.partition_point(|span| span.end as usize <= byte);
+        spans.get(at).filter(|span| span.start as usize <= byte).map(|span| span.capture)
     }
 
     pub fn spans(&self, lines: Range<usize>) -> Vec<Vec<(Range<usize>, Capture)>> {
@@ -481,10 +543,10 @@ impl SyntaxTree<'_> {
         let bounds: Vec<Range<usize>> = lines.clone().map(|l| self.line(l)).collect();
         let window = self.line_starts[lines.start]..self.line_starts.get(lines.end).copied().unwrap_or(self.text.len());
 
-        let cfg = config(self.lang);
+        let Some(cfg) = config(self.lang) else { return vec![Vec::new(); lines.len()] };
         let mut found = Vec::new();
         let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(window);
+        cursor.set_byte_range(window.clone());
         let mut captures = cursor.captures(&cfg.query, self.tree.root_node(), self.text.as_bytes());
         while let Some((m, i)) = captures.next() {
             let c = m.captures()[*i];
@@ -492,6 +554,9 @@ impl SyntaxTree<'_> {
                 found.push((c.node.byte_range(), paint));
             }
         }
+        let first = self.markdown.partition_point(|span| span.end_before <= window.start);
+        found.extend(self.markdown[first..].iter().take_while(|span| span.range.start < window.end)
+            .filter(|span| span.range.end > window.start).map(|span| (span.range.clone(), Some(span.capture))));
         // tree-sitter-highlight's precedence: an inner node paints over its parent, and for the
         // same node the later pattern wins (captures arrive in pattern order; the sort is stable).
         found.sort_by_key(|(r, _)| (r.start, Reverse(r.end)));
@@ -586,7 +651,8 @@ const IMPORT_KINDS: &[&str] = &[
 fn run_kinds(lang: Language) -> &'static [Option<FoldKind>] {
     static KINDS: [OnceLock<Vec<Option<FoldKind>>>; Language::ALL.len()] = [const { OnceLock::new() }; Language::ALL.len()];
     KINDS[lang as usize].get_or_init(|| {
-        let language = &config(lang).language;
+        let Some(config) = config(lang) else { return Vec::new() };
+        let language = &config.language;
         (0..language.node_kind_count() as u16)
             .map(|id| {
                 let kind = language.node_kind_for_id(id).unwrap_or_default();
@@ -603,6 +669,29 @@ fn run_kinds(lang: Language) -> &'static [Option<FoldKind>] {
 }
 
 impl SyntaxTree<'_> {
+    fn errors(&self, current: &dyn Fn() -> bool) -> Option<Vec<SyntaxError>> {
+        let mut errors = Vec::new();
+        let mut cursor = self.tree.walk();
+        let mut seen = 0;
+        loop {
+            seen += 1;
+            if seen % 256 == 0 && !current() { return None; }
+            let node = cursor.node();
+            if node.is_error() || node.is_missing() {
+                errors.push(SyntaxError { range: node.byte_range(), message: if node.is_missing() {
+                    format!("Missing {}", node.kind())
+                } else { "Syntax error".into() }, limited: false });
+                if errors.len() == 256 { break; }
+            } else if node.has_error() && cursor.goto_first_child() { continue; }
+            if cursor.goto_next_sibling() { continue; }
+            loop {
+                if !cursor.goto_parent() { return Some(errors); }
+                if cursor.goto_next_sibling() { break; }
+            }
+        }
+        Some(errors)
+    }
+
     /// Every named node spanning two lines or more (the outermost per first line), with consecutive comment lines and
     /// consecutive import lines merged into one region each. `None` once `current` says the work is obsolete.
     fn folds(&self, current: &dyn Fn() -> bool) -> Option<Folds> {
@@ -704,15 +793,22 @@ fn steps_now(lang: Language, text: &str, range: Range<usize>, current: &dyn Fn()
             push(start..end);
         }
     }
-    let language = &config(lang).language; // compiled outside the arena
+    // An environment file's steps come from its entries: a quoted value's inside, the value, the entry.
+    let Some(config) = config(lang) else {
+        if lang == Language::Env { env::steps(text, &range, current, &mut push)?; }
+        push(0..text.len());
+        return Some(out);
+    };
+    let language = &config.language; // compiled outside the arena
     {
         // Declared before the parser and tree, so it is dropped after both.
         let _arena = crate::syntax_arena::Scope::begin(text.len());
         let mut parser = Parser::new();
         parser.set_language(language).ok()?;
+        let json_pluses = if lang == Language::Json { json::exponent_pluses(text, current)? } else { Vec::new() };
         let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
         let tree = parser.parse_with_options(
-            &mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(),
+            &mut |offset, _| if lang == Language::Json { json::input(text, &json_pluses, offset) } else { text.as_bytes().get(offset..).unwrap_or_default() },
             None,
             Some(ParseOptions::new().progress_callback(&mut progress)),
         )?;
@@ -963,7 +1059,7 @@ fn tags(lang: Language) -> Option<&'static Tags> {
         .get_or_init(|| {
             let queries = tags_queries(lang)?;
             // A query that does not compile means no declarations for the language (a test checks they all do).
-            let query = Query::new(&config(lang).language, &queries.join("\n")).ok()?;
+            let query = Query::new(&config(lang)?.language, &queries.join("\n")).ok()?;
             let name = query.capture_index_for_name("name")?;
             let kinds = query
                 .capture_names()
@@ -1099,7 +1195,7 @@ fn relations(lang: Language) -> Option<&'static Relations> {
     crate::syntax_arena::install();
     RELATIONS[lang as usize]
         .get_or_init(|| {
-            let query = Query::new(&config(lang).language, relations_query(lang)?).ok()?;
+            let query = Query::new(&config(lang)?.language, relations_query(lang)?).ok()?;
             let index = |name: &str| query.capture_index_for_name(name);
             let (sub, sup, site) = (index("sub")?, index("sup").unwrap_or(u32::MAX), index("site")?);
             let sup_interface = index("sup.interface").unwrap_or(u32::MAX);
@@ -1127,7 +1223,7 @@ fn relations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> Opti
     }
     let _arena = crate::syntax_arena::Scope::begin(text.len());
     let mut parser = Parser::new();
-    parser.set_language(&config(lang).language).ok()?;
+    parser.set_language(&config(lang)?.language).ok()?;
     let mut progress = |_: &tree_sitter::ParseState| if current() { ControlFlow::Continue(()) } else { ControlFlow::Break(()) };
     let tree = parser.parse_with_options(&mut |offset, _| text.as_bytes().get(offset..).unwrap_or_default(), None, Some(ParseOptions::new().progress_callback(&mut progress)))?;
     let mut out = Vec::new();
@@ -1188,7 +1284,7 @@ fn declarations_now(lang: Language, text: &str, current: &dyn Fn() -> bool) -> O
     if !current() {
         return None;
     }
-    let language = &config(lang).language;
+    let language = &config(lang)?.language;
     // Declared before the parser, tree and query cursors, so it is dropped after all of them.
     let _arena = crate::syntax_arena::Scope::begin(text.len());
     let mut parser = Parser::new();
@@ -1285,6 +1381,39 @@ mod tests {
     /// A dropped parse tree must leave the process, on every platform: tree-sitter builds ~90 MiB
     /// of nodes for a 100k-line file, and libmalloc kept about half of that charged after the
     /// first teardown of concurrent parses (macOS 27, 2026-10-11) until a later parse reused it.
+    #[test]
+    fn syntax_errors_are_bounded_byte_ranges_and_missing_nodes() {
+        for (lang, text) in [(Rust, "fn main() {}"), (Json, "{\"x\": 1}"), (Xml, "<root/>")] {
+            assert!(parse_with(lang, text.into(), Want::default(), || true).unwrap().errors.unwrap().is_empty());
+        }
+        let syntax = parse_with(Json, "{\"x\": }".into(), Want::default(), || true).unwrap();
+        let errors = syntax.errors.unwrap();
+        assert!(!errors.is_empty());
+        assert!(errors.iter().all(|e| e.range.end <= 7));
+        let many = (0..1000).map(|_| "let = ;\n").collect::<String>();
+        let syntax = parse_with(Rust, many.into(), Want::default(), || true).unwrap();
+        assert!(syntax.errors.unwrap().len() <= 256);
+        assert!(parse_with(Env, "A=1".into(), Want::default(), || true).unwrap().errors.is_none());
+        // Every Markdown text is a document; the grammar errs on an empty last item with no line break after it.
+        for text in ["- one\n- ", "1. one\n2. ", "- [ ] a\n- [ ] "] {
+            assert_eq!(parse_with(Markdown, text.into(), Want::default(), || true).unwrap().errors, Some(Vec::new()), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn xml_detection_highlights_and_folds_are_xml_specific() {
+        for name in ["pom.xml", "App.config", "view.xaml", "transform.xslt", "schema.xsd", "page.xhtml", "Info.plist"] {
+            let language = detect(Path::new(name), "");
+            assert_eq!(format!("{language:?}"), "Some(Xml)", "{name}");
+        }
+        let text = "<ns:Root xmlns:ns=\"urn:test\">\n  <ns:Child attr='é'/>\n</ns:Root>";
+        let lang = detect(Path::new("a.xml"), "").unwrap();
+        let syntax = parse_with(lang, text.into(), Want { folds: true, declarations: false }, || true).unwrap();
+        assert_eq!(syntax.parsed.capture_at(0, 1), Some(Capture::Tag));
+        assert_eq!(syntax.parsed.capture_at(1, 12), Some(Capture::Attribute));
+        assert_eq!(syntax.folds.unwrap().regions, vec![Fold { first: 0, last: 2, kind: FoldKind::Block, closes: true }]);
+    }
+
     #[test]
     #[ignore = "process-wide memory: other tests skew it; scripts/ci-local.sh runs it alone"]
     fn concurrent_parses_return_the_trees_memory_to_the_system() {
@@ -1429,6 +1558,53 @@ mod tests {
         }
     }
 
+    /// Environment files by name; an extension naming a language wins (the explicit choice), and a direnv `.envrc` is
+    /// a shell script direnv runs, not data, so it is left as it was (plain text).
+    #[test]
+    fn detects_environment_files_by_name() {
+        let table = [
+            (".env", Some(Env)),
+            ("app/.env", Some(Env)),
+            (".ENV", Some(Env)),
+            (".env.local", Some(Env)),
+            (".env.example", Some(Env)),
+            (".env.production.local", Some(Env)),
+            (".env.development", Some(Env)),
+            ("docker.env", Some(Env)),
+            ("prod.ENV", Some(Env)),
+            (".flaskenv", Some(Env)),
+            (".env.sh", Some(Bash)),
+            (".env.json", Some(Json)),
+            (".env.d.ts", Some(TypeScript)),
+            (".env.yaml", Some(Yaml)),
+            (".envrc", None),
+            ("env", None),
+            (".environment", None),
+            ("env.txt", None),
+        ];
+        for (path, want) in table {
+            assert_eq!(d(path, ""), want, "{path}");
+        }
+        // The name wins over a shebang, as for every language.
+        assert_eq!(d(".env", "#!/bin/bash"), Some(Env));
+        assert!(!has_declarations(Env) && !has_type_relations(Env), "nothing in an environment file is indexed");
+    }
+
+    /// The background parse path (spans, folds, no declarations) and selection steps for an environment file.
+    #[test]
+    fn environment_files_parse_fold_and_expand_without_a_grammar() {
+        let src = "# a\n# b\nKEY=\"x\ny\"\n";
+        let syntax = parse_with(Env, src.into(), Want { folds: true, declarations: true }, || true).unwrap();
+        assert!(syntax.declarations.is_none());
+        assert_eq!(syntax.folds.unwrap().regions.iter().map(|f| (f.first, f.last)).collect::<Vec<_>>(), [(0, 1), (2, 3)]);
+        assert_eq!(tokens(&syntax.parsed, src, 2), vec![("KEY".to_string(), Property), ("=".to_string(), Capture::Operator), ("\"x".to_string(), Capture::String)]);
+        let at = src.find('x').unwrap();
+        let steps = selection_steps_while(Env, src.into(), at..at, || true).unwrap();
+        let shown: Vec<_> = steps.iter().map(|r| &src[r.clone()]).collect();
+        assert_eq!(shown, ["x", "x\ny", "\"x\ny\"", "KEY=\"x\ny\"", src]);
+        assert!(parse_with(Env, src.into(), Want::default(), || false).is_none(), "obsolete work stops");
+    }
+
     #[test]
     fn detects_by_shebang_only_as_fallback() {
         let table = [
@@ -1457,8 +1633,11 @@ mod tests {
     #[test]
     fn every_grammar_loads_and_its_query_compiles() {
         for lang in Language::ALL {
-            // `config` panics with the query error if a query does not compile.
-            assert!(!config(lang).captures.is_empty(), "{lang:?}");
+            // `config` panics with the query error if a query does not compile; only environment files have none.
+            match config(lang) {
+                Some(config) => assert!(!config.captures.is_empty(), "{lang:?}"),
+                None => assert!(matches!(lang, Env | Xml)),
+            }
             parse(lang, "x\n");
         }
     }
@@ -1483,6 +1662,7 @@ mod tests {
             (TypeScript, "interface A {}", "interface", Keyword),
             (Tsx, "const a = <div/>;", "const", Keyword),
             (Html, "<p class=\"a\">", "p", Tag),
+            (Xml, "<p attr=\"a\"/>", "p", Tag),
             (Css, "a { color: red; }", "color", Property),
             (Json, "{\"a\": 1}", "1", Number),
             (Yaml, "a: 1", "1", Number),
@@ -1491,6 +1671,7 @@ mod tests {
             (Markdown, "# T\n", "T", Heading),
             (Dockerfile, "FROM alpine", "FROM", Keyword),
             (Makefile, "ifdef X\nendif", "ifdef", Keyword),
+            (Env, "export A=1", "export", Keyword),
         ];
         for (lang, src, token, capture) in samples {
             let got = tokens(&parse(lang, src), src, 0);
@@ -1740,11 +1921,11 @@ mod tests {
     }
 
     #[test]
-    fn markdown_code_fence_content_stays_plain() {
+    fn markdown_code_fence_content_is_literal() {
         let src = "# Title\n\n```\ncode\n```\n";
         let p = parse(Markdown, src);
         assert!(has(&tokens(&p, src, 0), "Title", Heading));
-        assert_eq!(tokens(&p, src, 3), vec![]);
+        assert_eq!(tokens(&p, src, 3), vec![("code".to_string(), Capture::String)]);
     }
 
     #[test]
@@ -1785,10 +1966,11 @@ mod tests {
         let p = parse(Rust, &src);
         let n = crate::lines::line_starts(&src).len();
         let mut parser = Parser::new();
-        parser.set_language(&config(Rust).language).unwrap();
+        parser.set_language(&config(Rust).unwrap().language).unwrap();
         let tree = SyntaxTree {
             lang: Rust, text: &src, tree: parser.parse(&src, None).unwrap(),
             line_starts: crate::lines::line_starts(&src),
+            markdown: Vec::new(),
         };
         let whole = tree.spans(0..n);
         assert_eq!(p.spans(0..n), whole, "chunk boundaries preserve the original full-tree highlighting");
@@ -1796,6 +1978,67 @@ mod tests {
         for window in [1000..1060, 1003..1004, 1004..1063, n - 5..n] {
             assert_eq!(p.spans(window.clone()), whole[window.clone()], "{window:?}");
         }
+    }
+
+    #[test]
+    fn markdown_source_highlights_inline_constructs_without_touching_plain_prose() {
+        let src = "# Heading\r\n\r\nPlain *café* **strong** [site](https://example.test) and `code`.\r\n\r\n```text\r\n*literal* [not a link](x)\r\n```\r\n";
+        let parsed = parse(Markdown, src);
+        let starts = crate::lines::line_starts(src);
+        let at = |needle: &str| {
+            let byte = src.find(needle).unwrap();
+            let line = starts.partition_point(|&s| s <= byte) - 1;
+            parsed.capture_at(line, byte - starts[line])
+        };
+        assert_eq!(at("Heading"), Some(Heading));
+        assert_eq!(at("Plain"), None);
+        for needle in ["café", "strong", "site", "https://example.test", "code"] {
+            assert!(at(needle).is_some(), "missing Markdown source token: {needle}");
+        }
+        assert_eq!(at("café"), Some(Capture::Emphasis));
+        assert_eq!(at("strong"), Some(Capture::Strong));
+        assert_eq!(at("site"), Some(Capture::Link));
+        assert_eq!(at("code"), Some(Capture::String));
+        assert_eq!(at("literal"), Some(Capture::String), "code stays literal");
+        assert_eq!(at("not a link"), Some(Capture::String));
+        let multiline = format!("*{}end*\n", "continued\r\n".repeat(300));
+        let parsed = parse(Markdown, &multiline);
+        assert_eq!(parsed.capture_at(255, 0), Some(Capture::Emphasis));
+        assert_eq!(parsed.capture_at(256, 0), Some(Capture::Emphasis), "inline ranges survive the bounded query windows");
+        assert_eq!(parsed.capture_at(300, 0), Some(Capture::Emphasis));
+    }
+
+    #[test]
+    fn markdown_inline_context_and_continuation_offsets_survive_paragraph_parsing() {
+        let source = "# ```**literal**```\n\n> **first\n> second** and [reference][id]\n\n[id]: target.md\n\n*unclosed\n\n**separate**\n\n| cell |\n| --- |\n| ```**table**``` |\n";
+        let parsed = parse(Markdown, source);
+        let starts = crate::lines::line_starts(source);
+        for (needle, expected) in [("literal", Capture::String), ("first", Capture::Strong), ("second", Capture::Strong), ("reference", Capture::Link), ("separate", Capture::Strong), ("table", Capture::String)] {
+            let at = source.find(needle).unwrap();
+            let line = starts.partition_point(|&start| start <= at) - 1;
+            assert_eq!(parsed.capture_at(line, at - starts[line]), Some(expected), "{needle}");
+        }
+    }
+
+    #[test]
+    #[ignore = "focused Markdown source/preview release workload"]
+    fn markdown_polish_release_workload() {
+        let src = "# Heading\n\nPlain *café* **strong** [site](https://example.test) and `code`.\n\n```rust\nfn main() {}\n```\n\n".repeat(2000);
+        // Warm the compiled queries before sampling; parsing, preview source maps and cancellation stay checked.
+        let _ = parse(Markdown, "# warm\n");
+        for _ in 0..7 {
+            let now = std::time::Instant::now();
+            let parsed = parse(Markdown, &src);
+            assert_eq!(parsed.capture_at(0, 2), Some(Heading));
+            eprintln!("markdown_source_ms={:.3} retained_bytes={} source_bytes={}", now.elapsed().as_secs_f64() * 1000.0, parsed.bytes(), src.len());
+            let now = std::time::Instant::now();
+            let mut budget = crate::markdown::Limits::DEFAULT.segments_per_pair;
+            let doc = crate::markdown::parse(src.clone().into(), crate::markdown::Limits::DEFAULT, &mut budget, &|| true).unwrap();
+            assert_eq!(doc.source.as_ref(), src);
+            assert_eq!(doc.blocks.len(), 6000);
+            eprintln!("markdown_preview_parse_ms={:.3} blocks={}", now.elapsed().as_secs_f64() * 1000.0, doc.blocks.len());
+        }
+        assert!(parse_while(Markdown, src.into(), || false).is_none());
     }
 
     #[test]

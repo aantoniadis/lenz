@@ -294,7 +294,10 @@ pub fn open_files(
                 Ok(Some(p)) => (p.ours, p.theirs),
                 _ => ("Local".to_string(), "Remote".to_string()),
             };
-            (o, t, crate::conflicts::has_base(root, rel).unwrap_or(true))
+            match crate::conflicts::has_base(root, rel) {
+                Ok(None) => (o, t, !b.is_empty()),
+                base => (o, t, base.ok().flatten().unwrap_or(true)),
+            }
         }
         _ => ("Local".to_string(), "Remote".to_string(), !b.is_empty()),
     };

@@ -247,7 +247,8 @@ pub fn shape_with(
                 } else {
                     rgb(color).into()
                 },
-                background_color: run.highlight.then(|| rgb(style.highlight).into()),
+                background_color: if run.highlight { Some(rgb(style.highlight).into()) }
+                    else { inline_code.then(|| rgb(style.code_bg).into()) },
                 underline: (run.link && run.external).then_some(gpui::UnderlineStyle {
                     thickness: px(1.),
                     color: None,

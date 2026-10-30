@@ -14,6 +14,14 @@ pub fn hides_text(c: char) -> bool {
     c.is_control() || is_bidi_control(c)
 }
 
+/// Pasted text for a one-line field: a trailing line break dropped, inner line breaks and tabs as spaces (lines
+/// don't run together), other control characters removed.
+pub fn one_line(text: &str) -> String {
+    text.trim_end_matches(['\n', '\r']).replace("\r\n", "\n").chars()
+        .filter_map(|c| match c { '\n' | '\r' | '\t' => Some(' '), c if c.is_control() => None, c => Some(c) })
+        .collect()
+}
+
 fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
@@ -95,6 +103,13 @@ pub fn display_line(line: &str) -> (String, Vec<usize>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_paste_into_a_one_line_field_keeps_its_lines_apart() {
+        assert_eq!(one_line("first\r\nsecond\nthird\n"), "first second third");
+        assert_eq!(one_line("a\tb\u{7}c\r\n"), "a bc");
+        assert_eq!(one_line("path/to/repo\n"), "path/to/repo");
+    }
 
     #[test]
     fn tabs_hidden_characters_and_marks_keep_a_source_map() {

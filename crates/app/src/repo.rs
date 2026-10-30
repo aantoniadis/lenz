@@ -57,13 +57,18 @@ pub struct Stash {
 /// (index ⟷ working tree) and Untracked; a file staged and changed again is in both of the first two. Conflicted
 /// Files only with `conflicted` (the Conflicts entry lists the window's own).
 pub fn local_changes(dir: &Path, conflicted: bool) -> Result<ChangeSet, String> {
+    local_changes_paths(dir, conflicted, &[])
+}
+
+/// The same staged/unstaged/untracked grouping, limited to Git pathspecs (including unborn repositories).
+pub(crate) fn local_changes_paths(dir: &Path, conflicted: bool, paths: &[String]) -> Result<ChangeSet, String> {
     let root = toplevel(dir)?;
     let keep = |c: &crate::changeset::Comparison| conflicted || c.status != Status::Conflicted;
     // On an unborn branch `--cached` compares with the empty tree.
-    let mut staged = list_git(&root, &root, true, &[], &[], false)?;
+    let mut staged = list_git(&root, &root, true, &[], paths, false)?;
     staged.retain(keep);
     let (untracked, unstaged) =
-        list_git(&root, &root, false, &[], &[], true)?.into_iter().filter(keep).partition(|c| c.status == Status::Untracked);
+        list_git(&root, &root, false, &[], paths, true)?.into_iter().filter(keep).partition(|c| c.status == Status::Untracked);
     ChangeSet::grouped(root, vec![("Staged".into(), staged), ("Unstaged".into(), unstaged), ("Untracked".into(), untracked)])
 }
 

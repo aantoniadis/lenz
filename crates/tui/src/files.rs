@@ -134,7 +134,7 @@ impl Files {
                 }
                 (true,None)
             }
-            Event::Paste(text) if self.focused=>{self.begin_search();self.search.append(&text.replace(['\n','\r']," "));self.poll_search();(true,None)}
+            Event::Paste(text) if self.focused=>{self.begin_search();self.search.append(&lenz::document::one_line(text));self.poll_search();(true,None)}
             Event::Key(k) if self.focused&&k.kind!=KeyEventKind::Release=>{
                 let ctrl=k.modifiers==KeyModifiers::CONTROL;
                 if ctrl&&k.code==KeyCode::Char('a'){self.begin_search();self.search.set_query(String::new());return(true,None);}
