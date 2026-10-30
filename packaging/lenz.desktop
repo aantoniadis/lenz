@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
 Name=Lenz Code
-Comment=Fast code reader with language-server navigation
+Comment=Code editor with language-server assistance
 Exec=lenz-code %f
 Icon=lenz
 Terminal=false
 Categories=Development;
-StartupWMClass=lenz-reader
+StartupWMClass=lenz-code

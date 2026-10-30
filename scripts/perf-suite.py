@@ -52,7 +52,7 @@ def main():
     isolate_user_state()  # never measure with the user's own settings or saved positions
     cli = argparse.ArgumentParser(description=__doc__)
     cli.add_argument('--profile', choices=['quick','full','stress'], default='full')
-    cli.add_argument('--output', type=Path, help='New or empty directory (default target/perf/TIMESTAMP)')
+    cli.add_argument('--output', type=Path, help='New or empty directory (default perf-results/TIMESTAMP)')
     cli.add_argument('--runs', type=int, help='Measured repetitions: quick 1, full/stress 3')
     cli.add_argument('--stress-seconds', type=int, help='Mixed model workload in one process: full 10, stress 900')
     cli.add_argument('--ui', choices=['auto','off','native'], default='auto', help='auto: Linux private Xvfb; native: opt-in macOS desktop windows')
@@ -76,7 +76,7 @@ def main():
         cli.error('--ui native is macOS only; Linux always uses a private display')
     if platform.system() not in ('Linux', 'Darwin'):
         cli.error('supported hosts are Linux and macOS')
-    out = (opt.output or ROOT/'target'/'perf'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S')).resolve()
+    out = (opt.output or ROOT/'perf-results'/datetime.datetime.now().strftime('%Y%m%d-%H%M%S')).resolve()
     if out.exists() and any(out.iterdir()):
         cli.error('output directory must be new or empty')
     if opt.compare:

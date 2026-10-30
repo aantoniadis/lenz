@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 cli = argparse.ArgumentParser(description=__doc__)
 cli.add_argument('--gui', type=Path, default=ROOT/'target/release/lenz')
 cli.add_argument('--tui', type=Path, default=ROOT/'target/release/lenz-tui')
-cli.add_argument('--reader', type=Path, help='Also capture the Reader with this executable')
+cli.add_argument('--code', type=Path, help='Also capture Lenz Code with this executable')
 cli.add_argument('--output', type=Path, default=ROOT/'docs/images')
 cli.add_argument('--xvfb', default=shutil.which('Xvfb'))
 cli.add_argument('--theme', default='catppuccin')
@@ -356,8 +356,8 @@ def main():
             screen.click(win, x, y)
             screen.click_away(win)
 
-        def reader(name, root, file, keys):
-            proc, win, log = screen.launch([str(opt.reader.resolve()), str(root)], root, lambda text: True)
+        def code(name, root, file, keys):
+            proc, win, log = screen.launch([str(opt.code.resolve()), str(root)], root, lambda text: True)
             try:
                 win.configure(width=GUI_SIZE[0], height=GUI_SIZE[1])
                 screen.d.sync()
@@ -386,11 +386,11 @@ def main():
             'tui-repository': lambda: tui('tui-repository', ['log'], repo),
             'tui-merge': lambda: tui('tui-merge', ['merge', *merge], scratch),
         }
-        if opt.reader:
+        if opt.code:
             shots.update({
-                'reader-code': lambda: reader('reader-code', repo, 'config.rs',
+                'code-editor': lambda: code('code-editor', repo, 'config.rs',
                                               [('f', 'Control_L'), *[(c,) for c in 'workers']]),
-                'reader-markdown': lambda: reader('reader-markdown', scratch/'docs/new', 'README.md',
+                'code-markdown': lambda: code('code-markdown', scratch/'docs/new', 'README.md',
                                                   [('v', 'Control_L', 'Shift_L')]),
             })
         try:

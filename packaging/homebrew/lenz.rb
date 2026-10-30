@@ -1,7 +1,7 @@
 # Homebrew formula for a tap (e.g. a `homebrew-lenz` repository): `brew install <owner>/lenz/lenz`.
 # packaging/bump.sh fills in the version and checksums from a release.
 class Lenz < Formula
-  desc "Code reader, diff viewer, Git client and merge tool with GUI and terminal frontends"
+  desc "Code editor, diff viewer, Git client and merge tool with GUI and terminal frontends"
   homepage "https://github.com/aantoniadis/lenz"
   version "0.0.6"
   license all_of: ["MIT", "Apache-2.0"]

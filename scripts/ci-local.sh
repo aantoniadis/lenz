@@ -14,11 +14,11 @@ fi
 
 step "clippy, warnings as errors"
 cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo clippy --workspace --all-targets --locked --features lenz/gui-test,reader-tui/gui-test -- -D warnings
+cargo clippy --workspace --all-targets --locked --features lenz/gui-test,code-tui/gui-test -- -D warnings
 step "panic-prone sites"
 python3 scripts/panic-sites.py
-python3 scripts/panic-sites.py --reader
-python3 scripts/panic-sites.py --reader-tui
+python3 scripts/panic-sites.py --code
+python3 scripts/panic-sites.py --code-tui
 step "tests"
 cargo test --workspace --locked
 # They read the whole process's memory, which concurrent tests' allocations skew.
@@ -31,12 +31,12 @@ cargo test -p lenz-content --lib --locked -- --ignored --exact --test-threads=1 
     syntax_arena::tests::ending_a_scope_returns_touched_pages
 step "GUI adapter tests"
 cargo test -p lenz --features gui-test --locked gui_
-cargo test -p reader-gui --features test-support --locked
-cargo test -p reader-tui --features gui-test --locked
+cargo test -p code-gui --features test-support --locked
+cargo test -p code-tui --features gui-test --locked
 step "collector tests"
 python3 -m unittest discover -s scripts -p 'test_*.py'
 step "standalone terminal release builds (without GUI features)"
-cargo build --release --locked -p lenz-tui -p reader-tui
+cargo build --release --locked -p lenz-tui -p code-tui
 step "release build and stripped size (≤ 80,000,000 bytes)"
 cargo build --release --locked -p lenz
 stripped=$(mktemp)

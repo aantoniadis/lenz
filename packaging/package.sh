@@ -66,8 +66,8 @@ cmap="-ffile-prefix-map=$checkout=/lenz -ffile-prefix-map=$cargo_home=/cargo"
 export CFLAGS="${CFLAGS:+$CFLAGS }$cmap" CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }$cmap"
 # The installed name of each executable, and the package and Cargo executable it comes from.
 names=(lenz lenz-code lenz-code-tui lenz-diff lenz-diff-tui)
-packages=(lenz-launcher reader-gui reader-tui lenz lenz-tui)
-executables=(lenz-launcher lenz-reader lenz-reader-tui lenz lenz-tui)
+packages=(lenz-launcher code-gui code-tui lenz lenz-tui)
+executables=(lenz-launcher lenz-code lenz-code-tui lenz lenz-tui)
 built=()
 for i in "${!names[@]}"; do
     built+=("$(build "${packages[$i]}" "${executables[$i]}")")

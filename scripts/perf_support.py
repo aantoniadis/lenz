@@ -191,15 +191,20 @@ def compare(before, after, threshold):
 def owned_descendants(pid):
     # Linux native probes launch isolated sessions; retain birth ticks so a reused
     # PID cannot make cancellation touch an unrelated process.
+    # Some Linux kernels omit task/*/children. A PPID snapshot also includes
+    # children started by any thread, rather than just the main thread.
+    children = {}
+    for entry in Path('/proc').glob('[0-9]*'):
+        try:
+            stat = (entry / 'stat').read_text().rsplit(')', 1)[1].split()
+            children.setdefault(int(stat[1]), []).append((int(entry.name), stat[19]))
+        except (OSError, ValueError, IndexError):
+            continue  # A process may exit while the snapshot is read.
     pending=[pid];owned={}
     while pending:
         parent=pending.pop()
-        try:children=Path(f'/proc/{parent}/task/{parent}/children').read_text().split()
-        except OSError:continue
-        for child in map(int,children):
-            try:stat=Path(f'/proc/{child}/stat').read_text().rsplit(')',1)[1].split()
-            except OSError:continue
-            if child not in owned:owned[child]=stat[19];pending.append(child)
+        for child,birth in children.get(parent, []):
+            if child not in owned:owned[child]=birth;pending.append(child)
     return owned
 
 
@@ -233,11 +238,17 @@ def run(command, log, env, timeout, cwd=None, cancel_signal=signal.SIGTERM):
                 time.sleep(.05)
         finally:
             if proc.poll() is None:
-                owned=owned_descendants(proc.pid)
-                with suppress(ProcessLookupError):
-                    if cancel_signal==signal.SIGINT:
-                        proc.send_signal(signal.SIGINT)  # Python finally closes native apps/displays.
-                    else:os.killpg(proc.pid,cancel_signal)
+                # Process discovery can be slow on a busy host. Stop the owned group first, retaining its
+                # parent links for detached-child discovery without letting timed-out work continue.
+                with suppress(ProcessLookupError):os.killpg(proc.pid,signal.SIGSTOP)
+                try:
+                    owned=owned_descendants(proc.pid)
+                finally:
+                    with suppress(ProcessLookupError):
+                        if cancel_signal==signal.SIGINT:
+                            proc.send_signal(signal.SIGINT)  # Python finally closes native apps/displays.
+                        else:os.killpg(proc.pid,cancel_signal)
+                    with suppress(ProcessLookupError):os.killpg(proc.pid,signal.SIGCONT)
                 try:proc.wait(timeout=2)
                 except subprocess.TimeoutExpired:
                     with suppress(ProcessLookupError):os.killpg(proc.pid,signal.SIGKILL)

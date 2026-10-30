@@ -31,13 +31,13 @@ log "identity"
 } >"$OUT/identity.txt" 2>&1
 
 run build-locked cargo build --locked --release --workspace
-run core-graph sh -c "cargo tree -p reader-core -e normal | grep -ci gpui; echo '(expected 0 gpui crates in reader-core)'"
-run build-probe cargo build --release -p reader-gui --features perf-probe
-cp target/release/lenz-reader "$WORK/lenz-reader-probe"
-for i in 1 2 3; do run "tests-$i" cargo test --workspace --features reader-gui/test-support; done
-run real-providers cargo test --release -p reader-core --test providers -- --ignored --nocapture --test-threads 1 --skip corpus_readiness
-run real-rust-analyzer cargo test --release -p reader-core --test semantics real_rust_analyzer -- --ignored --nocapture
-run real-gui cargo test -p reader-gui --features test-support real_ -- --ignored --nocapture --test-threads 1
+run core-graph sh -c "cargo tree -p code-core -e normal | grep -ci gpui; echo '(expected 0 gpui crates in code-core)'"
+run build-probe cargo build --release -p code-gui --features perf-probe
+cp target/release/lenz-code "$WORK/lenz-code-probe"
+for i in 1 2 3; do run "tests-$i" cargo test --workspace --features code-gui/test-support; done
+run real-providers cargo test --release -p code-core --test providers -- --ignored --nocapture --test-threads 1 --skip corpus_readiness
+run real-rust-analyzer cargo test --release -p code-core --test semantics real_rust_analyzer -- --ignored --nocapture
+run real-gui cargo test -p code-gui --features test-support real_ -- --ignored --nocapture --test-threads 1
 
 log "corpora (pinned, disposable)"
 if [ ! -d "$WORK/lenz" ]; then
@@ -50,20 +50,20 @@ fi
 git -C "$WORK/lenz" log -1 --format='lenz %H' >>"$OUT/identity.txt"
 git -C "$WORK/metabase" log -1 --format='metabase %H' >>"$OUT/identity.txt"
 
-READER_CORPUS="$WORK/lenz" READER_CORPUS_NAME=lenz READER_SEARCH_TARGET_MS=2000 run acceptance-lenz cargo test --release -p reader-core --lib acceptance_perf -- --ignored --nocapture
-READER_CORPUS="$WORK/metabase" READER_CORPUS_NAME=metabase READER_SEARCH_TARGET_MS=5000 run acceptance-metabase cargo test --release -p reader-core --lib acceptance_perf -- --ignored --nocapture
-READER_CORPUS="$WORK/lenz" run rust-corpus-readiness cargo test --release -p reader-core --test providers real_rust_corpus_readiness -- --ignored --nocapture
-READER_CORPUS="$WORK/metabase" run typescript-corpus-readiness cargo test --release -p reader-core --test providers real_typescript_corpus_readiness -- --ignored --nocapture
+READER_CORPUS="$WORK/lenz" READER_CORPUS_NAME=lenz READER_SEARCH_TARGET_MS=2000 run acceptance-lenz cargo test --release -p code-core --lib acceptance_perf -- --ignored --nocapture
+READER_CORPUS="$WORK/metabase" READER_CORPUS_NAME=metabase READER_SEARCH_TARGET_MS=5000 run acceptance-metabase cargo test --release -p code-core --lib acceptance_perf -- --ignored --nocapture
+READER_CORPUS="$WORK/lenz" run rust-corpus-readiness cargo test --release -p code-core --test providers real_rust_corpus_readiness -- --ignored --nocapture
+READER_CORPUS="$WORK/metabase" run typescript-corpus-readiness cargo test --release -p code-core --test providers real_typescript_corpus_readiness -- --ignored --nocapture
 
 log "launch and memory: real windows open on this display; do not use the Mac meanwhile"
-run launch-bench python3 scripts/code-launch-bench.py --native --binary "$WORK/lenz-reader-probe" --file "$WORK/lenz/crates/engine/src/lib.rs" --corpus "$WORK/lenz" --out "$OUT"
+run launch-bench python3 scripts/code-launch-bench.py --native --binary "$WORK/lenz-code-probe" --file "$WORK/lenz/crates/engine/src/lib.rs" --corpus "$WORK/lenz" --out "$OUT"
 
 log "frame pacing: a window scrolls a large file for 20 s while Metabase is indexed"
-READER_PROBE_ROOT="$WORK/metabase" READER_PROBE_SCROLL=20 "$WORK/lenz-reader-probe" "$WORK/metabase/test/metabase/warehouses_rest/api_test.clj" >"$OUT/native-scroll.txt" 2>&1
+READER_PROBE_ROOT="$WORK/metabase" READER_PROBE_SCROLL=20 "$WORK/lenz-code-probe" "$WORK/metabase/test/metabase/warehouses_rest/api_test.clj" >"$OUT/native-scroll.txt" 2>&1
 echo "native-scroll exit $?" | tee -a "$OUT/run.log"
 
 log "15-minute stress (core process, physical footprint)"
-READER_CORPUS="$WORK/metabase" READER_STRESS_MINUTES=15 run stress-metabase-15min cargo test --release -p reader-core --lib stress_perf -- --ignored --nocapture
+READER_CORPUS="$WORK/metabase" READER_STRESS_MINUTES=15 run stress-metabase-15min cargo test --release -p code-core --lib stress_perf -- --ignored --nocapture
 
 log "summary"
 grep -h 'ACCEPTANCE' "$OUT"/acceptance-*.txt | tee -a "$OUT/run.log"
