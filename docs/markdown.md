@@ -8,6 +8,8 @@ Source is the default, including for each new independent view; `[view] markdown
 
 The Preview works for standalone, repository, commit and PR file comparisons, including added and deleted files with an empty opposite side, and in the Version Picker's two-way comparison preview. Markdown is detected by the extensions `.md`, `.markdown`, `.mdown` and `.mkd`, or by `--name`. Images, binary and unreadable files and oversized placeholders keep their own views, as do three-way Merge View panes.
 
+Lenz Code (the code reader) edits Markdown source with a live preview beside it, list continuation and link and heading completion; see [Markdown in Lenz Code](code/README.md#markdown). Lenz Diff's Preview below is a comparison view and stays read-only.
+
 PR conversations reuse the same bounded Markdown parser. The GUI uses the Preview's reading fonts, heading sizes and inline styles in a 30% wider column, shaped asynchronously; terminal conversations use styled cells. Their compact tables, linked image placeholders and timeline cards differ from the file Preview, and they have no image or callout controls. PR descriptions do not enter the comparison's edit or diff state.
 
 ## What is rendered

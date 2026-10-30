@@ -1,5 +1,8 @@
 # Reader TUI workspace integration — 2026-10-18
 
+Lenz Reader is now **Lenz Code**. The measurements below retain their original build names and markers;
+current builds produce `lenz-code` and `lenz-code-tui`. See the [current guide](README.md).
+
 Collector update, 2026-10-21: `scripts/code-tui-bench.py` now emits **schema 2**.
 `first_feedback_ms` ends when the fixture's filename appears in the reconstructed terminal screen;
 `first_content_ms` still requires the first source-line marker. The removed `Lenz Reader` label is no
@@ -10,7 +13,7 @@ retain their original schema and endpoints.
 The [final Linux validation](../release-validation.md) records the successful
 schema-2 workflow, fresh release comparisons and live dependency navigation.
 
-The terminal reader now uses this workspace's `reader-core` and `lenz-content`.
+The terminal reader now uses this workspace's `code-core` and `lenz-content`.
 The command-family trial exposes it through `lenz --tui [file-or-folder]` and
 `lenz-code-tui`. Release packaging remains a separate migration.
 
@@ -42,7 +45,7 @@ passed. Its intermittent cause was not diagnosed by this port.
 
 ## Method and retained evidence
 
-Local raw evidence is under `target/reader-tui-port/`: full gate/build logs,
+Local raw evidence is under `target/code-tui-port/`: full gate/build logs,
 `launcher-smoke.json`, raw terminal output, process/timing samples, fixture hashes,
 binary hashes and source identities. The integration starts from `3cca626` plus
 the pre-existing worktree changes saved in `preexisting.patch`; those changes were
@@ -122,7 +125,7 @@ Reproduction from the workspace root:
 scripts/try-launcher.sh
 python3 -B scripts/code-tui-bench.py \
   --binary target/launcher-trial/lenz-code-tui \
-  --out target/perf/code-tui-check \
+  --out perf-results/code-tui-check \
   --lines 100000 --rounds 100 --stress-seconds 60
 ```
 
@@ -316,7 +319,7 @@ and filters on their names. Menus show setting values and disabled reasons, supp
 a back row and wheel scrolling, and consume input before documents. Below 640 px the footer button drops its
 shortcut hint; below 240 px it yields to LSP status. F10 remains available.
 
-Evidence is retained under `target/perf/reader-gui-menus/`: `before.json` pins the preceding workspace build's
+Evidence is retained under `target/perf/code-gui-menus/`: `before.json` pins the preceding workspace build's
 source archive and copied binaries; `menu-change.patch` isolates this change from the preceding dirty tree;
 `identity.json`, `source.patch` and `source.tar.gz` identify the final source and production executables.
 `red.log` reproduces the missing visible menu before implementation. `ci-local.log` passes the full local gate,
@@ -382,7 +385,7 @@ searches, including deletion of the sole indexed source. A focused review found 
 `deletion-red.log` reproduces it and `deletion-green.log` verifies the shared fix.
 
 Evidence lives in `target/perf/search-everywhere/`. `before.json`, `before.patch`, copied baseline binaries and
-the preceding `reader-gui-menus/source.tar.gz` preserve the comparison baseline. Final identities and source
+the preceding `code-gui-menus/source.tar.gz` preserve the comparison baseline. Final identities and source
 are retained in `identity.json`, `source.patch` and `source.tar.gz`. Collector scripts, complete raw samples,
 build/gate logs, terminal streams and private-display screenshots accompany them. No production dependency,
 thread or language-server request was added. Actual GUI/TUI input replay compares files, symbols, action

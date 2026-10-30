@@ -22,20 +22,20 @@ Rust's standard library. It finds its siblings beside its own executable, preser
 directory, environment and arguments, and replaces itself with the selected app using Unix `exec`.
 The two terminal apps each build separately without GUI dependencies.
 
-`--tui` selects the terminal reader immediately after `lenz`, or the terminal comparison app
+`--tui` selects the terminal editor immediately after `lenz`, or the terminal comparison app
 immediately after `lenz diff`. Only that first selector is consumed; remaining arguments are
 forwarded unchanged, including option values and paths named `--tui`.
 For example, `lenz --tui diff` reads a path named `diff` in the terminal;
-`lenz -- --tui` reads a literal `--tui` path in the desktop reader, and
+`lenz -- --tui` reads a literal `--tui` path in the desktop editor, and
 `lenz diff -- --tui` compares that path in the desktop app.
 `lenz --help` describes the command family; `lenz diff --help` reaches the existing comparison help.
-Bare `lenz` opens the reader in the current directory; a path opens that file or folder.
+Bare `lenz` opens Lenz Code in the current directory; a path opens that file or folder.
 Only `diff` is a reserved application selector. Paths named `code`, `log` and `merge` go to
-the reader like other paths; use `lenz ./diff` or an absolute path to read something named `diff`.
+Lenz Code like other paths; use `lenz ./diff` or an absolute path to read something named `diff`.
 
 ## Migrating from 0.0.1
 
-`lenz` now opens the reader. Comparison commands need the `diff` prefix, or the separate
+`lenz` now opens Lenz Code. Comparison commands need the `diff` prefix, or the separate
 `lenz-diff` executable:
 
 | 0.0.1 command | 0.0.2 command |
@@ -49,17 +49,18 @@ the reader like other paths; use `lenz ./diff` or an absolute path to read somet
 Git difftool and mergetool command strings likewise become
 `lenz diff "$LOCAL" "$REMOTE"` and
 `lenz diff merge "$BASE" "$LOCAL" "$REMOTE" "$MERGED"`.
-Lenz changes no installed Git configuration: update yours by hand. Reader arguments are forwarded to its existing
-executable; use the explicit Diff command for comparisons instead of supplying two paths to the reader.
+Lenz changes no installed Git configuration: update yours by hand. Lenz Code arguments are forwarded to its existing
+executable; use the explicit Diff command for comparisons instead of supplying two paths to Lenz Code.
 
-Reader's code is under `crates/reader-core`, `crates/reader-gui` and `crates/reader-tui`.
-Both reader adapters share the reader core; terminal Code and Diff have no GUI dependencies.
-Reader documentation is [here](code/README.md), with terminal controls and capability limits
+Lenz Code's code is under `crates/code-core`, `crates/code-gui` and `crates/code-tui`.
+Both Code adapters share the editor core; terminal Code and Diff have no GUI dependencies.
+Lenz Code documentation is [here](code/README.md), with terminal controls and capability limits
 [in the TUI guide](code/tui.md). Application behavior remains in the existing respective cores.
 
-Cargo package and build-artifact names, window branding and configuration directories remain as
-they were; only release packaging installs the new names (with **Lenz Code** and **Lenz Diff**
-desktop entries on Linux). In particular, `target/release/lenz` remains the Diff GUI; use the
+The application and Cargo executables are **Lenz Code**, `lenz-code` and `lenz-code-tui`.
+Its Cargo packages are `code-core`, `code-gui` and `code-tui`. Settings, cache, recovery and
+recent-project directories are `lenz-code`; the first launch moves existing `lenz-reader` ones there.
+The Linux desktop entries are **Lenz Code** and **Lenz Diff**. In particular, `target/release/lenz` remains the Diff GUI; use the
 **staged** `target/launcher-trial/lenz` to try the command family from a checkout. The staging script
 creates aliases to the built applications and copies the tiny launcher; it does not combine
 their dependencies or retain an extra launcher process.

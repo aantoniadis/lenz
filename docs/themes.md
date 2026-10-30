@@ -1,6 +1,6 @@
 # Themes
 
-Lenz shares semantic chrome, syntax and diff colors between its GUI, TUI and Reader.
+Lenz shares semantic chrome, syntax and diff colors between its GUI, TUI and Lenz Code.
 Choose from 16 bundled themes:
 
 | Theme | ID | Appearance |
@@ -39,7 +39,7 @@ than reproducing each editor's token mapping. The new palettes adjust muted colo
 and a few light-theme syntax accents to keep at least 3:1 contrast on the editor
 background; Solarized Light uses its darker `base01` for body text.
 Selection, menus, diff highlights and Markdown use the same shared
-palette in Reader, GUI Diff and TUI.
+palette in Lenz Code, GUI Diff and TUI.
 
 ## Controls and Omarchy following
 
@@ -123,35 +123,37 @@ custom themes fall back while retaining their saved ID.
 
 `LENZ_THEME=system|<id>` overrides saved settings for that launch.
 `LENZ_APPEARANCE=light|dark` is read when LENZ_THEME is unset. Both products also
-accept the old Reader variables with lower priority: `LENZ_THEME`, then
-`LENZ_APPEARANCE`, then `LENZ_READER_THEME`, then `LENZ_READER_APPEARANCE`.
+accept Lenz Code's own variables with lower priority: `LENZ_THEME`, then
+`LENZ_APPEARANCE`, then `LENZ_CODE_THEME`, then `LENZ_CODE_APPEARANCE`, then its
+names from when it was Lenz Reader, `LENZ_READER_THEME` and `LENZ_READER_APPEARANCE`.
 Unknown overrides report a notice and use the saved/default selection. Explicit
 menu selection supersedes the environment override and saves normally.
 
 The theme format, built-in themes, selection and Omarchy following live in the
-shared `lenz-content` crate. Reader and Diff use the same `lenz/appearance.json`
+shared `lenz-content` crate. Lenz Code and Diff use the same `lenz/appearance.json`
 and `lenz/themes`. If the canonical selection file is absent, both read
-`lenz-reader/appearance.json`; a missing canonical user-theme file can fall back to
-`lenz-reader/themes/<name>.toml`. Existing canonical files always win, including
-invalid files, which produce a notice. Legacy files are never rewritten or
-migrated; explicit choices save to `lenz/appearance.json` and preserve its unknown
+`lenz-code/appearance.json`, then `lenz-reader/appearance.json` (Lenz Code's folder
+before its first launch moves it); a missing canonical user-theme file can fall back
+to `<folder>/themes/<name>.toml` in the same order. Existing canonical files always
+win, including invalid files, which produce a notice. Legacy files are never
+rewritten; explicit choices save to `lenz/appearance.json` and preserve its unknown
 JSON fields. Separate processes read the shared selection at their next launch;
 they do not synchronize menu choices live. Follow system still watches Omarchy
 changes live.
 
 Both GUIs also read `[gui] font_family`, `font_size` (8–32, default 13) and
 `reading_font` from `lenz/settings.toml` at startup. Font changes take effect on
-the next launch. Reader's other settings, recent roots, providers and document
+the next launch. Lenz Code's other settings, recent roots, providers and document
 state remain independent from Diff.
 
 
 ## Verification (2026-10-18)
 
-All ten additions passed production-window rendering checks in Reader, GUI Diff
+All ten additions passed production-window rendering checks in Lenz Code, GUI Diff
 and TUI, including selecting the final theme in a 400×300 chooser. Screenshots
 were inspected on an owned Xvfb display using Mesa lavapipe; these are software
 rendering checks. The full local CI gate passed, including shared contrast,
-Reader chooser/persistence, GUI/TUI input and packaging tests.
+Lenz Code chooser/persistence, GUI/TUI input and packaging tests.
 
 Alternating release-binary comparisons against `3cca626` used the same generated
 2,001-line Rust documents, isolated settings and two warmup pairs. Medians:
@@ -159,12 +161,12 @@ Alternating release-binary comparisons against `3cca626` used the same generated
 | Endpoint | Measured pairs | Before | After | RSS before / after at 1 s |
 |---|---:|---:|---:|---:|
 | Diff first-paint marker | 8 | 130.5 ms | 129.5 ms | 211.46 / 210.78 MiB |
-| Reader mapped window observed | 12 | 103.91 ms | 101.45 ms | 173.24 / 173.56 MiB |
+| Lenz Code mapped window observed | 12 | 103.91 ms | 101.45 ms | 173.24 / 173.56 MiB |
 | TUI first content bytes | 16 | 5.42 ms | 5.29 ms | 14.59 / 14.71 MiB |
 
-Reader window observation is not first paint or document readiness. TUI bytes
+Lenz Code window observation is not first paint or document readiness. TUI bytes
 are not emulator display latency or completed refinement. Initial TUI timing
-outliers did not reproduce in the 16-pair repeat. Reader's initial RSS difference
+outliers did not reproduce in the 16-pair repeat. Lenz Code's initial RSS difference
 of 0.91 MiB narrowed to 0.32 MiB on repeat; executable mappings accounted for
 0.46 MiB more residency, while anonymous mappings decreased by 0.09 MiB. This
 is not evidence of a heap leak or zero memory overhead. The stripped Diff GUI

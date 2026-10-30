@@ -1,6 +1,89 @@
 # Terminal frontend
 
-For the code reader, see the [terminal reader guide](code/tui.md).
+For the code reader, see the [terminal editor guide](code/tui.md).
+
+Lenz Code also offers optional **Vim Editing**, independent **Relative Line Numbers**, offline JSON formatting,
+richer Markdown source/preview styling, and explorer type-to-search in both adapters. See the
+[editor controls](code/tui.md) for enabling and using them.
+
+Lenz Code draft editing and Undo/Redo input are enabled by default in the Linux terminal and the Linux X11/Wayland GUI. The GUI checks its actual backend; native macOS remains gated pending platform verification. Checkpoint23 activation remains a private candidate until the combined gate and performance acceptance. See the [Unicode composition limits](research/code-unicode-composition.md). Draft blame shows “Blame pending…” while current-text attribution is recomputed, and “Blame failed” on errors; commit actions stay unavailable in both states.
+
+Lenz Code editing also covers several selections: Ctrl+Alt+Down / Up and **Select Next Occurrence** (Alt+J) add
+cursors, typing, paste, Delete and Cut change them in one transaction, and Escape returns to one. Tab indents and
+Shift+Tab outdents with the file's EditorConfig or project step; Ctrl+/ (or Alt+/) comments, Ctrl+Shift+Down/Up moves
+lines, and Alt+Shift+Down/Up duplicates them—each one Undo step, with CRLF, mixed line endings and a missing final
+newline kept in place. In YAML, Enter indents the new line by its line's structure and indentation is spaces only.
+Haml templates use Haml tag/attribute completion, structural Enter indentation and a configured haml-lint
+formatter through the same shared session in both adapters ([Haml editing](code/providers.md#haml-editing)).
+ERB templates run as Rails compiles them (a Rails view with its helpers and strict locals) and Ctrl+Alt+L / Format
+Document runs the project's configured erb_lint, alike in both adapters ([ERB editing](code/providers.md#erb-editing)).
+Environment files (`.env`, `.env.*`, `*.env`) are highlighted as key/value data in both adapters, comment with `#`, pair
+quotes only right after `=`, and are never expanded, run, formatted or sent to a language server; their bookmarks keep
+only line numbers ([environment files](code/README.md#environment-files)). A snippet suggestion from completion expands with the file's indentation and line ending,
+and Tab then visits its placeholders until Escape, a caret move, another tab or Undo ends it; the status bar says
+which placeholder is selected. The [terminal editor guide](code/tui.md) lists the keys, the snippet behavior and
+the terminal's modifier-key limits.
+
+Syntax-parser and language-server problems are underlined in both adapters for the exact text checked; parser
+errors remain available without a server. Inline messages follow the affected line; extra findings show `(+N)`.
+Tabs show `!N` for errors (`?` while rechecking), and the explorer uses red names and `•` for files and folders
+with known errors. The status bar names the problem at the caret, and F8 / Shift+F8 move to the
+next or previous one. **Problems…** lists known reports across files; unopened files are not scanned automatically.
+**Check Project Syntax** explicitly scans the current project inventory, with progress, cancellation and coverage.
+**Show Quick Fixes…** (Alt+Enter; Ctrl+. in the VS Code
+keymap) lists the server's fixes at the caret: Enter applies one to this file as a single Undo step, and fixes that
+would change other files, create or delete files, or run a server command are listed with the reason and never applied.
+**Format Document** (Ctrl+Alt+L) and **Organize Imports** (Ctrl+Alt+O) apply the language server's result as one
+Undo step, and the project's format-on-save formats before Save writes; see the
+[terminal editor guide](code/tui.md) for what is refused and when Save writes nothing. Python files run the project's
+configured ruff or black instead (Pyright does not format), in both adapters alike; Server Details names the Python
+environment Pyright uses ([Pyright](code/providers.md#pyright-python)).
+
+The editor's gutter marks the draft's changes against a named baseline in both adapters: **M** (blue) for a modified
+line, **A** (green) for an added one and **D** where lines were deleted above, each a letter and not only a colour.
+Tracked files compare with HEAD (unsaved edits included, so Save keeps the marks), new files say they are new, and
+files outside Git compare with the last save; the status bar and Status details name the baseline. See the
+[terminal editor guide](code/tui.md) for the cells, the timing and the limits.
+
+Find in the current draft also replaces: both adapters open find with Ctrl+F, Tab moves to the replacement row,
+Enter replaces the current match and selects the next, Alt+A replaces every listed match, and Alt+Enter lists every
+match while find keeps its keys (there it is not Show Quick Fixes). The replacement text,
+pattern, options and captured document version live in the shared session, so the GUI's box and the terminal's
+prompt show the same state; each replace is one undo step on the draft and never writes a file.
+
+The explorer also creates: **New File in Explorer…** and **New Folder in Explorer…** sit in an explorer row's
+right-click menu and in File → New, and name what to create in the highlighted folder through the terminal's prompt
+(the GUI uses its own dialog with the same shared rules and words). A created file opens as that file — its own draft,
+undo history and Save — and is selected in the explorer; a created folder shows open at once. Names another entry
+takes, missing folders, paths outside the project and folders whose permissions refuse new entries are refused with
+their reason before anything is written.
+
+Both adapters’ explorer menus copy names and full/project-relative paths, and offer saved-byte **Copy File / Folder**
+and **Paste File / Folder…** (Ctrl+C / Ctrl+V in the explorer). Paste asks for a name, never overwrites, and keeps
+unsaved drafts unchanged; background copies can be cancelled. Linux desktop file-manager copying uses `wl-copy`
+on Wayland or `xclip` on X11; tree Paste remains available without them. OSC 52 carries text only, and native macOS
+file clipboard is unsupported. **Show File / Folder Git History** opens the shared Diff history, following file
+renames or constraining history and comparisons to the selected folder. See the [copy rules](code/tui.md).
+
+**Rename in Explorer…** and **Move in Explorer…** sit in the same menus and act on the highlighted file or folder: the
+prompt starts with its current name (Rename) or its folder (Move, project-relative; empty is the root). A taken name, a
+folder moved into itself, a document whose save is running or unconfirmed and an undecided recovered draft are refused
+with their reason. The move never replaces another entry; open tabs, unsaved drafts with their undo history, Back and
+Forward, bookmarks and the explorer follow it, and Save then writes the file at its new path. References to the entry in
+other files are not changed. There is no default shortcut; the menus are the route in both adapters.
+
+**Delete** while the file tree is focused opens the same confirmation as **Delete in Explorer…**.
+It moves the highlighted file or folder to the freedesktop trash of its file system (the home
+trash, or the mount's own `.Trash` folder), after a confirmation that says what goes and how many open tabs close;
+**Restore Last Deleted Entry** puts this session's latest deletion back without replacing anything (the desktop's trash
+can restore it too). **Delete Permanently in Explorer…** is a separate command and confirmation. Where no trash can be
+used (another platform, a file system without one) Delete says so and removes nothing. A document with unsaved changes,
+a running or unconfirmed save, or an undecided recovered draft refuses both, so unsaved work is never deleted with its
+file, and deleted work is not offered back by draft recovery.
+
+Lenz Code’s **File → Compare → Compare with Saved** command and Ctrl+Shift+D open the same in-window saved/current comparison
+in both adapters. The current side shares the ordinary buffer/history; the saved side is immutable.
+See the [Lenz Code controls](code/tui.md) and [focused verification limits](research/code-saved-comparison.md).
 
 ![The terminal Diff showing a repository: sources, commit log with branch graph, changed files and the side-by-side comparison](images/tui-repository.png)
 
@@ -15,7 +98,7 @@ cargo build --locked --release -p lenz-tui
 ./target/release/lenz-tui merge
 ```
 
-`lenz diff --tui` needs an interactive terminal and takes the same arguments as `lenz diff`, including `--about`. Started outside a repository, `lenz diff --tui` and its `log`, `merge` and `pr` first show the shared repository chooser: type a path (Tab completes folders, `~` is home) or pick a recent repository with the arrows or a click, Enter opens it and Esc quits. The GUI has the same chooser plus **Browse…**, which a terminal cannot offer.
+`lenz diff --tui` needs an interactive terminal and takes the same arguments as `lenz diff`, including `--about`. Started outside a repository, `lenz diff --tui` and its `log`, `merge` and `pr` first show the shared repository chooser: type a path (Tab completes folders, `~` is home) or pick a recent repository with the arrows or a click, Enter opens it and Esc quits. The GUI has the same chooser plus **Browse…**, which a terminal cannot offer. The chooser has no command menu; **Report last error** is in the menus once a repository opens, and `lenz diff --tui report --last` works anywhere.
 
 ## Keyboard and mouse basics
 
@@ -56,7 +139,7 @@ cargo build --locked --release -p lenz-tui
 
 ### Editing and saving
 
-Apply, hunk revert, Undo and Redo change a pending draft; **Save changes** writes it. **Discard unsaved changes** reloads the file from disk and restores the last saved history. Drafts survive switching files and refreshing the same comparison. Quitting or changing comparison with drafts focuses an unsaved file and asks you to save or discard first; Cancel keeps the view. Applied changes stay marked Applied or Undone, including after a repository refresh removes a fully applied file from Git's diff. A record can be undone on its own unless a later overlapping edit requires a global Undo, which the Details dialog explains. One-line changes have no folding control. In the Merge View, **Reopen conflict** resets one resolution.
+Apply, hunk revert, Undo and Redo change a pending draft; **Save changes** writes it. **Discard unsaved changes** reloads the file from disk and restores the last saved history. Drafts survive switching files and refreshing the same comparison. Quitting or changing comparison with drafts focuses an unsaved file and asks you to save or discard first; quitting again right away (Ctrl-Q twice) closes without saving, and any other key keeps the view. Applied changes stay marked Applied or Undone, including after a repository refresh removes a fully applied file from Git's diff. A record can be undone on its own unless a later overlapping edit requires a global Undo, which the Details dialog explains. One-line changes have no folding control. In the Merge View, **Reopen conflict** resets one resolution.
 
 **Revert current hunk** copies the left version into the right working-tree side. **Discard working-tree changes** is a separate confirmed Git action that restores the indexed bytes and mode, keeps staged changes, handles tracked deletions, binary files and symlinks, and offers **Undo Git discard**. Save or discard the file's draft first. It refuses if the file or index changed after you confirmed, and does not apply to untracked files, submodules or conflicts. Undo is kept for at most 64 records and 64 MiB of original bytes; a larger file is refused.
 
@@ -80,6 +163,7 @@ Folder headings in Files collapse and expand: click the ▾/▸ arrow (the headi
 - A click on a removed word selects the old text; the arrow keys move a caret in the new text. Foldable callouts show ▸ or ▾ after the title and fold with a click or Enter; a callout containing a change starts open.
 - Callouts, `==highlights==`, tags, links, footnotes, properties and done tasks use theme colors and styles (see the guide).
 - Local images are decoded in the background and drawn at most 20 rows tall: as real pixels through kitty graphics Unicode placeholders in kitty and Ghostty (not inside tmux), as half-block cells elsewhere. `LENZ_IMAGES=cells|kitty` overrides detection (`sixel` also selects cells here). A missing or unreadable image keeps its placeholder text.
+- Lenz Code's terminal editor edits Markdown source with a preview beside it; see [its Markdown section](code/README.md#markdown).
 - Three-way merge panes keep their plain rendering. PR conversations share the Markdown file parser and terminal text styles; the GUI also reuses its reading fonts and inline styling in a 30% wider column, formatted in the background. PR tables keep compact text separators and images remain linked placeholders; the timeline does not offer the Preview's image or callout controls. The PR wheel moves one row per notch; the GUI accumulates small trackpad movements instead of treating every event as three rows.
 
 ### Themes and icons
@@ -177,4 +261,26 @@ Limits to be aware of:
 - Tests and shared behavior reduce drift between the adapters but cannot guarantee that every rendering or input bug is absent.
 - New behavior must be usable and verified in both adapters, and performance-sensitive changes need equivalent release workloads compared before and after.
 
-Both adapters offer **Report last error** in their command menus, even before a comparison is ready. `lenz diff --tui report --last` also works outside Git without an interactive terminal, and `--print` prints the report path and issue-draft link. On a panic the terminal restores mouse, paste, focus and raw/alternate-screen modes before diagnostics print. See [crash reporting](crash-reporting.md).
+Both adapters offer **Report last error** in their command menus, even before a comparison is ready (the repository chooser has no menu). `lenz diff --tui report --last` also works outside Git without an interactive terminal, and `--print` prints the report path and issue-draft link. On a panic the terminal restores mouse, paste, focus and raw/alternate-screen modes before diagnostics print. See [crash reporting](crash-reporting.md).
+
+PostgreSQL metadata uses the shared SQL menu's Configure / Connect / Refresh / Disconnect actions.
+Configure asks for a libpq service name and does not connect. The status bar and SQL Dialect details
+show snapshot age or failure; explicit snapshots feed completion/type documentation/parameter help.
+See [metadata setup and limits](code/providers.md#postgresql-metadata-snapshots).
+DuckDB uses the same metadata controls, with an absolute local file path in Configure. Its file is
+attached read-only only after explicit Connect/Refresh, with extension/network access disabled.
+File changes invalidate snapshots. See [DuckDB setup and limits](code/providers.md#duckdb-metadata-snapshots).
+
+Lenz Code's change letters open **Inspect Marked Change** on click; Alt+Shift+C and the Git command
+menu inspect the caret's settled block. The prior-content popup names HEAD/last-save/new-file baseline;
+`d` shows its read-only snapshot beside the shared editable draft, `r` reverts one block, and Esc closes.
+It takes input immediately, including before the next draw. Revert is undoable and writes only through
+Save; the Git index stays unchanged. Obsolete coordinates/HEAD changes are refused. A 64 KiB preview
+and 4 MiB revert-text limit keep large blocks bounded. The captured comparison baseline remains fixed
+until closed. Native physical-terminal input and platform rendering remain subject to the capability
+limits above.
+
+Lenz Code's collapsed **Logs** control opens the same bounded session activity in GUI and TUI: SQL
+metadata progress/failures and application notices, with Copy/Clear/Hide and independent scrolling.
+DuckDB metadata also accepts local SQLite files through its installed SQLite extension; see
+[metadata setup](code/providers.md#duckdb-metadata-snapshots).

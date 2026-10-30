@@ -1,0 +1,20 @@
+# 51: Deliver HTML and embedded-language assistance
+
+**What to build:** Complete tags/attributes, close tags and format markup with appropriate embedded-language help.
+
+**Blocked by:** 39: Apply completion imports and snippet edits atomically; 40: Display completion documentation and signature help; 41: Show diagnostics and apply single-file quick fixes; 42: Format and organize imports under project settings; 43: Explain active tools, environments and missing capabilities.
+
+**Status:** resolved
+
+- [x] Verify actual HTML completion replacement/closing-tag behavior and configured formatting.
+- [x] Exercise supported script/style embedding and correct original-source ranges with real provider messages.
+- [x] Both adapters accept/undo edits safely and explain missing embedded capabilities.
+- [x] Use the agreed Session-command seam and real adapter input/render replays for affected behavior; assert exact text/state/file output. Run relevant regressions and performance checks, retain evidence and keep unsupported claims explicit.
+
+**Spec coverage:** user stories 83.
+
+## Answer
+
+Merged in 8e8e10f (branch work/editor-51-html). Verified with the real HTML and CSS servers of vscode-langservers-extracted 4.10.0 (npm, installed for this ticket) on Node.js 22, Linux: problems inside `<style>` and `<script>` at their exact source ranges after a non-BMP character, with the user's `css.lint` setting; Format Document under `.editorconfig` and the user's `format` settings (style and script blocks too) as one Undo step; tag-name completion with UTF-16 ranges; typing `>` closes the element and `</` the innermost open one (the server's `html/autoInsert`, its own Undo step, dropped when the text or caret moved on, off with `autoClosingTags: false`); closing-tag and attribute completion; a CSS property followed by its values; a JavaScript function and its parameter information; Quick Fix and Organize Imports explain that the server offers none; files on disk unchanged.
+Fixed: the HTML server got `null` for its `css` settings section and failed every validation, so pages showed no problems; providers now name extra sections, answered from the user's settings or `{}` (`js/ts` stays `null`). A snippet whose only stop is `$0` now leaves the caret there (all servers). Changed: a suggestion carrying `editor.action.triggerSuggest` asks for suggestions again once applied, when typing completion is on (all servers); the HTML server formats (`provideFormatter: true`); HTML and CSS are tested for VS Code 1.141.0 or vscode-langservers-extracted 4.10.0. Also fixed (`f6e0987`, merged at `bdfe762`): the TUI snippet test had gone stale on a grown fake-server list since before this session.
+Evidence: ignored real tests `real_html_editing` (crates/code-core/tests/providers.rs, 4 of 4 runs) and `real_html_assistance_matches_in_both_adapters` (crates/code-tui/src/parity_tests.rs: typed `<li>` closed, Ctrl+Z, `</`, typed completion drawn in both, Down/Enter, Ctrl+Alt+L, Alt+Enter, Server Details through Find Action, Escape; 4 runs in a row, once more after merging); `real_html`, `real_css` and the GUI `real_html_and_css_through_the_window` re-run and pass; fake-server tests `typing_a_tags_closing_bracket_inserts_its_closing_tag_as_its_own_undo_step` and `a_closing_tag_answered_after_more_typing_or_turned_off_inserts_nothing` (written after the code, not seen failing); unit tests for the sections and the final-caret snippet. Filtered core, semantics, GUI and TUI sets pass; clippy clean; panic-site ratchets at baseline. Performance deferred to the end-of-epic campaign (user decision). Limits in docs/code/providers.md (HTML and CSS) and docs/editor-follow-ups.md (ticket 51): no quick fixes or organize imports from the server; no linked tag editing or `autoQuote`; `<script lang="ts">` read as JavaScript; embedded JavaScript gets no standard-library or DOM types with 4.10.0 (its TypeScript library lookup misses); the formatter drops the final newline unless `format.endWithNewline`; CSS-file editing, VS Code's bundled server for editing, native macOS, Wayland and physical terminals unverified.

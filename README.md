@@ -4,40 +4,45 @@
 
 <h1 align="center">Lenz</h1>
 
-<p align="center">Read code, explore repositories, compare changes and resolve merges.</p>
+<p align="center">Read and edit code, explore repositories, compare changes and resolve merges.</p>
 
 ![Lenz GUI comparing working-tree changes in a Rust project, with the changed files on the left and word-level highlights between the two sides](docs/images/gui-comparison.png)
 
-A native code reader, diff viewer, git client and merge tool, built in Rust.
-**Lenz Code** reads code; **Lenz Diff** compares and merges. Both have native
+A native code editor, diff viewer, git client and merge tool, built in Rust.
+**Lenz Code** reads and edits code; **Lenz Diff** compares and merges. Both have native
 windows and terminal adapters. The desktop apps use [GPUI](https://github.com/zed-industries/zed);
 the terminal uses [Ratatui](https://ratatui.rs) and has no GUI dependencies.
+
+Lenz Code includes optional Vim editing and relative line numbers, offline JSON formatting, rich Markdown previews,
+and explorer speed search; [editor controls](docs/code/README.md#vim-editing-and-relative-line-numbers) lists the keys.
+On Linux, the [integrated terminal](docs/code/terminal.md) adds independent shell tabs,
+selected-draft paste and quoted file-path drops for SQL clients, scripts and terminal agents.
 
 One `lenz` command opens both, each a separate executable:
 
 | Command | Opens |
 |---|---|
-| `lenz [file-or-folder]` | Code Reader; with no path, the current folder |
-| `lenz --tui [file-or-folder]` | Terminal Code Reader |
+| `lenz [file-or-folder]` | Lenz Code; with no path, the current folder |
+| `lenz --tui [file-or-folder]` | Terminal Lenz Code |
 | `lenz diff …` | Desktop Diff |
 | `lenz diff --tui …` | Terminal Diff |
 
 `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui` run an app directly with the same arguments.
 
-**Upgrading from 0.0.1:** `lenz` now opens the Code Reader. Comparisons need the `diff` prefix
+**Upgrading from 0.0.1:** `lenz` now opens Lenz Code. Comparisons need the `diff` prefix
 (`lenz diff left right`, `lenz diff log`, `lenz diff merge …`), `lenz-tui` is now `lenz diff --tui`
 (or `lenz-diff-tui`), and git difftool and mergetool configurations change as shown in
 [git difftool](#git-difftool) and [git mergetool](#git-mergetool).
 
 **Status:** beta (0.0.6). Diff is tested on Linux and macOS (Apple Silicon), with automated
-GUI interaction coverage on Linux. The Code Reader and the launcher are verified on Linux;
-native macOS validation is pending. The Reader never edits files (Git checkouts you choose aside), with desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
+GUI interaction coverage on Linux. Lenz Code and the launcher are verified on Linux;
+native macOS validation is pending. Lenz Code edits existing files on verified Linux input (X11 desktop and terminal); Wayland desktop and macOS editing stay disabled. It has desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
-| Code Reader: project browsing and Find | Code Reader: Markdown preview |
+| Lenz Code: project browsing and Find | Lenz Code: Markdown preview |
 |---|---|
-| [![Reader showing a Rust file, project explorer and highlighted search matches](docs/images/reader-code.png)](docs/images/reader-code.png) | [![Reader rendering Markdown properties, callouts, code and a checklist](docs/images/reader-markdown.png)](docs/images/reader-markdown.png) |
+| [![Lenz Code showing a Rust file, project explorer and highlighted search matches](docs/images/code-editor.png)](docs/images/code-editor.png) | [![Lenz Code rendering Markdown properties, callouts, code and a checklist](docs/images/code-markdown.png)](docs/images/code-markdown.png) |
 
 | | Diff GUI | Diff terminal |
 |---|---|---|
@@ -47,7 +52,11 @@ native macOS validation is pending. The Reader never edits files (Git checkouts 
 
 ## Features
 
-### Code Reader
+### Lenz Code
+
+A bounded SQL completion check (512 tables × 16 columns, Linux release, ten alternating pairs)
+measured **1.84→1.86 ms per completion** after the default-schema fix; paired differences varied in both
+directions. This is core computation, not popup latency; see the [SQL completion notes](docs/optimization-notebook.md#sql-metadata-completion--2026-10-29).
 
 - **Explore code** with a project tree, file finder, tabs, independent split panes,
   breadcrumbs, outline, folding and sticky declarations.
@@ -57,16 +66,65 @@ native macOS validation is pending. The Reader never edits files (Git checkouts 
   Dependency definitions reveal a lazy **Libraries** section for browsing their source files.
   F2 offers [project-scoped LSP settings](docs/code/providers.md#project-language-server-settings),
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
-- **Find** within a file or across the project, with case, whole-word and regular-expression
+- **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
+  step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
+- **Edit structure** with the file's conventions: Tab / Shift+Tab indent and outdent selected lines (EditorConfig,
+  then the project's choice), Ctrl+/ toggles comments, Ctrl+Shift+Down/Up move lines (VS Code keymap: Alt+Down/Up)
+  and Alt+Shift+Down/Up duplicate them—each action one Undo step, with line endings kept exactly. Typing a bracket or
+  quote wraps a selection or opens the pair, and the closer already there is stepped over.
+- **Complete and expand snippets**: the language server's completion popup opens as you type or on Ctrl+Space, Tab
+  or Enter accepts and Esc dismisses. A snippet suggestion expands with the file's indentation, and Tab then visits
+  its placeholders (`$1`, `$2`, …, `$0` last; a placeholder written twice is selected in both places at once) until
+  Escape, a caret move, another tab or Undo ends it; the status bar names the placeholder and the keys. Bodies with
+  snippet variables, transforms or nested placeholders are refused with their reason instead of inserting half.
+- **Keep your keys** with IntelliJ chords by default, a **VS Code** preset and per-command overrides in
+  **Keymap…**; menus, palette labels and dispatch come from one keymap in both the window and the
+  terminal. A shortcut a terminal cannot deliver leaves its command in the command menu.
+- **Declare an SQL dialect** per project or file in the **SQL** menu: PostgreSQL and DuckDB are distinct, an
+  unset dialect stays visibly unset (Lenz never assumes PostgreSQL), and the status bar shows which one applies.
+  Choosing one writes only Lenz Code settings, never a document or a database connection.
+- **Reconcile an external change**: when a file changes on disk while you have unsaved text, the status bar says so
+  at once and Save opens **Resolve External Change…** (also in the File menu) instead of overwriting it. It reads
+  the file and shows the version on
+  disk, your draft and the confirmed baseline it was edited from, then offers **Compare Disk, Draft and Baseline…**,
+  **Take Disk Version** (one undoable edit), **Save Draft over Disk** (written only after one more identity and
+  content check) or **Keep Draft**, which changes nothing and adopts no new baseline. Each choice is the same command
+  with the same label and disabled reason in the window and the terminal.
 - **Read** syntax-highlighted text, images and rendered Markdown. Toggle source/preview
   with `Ctrl+Shift+V`, soft wrap with `Alt+Z`, and search with `Ctrl+F`.
 - **Share appearance** with Diff: theme selection, custom themes and desktop font
   preferences. Each app keeps its own documents and navigation state.
 
-The Reader does not edit the files it displays; only the checkouts and branches you choose change your repository. Archive browsing is currently a
-Diff feature. See the [Reader guide](docs/code/README.md) for controls and limits,
+Lenz Code edits stay in shared drafts until Save or Save As writes the file. Checkouts and branch operations
+change repository state explicitly. Archive browsing is currently a
+Diff feature. See the [Lenz Code guide](docs/code/README.md) for controls and limits,
 and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
+
+The internal snapshot migration measured core text availability at **0.888 → 0.912–0.976 ms**
+for the 945,000-byte fixture; the measured performance exception was accepted. This endpoint
+excludes frontend painting and does not enable editing. See the [snapshot measurements](docs/research/code-snapshot-migration-performance.md)
+for repeated timing, sustained memory, unsuccessful experiments and remaining limits.
+
+The combined rendering/analysis migration added **0.72 ms / 9.87 ms** to syntax
+readiness for 56 KB / roughly 1 MiB fixtures and **1.79 MiB** settled stress RSS;
+these documented costs were accepted. Cached navigation improved. See the
+[completed snapshot batch](docs/research/code-snapshot-batch-08-10.md) for the
+phased validation, measurements and remaining limits.
+
+Pending syntax and semantic colours stay on unchanged text while checks run. A Java component probe after 512
+edits measured **0.471 ms** for 60 rows of combined mapped colour lookup; this excludes painting and display latency.
+Long completion documentation is shaped in cancellable background work. See the
+[editor polish findings](docs/optimization-notebook.md#editor-polish--2026-10-28) and
+[data editor checks](docs/optimization-notebook.md#data-editor-and-syntax-checks--2026-10-28) for scope and evidence limits.
+Inline diagnostics paint outside source text; matched short native error-present editing measured **5.04→5.05 s**
+of process CPU over about 3.46 s of input. See the [inline diagnostic measurements](docs/optimization-notebook.md#inline-diagnostics-and-explorer-error-styling--2026-10-28)
+for memory, feedback endpoints and unverified platforms.
+
+Explorer copy/history checks include actual Wayland/Nautilus file paste and a checksum-verified 32 MiB folder copy.
+Matched GUI typing CPU remained **5.21→5.21 s**; repeated terminal arrow-key feedback was **0.659→0.651 ms** to first
+PTY bytes. See the [explorer measurements](docs/optimization-notebook.md#explorer-commands-and-file-clipboard--2026-10-29)
+for memory, workload scope and unverified platforms.
 
 ### Diff and merge
 
@@ -79,7 +137,7 @@ and [language-server compatibility](docs/code/providers.md) for setup and provid
 - **Folders**: a folder heading in Files collapses and expands with its arrow; archives start collapsed with their file count. A click on a folder's name shows its **Folder Summary**: the folder's changed files with the lines each added and removed.
 - **Markdown Preview**: an Obsidian-like reading view (callouts, properties, highlights, tags, wiki links, footnotes, local images), Inline with removed words struck in place or Side by side, with change bars beside each changed block; every source change stays reachable. The terminal app shows it too, with images as real pixels in kitty and Ghostty.
 - **Themes**: 16 bundled dark/light palettes, including Nord, Everforest, Kanagawa, Dracula, One Dark, Rosé Pine, Flexoki and Solarized; system/Omarchy following and custom TOML themes. See the [theme list](docs/themes.md).
-- **Safe writes**: atomic, keeping encoding, BOM, line endings and file mode, and never over a file that changed on disk since Lenz read it.
+- **Safe writes**: atomic, keeping encoding, BOM and file mode, and never over a file that changed on disk since Lenz read it or one you can't write. Saved lines take the file's line ending: a file with mixed endings is saved with the one most of its lines use (Lenz Code keeps each line's ending exactly). A lone carriage return isn't a line break, so a classic Mac OS file shows as one line.
 
 ## Install
 
@@ -113,9 +171,9 @@ target/launcher-trial/lenz diff --tui --no-index left.txt right.txt
 
 The script prints the staging directory (which may differ with a custom Cargo target directory).
 It installs nothing globally. Cargo's build names differ from the installed ones: `lenz-launcher` is `lenz`,
-`lenz-reader` and `lenz-reader-tui` are `lenz-code` and `lenz-code-tui`, and Diff's `lenz` and `lenz-tui` are
-`lenz-diff` and `lenz-diff-tui`. To build only the Reader, use `cargo build --release --locked -p reader-gui`
-and run `target/release/lenz-reader`.
+`lenz-code` and `lenz-code-tui` keep their build names, and Diff's `lenz` and `lenz-tui` become
+`lenz-diff` and `lenz-diff-tui`. To build only Lenz Code, use `cargo build --release --locked -p code-gui`
+and run `target/release/lenz-code`.
 
 ### Diff binaries
 
@@ -137,7 +195,7 @@ packaging/package.sh 0.0.6
 The bundle is at `target/package/lenz-0.0.6-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.6-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version. It builds in `/tmp/lenz-dist` (set `CARGO_TARGET_DIR` to choose another folder outside your home): the shaders record their build folder, and no home folder may ship.
 
 ```sh
-open target/package/lenz-0.0.6-aarch64-apple-darwin/Lenz.app                          # the Reader, as from Finder
+open target/package/lenz-0.0.6-aarch64-apple-darwin/Lenz.app                          # Lenz Code, as from Finder
 target/package/lenz-0.0.6-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
 ```
 
@@ -145,7 +203,7 @@ To install it, copy `Lenz.app` to `/Applications` and put symlinks to the five e
 
 ## Usage
 
-This is Diff's reference; Reader usage is in the [Reader guide](docs/code/README.md).
+This is Diff's reference; Lenz Code usage is in the [Lenz Code guide](docs/code/README.md).
 `lenz diff --tui` (the terminal) takes the same arguments as `lenz diff`, and `lenz-diff` and
 `lenz-diff-tui` take them without the prefix. The git grammar mirrors `git diff`:
 
@@ -278,7 +336,7 @@ To turn icons off:
 
 ### Editing and saving
 
-Editable text comparisons keep **Undo**, **Redo** and **Save** directly accessible, with **Discard unsaved changes** in the Edit menu. Hunk moves stay pending until **Ctrl/Cmd+S** (Ctrl-S in the TUI comparison pane). **Revert hunk** restores the left version on the right working-tree side. Drafts survive file switches and repository refresh, and Lenz asks before closing or changing comparisons with unsaved drafts.
+In editable text comparisons **Undo** (Ctrl/Cmd+Z), **Redo** (Ctrl/Cmd+Shift+Z) and **Save** keep their shortcuts and are in the command palette with **Discard unsaved changes**; the toolbar shows them only in the Merge View. Hunk moves stay pending until **Ctrl/Cmd+S** (Ctrl-S in the TUI comparison pane). **Revert hunk** restores the left version on the right working-tree side. Drafts survive file switches and repository refresh, and Lenz asks before closing or changing comparisons with unsaved drafts: quitting again right away closes without saving them, and any other key keeps the window.
 
 **Discard file** is a separate confirmed Git action: it restores the index version, preserves staged changes, restores tracked deletions, and offers **Undo Git discard**.
 
@@ -308,7 +366,7 @@ git config --global difftool.lenz.cmd 'lenz diff --name "$MERGED" "$LOCAL" "$REM
 git config --global difftool.prompt false
 ```
 
-Prefer `git difftool -d` (for example `git difftool -d main...HEAD`): it opens one window for the whole Change Set instead of one window per file. Use `lenz diff --tui` in place of `lenz diff` for the terminal frontend. Configurations from 0.0.1 that run plain `lenz` open the Code Reader instead; add `diff`, or run `lenz-diff` directly.
+Prefer `git difftool -d` (for example `git difftool -d main...HEAD`): it opens one window for the whole Change Set instead of one window per file. Use `lenz diff --tui` in place of `lenz diff` for the terminal frontend. Configurations from 0.0.1 that run plain `lenz` open Lenz Code instead; add `diff`, or run `lenz-diff` directly.
 
 ## git mergetool
 
@@ -322,14 +380,27 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+The [integrated-editor Linux validation](docs/research/code-integrated-editor-linux-validation.md)
+records a fresh complete CI pass, 62 available-provider checks, native SQL/X11/PTY safety and the
+completed Linux measurement campaign. Final 180-second Lenz Code PTY settled RSS was **45.70→40.00 MiB**;
+ordinary GUI editing repeats measured **162.69→207.71 MiB** settled RSS. Cached operations and
+other memory/throughput costs are detailed in the report. **The single cost decision remains pending**;
+this is not complete native release acceptance. macOS remains unverified and gated.
+
 The [final Linux validation on 2026-10-21](docs/release-validation.md) passed the
 full suite: **133 cases, 394 metrics**, plus ten live language-server lifecycle
-checks. Fresh paired runs measured Reader wheel feedback at **26.00→26.01 ms**
+checks. Fresh paired runs measured Lenz Code wheel feedback at **26.00→26.01 ms**
 and Rails recovery after lost watcher events at **6.79→0.95 seconds**. The report
 records startup, memory, stress, collector corrections and remaining native macOS
 checks. The measurements below retain their original fixtures and endpoints.
 
-### Code Reader
+### Lenz Code
+
+Against 0.0.6 in alternating Linux release pairs, 0.0.7 opens a 2,000-line file in
+**~164 ms p95 versus ~145 ms**, holds **~186 versus ~181 MiB** for ten tabs, and the TUI
+holds **~50 versus ~36 MiB** on 100,000 lines with faster input feedback (0.63 versus 0.77 ms).
+Project search over 9,000 matches completes in **~17 versus 6.5 ms** (TUI). The
+[0.0.7 performance report](docs/code/release-0.0.7-performance.md) has both pairs and attribution.
 
 Linux release build on a private Xvfb display with Mesa software rendering;
 generated Rust files, language servers disabled. Startup measures the first content-frame
@@ -337,20 +408,55 @@ marker, before GPU presentation and without waiting for syntax highlighting.
 
 | Measurement | Result |
 |---|---:|
-| Open a 2,000-line Rust file, warm Reader cache (20 launches) | 153 ms median · 156 ms p95 |
-| Same file, fresh Reader cache (20 launches) | 152 ms median · 156 ms p95 |
+| Open a 2,000-line Rust file, warm Lenz Code cache (20 launches) | 153 ms median · 156 ms p95 |
+| Same file, fresh Lenz Code cache (20 launches) | 152 ms median · 156 ms p95 |
 | Ten kept tabs, 20,000 source lines total | 164 MiB settled RSS · 164 MiB peak RSS |
 
 The warm OS page cache and shader cache were retained in both startup cases;
-"fresh" means an empty Reader cache. Memory covers the Reader process, not language
-servers or GPU allocations. See [Reader measurements](docs/code/performance.md) for
+"fresh" means an empty Lenz Code cache. Memory covers Lenz Code process, not language
+servers or GPU allocations. See [Lenz Code measurements](docs/code/performance.md) for
 raw samples, fixture details, reproduction and limits.
 
-The integrated terminal reader opened 100,000 plain-text lines in 6.76 ms median
+The bounded-source GUI migration measured **142.45→142.39 ms** startup in eight
+alternating release pairs, **172.50→172.03 MiB** settled RSS for ten kept tabs, and
+matching 15-second wrapped/unwrapped repaint intervals. These use a separate generated
+fixture and owned software display; see the [migration measurements](docs/research/code-snapshot-gui.md)
+for endpoints and limits, and the [completed batch checks](docs/research/code-snapshot-batch-08-10.md).
+
+The 11–18 editor batch measured core first-text increases of **35 µs / 405 µs** for 50 KB / 945 KB,
+TUI first content **7.90→12.07 ms**, and about **20% fewer mixed-stress iterations**. TUI post-workflow
+RSS reached **46.42 MiB versus 37.73 MiB**, with a lower candidate band also observed. These new costs
+were explicitly accepted on 2026-10-24. GUI startup/cadence remain similar in these software-display samples;
+actual scrolling is now checked with changing source crops. See the
+[batch performance report](docs/research/code-editor-batch-11-18-performance.md) for all distributions,
+RSS/ownership limits, the retained baseline failure and new Save/history measurements.
+
+The 14–23 foundation candidate passes the phased local gate and native Linux input/close checks.
+Its paired runs preserve startup/navigation and core-stress throughput, while sustained editing completes
+**5.8% fewer cycles**, with **0.048–0.319 ms** higher matched-history edit medians and **0.676 MiB**
+more TUI startup RSS. These costs were explicitly accepted on 2026-10-24 and activation merged; see the
+[foundation batch report](docs/research/code-editor-foundation-batch-14-23.md) for memory phases,
+retained-history proof, source identities and unverified targets.
+
+The integrated terminal editor opened 100,000 plain-text lines in 6.76 ms median
 (seven launches), with 0.50 ms median page feedback and 35.9 MiB RSS after a
 60-second navigation run. Timings end at PTY bytes, and RSS excludes GPU and
-language-server memory. See [Reader TUI verification](docs/code/tui-performance.md)
+language-server memory. See [Lenz Code TUI verification](docs/code/tui-performance.md)
 for the standalone comparison, raw evidence and unverified workloads.
+
+With the terminal panel unopened, matched Linux releases measured warm GUI window mapping
+**96.87→96.05 ms** (1,000-line file) and TUI first content **5.79→5.54 ms** (10,000 lines).
+Settled RSS medians were **248.75→250.80 MiB** for 100,000-line GUI editing and
+**19.77→20.02 MiB** for the 10,000-line TUI, with overlapping run ranges. These short samples
+do not establish a speedup or exclude smaller costs. Separate terminal-output checks passed
+15 seconds in each adapter and 60 seconds in the core; see the
+[terminal validation notes](docs/optimization-notebook.md#integrated-terminal-tabs--2026-10-29)
+for workload boundaries, retained attempts and unverified platforms.
+
+Follow-up release checks cover terminal tab names, Find, selected empty lines and search caret input.
+Warm GUI mapping was **97.00→96.13 ms** and TUI first content **5.32→5.61 ms**; these are
+observations, not speedup claims. Precise GUI edit-latency preservation remains unverified after
+controlled repeats; see the [interaction validation](docs/optimization-notebook.md#terminal-interaction-refinements--2026-10-29).
 
 Lazy library browsing revealed a 1,000-file library in 0.811 ms in the shared core, leaving an unopened
 10,000-file subtree unread. Paired GUI RSS was 168.78→168.88 MiB; this is a Linux software-rendered sample,
@@ -377,37 +483,41 @@ In a shared-core release fixture with 5,001 branches and 25 worktrees, increment
 
 The maintainer accepted about 7.5 MiB more settled GUI RSS and 0.05–0.07 seconds more startup CPU on the Linux software-rendered fixtures after checking the changes on Linux. Most extra repository RSS is one additional window-sized graphics allocation; hardware-rendered memory use remains unverified.
 
-Reader/Diff sharing checks on this Linux experiment measured 35.8→35.1 ms to observe the Reader window, 36.3→37.3 ms for Diff, and 6.0→6.4 ms to TUI content (16 alternating pairs). These GUI endpoints precede first paint and cannot replace the table above. Timing repeats found no consistent regression; see the [shared-feature verification](docs/shared-features-performance.md) for memory, stress and limits.
+Lenz Code/Diff sharing checks on this Linux experiment measured 35.8→35.1 ms to observe Lenz Code window, 36.3→37.3 ms for Diff, and 6.0→6.4 ms to TUI content (16 alternating pairs). These GUI endpoints precede first paint and cannot replace the table above. Timing repeats found no consistent regression; see the [shared-feature verification](docs/shared-features-performance.md) for memory, stress and limits.
 
 The bottom commit-panel checks measured GUI alternating scroll feedback at 11.89→11.93 ms and TUI feedback at 0.486→0.451 ms. Hardware-rendered log first paint measured 137→134 ms; 15-minute GUI/TUI runs passed with comparable memory growth and matching GPU allocation plateaus. See the [panel verification](docs/commit-panel-performance.md) for startup, Find, memory, stress, and measurement limits.
 
-The dependency refresh measured Reader GUI startup at 163.57→163.75 ms to the
+The dependency refresh measured Lenz Code GUI startup at 163.57→163.75 ms to the
 first received client image and TUI content at 7.695→7.981 ms in alternating
 release runs. Both full suites passed 75 cases. These startup endpoints differ
 from the historical content-frame figures above; see the
 [refresh measurements](docs/performance.md#dependency-refresh-2026-10-18) for
 memory, repeated outliers and the slower image microbenchmark.
 
-Reader theme-chooser parity measured GUI first client image at 157.02→154.04 ms,
+Lenz Code editor-polish checks measured ordinary GUI editing at 191.67→191.85 MiB settled RSS
+and TUI input feedback at 0.726→0.699 ms in three alternating release pairs. The full local gate
+and private-display editing checks pass; see the [editor-polish experiments and limits](docs/optimization-notebook.md#editor-polish-and-bounded-markdown-work--2026-10-29).
+
+Lenz Code theme-chooser parity measured GUI first client image at 157.02→154.04 ms,
 menu feedback at 25.11→23.39 ms and RSS at 173.61→173.44 MiB in seven alternating
 release pairs. See the [theme checks](docs/code/performance.md#theme-chooser-parity-2026-10-18)
 for terminal measurements, actual input and short stress limits.
 
-Reader toolbar/status checks repeated the GUI comparison at 157.35→159.47 ms
+Lenz Code toolbar/status checks repeated the GUI comparison at 157.35→159.47 ms
 first client image and 24.13→24.40 ms menu feedback; TUI source receipt was
 8.88→8.80 ms. Pair variation includes zero timing difference. Initial GUI RSS
 rose slightly while sustained RSS settled below baseline in both rounds; see the
 [chrome measurements](docs/code/performance.md#reader-chrome-parity-2026-10-18)
 for the complete results and 60-second status/copy/resize checks.
 
-Reader trackpad/progress checks measured first content at 126.78→126.65 ms in
+Lenz Code trackpad/progress checks measured first content at 126.78→126.65 ms in
 four alternating release pairs, with comparable scrolling and memory during a
 2,001-file Ruby project load. See the [scrolling checks](docs/code/performance.md#trackpad-scrolling-and-indexing-progress-2026-10-21)
 for server setup, repeated measurements and unverified native macOS behavior.
 
-Diff and Reader now share GUI wheel conversion and fractional-step handling. Final
+Diff and Lenz Code now share GUI wheel conversion and fractional-step handling. Final
 release pairs measured wheel feedback at 27.04→27.23 ms for Diff and 25.53→26.11 ms
-for Reader; see the [shared scrolling checks](docs/code/performance.md#shared-gui-wheel-input-2026-10-21)
+for Lenz Code; see the [shared scrolling checks](docs/code/performance.md#shared-gui-wheel-input-2026-10-21)
 for startup, repeated timing variation, memory, short stress and native-platform limits.
 
 On a pinned large Discourse Rails checkout, optional project/tooling-gem exclusions reduced Ruby LSP 0.26.11
@@ -467,10 +577,10 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 
 | Guide | Covers |
 |---|---|
-| [Code Reader](docs/code/README.md) | Navigation, search, splits, Markdown and language-server controls |
-| [Terminal Code Reader](docs/code/tui.md) | Reader TUI controls and capability limits |
+| [Lenz Code](docs/code/README.md) | Navigation, search, splits, Markdown and language-server controls |
+| [Terminal Lenz Code](docs/code/tui.md) | Lenz Code TUI controls and capability limits |
 | [Command family](docs/launcher-trial.md) | How `lenz` dispatches to the four apps, migrating 0.0.1 commands, and the trial record |
-| [Reader performance](docs/code/performance.md) | Startup and memory measurements, raw samples and limits |
+| [Lenz Code performance](docs/code/performance.md) | Startup and memory measurements, raw samples and limits |
 | [Terminal frontend](docs/tui.md) | TUI controls, architecture and capability limits |
 | [Markdown Preview](docs/markdown.md) | Source, Inline and Side by side views and source fidelity |
 | [Themes](docs/themes.md) | Built-in themes, system following and the custom theme format |
@@ -484,7 +594,7 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 
 ## Contributing
 
-Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the Diff screenshots (Catppuccin Mocha) on a private display. Add `--reader target/release/lenz-reader --only reader-code reader-markdown` to capture the Reader using disposable demo files.
+Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the Diff screenshots (Catppuccin Mocha) on a private display. Add `--reader target/release/lenz-code --only reader-code reader-markdown` to capture Lenz Code using disposable demo files.
 
 ## Licence
 
