@@ -20,7 +20,7 @@ for arch in "${arches[@]}"; do
     "$engine" build --platform "linux/$arch" -t "$image" -f - "$ctx" <<'EOF'
 FROM docker.io/library/ubuntu:22.04
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git pkg-config python3 \
+    build-essential ca-certificates curl git pkg-config python3 libclang-dev \
     libxkbcommon-x11-dev libwayland-dev libfontconfig-dev libx11-xcb-dev libvulkan1 libglib2.0-dev libzstd-dev \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
