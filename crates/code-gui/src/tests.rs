@@ -801,6 +801,43 @@ fn opted_in_draft_input_replaces_unicode_and_replays_shared_undo_without_saving(
 }
 
 #[gpui::test]
+fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let one = project(&f.dir.path().join("one"), &["a.rs"]);
+    let recent = f.dir.path().join("state/lenz-code/recent-roots.json");
+    std::fs::create_dir_all(recent.parent().unwrap()).unwrap();
+    std::fs::write(&recent, serde_json::to_string(&[&one]).unwrap()).unwrap();
+    // A window opened after the folder was recent, with nothing to open.
+    let view = cx.new(|cx| ReaderView::new(Session::new((f.make)(true)), None, cx).with_config(f.make.clone()));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| view.clone())).unwrap();
+    let f = Fixture { view, window, ..f };
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(600.0)));
+    draw(&mut v);
+    let hits = f.view.read_with(&v, |v, _| v.start_hits.clone());
+    assert_eq!(hits.iter().map(|h| h.1).collect::<Vec<_>>(), [0, 1, 2], "Open File…, Open Folder…, the recent folder");
+    assert!(hits.windows(2).all(|w| w[0].0.origin.y < w[1].0.origin.y), "one row each, top to bottom");
+    // Open File… and Open Folder… ask the platform for a file and for a folder.
+    v.simulate_click(hits[0].0.center(), Modifiers::default());
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.files && !options.directories);
+        None
+    });
+    v.simulate_click(hits[1].0.center(), Modifiers::default());
+    assert!(cx.did_prompt_for_paths());
+    cx.simulate_path_prompt_response(|options| {
+        assert!(options.directories && !options.files);
+        None
+    });
+    // A recent folder opens, and the start screen gives way to it.
+    v.simulate_click(hits[2].0.center(), Modifiers::default());
+    settle(cx, &f, |v| scanned(v) && v.session().state().project().is_some_and(|p| p.root() == one));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |v, _| v.start_hits.is_empty()));
+}
+
+#[gpui::test]
 fn an_empty_window_renders_and_its_menu_explains_disabled_commands(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let mut v = visual(cx, &f);

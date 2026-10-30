@@ -1421,6 +1421,15 @@ pub enum Place {
     Location(PathBuf, usize),
 }
 
+/// An item of the start screen a window shows while no file or folder is open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StartItem {
+    /// Open File… or Open Folder…, run as from the menus.
+    Command(CommandId),
+    /// A recent folder, opened with [`Command::OpenRoot`].
+    Recent(PathBuf),
+}
+
 /// The lists of places the adapter shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PlaceList {
@@ -2301,7 +2310,6 @@ impl State {
     pub fn project(&self) -> Option<&Project> {
         self.project.as_ref()
     }
-    /// Recently opened roots, most recent first.
     /// The project's bookmarks, recent files and recent locations.
     pub fn places(&self) -> &crate::places::Places {
         &self.places
@@ -2344,8 +2352,17 @@ impl State {
         let q = query.to_lowercase();
         rows.into_iter().filter(|r| lenz_content::fuzzy::score(query, &format!("{}/{}", r.detail, r.label)).is_some() || r.label.to_lowercase().contains(&q) || r.detail.to_lowercase().contains(&q)).collect()
     }
+    /// Recently opened roots, most recent first.
     pub fn recent(&self) -> &[PathBuf] {
         &self.recent
+    }
+    /// The start screen: Open File…, Open Folder…, then the recent folders; empty once a file or folder is open
+    /// (or opening); split panes show it in the first. Adapters resolve a chosen row by its index here at use time.
+    pub fn start_items(&self) -> Vec<StartItem> {
+        if self.project.is_some() || !self.tabs.is_empty() || self.loading.is_some() {
+            return Vec::new();
+        }
+        [CommandId::Open, CommandId::OpenFolder].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::Recent)).collect()
     }
     /// The tree lists each folder's folders before its files.
     pub fn folders_first(&self) -> bool {

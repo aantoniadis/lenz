@@ -34,6 +34,9 @@ cargo test --release -p code-core -- --ignored --nocapture open_perf
 cargo test --release -p code-core --test semantics -- --ignored --nocapture   # real rust-analyzer, if installed
 ```
 
+Started with nothing to open (from home or `/`, as a desktop launcher does), a window shows **Open File…**, **Open
+Folder…** and the recent folders; a click runs the command or opens the folder ([terminal](tui.md)).
+
 Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
 all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+W / Ctrl+Shift+W extend / shrink the selection, Ctrl+- / Ctrl+= collapse /
 expand, Ctrl+Shift+- / Ctrl+Shift+= collapse / expand all, arrows move the cursor, PageUp/PageDown/Home/End scroll,

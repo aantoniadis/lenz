@@ -25,6 +25,11 @@ work without a terminal; ordinary reading needs an interactive terminal on stdin
 path beginning with a dash. Opening a file alone does not enumerate its parent; Open Folder starts project
 browsing and project search.
 
+A window with nothing open starts on **Open File…**, **Open Folder…** and the recent folders (newest first, at most
+ten), in the terminal as in the GUI. A click runs the command or opens the folder; from the keyboard, Ctrl+O opens a
+file and the command menu (F10) has Open Folder… and Open Recent Folder…. Rows a small terminal cannot show are
+clipped and take no clicks.
+
 Reopening a directory restores its saved tabs, active file, caret and scroll positions, split panes and explorer
 state through the same core as the GUI. Switching directories saves and replaces the workspace; closing a view
 or quitting saves it too. Files load lazily and missing files are skipped. See [workspace persistence](README.md)

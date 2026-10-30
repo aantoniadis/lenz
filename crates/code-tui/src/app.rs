@@ -17,7 +17,7 @@ use code_core::{
     search::{Group, Row},
     session::{
         Command, CommandId, Completion, Config, MenuEntry, Motion, Place, PlaceList, Rendering,
-        SearchIn, Selection, Session,
+        SearchIn, Selection, Session, StartItem,
     },
     tabs::TabId,
 };
@@ -3305,6 +3305,15 @@ impl App {
                     self.dispatch(Command::FocusPane(pane));
                     self.crumb_at = crumb;
                     self.prompt(Prompt::Siblings { pane, crumb });
+                    return;
+                }
+                // A start screen row: its command, or its recent folder opened.
+                if !drag && let Some(&(i, _)) = pane.start.iter().find(|(_, r)| r.contains(point)) {
+                    match self.session.state().start_items().into_iter().nth(i) {
+                        Some(StartItem::Command(id)) => self.run(id),
+                        Some(StartItem::Recent(root)) => self.open_root(root),
+                        None => {}
+                    }
                     return;
                 }
                 if pane.source_view(self).is_none() {
