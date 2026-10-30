@@ -5066,6 +5066,11 @@ impl Session {
             },
             Command::SaveWorkspace => { self.checkpoint_workspace(); self.places_saver.flush(); Effect::default() }
             Command::SetExplorer(explorer) => { self.state.explorer = explorer; repaint }
+            // The folder already open keeps its tabs, index and language servers; it may have become a repository since.
+            Command::OpenRoot(root) if self.state.project.as_ref().is_some_and(|p| p.root() == normalized(&root)) => {
+                if self.state.repo.is_none() { self.state.repo_anchor = None; self.sync_repo(); }
+                repaint
+            }
             Command::OpenRoot(root) => self.prepare_transition(transition_work::Transition::Root(root)),
             Command::ActivateTree { path, retain } => self.activate_tree(path, retain),
             Command::ExplorerSearch(input) => self.explorer_search(input),
