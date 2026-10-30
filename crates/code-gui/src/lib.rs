@@ -20,7 +20,7 @@ use code_core::{
     search::{Fold, Group, Row},
     semantics::hierarchy::Direction,
     chrome::MenuTarget,
-    session::{Command, CommandId, Completion, Config, Layout, MenuEntry, Motion, PlaceList, Rendering, SearchIn, Selection, Session, Split},
+    session::{Command, CommandId, Completion, Config, Layout, MenuEntry, Motion, PlaceList, Rendering, SearchIn, Selection, Session, Split, StartItem},
     tabs::{Tab, TabId},
 };
 
@@ -240,6 +240,8 @@ pub struct ReaderView {
     text_bounds: Option<Bounds<Pixels>>,
     /// The sticky lines drawn last frame: bounds, pane and source line (a click goes to the line).
     pub(crate) sticky_hits: Vec<(Bounds<Pixels>, u8, usize)>,
+    /// The start screen's rows as last painted, by their index in the core's start items.
+    pub(crate) start_hits: Vec<(Bounds<Pixels>, usize)>,
     /// The focused pane's underlines and strikethroughs as last drawn (row, display range, colour, modifier bits).
     pub(crate) marks_drawn: Vec<(f32, std::ops::Range<usize>, u32, u8)>,
     /// The focused pane's fold marks as last drawn (row, collapsed): text rows below the sticky band, then the sticky
@@ -762,7 +764,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -3729,6 +3731,15 @@ impl ReaderView {
             return self.follow_crumb(h.pane, i, window, cx);
         }
         self.crumb_focus = None;
+        // A start screen row: its command, or its recent folder opened.
+        if let Some(&(_, i)) = self.start_hits.iter().find(|h| h.0.contains(&ev.position)) {
+            match self.session.state().start_items().into_iter().nth(i) {
+                Some(StartItem::Command(id)) => self.run(id, window, cx),
+                Some(StartItem::Recent(root)) => self.open_root(root, cx),
+                None => {}
+            }
+            return cx.notify();
+        }
         // A sticky line: its pane gets the keys and the caret goes to the line (Back returns).
         if let Some(&(_, pane, line)) = self.sticky_hits.iter().find(|h| h.0.contains(&ev.position) && self.session.state().presentation_shown(h.1).is_some_and(|tab| self.current_source_geometry(tab))) {
             if pane != self.session.state().focused_pane() {
@@ -5603,6 +5614,7 @@ impl Render for ReaderView {
         let mut frames = Vec::new();
         self.csv_ui.hits_clear();
         let mut sticky_hits = Vec::new();
+        let mut start_hits = Vec::new();
         let mut marks_drawn = Vec::new();
         #[cfg(feature = "test-support")]
         let mut painted_markers = Vec::new();
@@ -5635,8 +5647,31 @@ impl Render for ReaderView {
                 row.fg.insert(0, (shown.clone(), state.palette().syntax.link));
                 Some((row.y, shown))
             });
+            // Nothing open: the start screen's commands and recent folders, each a click target.
+            let items = if tab.is_none() && g.pane == 0 { state.start_items() } else { Vec::new() };
+            let (mut start, mut gap) = (Vec::new(), 0.0);
+            for (i, item) in items.iter().enumerate() {
+                let label = match item {
+                    StartItem::Command(id) => self.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
+                    StartItem::Recent(root) => root.display().to_string(),
+                };
+                // The recent folders under a blank row and their heading.
+                if matches!(item, StartItem::Recent(_)) && gap == 0.0 {
+                    gap = 1.0;
+                    start.push((start.len() as f32 + gap, "Recent folders".to_string(), false));
+                }
+                let row = start.len() as f32 + gap;
+                // Only what the pane shows takes clicks: a row past its edge would cover the panel below.
+                let (top, width) = (24.0 + row * line_h(), (lenz_content::wrap::width(&label) as f32 * self.char_w).min(f32::from(g.text.size.width) - 24.0));
+                if top + line_h() <= f32::from(g.text.size.height) && width > 0.0 {
+                    let at = gpui::point(g.text.origin.x + px(24.0), g.text.origin.y + px(top));
+                    start_hits.push((Bounds { origin: at, size: gpui::size(px(width), px(line_h())) }, i));
+                }
+                start.push((row, label, true));
+            }
             let hint = match tab {
                 Some(t) if state.presentation_view(t.id()).is_some() || state.loading().is_some() => None,
+                None if !start.is_empty() => None,
                 None if split.is_some() => Some("Open a file here, or drag a tab to this pane"),
                 _ if state.project().is_some() => Some("Pick a file in the tree, or find one with Ctrl+P"),
                 _ => Some("Open a file to read it (Ctrl+O)"),
@@ -5723,13 +5758,14 @@ impl Render for ReaderView {
             });
             #[cfg(feature = "test-support")]
             painted_markers.extend(change_marks.iter().map(|&(_, glyph, color)| (glyph, color)));
-            frames.push(PaneFrame { relative_caret: tab.and_then(|t| state.relative_number_origin(t.id())), inline: Vec::new(), csv, row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, change_marks, sticky_change, link, decor, hscroll, picture, markdown, pending, unshowable, hint, sticky, sticky_decor, ann });
+            frames.push(PaneFrame { relative_caret: tab.and_then(|t| state.relative_number_origin(t.id())), inline: Vec::new(), csv, row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, change_marks, sticky_change, link, decor, hscroll, picture, markdown, pending, unshowable, hint, start, sticky, sticky_decor, ann });
             if let Some(frame) = frames.last_mut() { frame.inline = self.inline_annotations(frame, window); }
         }
         #[cfg(feature = "test-support")]
         { self.painted_markers = painted_markers; self.painted_inline = frames.iter().flat_map(|frame| frame.inline.iter().cloned().map(|annotation| (frame.geom.pane, annotation))).collect(); }
         self.source_geometry = [0, 1].map(|pane| self.session.state().presentation_shown(pane).filter(|tab| self.session.state().csv(tab.id()).is_none()).and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
+        self.start_hits = start_hits;
         self.marks_drawn = marks_drawn;
         self.fold_marks_drawn = folds_drawn;
         self.uploads.keep(frames.iter().flat_map(|f| f.picture.iter().map(|(t, _)| t.clone()).chain(f.markdown.iter().flat_map(|m| m.2.iter().map(|(_, t)| t.clone())))).collect(), window);
@@ -6108,6 +6144,9 @@ impl Render for ReaderView {
                                 if let Some(csv) = &f.csv { csv.paint(window, cx, m, &palette); }
                                 if let Some(hint) = f.hint {
                                     lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0, hint, palette.dim);
+                                }
+                                for (row, label, target) in &f.start {
+                                    lenz_gpui::text(window, cx, m, tx + 24.0, ty + 24.0 + row * m.line_h, label, if *target { palette.accent } else { palette.dim });
                                 }
                                 for (i, row) in f.rows.iter().enumerate() {
                                     paint_source_row(window, cx, m, &palette, text, tx, tw, f.hscroll, row, f.relative_caret, f.row_parts.get(i).map_or(&[], Vec::as_slice));
@@ -6528,6 +6567,8 @@ struct PaneFrame {
     pending: bool,
     unshowable: Option<String>,
     hint: Option<&'static str>,
+    /// The start screen's rows: row, text, and whether it is a click target (not a heading).
+    start: Vec<(f32, String, bool)>,
     /// Blame annotations: row, label, age shade (`None`: not committed), of the hovered commit.
     ann: Vec<(f32, String, Option<f32>, bool)>,
 }

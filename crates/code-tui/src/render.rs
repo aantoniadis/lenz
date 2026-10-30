@@ -15,7 +15,7 @@ use ratatui::{
 };
 use code_core::{
     navigation::{Kind, Scope},
-    session::{Command, CommandId, MenuEntry, Rendering, Split, State, View},
+    session::{Command, CommandId, MenuEntry, Rendering, Split, StartItem, State, View},
     tabs::{Tab, TabId},
     text::SnapshotKey,
 };
@@ -90,6 +90,8 @@ pub(crate) struct PaneGeometry {
     pub tabs: Vec<(TabId, Rect)>,
     pub tab_bar: Rect,
     pub crumbs: Vec<(usize, Rect)>,
+    /// The start screen's rows, by their index in the core's start items.
+    pub start: Vec<(usize, Rect)>,
     pub text: Rect,
     /// Where the gutter starts, and the blame column's width there (0: none).
     pub gutter_x: u16,
@@ -1907,6 +1909,32 @@ fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     )
 }
 
+/// Nothing open: the start screen's commands, then the recent folders under their heading, each a click target.
+fn draw_start(frame: &mut ratatui::Frame, app: &App, items: &[StartItem], geometry: &mut PaneGeometry, p: &Palette) {
+    let area = geometry.text;
+    let area = Rect::new(area.x.saturating_add(2), area.y.saturating_add(1), area.width.saturating_sub(2), area.height.saturating_sub(1));
+    let (mut offset, mut headed) = (0, false);
+    for (i, item) in items.iter().enumerate() {
+        let label = match item {
+            StartItem::Command(id) => app.session.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
+            StartItem::Recent(root) => root.display().to_string(),
+        };
+        // The recent folders under a blank row and their heading.
+        if matches!(item, StartItem::Recent(_)) && !headed {
+            headed = true;
+            line(frame.buffer_mut(), row(area, offset + 1), "Recent folders", style(p.dim, p.bg));
+            offset += 2;
+        }
+        let at = row(area, offset);
+        let at = Rect { width: at.width.min(label.width() as u16), ..at };
+        line(frame.buffer_mut(), at, &label, style(p.accent, p.bg));
+        if !at.is_empty() {
+            geometry.start.push((i, at));
+        }
+        offset += 1;
+    }
+}
+
 fn draw_pane(
     frame: &mut ratatui::Frame,
     app: &App,
@@ -2166,12 +2194,16 @@ fn draw_pane(
         }
     }
     let Some(tab) = state.shown(pane) else {
-        line(
-            frame.buffer_mut(),
-            geometry.text,
-            "Open a file with Ctrl+P or F10",
-            style(p.dim, p.bg),
-        );
+        let items = if pane == 0 { state.start_items() } else { Vec::new() };
+        if items.is_empty() {
+            line(
+                frame.buffer_mut(),
+                geometry.text,
+                "Open a file with Ctrl+P or F10",
+                style(p.dim, p.bg),
+            );
+        }
+        draw_start(frame, app, &items, &mut geometry, p);
         return geometry;
     };
     let Some(view) = state.view(tab.id()) else {

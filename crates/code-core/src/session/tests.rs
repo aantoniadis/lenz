@@ -2974,7 +2974,13 @@ fn replacing_the_root_discards_the_old_scan_and_remembers_roots() {
         if read_recent(&recent_file).len() == 2 { break; }
         std::thread::sleep(Duration::from_millis(5));
     }
-    assert_eq!(session(d.path()).state().recent(), [b, a], "kept outside the checkout across sessions");
+    let mut s = session(d.path());
+    assert_eq!(s.state().recent(), [b.clone(), a.clone()], "kept outside the checkout across sessions");
+    // A window with nothing open starts on the file and folder commands, then the recent folders.
+    let start = [StartItem::Command(CommandId::Open), StartItem::Command(CommandId::OpenFolder), StartItem::Recent(b), StartItem::Recent(a.clone())];
+    assert_eq!(s.state().start_items(), start);
+    s.dispatch(Command::OpenRoot(a));
+    assert_eq!(s.state().start_items(), [], "an open folder replaces the start screen");
 }
 
 #[test]

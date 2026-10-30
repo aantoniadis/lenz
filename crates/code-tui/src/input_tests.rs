@@ -3296,6 +3296,40 @@ fn chrome_menu_button_opens_the_application_menu_like_the_gui_without_moving_car
 }
 
 #[test]
+fn an_empty_window_starts_on_open_file_open_folder_and_recent_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("a.rs"), "fn a() {}\n").unwrap();
+    std::fs::create_dir_all(dir.path().join("state")).unwrap();
+    std::fs::write(dir.path().join("state/recent.json"), serde_json::to_string(&[&root]).unwrap()).unwrap();
+    let mut a = App::with_text_input(config(dir.path()), None, false);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let screen: String = terminal.backend().buffer().content().iter().map(|c| c.symbol()).collect();
+    for shown in ["Open File…  Ctrl+O", "Open Folder…", "Recent folders", &root.display().to_string()] {
+        assert!(screen.contains(shown), "{shown} on the start screen");
+    }
+    let start = a.layout.panes[0].start.clone();
+    assert_eq!(start.iter().map(|(i, _)| *i).collect::<Vec<_>>(), [0, 1, 2]);
+    // Open File… and Open Folder… ask for a path; a recent folder opens.
+    click(&mut a, start[0].1.x, start[0].1.y);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::Open);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    click(&mut a, start[1].1.x, start[1].1.y);
+    assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::OpenFolder);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    click(&mut a, start[2].1.x, start[2].1.y);
+    settle(&mut a, |a| a.session.state().project().is_some_and(|p| p.root() == root));
+    draw(&mut a, 100, 24);
+    assert!(a.layout.panes[0].start.is_empty(), "the open folder replaces the start screen");
+    // A tiny terminal clips the rows it cannot show and keeps no target for them.
+    let mut b = App::with_text_input(config(dir.path()), None, false);
+    draw(&mut b, 20, 4);
+    assert!(b.layout.panes.iter().flat_map(|p| &p.start).all(|(_, r)| r.height == 1 && r.right() <= 20 && r.bottom() <= 4));
+}
+
+#[test]
 fn chrome_toolbar_controls_and_footer_commands_run_catalog_actions() {
     let dir = tempfile::tempdir().unwrap();
     let mut a = app(dir.path());
