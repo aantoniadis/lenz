@@ -2984,6 +2984,28 @@ fn replacing_the_root_discards_the_old_scan_and_remembers_roots() {
 }
 
 #[test]
+fn reopening_the_open_folder_keeps_its_tabs_index_and_drafts() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("project");
+    std::fs::create_dir(&root).unwrap();
+    let path = write(&root, "a.txt", b"saved\n");
+    let mut s = session(&d.path().join("state"));
+    s.dispatch(Command::OpenRoot(root.clone()));
+    settle(&mut s, scanned);
+    open(&mut s, Command::OpenRetained(path), "a.txt");
+    let (tab, expected) = (s.state().active().unwrap().id(), s.state().current_source().unwrap().key());
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..5, text: "draft".into() }], kind: crate::text::EditKind::Replace });
+    let generation = s.state().project().unwrap().generation();
+    for again in [root.clone(), root.join("."), root.join("sub/..")] {
+        s.dispatch(Command::OpenRoot(again));
+        assert!(s.close_prompt().is_none(), "the open folder is not closed");
+        assert_eq!(s.state().project().unwrap().generation(), generation, "no rescan, reindex or server restart");
+        assert_eq!(s.state().active().unwrap().id(), tab);
+        assert_eq!(source_text(s.state().current_source().unwrap()), "draft\n");
+    }
+}
+
+#[test]
 fn files_opened_without_a_folder_are_recent_on_the_start_screen() {
     let d = tempfile::tempdir().unwrap();
     let lone = d.path().join("lone.txt");
@@ -5066,6 +5088,8 @@ fn file_search_limits_cancellation_and_root_replacement() {
     settle(&mut s, scanned);
     s.dispatch(Command::Search { query: "f".into(), scope: SearchIn::Project });
     s.dispatch(Command::OpenRoot(d.path().join("p")));
+    assert!(s.state().results().is_some(), "reopening the open folder keeps its results");
+    s.dispatch(Command::OpenRoot(d.path().to_path_buf()));
     assert!(s.state().results().is_none());
 }
 

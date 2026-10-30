@@ -33,7 +33,8 @@ Folder…. Rows a small terminal cannot show are clipped and take no clicks.
 
 Reopening a directory restores its saved tabs, active file, caret and scroll positions, split panes and explorer
 state through the same core as the GUI. Switching directories saves and replaces the workspace; closing a view
-or quitting saves it too. Files load lazily and missing files are skipped. See [workspace persistence](README.md)
+or quitting saves it too. Opening the folder that is already open changes nothing: its tabs, drafts, index and
+language servers stay. Files load lazily and missing files are skipped. See [workspace persistence](README.md)
 for limits and concurrent-window behavior.
 
 Dependency definitions reveal the same lazy **Libraries** section as the GUI, including when no project folder
