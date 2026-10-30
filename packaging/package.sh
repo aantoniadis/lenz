@@ -25,6 +25,12 @@ fi
 if [[ $target == *-apple-darwin && -z ${CARGO_TARGET_DIR:-} ]]; then
     export CARGO_TARGET_DIR=/tmp/lenz-dist
 fi
+# glibc before 2.38 has no strlcpy, which the PostgreSQL parser's C library expects (see packaging/glibc-strlcpy.h);
+# only that library's make reads CPPFLAGS.
+glibc=$(getconf GNU_LIBC_VERSION 2> /dev/null | sed -n 's/^glibc 2\.\([0-9]*\).*/\1/p')
+if [[ -n $glibc && $glibc -lt 38 ]]; then
+    export CPPFLAGS="${CPPFLAGS:+$CPPFLAGS }-include $PWD/packaging/glibc-strlcpy.h"
+fi
 artifact_json=$(mktemp)
 trap 'rm -f "$artifact_json"' EXIT
 # Packaging is host-only; Cargo's reported path also respects CARGO_TARGET_DIR. Each package builds on its own so
