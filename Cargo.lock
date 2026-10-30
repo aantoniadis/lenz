@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "code-core"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "alacritty_terminal",
  "async-channel",
@@ -1037,7 +1037,7 @@ dependencies = [
 
 [[package]]
 name = "code-gui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "code-core",
  "gpui",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "code-tui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-io",
  "base64 0.23.1",
@@ -3314,7 +3314,7 @@ checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
 name = "lenz"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "bzip2",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "lenz-content"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "chardetng",
@@ -3394,7 +3394,7 @@ dependencies = [
 
 [[package]]
 name = "lenz-engine"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "gix-imara-diff",
  "insta",
@@ -3402,7 +3402,7 @@ dependencies = [
 
 [[package]]
 name = "lenz-gpui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "gpui",
  "lenz-content",
@@ -3410,14 +3410,14 @@ dependencies = [
 
 [[package]]
 name = "lenz-launcher"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "tempfile",
 ]
 
 [[package]]
 name = "lenz-tui"
-version = "0.0.7"
+version = "0.0.8"
 dependencies = [
  "async-channel",
  "async-io",
