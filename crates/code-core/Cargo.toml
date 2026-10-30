@@ -1,0 +1,61 @@
+[package]
+name = "code-core"
+description = "Headless core of the Lenz Code editor: documents, commands and state"
+license = "MIT"
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[features]
+test-support = []
+
+[dependencies]
+lenz-content.workspace = true
+lenz-engine = { path = "../engine" }
+# Completion channels the adapter awaits; the version lenz-content already uses.
+async-channel = "2.5.0"
+# Project enumeration with .gitignore/.ignore rules (ripgrep's walker).
+ignore = "0.4"
+# Recent roots.
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+# Cargo manifests, for rust-analyzer's workspace discovery (already in the tree through lenz-content).
+toml = "1.1.8"
+# Following external file changes; the version lenz-content already uses.
+notify = "8.2.0"
+# Literal text search (ripgrep's libraries).
+grep-searcher = "0.1"
+grep-regex = "0.1"
+grep-matcher = "0.1"
+# File patterns for project search (ripgrep's, already in the tree through `ignore`).
+globset = "0.4"
+# Content validation; already in the workspace dependency graph.
+sha2 = "0.10.9"
+
+# Offline PostgreSQL syntax/scopes and source-preserving whitespace formatting.
+sqlparser = { version = "0.63", features = ["visitor", "derive-dialect"] }
+sqlformat = "0.5"
+# Native PostgreSQL 18 grammar with structured Unicode cursor positions.
+pg_parse = "0.15"
+# Shared bounded display projection; the terminal already uses this locked version.
+unicode-segmentation = "1.13.3"
+
+# Terminal process ownership is Linux-only until other platforms are verified.
+[target.'cfg(target_os = "linux")'.dependencies]
+alacritty_terminal = { version = "0.26.0", default-features = false }
+portable-pty = { version = "0.9.0", default-features = false }
+filedescriptor = "0.8.3"
+rustix = { version = "1.1.4", features = ["process", "event", "fs", "pipe"] }
+
+[build-dependencies]
+sha2 = "0.10.9"
+
+[dev-dependencies]
+tempfile = "3"
+# Throwaway git repositories for the blame tests.
+lenz-content = { workspace = true, features = ["git-testing", "write-testing"] }
+# Encoding image fixtures (already in the tree through lenz-content).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[lints]
+workspace = true
