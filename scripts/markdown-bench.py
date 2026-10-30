@@ -275,7 +275,7 @@ def tui_startup(opt, manifest):
         for label,binary in (builds if iteration%2 else builds[::-1]):
             p=TerminalProbe([str(Path(binary).resolve()),'--no-index','source-left.txt','source-right.txt'],root)
             try:
-                paint=p.expect(b'Lenz'); first_stat=Path(f'/proc/{p.proc.pid}/stat').read_text().rsplit(')',1)[1].split()
+                paint=p.expect(b'details'); first_stat=Path(f'/proc/{p.proc.pid}/stat').read_text().rsplit(')',1)[1].split()
                 content=p.expect(b'RIGHT_SOURCE_MARKER'); p.quiet(.5)
                 sample={'build':label,'run':iteration,'warmup':iteration==0,'first_paint_ms':paint,'first_content_ms':content,'first_paint_minor_faults':int(first_stat[7]),'first_paint_major_faults':int(first_stat[9]),**p.sample()}
                 results.append(sample); p.finish()
