@@ -151,6 +151,19 @@ fn preview_and_csv_get_a_thumb_without_marks(cx: &mut TestAppContext) {
     let s = strip(&v, &f, 0);
     click(&mut v, s.center().x, f32::from(s.origin.y) + f32::from(s.size.height) * 0.8);
     assert!(f.view.read_with(&v, |r, _| r.markdown[0].as_ref().unwrap().top) > 0.0, "a page down the preview");
+    // A preview has no gutter: it keeps its strip until its own width is under two strips, past where text would drop it.
+    let sw = 12.0 * font_size() / 13.0;
+    let mut kept_past_text_rule = false;
+    for width in (1..=30).rev().map(|i| i as f32 * 10.0) {
+        v.simulate_resize(size(px(width), px(400.0)));
+        draw(&mut v);
+        let g = f.view.read_with(&v, |r, _| r.panes[0]);
+        let pane_w = f32::from(g.text.size.width + g.bar_strip.size.width);
+        let want = if pane_w - 16.0 < 2.0 * sw { 0.0 } else { sw };
+        assert_eq!(g.bar_strip.size.width, px(want), "a {pane_w} px preview at {width}");
+        kept_past_text_rule |= want > 0.0 && pane_w - num_w() - 16.0 < 2.0 * sw;
+    }
+    assert!(kept_past_text_rule, "some width keeps the preview's strip where a text pane would drop it");
 
     let rows: String = std::iter::once("a,b\n".to_string()).chain((0..200).map(|i| format!("{i},x\n"))).collect();
     let f = fixture(cx, Some(("data.csv", rows.as_bytes())));
