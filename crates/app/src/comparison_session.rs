@@ -360,6 +360,15 @@ impl ComparisonSession {
         self.anchor_find();
         Some((side, line, range, wrapped))
     }
+    /// Make find hit `i` current, as stepping to it does (a scrollbar mark); the hit, for the adapter to show.
+    pub fn go_to_find_hit(&mut self, i: usize) -> Option<(Side, u32, std::ops::Range<usize>)> {
+        let find = self.find.as_mut()?;
+        let (line, range) = find.hits.get(i)?.clone();
+        find.at = Some(i);
+        let side = find.side;
+        self.anchor_find();
+        Some((side, line, range))
+    }
     pub fn show_text(&mut self, doc: &TextDocument, place: Place) {
         let mut view = doc.view(&[], self.view.viewport_rows());
         view.start_in(self.view.mode());

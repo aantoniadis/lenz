@@ -80,6 +80,8 @@ pub(super) struct MergeFrame {
     auto: Vec<(f32, f32)>,
     /// Result rows of blocks resumed from the file ("edited outside Lenz").
     outside: Vec<(f32, f32)>,
+    /// The panes' scrollbars, under the banner.
+    pub(super) bars: Vec<super::scrollbars::PaintedBar>,
 }
 
 impl Viewer {
@@ -287,6 +289,7 @@ impl Viewer {
             current,
             auto,
             outside,
+            bars: Vec::new(),
         })
     }
 
@@ -609,7 +612,7 @@ pub(super) fn paint(palette: &theme::Palette,
         size: size(px(w.max(0.0)), px((h - hdr_h()).max(0.0))),
     };
     for (i, rows) in f.panes.iter().enumerate() {
-        paint_side(palette, window, cx, font, body, xs[i], widths[i], f.horizontal[i], 0.0, rows);
+        paint_side(palette, window, cx, font, body, xs[i], widths[i] - super::scrollbars::strip_w(widths[i]), f.horizontal[i], 0.0, rows);
     }
     // wand-resolved, not yet looked at: a dotted edge down the Result's left side
     for &(a, b) in &f.auto {
@@ -633,7 +636,7 @@ pub(super) fn paint(palette: &theme::Palette,
     for &(a, b) in &f.outside {
         fill(
             window,
-            xs[1] + widths[1] - 3.0,
+            xs[1] + widths[1] - super::scrollbars::strip_w(widths[1]) - 3.0,
             y0 + a * line_h(),
             3.0,
             (b - a).max(0.1) * line_h(),
@@ -662,6 +665,7 @@ pub(super) fn paint(palette: &theme::Palette,
             text(window, cx, font, cx_ + 2.0, cy, glyph, palette.accent);
         }
     });
+    for bar in &f.bars { super::scrollbars::paint(palette, window, bar); }
     if let Some((ask, failed)) = &f.ask {
         let bh = line_h() + 8.0;
         fill(
@@ -739,7 +743,7 @@ impl MergeState {
         if delta<=0.0&&self.horizontal[pane]==0.0{return;}
         let lines=match pane{0=>self.core.m.side(Some(Pick::Ours)),1=>self.core.mid_lines(),_=>self.core.m.side(Some(Pick::Theirs))};
         let widest=*self.columns[pane].get_or_insert_with(||super::horizontal::columns(lines));
-        let width=(self.pane_w[pane]-num_w()-16.0).max(0.0);
+        let width=super::text_width(self.pane_w[pane]);
         self.horizontal[pane]=(self.horizontal[pane]+delta).clamp(0.0,(widest as f32*char_w-width).max(0.0));
     }
 }

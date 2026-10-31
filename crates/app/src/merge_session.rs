@@ -2447,6 +2447,13 @@ impl MergeSession {
         self.show_find_hit();
         true
     }
+    /// Make find hit `i` of the focused pane current and show it, as stepping to it does (a scrollbar mark).
+    pub fn go_to_find_hit(&mut self, i: usize) {
+        if let Some(f) = self.find.as_mut().filter(|f| i < f.search.hits.len()) {
+            f.search.at = Some(i);
+            self.show_find_hit();
+        }
+    }
     fn show_find_hit(&mut self) {
         let Some((line, _)) = self
             .find

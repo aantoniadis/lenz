@@ -3,6 +3,7 @@ mod context;
 mod checkout;
 mod horizontal;
 mod panes;
+mod scrollbars;
 mod pane_search;
 mod editing;
 mod menus;
@@ -116,6 +117,8 @@ impl Doc {
 fn scaled(font_size: f32, at_13: f32) -> f32 { at_13 * font_size / 13.0 }
 fn scale_of(at_13: f32) -> f32 { scaled(crate::settings::get().gui.font_size, at_13) }
 fn line_h() -> f32 { scale_of(20.0) }
+/// A pane's text width: less its line numbers, margins and scrollbar strip.
+fn text_width(w: f32) -> f32 { (w - num_w() - 16.0 - scrollbars::strip_w(w)).max(0.0) }
 fn font_size() -> f32 { crate::settings::get().gui.font_size }
 const GUTTER_W: f32 = 72.0;
 fn num_w() -> f32 { scale_of(56.0) }
@@ -362,6 +365,9 @@ pub struct Viewer {
     char_w: f32,
     /// Width of a pane's text area, as last painted.
     text_w: [f32; 2],
+    /// Each scrollbar strip the last frame laid out: its pane, thumb and marked kinds.
+    #[cfg(test)]
+    painted_scrollbars: Vec<scrollbars::PaintedScrollbar>,
     spec: Spec,
     blame_on: bool,
     /// Sticky scroll: pin the enclosing declarations at the top of each pane (for this run; the settings file sets
@@ -788,6 +794,8 @@ impl Viewer {
             hscroll: [0.0; 2],
             char_w: 0.0,
             text_w: [600.0; 2],
+            #[cfg(test)]
+            painted_scrollbars: Vec::new(),
             panes: PaneSizes::default(),
             spec,
             blame_on: blame,
@@ -2148,8 +2156,9 @@ impl Viewer {
         // a press on the panel takes the keyboard back
         (self.message_focused, self.message_press) = (false, None);
         if ev.button == MouseButton::Left { self.message_sel = None; }
+        let on_strip = self.on_scrollbar(x, y, window);
         self.mouse_down(ev, window, cx);
-        if outside_find && self.comparison.find.is_some() {
+        if outside_find && !on_strip && self.comparison.find.is_some() {
             self.comparison.find = None;
             cx.notify();
         }
@@ -2173,6 +2182,8 @@ impl Viewer {
         if self.picker_v.is_some() && self.menu.is_none() && x >= self.diff_x() && y >= band_top && self.picker_v_click(y - band_top, cx) {
             return;
         }
+        // a strip takes its presses before the panes' clicks and text selection; the find bar stays for its marks
+        if matches!(self.modal(), None | Some(Modal::Find | Modal::MergeFind)) && self.scrollbar_press(x, y, window, cx) { return; }
         if self.merge.is_some() && self.menu.is_none() && x >= self.diff_x() && y >= self.top() - hdr_h() {
             self.nav_focused = false;
             self.panel_focused = false;
@@ -2379,7 +2390,8 @@ impl Viewer {
         let widths = self.comparison_widths(f32::from(window.viewport_size().width) - sw);
         let pane_w = widths[0];
         let x0 = if side == Side::Left { sw } else { sw + pane_w + GUTTER_W };
-        (x0 + self.ann_w(side) + num_w(), x0 + widths[side as usize])
+        let w = widths[side as usize];
+        (x0 + self.ann_w(side) + num_w(), x0 + w - scrollbars::strip_w(w))
     }
 
     /// While a drag selection sits past a pane edge: scroll every 30 ms and pull the selection along.
@@ -2421,10 +2433,11 @@ impl Viewer {
         .detach();
     }
 
-    fn on_mouse_up(&mut self, _ev: &MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_mouse_up(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.message_release(cx);
         self.pr_dialog_release();
         self.panes.drag=None;
+        self.scrollbar_release(f32::from(ev.position.y), window, cx);
         self.markdown.dragging=false;
         if self.theme_chooser.is_some(){return;}
         self.iview.drag = None;
@@ -2555,6 +2568,7 @@ impl Viewer {
         }
         if self.markdown_active()&&(self.help||self.goto.is_some()||self.git_prompt.is_some()||self.switcher.is_some()||self.popup.is_some()){return;}
         if self.resize_move(x,y,ev.pressed_button==Some(MouseButton::Left),cx){return;}
+        if self.scrollbar_move(y,ev.pressed_button==Some(MouseButton::Left),window,cx){return;}
         if ev.pressed_button==Some(MouseButton::Left) && (self.message_drag(x,y,cx) || self.pr_dialog_drag(x,y,cx)) {return;}
         if self.markdown_drag(ev,window,cx){return;}
         if self.image_doc().is_some() && self.image_drag(x, y, ev.pressed_button == Some(MouseButton::Left), window, cx) {
@@ -3190,7 +3204,7 @@ impl Viewer {
         if dx != 0.0 {
             let widths=self.comparison_widths(f32::from(window.viewport_size().width)-sw);
             let side=if x<sw+widths[0]{Side::Left}else{Side::Right};
-            self.text_w=widths.map(|w|(w-num_w()-16.0).max(0.0));
+            self.text_w=widths.map(text_width);
             self.scroll_horizontal(side,dx);
             cx.notify();
         }
@@ -3519,16 +3533,20 @@ impl Render for Viewer {
         }
         let picker_v_frame = self.picker_v_frame();
         let version_h=self.picker_v_height();
-        let merge_frame = self.merge_frame(rows, self.merge_widths(f32::from(window.viewport_size().width) - self.diff_x()));
+        let mut merge_frame = self.merge_frame(rows, self.merge_widths(f32::from(window.viewport_size().width) - self.diff_x()));
         if self.char_w == 0.0 {
             let run = TextRun { len: 10, font: self.font.clone(), color: Hsla::default(), background_color: None, underline: None, strikethrough: None };
             let ten = window.text_system().shape_line("0000000000".into(), px(font_size()), &[run], None);
             self.char_w = f32::from(ten.width) / 10.0;
         }
         let widths = self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x());
-        self.text_w = widths.map(|w| (w - num_w() - 16.0).max(0.0));
+        self.text_w = widths.map(text_width);
         for side in [Side::Left,Side::Right]{self.clamp_horizontal(side);}
         let markdown_frame=self.markdown_frame(window,cx);
+        let mut bars=self.scrollbar_frame(window);
+        if let Some(f)=&mut merge_frame { f.bars=std::mem::take(&mut bars); }
+        // the panes' text stops at their strips
+        let text_ws=widths.map(|w|w-scrollbars::strip_w(w));
         let hscroll = self.hscroll;
         let frame = self.comparison.view.frame();
         let unified = self.comparison.view.unified();
@@ -3879,18 +3897,19 @@ impl Render for Viewer {
                             fill(window,gx,y0,GUTTER_W,h,if frame.inline(){palette.bg}else{palette.gutter_bg});
                         } else if unified {
                             // one column: deleted rows (left) and the rest (right) interleave by row
-                            paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &left);
-                            paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &right);
-                            paint_sticky(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &sticky[1]);
+                            paint_side(&palette, window, cx, &font, bounds, rx, text_ws[1], hscroll[1], ann_w[1], &left);
+                            paint_side(&palette, window, cx, &font, bounds, rx, text_ws[1], hscroll[1], ann_w[1], &right);
+                            paint_sticky(&palette, window, cx, &font, bounds, rx, text_ws[1], hscroll[1], ann_w[1], &sticky[1]);
                             fill(window, gx, y0, GUTTER_W, h, palette.bg);
                         } else {
-                            paint_side(&palette, window, cx, &font, bounds, x0, pane_w, hscroll[0], ann_w[0], &left);
-                            paint_side(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &right);
-                            paint_sticky(&palette, window, cx, &font, bounds, x0, pane_w, hscroll[0], ann_w[0], &sticky[0]);
-                            paint_sticky(&palette, window, cx, &font, bounds, rx, widths[1], hscroll[1], ann_w[1], &sticky[1]);
+                            paint_side(&palette, window, cx, &font, bounds, x0, text_ws[0], hscroll[0], ann_w[0], &left);
+                            paint_side(&palette, window, cx, &font, bounds, rx, text_ws[1], hscroll[1], ann_w[1], &right);
+                            paint_sticky(&palette, window, cx, &font, bounds, x0, text_ws[0], hscroll[0], ann_w[0], &sticky[0]);
+                            paint_sticky(&palette, window, cx, &font, bounds, rx, text_ws[1], hscroll[1], ann_w[1], &sticky[1]);
                             fill(window, gx, y0, GUTTER_W, h, palette.gutter_bg);
                             paint_connectors(&palette, window, bounds, x0, widths, &connectors, arrows);
                         }
+                        for bar in &bars { scrollbars::paint(&palette, window, bar); }
                         if let Some(f) = &picker_v_frame {
                             version_picker::paint(&palette, window, cx, &font, x0, y0 + h - f.height(), w, f);
                         }
