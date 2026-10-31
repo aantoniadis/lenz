@@ -826,7 +826,7 @@ impl MergeSession {
                 let mid = self.views[1].anchor_line_on(Side::Left);
                 // Theirs lines the Result lacks map to the Result line at their start: moving down from there, step
                 // just past them
-                self.place_mid_at(if down && mid <= at { at + crate::view::PAST_RUN } else { mid });
+                self.place_mid_at(if down && mid <= at { crate::view::past_run(at) } else { mid });
             }
             _ => {
                 let (view, side) = self.pane_view(pane);
@@ -1577,16 +1577,19 @@ pub(crate) mod tests {
 
     #[test]
     fn theirs_pages_past_a_long_run_the_result_lacks() {
-        // Ours deletes line 30 where Theirs turns it into 30 lines; taking Ours leaves the Result without them
-        let base: String = (0..60).map(|i| format!("l{i}\n")).collect();
-        let run: String = (0..30).map(|i| format!("T{i}\n")).collect();
-        let (_d, mut s) = state(&base, &base.replace("l30\n", ""), &base.replace("l30\n", &run));
-        let i = s.current.unwrap();
-        s.control(Control::Accept(i, Pick::Ours));
-        assert_eq!((s.mid_range(i).len(), s.m.blocks()[i].right.len()), (0, 30));
-        s.set_viewport_rows(10.0);
-        let s = std::cell::RefCell::new(s);
-        crate::view::tests::page_through("Theirs", || s.borrow().scrollbar(2), |top| s.borrow_mut().scroll_to(2, top));
+        // Ours deletes line `at` where Theirs turns it into 30 lines; taking Ours leaves the Result without them; at
+        // line 50,000 f32 steps are coarse
+        for at in [30, 50_000] {
+            let base: String = (0..at + 30).map(|i| format!("l{i}\n")).collect();
+            let (line, run) = (format!("\nl{at}\n"), (0..30).map(|i| format!("T{i}\n")).collect::<String>());
+            let (_d, mut s) = state(&base, &base.replacen(&line, "\n", 1), &base.replacen(&line, &format!("\n{run}"), 1));
+            let i = s.current.unwrap();
+            s.control(Control::Accept(i, Pick::Ours));
+            assert_eq!((s.mid_range(i).start, s.mid_range(i).len(), s.m.blocks()[i].right.len()), (at as u32, 0, 30));
+            s.set_viewport_rows(10.0);
+            let s = std::cell::RefCell::new(s);
+            crate::view::tests::page_through(&format!("Theirs at {at}"), || s.borrow().scrollbar(2), |top| s.borrow_mut().scroll_to(2, top));
+        }
     }
 
     #[test]

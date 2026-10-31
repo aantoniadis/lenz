@@ -6,9 +6,12 @@ use lenz_engine::{ChangeBlock, Refinement};
 
 use crate::scrollbar::{Mark, MarkKind, Scrollbar};
 
-/// A fraction of a line past a run the leading Side lacks: the first top after the run, which the run's own lines
-/// map back to its start.
-pub(crate) const PAST_RUN: f32 = 1e-3;
+/// A position a sliver past `x`: the first top after a run the leading Side lacks, whose own lines map back to the
+/// run's start. The sliver scales with `x` (a few dozen f32 steps) so it survives the rounding of the maps it goes
+/// through, at any file size.
+pub(crate) fn past_run(x: f32) -> f32 {
+    x + x.abs().max(1.0) * f32::EPSILON * 16.0
+}
 
 /// Scrollbar mark targets at or above this are find hits (`FIND_TARGET + hit index`); below it, Change Block indices.
 pub const FIND_TARGET: usize = 1 << 31;
@@ -891,7 +894,7 @@ impl View {
                     // the left Side's lines place the top: one that left lacks lands at the run's start, so moving
                     // down from there steps just past the run's end instead
                     let left = self.combined_to_side(Side::Left, c);
-                    let left = if t > self.unified_top() && left <= self.left_top { self.left_top + PAST_RUN } else { left };
+                    let left = if t > self.unified_top() && left <= self.left_top { past_run(self.left_top) } else { left };
                     (left - self.left_top, Side::Left)
                 }
                 _ => (c - self.top, side),
@@ -2011,7 +2014,7 @@ pub(crate) mod tests {
                 let before = bar();
                 let target = before.page(down);
                 if target == before.top { break; }
-                assert!(page < 100, "{name}: paging {} never ends: {before:?}", if down { "down" } else { "up" });
+                assert!(page <= (before.total / before.visible) as usize * 2 + 10, "{name}: paging {} never ends: {before:?}", if down { "down" } else { "up" });
                 scroll_to(target);
                 let after = bar().top;
                 assert!(if down { after > before.top } else { after < before.top }, "{name}: {before:?} → {target} landed at {after}");
@@ -2023,11 +2026,12 @@ pub(crate) mod tests {
 
     #[test]
     fn unified_pages_past_a_long_insertion_in_aligned_and_independent() {
-        for mode in [ScrollMode::Aligned, ScrollMode::Independent] {
-            let v = std::cell::RefCell::new(View::new(100, 200, &[block(50..50, 50..150)], 10.0));
+        // the insertion after line 50, then after line 50,000, where f32 steps are coarse
+        for (mode, at) in [(ScrollMode::Aligned, 50), (ScrollMode::Independent, 50), (ScrollMode::Aligned, 50_000), (ScrollMode::Independent, 50_000)] {
+            let v = std::cell::RefCell::new(View::new(at + 50, at + 150, &[block(at..at, at..at + 100)], 10.0));
             v.borrow_mut().start_in(mode);
             v.borrow_mut().set_unified(true);
-            page_through(&format!("{mode:?}"), || v.borrow().scrollbar(Side::Right), |top| v.borrow_mut().scroll_to(Side::Right, top));
+            page_through(&format!("{mode:?} at {at}"), || v.borrow().scrollbar(Side::Right), |top| v.borrow_mut().scroll_to(Side::Right, top));
         }
     }
 
