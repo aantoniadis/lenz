@@ -139,11 +139,12 @@ pub struct MergeSession {
     /// [`Self::segments`] for the Result `version` and the middle pane it was built for.
     padded: Cached<(u64, bool), (Vec<Seg3>, u32)>,
     /// Per pane: each block's (row, rows) and each find hit's row on its scrollbar, for [`Self::rows_key`].
-    mark_rows: [Cached<RowsKey, MarkRows>; 3],
+    rows_cache: [Cached<RowsKey, MarkRows>; 3],
 }
 
 /// What a pane's mark rows are built from: the Result `version`, the middle pane, the Scroll Mode, both views'
-/// layouts and the pane's find.
+/// layouts and the pane's find. The Scroll Mode is needed (Shared ⟷ Padded keeps the views); the middle pane is
+/// implied by `version` (showing the Base relays out), kept so the key does not rest on that.
 type RowsKey = (u64, bool, ScrollMode, [u64; 2], Option<u64>);
 /// Each block's (row, rows) and each find hit's row.
 type MarkRows = (Vec<(f64, f64)>, Vec<f64>);
@@ -526,7 +527,7 @@ impl MergeSession {
             error: None,
             disk_kept: false,
             padded: Default::default(),
-            mark_rows: Default::default(),
+            rows_cache: Default::default(),
         };
         if let Some(i) = current {
             s.show_block(i);
@@ -855,7 +856,7 @@ impl MergeSession {
     /// else `Modified` where the pane changed; then the find hits when `pane` is focused, targets offset by
     /// [`crate::view::FIND_TARGET`].
     pub fn scrollbar_marks(&self, pane: usize) -> Vec<Mark> {
-        let rows = self.mark_rows[pane].get(self.rows_key(pane), || self.mark_rows(pane));
+        let rows = self.rows_cache[pane].get(self.rows_key(pane), || self.mark_rows(pane));
         let mut marks: Vec<Mark> = rows.0
             .iter()
             .enumerate()
@@ -1567,6 +1568,49 @@ pub(crate) mod tests {
         let finds = |pane| s.scrollbar_marks(pane).into_iter().filter(|m| m.target >= FIND_TARGET).map(|m| (m.row, m.kind, m.target - FIND_TARGET)).collect::<Vec<_>>();
         assert_eq!(finds(2), [(30.0, MarkKind::FindCurrent, 0), (45.0, MarkKind::Find, 1)]);
         assert!(finds(0).is_empty() && finds(1).is_empty(), "find hits mark the focused pane only");
+    }
+
+    /// After each change the held mark rows equal rows built afresh: every input of the caches is in their keys.
+    #[test]
+    fn warm_scrollbar_marks_match_a_fresh_build_after_each_change() {
+        // Theirs inserts 20 lines (taken) and runs 20 lines longer at the Conflict: Padded rows differ from Shared
+        let base: String = (0..100).map(|i| format!("l{i}\n")).collect();
+        let lines = |tag: &str| (0..20).map(|i| format!("{tag}{i}\n")).collect::<String>();
+        let ours = base.replace("l50\n", "O50\n");
+        let theirs = base.replace("l10\n", &format!("l10\n{}", lines("A"))).replace("l50\n", &format!("T50\n{}", lines("B")));
+        let (_d, mut s) = state(&base, &ours, &theirs);
+        let conflict = s.current.unwrap();
+        s.set_viewport_rows(10.0);
+        let check = |s: &mut MergeSession, what: &str| {
+            let warm: Vec<_> = (0..3).map(|p| s.scrollbar_marks(p)).collect();
+            (s.rows_cache, s.padded) = Default::default();
+            let fresh: Vec<_> = (0..3).map(|p| s.scrollbar_marks(p)).collect();
+            assert_eq!(warm, fresh, "{what}");
+        };
+        check(&mut s, "opened");
+        s.control(Control::Accept(conflict, Pick::Ours));
+        check(&mut s, "accept");
+        assert!(s.changed_by(|m| m.undo()));
+        check(&mut s, "undo");
+        s.toggle_scroll();
+        check(&mut s, "Padded");
+        s.control(Control::Accept(conflict, Pick::Theirs));
+        check(&mut s, "accept in Padded");
+        assert!(s.toggle_base());
+        check(&mut s, "Base shown");
+        s.focus_pane(2);
+        check(&mut s, "focus pane");
+        s.begin_find(Default::default());
+        s.type_find("1");
+        check(&mut s, "find");
+        s.type_find("5");
+        check(&mut s, "find query");
+        s.focus_pane(0);
+        check(&mut s, "focus pane with find");
+        s.toggle_scroll();
+        check(&mut s, "Shared with find");
+        assert!(s.toggle_base());
+        check(&mut s, "Result shown");
     }
 
     #[test]
