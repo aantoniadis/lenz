@@ -110,8 +110,6 @@ pub(super) struct Layout {
     projection: Arc<Projection>,
     /// [`Adapter::syntax_rev`] when built: code colours arrive after the first layout.
     syntax_rev: u64,
-    #[cfg(all(test, feature = "gui-test"))]
-    width: f32,
     widths: [f32;2],
     mode: ScrollMode,
     palette: Arc<theme::Palette>,
@@ -451,8 +449,6 @@ impl Layout {
         let syntax = &*syntax;
         let mut result = Self {
             projection,
-            #[cfg(all(test, feature = "gui-test"))]
-            width: widths[0],
             widths,
             syntax_rev,
             mode,
@@ -1258,7 +1254,7 @@ impl Frame {
             let hx = self.horizontal[i];
             let clip_bounds = Bounds {
                 origin: point(px(x), px(y0)),
-                size: size(px(pane_w.max(0.)), px(h)),
+                size: size(px((pane_w - super::scrollbars::strip_w(pane_w)).max(0.)), px(h)),
             };
             window.with_content_mask(
                 Some(ContentMask {
@@ -1510,7 +1506,8 @@ impl Viewer {
         if self.markdown.syntax.as_mut().is_some_and(CodeSyntax::poll) {
             self.markdown.syntax_rev += 1;
         }
-        let widths = self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x());
+        // the text wraps short of each pane's scrollbar strip
+        let widths = self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x()).map(|w| w - super::scrollbars::strip_w(w));
         if widths.iter().all(|w| *w <= 0.) {
             self.markdown.layout = None;
             self.markdown.building = None;
@@ -1827,6 +1824,19 @@ impl Viewer {
                 self.markdown.anchors[a.side as usize] = Some(a);
             }
         }
+    }
+    /// Pane `side`'s preview scrollbar in laid-out pixels (Inline has one pane), once a layout is on screen.
+    pub(super) fn markdown_scrollbar(&self, side: Side, window: &Window) -> Option<crate::scrollbar::Scrollbar> {
+        let l = self.markdown.layout.as_ref()?;
+        let i = if l.inline { 1 } else { side as usize };
+        let (top, visible) = (self.markdown.top[i], self.markdown_height(window));
+        Some(crate::scrollbar::Scrollbar { total: f64::from(l.heights[i].max(top + visible)), top: f64::from(top), visible: f64::from(visible) })
+    }
+    /// Scroll pane `side`'s preview so its top is `top` pixels, as the wheel does.
+    pub(super) fn markdown_scroll_to(&mut self, side: Side, top: f32, window: &Window) {
+        let Some(l) = &self.markdown.layout else { return };
+        let i = if l.inline { 1 } else { side as usize };
+        self.markdown_scroll(side, top - self.markdown.top[i], 0.0, window);
     }
     pub(super) fn markdown_select(&mut self, s: RenderSelection) {
         let anchor = self
@@ -2583,7 +2593,7 @@ mod tests {
         let right=left.replace("](old)","](new)");
         let f=fixture_named(cx,&left,&right,"md");run(cx,&f,crate::catalog::Action::Comparison(Command::Preview(crate::markdown::MarkdownLayout::Inline)));markdown_ready(cx,&f);
         key(cx,&f,"n",false,false,false);
-        let (x,y,a)=f.window.update(cx,|v,w,cx|{let frame=v.markdown_frame(w,cx).unwrap();let l=&frame.layout;let row=l.rows[1].iter().find(|r|r.marker.is_some()).unwrap();assert!(row.y>=v.markdown.top[1]&&row.y<v.markdown.top[1]+v.markdown_height(w),"selected markup marker must be visible");(v.diff_x()+l.width+GUTTER_W+20.,v.top()+row.y-v.markdown.top[1]+3.,l.row_anchor(1,l.rows[1].iter().position(|r|r.marker.is_some()).unwrap()).unwrap())}).unwrap();
+        let (x,y,a)=f.window.update(cx,|v,w,cx|{let frame=v.markdown_frame(w,cx).unwrap();let l=&frame.layout;let row=l.rows[1].iter().find(|r|r.marker.is_some()).unwrap();assert!(row.y>=v.markdown.top[1]&&row.y<v.markdown.top[1]+v.markdown_height(w),"selected markup marker must be visible");(v.markdown_pane_x(w,1)+20.,v.top()+row.y-v.markdown.top[1]+3.,l.row_anchor(1,l.rows[1].iter().position(|r|r.marker.is_some()).unwrap()).unwrap())}).unwrap();
         f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{position:point(px(x),px(y)),button:MouseButton::Right,..Default::default()},w,cx)).unwrap();
         assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.markdown_mode()),PresentationMode::Rendered);
         assert_eq!(f.viewer.read_with(cx,|v,_|v.comparison.markdown_anchor(Side::Right)),Some(a));
@@ -2596,7 +2606,7 @@ mod tests {
         let cx=&mut native;
         let f=rendered(cx,"# First\n\nsecond direct target\n\nentity &amp; end\n\n- list target\n");
         let context_at=|cx:&mut TestAppContext, needle:&str| {
-            let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);let l=v.markdown.layout.as_ref().unwrap();let at=l.projection.pair.sides[1].text.find(needle).unwrap();let row=l.rows[1].iter().find(|r|r.pieces.iter().any(|p|p.range.contains(&at))).unwrap();let piece=row.pieces.iter().find(|p|p.range.contains(&at)).unwrap();(v.diff_x()+l.width+GUTTER_W+piece.x+f32::from(piece.shaped.x_for_index(at-piece.range.start))+0.1,v.top()+row.y-v.markdown.top[1]+2.)}).unwrap();
+            let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);let l=v.markdown.layout.as_ref().unwrap();let at=l.projection.pair.sides[1].text.find(needle).unwrap();let row=l.rows[1].iter().find(|r|r.pieces.iter().any(|p|p.range.contains(&at))).unwrap();let piece=row.pieces.iter().find(|p|p.range.contains(&at)).unwrap();(v.markdown_pane_x(w,1)+piece.x+f32::from(piece.shaped.x_for_index(at-piece.range.start))+0.1,v.top()+row.y-v.markdown.top[1]+2.)}).unwrap();
             f.window.update(cx,|v,w,cx|v.on_right_down(&MouseDownEvent{position:point(px(x),px(y)),button:MouseButton::Right,..Default::default()},w,cx)).unwrap();
         };
         // No prior left click, then a stale empty caret on a different paragraph.
@@ -2650,10 +2660,10 @@ mod tests {
     fn gui_markdown_literal_math_and_mapped_editor_use_actual_input(cx:&mut TestAppContext) {
         let f=rendered(cx,"# 漢字\n\n$**bold**$ and $$*math*$$\n\nentity &amp;\n");
         f.window.update(cx,|v,w,cx|{let frame=v.markdown_frame(w,cx).unwrap();let doc=&frame.layout.projection.pair.sides[1];assert!(doc.text.contains("$**bold**$ and $$*math*$$"));}).unwrap();
-        let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);let l=v.markdown.layout.as_ref().unwrap();(v.diff_x()+l.width+GUTTER_W+16.,v.top()+2.)}).unwrap();
+        let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);assert!(v.markdown.layout.is_some());(v.markdown_pane_x(w,1)+16.,v.top()+2.)}).unwrap();
         click(cx,&f,x,y);key(cx,&f,"o",false,false,false);
         assert_eq!(f.viewer.read_with(cx,|v,_|v.inspected_position),Some((0,Side::Right,Some(1),Some(3))));
-        let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);let l=v.markdown.layout.as_ref().unwrap();let row=l.rows[1].iter().find(|r|r.pieces.iter().any(|p|l.projection.pair.sides[1].text[p.range.clone()].contains('&'))).unwrap();let piece=row.pieces.iter().find(|p|l.projection.pair.sides[1].text[p.range.clone()].contains('&')).unwrap();let at=l.projection.pair.sides[1].text[piece.range.clone()].find('&').unwrap();(v.diff_x()+l.width+GUTTER_W+piece.x+f32::from(piece.shaped.x_for_index(at))+1.,v.top()+row.y+2.)}).unwrap();
+        let (x,y)=f.window.update(cx,|v,w,_|{v.markdown_prepare(w);let l=v.markdown.layout.as_ref().unwrap();let row=l.rows[1].iter().find(|r|r.pieces.iter().any(|p|l.projection.pair.sides[1].text[p.range.clone()].contains('&'))).unwrap();let piece=row.pieces.iter().find(|p|l.projection.pair.sides[1].text[p.range.clone()].contains('&')).unwrap();let at=l.projection.pair.sides[1].text[piece.range.clone()].find('&').unwrap();(v.markdown_pane_x(w,1)+piece.x+f32::from(piece.shaped.x_for_index(at))+1.,v.top()+row.y+2.)}).unwrap();
         click(cx,&f,x,y);key(cx,&f,"o",false,false,false);
         assert_eq!(f.viewer.read_with(cx,|v,_|v.toast.as_ref().unwrap().0.clone()),"Show in source to inspect this position");
     }
@@ -2706,10 +2716,10 @@ mod tests {
     #[gpui::test]
     fn gui_markdown_click_selection_copy_marker_and_source_restore(cx: &mut TestAppContext) {
         let f = rendered(cx, "# Hello **world**\n\n<!-- hidden target -->\n");
-        let (x, y) = f.viewer.read_with(cx, |v, _| {
-            let l = v.markdown.layout.as_ref().unwrap();
-            (v.diff_x() + l.width + GUTTER_W + 20., v.top() + 15.)
-        });
+        let (x, y) = f.window.update(cx, |v, w, _| {
+            assert!(v.markdown.layout.is_some());
+            (v.markdown_pane_x(w, 1) + 20., v.top() + 15.)
+        }).unwrap();
         click(cx, &f, x, y);
         assert!(
             f.viewer
@@ -2742,11 +2752,11 @@ mod tests {
             .update(cx, |v, w, _| v.markdown_prepare(w))
             .unwrap();
         let f = marker;
-        let (mx, my) = f.viewer.read_with(cx, |v, _| {
+        let (mx, my) = f.window.update(cx, |v, w, _| {
             let l = v.markdown.layout.as_ref().unwrap();
             let r = l.rows[1].iter().find(|r| r.marker.is_some()).unwrap();
-            (v.diff_x() + l.width + GUTTER_W + 20., v.top() + r.y + 3.)
-        });
+            (v.markdown_pane_x(w, 1) + 20., v.top() + r.y + 3.)
+        }).unwrap();
         click(cx, &f, mx, my);
         assert_eq!(
             f.viewer.read_with(cx, |v, _| v.comparison.markdown_mode()),
@@ -2793,8 +2803,8 @@ mod tests {
             .window
             .update(cx, |v, w, _| {
                 v.markdown_prepare(w);
-                let l = v.markdown.layout.as_ref().unwrap();
-                (v.diff_x() + l.width + GUTTER_W + 20., v.top() + 44.)
+                assert!(v.markdown.layout.is_some());
+                (v.markdown_pane_x(w, 1) + 20., v.top() + 44.)
             })
             .unwrap();
         click(cx, &f, x, y);
@@ -2849,8 +2859,9 @@ mod tests {
     fn v_widths_of(v: &Viewer, w: &Window) -> [f32; 2] {
         v.comparison_widths(f32::from(w.viewport_size().width) - v.diff_x())
     }
+    /// The panes' text widths, short of their scrollbar strips: what a layout wraps to.
     fn v_widths(cx: &mut TestAppContext, f: &super::super::parity_tests::Fixture) -> [f32; 2] {
-        f.window.update(cx, |v, w, _| v.comparison_widths(f32::from(w.viewport_size().width) - v.diff_x())).unwrap()
+        f.window.update(cx, |v, w, _| v_widths_of(v, w).map(|w| w - super::super::scrollbars::strip_w(w))).unwrap()
     }
     #[gpui::test]
     fn gui_the_settings_markdown_default_starts_markdown_rendered_and_leaves_other_files_alone(cx: &mut TestAppContext) {
@@ -2966,11 +2977,11 @@ mod tests {
                 v.markdown_prepare(w);
             })
             .unwrap();
-        let (x, y) = f.viewer.read_with(cx, |v, _| {
+        let (x, y) = f.window.update(cx, |v, w, _| {
             let l = v.markdown.layout.as_ref().unwrap();
             let r = l.rows[1].iter().find(|r| r.block == Some(1)).unwrap();
-            (v.diff_x() + l.width + GUTTER_W + 20., v.top() + r.y + 4.)
-        });
+            (v.markdown_pane_x(w, 1) + 20., v.top() + r.y + 4.)
+        }).unwrap();
         click(cx, &f, x, y);
         key(cx, &f, "end", false, false, false);
         let end = f
@@ -3037,7 +3048,7 @@ mod tests {
                 let marker = rows.iter().position(|r| r.marker.is_some()).unwrap();
                 assert!(marker > 0 && marker + 1 < rows.len());
                 (
-                    v.diff_x() + l.width + GUTTER_W + 16.,
+                    v.markdown_pane_x(w, 1) + 16.,
                     v.top() + rows[marker - 1].y + 2.,
                     v.top() + rows[marker + 1].y + 2.,
                 )
@@ -3099,8 +3110,8 @@ mod tests {
             .window
             .update(cx, |v, w, _| {
                 v.markdown_prepare(w);
-                let l = v.markdown.layout.as_ref().unwrap();
-                (v.diff_x() + l.width + GUTTER_W + 16., v.top() + 2.)
+                assert!(v.markdown.layout.is_some());
+                (v.markdown_pane_x(w, 1) + 16., v.top() + 2.)
             })
             .unwrap();
         click(cx, &f, x, y);
@@ -3192,15 +3203,15 @@ mod tests {
         for question in ["close", "overwrite", "overwrite_done", "done"] {
             let f = picker_confirmation(cx, question);
             let before = super::super::parity_tests::picker_preview_state(cx, &f);
-            let (x, text_y, marker_y) = f.viewer.read_with(cx, |v, _| {
+            let (x, text_y, marker_y) = f.window.update(cx, |v, w, _| {
                 let l = v.markdown.layout.as_ref().unwrap();
                 let marker = l.rows[1].iter().find(|r| r.marker.is_some()).unwrap();
                 (
-                    v.diff_x() + l.width + GUTTER_W + 50.,
+                    v.markdown_pane_x(w, 1) + 50.,
                     v.top() + l.rows[1].last().unwrap().y + 2.,
                     v.top() + marker.y + 2.,
                 )
-            });
+            }).unwrap();
             // A drag begun before the question must also stay frozen.
             f.window
                 .update(cx, |v, w, cx| {
@@ -3282,12 +3293,12 @@ impl Viewer {
     pub(super) fn markdown_test_marker(&mut self,window:&Window,hunk:usize,side:Side)->(f32,f32,SourceAnchor) {
         self.markdown_prepare(window);let l=self.markdown.layout.as_ref().unwrap();let i=side as usize;
         let row=l.rows[i].iter().find(|r|r.marker.is_some_and(|d|l.projection.decorations[d].hunk==hunk)).unwrap();
-        (self.diff_x()+i as f32*(l.width+GUTTER_W)+16.,self.top()+row.y-self.markdown.top[i]+2.,l.row_anchor(i,l.row_at(i,row.y)).unwrap())
+        (self.markdown_pane_x(window,i)+16.,self.top()+row.y-self.markdown.top[i]+2.,l.row_anchor(i,l.row_at(i,row.y)).unwrap())
     }
     pub(super) fn markdown_test_text(&mut self,window:&Window,side:Side,needle:&str)->(f32,f32) {
         self.markdown_prepare(window);let l=self.markdown.layout.as_ref().unwrap();let i=side as usize;let byte=l.projection.pair.sides[i].text.find(needle).unwrap();
         let row=l.rows[i].iter().find(|r|r.pieces.iter().any(|p|p.range.contains(&byte))).unwrap();let piece=row.pieces.iter().find(|p|p.range.contains(&byte)).unwrap();
-        (self.diff_x()+i as f32*(l.width+GUTTER_W)+piece.x+f32::from(piece.shaped.x_for_index(byte-piece.range.start))+1.,self.top()+row.y-self.markdown.top[i]+2.)
+        (self.markdown_pane_x(window,i)+piece.x+f32::from(piece.shaped.x_for_index(byte-piece.range.start))+1.,self.top()+row.y-self.markdown.top[i]+2.)
     }
 
 }

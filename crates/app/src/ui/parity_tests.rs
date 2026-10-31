@@ -12,6 +12,9 @@ mod followup_tests;
 #[path = "pr_reading_tests.rs"]
 mod pr_reading_tests;
 
+#[path = "scrollbar_tests.rs"]
+mod scrollbar_tests;
+
 #[gpui::test]
 fn gui_user_flow_discard_shorter_external_file_renders_before_diff_completes(
     cx: &mut TestAppContext,

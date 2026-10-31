@@ -19,12 +19,14 @@ pub(super) struct PaneSizes {
     pub(super) version_scroll: f32,
     pub(super) viewport: [f32; 2],
     pub(super) drag: Option<PaneDrag>,
+    /// A held scrollbar thumb.
+    pub(super) bar: Option<super::scrollbars::BarDrag>,
 }
 impl Default for PaneSizes {
     fn default() -> Self {
         Self { comparison: 0.5, merge: [1.0/3.0,2.0/3.0], navigator: SIDEBAR_W,
             picker: 240.0, log: (LOG_ROWS+1.0)*line_h(), panel: PANEL_ROWS*line_h(),
-            version: None, version_scroll: 0.0, viewport: [1600.0,900.0], drag: None }
+            version: None, version_scroll: 0.0, viewport: [1600.0,900.0], drag: None, bar: None }
     }
 }
 impl Viewer {
