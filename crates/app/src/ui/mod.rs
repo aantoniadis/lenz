@@ -118,7 +118,7 @@ fn scaled(font_size: f32, at_13: f32) -> f32 { at_13 * font_size / 13.0 }
 fn scale_of(at_13: f32) -> f32 { scaled(crate::settings::get().gui.font_size, at_13) }
 fn line_h() -> f32 { scale_of(20.0) }
 /// A pane's text width: less its line numbers, margins and scrollbar strip.
-fn text_width(w: f32) -> f32 { (w - num_w() - 16.0 - scrollbars::strip_w(w)).max(0.0) }
+fn text_width(w: f32) -> f32 { (w - num_w() - 16.0 - scrollbars::strip_w(w, num_w())).max(0.0) }
 fn font_size() -> f32 { crate::settings::get().gui.font_size }
 const GUTTER_W: f32 = 72.0;
 fn num_w() -> f32 { scale_of(56.0) }
@@ -2391,7 +2391,7 @@ impl Viewer {
         let pane_w = widths[0];
         let x0 = if side == Side::Left { sw } else { sw + pane_w + GUTTER_W };
         let w = widths[side as usize];
-        (x0 + self.ann_w(side) + num_w(), x0 + w - scrollbars::strip_w(w))
+        (x0 + self.ann_w(side) + num_w(), x0 + w - scrollbars::strip_w(w, num_w()))
     }
 
     /// While a drag selection sits past a pane edge: scroll every 30 ms and pull the selection along.
@@ -3546,7 +3546,7 @@ impl Render for Viewer {
         let mut bars=self.scrollbar_frame(window);
         if let Some(f)=&mut merge_frame { f.bars=std::mem::take(&mut bars); }
         // the panes' text stops at their strips
-        let text_ws=widths.map(|w|w-scrollbars::strip_w(w));
+        let text_ws=widths.map(|w|w-scrollbars::strip_w(w,num_w()));
         let hscroll = self.hscroll;
         let frame = self.comparison.view.frame();
         let unified = self.comparison.view.unified();

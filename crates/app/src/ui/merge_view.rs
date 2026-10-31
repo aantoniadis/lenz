@@ -612,7 +612,7 @@ pub(super) fn paint(palette: &theme::Palette,
         size: size(px(w.max(0.0)), px((h - hdr_h()).max(0.0))),
     };
     for (i, rows) in f.panes.iter().enumerate() {
-        paint_side(palette, window, cx, font, body, xs[i], widths[i] - super::scrollbars::strip_w(widths[i]), f.horizontal[i], 0.0, rows);
+        paint_side(palette, window, cx, font, body, xs[i], widths[i] - super::scrollbars::strip_w(widths[i], num_w()), f.horizontal[i], 0.0, rows);
     }
     // wand-resolved, not yet looked at: a dotted edge down the Result's left side
     for &(a, b) in &f.auto {
@@ -636,7 +636,7 @@ pub(super) fn paint(palette: &theme::Palette,
     for &(a, b) in &f.outside {
         fill(
             window,
-            xs[1] + widths[1] - super::scrollbars::strip_w(widths[1]) - 3.0,
+            xs[1] + widths[1] - super::scrollbars::strip_w(widths[1], num_w()) - 3.0,
             y0 + a * line_h(),
             3.0,
             (b - a).max(0.1) * line_h(),

@@ -1254,7 +1254,7 @@ impl Frame {
             let hx = self.horizontal[i];
             let clip_bounds = Bounds {
                 origin: point(px(x), px(y0)),
-                size: size(px((pane_w - super::scrollbars::strip_w(pane_w)).max(0.)), px(h)),
+                size: size(px((pane_w - super::scrollbars::strip_w(pane_w, 0.0)).max(0.)), px(h)),
             };
             window.with_content_mask(
                 Some(ContentMask {
@@ -1596,7 +1596,7 @@ impl Viewer {
     /// The preview panes' text widths: each pane short of its scrollbar strip, what the text wraps to, is clipped to
     /// and scrolls across.
     fn markdown_text_widths(&self, window: &Window) -> [f32; 2] {
-        self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x()).map(|w| w - super::scrollbars::strip_w(w))
+        self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x()).map(|w| w - super::scrollbars::strip_w(w, 0.0))
     }
 
     /// Where pane `i`'s text starts, at the current pane widths (what paint uses).
@@ -2883,7 +2883,7 @@ mod tests {
     }
     /// The panes' text widths, short of their scrollbar strips: what a layout wraps to.
     fn v_widths(cx: &mut TestAppContext, f: &super::super::parity_tests::Fixture) -> [f32; 2] {
-        f.window.update(cx, |v, w, _| v_widths_of(v, w).map(|w| w - super::super::scrollbars::strip_w(w))).unwrap()
+        f.window.update(cx, |v, w, _| v_widths_of(v, w).map(|w| w - super::super::scrollbars::strip_w(w, 0.0))).unwrap()
     }
     #[gpui::test]
     fn gui_the_settings_markdown_default_starts_markdown_rendered_and_leaves_other_files_alone(cx: &mut TestAppContext) {

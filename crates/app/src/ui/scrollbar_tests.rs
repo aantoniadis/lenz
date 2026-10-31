@@ -207,12 +207,12 @@ fn gui_merge_scrollbar_drag_and_page_move_each_pane(cx: &mut TestAppContext) {
     assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(), disk);
 }
 
-/// Narrowing the window drops each pane's strip before its text gets under two strips wide; text and strip always
-/// fit the pane.
+/// Narrowing the window drops each pane's strip before its text gets under two strips wide (a preview has no
+/// gutter); text and strip always fit the pane.
 #[gpui::test]
 fn gui_scrollbars_leave_narrow_panes_before_their_text(cx: &mut TestAppContext) {
     let s = scale_of(12.0);
-    let check = |cx: &mut TestAppContext, f: &Fixture, what: &str| {
+    let check = |cx: &mut TestAppContext, f: &Fixture, what: &str, gutter: f32| {
         for width in [1200.0, 900.0, 700.0, 560.0, 480.0, 420.0, 360.0, 300.0, 240.0, 120.0, 1.0] {
             cx.simulate_window_resize(f.window.into(), size(px(width), px(400.0)));
             cx.executor().run_until_parked();
@@ -231,23 +231,30 @@ fn gui_scrollbars_leave_narrow_panes_before_their_text(cx: &mut TestAppContext) 
             }).unwrap();
             for (px0, pw) in panes {
                 let strip = strips.iter().find(|b| b.x >= px0 && b.x + b.w <= px0 + pw + 0.01 && pw > 0.0);
-                let text = pw - num_w() - 16.0;
+                let text = pw - gutter - 16.0;
                 if text < 2.0 * s {
                     assert!(strip.is_none(), "{what} at {width}: a {pw} px pane keeps no strip");
                 } else {
                     let b = strip.unwrap_or_else(|| panic!("{what} at {width}: a {pw} px pane has a strip"));
                     assert!((b.x + b.w - (px0 + pw)).abs() < 0.01, "{what} at {width}: at the pane's right edge");
                 }
-                assert!(text_width(pw) + strip.map_or(0.0, |b| b.w) <= pw.max(0.0) + 0.01, "{what} at {width}: text and strip fit");
+                let text_w = if gutter > 0.0 { text_width(pw) } else { (pw - strip.map_or(0.0, |b| b.w)).max(0.0) };
+                assert!(text_w + strip.map_or(0.0, |b| b.w) <= pw.max(0.0) + 0.01, "{what} at {width}: text and strip fit");
             }
         }
     };
     let f = two_way(cx);
-    check(cx, &f, "two-way");
+    check(cx, &f, "two-way", num_w());
     f.viewer.update(cx, |v, _| v.comparison.view.set_unified(true));
-    check(cx, &f, "unified");
+    check(cx, &f, "unified", num_w());
     let f = merge(cx);
-    check(cx, &f, "merge");
+    check(cx, &f, "merge", num_w());
+    let body: String = (0..40).map(|i| format!("Paragraph {i}.\n\n")).collect();
+    let f = fixture_named(cx, &format!("# Old\n\n{body}"), &format!("# New\n\n{body}"), "md");
+    sized(cx, &f);
+    run(cx, &f, crate::catalog::Action::Comparison(Command::Preview(crate::markdown::MarkdownLayout::SideBySide)));
+    markdown_ready(cx, &f);
+    check(cx, &f, "preview", 0.0);
 }
 
 #[gpui::test]
