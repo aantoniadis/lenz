@@ -6,6 +6,10 @@ use lenz_engine::{ChangeBlock, Refinement};
 
 use crate::scrollbar::{Mark, MarkKind, Scrollbar};
 
+/// A fraction of a line past a run the leading Side lacks: the first top after the run, which the run's own lines
+/// map back to its start.
+pub(crate) const PAST_RUN: f32 = 1e-3;
+
 /// Scrollbar mark targets at or above this are find hits (`FIND_TARGET + hit index`); below it, Change Block indices.
 pub const FIND_TARGET: usize = 1 << 31;
 
@@ -866,7 +870,7 @@ impl View {
 
     /// Scroll `side`'s scrollbar top to `top` with one [`Self::scroll_by`], so the Scroll Mode moves the other Side.
     /// Unified in Aligned and Independent follows the left Side's lines, so a top inside lines it lacks lands at
-    /// their start.
+    /// their start, or just past their end when that start is no move down.
     pub fn scroll_to(&mut self, side: Side, top: f64) {
         let (rows, lead) = self.scroll_units_for(side, top);
         self.scroll_by(rows, lead);
@@ -883,7 +887,13 @@ impl View {
                 None => self.combined + (t - self.unified_rows),
             };
             return match self.mode {
-                ScrollMode::Aligned | ScrollMode::Independent => (self.combined_to_side(Side::Left, c) - self.left_top, Side::Left),
+                ScrollMode::Aligned | ScrollMode::Independent => {
+                    // the left Side's lines place the top: one that left lacks lands at the run's start, so moving
+                    // down from there steps just past the run's end instead
+                    let left = self.combined_to_side(Side::Left, c);
+                    let left = if t > self.unified_top() && left <= self.left_top { self.left_top + PAST_RUN } else { left };
+                    (left - self.left_top, Side::Left)
+                }
                 _ => (c - self.top, side),
             };
         }
@@ -1161,7 +1171,7 @@ impl View {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn block(left: std::ops::Range<u32>, right: std::ops::Range<u32>) -> ChangeBlock {
@@ -1991,6 +2001,33 @@ mod tests {
                 v.scroll_to(Side::Right, top);
                 assert!((v.scrollbar(Side::Right).top - top).abs() <= 1.0, "{mode:?}: {top} landed at {:?}", v.scrollbar(Side::Right));
             }
+        }
+    }
+
+    /// Page `bar`'s pane down to its end, then up to 0, through `scroll_to`: every page must move the top.
+    pub(crate) fn page_through(name: &str, mut bar: impl FnMut() -> Scrollbar, mut scroll_to: impl FnMut(f64)) {
+        for down in [true, false] {
+            for page in 0.. {
+                let before = bar();
+                let target = before.page(down);
+                if target == before.top { break; }
+                assert!(page < 100, "{name}: paging {} never ends: {before:?}", if down { "down" } else { "up" });
+                scroll_to(target);
+                let after = bar().top;
+                assert!(if down { after > before.top } else { after < before.top }, "{name}: {before:?} → {target} landed at {after}");
+            }
+            let end = bar();
+            assert!(if down { end.top + end.visible >= end.total } else { end.top == 0.0 }, "{name}: stopped at {end:?}");
+        }
+    }
+
+    #[test]
+    fn unified_pages_past_a_long_insertion_in_aligned_and_independent() {
+        for mode in [ScrollMode::Aligned, ScrollMode::Independent] {
+            let v = std::cell::RefCell::new(View::new(100, 200, &[block(50..50, 50..150)], 10.0));
+            v.borrow_mut().start_in(mode);
+            v.borrow_mut().set_unified(true);
+            page_through(&format!("{mode:?}"), || v.borrow().scrollbar(Side::Right), |top| v.borrow_mut().scroll_to(Side::Right, top));
         }
     }
 

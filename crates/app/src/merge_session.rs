@@ -813,15 +813,20 @@ impl MergeSession {
         view.scrollbar(side)
     }
 
-    /// Scroll so pane `pane`'s scrollbar top is `top`; the other panes follow.
+    /// Scroll so pane `pane`'s scrollbar top is `top`; the other panes follow. Theirs follows the Result line at the
+    /// anchor, so a top inside Theirs lines the Result lacks lands at their start, or just past their end when that
+    /// start is no move down.
     pub fn scroll_to(&mut self, pane: usize, top: f64) {
         match (self.scroll, pane) {
             (ScrollMode::Padded, _) => self.scroll_by((top - f64::from(self.padded_top)) as f32),
             // Theirs follows the Result line at the anchor: lead with that line, as a find hit in Theirs does
             (_, 2) => {
+                let (down, at) = (top > self.scrollbar(2).top, self.views[0].anchor_line_on(Side::Right));
                 self.views[1].scroll_to(Side::Right, top);
                 let mid = self.views[1].anchor_line_on(Side::Left);
-                self.place_mid_at(mid);
+                // Theirs lines the Result lacks map to the Result line at their start: moving down from there, step
+                // just past them
+                self.place_mid_at(if down && mid <= at { at + crate::view::PAST_RUN } else { mid });
             }
             _ => {
                 let (view, side) = self.pane_view(pane);
@@ -1568,6 +1573,20 @@ pub(crate) mod tests {
             }
             s.toggle_scroll();
         }
+    }
+
+    #[test]
+    fn theirs_pages_past_a_long_run_the_result_lacks() {
+        // Ours deletes line 30 where Theirs turns it into 30 lines; taking Ours leaves the Result without them
+        let base: String = (0..60).map(|i| format!("l{i}\n")).collect();
+        let run: String = (0..30).map(|i| format!("T{i}\n")).collect();
+        let (_d, mut s) = state(&base, &base.replace("l30\n", ""), &base.replace("l30\n", &run));
+        let i = s.current.unwrap();
+        s.control(Control::Accept(i, Pick::Ours));
+        assert_eq!((s.mid_range(i).len(), s.m.blocks()[i].right.len()), (0, 30));
+        s.set_viewport_rows(10.0);
+        let s = std::cell::RefCell::new(s);
+        crate::view::tests::page_through("Theirs", || s.borrow().scrollbar(2), |top| s.borrow_mut().scroll_to(2, top));
     }
 
     #[test]
