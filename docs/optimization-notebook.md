@@ -45,6 +45,13 @@ in the same time as the baseline. Its window scroll CPU, re-measured alongside, 
 overlapping ranges, same cadence); the fixture shows only the caret mark, and a profile points at GPUI's bounds tree
 insertions growing (the strip's track is painted before the pane's text), not at marks. That is left open.
 
+**Inconclusive: painting the Lenz Code strip after the pane's text.** The hypothesis above was tested directly: the
+strip's track, thumb and marks moved from before the pane's text to just after it (no text overlaps the strip, so
+nothing else changes), against the same tree without the move, alternately in six pairs of the 10 s window scroll
+probe. Process CPU per 10 s read 7.78 s (7.59–7.89) before and 7.80 s (7.42–8.00) after; the paired differences ran
+from −0.17 to +0.23 s with a median of −0.04 s, and the frame cadence held (210–211 frames, 48.0 ms median interval)
+in both. No gain outside noise, so the paint order was left as it was; the remaining Code scroll cost is unexplained.
+
 **Small absolute slowdowns** (before the fix above). Two-way Diff window find phases on the generated 100k-line comparison rose by about
 2 ms (find typing 12.8→15.0 ms, next match 12.9→15.0 ms, scrolling with find open 15.1→17.1 ms; four pairs), as find
 hits become marks each frame. The terminal's long-line find render went 0.020→0.168 ms and its 100k-line scroll render
