@@ -293,6 +293,14 @@ impl Markers {
     pub fn change(&self, line: usize) -> Option<LineChange> {
         self.published.as_ref()?.blocks.change(line)
     }
+    /// The published changed ranges (draft lines) in document order.
+    pub fn blocks(&self) -> impl Iterator<Item = (std::ops::Range<usize>, LineChange)> + '_ {
+        self.published.iter().flat_map(|p| p.blocks.changed.iter().map(|&(start, end, change)| (start as usize..end as usize, change)))
+    }
+    /// The draft line each published deletion sits above.
+    pub fn deletions(&self) -> impl Iterator<Item = usize> + '_ {
+        self.published.iter().flat_map(|p| p.blocks.deleted.iter().map(|&(at, _)| at as usize))
+    }
     /// How many baseline lines were deleted just above `line`.
     pub fn deleted_above(&self, line: usize) -> u32 {
         self.published.as_ref().map_or(0, |p| p.blocks.deleted_above(line))

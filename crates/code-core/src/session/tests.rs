@@ -28,6 +28,7 @@ mod editor_perf;
 mod annotation_width;
 mod highlight_stability;
 mod csv;
+mod scrollbar;
 mod problems;
 mod project_syntax;
 use crate::tabs::TabId;

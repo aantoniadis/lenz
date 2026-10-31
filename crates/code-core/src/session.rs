@@ -2359,7 +2359,7 @@ impl State {
             PlaceRow { place, label, detail: format!("{}{moved}", m.anchor.trim()), missing: self.missing.contains(&*m.source) }
         };
         let rows: Vec<PlaceRow> = match list {
-            PlaceList::Bookmarks => self.places.bookmarks().iter().map(|m| mark(m, Place::Bookmark(m.source.to_path_buf(), m.line))).collect(),
+            PlaceList::Bookmarks => self.places().bookmarks().iter().map(|m| mark(m, Place::Bookmark(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentLocations => self.places.recent_locations().iter().map(|m| mark(m, Place::Location(m.source.to_path_buf(), m.line))).collect(),
             PlaceList::RecentFiles => {
                 let current = self.active().filter(|t| t.is_file()).map(|t| t.source.clone());
@@ -2692,6 +2692,49 @@ impl State {
 
     /// The adapter's current text viewport, in its own columns and rows.
     pub fn text_size(&self, pane: u8) -> Option<(usize, usize)> { self.text_size.get(pane as usize).copied() }
+
+    /// Pane `pane`'s scrollbar in shown rows and the marks on its track; `None` unless it shows source text with a
+    /// known size (not an image picture, a CSV table or a Markdown preview).
+    pub fn scrollbar(&self, pane: u8) -> Option<(lenz_content::scrollbar::Scrollbar, Vec<lenz_content::scrollbar::Mark>)> {
+        use lenz_content::scrollbar::{Mark, MarkKind, Scrollbar};
+        let tab = self.shown(pane)?;
+        let view = self.view(tab.id)?;
+        let snapshot = view.snapshot();
+        if self.csv(tab.id).is_some() || (snapshot.image().is_some() && !tab.image_source)
+            || matches!(view.rendering(), Some(Rendering::Preview(_) | Rendering::Pending)) { return None; }
+        let rows = self.text_size(pane)?.1;
+        let visible = view.visible();
+        let at = |line: usize, kind, target| Mark { row: visible.rows_between(0, line) as f64, rows: 1.0, kind, target };
+        let mut marks = Vec::new();
+        if let Some(found) = self.diagnostics(tab.id) {
+            for d in &found.items {
+                let kind = match d.severity { crate::semantics::diagnostics::Severity::Error => MarkKind::Error, crate::semantics::diagnostics::Severity::Warning => MarkKind::Warning, _ => continue };
+                let line = snapshot.line_of(d.range.start);
+                marks.push(at(line, kind, line));
+            }
+        }
+        if let Some(find) = tab.find() {
+            for (i, (line, _)) in find.matches().iter().enumerate() {
+                marks.push(at(*line, if find.current() == Some(i) { MarkKind::FindCurrent } else { MarkKind::Find }, *line));
+            }
+        }
+        if let Some(markers) = self.markers(tab.id) {
+            for (range, change) in markers.blocks() {
+                let kind = match change { crate::markers::LineChange::Added => MarkKind::Added, crate::markers::LineChange::Modified => MarkKind::Modified };
+                marks.push(Mark { rows: visible.rows_between(range.start, range.end) as f64, ..at(range.start, kind, range.start) });
+            }
+            for line in markers.deletions() { marks.push(Mark { rows: 0.0, ..at(line, MarkKind::Deleted, line) }); }
+        }
+        for m in self.places().bookmarks().iter().filter(|m| *m.source == *tab.source || tab.canonical.as_deref() == Some(&*m.source)) {
+            marks.push(at(m.line, MarkKind::Bookmark, m.line));
+        }
+        if let Some(selection) = tab.selection() {
+            let line = snapshot.line_of(selection.head);
+            marks.push(at(line, MarkKind::Caret, line));
+        }
+        let bar = Scrollbar { total: (visible.rows_between(0, visible.last()) + 1) as f64, top: visible.rows_between(0, tab.top_line()) as f64, visible: rows as f64 };
+        Some((bar, marks))
+    }
 
     /// The columns `tab`'s lines wrap at: `None` when wrap is off, the width is not known yet, or the tab shows a
     /// large file, an image or a Markdown preview.
