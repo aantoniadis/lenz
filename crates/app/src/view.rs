@@ -13,6 +13,13 @@ pub(crate) fn past_run(x: f32) -> f32 {
     x + x.abs().max(1.0) * f32::EPSILON * 16.0
 }
 
+/// A fresh value per call, process-wide: a View's [`View::layout_stamp`] and a find's identity, so caches keyed on
+/// them never mistake a rebuilt or replaced one for the one they were built from.
+pub(crate) fn next_stamp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Scrollbar mark targets at or above this are find hits (`FIND_TARGET + hit index`); below it, Change Block indices.
 pub const FIND_TARGET: usize = 1 << 31;
 
@@ -155,6 +162,16 @@ impl Seg {
     }
 }
 
+/// The display row of raw line position `raw`, given `after`: how many of `rows` start at or before it.
+fn display_at(rows: &[DRow], after: usize, raw: f32) -> f32 {
+    let i = after.saturating_sub(1);
+    match rows.get(i) {
+        Some(DRow::Line(l)) => i as f32 + (raw - *l as f32).clamp(0.0, 1.0),
+        Some(DRow::Fold { .. } | DRow::Folded { .. }) => i as f32,
+        None => raw,
+    }
+}
+
 fn kind_of(b: &ChangeBlock) -> Kind {
     match (b.left.is_empty(), b.right.is_empty()) {
         (true, _) => Kind::Inserted,
@@ -210,6 +227,8 @@ pub struct View {
     /// One column: each Change Block's left rows, then its right rows.
     unified: bool,
     unified_rows: f32,
+    /// New whenever what [`Self::display_row`] reads changes: the rows, the Scroll Mode or Unified.
+    layout: u64,
 }
 
 #[derive(Clone)]
@@ -245,6 +264,7 @@ impl View {
             right_top: 0.0,
             unified: false,
             unified_rows: 0.0,
+            layout: 0,
         };
         view.tint_lines();
         view.rebuild();
@@ -408,6 +428,7 @@ impl View {
         self.segs = segs;
         self.combined = c as f32;
         self.nav = None;
+        self.layout = next_stamp();
     }
 
     fn rows(&self, side: Side) -> &[DRow] {
@@ -417,12 +438,7 @@ impl View {
     /// Display row position of a raw line position (a hidden line maps to its Collapsed Region).
     fn display_of(&self, side: Side, raw: f32) -> f32 {
         let rows = self.rows(side);
-        let i = rows.partition_point(|r| r.raw_start() as f32 <= raw).saturating_sub(1);
-        match rows.get(i) {
-            Some(DRow::Line(l)) => i as f32 + (raw - *l as f32).clamp(0.0, 1.0),
-            Some(DRow::Fold { .. } | DRow::Folded { .. }) => i as f32,
-            None => raw,
-        }
+        display_at(rows, rows.partition_point(|r| r.raw_start() as f32 <= raw), raw)
     }
 
     /// Raw line position of a display row position.
@@ -532,12 +548,14 @@ impl View {
     /// Use `mode` for a freshly built view, which stays at the top of the file.
     pub fn start_in(&mut self, mode: ScrollMode) {
         self.mode = mode;
+        self.layout = next_stamp();
     }
 
     /// Switch Scroll Mode, keeping the left Side's line at the anchor in place.
     pub fn set_mode(&mut self, mode: ScrollMode) {
         let anchor_line = self.anchor_line();
         self.mode = mode;
+        self.layout = next_stamp();
         self.place_left_at(anchor_line);
     }
 
@@ -909,6 +927,9 @@ impl View {
         (rows, side)
     }
 
+    /// Changes whenever [`Self::display_row`] might map a line elsewhere, never otherwise: a key for cached rows.
+    pub fn layout_stamp(&self) -> u64 { self.layout }
+
     /// `side`'s raw line in [`Self::scrollbar`] rows (a hidden line is its region's or folded block's row).
     pub fn display_row(&self, side: Side, raw_line: u32) -> f64 {
         let d = self.display_of(side, raw_line as f32);
@@ -927,6 +948,24 @@ impl View {
             Some(_) if side == Side::Right => s.u0 + s.ln + k,
             _ => s.u0 + k,
         })
+    }
+
+    /// [`Self::display_row`] of each of `side`'s raw `lines`: one pass over the rows for lines in order (as Change
+    /// Block bounds and find hits are), rather than a search each.
+    pub fn display_rows(&self, side: Side, lines: impl IntoIterator<Item = u32>) -> Vec<f64> {
+        let lines = lines.into_iter();
+        if self.unified || self.mode == ScrollMode::Padded { return lines.map(|line| self.display_row(side, line)).collect(); }
+        let rows = self.rows(side);
+        // rows[..after] start at or before the last line
+        let (mut after, mut last) = (0, 0.0);
+        lines.map(|line| {
+            let raw = line as f32;
+            if raw < last { after = 0; }
+            // a walk from the last line: lines a few rows apart make it faster than galloping or a search
+            while after < rows.len() && rows[after].raw_start() as f32 <= raw { after += 1; }
+            last = raw;
+            f64::from(display_at(rows, after, raw))
+        }).collect()
     }
 
     /// One scrollbar mark per Change Block on `side`, in [`Self::scrollbar`] rows, its target the block index: the
@@ -1046,7 +1085,7 @@ impl View {
     }
 
     /// Show one column (Unified) or the two Sides (Split); the scroll position is shared.
-    pub fn set_unified(&mut self, on: bool) { self.unified = on; }
+    pub fn set_unified(&mut self, on: bool) { self.unified = on; self.layout = next_stamp(); }
     pub fn unified(&self) -> bool { self.unified }
 
     pub fn frame(&self) -> Frame {
@@ -1937,6 +1976,31 @@ pub(crate) mod tests {
     }
 
     const MODES: [ScrollMode; 4] = [ScrollMode::Shared, ScrollMode::Aligned, ScrollMode::Padded, ScrollMode::Independent];
+
+    #[test]
+    fn display_rows_match_display_row_in_one_pass() {
+        let mut v = View::new(200, 230, &[block(10..10, 10..30), block(60..70, 80..85), block(150..151, 165..166)], 10.0);
+        let check = |v: &View, what: &str| {
+            for side in [Side::Left, Side::Right] {
+                let lines: Vec<u32> = (0..=240).chain([5, 199, 0, 120]).collect();
+                let one = lines.iter().map(|&l| v.display_row(side, l)).collect::<Vec<_>>();
+                assert_eq!(v.display_rows(side, lines), one, "{what} {side:?}");
+            }
+        };
+        check(&v, "plain");
+        v.set_collapsed(true);
+        check(&v, "collapsed");
+        v.toggle_fold(1);
+        check(&v, "folded");
+        let stamp = v.layout_stamp();
+        for mode in MODES {
+            v.set_mode(mode);
+            check(&v, &format!("{mode:?}"));
+        }
+        v.set_unified(true);
+        check(&v, "unified");
+        assert_ne!(v.layout_stamp(), stamp, "a new layout gets a new stamp");
+    }
 
     #[test]
     fn scrollbar_rows_follow_collapsed_regions_and_filler_rows() {

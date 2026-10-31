@@ -25,13 +25,15 @@ pub struct Find {
     pub(crate) capped: bool,
     /// Why the query cannot be matched (a bad regular expression); no hits while set.
     pub(crate) error: Option<String>,
+    /// A fresh [`crate::view::next_stamp`] whenever `hits` change: what a cache of their rows keys on.
+    pub(crate) id: u64,
 }
 
 impl Find {
     pub fn new(query: String, options: FindOptions, side: Side, lines: &[String], from: crate::selection::Pos) -> Self {
         let query = Query { text: query, options };
         let (hits, at, capped, error) = match Self::search(lines, &query, from) { Ok((hits, at, capped)) => (hits, at, capped, None), Err(e) => (Vec::new(), None, false, Some(e)) };
-        Self { query: query.text, side, hits, at, capped, error }
+        Self { query: query.text, side, hits, at, capped, error, id: crate::view::next_stamp() }
     }
     pub fn search(lines: &[String], query: &Query, from: crate::selection::Pos) -> Result<(Hits, Option<usize>, bool), String> {
         let matcher = Matcher::new(query).map_err(|e| e.to_string())?;
@@ -51,6 +53,7 @@ impl Find {
     pub fn hits(&self) -> &[(u32, Range<usize>)] { &self.hits }
     pub fn at(&self) -> Option<usize> { self.at }
     pub fn error(&self) -> Option<&str> { self.error.as_deref() }
+    pub fn id(&self) -> u64 { self.id }
 }
 
 /// Every match in `lines`, in order: (line, byte range).

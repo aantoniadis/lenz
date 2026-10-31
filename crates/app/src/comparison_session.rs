@@ -50,6 +50,8 @@ pub struct ComparisonSession {
     pub folders: crate::folders::Folders,
     /// The comparison set has no files (an empty window, a selection without changes): nothing is loading.
     pub(crate) empty: bool,
+    /// The open find's hits in scrollbar rows, kept for that find and the view's layout.
+    hit_rows: crate::scrollbar::Cached<(u64, u64), Vec<f64>>,
 }
 
 impl ComparisonSession {
@@ -57,7 +59,7 @@ impl ComparisonSession {
         Self { current: 0, view, options, collapse: true, press_again: PressAgain::default(), find: None, find_options: Default::default(),
             generation: 0, work_id: Arc::new(()), diffed: 0, refining: false, budget: Budget::default(),
             #[cfg(feature="gui")]
-            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None, folders: Default::default(), empty: false }
+            cache: DiffCache::default(), markdown: None, markdown_revision: 0, markdown_layout: crate::settings::get().view.markdown_layout, presentation_notice: None, positions:HashMap::new(), folds: HashMap::new(), banner: None, folders: Default::default(), empty: false, hit_rows: Default::default() }
     }
     /// The change blocks to refine next: near the viewport in Source; in the Markdown Preview every change, a
     /// batch at a time, since its word outlines show anywhere in the document.
@@ -269,9 +271,10 @@ impl ComparisonSession {
         use crate::scrollbar::{Mark, MarkKind};
         let mut marks = self.view.block_marks(side);
         if let Some(find) = self.find.as_ref().filter(|f| f.side() == side || self.view.unified()) {
-            marks.extend(find.hits().iter().enumerate().map(|(i, (line, _))| {
+            let rows = self.hit_rows.get((find.id(), self.view.layout_stamp()), || self.view.display_rows(find.side(), find.hits().iter().map(|(line, _)| *line)));
+            marks.extend(rows.iter().enumerate().map(|(i, &row)| {
                 let kind = if find.at() == Some(i) { MarkKind::FindCurrent } else { MarkKind::Find };
-                Mark { row: self.view.display_row(find.side(), *line), rows: 1.0, kind, target: crate::view::FIND_TARGET + i }
+                Mark { row, rows: 1.0, kind, target: crate::view::FIND_TARGET + i }
             }));
         }
         marks
