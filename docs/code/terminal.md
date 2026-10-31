@@ -1,6 +1,6 @@
 # Integrated terminal
 
-Lenz Code on Linux includes a terminal panel with multiple sessions. Choose
+Lenz Code on Linux and macOS includes a terminal panel with multiple sessions. Choose
 **View → Terminal → New Terminal**, press **Ctrl+Alt+T**, or use **F10** to find a
 terminal command. The panel uses Alacritty's terminal model and the same shared
 session behavior in the desktop and terminal editors.
@@ -107,9 +107,18 @@ recovery continues to protect source edits.
 
 ## Capability limits
 
-- Terminal process ownership currently requires Linux with pidfd support. The
-  feature is unavailable on other platforms pending lifecycle verification;
-  native macOS support is unverified.
+- Terminal process ownership requires Linux with pidfd support, or macOS. Other
+  platforms do not offer the terminal.
+- **macOS support has never been compiled or run.** It was written on Linux and
+  is first built by the next tagged release (`release.yml`). There, a thread waits
+  for the shell's exit without reaping it (`waitid` with `WNOWAIT`), the session's
+  processes are found with `proc_listallpids` and `getsid`, and the reactor waits
+  with `select(2)` because macOS `poll(2)` does not support devices such as the
+  PTY master. Without pidfds, a session member that exits between its check and
+  its signal leaves a short window in which its PID could be reused. Check first
+  on a Mac: output appears in a new terminal (else the PTY wait is broken), and
+  closing a tab running `sleep 1000 &` leaves no `sleep` behind (else `getsid`
+  is refused across sessions, and `sysctl` `KERN_PROC_SESSION` is the fallback).
 - The adapters render terminal cells with Unicode, ANSI/true color, alternate
   screens, ordinary control/function/cursor keys and supported mouse reporting.
   Graphics protocols, clickable terminal hyperlinks, OSC clipboard access and

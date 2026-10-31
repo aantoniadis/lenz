@@ -1,10 +1,10 @@
 //! Shared terminal sessions, input and immutable visible cell projections.
 mod input;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod model;
 mod worker;
 pub(crate) use input::MAX_PASTE;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) use input::{encode_key, encode_paste, quote_paths};
 pub use worker::Process;
 

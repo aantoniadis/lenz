@@ -1,11 +1,11 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::keymap::KeyPress;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::path::PathBuf;
 
 pub(crate) const MAX_PASTE: usize = 1024 * 1024;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Result<Vec<u8>, String> {
     if text.len() > MAX_PASTE {
         return Err("Paste exceeds the 1 MiB terminal limit; nothing was sent".into());
@@ -30,7 +30,7 @@ pub(crate) fn encode_paste(text: &str, bracketed: bool) -> Result<Vec<u8>, Strin
     Ok(bytes)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn quote_paths(paths: &[PathBuf]) -> Result<String, String> {
     if paths.is_empty() {
         return Err("Choose a file path to paste".into());
@@ -68,7 +68,7 @@ pub(crate) fn quote_paths(paths: &[PathBuf]) -> Result<String, String> {
     Ok(quoted)
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) fn encode_key(
     key: &KeyPress,
     application_cursor: bool,
@@ -247,7 +247,7 @@ pub(crate) fn encode_key(
     Some(bytes)
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod tests {
     use super::*;
 
@@ -334,7 +334,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
 mod keypad_tests {
     use super::*;
     #[test]

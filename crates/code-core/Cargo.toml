@@ -40,12 +40,16 @@ pg_parse = "0.15"
 # Shared bounded display projection; the terminal already uses this locked version.
 unicode-segmentation = "1.13.3"
 
-# Terminal process ownership is Linux-only until other platforms are verified.
-[target.'cfg(target_os = "linux")'.dependencies]
+# Terminal process ownership: Linux, and macOS (unverified there; see docs/code/terminal.md).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 alacritty_terminal = { version = "0.26.0", default-features = false }
 portable-pty = { version = "0.9.0", default-features = false }
 filedescriptor = "0.8.3"
 rustix = { version = "1.1.4", features = ["process", "event", "fs", "pipe"] }
+
+# macOS has no /proc: its process list and process states come from libproc.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.191"
 
 [build-dependencies]
 sha2 = "0.11.1"
