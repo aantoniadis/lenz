@@ -104,7 +104,7 @@ impl Viewer {
     /// Scroll so `target`'s scrollbar top is `top`, through each core's own scroll (the Scroll Mode moves the rest).
     fn bar_scroll_to(&mut self, target: Target, top: f64, window: &Window) {
         match target {
-            Target::Side(side) => self.comparison.view.scroll_to(side, top),
+            Target::Side(side) => self.comparison.scroll_to(side, top),
             Target::Merge(pane) => if let Some(s) = self.merge.as_mut() { s.scroll_to(pane, top) },
             Target::Preview(side) => self.markdown_scroll_to(side, top as f32, window),
         }
@@ -116,7 +116,7 @@ impl Viewer {
             (Target::Merge(_), Some(hit)) => if let Some(s) = self.merge.as_mut() { s.go_to_find_hit(hit) },
             (Target::Merge(_), None) => if let Some(s) = self.merge.as_mut() { s.go_to_block(mark) },
             (_, Some(hit)) => if let Some((side, line, range)) = self.comparison.go_to_find_hit(hit) { self.select_hit(side, line, range) },
-            (_, None) => self.comparison.view.go_to_change(mark),
+            (_, None) => self.comparison.go_to_change(mark),
         }
     }
 

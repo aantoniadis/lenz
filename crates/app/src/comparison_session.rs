@@ -258,6 +258,11 @@ impl ComparisonSession {
         self.folds=std::mem::take(&mut self.folds).into_iter().filter_map(|(i,entry)|crate::changeset::comparison_identity(old,i).and_then(|key|indices.get(&key)).map(|&index|(index,entry))).collect();
     }
     pub fn view(&self) -> &View { &self.view }
+    /// Scroll so `side`'s scrollbar top is `top` (a scrollbar's thumb or track, in both adapters), through
+    /// [`View::scroll_to`]; as any scroll, it disarms "press again for the next file".
+    pub fn scroll_to(&mut self, side: Side, top: f64) { self.press_again.reset(); self.view.scroll_to(side, top); }
+    /// Make Change Block `i` current and show it (a scrollbar mark, in both adapters), disarming "press again".
+    pub fn go_to_change(&mut self, i: usize) { self.press_again.reset(); self.view.go_to_change(i); }
     /// `side`'s scrollbar marks: [`View::block_marks`], then the open find's hits when they are on `side` (Unified
     /// shows both Sides' lines in one pane), targets offset by [`crate::view::FIND_TARGET`].
     pub fn scrollbar_marks(&self, side: Side) -> Vec<crate::scrollbar::Mark> {

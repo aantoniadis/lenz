@@ -270,3 +270,22 @@ fn gui_markdown_preview_scrolls_from_its_scrollbar(cx: &mut TestAppContext) {
         assert!((after - start).abs() > size, "{layout:?}: the preview scrolled: {start} -> {after}");
     }
 }
+
+/// A page from the track disarms "press again for the next file", as any scroll does; the terminal asserts the same
+/// (crates/tui/src/scrollbar.rs `strip_page_disarms_press_again_as_in_the_window`).
+#[gpui::test]
+fn gui_scrollbar_page_disarms_press_again(cx: &mut TestAppContext) {
+    let f = two_way(cx);
+    let s = strip(cx, &f, "right", 0);
+    f.viewer.update(cx, |v, _| {
+        v.comparison.go_to_change(2);
+        assert!(!v.comparison.press_again.at_edge(true) && v.comparison.press_again.at_edge(true), "an edge press arms, the next crosses");
+        v.comparison.press_again.at_edge(true);
+    });
+    let top = top(cx, &f, Side::Right);
+    let (start, size) = painted(cx, &f)[1].1.unwrap();
+    assert!(start + size < s.h - 6.0, "the track's end is below the thumb");
+    press(cx, &f, s.x + s.w / 2.0, s.y + s.h - 1.0);
+    assert!(f.viewer.read_with(cx, |v, _| v.comparison.view.scrollbar(Side::Right).top) > top, "a page down");
+    assert!(f.viewer.update(cx, |v, _| !v.comparison.press_again.at_edge(true)), "the page disarmed it");
+}
