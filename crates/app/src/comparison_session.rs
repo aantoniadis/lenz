@@ -454,6 +454,38 @@ mod tests {
         assert!(s.scrollbar_marks(Side::Right).iter().all(|m| m.target < FIND_TARGET), "hits mark their own Side");
     }
 
+    /// After each change the held find-hit rows equal rows built afresh: every input of the cache is in its key.
+    #[test]
+    fn warm_scrollbar_marks_match_a_fresh_build_after_each_change() {
+        use crate::view::ScrollMode;
+        let left: String = (0..200).map(|i| format!("x {i}\n")).collect();
+        let right = left.replace("x 20\n", "y 20\n").replace("x 150\n", "y 150\n");
+        let doc = TextDocument::new(&left, &right, std::path::Path::new("a.txt"), std::path::Path::new("b.txt"));
+        let view = doc.view(&doc.line_diff(&Options::default()), 40.);
+        let mut s = ComparisonSession::new(view, Options::default());
+        let check = |s: &mut ComparisonSession, what: &str| {
+            let warm = [Side::Left, Side::Right].map(|side| s.scrollbar_marks(side));
+            s.hit_rows = Default::default();
+            let fresh = [Side::Left, Side::Right].map(|side| s.scrollbar_marks(side));
+            assert_eq!(warm, fresh, "{what}");
+            assert!(warm[0].len() > 2, "{what}: hits are marked");
+        };
+        s.search(&doc, "x".into(), Side::Left, Pos::new(0, 0));
+        check(&mut s, "find open");
+        s.view.set_collapsed(true);
+        check(&mut s, "collapsed");
+        s.view.set_collapsed(false);
+        check(&mut s, "expanded");
+        s.view.set_unified(true);
+        check(&mut s, "Unified");
+        s.view.set_unified(false);
+        check(&mut s, "Split");
+        s.view.set_mode(ScrollMode::Padded);
+        check(&mut s, "Padded");
+        s.search(&doc, "x 1".into(), Side::Left, Pos::new(0, 0));
+        check(&mut s, "new query");
+    }
+
     #[test]
     fn the_preview_refines_every_change_not_only_the_visible_ones() {
         let body: String = (0..1000).map(|i| format!("Paragraph {i} words.\n\n")).collect();
