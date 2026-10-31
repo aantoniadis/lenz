@@ -28,6 +28,8 @@ mod sql_dialect;
 mod annotation_width;
 #[path = "input_tests/csv.rs"]
 mod csv;
+#[path = "input_tests/scrollbar.rs"]
+mod scrollbar;
 #[path = "input_tests/problems.rs"]
 mod problems;
 #[path = "input_tests/project_syntax.rs"]

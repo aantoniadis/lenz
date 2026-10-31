@@ -161,6 +161,12 @@ struct Hover {
     top: usize,
     due: Instant,
 }
+/// A scrollbar thumb held by the pointer: its pane and the tab and document shown there (a reused tab may show another
+/// file), the press's offset into the thumb (cells), the row pressed, and whether the pointer has left that row since
+/// (a release that did not is a click).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollbarDrag { pane: u8, shown: (TabId, code_core::text::BufferId), grab: f32, row: u16, moved: bool }
+
 /// Current preview coordinates retain metadata identity as well as text version.
 #[derive(Clone, Debug)]
 pub(crate) struct PreviewSource { key: code_core::text::SnapshotKey, metadata: std::sync::Arc<code_core::document::SourceMeta> }
@@ -226,6 +232,8 @@ pub(crate) struct App {
     pub(crate) split_drag: Option<u32>,
     /// The results panel's share of the height while its heading is dragged.
     pub(crate) results_drag: Option<u32>,
+    /// The scrollbar thumb being dragged, fenced to the tab its pane showed.
+    pub(crate) scrollbar_drag: Option<ScrollbarDrag>,
     /// The dragged size when the button went down: a click that does not move it remembers nothing.
     divider_from: u32,
     /// The last text click (when, where) and how many came in a row there: two take the word, three its group.
@@ -282,6 +290,7 @@ impl App {
             pointer_text: false,
             split_drag: None,
             results_drag: None,
+            scrollbar_drag: None,
             divider_from: 0,
             clicks: None,
             tree_click: None,
@@ -2947,7 +2956,7 @@ impl App {
             }
         }
         // A dialog opened mid-drag ends it, keeping the size from before.
-        if self.modal.is_some() { self.explorer_drag = None; self.split_drag = None; self.results_drag = None; }
+        if self.modal.is_some() { self.explorer_drag = None; self.split_drag = None; self.results_drag = None; self.scrollbar_drag = None; }
         // The results heading drags the panel's share of the height.
         if self.results_drag.is_some() {
             let main = self.layout.reading.union(self.layout.results);
@@ -2985,6 +2994,17 @@ impl App {
                 _ => self.split_drag = None,
             }
         }
+        // A held scrollbar thumb follows the pointer, until its pane shows another tab or file.
+        if let Some(held) = self.scrollbar_drag
+            && matches!(event.kind, MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Up(MouseButton::Left))
+        {
+            let current = self.shown_buffer(held.pane) == Some(held.shown);
+            let up = event.kind == MouseEventKind::Up(MouseButton::Left);
+            self.scrollbar_drag = (current && !up).then_some(ScrollbarDrag { moved: held.moved || y != held.row, ..held });
+            if current { self.scrollbar_moved(held, y, up); }
+            return;
+        }
+        self.scrollbar_drag = None;
         if self.modal.is_none() && event.kind == MouseEventKind::Down(MouseButton::Left) && !self.layout.tree.is_empty()
             && x + 1 == self.layout.tree.right() && y >= self.layout.tree.y && y < self.layout.tree.bottom()
         {
@@ -3289,6 +3309,13 @@ impl App {
             self.run(id);
             return;
         }
+        if self.modal.is_none() && event.kind == MouseEventKind::Down(MouseButton::Left)
+            && let Some(pane) = self.layout.panes.iter().find(|g| g.strip.contains(point)).map(|g| g.pane)
+        {
+            self.drag = None;
+            self.scrollbar_press(pane, y);
+            return;
+        }
         if matches!(event.kind, MouseEventKind::Up(MouseButton::Left)) {
             self.drag = None;
             return;
@@ -3532,7 +3559,7 @@ impl App {
                     .layout
                     .panes
                     .iter()
-                    .find(|p| p.text.contains(point))
+                    .find(|p| p.text.contains(point) || p.strip.contains(point))
                     .map(|p| p.pane)
                 {
                     self.dispatch(Command::FocusPane(pane));
@@ -3552,6 +3579,66 @@ impl App {
             }
         }
         self.clamp();
+    }
+
+    /// A press on pane `pane`'s scrollbar at row `y`, the pane focused first (as the wheel does): the thumb is
+    /// grabbed, a mark goes to its line (Back returns), the track pages toward the press.
+    fn scrollbar_press(&mut self, pane: u8, y: u16) {
+        use lenz_content::scrollbar::{hit, place, Hit};
+        if pane != self.session.state().focused_pane() { self.dispatch(Command::FocusPane(pane)); }
+        let Some(g) = self.layout.panes.iter().find(|g| g.pane == pane) else { return };
+        let Some((bar, marks)) = g.scrollbar(self) else { return };
+        let (at, len) = (f32::from(y - g.strip.y) + 0.5, f32::from(g.strip.height));
+        let placed = place(&marks, bar.total, usize::from(g.strip.height));
+        match hit(&bar, &placed, &marks, at, len, 1.0) {
+            Hit::Thumb => {
+                let Some(shown) = self.shown_buffer(pane) else { return };
+                let grab = at - bar.thumb(len, 1.0).map_or(0.0, |t| t.0);
+                self.scrollbar_drag = Some(ScrollbarDrag { pane, shown, grab, row: y, moved: false });
+            }
+            Hit::Mark(i) => self.go_to_mark(marks[i].target),
+            Hit::Above => self.scrollbar_to(pane, bar.page(false)),
+            Hit::Below => self.scrollbar_to(pane, bar.page(true)),
+        }
+    }
+
+    /// The held thumb at pointer row `y`: once moved off its row it scrolls proportionally; released where it was
+    /// pressed, it is a click on the mark under it, if any.
+    fn scrollbar_moved(&mut self, held: ScrollbarDrag, y: u16, up: bool) {
+        let Some(g) = self.layout.panes.iter().find(|g| g.pane == held.pane) else { return };
+        let Some((bar, marks)) = g.scrollbar(self) else { return };
+        let (at, len) = (f32::from(y) - f32::from(g.strip.y) + 0.5, f32::from(g.strip.height));
+        if up && !held.moved && y == held.row {
+            let placed = lenz_content::scrollbar::place(&marks, bar.total, usize::from(g.strip.height));
+            if let Some(i) = lenz_content::scrollbar::mark_at(&placed, &marks, at, len) { self.go_to_mark(marks[i].target); }
+        } else if !up && (held.moved || y != held.row) {
+            self.scrollbar_to(held.pane, bar.top_at(at - held.grab, len, 1.0));
+        }
+    }
+
+    /// Scroll pane `pane` so its scrollbar top is `top`: a table's row, a preview's layout row, else a shown line.
+    fn scrollbar_to(&mut self, pane: u8, top: f64) {
+        let state = self.session.state();
+        let Some(tab) = state.shown(pane) else { return };
+        let row = top.round().max(0.0) as usize;
+        if let Some(table) = state.csv(tab.id()) {
+            let rows = row as isize - table.top as isize;
+            return self.dispatch(Command::Csv(code_core::csv::Command::Scroll { rows, columns: 0 }));
+        }
+        // The focused preview takes an absolute scroll in its own rows.
+        if self.layout.panes.iter().any(|g| g.pane == pane && g.preview) { return self.dispatch(Command::Scroll(row)); }
+        let Some(line) = state.view(tab.id()).map(|view| view.visible().line_at_row(row)) else { return };
+        self.dispatch(Command::Scroll(line));
+    }
+
+    fn shown_buffer(&self, pane: u8) -> Option<(TabId, code_core::text::BufferId)> {
+        let state = self.session.state();
+        let tab = state.shown(pane)?.id();
+        Some((tab, state.view(tab)?.snapshot().key().buffer))
+    }
+
+    fn go_to_mark(&mut self, line: usize) {
+        self.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: u32::try_from(line + 1).unwrap_or(u32::MAX), column: None }));
     }
 
     fn context_menu(&mut self, x: u16, y: u16) {
