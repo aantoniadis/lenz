@@ -86,7 +86,7 @@ fn a_file_outside_git_marks_changed_lines_against_its_last_saved_version() {
 }
 
 /// Settles markers while ticking the repository, so HEAD and status changes are noticed as they are in use.
-fn settle_repo(s: &mut Session, done: impl Fn(&Session) -> bool) {
+pub(super) fn settle_repo(s: &mut Session, done: impl Fn(&Session) -> bool) {
     let until = std::time::Instant::now() + Duration::from_secs(10);
     while !done(s) {
         assert!(std::time::Instant::now() < until, "repository markers did not settle");
