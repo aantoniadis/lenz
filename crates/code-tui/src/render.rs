@@ -6,7 +6,7 @@ mod details;
 use crate::app::{App, Focus, Prompt};
 use lenz_content::find::FindOption;
 use lenz_content::icons::Icon;
-use lenz_content::{markdown::BlockKind, theme::Palette};
+use lenz_content::{markdown::BlockKind, scrollbar::Scrollbar, theme::Palette};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -93,6 +93,8 @@ pub(crate) struct PaneGeometry {
     /// The start screen's rows, by their index in the core's start items.
     pub start: Vec<(usize, Rect)>,
     pub text: Rect,
+    /// The scrollbar: one column right of the text, as tall as it (empty: none).
+    pub strip: Rect,
     /// Where the gutter starts, and the blame column's width there (0: none).
     pub gutter_x: u16,
     pub ann: u16,
@@ -102,6 +104,22 @@ pub(crate) struct PaneGeometry {
 }
 
 impl PaneGeometry {
+    /// The pane's scrollbar: the core's over shown lines, with its marks; a Markdown preview's (layout rows) or a CSV
+    /// table's (rows) measured here, without marks. `None` without a strip or anything to measure.
+    pub(crate) fn scrollbar(&self, app: &App) -> Option<(Scrollbar, Vec<lenz_content::scrollbar::Mark>)> {
+        if self.strip.is_empty() { return None; }
+        let state = app.session.state();
+        if let Some(bar) = state.scrollbar(self.pane) { return Some(bar); }
+        let tab = state.shown(self.pane)?;
+        if let Some(table) = state.csv(tab.id()) {
+            return Some((Scrollbar { total: table.row_count() as f64, top: table.top as f64, visible: table.rows.max(1) as f64 }, Vec::new()));
+        }
+        let view = state.view(tab.id()).filter(|_| self.preview)?;
+        // As the wheel reads it: the remembered top of this version, else the drawn one.
+        let top = app.preview_scroll.get(&tab.id()).filter(|(source, _)| source.matches(&view)).map_or(self.preview_top, |(_, top)| *top);
+        Some((Scrollbar { total: self.preview_total as f64, top: top as f64, visible: f64::from(self.text.height.max(1)) }, Vec::new()))
+    }
+
     pub(crate) fn source_view<'a>(&self, app: &'a App) -> Option<View<'a>> {
         let state = app.session.state();
         let tab = state.shown(self.pane)?;
@@ -626,9 +644,9 @@ impl App {
                 let area = text_area(self.session.state(), pane as u8, rect);
                 self.session.dispatch(Command::Csv(code_core::csv::Command::Size { rows: area.height.saturating_sub(2) as usize, columns: usize::from(area.width / 18).max(1) }));
             }
-            geometry
-                .panes
-                .push(draw_pane(frame, self, pane as u8, rect, p));
+            let pane = draw_pane(frame, self, pane as u8, rect, p);
+            draw_scrollbar(frame.buffer_mut(), self, &pane, p);
+            geometry.panes.push(pane);
         }
         for pane in &geometry.panes {
             geometry.controls.extend(pane.controls.iter().copied());
@@ -1901,20 +1919,29 @@ fn marker_cells(state: &State, pane: u8) -> u16 {
     if text { MARKER_CELLS } else { 0 }
 }
 
+/// Pane `pane`'s text within `area`: right of the gutter and left of the scrollbar column, which a pane showing text, a
+/// preview or a table has unless its text would be narrower than 12 columns (the strip goes before the text does).
 fn text_area(state: &State, pane: u8, area: Rect) -> Rect {
     let bars = 1 + u16::from(state.breadcrumbs());
-    let gutter = state
-        .shown(pane)
-        .and_then(|t| state.view(t.id()))
-        .map_or(3 + MARKER_CELLS, |view| number_cells(view.line_count()) + 3 + marker_cells(state, pane))
+    let view = state.shown(pane).and_then(|t| Some((t, state.view(t.id())?)));
+    let gutter = view
+        .as_ref()
+        .map_or(3 + MARKER_CELLS, |(_, view)| number_cells(view.line_count()) + 3 + marker_cells(state, pane))
         .saturating_add(annotation_cells(state, pane, area.width))
         .min(area.width);
+    let scrolls = view.is_some_and(|(tab, view)| view.snapshot().image().is_none() || tab.image_source());
+    let strip = u16::from(scrolls && area.width - gutter > 12);
     Rect::new(
         area.x + gutter,
         area.y + bars.min(area.height),
-        area.width.saturating_sub(gutter),
+        area.width - gutter - strip,
         area.height.saturating_sub(bars),
     )
+}
+
+/// The scrollbar column beside a pane's text: empty when the pane has none.
+fn strip_area(text: Rect, area: Rect) -> Rect {
+    Rect::new(text.right(), text.y, area.right().saturating_sub(text.right()).min(1), text.height)
 }
 
 /// Nothing open: the start screen's commands, then each group of recents under its heading, each a click target.
@@ -1945,6 +1972,35 @@ fn draw_start(frame: &mut ratatui::Frame, app: &App, items: &[StartItem], geomet
     }
 }
 
+/// Whether track cell `cell` lies on `thumb`, as [`lenz_content::scrollbar::hit`] decides for a press at its centre.
+pub(crate) fn on_thumb(thumb: Option<(f32, f32)>, cell: u16) -> bool {
+    thumb.is_some_and(|(start, size)| (start..=start + size).contains(&(f32::from(cell) + 0.5)))
+}
+
+/// A pane's scrollbar column: the track `│`, the thumb's cells in its colour, and each marked cell `━` in its mark's
+/// colour (the caret a thin `─`). Bounded by the marks the core holds and the column's cells.
+fn draw_scrollbar(buf: &mut Buffer, app: &App, g: &PaneGeometry, p: &Palette) {
+    use code_core::markers::{scrollbar_mark_color, scrollbar_thumb_color};
+    use lenz_content::scrollbar::MarkKind;
+    let strip = g.strip;
+    if strip.is_empty() { return; }
+    let (thumb, placed, marks) = g.scrollbar(app).map_or_else(Default::default, |(bar, marks)| {
+        let placed = lenz_content::scrollbar::place(&marks, bar.total, usize::from(strip.height));
+        (bar.thumb(f32::from(strip.height), 1.0), placed, marks)
+    });
+    let (thumb_bg, track) = (scrollbar_thumb_color(p), lenz_content::theme::mix(p.gutter_bg, p.border, 0.5));
+    for cell in 0..strip.height {
+        let on = on_thumb(thumb, cell);
+        let (symbol, fg) = match placed.get(usize::from(cell)).copied().flatten().map(|i| marks[i].kind) {
+            Some(MarkKind::Caret) => ("─", scrollbar_mark_color(MarkKind::Caret, p)),
+            Some(kind) => ("━", scrollbar_mark_color(kind, p)),
+            None if on => (" ", thumb_bg),
+            None => ("│", track),
+        };
+        buf[(strip.x, strip.y + cell)].set_symbol(symbol).set_style(style(fg, if on { thumb_bg } else { p.gutter_bg }));
+    }
+}
+
 fn draw_pane(
     frame: &mut ratatui::Frame,
     app: &App,
@@ -1964,9 +2020,11 @@ fn draw_pane(
         .panes
         .get(pane as usize)
         .and_then(|pane| pane.markdown.clone());
+    let text = text_area(state, pane, area);
     let mut geometry = PaneGeometry {
         pane,
-        text: text_area(state, pane, area),
+        text,
+        strip: strip_area(text, area),
         gutter_x: area.x,
         ann: annotation_cells(state, pane, area.width),
         ..Default::default()

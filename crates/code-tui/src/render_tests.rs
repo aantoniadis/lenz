@@ -1281,7 +1281,9 @@ fn markdown_lists_show_each_marker_once_and_keep_tight_items_together() {
     app.dispatch(Command::ToggleMarkdownSource);
     settle(&mut app, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
     let buffer = draw(&mut app, 50, 20);
-    let rows: Vec<String> = (0..20).map(|y| (0..50).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()).collect();
+    // Left of the scrollbar column.
+    let right = app.layout.panes[0].strip.x;
+    let rows: Vec<String> = (0..20).map(|y| (0..right).map(|x| buffer[(x, y)].symbol()).collect::<String>().trim_end().to_owned()).collect();
     let shown = |s: &str| rows.iter().position(|r| r.ends_with(s)).unwrap_or_else(|| panic!("{s:?} not in {rows:#?}"));
     for (row, marker) in [("a", "•"), ("one", "1."), ("task", "☐"), ("done", "☑")] {
         let r = &rows[shown(row)];
@@ -1289,4 +1291,75 @@ fn markdown_lists_show_each_marker_once_and_keep_tight_items_together() {
         assert!(!r.contains("[ ]") && !r.contains("[x]"), "{r:?}");
     }
     assert_eq!(shown("b"), shown("a") + 1, "tight items are not separated by a blank row");
+}
+
+/// Track cells whose centre lies on the thumb: what the strip paints and what a press hits.
+fn thumb_cells(bar: &lenz_content::scrollbar::Scrollbar, cells: u16) -> Vec<u16> {
+    let Some((start, size)) = bar.thumb(f32::from(cells), 1.0) else { return Vec::new() };
+    (0..cells).filter(|&c| (start..=start + size).contains(&(f32::from(c) + 0.5))).collect()
+}
+
+#[test]
+fn scrollbar_column_shows_thumb_and_marks() {
+    use code_core::markers::{scrollbar_mark_color, scrollbar_thumb_color};
+    use lenz_content::scrollbar::{place, MarkKind};
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    let source: String = (0..300).map(|n| if n == 200 { "    let = ;\n".to_owned() } else { format!("// {n}\n") }).collect();
+    open(&mut a, dir.path(), "long.rs", source.as_bytes());
+    let tab = a.session.state().active().unwrap().id();
+    draw(&mut a, 80, 20);
+    settle(&mut a, |a| a.session.state().diagnostics(tab).is_some_and(|d| !d.items.is_empty()));
+    let buffer = draw(&mut a, 80, 20);
+    let (strip, text) = (a.layout.panes[0].strip, a.layout.panes[0].text);
+    assert_eq!((strip.x, strip.y, strip.width, strip.height), (79, text.y, 1, text.height), "the pane's last column, beside its text");
+    let p = a.session.state().palette().clone();
+    let (bar, marks) = a.session.state().scrollbar(0).unwrap();
+    let placed = place(&marks, bar.total, usize::from(strip.height));
+    let thumb = thumb_cells(&bar, strip.height);
+    assert!(!thumb.is_empty() && thumb[0] == 0, "{thumb:?}");
+    for &c in &thumb { assert_eq!(buffer[(strip.x, strip.y + c)].bg, color(scrollbar_thumb_color(&p)), "thumb cell {c}"); }
+    let error = placed.iter().position(|i| i.is_some_and(|i| marks[i].kind == MarkKind::Error)).expect("an error mark") as u16;
+    let cell = &buffer[(strip.x, strip.y + error)];
+    assert_eq!((cell.symbol(), cell.fg, cell.bg), ("━", color(scrollbar_mark_color(MarkKind::Error, &p)), color(p.gutter_bg)));
+    let plain = (0..strip.height).find(|&c| placed[usize::from(c)].is_none() && !thumb.contains(&c)).unwrap();
+    let cell = &buffer[(strip.x, strip.y + plain)];
+    assert_eq!((cell.symbol(), cell.bg), ("│", color(p.gutter_bg)), "the track");
+}
+
+#[test]
+fn tiny_terminal_drops_the_strip_before_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    open(&mut a, dir.path(), "tiny.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+    for w in 1..=40 {
+        for h in 1..=6 {
+            draw(&mut a, w, h);
+            let g = &a.layout.panes[0];
+            assert!(g.strip.is_empty() || g.text.width >= 12, "{w}x{h}: {:?} {:?}", g.text, g.strip);
+            assert!(g.strip.is_empty() || g.strip.x == g.text.right(), "{w}x{h}");
+        }
+    }
+    draw(&mut a, 12, 4);
+    assert!(a.layout.panes[0].strip.is_empty(), "{:?}", a.layout.panes[0].strip);
+    // 12x4 has no text row under the bars; two more rows show the text, still without a strip.
+    let buffer = draw(&mut a, 12, 6);
+    let g = &a.layout.panes[0];
+    assert!(g.strip.is_empty() && g.text.width > 0 && g.text.height > 0, "{:?} {:?}", g.text, g.strip);
+    assert!(text(&buffer).contains("ab"), "the text is still drawn: {:?}", text(&buffer));
+}
+
+#[test]
+fn scrollbar_strip_does_not_cover_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = app(dir.path(), true);
+    open(&mut a, dir.path(), "a.txt", "line\n".repeat(100).as_bytes());
+    draw(&mut a, 80, 20);
+    a.dispatch(Command::Split(code_core::session::Split::Columns));
+    draw(&mut a, 80, 20);
+    for g in &a.layout.panes {
+        assert_eq!(a.session.state().text_size(g.pane).map(|s| s.0), Some(usize::from(g.text.width)), "pane {}", g.pane);
+        assert!(g.strip.width == 1 && g.strip.x == g.text.right() && !g.text.intersects(g.strip), "pane {}: {:?} {:?}", g.pane, g.text, g.strip);
+    }
+    assert_eq!(a.layout.panes[0].strip.x + 1, a.layout.divider.x, "the first pane's strip sits left of the divider");
 }

@@ -98,7 +98,9 @@ impl App {
     }
     pub(super) fn csv_mouse(&mut self, event: MouseEvent) -> bool {
         let point = Position::new(event.column, event.row);
-        let Some((pane, geometry)) = self.layout.panes.iter().find_map(|pane| pane.csv.as_ref().filter(|csv| csv.area.contains(point)).map(|csv| (pane.pane, csv))) else { return false };
+        // The wheel over the table's scrollbar scrolls it as over its cells.
+        let wheel = matches!(event.kind, MouseEventKind::ScrollDown | MouseEventKind::ScrollUp | MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight);
+        let Some((pane, geometry)) = self.layout.panes.iter().find_map(|pane| pane.csv.as_ref().filter(|csv| csv.area.contains(point) || (wheel && pane.strip.contains(point))).map(|csv| (pane.pane, csv))) else { return false };
         let current = self.session.state().shown(pane).is_some_and(|tab| tab.id() == geometry.tab)
             && self.session.state().view(geometry.tab).is_some_and(|view| view.snapshot().key() == geometry.key && Arc::ptr_eq(view.snapshot().source_meta(), &geometry.metadata))
             && self.session.state().csv(geometry.tab).is_some_and(|table| table.revision() == geometry.revision && !table.pending && table.top == geometry.top && table.left == geometry.left && table.rows == geometry.rows && table.columns == geometry.columns);
