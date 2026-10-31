@@ -13,6 +13,7 @@ use gpui::{
 use gpui::InteractiveElement;
 use lenz_content::find::FindOption;
 use lenz_content::scrollbar::{self, Hit, Mark, MarkKind, Scrollbar};
+use code_core::markers::{match_colors, scrollbar_mark_color, scrollbar_thumb_color};
 use lenz_content::{display, theme::{ThemeCommand, ThemeSelection}};
 use lenz_gpui::{Metrics, TextRow};
 use code_core::{
@@ -6317,11 +6318,11 @@ impl Render for ReaderView {
                                 // The scrollbar: its track, the thumb, and over both each marked cell (the caret a 1 px line).
                                 let (sx, sy, sw, sh) = (x0 + f32::from(g.bar_strip.origin.x), y0 + f32::from(g.bar_strip.origin.y), f32::from(g.bar_strip.size.width), f32::from(g.bar_strip.size.height));
                                 lenz_gpui::fill(window, sx, sy, sw, sh, palette.gutter_bg);
-                                if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, thumb_color(&palette)); }
+                                if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, scrollbar_thumb_color(&palette)); }
                                 let cell_h = sh / track_cells(sh).max(1) as f32;
                                 for &(cell, kind) in &f.scrollbar.1 {
                                     let (y, h) = if kind == MarkKind::Caret { (sy + cell as f32 * cell_h + 1.0, 1.0) } else { (sy + cell as f32 * cell_h, 3.0) };
-                                    lenz_gpui::fill(window, sx + 1.0, y, sw - 2.0, h, mark_color(kind, &palette));
+                                    lenz_gpui::fill(window, sx + 1.0, y, sw - 2.0, h, scrollbar_mark_color(kind, &palette));
                                 }
                             }
                             window.with_content_mask(Some(gpui::ContentMask { bounds: text }), |window| {
@@ -6778,26 +6779,6 @@ fn display_number(number: u32, relative_caret: Option<usize>) -> u32 {
         .map_or(number, |caret| number.abs_diff(caret.saturating_add(1).min(u32::MAX as usize) as u32))
 }
 
-/// A scrollbar's thumb: a border tone a little toward the track, so marks over it keep their contrast.
-fn thumb_color(p: &lenz_content::theme::Palette) -> u32 {
-    lenz_content::theme::mix(p.gutter_bg, p.border, 0.8)
-}
-
-/// A scrollbar mark's colour: its kind's colour elsewhere (problems, change marks, bookmarks); find matches the text's
-/// match background, lifted toward its text colour (the current one more); the caret's dim.
-fn mark_color(kind: MarkKind, p: &lenz_content::theme::Palette) -> u32 {
-    match kind {
-        MarkKind::Error | MarkKind::Conflict => p.error,
-        MarkKind::Warning | MarkKind::Current | MarkKind::Bookmark => p.accent,
-        MarkKind::FindCurrent => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.45) }
-        MarkKind::Find => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.2) }
-        MarkKind::Added => code_core::markers::LineChange::Added.color(p),
-        MarkKind::Modified => code_core::markers::LineChange::Modified.color(p),
-        MarkKind::Deleted => code_core::markers::deleted_color(p),
-        MarkKind::Caret => p.dim,
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn paint_source_row(window: &mut Window, cx: &mut App, metrics: Metrics<'_>, palette: &lenz_content::theme::Palette, bounds: Bounds<Pixels>, x: f32, width: f32, scroll: f32, row: &TextRow, relative_caret: Option<usize>, parts: &[(std::ops::Range<usize>, f32)]) {
     for (i, (part, origin)) in parts.iter().enumerate() {
@@ -6950,14 +6931,6 @@ pub struct ResultRow {
     pub node: Option<(icons::Icon, bool)>,
     /// The result it shows.
     pub hit: Option<usize>,
-}
-
-/// A match's background and text: stronger than the theme's find colour, so it stands out over syntax colours.
-fn match_colors(p: &lenz_content::theme::Palette) -> (u32, u32) {
-    let bg = lenz_content::theme::mix(p.found_bg, p.accent, 0.45);
-    // Black or white, whichever contrasts more (WCAG ratio: (L1 + 0.05) / (L2 + 0.05)).
-    let l = lenz_content::theme::luminance(bg);
-    (bg, if (l + 0.05) / 0.05 >= 1.05 / (l + 0.05) { 0x000000 } else { 0xFFFFFF })
 }
 
 fn metrics(font: &Font) -> Metrics<'_> {
