@@ -1,7 +1,7 @@
 //! Lenz Code's headless core: immutable versioned documents, the reloadable-content cache and the
 //! session that owns every semantic state transition. Free of GPUI; adapters translate input into commands
 //! and present the state snapshot.
-#![deny(unsafe_code)]
+#![deny(unsafe_code)] // audited FFI only: the macOS terminal's `os` module in `terminal/worker.rs`
 
 pub mod actions;
 mod analysis;

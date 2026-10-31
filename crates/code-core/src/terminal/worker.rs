@@ -890,11 +890,12 @@ mod unix {
         }
     }
 
-    /// macOS has neither pidfds nor /proc. Never compiled or run on macOS yet: see docs/code/terminal.md.
+    /// macOS has neither pidfds nor /proc. Built by CI on macOS, never run there yet: see docs/code/terminal.md.
     #[cfg(target_os = "macos")]
+    #[allow(unsafe_code)] // libproc and select(2), which rustix does not wrap; see the SAFETY comments
     mod os {
         use super::{FileDescriptor, Ready};
-        use rustix::process::{Pid, Signal, getsid, kill_process};
+        use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, getsid, kill_process, waitid};
         use std::{
             io::{self, Write},
             os::{fd::AsRawFd, unix::net::UnixStream},
@@ -923,19 +924,11 @@ mod unix {
                 fd.set_nonblocking(true).map_err(|e| e.to_string())?;
                 let done = Arc::new(AtomicBool::new(false));
                 let flag = done.clone();
-                let raw = pid.as_raw_pid();
                 std::thread::Builder::new()
                     .name("terminal-exit".into())
                     .spawn(move || {
-                        loop {
-                            // SAFETY: an all-zero siginfo_t is a valid value of this plain C struct.
-                            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-                            // SAFETY: `info` is a writable siginfo_t; WNOWAIT leaves the child for its owner to reap.
-                            let result = unsafe { libc::waitid(libc::P_PID, raw as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
-                            if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
-                                break;
-                            }
-                        }
+                        // NOWAIT leaves the exited child for its owner to reap.
+                        while let Err(rustix::io::Errno::INTR) = waitid(WaitId::Pid(pid), WaitIdOptions::EXITED | WaitIdOptions::NOWAIT) {}
                         // A failed wait reports an exit too: a shell shown as ended beats a reactor that never wakes.
                         flag.store(true, Ordering::Release);
                         let _ = notify.write(&[1]);
