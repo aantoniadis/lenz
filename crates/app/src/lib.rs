@@ -17,6 +17,7 @@ pub mod find;
 /// Go-to-line input, from the shared content crate.
 pub use lenz_content::goto;
 pub use lenz_content::double_shift;
+pub use lenz_content::scrollbar;
 pub use lenz_content::branches;
 pub mod folders;
 pub mod git;
