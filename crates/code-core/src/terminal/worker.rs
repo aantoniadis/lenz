@@ -802,9 +802,9 @@ mod unix {
 
         /// /proc for the session's members, and one pidfd slot reserved (an unsupported kernel refused) before a
         /// shell starts.
-        pub(super) fn preflight() -> Result<OwnedFd, String> {
+        pub(super) fn preflight() -> Result<Option<OwnedFd>, String> {
             fs::read_dir("/proc").map_err(|error| format!("The terminal needs Linux /proc for owned process cleanup: {error}"))?;
-            pidfd_open(getpid(), PidfdFlags::empty()).map_err(|error| format!("Linux pidfd support is required for terminal ownership: {error}"))
+            pidfd_open(getpid(), PidfdFlags::empty()).map(Some).map_err(|error| format!("Linux pidfd support is required for terminal ownership: {error}"))
         }
 
         /// The shell's pidfd: readable once it exits, and a signal target that cannot reach a recycled PID.
@@ -905,8 +905,9 @@ mod unix {
         /// `sys/proc.h`'s zombie state, as `proc_bsdinfo::pbi_status` reports it.
         const SZOMB: u32 = 5;
 
-        pub(super) fn preflight() -> Result<(), String> {
-            Ok(())
+        /// Nothing to reserve: no descriptor stands for the shell here.
+        pub(super) fn preflight() -> Result<Option<std::os::fd::OwnedFd>, String> {
+            Ok(None)
         }
 
         /// The shell's exit. A thread waits for it without reaping (`WNOWAIT`), so the unreaped leader keeps its PID
@@ -927,8 +928,9 @@ mod unix {
                     .name("terminal-exit".into())
                     .spawn(move || {
                         loop {
-                            // SAFETY: `info` is a writable siginfo_t; WNOWAIT leaves the child for its owner to reap.
+                            // SAFETY: an all-zero siginfo_t is a valid value of this plain C struct.
                             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                            // SAFETY: `info` is a writable siginfo_t; WNOWAIT leaves the child for its owner to reap.
                             let result = unsafe { libc::waitid(libc::P_PID, raw as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
                             if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
                                 break;
@@ -975,8 +977,9 @@ mod unix {
         /// Whether the process exists and is not a zombie.
         fn alive(pid: Pid) -> bool {
             let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
-            // SAFETY: a zeroed proc_bsdinfo is valid, and `size` is its size in bytes.
+            // SAFETY: an all-zero proc_bsdinfo is a valid value of this plain C struct.
             let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            // SAFETY: `info` is writable and `size` is its size in bytes.
             let read = unsafe { libc::proc_pidinfo(pid.as_raw_pid(), libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
             read == size && info.pbi_status != SZOMB
         }
@@ -988,8 +991,8 @@ mod unix {
                 return Vec::new();
             }
             // Room for processes started since the count.
-            let mut pids = vec![0 as libc::pid_t; count as usize + 64];
-            let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+            let mut pids: Vec<libc::pid_t> = vec![0; count as usize + 64];
+            let bytes = std::mem::size_of_val(pids.as_slice()) as libc::c_int;
             // SAFETY: the buffer holds `pids.len()` PIDs and its size is given in bytes.
             let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
             pids.truncate(count.max(0) as usize);
@@ -1003,7 +1006,7 @@ mod unix {
         /// poll(2) on macOS does not support devices, and the PTY master is one; select(2) does.
         pub(super) fn wait(wake: &UnixStream, pty: Option<(&FileDescriptor, bool)>, exit: Option<&Exit>, timeout: Option<Duration>) -> io::Result<Ready> {
             let fds = [Some(wake.as_raw_fd()), pty.map(|(fd, _)| fd.as_raw_fd()), exit.map(|exit| exit.fd.as_raw_fd())];
-            if fds.iter().flatten().any(|&fd| fd < 0 || fd as usize >= libc::FD_SETSIZE as usize) {
+            if fds.iter().flatten().any(|&fd| fd < 0 || fd as usize >= libc::FD_SETSIZE) {
                 return Err(io::Error::other("A terminal descriptor is beyond select's limit"));
             }
             let mut timeval = timeout.map(|d| libc::timeval { tv_sec: d.as_secs() as _, tv_usec: d.subsec_micros() as _ });
