@@ -13,9 +13,21 @@ pub enum CatalogAction {
     Interface(InterfaceAction),
 }
 
+/// A panel the keys and menus resize; the step is the adapter's (cells or pixels), the result a shared
+/// [`crate::session::Command::SetLayout`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Panel {
+    Explorer,
+    Results,
+    /// The first (left or top) of the split file panes.
+    FirstPane,
+}
+
 /// Interface requests whose inputs and layout belong to the frontend.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InterfaceAction {
+    /// Grow or shrink a panel by one step, within the limits dragging its edge keeps.
+    Resize { panel: Panel, grow: bool },
     RenameTerminal(crate::terminal::Id),
     PasteTerminalPath,
     SearchEverywhere,
@@ -379,6 +391,9 @@ impl Session {
             CommandId::SplitRight => Command::Split(Split::Columns),
             CommandId::SplitDown => Command::Split(Split::Rows),
             CommandId::Unsplit => Command::Unsplit,
+            CommandId::WidenExplorer | CommandId::NarrowExplorer => return CatalogAction::Interface(InterfaceAction::Resize { panel: Panel::Explorer, grow: id == CommandId::WidenExplorer }),
+            CommandId::TallerResults | CommandId::ShorterResults => return CatalogAction::Interface(InterfaceAction::Resize { panel: Panel::Results, grow: id == CommandId::TallerResults }),
+            CommandId::EnlargeFirstPane | CommandId::EnlargeSecondPane => return CatalogAction::Interface(InterfaceAction::Resize { panel: Panel::FirstPane, grow: id == CommandId::EnlargeFirstPane }),
             CommandId::FocusOtherPane => Command::FocusPane(1 - state.focused_pane()),
             CommandId::MoveTabToOtherPane => match state.active() {
                 Some(tab) => Command::MoveTab { tab: tab.id(), pane: 1 - state.focused_pane(), index: usize::MAX },
@@ -538,7 +553,7 @@ impl CommandId {
             Self::NewDocument | Self::NewExplorerFile | Self::NewExplorerFolder | Self::NewScratch | Self::ScratchFiles => return G::New,
             Self::CloseAllTabs | Self::CloseOtherTabs | Self::CloseTabsLeft | Self::CloseTabsRight | Self::PinTab => return G::Tabs,
             Self::CompareWith | Self::CompareSelected | Self::CompareSaved | Self::CloseSavedComparison => return G::Compare,
-            Self::SplitRight | Self::SplitDown | Self::Unsplit | Self::FocusOtherPane | Self::MoveTabToOtherPane | Self::ToggleExplorer | Self::ToggleActivityLog | Self::CopyActivityLog | Self::ClearActivityLog => return G::Layout,
+            Self::SplitRight | Self::SplitDown | Self::Unsplit | Self::FocusOtherPane | Self::MoveTabToOtherPane | Self::ToggleExplorer | Self::WidenExplorer | Self::NarrowExplorer | Self::TallerResults | Self::ShorterResults | Self::EnlargeFirstPane | Self::EnlargeSecondPane | Self::ToggleActivityLog | Self::CopyActivityLog | Self::ClearActivityLog => return G::Layout,
             Self::RelativeLineNumbers | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::FileIcons | Self::ImageSource | Self::MarkdownSource | Self::PreviewBeside => return G::Appearance,
             Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports => return G::Folding,
             Self::DocumentationOnHover | Self::AutoCompletion | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting => return G::Hints,
@@ -574,7 +589,7 @@ impl CommandId {
             | Self::CopyExplorerName | Self::CopyExplorerFullPath | Self::CopyExplorerRelativePath | Self::CopyExplorerEntry | Self::PasteExplorerEntry | Self::CancelExplorerCopy | Self::ExplorerHistory
             | Self::RenameExplorerEntry | Self::MoveExplorerEntry | Self::DeleteExplorerEntry | Self::DeleteExplorerPermanently | Self::RestoreDeleted
             | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::CloseAnnotations | Self::NarrowAnnotations | Self::WidenAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
-            | Self::FocusOtherPane | Self::MoveTabToOtherPane => G::View,
+            | Self::FocusOtherPane | Self::MoveTabToOtherPane | Self::WidenExplorer | Self::NarrowExplorer | Self::TallerResults | Self::ShorterResults | Self::EnlargeFirstPane | Self::EnlargeSecondPane => G::View,
             Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision | Self::CompareWithBase
             | Self::ShowBranchChanges | Self::CompareWithWorktree | Self::ResolveConflicts => G::Git,
             Self::GoToLine | Self::FocusBreadcrumbs | Self::Back | Self::Forward | Self::ToggleBookmark

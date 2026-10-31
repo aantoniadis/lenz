@@ -950,6 +950,25 @@ impl ReaderView {
         }
     }
 
+    /// One key or menu step of a panel's size, within the limits its drag keeps: 20 px of explorer, or a twentieth
+    /// of the height (results) or the panel (split). A hidden explorer is shown first.
+    fn resize_panel(&mut self, panel: code_core::actions::Panel, grow: bool, cx: &mut Context<Self>) {
+        use code_core::actions::Panel;
+        let step = |now: u32, lo: u32, hi: u32| Some(if grow { now + 50 } else { now.saturating_sub(50) }.clamp(lo, hi));
+        match panel {
+            Panel::Explorer if !self.tree_shown => { self.tree_shown = true; self.remember_explorer(); cx.notify(); return; }
+            Panel::Explorer if self.sidebar_w <= 0.0 => return,
+            Panel::Explorer => self.layout.explorer_width = Some((self.sidebar_w + if grow { 20.0 } else { -20.0 }).clamp(120.0, (self.width - 160.0).max(120.0)).round() as u32),
+            Panel::Results => {
+                let (top, bottom) = (toolbar_h() + line_h(), self.body_bottom());
+                let shown = ((bottom - self.panel_top.min(bottom)) / (bottom - top).max(1.0) * 1000.0).round() as u32;
+                self.layout.results_permille = step(self.layout.results_permille.unwrap_or(shown), 50, 950);
+            }
+            Panel::FirstPane => self.layout.split_permille = step(self.layout.split_permille.unwrap_or(500), 100, 900),
+        }
+        self.dispatch(Command::SetLayout(self.layout), cx);
+    }
+
     fn remember_explorer(&mut self) {
         if self.pending_explorer.is_some() || self.session.state().project().is_none() { return; }
         let explorer = code_core::workspace::Explorer { visible: self.tree_shown, selected: self.tree_sel.as_ref().map(ToString::to_string), top: self.session.state().tree_rows().nth(self.tree_scroll).map(|r| r.path.to_string()) };
@@ -1241,6 +1260,7 @@ impl ReaderView {
                 }
             }
             CatalogAction::Interface(action) => match action {
+                InterfaceAction::Resize { panel, grow } => self.resize_panel(panel, grow, cx),
                 InterfaceAction::RenameTerminal(id) => {
                     if let Some(tab) = self.session.state().terminal().tabs().iter().find(|tab| tab.id() == id) {
                         self.modal_scroll.set(0);
@@ -1714,6 +1734,17 @@ impl ReaderView {
         if self.tree_focus && ctrl && !k.modifiers.alt && !shift {
             let action = match key { "c" => Some(CommandId::CopyExplorerEntry), "v" => Some(CommandId::PasteExplorerEntry), _ => None };
             if let Some(action) = action { return self.run(action, window, cx); }
+        }
+        // IntelliJ's Stretch keys in a focused panel, before the keymap's (Ctrl+Shift+Up/Down move lines in the text).
+        if k.modifiers.control && shift && !k.modifiers.alt {
+            let stretch = match (key, self.tree_focus, self.results_focus) {
+                ("left", true, _) => Some(CommandId::NarrowExplorer),
+                ("right", true, _) => Some(CommandId::WidenExplorer),
+                ("up", _, true) => Some(CommandId::TallerResults),
+                ("down", _, true) => Some(CommandId::ShorterResults),
+                _ => None,
+            };
+            if let Some(id) = stretch { return self.run(id, window, cx); }
         }
         if self.tree_focus && key == "delete" && !ctrl && !shift && !k.modifiers.alt {
             return self.run(CommandId::DeleteExplorerEntry, window, cx);

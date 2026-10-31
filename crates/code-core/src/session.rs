@@ -875,6 +875,8 @@ pub enum CommandId {
     Unsplit,
     FocusOtherPane,
     MoveTabToOtherPane,
+    /// Resize a panel by one step from the keys or a menu, as dragging its edge does (each adapter's unit).
+    WidenExplorer, NarrowExplorer, TallerResults, ShorterResults, EnlargeFirstPane, EnlargeSecondPane,
     SearchEverywhere,
     FindSymbol,
     FindAction,
@@ -944,7 +946,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 244] = [
+    pub const ALL: [CommandId; 250] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -1137,6 +1139,7 @@ impl CommandId {
         Self::SplitRight,
         Self::SplitDown,
         Self::Unsplit,
+        Self::WidenExplorer, Self::NarrowExplorer, Self::TallerResults, Self::ShorterResults, Self::EnlargeFirstPane, Self::EnlargeSecondPane,
         Self::FocusOtherPane,
         Self::MoveTabToOtherPane,
         Self::SearchEverywhere,
@@ -1414,6 +1417,12 @@ impl CommandId {
             Self::SplitRight => "Split Right",
             Self::SplitDown => "Split Down",
             Self::Unsplit => "Close Split",
+            Self::WidenExplorer => "Widen Explorer",
+            Self::NarrowExplorer => "Narrow Explorer",
+            Self::TallerResults => "Make Results Taller",
+            Self::ShorterResults => "Make Results Shorter",
+            Self::EnlargeFirstPane => "Enlarge Left / Top Pane",
+            Self::EnlargeSecondPane => "Enlarge Right / Bottom Pane",
             Self::FocusOtherPane => "Focus Other Pane",
             Self::MoveTabToOtherPane => "Move Tab to Other Pane",
         }
@@ -3355,7 +3364,9 @@ impl Session {
             CommandId::RelativeLineNumbers | CommandId::VimMode | CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow | CommandId::CloseWindow | CommandId::QuitAll => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
-            CommandId::Unsplit | CommandId::FocusOtherPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
+            CommandId::Unsplit | CommandId::FocusOtherPane | CommandId::EnlargeFirstPane | CommandId::EnlargeSecondPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
+            CommandId::WidenExplorer | CommandId::NarrowExplorer => (!self.state.has_tree()).then_some("No folder or library is open"),
+            CommandId::TallerResults | CommandId::ShorterResults => self.state.results().is_none().then_some("No search results are shown"),
             CommandId::MoveTabToOtherPane => match (self.state.settings.split, self.state.active) {
                 (None, _) => Some("The file panel is not split"),
                 (_, None) => Some("No tab is open"),

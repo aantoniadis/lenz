@@ -6350,6 +6350,73 @@ fn bulk_tab_closure_cancel_and_discard_match_in_both_adapters(cx: &mut TestAppCo
     assert!(tui.session.state().tabs().is_empty());
 }
 
+/// Panels resize from the keys (IntelliJ's Stretch: Ctrl+Shift+arrows in the focused explorer or results) and the
+/// menu in both adapters, each in its own unit for the explorer and in the shared shares for the results and split.
+#[gpui::test]
+fn panels_resize_from_stretch_keys_and_menus_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    for (name, text) in [("src/a.rs", "needle\nx\n"), ("b.rs", "needle\n")] { std::fs::write(root.join(name), text).unwrap(); }
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(root.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx); let focus = gui.read_with(&visual, |v, _| v.focus_handle()); visual.update(|w, cx| focus.focus(w, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(root.clone()));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 32)).unwrap();
+    let mut settle = |visual: &mut VisualTestContext, tui: &mut App, done: &dyn Fn(&State) -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(gui.read_with(visual, |v, _| done(v.session().state())) && done(tui.session.state())) {
+            gui.update(visual, |v, cx| v.poll(cx)); while let Ok(c) = tui.session.completions().try_recv() { tui.apply(c); }
+            assert!(Instant::now() < deadline, "did not settle"); std::thread::sleep(Duration::from_millis(2));
+        }
+        visual.update(|w, cx| { let _ = w.draw(cx); }); terminal.draw(|f| tui.draw(f)).unwrap();
+    };
+    let key = |tui: &mut App, code, modifiers| { tui.handle(Event::Key(KeyEvent::new(code, modifiers))); };
+    let layouts = |visual: &VisualTestContext, tui: &App| (gui.read_with(visual, |v, _| v.session().state().layout()), tui.session.state().layout());
+    let stretch = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+    settle(&mut visual, &mut tui, &|s| s.project().is_some_and(|p| matches!(p.coverage(), code_core::project::Coverage::Complete(_))));
+    // Explorer: Ctrl+Shift+E focuses it, Ctrl+Shift+Right widens (20 px / 2 columns), Ctrl+Shift+Left narrows back.
+    let columns = tui.layout.tree.width;
+    visual.simulate_keystrokes("ctrl-shift-e ctrl-shift-right");
+    key(&mut tui, KeyCode::Char('e'), stretch); key(&mut tui, KeyCode::Right, stretch);
+    settle(&mut visual, &mut tui, &|_| true);
+    let (g, t) = layouts(&visual, &tui);
+    let wide = g.explorer_width.expect("the GUI explorer widened");
+    assert_eq!((t.explorer_columns, tui.layout.tree.width), (Some(u32::from(columns) + 2), columns + 2));
+    visual.simulate_keystrokes("ctrl-shift-left"); key(&mut tui, KeyCode::Left, stretch);
+    settle(&mut visual, &mut tui, &|_| true);
+    let (g, t) = layouts(&visual, &tui);
+    assert_eq!((g.explorer_width, t.explorer_columns), (Some(wide - 20), Some(u32::from(columns))));
+    // Results: unavailable until a search shows them, then Ctrl+Shift+Up in the focused list is a twentieth taller.
+    for id in [CommandId::TallerResults, CommandId::ShorterResults] {
+        assert_eq!(tui.session.disabled(id), Some("No search results are shown"));
+        assert_eq!(gui.read_with(&visual, |v, _| v.session().disabled(id)), Some("No search results are shown"));
+    }
+    gui.update(&mut visual, |v, cx| { v.dispatch_for_test(Command::Search { query: "needle".into(), scope: code_core::session::SearchIn::Project }, cx); v.results_focus = true; v.tree_focus = false; });
+    tui.dispatch(Command::Search { query: "needle".into(), scope: code_core::session::SearchIn::Project }); tui.focus = crate::app::Focus::Results;
+    settle(&mut visual, &mut tui, &|s| s.results().is_some_and(|r| r.done()));
+    visual.simulate_keystrokes("ctrl-shift-up"); key(&mut tui, KeyCode::Up, stretch);
+    let (g, t) = layouts(&visual, &tui);
+    let (g_up, t_up) = (g.results_permille.expect("GUI results taller"), t.results_permille.expect("TUI results taller"));
+    visual.simulate_keystrokes("ctrl-shift-down ctrl-shift-down"); key(&mut tui, KeyCode::Down, stretch); key(&mut tui, KeyCode::Down, stretch);
+    let (g, t) = layouts(&visual, &tui);
+    assert_eq!((g.results_permille, t.results_permille), (Some(g_up - 100), Some(t_up - 100)), "each step is 50 thousandths");
+    // The split: menu only, the same shared share in both, and unavailable without a split.
+    assert_eq!(tui.session.disabled(CommandId::EnlargeFirstPane), Some("The file panel is not split"));
+    gui.update(&mut visual, |v, cx| v.dispatch_for_test(Command::Open(root.join("b.rs")), cx)); tui.dispatch(Command::Open(root.join("b.rs")));
+    settle(&mut visual, &mut tui, &|s| s.current_source().is_some());
+    visual.update(|w, cx| gui.update(cx, |v, cx| { v.run(CommandId::SplitRight, w, cx); v.run(CommandId::EnlargeFirstPane, w, cx); v.run(CommandId::EnlargeFirstPane, w, cx); v.run(CommandId::EnlargeSecondPane, w, cx); }));
+    for id in [CommandId::SplitRight, CommandId::EnlargeFirstPane, CommandId::EnlargeFirstPane, CommandId::EnlargeSecondPane] { tui.run(id); }
+    let (g, t) = layouts(&visual, &tui);
+    assert_eq!((g.split_permille, t.split_permille), (Some(550), Some(550)));
+    // In the text, Ctrl+Shift+Left stays word selection: the explorer keeps its width.
+    tui.focus = crate::app::Focus::Text;
+    gui.update(&mut visual, |v, _| { v.results_focus = false; v.tree_focus = false; });
+    visual.simulate_keystrokes("ctrl-shift-left"); key(&mut tui, KeyCode::Left, stretch);
+    let (g, t) = layouts(&visual, &tui);
+    assert_eq!((g.explorer_width, t.explorer_columns), (Some(wide - 20), Some(u32::from(columns))));
+}
+
 #[gpui::test]
 fn results_panel_hide_show_stepping_and_history_match_through_keys(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();

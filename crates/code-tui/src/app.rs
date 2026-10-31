@@ -743,8 +743,28 @@ impl App {
             self.dispatch(Command::Notice(message));
         }
     }
+    /// One key or menu step of a panel's size, within the limits its drag keeps: two explorer columns, or a
+    /// twentieth of the height (results) or the panel (split). A hidden explorer is shown first.
+    fn resize_panel(&mut self, panel: code_core::actions::Panel, grow: bool) {
+        use code_core::actions::Panel;
+        let mut layout = self.session.state().layout();
+        let step = |now: u32, unit: u32, lo: u32, hi: u32| if grow { now + unit } else { now.saturating_sub(unit) }.clamp(lo, hi.max(lo));
+        match panel {
+            Panel::Explorer if !self.tree_shown => { self.tree_shown = true; self.remember_explorer(); return; }
+            Panel::Explorer if self.layout.tree.width == 0 => return,
+            Panel::Explorer => layout.explorer_columns = Some(step(u32::from(self.layout.tree.width), 2, 12, u32::from(self.layout.reading.right()).saturating_sub(24))),
+            Panel::Results => {
+                let main = self.layout.reading.union(self.layout.results);
+                let now = layout.results_permille.unwrap_or(u32::from(self.layout.results.height) * 1000 / u32::from(main.height.max(1)));
+                layout.results_permille = Some(step(now, 50, 50, 950));
+            }
+            Panel::FirstPane => layout.split_permille = Some(step(layout.split_permille.unwrap_or(500), 50, 100, 900)),
+        }
+        self.dispatch(Command::SetLayout(layout));
+    }
     fn interface(&mut self, action: InterfaceAction) {
         let kind = match action {
+            InterfaceAction::Resize { panel, grow } => return self.resize_panel(panel, grow),
             InterfaceAction::CloseWindow => { self.quit = true; return; }
             InterfaceAction::QuitAll => { self.quit_all = true; return; }
             InterfaceAction::Open => Prompt::Open,
@@ -2438,6 +2458,17 @@ impl App {
         if self.focus == Focus::Tree && ctrl && !alt && !shift {
             let action = match key.code { KeyCode::Char('c') => Some(CommandId::CopyExplorerEntry), KeyCode::Char('v') => Some(CommandId::PasteExplorerEntry), _ => None };
             if let Some(action) = action { return self.run(action); }
+        }
+        // IntelliJ's Stretch keys in a focused panel, before the keymap's (Ctrl+Shift+Up/Down move lines in the text).
+        if ctrl && shift && !alt {
+            let stretch = match (self.focus, key.code) {
+                (Focus::Tree, KeyCode::Left) => Some(CommandId::NarrowExplorer),
+                (Focus::Tree, KeyCode::Right) => Some(CommandId::WidenExplorer),
+                (Focus::Results, KeyCode::Up) => Some(CommandId::TallerResults),
+                (Focus::Results, KeyCode::Down) => Some(CommandId::ShorterResults),
+                _ => None,
+            };
+            if let Some(id) = stretch { return self.run(id); }
         }
         // Semantic commands take their keys from the session's keymap: a preset or an override changes what runs, and
         // an unavailable command says why instead of vanishing. Typing keys are never bound there.
