@@ -14,7 +14,7 @@ colours from the theme. Both were built in release with the unchanged Cargo prof
 worktree with its own target, and measured alternately (ABBA order) on one machine. GUI collectors used a private
 Xvfb display with software Vulkan; terminal collectors used owned pseudo-terminals.
 
-**Regressed: the Merge View, in both Diff adapters.** Four alternating pairs of `interaction-bench.py --scenario merge`
+**Regressed, then fixed: the Merge View, in both Diff adapters.** Four alternating pairs of `interaction-bench.py --scenario merge`
 on the generated 100k-line three-way merge, with no overlap between builds: accept/undo first damage went from
 4.3–5.4 ms to 31–34 ms per choice (Accept Ours alone stayed at 4.9→3.3 ms), page scrolling 8.6→13.9 ms and next
 change 9.7→15.0 ms (per-run medians of 20 inputs). In the terminal, six launches per build of the merge case in
@@ -23,9 +23,29 @@ change 9.7→15.0 ms (per-run medians of 20 inputs). In the terminal, six launch
 0.31→3.51 ms over three runs each. A sampling profile of the candidate's merge scenario puts `View::display_row` at
 about two-fifths of the application's own CPU samples: each frame rebuilds each merge pane's marks, mapping every
 block's start and end, and every find hit, to display rows, with nothing cached between frames. This contradicts the
-spec's "cached until its inputs change" anti-goal; it was reported for a decision rather than optimized here.
+spec's "cached until its inputs change" anti-goal.
 
-**Small absolute slowdowns.** Two-way Diff window find phases on the generated 100k-line comparison rose by about
+**Fixed: mark rows cached in the Diff cores.** Each merge pane now keeps its blocks' (row, rows) and its find hits' rows
+until the Result `version`, Base shown, the Scroll Mode, either view's layout stamp or the find's hit list changes; a
+`View` takes a new process-wide stamp whenever its display rows, Scroll Mode or Unified change, and a find takes a new
+id whenever its hits change. A frame then only assigns kinds (Conflict, Current, Modified, current find hit) to the
+held rows and places them on the track. The Comparison keeps its find hits' rows the same way, and the Padded merge
+layout (`segments()`, previously rebuilt for each pane's total and marks and each Padded scroll) is kept per Result
+version. Rebuilding after a change maps the lines in order with one walk over the rows instead of a binary search
+each; galloping from the previous line measured slower (100k merge frame after a change 2.1 ms against 1.0 ms), as
+consecutive block bounds sit a few rows apart. Against the same baseline, alternating again: Merge View accept/undo
+first damage 4.3–5.4→5.4–7.0 ms (from 31–34 ms), page scroll 8.6→9.7 ms and next change 9.7→10.8 ms (four pairs; the
+collector's first-damage samples fall on steps about 1 ms apart, and every per-input median moved by one step); terminal
+merge PageDown first PTY byte 1.24→1.35 ms (six launches each), in-process 100k merge frame 0.66→1.01 ms (every frame
+there follows an accept, undo, redo or next change, so it includes the rebuild) and resize 0.28→0.36 ms (three runs);
+two-way window find typing 13.8→13.9, next match 12.9→13.9 and scrolling with find open 15.3→16.1 ms (four pairs);
+terminal long-line find render 0.023→0.086 ms. Lenz Code does not use these caches: its marks come from what its core
+already holds (diagnostics, capped find matches, change blocks, bookmarks, the caret), and its 10,000-match find drew
+in the same time as the baseline. Its window scroll CPU, re-measured alongside, read 7.94→8.13 s per 10 s (six pairs,
+overlapping ranges, same cadence); the fixture shows only the caret mark, and a profile points at GPUI's bounds tree
+insertions growing (the strip's track is painted before the pane's text), not at marks. That is left open.
+
+**Small absolute slowdowns** (before the fix above). Two-way Diff window find phases on the generated 100k-line comparison rose by about
 2 ms (find typing 12.8→15.0 ms, next match 12.9→15.0 ms, scrolling with find open 15.1→17.1 ms; four pairs), as find
 hits become marks each frame. The terminal's long-line find render went 0.020→0.168 ms and its 100k-line scroll render
 0.180→0.214 ms (three runs each). Lenz Code window scrolling, one line per frame for 10 s on a 100k-line file, kept the
