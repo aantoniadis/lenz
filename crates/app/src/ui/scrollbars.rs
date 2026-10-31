@@ -7,11 +7,11 @@ use crate::view::FIND_TARGET;
 
 const THUMB_MIN: f32 = 16.0;
 
-/// The strip's width on a pane `w` wide: 12 px at the default font size, none once the pane's text would be under two
-/// strips wide (the strip goes before the text does).
-pub(super) fn strip_w(w: f32) -> f32 {
+/// The strip's width on a pane `w` wide with a `gutter` (line numbers; none in a preview): 12 px at the default font
+/// size, none once the pane's text would be under two strips wide (the strip goes before the text does).
+pub(super) fn strip_w(w: f32, gutter: f32) -> f32 {
     let s = scale_of(12.0);
-    if w - num_w() - 16.0 < 2.0 * s { 0.0 } else { s }
+    if w - gutter - 16.0 < 2.0 * s { 0.0 } else { s }
 }
 
 /// One track cell per 3 px.
@@ -61,7 +61,7 @@ impl Viewer {
         let width = f32::from(window.viewport_size().width) - x0;
         let h = (self.content_bottom() - y - self.panel_h() - self.picker_v_height()).max(0.0);
         let strip = |key, target, x: f32, w: f32| {
-            let sw = strip_w(w);
+            let sw = strip_w(w, if matches!(target, Target::Preview(_)) { 0.0 } else { num_w() });
             (sw > 0.0 && h > 0.0).then_some(Strip { key, target, x: x + w - sw, y, w: sw, h })
         };
         if self.merge.is_some() {
