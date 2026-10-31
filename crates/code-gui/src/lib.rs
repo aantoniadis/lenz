@@ -6317,7 +6317,7 @@ impl Render for ReaderView {
                             if g.bar_strip.size.width > px(0.0) {
                                 // The scrollbar: its track, the thumb, and over both each marked cell (the caret a 1 px line).
                                 let (sx, sy, sw, sh) = (x0 + f32::from(g.bar_strip.origin.x), y0 + f32::from(g.bar_strip.origin.y), f32::from(g.bar_strip.size.width), f32::from(g.bar_strip.size.height));
-                                lenz_gpui::fill(window, sx, sy, sw, sh, palette.gutter_bg);
+                                lenz_gpui::fill(window, sx, sy, sw, sh, scrollbar::track_color(&palette));
                                 if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, scrollbar_thumb_color(&palette)); }
                                 let cell_h = sh / track_cells(sh).max(1) as f32;
                                 for &(cell, kind) in &f.scrollbar.1 {

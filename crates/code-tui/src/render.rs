@@ -1997,7 +1997,7 @@ fn draw_scrollbar(buf: &mut Buffer, app: &App, g: &PaneGeometry, p: &Palette) {
             None if on => (" ", thumb_bg),
             None => ("│", track),
         };
-        buf[(strip.x, strip.y + cell)].set_symbol(symbol).set_style(style(fg, if on { thumb_bg } else { p.gutter_bg }));
+        buf[(strip.x, strip.y + cell)].set_symbol(symbol).set_style(style(fg, if on { thumb_bg } else { lenz_content::scrollbar::track_color(p) }));
     }
 }
 

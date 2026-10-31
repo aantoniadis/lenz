@@ -120,11 +120,8 @@ pub fn match_colors(p: &Palette) -> (u32, u32) {
     (bg, if (l + 0.05) / 0.05 >= 1.05 / (l + 0.05) { 0x000000 } else { 0xFFFFFF })
 }
 
-/// A scrollbar's thumb, over its `gutter_bg` track: a border tone a little toward the track, so marks over it keep
-/// their contrast.
-pub fn scrollbar_thumb_color(p: &Palette) -> u32 {
-    lenz_content::theme::mix(p.gutter_bg, p.border, 0.8)
-}
+/// A scrollbar's thumb: [`lenz_content::scrollbar::thumb_color`], shared with Lenz Diff.
+pub fn scrollbar_thumb_color(p: &Palette) -> u32 { lenz_content::scrollbar::thumb_color(p) }
 
 /// A scrollbar mark's colour: its kind's colour elsewhere (problems, change marks, bookmarks); find matches the text's
 /// match background, lifted toward its text colour (the current one more); the caret's dim.
@@ -447,7 +444,7 @@ mod tests {
         for (name, p) in [("Darcula", &DARCULA), ("Light", &LIGHT)] {
             for kind in [Error, Conflict, Warning, Current, FindCurrent, Find, Added, Deleted, Modified, Bookmark].into_iter().filter(|k| k.jumps()) {
                 let c = scrollbar_mark_color(kind, p);
-                for (under, bg) in [("track", p.gutter_bg), ("thumb", scrollbar_thumb_color(p))] {
+                for (under, bg) in [("track", lenz_content::scrollbar::track_color(p)), ("thumb", scrollbar_thumb_color(p))] {
                     assert!(contrast(c, bg) >= 1.8, "{name} {kind:?} on the {under}: {:.2}", contrast(c, bg));
                 }
             }

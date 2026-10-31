@@ -56,6 +56,12 @@ impl Scrollbar {
     }
 }
 
+/// The track's colour: the gutter's, so a strip reads as part of the pane's edge.
+pub fn track_color(p: &crate::theme::Palette) -> u32 { p.gutter_bg }
+
+/// The thumb's colour: a border tone a little toward the track, so marks over it keep their contrast.
+pub fn thumb_color(p: &crate::theme::Palette) -> u32 { crate::theme::mix(p.gutter_bg, p.border, 0.8) }
+
 fn cell_of(x: f64, total: f64, cells: usize) -> usize {
     ((x / total * cells as f64).floor().max(0.0) as usize).min(cells.saturating_sub(1))
 }
