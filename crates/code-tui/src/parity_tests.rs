@@ -6473,3 +6473,116 @@ fn results_panel_hide_show_stepping_and_history_match_through_keys(cx: &mut Test
     assert_eq!(same(&visual, &tui).0.map(|r| r.0), Some("x".to_owned()));
     for (name, text) in [("src/a.rs", "needle\n"), ("src/b.rs", "x\nneedle\n"), ("c.rs", "x\n")] { assert_eq!(std::fs::read(root.join(name)).unwrap(), text.as_bytes()); }
 }
+
+/// The scrollbar's thumb drag, track paging and mark clicks leave both adapters on the same lines.
+#[gpui::test]
+fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &mut TestAppContext) {
+    use gpui::{point, px, size, Modifiers, MouseButton};
+    use crossterm::event::{MouseEvent, MouseEventKind};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.txt");
+    let original: String = (0..300).map(|i| if i == 100 || i == 150 { format!("needle {i}\n") } else { format!("line {i}\n") }).collect();
+    std::fs::write(&path, &original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    visual.simulate_resize(size(px(800.0), px(400.0)));
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+    let draw = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        visual.update(|window, cx| { let _ = window.draw(cx); });
+        terminal.draw(|frame| tui.draw(frame)).unwrap();
+    };
+    draw(&mut visual, &mut tui, &mut terminal);
+    // Give the terminal as many text rows as the window shows, so a page is the same distance in both.
+    let rows = gui.read_with(&visual, |view, _| view.panes[0].rows);
+    let chrome = 24 - tui.layout.panes[0].text.height;
+    terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, rows as u16 + chrome)).unwrap();
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(usize::from(tui.layout.panes[0].text.height), rows, "comparable panes");
+    // Find "needle" in both: two Find marks, lines 100 and 150 (0-based).
+    visual.simulate_keystrokes("ctrl-f n e e d l e");
+    key_chars(&mut tui, "needle");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let found = |s: &State| s.active().and_then(|t| t.find()).is_some_and(|f| f.matches().len() == 2);
+    while !gui.read_with(&visual, |view, _| found(view.session().state())) || !found(tui.session.state()) {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let reset = |visual: &mut VisualTestContext, tui: &mut App, terminal: &mut ratatui::Terminal<ratatui::backend::TestBackend>| {
+        gui.update(visual, |view, cx| view.dispatch_for_test(Command::Scroll(0), cx));
+        tui.dispatch(Command::Scroll(0));
+        draw(visual, tui, terminal);
+    };
+    // The terminal's find prompt is modal; Enter accepts it and the matches (and their marks) stay.
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)));
+    assert!(tui.modal.is_none() && found(tui.session.state()));
+    reset(&mut visual, &mut tui, &mut terminal);
+    let gui_top = |visual: &VisualTestContext| gui.read_with(visual, |view, _| view.session().state().active().unwrap().top_line());
+    let line_of_caret = |s: &State| s.view(s.active().unwrap().id()).unwrap().snapshot().line_of(s.selection().unwrap().head);
+    assert_eq!((gui_top(&visual), tui.session.state().top_line()), (0, 0));
+    let total = 300.0;
+    let strip = tui.layout.panes[0].strip;
+    let gstrip = gui.read_with(&visual, |view, _| view.panes[0].bar_strip);
+    let (y0, len) = (f32::from(gstrip.origin.y), f32::from(gstrip.size.height));
+    let x = f32::from(gstrip.center().x);
+    let carets = |visual: &VisualTestContext, tui: &App| (gui.read_with(visual, |view, _| line_of_caret(view.session().state())), line_of_caret(tui.session.state()));
+    let before = carets(&visual, &tui);
+    // (a) Drag the thumb to the middle of the track: the same place, within one terminal cell's worth of lines.
+    let (start, thumb) = gui.read_with(&visual, |view, _| view.painted_scrollbars[0].1.unwrap());
+    visual.simulate_mouse_down(point(px(x), px(y0 + start + thumb / 2.0)), MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_move(point(px(x), px(y0 + len / 2.0)), MouseButton::Left, Modifiers::default());
+    visual.simulate_mouse_up(point(px(x), px(y0 + len / 2.0)), MouseButton::Left, Modifiers::default());
+    let mouse = |tui: &mut App, kind, row: u16| tui.handle(Event::Mouse(MouseEvent { kind, column: strip.x, row, modifiers: KeyModifiers::NONE }));
+    mouse(&mut tui, MouseEventKind::Down(crossterm::event::MouseButton::Left), strip.y);
+    mouse(&mut tui, MouseEventKind::Drag(crossterm::event::MouseButton::Left), strip.y + strip.height / 2);
+    mouse(&mut tui, MouseEventKind::Up(crossterm::event::MouseButton::Left), strip.y + strip.height / 2);
+    draw(&mut visual, &mut tui, &mut terminal);
+    let (g, t) = (gui_top(&visual), tui.session.state().top_line());
+    let cell = (total / f64::from(strip.height)).ceil() as usize + 1;
+    assert!(g.abs_diff(t) <= cell && g > 50 && t > 50, "drag: window {g}, terminal {t}, cell {cell}");
+    assert_eq!(carets(&visual, &tui), before, "a drag moves the view, not either caret");
+    // (b) One click on the track below the thumb pages down by the visible rows in both.
+    reset(&mut visual, &mut tui, &mut terminal);
+    visual.simulate_click(point(px(x), px(y0 + len * 0.6)), Modifiers::default());
+    mouse(&mut tui, MouseEventKind::Down(crossterm::event::MouseButton::Left), strip.y + strip.height * 3 / 5);
+    mouse(&mut tui, MouseEventKind::Up(crossterm::event::MouseButton::Left), strip.y + strip.height * 3 / 5);
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!((gui_top(&visual), tui.session.state().top_line()), (rows, rows), "one page down");
+    // (c) The Find mark of line 150: the caret lands there in both.
+    reset(&mut visual, &mut tui, &mut terminal);
+    use lenz_content::scrollbar::place;
+    let gy = gui.read_with(&visual, |view, _| {
+        let (bar, marks) = view.session().state().scrollbar(0).unwrap();
+        let cells = (len / 3.0).floor() as usize;
+        let cell = place(&marks, bar.total, cells).iter().position(|p| p.is_some_and(|i| marks[i].target == 150 && marks[i].kind.jumps())).unwrap();
+        y0 + (cell as f32 + 0.5) * len / cells as f32
+    });
+    let ty = {
+        let (bar, marks) = tui.session.state().scrollbar(0).unwrap();
+        strip.y + place(&marks, bar.total, usize::from(strip.height)).iter().position(|p| p.is_some_and(|i| marks[i].target == 150 && marks[i].kind.jumps())).unwrap() as u16
+    };
+    visual.simulate_click(point(px(x), px(gy)), Modifiers::default());
+    mouse(&mut tui, MouseEventKind::Down(crossterm::event::MouseButton::Left), ty);
+    mouse(&mut tui, MouseEventKind::Up(crossterm::event::MouseButton::Left), ty);
+    draw(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(gui.read_with(&visual, |view, _| line_of_caret(view.session().state())), 150, "window");
+    assert_eq!(line_of_caret(tui.session.state()), 150, "terminal");
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
+fn key_chars(tui: &mut App, text: &str) {
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
+    for c in text.chars() { tui.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))); }
+}
