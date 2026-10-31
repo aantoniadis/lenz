@@ -5642,12 +5642,13 @@ impl Render for ReaderView {
             }
         }
         // The scrollbar: a strip at the right edge of a pane showing text, a preview or a table, taken from its text
-        // (so lines wrap before it); none in a pane narrower than three strips.
+        // (so lines wrap before it); none once the text right of the gutter would be under two strips wide (the strip
+        // goes before the text does).
         let strip_w = 12.0 * font_size() / 13.0;
         for g in &mut panes {
             let state = self.session.state();
             let scrolls = state.presentation_shown(g.pane).is_some_and(|t| state.presentation_view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()));
-            if scrolls && f32::from(g.text.size.width) >= 3.0 * strip_w {
+            if scrolls && f32::from(g.text.size.width) - num_w() - 16.0 >= 2.0 * strip_w {
                 g.text.size.width -= px(strip_w);
                 g.bar_strip = Bounds { origin: gpui::point(g.text.right(), g.text.origin.y), size: gpui::size(px(strip_w), g.text.size.height) };
             }

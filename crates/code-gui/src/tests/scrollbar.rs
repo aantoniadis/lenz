@@ -206,3 +206,35 @@ fn scrollbar_thumb_drag_counts_a_collapsed_fold_as_one_row(cx: &mut TestAppConte
     assert!(want > row + 50, "the row lies below the fold: row {row}, line {want}");
     assert_eq!(top_line(&v, &f), want);
 }
+
+/// Narrowing the window drops each pane's strip before the text right of its gutter gets under two strips wide; text
+/// and strip always fit the pane.
+#[gpui::test]
+fn scrollbars_leave_narrow_panes_before_their_text(cx: &mut TestAppContext) {
+    let (f, mut v) = opened(cx, &lines(300, &[]), 1200.0, 400.0);
+    let s = 12.0 * font_size() / 13.0;
+    for split in [false, true] {
+        if split {
+            v.simulate_resize(size(px(1200.0), px(400.0)));
+            draw(&mut v);
+            v.simulate_keystrokes("ctrl-\\");
+            draw(&mut v);
+        }
+        for width in [1200.0, 700.0, 400.0, 300.0, 240.0, 200.0, 180.0, 160.0, 140.0, 120.0, 100.0, 60.0, 1.0] {
+            v.simulate_resize(size(px(width), px(400.0)));
+            draw(&mut v);
+            let panes = f.view.read_with(&v, |r, _| r.panes.clone());
+            assert_eq!(panes.len(), if split { 2 } else { 1 }, "split={split} at {width}");
+            for g in panes {
+                let (text, strip) = (g.text, g.bar_strip);
+                let pane_w = f32::from(text.size.width + strip.size.width);
+                if pane_w - num_w() - 16.0 < 2.0 * s {
+                    assert_eq!(strip.size.width, px(0.0), "split={split} at {width}: a {pane_w} px pane keeps no strip");
+                } else {
+                    assert_eq!(strip.size.width, px(s), "split={split} at {width}: a {pane_w} px pane has a strip");
+                    assert!(text.right() <= strip.left(), "split={split} at {width}: the text stops at the strip");
+                }
+            }
+        }
+    }
+}
