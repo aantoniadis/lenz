@@ -4,6 +4,11 @@ use std::{collections::HashSet, ops::Range};
 
 use lenz_engine::{ChangeBlock, Refinement};
 
+use crate::scrollbar::{Mark, MarkKind, Scrollbar};
+
+/// Scrollbar mark targets at or above this are find hits (`FIND_TARGET + hit index`); below it, Change Block indices.
+pub const FIND_TARGET: usize = 1 << 31;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Side {
     Left,
@@ -778,7 +783,7 @@ impl View {
         };
         match target {
             Some(i) => {
-                self.jump_to_change(i);
+                self.go_to_change(i);
                 true
             }
             None => false,
@@ -787,17 +792,18 @@ impl View {
 
     pub fn jump_to_first_change(&mut self) {
         if self.change_count() > 0 {
-            self.jump_to_change(0);
+            self.go_to_change(0);
         }
     }
 
     pub fn jump_to_last_change(&mut self) {
         if let Some(last) = self.change_count().checked_sub(1) {
-            self.jump_to_change(last);
+            self.go_to_change(last);
         }
     }
 
-    fn jump_to_change(&mut self, i: usize) {
+    /// Make Change Block `i` current and show it at the anchor, as Next Change does; nothing past the last block.
+    pub fn go_to_change(&mut self, i: usize) {
         let Some(s) = self.change_segs().nth(i).copied() else { return };
         let a = self.anchor();
         match self.mode {
@@ -840,6 +846,78 @@ impl View {
             }
             _ => self.top = (self.top + rows).clamp(0.0, Self::last_top(self.combined)),
         }
+    }
+
+    /// `side`'s scrollbar in the rows it paints: its display rows (a Collapsed Region or Folded Change Block is one
+    /// row), plus its Filler Rows in Padded. Unified paints one column (adapters call it `Side::Right`): `side` is
+    /// ignored and the rows are the Unified rows.
+    pub fn scrollbar(&self, side: Side) -> Scrollbar {
+        let (total, top) = if self.unified {
+            (self.unified_rows, self.unified_top())
+        } else if self.mode == ScrollMode::Padded {
+            (self.combined, self.top)
+        } else {
+            (self.lines(side), self.side_top(side))
+        };
+        Scrollbar { total: f64::from(total), top: f64::from(top), visible: f64::from(self.viewport_rows) }
+    }
+
+    /// Scroll `side`'s scrollbar top to `top` through [`Self::scroll_by`] led by `side`, so the Scroll Mode moves the
+    /// other Side; the mapping is piecewise linear in Shared and Unified, so a few rounds settle it.
+    pub fn scroll_to(&mut self, side: Side, top: f64) {
+        // Unified rows follow the left Side's top in Aligned and Independent
+        let lead = if self.unified { Side::Left } else { side };
+        for _ in 0..4 {
+            let delta = (top - self.scrollbar(side).top) as f32;
+            if delta.abs() < 1e-3 { return; }
+            self.scroll_by(delta, lead);
+        }
+    }
+
+    /// `side`'s raw line in [`Self::scrollbar`] rows (a hidden line is its region's or folded block's row).
+    pub fn display_row(&self, side: Side, raw_line: u32) -> f64 {
+        let d = self.display_of(side, raw_line as f32);
+        if !self.unified && self.mode != ScrollMode::Padded { return f64::from(d); }
+        // the segment holding display row `d`, past runs `side` lacks
+        let i = self.segs.partition_point(|s| { let (a, n) = s.side(side); a + n <= d });
+        let Some(s) = self.segs.get(i) else {
+            let end = if self.unified { self.unified_rows } else { self.combined };
+            return f64::from(end + d - self.lines(side));
+        };
+        let k = d - s.side(side).0;
+        f64::from(match s.change {
+            _ if !self.unified => s.c0 + k,
+            Some(_) if matches!(self.rows_left.get(s.l0 as usize), Some(DRow::Folded { .. })) => s.u0,
+            // Unified lists a Change Block's left rows, then its right rows
+            Some(_) if side == Side::Right => s.u0 + s.ln + k,
+            _ => s.u0 + k,
+        })
+    }
+
+    /// One scrollbar mark per Change Block on `side`, in [`Self::scrollbar`] rows, its target the block index: the
+    /// current block as `Current`, the others by kind. Unified and Padded span each block's rows whatever `side`.
+    pub fn block_marks(&self, side: Side) -> Vec<Mark> {
+        let current = self.current_change();
+        self.change_segs()
+            .enumerate()
+            .filter_map(|(i, s)| {
+                let (row, rows) = if self.unified {
+                    (s.u0, s.un)
+                } else if self.mode == ScrollMode::Padded {
+                    (s.c0, s.cn)
+                } else {
+                    s.side(side)
+                };
+                let kind = match s.change?.0 {
+                    _ if current == Some(i) => MarkKind::Current,
+                    Kind::Inserted => MarkKind::Added,
+                    Kind::Deleted => MarkKind::Deleted,
+                    Kind::Modified => MarkKind::Modified,
+                    Kind::Conflict => MarkKind::Conflict,
+                };
+                Some(Mark { row: f64::from(row), rows: f64::from(rows), kind, target: i })
+            })
+            .collect()
     }
 
     // Retain trailing space for anchor navigation, but never scroll beyond the last row.
@@ -1821,5 +1899,80 @@ mod tests {
         eprintln!("view model, 100k lines: build {build:.2} ms (budget {BUILD}), scroll + frame {frame:.4} ms (budget {FRAME})");
         crate::perf::check(build <= 2.0 * BUILD, "view build exceeds budget");
         crate::perf::check(frame <= 2.0 * FRAME, "scroll layout exceeds budget");
+    }
+
+    const MODES: [ScrollMode; 4] = [ScrollMode::Shared, ScrollMode::Aligned, ScrollMode::Padded, ScrollMode::Independent];
+
+    #[test]
+    fn scrollbar_rows_follow_collapsed_regions_and_filler_rows() {
+        // the right Side inserts 20 lines at line 10
+        let mut v = View::new(100, 120, &[block(10..10, 10..30)], 10.0);
+        let totals = |v: &View| (v.scrollbar(Side::Left).total, v.scrollbar(Side::Right).total);
+        assert_eq!(totals(&v), (100.0, 120.0));
+        assert_eq!(v.scrollbar(Side::Left).visible, 10.0);
+        v.set_mode(ScrollMode::Padded);
+        assert_eq!(totals(&v), (120.0, 120.0), "Filler Rows count on the shorter Side");
+        assert_eq!(v.display_row(Side::Left, 10), 30.0, "the line after the insertion sits below its Filler Rows");
+        v.set_mode(ScrollMode::Shared);
+        v.set_collapsed(true);
+        // left: region, 6..10, 10..14, region; right: region, 6..10, the 20 inserted lines, 30..34, region
+        assert_eq!(totals(&v), (10.0, 30.0));
+        assert_eq!((v.display_row(Side::Left, 7), v.display_row(Side::Left, 50)), (2.0, 9.0), "a hidden line is its region's row");
+        v.set_unified(true);
+        assert_eq!(totals(&v), (30.0, 30.0), "Unified: one column of rows, whichever Side");
+        assert_eq!((v.display_row(Side::Left, 12), v.display_row(Side::Right, 32)), (27.0, 27.0), "an unchanged line is one row");
+        // a b c d against a B c x d: ' a', '-b', '+B', ' c', '+x', ' d'
+        let mut v = View::new(4, 5, &[block(1..2, 1..2), block(3..3, 3..4)], 20.0);
+        v.set_unified(true);
+        assert_eq!(v.scrollbar(Side::Left).total, 6.0);
+        let rows = [(Side::Left, 1), (Side::Right, 1), (Side::Right, 3), (Side::Left, 3)].map(|(side, line)| v.display_row(side, line));
+        assert_eq!(rows, [1.0, 2.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn scroll_to_follows_each_scroll_mode() {
+        // the right Side inserts 20 lines at line 10, so its row 50 faces the left Side's row 30
+        let other_top = |mode, lead: Side, top: f64| {
+            let mut v = View::new(100, 120, &[block(10..10, 10..30)], 10.0);
+            v.start_in(mode);
+            v.scroll_to(lead, top);
+            assert!((v.scrollbar(lead).top - top).abs() < 1e-3, "{mode:?} {lead:?}: {:?}", v.scrollbar(lead));
+            v.scrollbar(View::other(lead)).top
+        };
+        for (mode, left, right) in [(ScrollMode::Shared, 30.0, 50.0), (ScrollMode::Aligned, 30.0, 50.0), (ScrollMode::Padded, 50.0, 30.0), (ScrollMode::Independent, 0.0, 0.0)] {
+            assert!((other_top(mode, Side::Right, 50.0) - left).abs() < 1e-3, "{mode:?}: left follows the right Side");
+            assert!((other_top(mode, Side::Left, 30.0) - right).abs() < 1e-3, "{mode:?}: right follows the left Side");
+        }
+    }
+
+    #[test]
+    fn block_marks_carry_kind_and_current() {
+        use crate::scrollbar::{Mark, MarkKind};
+        let blocks = [block(20..20, 20..23), block(30..32, 33..33), block(40..41, 41..42)];
+        // a tall viewport keeps every block below the anchor: none is current yet
+        let mut v = View::new(60, 61, &blocks, 30.0);
+        let mark = |row: f64, rows: f64, kind, target| Mark { row, rows, kind, target };
+        assert_eq!(v.block_marks(Side::Left), [mark(20.0, 0.0, MarkKind::Added, 0), mark(30.0, 2.0, MarkKind::Deleted, 1), mark(40.0, 1.0, MarkKind::Modified, 2)]);
+        assert_eq!(v.block_marks(Side::Right), [mark(20.0, 3.0, MarkKind::Added, 0), mark(33.0, 0.0, MarkKind::Deleted, 1), mark(41.0, 1.0, MarkKind::Modified, 2)]);
+        v.go_to_change(1);
+        let kinds = |v: &View, side| v.block_marks(side).iter().map(|m| m.kind).collect::<Vec<_>>();
+        assert_eq!(kinds(&v, Side::Left), [MarkKind::Added, MarkKind::Current, MarkKind::Modified]);
+        v.set_mode(ScrollMode::Padded);
+        assert_eq!(v.block_marks(Side::Left), v.block_marks(Side::Right), "Padded: both Sides span each block's rows");
+        assert_eq!(v.block_marks(Side::Left)[1], mark(33.0, 2.0, MarkKind::Current, 1));
+    }
+
+    #[test]
+    fn go_to_change_makes_it_current_and_visible() {
+        let blocks = [block(20..20, 20..23), block(30..32, 33..33), block(40..41, 41..42)];
+        for mode in MODES {
+            let mut v = View::new(60, 61, &blocks, 10.0);
+            v.start_in(mode);
+            v.go_to_change(2);
+            assert_eq!(v.current_change(), Some(2), "{mode:?}");
+            assert!(v.line_visible(Side::Left, 40) && v.line_visible(Side::Right, 41), "{mode:?}");
+            v.go_to_change(3);
+            assert_eq!(v.current_change(), Some(2), "{mode:?}: past the last block nothing moves");
+        }
     }
 }
