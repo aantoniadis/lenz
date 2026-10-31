@@ -1852,6 +1852,9 @@ fn tabs_open_reuse_keep_and_close_through_real_input(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     v.simulate_event(gpui::MouseDownEvent { button: MouseButton::Left, position: point(px(hits[1].0 + 10.0), px(bar_y)), modifiers: Modifiers::default(), click_count: 2, first_mouse: false });
     assert_eq!(f.view.read_with(&v, |v, _| tab_titles(v)), ["b.rs*", "a.rs"]);
+    // Keeping a tab changes the labels' widths: take the × from the bar as it is now drawn.
+    draw(&mut v);
+    let hits = f.view.read_with(&v, |v, _| v.tab_hits.clone());
     v.simulate_click(point(px(hits[0].1 - 4.0), px(bar_y)), Modifiers::default());
     drop(v);
     settle(cx, &f, active_is("a.rs"));
