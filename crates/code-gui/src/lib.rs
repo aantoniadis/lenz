@@ -4560,9 +4560,7 @@ impl ReaderView {
             return self.dispatch(Command::Csv(code_core::csv::Command::Scroll { rows, columns: 0 }), cx);
         }
         if self.markdown[pane as usize].as_ref().is_some_and(|m| m.layout.is_some()) { return self.scroll_preview(top as f32, cx); }
-        // ponytail: `step` walks row by row (O(top row) per drag move); a direct shown-row lookup in `folds::Visible`
-        // if dragging over very long files is slow.
-        let Some(line) = state.view(tab.id()).map(|view| view.visible().step(0, top.round() as isize)) else { return };
+        let Some(line) = state.view(tab.id()).map(|view| view.visible().line_at_row(top.round().max(0.0) as usize)) else { return };
         self.dispatch(Command::Scroll(line), cx);
     }
 
@@ -6319,7 +6317,7 @@ impl Render for ReaderView {
                                 // The scrollbar: its track, the thumb, and over both each marked cell (the caret a 1 px line).
                                 let (sx, sy, sw, sh) = (x0 + f32::from(g.bar_strip.origin.x), y0 + f32::from(g.bar_strip.origin.y), f32::from(g.bar_strip.size.width), f32::from(g.bar_strip.size.height));
                                 lenz_gpui::fill(window, sx, sy, sw, sh, palette.gutter_bg);
-                                if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, palette.border); }
+                                if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, thumb_color(&palette)); }
                                 let cell_h = sh / track_cells(sh).max(1) as f32;
                                 for &(cell, kind) in &f.scrollbar.1 {
                                     let (y, h) = if kind == MarkKind::Caret { (sy + cell as f32 * cell_h + 1.0, 1.0) } else { (sy + cell as f32 * cell_h, 3.0) };
@@ -6780,14 +6778,19 @@ fn display_number(number: u32, relative_caret: Option<usize>) -> u32 {
         .map_or(number, |caret| number.abs_diff(caret.saturating_add(1).min(u32::MAX as usize) as u32))
 }
 
-/// A scrollbar mark's colour: its kind's colour elsewhere (problems, find matches, change marks, bookmarks); the
-/// caret's dim.
+/// A scrollbar's thumb: a border tone a little toward the track, so marks over it keep their contrast.
+fn thumb_color(p: &lenz_content::theme::Palette) -> u32 {
+    lenz_content::theme::mix(p.gutter_bg, p.border, 0.8)
+}
+
+/// A scrollbar mark's colour: its kind's colour elsewhere (problems, change marks, bookmarks); find matches the text's
+/// match background, lifted toward its text colour (the current one more); the caret's dim.
 fn mark_color(kind: MarkKind, p: &lenz_content::theme::Palette) -> u32 {
     match kind {
         MarkKind::Error | MarkKind::Conflict => p.error,
         MarkKind::Warning | MarkKind::Current | MarkKind::Bookmark => p.accent,
-        MarkKind::FindCurrent => lenz_content::theme::mix(p.found_bg, p.fg, 0.4),
-        MarkKind::Find => p.found_bg,
+        MarkKind::FindCurrent => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.45) }
+        MarkKind::Find => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.2) }
         MarkKind::Added => code_core::markers::LineChange::Added.color(p),
         MarkKind::Modified => code_core::markers::LineChange::Modified.color(p),
         MarkKind::Deleted => code_core::markers::deleted_color(p),

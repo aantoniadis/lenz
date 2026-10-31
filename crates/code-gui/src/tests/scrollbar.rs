@@ -180,3 +180,45 @@ fn scrollbar_wheel_over_it_scrolls_the_pane(cx: &mut TestAppContext) {
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().focused_pane()), 0, "the strip's pane, as its text would");
     assert!(top_line(&v, &f) > 0);
 }
+
+/// Every mark a click can reach stands out from the track and from the thumb it may sit on, in both built-in palettes.
+#[test]
+fn scrollbar_marks_contrast_with_the_track_and_the_thumb() {
+    use lenz_content::theme::{contrast, DARCULA, LIGHT};
+    use MarkKind::*;
+    for (name, p) in [("Darcula", &DARCULA), ("Light", &LIGHT)] {
+        for kind in [Error, Conflict, Warning, Current, FindCurrent, Find, Added, Deleted, Modified, Bookmark].into_iter().filter(|k| k.jumps()) {
+            let c = mark_color(kind, p);
+            for (under, bg) in [("track", p.gutter_bg), ("thumb", thumb_color(p))] {
+                assert!(contrast(c, bg) >= 1.8, "{name} {kind:?} on the {under}: {:.2}", contrast(c, bg));
+            }
+        }
+        assert!(contrast(mark_color(FindCurrent, p), p.gutter_bg) > contrast(mark_color(Find, p), p.gutter_bg), "{name}: the current match is stronger");
+    }
+}
+
+#[gpui::test]
+fn scrollbar_thumb_drag_counts_a_collapsed_fold_as_one_row(cx: &mut TestAppContext) {
+    let body: String = (0..100).map(|i| format!("    let x{i} = {i};\n")).collect();
+    let rest: String = (0..200).map(|i| format!("fn f{i}() {{}}\n")).collect();
+    let source = format!("fn main() {{\n{body}}}\n{rest}");
+    let f = fixture(cx, Some(("folded.rs", source.as_bytes())));
+    let folds = |r: &ReaderView| { let s = r.session().state(); s.active().and_then(|t| s.view(t.id())).is_some_and(|v| v.folds().is_some()) };
+    settle(cx, &f, folds);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::ToggleFold(0), cx));
+    draw(&mut v);
+    let (start, size) = painted(&v, &f)[0].1.expect("a thumb");
+    let s = strip(&v, &f, 0);
+    let (y0, len, x) = (f32::from(s.origin.y), f32::from(s.size.height), f32::from(s.center().x));
+    let (bar, visible) = f.view.read_with(&v, |r, _| { let st = r.session().state(); (st.scrollbar(0).unwrap().0, st.view(st.active().unwrap().id()).unwrap().visible()) });
+    assert!(bar.total < 210.0, "the fold's 100 hidden lines are not rows: {}", bar.total);
+    let mid = y0 + len / 2.0;
+    drag(&mut v, (x, y0 + start + size / 2.0), (x, mid));
+    let row = bar.top_at(mid - y0 - size / 2.0, len, 16.0).round() as usize;
+    let want = visible.line_at_row(row);
+    assert!(want > row + 50, "the row lies below the fold: row {row}, line {want}");
+    assert_eq!(top_line(&v, &f), want);
+}
