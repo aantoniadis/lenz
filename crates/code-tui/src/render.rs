@@ -584,9 +584,17 @@ impl App {
                 });
             }
         }
-        self.draw_tree(frame, geometry.tree, p);
-        if geometry.tree.width >= 3 && geometry.tree.height > 0 {
-            let rect = Rect::new(geometry.tree.right() - 3, geometry.tree.y, 3, 1);
+        // The explorer's last column is its edge, drawn as the split's divider is: the cell to drag.
+        let edge = u16::from(geometry.tree.width >= 2);
+        let listing = Rect { width: geometry.tree.width - edge, ..geometry.tree };
+        self.draw_tree(frame, listing, p);
+        if edge == 1 {
+            for y in geometry.tree.top()..geometry.tree.bottom() {
+                frame.buffer_mut()[(listing.right(), y)].set_symbol("│").set_style(style(p.border, p.bg));
+            }
+        }
+        if listing.width >= 3 && listing.height > 0 {
+            let rect = Rect::new(listing.right() - 3, listing.y, 3, 1);
             geometry
                 .controls
                 .push((code_core::session::CommandId::LocateFile, rect));

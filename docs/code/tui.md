@@ -40,7 +40,7 @@ for limits and concurrent-window behavior.
 Dependency definitions reveal the same lazy **Libraries** section as the GUI, including when no project folder
 is open. A single click selects a folder; click its arrow or double-click its name to expand or collapse it.
 Ctrl+Shift+E focuses the explorer; arrows expand or collapse folders and Enter opens a file. A click on a file
-opens it and leaves the keys in the explorer, as in the desktop. Drag the explorer's last column to resize it; the
+opens it and leaves the keys in the explorer, as in the desktop. Drag the explorer's edge (the `│` in its last column) to resize it; the
 width is remembered and the text keeps at least 24 columns. With two panes, drag the divider (`│`, the first pane's
 last column), or the lower pane's tab bar past its tabs, to share the space differently; the share
 is the desktop's, remembered, and each pane keeps 4 rows or 12 columns (the first pane's last one is the divider). Drag the results panel's heading, past its
