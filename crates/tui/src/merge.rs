@@ -1163,7 +1163,7 @@ impl Merger {
             _ => Scope { surface: Surface::Merge, ..Scope::comparison() },
         }
     }
-    fn open_palette(&mut self) {
+    pub(crate) fn open_palette(&mut self) {
         self.toolbar.close();
         self.menu = None;
         self.files_menu_target = None;

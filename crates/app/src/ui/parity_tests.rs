@@ -539,6 +539,19 @@ fn gui_merge_toolbar_clicks_respect_about_and_preserve_dirty_result(cx:&mut Test
     assert_eq!(std::fs::read_to_string(dir.path().join("result")).unwrap(),draft);
 }
 
+/// Two bare Shift taps open the command palette, as Search Everywhere in Lenz Code; a key between them does not.
+#[gpui::test]
+fn gui_double_shift_opens_the_command_palette(cx:&mut TestAppContext) {
+    let f=fixture(cx,"old\n","new\n");
+    let modifiers=|cx:&mut TestAppContext,shift:bool|{f.window.update(cx,|v,w,cx|v.on_modifiers(&gpui::ModifiersChangedEvent{modifiers:gpui::Modifiers{shift,..Default::default()},capslock:Default::default()},w,cx)).unwrap();};
+    let tap=|cx:&mut TestAppContext|{modifiers(cx,true);modifiers(cx,false);};
+    tap(cx);tap(cx);
+    assert!(f.viewer.read_with(cx,|v,_|v.command_palette.is_some()));
+    key(cx,&f,"escape",false,false,false);
+    tap(cx);key(cx,&f,"a",false,false,false);tap(cx);
+    assert!(f.viewer.read_with(cx,|v,_|v.command_palette.is_none()),"a key between the taps");
+}
+
 #[gpui::test]
 fn gui_find_keys_keep_help_and_palette_modal(cx:&mut TestAppContext) {
     let f=fixture(cx,"old\n","new\n");
