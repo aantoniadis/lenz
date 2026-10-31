@@ -367,7 +367,7 @@ def main():
                     screen.key(win, 'period' if c == '.' else c)
                 screen.key(win, 'Return')
                 time.sleep(2)
-                screen.click(win, 266, 10)  # Reveal the opened file in the explorer.
+                screen.click(win, 266, 38)  # Reveal the opened file in the explorer (its button, right of the explorer title).
                 for key in keys:
                     screen.key(win, *key)
                 screen.click_away(win)
