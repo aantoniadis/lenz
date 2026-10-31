@@ -254,3 +254,39 @@ fn scrollbars_leave_narrow_panes_before_their_text(cx: &mut TestAppContext) {
         }
     }
 }
+
+#[gpui::test]
+fn a_held_preview_thumb_scrolls_its_own_pane_after_focus_moves(cx: &mut TestAppContext) {
+    let md = format!("# Top\n\n{}", (0..120).map(|i| format!("Paragraph {i}.\n\n")).collect::<String>());
+    let f = fixture(cx, Some(("doc.md", md.as_bytes())));
+    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Source)));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(1000.0), px(400.0)));
+    draw(&mut v);
+    click_preview(&mut v, &f, 0);
+    drop(v);
+    settle(cx, &f, |v| matches!(v.session().state().rendering(), Some(Rendering::Preview(_))));
+    let mut v = visual(cx, &f);
+    v.simulate_keystrokes("ctrl-\\");
+    let long = f.dir.path().join("long.txt");
+    std::fs::write(&long, lines(300, &[])).unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Open(long), cx));
+    drop(v);
+    settle(cx, &f, active_is("long.txt"));
+    let mut v = visual(cx, &f);
+    show(&mut v);
+    show(&mut v);
+    let s = strip(&v, &f, 0);
+    let (thumb, top) = f.view.read_with(&v, |r, _| (r.painted_scrollbars.iter().find(|p| p.0 == 0).and_then(|p| p.1), r.markdown[0].as_ref().map(|m| m.top)));
+    let (start, size) = thumb.expect("the preview's thumb");
+    let before = top.expect("a preview in the first pane");
+    let (x, y0, len) = (f32::from(s.center().x), f32::from(s.origin.y), f32::from(s.size.height));
+    v.simulate_mouse_down(point(px(x), px(y0 + start + size / 2.0)), MouseButton::Left, Modifiers::default());
+    assert!(matches!(f.view.read_with(&v, |r, _| r.drag), Some(Drag::Scrollbar { pane: 0, .. })), "a press on the preview's thumb grabs it");
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::FocusPane(1), cx));
+    v.simulate_mouse_move(point(px(x), px(y0 + len - 1.0)), MouseButton::Left, Modifiers::default());
+    v.simulate_mouse_up(point(px(x), px(y0 + len - 1.0)), MouseButton::Left, Modifiers::default());
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.markdown[0].as_ref().unwrap().top) > before + 100.0, "the preview follows its thumb");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().shown(1).unwrap().top_line()), 0, "the focused pane's text stays");
+}

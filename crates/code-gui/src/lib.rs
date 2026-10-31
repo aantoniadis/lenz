@@ -1844,7 +1844,7 @@ impl ReaderView {
                 _ => None,
             };
             if let Some(to) = to {
-                return self.scroll_preview(to, cx);
+                return self.scroll_preview(self.session.state().focused_pane(), to, cx);
             }
         }
         let page = self.rows.max(1);
@@ -3166,7 +3166,7 @@ impl ReaderView {
                 ScrollDelta::Lines(l) => -l.y * 3.0 * line_h(),
             };
             let to = m.top + dy;
-            return self.scroll_preview(to, cx);
+            return self.scroll_preview(self.session.state().focused_pane(), to, cx);
         }
         let delta = lenz_gpui::scroll::shifted(lenz_gpui::scroll::pixels(ev.delta, line_h(), self.char_w), ev.modifiers.shift);
         let pane = self.session.state().focused_pane() as usize;
@@ -4562,7 +4562,7 @@ impl ReaderView {
             let rows = top.round() as isize - view.top as isize;
             return self.dispatch(Command::Csv(code_core::csv::Command::Scroll { rows, columns: 0 }), cx);
         }
-        if self.markdown[pane as usize].as_ref().is_some_and(|m| m.layout.is_some()) { return self.scroll_preview(top as f32, cx); }
+        if self.markdown[pane as usize].as_ref().is_some_and(|m| m.layout.is_some()) { return self.scroll_preview(pane, top as f32, cx); }
         let Some(line) = state.view(tab.id()).map(|view| view.visible().line_at_row(top.round().max(0.0) as usize)) else { return };
         self.dispatch(Command::Scroll(line), cx);
     }
@@ -4610,14 +4610,18 @@ impl ReaderView {
         self.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: u32::try_from(line + 1).unwrap_or(u32::MAX), column: None }), cx);
     }
 
-    fn scroll_preview(&mut self, to: f32, cx: &mut Context<Self>) {
-        let view = self.rows as f32 * line_h();
-        let Some(m) = self.markdown[self.session.state().focused_pane() as usize].as_mut() else { return };
+    /// Scroll pane `pane`'s preview to pixel `to`; the source follows when the pane is focused (a session scroll moves
+    /// the active tab).
+    fn scroll_preview(&mut self, pane: u8, to: f32, cx: &mut Context<Self>) {
+        let focused = pane == self.session.state().focused_pane();
+        let Some(rows) = self.panes.iter().find(|g| g.pane == pane).map(|g| g.rows) else { return };
+        let view = rows as f32 * line_h();
+        let Some(m) = self.markdown[pane as usize].as_mut() else { return };
         let Some(layout) = &m.layout else { return };
         m.top = to.min(layout.height - view).max(0.0);
         let line = layout.row_at(m.top).map(|r| r.line);
         cx.notify();
-        if let Some(line) = line.filter(|&l| l != m.line) {
+        if let Some(line) = line.filter(|&l| focused && l != m.line) {
             m.line = line;
             self.dispatch(Command::Scroll(line), cx);
         }
