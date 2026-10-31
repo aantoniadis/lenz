@@ -284,6 +284,8 @@ pub struct ReaderView {
     dragging: bool,
     /// The pane whose gutter the pointer is over: its fold marks show at full strength.
     gutter_hover: Option<u8>,
+    /// The pointer is over a pane's text (past its gutter) or a Markdown preview: an I-beam.
+    text_hover: bool,
     /// A drag is selecting the focused Markdown preview's text.
     preview_drag: bool,
     themes_started: bool,
@@ -764,7 +766,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -4137,6 +4139,19 @@ impl ReaderView {
         self.context_layout()?.1.into_iter().find(|(_, _, e)| matches!(e, MenuEntry::Command(id) if id.label() == label)).map(|r| r.0)
     }
 
+    /// The mouse pointer's shape: a resize arrow over or while dragging a divider, a hand over a link or a button, an
+    /// I-beam over text; `None` keeps the platform's default.
+    pub fn pointer(&self) -> Option<gpui::CursorStyle> {
+        match self.drag.or(self.hover_divider) {
+            Some(Drag::Explorer | Drag::Annotations { .. }) => Some(gpui::CursorStyle::ResizeLeftRight),
+            Some(Drag::Split) if self.session.state().split() == Some(Split::Columns) => Some(gpui::CursorStyle::ResizeLeftRight),
+            Some(Drag::Split | Drag::Results) => Some(gpui::CursorStyle::ResizeUpDown),
+            None if self.link.is_some() || self.app_menu_hover || self.commands_hover || self.nav_hover.is_some() || self.preview_hover.is_some() => Some(gpui::CursorStyle::PointingHand),
+            None if self.text_hover && self.modal.is_none() => Some(gpui::CursorStyle::IBeam),
+            _ => None,
+        }
+    }
+
     fn on_mouse_move(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.modal.is_none() && self.input_state.capture.is_some() { self.link = None; self.doc_rest = (None, None); return; }
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
@@ -4209,6 +4224,14 @@ impl ReaderView {
         self.hover_link(window, x, y, ev.modifiers.control || ev.modifiers.platform, cx);
         self.rest_pointer(window, ev, cx);
         let gutter = self.panes.iter().find(|g| g.text.contains(&ev.position) && x < f32::from(g.text.origin.x) + num_w()).map(|g| g.pane);
+        let text_hover = self.panes.iter().any(|g| g.text.contains(&ev.position) && {
+            let i = g.pane as usize;
+            self.markdown[i].is_some() || self.source_geometry[i].is_some() && x >= f32::from(g.text.origin.x) + num_w()
+        });
+        if text_hover != self.text_hover {
+            self.text_hover = text_hover;
+            cx.notify();
+        }
         if gutter != self.gutter_hover {
             self.gutter_hover = gutter;
             cx.notify();
@@ -5598,13 +5621,7 @@ impl Render for ReaderView {
         }
         // Where a dragged tab would land, drawn as a mark in that pane's bar.
         let drop_x = self.tab_drop.filter(|_| matches!(self.drag, Some(Drag::Tab { moved: true, .. }))).map(|(pane, _, x)| (pane, x));
-        let cursor = match self.drag.or(self.hover_divider) {
-            Some(Drag::Explorer | Drag::Annotations { .. }) => Some(gpui::CursorStyle::ResizeLeftRight),
-            Some(Drag::Split) if split == Some(Split::Columns) => Some(gpui::CursorStyle::ResizeLeftRight),
-            Some(Drag::Split | Drag::Results) => Some(gpui::CursorStyle::ResizeUpDown),
-            None if self.link.is_some() || self.app_menu_hover || self.commands_hover || self.nav_hover.is_some() || self.preview_hover.is_some() => Some(gpui::CursorStyle::PointingHand),
-            _ => None,
-        };
+        let cursor = self.pointer();
         // Bring a newly highlighted tree row into view once; the wheel's scroll otherwise stands, within the rows.
         let (tree_len, tree_at) = (self.tree_len(), self.tree_at());
         if std::mem::take(&mut self.tree_reveal) {

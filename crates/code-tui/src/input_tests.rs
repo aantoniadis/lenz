@@ -4681,3 +4681,22 @@ fn results_heading_stop_rerun_hide_and_back_buttons_run() {
     draw(&mut a, 120, 30);
     assert!(a.session.state().results().is_none() && a.layout.controls.iter().any(|(id, r)| *id == CommandId::ToggleResults && r.y == 29));
 }
+
+/// Over a pane's text the runtime asks for an I-beam (OSC 22); over its gutter or under a dialog, the default.
+#[test]
+fn the_pointer_is_text_over_pane_text_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pointer.txt");
+    std::fs::write(&path, "some text\nmore\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    draw(&mut a, 80, 20);
+    let moved = |a: &mut App, column, row| { a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Moved, column, row, modifiers: KeyModifiers::NONE })); a.pointer_text };
+    let text = a.layout.panes[0].text;
+    assert!(moved(&mut a, text.x + 2, text.y), "over the text");
+    assert!(!moved(&mut a, text.x.saturating_sub(1), text.y), "over the gutter");
+    assert!(moved(&mut a, text.x + 2, text.y));
+    a.handle(Event::Key(KeyEvent::new(KeyCode::F(10), KeyModifiers::NONE)));
+    assert!(!moved(&mut a, text.x + 2, text.y), "under a dialog");
+}

@@ -174,6 +174,26 @@ fn draw(v: &mut VisualTestContext) {
     });
 }
 
+/// The pointer is an I-beam over a pane's text, not over its gutter, and the default while a dialog is open.
+#[gpui::test]
+fn the_pointer_is_an_i_beam_over_text_only(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("pointer.txt", b"some text\nmore\n")));
+    settle(cx, &f, |view| view.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let y = text.origin.y + px(line_h() / 2.0);
+    let pointer = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.pointer());
+    v.simulate_mouse_move(point(text.origin.x + px(num_w() + 20.0), y), None, Modifiers::default());
+    assert_eq!(pointer(&mut v), Some(gpui::CursorStyle::IBeam), "over the text");
+    v.simulate_mouse_move(point(text.origin.x + px(4.0), y), None, Modifiers::default());
+    assert_eq!(pointer(&mut v), None, "over the gutter");
+    v.simulate_mouse_move(point(text.origin.x + px(num_w() + 20.0), y), None, Modifiers::default());
+    v.simulate_keystrokes("f10");
+    assert_eq!(pointer(&mut v), None, "under a dialog");
+}
+
 #[gpui::test]
 fn unicode_delete_and_cut_paste_use_shared_transactions(cx: &mut TestAppContext) {
     let original = "é😀\r\nsecond";

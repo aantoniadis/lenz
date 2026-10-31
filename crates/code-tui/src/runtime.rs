@@ -77,7 +77,14 @@ fn enter() -> io::Result<ratatui::DefaultTerminal> {
     Ok(terminal)
 }
 
+/// OSC 22: the terminal's pointer shape by its CSS name (foot, kitty, Ghostty and others; the rest ignore it).
+fn pointer(output: &mut impl io::Write, text: bool) -> io::Result<()> {
+    write!(output, "\x1b]22;{}\x1b\\", if text { "text" } else { "default" })?;
+    output.flush()
+}
+
 fn leave() {
+    let _ = pointer(&mut io::stdout(), false);
     let _ = execute!(
         io::stdout(),
         PopKeyboardEnhancementFlags,
@@ -223,6 +230,7 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
     let mut coordinator = code_core::close::CloseCoordinator::default();
     let mut input = None;
     let mut dirty = true;
+    let mut pointer_text = false;
     loop {
         // A bounded batch keeps input responsive even during a fast project scan.
         for (i, view) in views.iter_mut().enumerate() {
@@ -285,6 +293,10 @@ fn run(path: Option<PathBuf>) -> io::Result<()> {
                 }
                 dirty |= dispatch_input(&mut views, &mut active, &mut coordinator, event);
                 if views.is_empty() { return Ok(()); }
+                if views[active].pointer_text != pointer_text {
+                    pointer_text = views[active].pointer_text;
+                    pointer(&mut io::stdout(), pointer_text)?;
+                }
             }
             Wake::Completion(i, c) => dirty |= views[i].apply(c) && i == active,
             Wake::Theme(i, t) => {

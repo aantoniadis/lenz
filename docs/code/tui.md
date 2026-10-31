@@ -552,7 +552,8 @@ when the shared theme service cannot detect appearance. There is no native file 
 and Workspace Root accept paths. Opening another view creates another session with its own documents and places;
 it does not mirror a live document from a different view.
 
-Clipboard transport is OSC 52: the terminal or multiplexer must permit it. Source text is base64 encoded before
+Over a pane's text the pointer becomes an I-beam through OSC 22, where the terminal supports it (foot, kitty, Ghostty;
+others ignore it), and goes back to the default elsewhere and on exit. Clipboard transport is OSC 52: the terminal or multiplexer must permit it. Source text is base64 encoded before
 entering the escape sequence. Legacy terminals cannot distinguish every Ctrl/Shift combination; use the palette
 for any shortcut your terminal does not deliver. The explorer's edge, the split panes' divider and the results
 heading drag; mouse tab dragging and the divider between the results list and its preview are not available; tabs
