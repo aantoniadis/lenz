@@ -1,5 +1,5 @@
 //! Base palettes from Omarchy and upstream editor themes; sources and MIT notices in docs/themes.md.
-use super::{Palette, Syntax, ThemeEntry};
+use super::{Palette, Syntax, ThemeEntry, terminal_colors};
 #[derive(Clone, Copy)]
 pub(super) struct Seed {
     pub bg: u32,
@@ -61,6 +61,7 @@ pub(super) const fn from_seed(s: Seed) -> Palette {
         ],
         edge: [s.green, s.red, s.blue, s.yellow],
         status: [s.green, s.red, s.blue, s.magenta, s.red],
+        terminal: terminal_colors(s.bg, s.fg, [s.red, s.green, s.yellow, s.blue, s.magenta, s.cyan]),
         syntax: Syntax {
             keyword: s.magenta,
             string: s.green,

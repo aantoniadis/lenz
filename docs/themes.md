@@ -107,7 +107,11 @@ All colors are `#RRGGBB`. Optional base colors are `selection`, `muted`,
 `sel_bg`, `caret`, `found_bg`, `banner_bg`, `accent`, `error`, and `blame_new`.
 `block`, `inline` and `edge` accept four colors ordered inserted, deleted,
 modified, conflict. `status` accepts five colors ordered added, deleted,
-modified, renamed, conflicted.
+modified, renamed, conflicted. `terminal` accepts the integrated terminal's 16
+ANSI colors: black, red, green, yellow, blue, magenta, cyan, white, then their
+bright variants. Without it they come from the theme's `red`, `green`,
+`yellow`, `blue`, `magenta` and `cyan`, with black, white and the bright
+variants blended from its background and foreground.
 
 `[syntax]` accepts `keyword`, `string`, `number`, `comment`, `doc_comment`,
 `function`, `constant`, `macro_`, `type_`, `builtin_var`, `tag`, `attribute`,

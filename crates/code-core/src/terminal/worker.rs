@@ -24,7 +24,7 @@ impl Process {
         _cwd: PathBuf,
         _shell: OsString,
         _tx: async_channel::Sender<session::Completion>,
-        _colors: (u32, u32),
+        _colors: super::Colors,
     ) -> Result<Self, String> {
         Err("The integrated terminal is supported on Linux and macOS; this platform's process lifecycle is unverified".into())
     }
@@ -184,7 +184,7 @@ mod unix {
             cwd: PathBuf,
             shell: OsString,
             tx: async_channel::Sender<session::Completion>,
-            colors: (u32, u32),
+            colors: crate::terminal::Colors,
         ) -> Result<Self, String> {
             // Reject an unsupported platform (and on Linux reserve a pidfd slot) before launching a shell.
             let preflight = os::preflight()?;
@@ -301,7 +301,8 @@ mod unix {
                 | Command::Copy
                 | Command::Search { .. }
                 | Command::Mouse { .. }
-                | Command::Focus(_)) => Input::Model(command),
+                | Command::Focus(_)
+                | Command::Colors(_)) => Input::Model(command),
                 _ => return Err("This command is managed by the terminal session".into()),
             };
             if matches!(&input, Input::Bytes(bytes) if bytes.is_empty()) {
@@ -522,7 +523,7 @@ mod unix {
         mut fd: FileDescriptor,
         master: Box<dyn MasterPty + Send>,
         mut child: OwnedChild,
-        colors: (u32, u32),
+        colors: crate::terminal::Colors,
     ) {
         let mut model = Model::new(colors);
         let mut writes: VecDeque<Pending> = VecDeque::new();
@@ -601,6 +602,7 @@ mod unix {
                                 }
                             }
                             Command::ScrollTo { top } => model.scroll_to(top),
+                            Command::Colors(colors) => model.set_colors(colors),
                             Command::Search { query, backwards, advance } => model.search(&query, backwards, advance),
                             Command::Select {
                                 row,
@@ -1058,7 +1060,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process.send(Command::Text("printf '\\033[?2004h'; stty -echo -icanon; printf '\\122\\105\\101\\104\\131'; dd bs=1 count=17 2>/dev/null | od -An -tx1 -w32; exit\n".into())).unwrap();
@@ -1110,7 +1112,7 @@ mod tests {
     fn terminal_pty_find_output_release_probe() {
         let directory = tempfile::tempdir().unwrap();
         let (tx,_rx) = async_channel::unbounded();
-        let process = Process::spawn(Id(400),1,directory.path().into(),"/bin/sh".into(),tx,(0xffffff,0)).unwrap();
+        let process = Process::spawn(Id(400),1,directory.path().into(),"/bin/sh".into(),tx,(0xffffff,0).into()).unwrap();
         process.send(Command::Text("stty -echo; (while :; do printf 'needle.*界\\r\\n'; done) & producer=$!; printf '%s' $producer > producer; read answer; kill $producer; wait $producer 2>/dev/null; printf 'INPUT_ACK_%s' \"$answer\"\n".into())).unwrap();
         wait_pid(directory.path(),"producer");
         let start = Instant::now();
@@ -1149,7 +1151,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1220,7 +1222,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1246,7 +1248,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1275,7 +1277,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process.send(Command::Text("setsid /bin/sh -c 'echo $$ > detached; exec sleep 60' </dev/null >/dev/null 2>&1 &\n".into())).unwrap();
@@ -1310,7 +1312,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1359,7 +1361,7 @@ mod tests {
                 directory.path().into(),
                 "/missing/lenz-test-shell".into(),
                 tx.clone(),
-                (0xffffff, 0)
+                (0xffffff, 0).into()
             )
             .is_err()
         );
@@ -1369,7 +1371,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1413,7 +1415,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1443,7 +1445,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx.clone(),
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process
@@ -1533,7 +1535,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process.send(Command::Text("printf '%s' $$ > leader; (trap '' HUP TERM; exec \"./$(printf 'sleep-\\377')\" 60) & printf '%s' $! > binary; wait\n".into())).unwrap();
@@ -1629,7 +1631,7 @@ mod tests {
                 directory.path().into(),
                 "/bin/sh".into(),
                 tx,
-                (0xffffff, 0),
+                (0xffffff, 0).into(),
             )
             .unwrap();
             process.send(Command::Text("printf '%s' $$ > leader; sleep 60 | sleep 60 & printf '%s' $! > pipeline; wait\n".into())).unwrap();
@@ -1656,7 +1658,7 @@ mod tests {
             directory.path().into(),
             "/bin/sh".into(),
             tx,
-            (0xffffff, 0),
+            (0xffffff, 0).into(),
         )
         .unwrap();
         process.send(Command::Text("stty -echo; printf '%s' $$ > leader; while :; do printf '0123456789 terminal-stress \\347\\225\\214 e\\314\\201\\n'; done\n".into())).unwrap();

@@ -36,6 +36,12 @@ impl State {
     }
 }
 impl Session {
+    /// Open terminals redraw with a new theme's colours (a failed send only leaves one on the old ones).
+    pub(crate) fn recolor_terminals(&self, colors: terminal::Colors) {
+        for process in self.terminals.processes.values() {
+            let _ = process.send(terminal::Command::Colors(colors));
+        }
+    }
     pub(crate) fn terminal_disabled(&self, id: CommandId) -> Option<&'static str> {
         let state = &self.state.terminal;
         let tab = state.active();
@@ -415,6 +421,8 @@ impl Session {
                     }
                 }
             }
+            // The session sends it to its processes when the theme changes (`recolor_terminals`); adapters do not.
+            T::Colors(_) => {}
             command @ (T::Key(_)
             | T::Text(_)
             | T::Paste(_)
@@ -476,7 +484,7 @@ impl Session {
         tab.frame = None;
         let cwd = tab.cwd.clone();
         let tx = self.tx.clone();
-        let colors = (self.state.palette.fg, self.state.palette.bg);
+        let colors = terminal::Colors::of(&self.state.palette);
         #[cfg(any(test, feature = "test-support"))]
         let shell = std::ffi::OsString::from("/bin/sh");
         #[cfg(not(any(test, feature = "test-support")))]
@@ -828,6 +836,25 @@ mod tests {
         assert_eq!(s.state.terminal.active().unwrap().error, refusal);
         s.dispatch(Command::Terminal(T::Text(" ".into())));
         assert_eq!(s.state.terminal.active().unwrap().error, None);
+    }
+
+    /// ANSI colours come from the theme, and a theme change recolours what an open terminal shows.
+    #[test]
+    fn terminal_colors_follow_the_theme_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = session(dir.path());
+        s.dispatch(Command::Terminal(T::New));
+        settle(&mut s, |s| s.state.terminal.active().is_some_and(|t| t.running && t.frame.is_some()));
+        s.dispatch(Command::Terminal(T::Text("printf '\\033[31mQ\\033[0m\\n'\n".into())));
+        let red = |s: &Session| s.state.terminal.active().and_then(|t| t.frame.as_ref())
+            .and_then(|f| f.cells.iter().find_map(|c| (c.text == "Q").then_some(c.fg).flatten()));
+        settle(&mut s, |s| red(s).is_some());
+        let before = s.state.palette.terminal[1];
+        assert_eq!(red(&s), Some(before), "the shell's red is the theme's");
+        s.dispatch(Command::PreviewTheme(Some("gruvbox".into())));
+        let gruvbox = lenz_content::theme::builtin("gruvbox").unwrap().terminal[1];
+        assert_ne!(gruvbox, before, "a distinct colour to wait for");
+        settle(&mut s, |s| red(s) == Some(gruvbox));
     }
 
     #[test]

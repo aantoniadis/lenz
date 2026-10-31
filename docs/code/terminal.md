@@ -3,7 +3,9 @@
 Lenz Code on Linux and macOS includes a terminal panel with multiple sessions. Choose
 **View → Terminal → New Terminal**, press **Ctrl+Alt+T**, or use **F10** to find a
 terminal command. The panel uses Alacritty's terminal model and the same shared
-session behavior in the desktop and terminal editors.
+session behavior in the desktop and terminal editors. Its 16 ANSI colors come from
+the current theme (see [themes](../themes.md)), and changing the theme recolors open
+terminals.
 
 Each terminal tab has its own interactive shell, working directory and scrollback.
 Choose **View → Terminal → Rename Terminal Tab…** (or find it with **F10**) to name

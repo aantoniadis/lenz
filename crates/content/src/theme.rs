@@ -37,7 +37,24 @@ pub struct Palette {
     pub edge: [u32; 4],
     /// File status: added, deleted, modified, renamed, conflicted.
     pub status: [u32; 5],
+    /// The integrated terminal's 16 ANSI colours: black, red, green, yellow, blue, magenta, cyan and white, then their
+    /// bright variants (see [`terminal_colors`]).
+    pub terminal: [u32; 16],
     pub syntax: Syntax,
+}
+
+/// A theme's terminal colours: its own six hues, black and white blended from its background and text (toward the text
+/// for a dark theme, toward the background for a light one), and bright variants a little toward the text, so
+/// nothing is the fully saturated xterm default.
+pub const fn terminal_colors(bg: u32, fg: u32, [red, green, yellow, blue, magenta, cyan]: [u32; 6]) -> [u32; 16] {
+    let dark = (bg >> 16 & 255) + (bg >> 8 & 255) + (bg & 255) < 384;
+    let (black, white, bright_black, bright_white) = if dark {
+        (blend(fg, bg, 25), blend(fg, bg, 75), blend(fg, bg, 45), fg)
+    } else {
+        (blend(fg, bg, 80), blend(fg, bg, 25), blend(fg, bg, 55), blend(fg, bg, 12))
+    };
+    [black, red, green, yellow, blue, magenta, cyan, white, bright_black, blend(red, fg, 82), blend(green, fg, 82),
+        blend(yellow, fg, 82), blend(blue, fg, 82), blend(magenta, fg, 82), blend(cyan, fg, 82), bright_white]
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +98,8 @@ pub const DARCULA: Palette = Palette {
     inline: [0x3C6B48, 0x656E76, 0x4E78A8, 0x6B3C35],
     edge: [0x5C9A6C, 0x8A8F94, 0x6A93C8, 0xC75450],
     status: [0x629755, 0x8C8C8C, 0x6897BB, 0x9876AA, 0xD25252],
+    // IntelliJ's Darcula console hues: its error red, change green and blue, constant purple, a muted yellow and teal.
+    terminal: terminal_colors(0x2B2B2B, 0xA9B7C6, [0xD25252, 0x629755, 0xD6BF55, 0x6897BB, 0x9876AA, 0x299999]),
     syntax: Syntax {
         keyword: 0xCC7832,
         string: 0x6A8759,
@@ -122,6 +141,8 @@ pub const LIGHT: Palette = Palette {
     inline: [0x8FDB8F, 0xA9A9A9, 0x8EAEF5, 0xFFB0A1],
     edge: [0x56A556, 0x999999, 0x6F95E6, 0xE0614F],
     status: [0x067D17, 0x6C6C6C, 0x0032A0, 0x871094, 0xC7222D],
+    // The Light theme's own error red, change green, number blue and constant purple, with a dark yellow and teal.
+    terminal: terminal_colors(0xFFFFFF, 0x080808, [0xC7222D, 0x067D17, 0x9E880D, 0x1750EB, 0x871094, 0x0E7F80]),
     syntax: Syntax {
         keyword: 0x0033B3,
         string: 0x067D17,
