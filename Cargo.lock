@@ -1021,6 +1021,7 @@ dependencies = [
  "image",
  "lenz-content",
  "lenz-engine",
+ "libc",
  "notify",
  "pg_parse",
  "portable-pty",

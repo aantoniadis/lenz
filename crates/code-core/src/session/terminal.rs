@@ -41,8 +41,8 @@ impl Session {
         let tab = state.active();
         match id {
             CommandId::ShowTerminal | CommandId::NewTerminal | CommandId::FocusTerminal => {
-                (!cfg!(target_os = "linux"))
-                    .then_some("Integrated terminals are currently supported on Linux")
+                (!cfg!(any(target_os = "linux", target_os = "macos")))
+                    .then_some("Integrated terminals are currently supported on Linux and macOS")
             }
             CommandId::FocusEditor => None,
             CommandId::SendSelectionToTerminal => {
@@ -259,9 +259,9 @@ impl Session {
                 self.state.terminal.focused = false;
             }
             T::New => {
-                if !cfg!(target_os = "linux") {
+                if !cfg!(any(target_os = "linux", target_os = "macos")) {
                     return self.command(Command::Notice(
-                        "Integrated terminals are currently supported on Linux".into(),
+                        "Integrated terminals are currently supported on Linux and macOS".into(),
                     ));
                 }
                 self.cancel_close();

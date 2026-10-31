@@ -10,13 +10,13 @@ pub struct Update {
     pub copy: Option<String>,
 }
 
-#[cfg(target_os = "linux")]
-pub use linux::Process;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub use unix::Process;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[derive(Debug)]
 pub struct Process;
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 impl Process {
     pub(crate) fn spawn(
         _id: Id,
@@ -26,7 +26,7 @@ impl Process {
         _tx: async_channel::Sender<session::Completion>,
         _colors: (u32, u32),
     ) -> Result<Self, String> {
-        Err("The integrated terminal is supported on Linux; this platform's process lifecycle is unverified".into())
+        Err("The integrated terminal is supported on Linux and macOS; this platform's process lifecycle is unverified".into())
     }
     pub(crate) fn send(&self, _command: Command) -> Result<(), String> {
         Err("Terminal is unavailable".into())
@@ -46,24 +46,24 @@ impl Process {
     }
 }
 
-#[cfg(target_os = "linux")]
-mod linux {
+/// The terminal's reactor on Unix. What the platforms do differently sits in `os`: following the shell's exit,
+/// finding and signalling the processes of its session, and waiting on the descriptors.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod unix {
     use super::super::{encode_key, encode_paste, model::Model, quote_paths};
     use super::*;
     use alacritty_terminal::term::TermMode;
     use filedescriptor::FileDescriptor;
     use portable_pty::{Child, CommandBuilder, MasterPty, PtySize};
     use rustix::{
-        event::{PollFd, PollFlags, Timespec, poll},
         fs::{OFlags, fcntl_getfl, fcntl_setfl},
-        process::{Pid, PidfdFlags, Signal, getpid, kill_process, pidfd_open, pidfd_send_signal},
+        process::{Pid, Signal, kill_process},
     };
     use std::{
         collections::VecDeque,
-        fs,
         io::{self, Read, Write},
         os::{
-            fd::{AsRawFd, OwnedFd},
+            fd::AsRawFd,
             unix::net::UnixStream,
         },
         sync::{
@@ -186,13 +186,8 @@ mod linux {
             tx: async_channel::Sender<session::Completion>,
             colors: (u32, u32),
         ) -> Result<Self, String> {
-            fs::read_dir("/proc").map_err(|error| {
-                format!("The terminal needs Linux /proc for owned process cleanup: {error}")
-            })?;
-            // Reserve one pidfd slot and reject unsupported kernels before launching a shell.
-            let preflight = pidfd_open(getpid(), PidfdFlags::empty()).map_err(|error| {
-                format!("Linux pidfd support is required for terminal ownership: {error}")
-            })?;
+            // Reject an unsupported platform (and on Linux reserve a pidfd slot) before launching a shell.
+            let preflight = os::preflight()?;
             let (wake, reader) = UnixStream::pair().map_err(|e| e.to_string())?;
             wake.set_nonblocking(true).map_err(|e| e.to_string())?;
             reader.set_nonblocking(true).map_err(|e| e.to_string())?;
@@ -233,18 +228,16 @@ mod linux {
                 .and_then(Pid::from_raw)
                 .ok_or("PTY child has no process identity")?;
             drop(preflight);
-            let pidfd = match pidfd_open(pid, PidfdFlags::empty()) {
-                Ok(fd) => fd,
+            let exit = match os::Exit::new(pid) {
+                Ok(exit) => exit,
                 Err(error) => {
                     kill_failed_start(child, pid);
-                    return Err(format!(
-                        "Linux pidfd support is required for terminal ownership: {error}"
-                    ));
+                    return Err(error);
                 }
             };
             let owned = OwnedChild {
                 child: Some(child),
-                pidfd,
+                exit,
                 pid,
                 cleaned: false,
                 pending: Vec::new(),
@@ -387,9 +380,11 @@ mod linux {
             reap_later(child);
         }
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux"))]
     #[test]
     fn terminal_pty_failed_start_kills_hup_ignoring_child() {
+        use rustix::{event::{PollFd, PollFlags, Timespec, poll}, process::{PidfdFlags, pidfd_open}};
+        use std::fs;
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize::default())
             .unwrap();
@@ -435,38 +430,30 @@ mod linux {
     }
     struct OwnedChild {
         child: Option<Box<dyn Child + Send + Sync>>,
-        pidfd: OwnedFd,
+        exit: os::Exit,
         pid: Pid,
         cleaned: bool,
-        pending: Vec<OwnedFd>,
+        pending: Vec<os::Member>,
     }
     impl OwnedChild {
         fn ready(&self) -> bool {
-            let mut descriptors = [PollFd::new(&self.pidfd, PollFlags::IN)];
-            poll(
-                &mut descriptors,
-                Some(&Timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                }),
-            )
-            .is_ok_and(|n| n != 0)
+            self.exit.exited()
         }
         fn cleanup(&mut self) -> String {
             if self.cleaned {
                 return "Exited".into();
             }
-            // The unreaped leader pins the SID while /proc members are opened as pidfds.
+            // The unreaped leader pins the SID while the session's members are found.
             for (signal, wait) in [(Signal::HUP, 80), (Signal::TERM, 120), (Signal::KILL, 300)] {
-                let _ = pidfd_send_signal(&self.pidfd, signal);
+                self.exit.signal(signal);
                 let deadline = Instant::now() + Duration::from_millis(wait);
                 loop {
-                    let members = session_members(self.pid);
+                    let members = os::members(self.pid);
                     if members.is_empty() {
                         break;
                     }
-                    for fd in members {
-                        let _ = pidfd_send_signal(fd, signal);
+                    for member in &members {
+                        member.signal(signal);
                     }
                     if Instant::now() >= deadline {
                         break;
@@ -475,7 +462,7 @@ mod linux {
                 }
             }
             self.cleaned = true;
-            self.pending = session_members(self.pid);
+            self.pending = os::members(self.pid);
             if self.ready() && self.pending.is_empty() {
                 match self.child.as_mut().map(|child| child.wait()) {
                     Some(Ok(status)) => format!("Exited: {status}"),
@@ -491,9 +478,8 @@ mod linux {
     impl OwnedChild {
         fn reap(&mut self) -> Option<io::Result<portable_pty::ExitStatus>> {
             // SIGKILL may be pending on an uninterruptible task; closure waits off the UI thread.
-            for fd in self.pending.drain(..) {
-                let mut descriptors = [PollFd::new(&fd, PollFlags::IN)];
-                while let Err(rustix::io::Errno::INTR) = poll(&mut descriptors, None) {}
+            for member in self.pending.drain(..) {
+                member.wait();
             }
             self.child.take().map(|mut child| child.wait())
         }
@@ -506,40 +492,6 @@ mod linux {
             // Also cover OS thread creation failure before a reactor owns the child.
             self.reap();
         }
-    }
-
-    fn stat_session(pid: u32) -> Option<(u32, char)> {
-        let stat = fs::read(format!("/proc/{pid}/stat")).ok()?;
-        // Linux comm bytes are arbitrary; only the numeric suffix is ASCII.
-        let end = stat.iter().rposition(|byte| *byte == b')')?;
-        let mut fields = std::str::from_utf8(stat.get(end + 1..)?)
-            .ok()?
-            .split_whitespace();
-        let state = fields.next()?.chars().next()?;
-        let sid = fields.nth(2)?.parse().ok()?;
-        Some((sid, state))
-    }
-    fn session_members(sid: Pid) -> Vec<OwnedFd> {
-        let Ok(entries) = fs::read_dir("/proc") else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
-                let (session, state) = stat_session(pid)?;
-                if session != sid.as_raw_nonzero().get() as u32 || state == 'Z' {
-                    return None;
-                }
-                let fd = pidfd_open(
-                    Pid::from_raw(i32::try_from(pid).ok()?)?,
-                    PidfdFlags::empty(),
-                )
-                .ok()?;
-                // Recheck after pinning; a recycled PID cannot target an unrelated session.
-                (stat_session(pid)?.0 == session).then_some(fd)
-            })
-            .collect()
     }
 
     fn response(writes: &mut VecDeque<Pending>, bytes: Vec<u8>) -> Result<(), String> {
@@ -698,60 +650,29 @@ mod linux {
             }
             let retry = shared.retry_wake();
             let timeout = (dirty || retry).then(|| {
-                let duration = if dirty {
+                if dirty {
                     FRAME_INTERVAL.saturating_sub(last_frame.elapsed())
                 } else {
                     FRAME_INTERVAL
-                };
-                Timespec {
-                    tv_sec: 0,
-                    tv_nsec: duration.as_nanos() as _,
                 }
             });
-            let mut descriptors = vec![PollFd::new(&wake, PollFlags::IN)];
-            let pty_index = (running && read_open).then(|| {
-                descriptors.push(PollFd::new(
-                    &fd,
-                    if writes.is_empty() {
-                        PollFlags::IN
-                    } else {
-                        PollFlags::IN | PollFlags::OUT
-                    },
-                ));
-                descriptors.len() - 1
-            });
-            let child_index = running.then(|| {
-                descriptors.push(PollFd::new(&child.pidfd, PollFlags::IN));
-                descriptors.len() - 1
-            });
-            match poll(&mut descriptors, timeout.as_ref()) {
-                Ok(_) => {}
-                Err(rustix::io::Errno::INTR) => continue,
+            let pty = (running && read_open).then_some((&fd, !writes.is_empty()));
+            let ready = match os::wait(&wake, pty, running.then_some(&child.exit), timeout) {
+                Ok(ready) => ready,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
                     failure = Some(format!("Terminal wait failed: {error}"));
                     break;
                 }
-            }
-            let wake_ready = descriptors[0]
-                .revents()
-                .intersects(PollFlags::IN | PollFlags::HUP);
-            let child_ready =
-                child_index.is_some_and(|index| !descriptors[index].revents().is_empty());
-            let pty_flags = pty_index
-                .map(|index| descriptors[index].revents())
-                .unwrap_or(PollFlags::empty());
-            drop(descriptors);
-            if wake_ready {
+            };
+            if ready.wake {
                 let mut bytes = [0; 256];
                 while wake.read(&mut bytes).is_ok_and(|n| n != 0) {}
             }
             if shared.cancel.load(Ordering::Acquire) {
                 break;
             }
-            if running
-                && read_open
-                && pty_flags.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR)
-            {
+            if running && read_open && ready.pty_read {
                 let mut bytes = [0; 4096];
                 // A bounded turn keeps input, cancellation and presentation responsive under floods.
                 for _ in 0..16 {
@@ -782,7 +703,7 @@ mod linux {
                     }
                 }
             }
-            if running && pty_flags.contains(PollFlags::OUT) {
+            if running && ready.pty_write {
                 for _ in 0..16 {
                     let Some(pending) = writes.front_mut() else {
                         break;
@@ -814,7 +735,7 @@ mod linux {
                     }
                 }
             }
-            if child_ready {
+            if ready.child {
                 shared.running.store(false, Ordering::Release);
                 status = child.cleanup();
                 running = false;
@@ -855,16 +776,257 @@ mod linux {
         shared.publish(Some(frame), false, &status, failure, None);
         // Final acknowledgement survives a full inbox, including after stop() cancellation.
         while shared.retry_wake() {
-            let mut descriptors = [PollFd::new(&wake, PollFlags::IN)];
-            let _ = poll(
-                &mut descriptors,
-                Some(&Timespec {
-                    tv_sec: 0,
-                    tv_nsec: FRAME_INTERVAL.as_nanos() as _,
-                }),
-            );
+            let _ = os::wait(&wake, None, None, Some(FRAME_INTERVAL));
             let mut bytes = [0; 256];
             while wake.read(&mut bytes).is_ok_and(|n| n != 0) {}
+        }
+    }
+
+    /// What one wait found ready: the wake socket, the PTY for reading (or hung up) and writing, the shell's exit.
+    #[derive(Default)]
+    struct Ready {
+        wake: bool,
+        pty_read: bool,
+        pty_write: bool,
+        child: bool,
+    }
+
+    #[cfg(target_os = "linux")]
+    mod os {
+        use super::{FileDescriptor, Ready};
+        use rustix::{
+            event::{PollFd, PollFlags, Timespec, poll},
+            process::{Pid, PidfdFlags, Signal, getpid, pidfd_open, pidfd_send_signal},
+        };
+        use std::{fs, io, os::{fd::OwnedFd, unix::net::UnixStream}, time::Duration};
+
+        /// /proc for the session's members, and one pidfd slot reserved (an unsupported kernel refused) before a
+        /// shell starts.
+        pub(super) fn preflight() -> Result<OwnedFd, String> {
+            fs::read_dir("/proc").map_err(|error| format!("The terminal needs Linux /proc for owned process cleanup: {error}"))?;
+            pidfd_open(getpid(), PidfdFlags::empty()).map_err(|error| format!("Linux pidfd support is required for terminal ownership: {error}"))
+        }
+
+        /// The shell's pidfd: readable once it exits, and a signal target that cannot reach a recycled PID.
+        pub(super) struct Exit(OwnedFd);
+        impl Exit {
+            pub(super) fn new(pid: Pid) -> Result<Self, String> {
+                pidfd_open(pid, PidfdFlags::empty()).map(Self).map_err(|error| format!("Linux pidfd support is required for terminal ownership: {error}"))
+            }
+            pub(super) fn signal(&self, signal: Signal) {
+                let _ = pidfd_send_signal(&self.0, signal);
+            }
+            pub(super) fn exited(&self) -> bool {
+                let mut descriptors = [PollFd::new(&self.0, PollFlags::IN)];
+                poll(&mut descriptors, Some(&Timespec { tv_sec: 0, tv_nsec: 0 })).is_ok_and(|n| n != 0)
+            }
+        }
+
+        /// A live process of the shell's session, pinned by its pidfd.
+        pub(super) struct Member(OwnedFd);
+        impl Member {
+            pub(super) fn signal(&self, signal: Signal) {
+                let _ = pidfd_send_signal(&self.0, signal);
+            }
+            pub(super) fn wait(self) {
+                let mut descriptors = [PollFd::new(&self.0, PollFlags::IN)];
+                while let Err(rustix::io::Errno::INTR) = poll(&mut descriptors, None) {}
+            }
+        }
+
+        fn stat_session(pid: u32) -> Option<(u32, char)> {
+            let stat = fs::read(format!("/proc/{pid}/stat")).ok()?;
+            // Linux comm bytes are arbitrary; only the numeric suffix is ASCII.
+            let end = stat.iter().rposition(|byte| *byte == b')')?;
+            let mut fields = std::str::from_utf8(stat.get(end + 1..)?)
+                .ok()?
+                .split_whitespace();
+            let state = fields.next()?.chars().next()?;
+            let sid = fields.nth(2)?.parse().ok()?;
+            Some((sid, state))
+        }
+        /// The live processes of the session, each pinned by a pidfd.
+        pub(super) fn members(sid: Pid) -> Vec<Member> {
+            let Ok(entries) = fs::read_dir("/proc") else {
+                return Vec::new();
+            };
+            entries
+                .filter_map(Result::ok)
+                .filter_map(|entry| {
+                    let pid: u32 = entry.file_name().to_str()?.parse().ok()?;
+                    let (session, state) = stat_session(pid)?;
+                    if session != sid.as_raw_nonzero().get() as u32 || state == 'Z' {
+                        return None;
+                    }
+                    let fd = pidfd_open(
+                        Pid::from_raw(i32::try_from(pid).ok()?)?,
+                        PidfdFlags::empty(),
+                    )
+                    .ok()?;
+                    // Recheck after pinning; a recycled PID cannot target an unrelated session.
+                    (stat_session(pid)?.0 == session).then_some(Member(fd))
+                })
+                .collect()
+        }
+
+        pub(super) fn wait(wake: &UnixStream, pty: Option<(&FileDescriptor, bool)>, exit: Option<&Exit>, timeout: Option<Duration>) -> io::Result<Ready> {
+            let mut descriptors = vec![PollFd::new(wake, PollFlags::IN)];
+            if let Some((fd, write)) = pty {
+                descriptors.push(PollFd::new(fd, if write { PollFlags::IN | PollFlags::OUT } else { PollFlags::IN }));
+            }
+            if let Some(exit) = exit {
+                descriptors.push(PollFd::new(&exit.0, PollFlags::IN));
+            }
+            let timeout = timeout.map(|d| Timespec { tv_sec: d.as_secs() as _, tv_nsec: d.subsec_nanos() as _ });
+            poll(&mut descriptors, timeout.as_ref())?;
+            let flags = |index: usize| descriptors.get(index).map_or(PollFlags::empty(), PollFd::revents);
+            let pty_flags = if pty.is_some() { flags(1) } else { PollFlags::empty() };
+            Ok(Ready {
+                wake: flags(0).intersects(PollFlags::IN | PollFlags::HUP),
+                pty_read: pty_flags.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR),
+                pty_write: pty_flags.contains(PollFlags::OUT),
+                child: exit.is_some() && !flags(1 + usize::from(pty.is_some())).is_empty(),
+            })
+        }
+    }
+
+    /// macOS has neither pidfds nor /proc. Never compiled or run on macOS yet: see docs/code/terminal.md.
+    #[cfg(target_os = "macos")]
+    mod os {
+        use super::{FileDescriptor, Ready};
+        use rustix::process::{Pid, Signal, getsid, kill_process};
+        use std::{
+            io::{self, Write},
+            os::{fd::AsRawFd, unix::net::UnixStream},
+            sync::{Arc, atomic::{AtomicBool, Ordering}},
+            time::Duration,
+        };
+
+        /// `sys/proc.h`'s zombie state, as `proc_bsdinfo::pbi_status` reports it.
+        const SZOMB: u32 = 5;
+
+        pub(super) fn preflight() -> Result<(), String> {
+            Ok(())
+        }
+
+        /// The shell's exit. A thread waits for it without reaping (`WNOWAIT`), so the unreaped leader keeps its PID
+        /// (and the session's ID) from being recycled until `Child::wait`, then wakes the reactor through a socket.
+        pub(super) struct Exit {
+            pid: Pid,
+            fd: UnixStream,
+            done: Arc<AtomicBool>,
+        }
+        impl Exit {
+            pub(super) fn new(pid: Pid) -> Result<Self, String> {
+                let (fd, mut notify) = UnixStream::pair().map_err(|e| e.to_string())?;
+                fd.set_nonblocking(true).map_err(|e| e.to_string())?;
+                let done = Arc::new(AtomicBool::new(false));
+                let flag = done.clone();
+                let raw = pid.as_raw_pid();
+                std::thread::Builder::new()
+                    .name("terminal-exit".into())
+                    .spawn(move || {
+                        loop {
+                            // SAFETY: `info` is a writable siginfo_t; WNOWAIT leaves the child for its owner to reap.
+                            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                            let result = unsafe { libc::waitid(libc::P_PID, raw as libc::id_t, &mut info, libc::WEXITED | libc::WNOWAIT) };
+                            if result == 0 || io::Error::last_os_error().kind() != io::ErrorKind::Interrupted {
+                                break;
+                            }
+                        }
+                        // A failed wait reports an exit too: a shell shown as ended beats a reactor that never wakes.
+                        flag.store(true, Ordering::Release);
+                        let _ = notify.write(&[1]);
+                    })
+                    .map_err(|e| e.to_string())?;
+                Ok(Self { pid, fd, done })
+            }
+            pub(super) fn signal(&self, signal: Signal) {
+                let _ = kill_process(self.pid, signal);
+            }
+            pub(super) fn exited(&self) -> bool {
+                self.done.load(Ordering::Acquire)
+            }
+        }
+
+        /// A live process of the shell's session, found by its session ID.
+        pub(super) struct Member {
+            pid: Pid,
+            sid: Pid,
+        }
+        impl Member {
+            fn current(&self) -> bool {
+                getsid(Some(self.pid)).is_ok_and(|sid| sid == self.sid) && alive(self.pid)
+            }
+            // ponytail: without pidfds a member that exits between this check and the signal could be replaced by an
+            // unrelated process with its PID; pinning each member (kqueue EVFILT_PROC) would close that window.
+            pub(super) fn signal(&self, signal: Signal) {
+                if self.current() {
+                    let _ = kill_process(self.pid, signal);
+                }
+            }
+            pub(super) fn wait(self) {
+                while self.current() {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        }
+
+        /// Whether the process exists and is not a zombie.
+        fn alive(pid: Pid) -> bool {
+            let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+            // SAFETY: a zeroed proc_bsdinfo is valid, and `size` is its size in bytes.
+            let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+            let read = unsafe { libc::proc_pidinfo(pid.as_raw_pid(), libc::PROC_PIDTBSDINFO, 0, (&raw mut info).cast(), size) };
+            read == size && info.pbi_status != SZOMB
+        }
+
+        pub(super) fn members(sid: Pid) -> Vec<Member> {
+            // SAFETY: a null buffer asks only for the number of processes.
+            let count = unsafe { libc::proc_listallpids(std::ptr::null_mut(), 0) };
+            if count <= 0 {
+                return Vec::new();
+            }
+            // Room for processes started since the count.
+            let mut pids = vec![0 as libc::pid_t; count as usize + 64];
+            let bytes = (pids.len() * std::mem::size_of::<libc::pid_t>()) as libc::c_int;
+            // SAFETY: the buffer holds `pids.len()` PIDs and its size is given in bytes.
+            let count = unsafe { libc::proc_listallpids(pids.as_mut_ptr().cast(), bytes) };
+            pids.truncate(count.max(0) as usize);
+            pids.into_iter()
+                .filter_map(Pid::from_raw)
+                .map(|pid| Member { pid, sid })
+                .filter(Member::current)
+                .collect()
+        }
+
+        /// poll(2) on macOS does not support devices, and the PTY master is one; select(2) does.
+        pub(super) fn wait(wake: &UnixStream, pty: Option<(&FileDescriptor, bool)>, exit: Option<&Exit>, timeout: Option<Duration>) -> io::Result<Ready> {
+            let fds = [Some(wake.as_raw_fd()), pty.map(|(fd, _)| fd.as_raw_fd()), exit.map(|exit| exit.fd.as_raw_fd())];
+            if fds.iter().flatten().any(|&fd| fd < 0 || fd as usize >= libc::FD_SETSIZE as usize) {
+                return Err(io::Error::other("A terminal descriptor is beyond select's limit"));
+            }
+            let mut timeval = timeout.map(|d| libc::timeval { tv_sec: d.as_secs() as _, tv_usec: d.subsec_micros() as _ });
+            let timeval = timeval.as_mut().map_or(std::ptr::null_mut(), |t| t as *mut libc::timeval);
+            let nfds = fds.iter().flatten().max().map_or(0, |fd| fd + 1);
+            // SAFETY: zeroed fd_sets are valid empty sets, and every descriptor is open and below FD_SETSIZE.
+            unsafe {
+                let mut read: libc::fd_set = std::mem::zeroed();
+                let mut write: libc::fd_set = std::mem::zeroed();
+                libc::FD_ZERO(&mut read);
+                libc::FD_ZERO(&mut write);
+                for &fd in fds.iter().flatten() {
+                    libc::FD_SET(fd, &mut read);
+                }
+                if let Some((fd, true)) = pty {
+                    libc::FD_SET(fd.as_raw_fd(), &mut write);
+                }
+                if libc::select(nfds, &mut read, &mut write, std::ptr::null_mut(), timeval) < 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let set = |fd: Option<i32>, set: &libc::fd_set| fd.is_some_and(|fd| libc::FD_ISSET(fd, set));
+                Ok(Ready { wake: set(fds[0], &read), pty_read: set(fds[1], &read), pty_write: set(fds[1], &write), child: set(fds[2], &read) })
+            }
         }
     }
 }
