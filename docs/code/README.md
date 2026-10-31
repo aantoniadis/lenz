@@ -566,6 +566,18 @@ or the declarations beside a declaration (type to filter, Enter goes there). Ctr
 Right, Enter, Escape). Both come from the syntax tree, for the languages the outline covers; both are on by default
 and turn off in the command menu (Sticky Scroll, Breadcrumbs; remembered in `settings.json`).
 
+Each pane showing text, a Markdown preview or a CSV table has a scrollbar at its right edge, as in IntelliJ: 12 px wide
+at the default font size in the window, one column in the terminal app. The track is always drawn; the thumb shows the
+visible share and appears once there is something to scroll. Drag the thumb to scroll, click the track to page one
+screen toward the click, and the wheel over the scrollbar scrolls the pane. Coloured marks along the track show where
+the file's problems and changes are, one per track cell, the most important winning: errors (the error colour),
+warnings (the accent), find matches (the match colour, the current one stronger), the gutter's changes against HEAD
+(added, modified and deleted in their gutter colours), bookmarks (the accent) and a thin line for the caret's line.
+Clicking a mark places the caret on its line and reveals it, as Go to Line does (Back returns); the caret's line is
+drawn but never a target. Soft wrap and folds count a shown line (a collapsed fold is one), so the thumb is
+approximate in heavily wrapped text. A Markdown preview and a CSV table get a thumb and track over their own rows
+without marks; images have none. A pane too narrow for its text drops the scrollbar first.
+
 Bookmarks work as in IntelliJ: F11 adds one on the caret's line (or removes the one there), Ctrl+F11 asks for a key
 (0–9, A–Z; the line's own key removes it, a key used elsewhere moves here), Ctrl+Shift+digit sets a numbered one and
 Alt+digit goes to it. On an AZERTY keyboard Alt takes the digit row's key without Shift (Alt+&, Alt+é, …); there

@@ -4,6 +4,50 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## Scrollbars with track marks — 2026-10-31
+
+Every text pane in both apps gained an IntelliJ-style scrollbar: a thumb, a track that pages, and priority-merged
+marks for problems, find matches and changes. The shared model places marks per track cell and classifies presses;
+each core supplies its rows and marks. The baseline is the branch tip before the scrollbar work (`4f4e63b`), the
+candidate `1ae4f46`; the candidate also carries one unrelated commit that only takes the integrated terminal's ANSI
+colours from the theme. Both were built in release with the unchanged Cargo profiles, the baseline in a disposable
+worktree with its own target, and measured alternately (ABBA order) on one machine. GUI collectors used a private
+Xvfb display with software Vulkan; terminal collectors used owned pseudo-terminals.
+
+**Regressed: the Merge View, in both Diff adapters.** Four alternating pairs of `interaction-bench.py --scenario merge`
+on the generated 100k-line three-way merge, with no overlap between builds: accept/undo first damage went from
+4.3–5.4 ms to 31–34 ms per choice (Accept Ours alone stayed at 4.9→3.3 ms), page scrolling 8.6→13.9 ms and next
+change 9.7→15.0 ms (per-run medians of 20 inputs). In the terminal, six launches per build of the merge case in
+`tui-startup-bench.py` measured PageDown first PTY byte at 1.05→5.32 ms (per-launch medians 0.45–1.40 versus
+5.09–5.47 ms), and the in-process `terminal_perf_merge` test measured a 100k merge frame at 0.67→4.14 ms and resize at
+0.31→3.51 ms over three runs each. A sampling profile of the candidate's merge scenario puts `View::display_row` at
+about two-fifths of the application's own CPU samples: each frame rebuilds each merge pane's marks, mapping every
+block's start and end, and every find hit, to display rows, with nothing cached between frames. This contradicts the
+spec's "cached until its inputs change" anti-goal; it was reported for a decision rather than optimized here.
+
+**Small absolute slowdowns.** Two-way Diff window find phases on the generated 100k-line comparison rose by about
+2 ms (find typing 12.8→15.0 ms, next match 12.9→15.0 ms, scrolling with find open 15.1→17.1 ms; four pairs), as find
+hits become marks each frame. The terminal's long-line find render went 0.020→0.168 ms and its 100k-line scroll render
+0.180→0.214 ms (three runs each). Lenz Code window scrolling, one line per frame for 10 s on a 100k-line file, kept the
+same frame cadence (210 frames, median interval 48.02→48.01 ms, pinned by the software renderer), so process CPU is the
+sensitive measure there: 7.74→7.99 s, about 1.2 ms more per frame (six pairs; soft wrap on: 7.74→7.96 s).
+
+**Neutral.** Diff window startup (ten pairs; small 119.5→117.0 ms, merge 260.5→261.5 ms first paint) and settled
+RSS within about 1 MiB; idle CPU after first paint stayed at zero. Process CPU over launch plus three seconds moved
+in both directions between the first six pairs and the repeat (small +0.11 then −0.10 s; merge +0.22 then +0.11 s),
+so only the merge case leans worse. Two-way Diff page scrolling 16.00→16.08 ms. Diff
+terminal PTY first content 22.2→23.2 ms, focus-switch feedback 0.90→0.77 ms and settled RSS 52.4→53.5 MiB (five pairs).
+Lenz Code window launch to readable 156.5→156.8 ms (warm, 60 launches each), ten-tab settled RSS 185.8→186.9 MiB, typing
+feedback 2.25→2.25 ms per edit (three pairs of 30 cycles), and a 10,000-match find drawn in 30.65→30.75 ms (six pairs).
+The Lenz Code terminal app's arrow and PageDown/PageUp stress feedback were 0.81→0.84 and 0.90→0.90 ms (three pairs).
+Its settled RSS read 52.1→42.2 MiB; that drop is unexplained and is not claimed as an improvement.
+
+Not covered: Lenz Code git-change marks (the fixtures are outside Git), scrolling with find open in Lenz Code,
+physical-display latency, GPU memory, long-duration stress and native macOS. `tui-startup-bench.py` stops at its
+images-4k case on both builds (it waits for `regions`; the generated fixture reports `1 region`), so the terminal
+startup matrix ran from a retained copy of the collector with that marker relaxed. Raw samples, collector copies,
+the profile, configuration and executable hashes are in ignored `perf-results/scrollbars/`.
+
 ## SQL metadata completion — 2026-10-29
 
 DuckDB/SQLite metadata stores schema-qualified identifiers. Unqualified table resolution now falls back
