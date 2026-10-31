@@ -112,10 +112,19 @@ fn gui_scrollbar_drag_and_page_move_the_side(cx: &mut TestAppContext) {
 fn gui_scrollbar_mark_click_makes_the_change_current(cx: &mut TestAppContext) {
     let f = two_way(cx);
     let s = strip(cx, &f, "right", 0);
-    let (y, mark) = f.viewer.read_with(cx, |v, _| mark_y(&s, v.comparison.view.scrollbar(Side::Right), &v.comparison.scrollbar_marks(Side::Right), |m| m.target == 2));
-    assert_eq!(mark.kind, MarkKind::Added);
+    let at = |cx: &mut TestAppContext, target: usize| f.viewer.read_with(cx, |v, _| mark_y(&s, v.comparison.view.scrollbar(Side::Right), &v.comparison.scrollbar_marks(Side::Right), |m| m.target == target));
+    let (y, mark) = at(cx, 0);
+    assert_eq!(mark.kind, MarkKind::Modified);
     press(cx, &f, s.x + s.w / 2.0, y);
-    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.current_change()), Some(2));
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.current_change()), Some(0));
+    // a press on the thumb released without moving goes to the mark under it
+    f.viewer.update(cx, |v, _| { v.comparison.view.set_mode(ScrollMode::Independent); v.comparison.view.scroll_to(Side::Right, 240.0); });
+    let (start, size) = painted(cx, &f)[1].1.unwrap();
+    let (y, mark) = at(cx, 2);
+    assert_eq!(mark.kind, MarkKind::Added);
+    assert!((start..start + size).contains(&(y - s.y)), "the mark is under the thumb");
+    press(cx, &f, s.x + s.w / 2.0, y);
+    assert_eq!(f.viewer.read_with(cx, |v, _| (v.comparison.view.current_change(), v.panes.bar.is_none())), (Some(2), true));
     // a find hit's mark makes that hit current and selects it; the find bar stays
     key(cx, &f, "f", true, false, false);
     for c in ["2", "9"] { key(cx, &f, c, false, false, false); }
