@@ -6511,7 +6511,7 @@ fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &
     assert_eq!(usize::from(tui.layout.panes[0].text.height), rows, "comparable panes");
     // Find "needle" in both: two Find marks, lines 100 and 150 (0-based).
     visual.simulate_keystrokes("ctrl-f n e e d l e");
-    key_chars(&mut tui, "needle");
+    open_find_and_type(&mut tui, "needle");
     let deadline = Instant::now() + Duration::from_secs(5);
     let found = |s: &State| s.active().and_then(|t| t.find()).is_some_and(|f| f.matches().len() == 2);
     while !gui.read_with(&visual, |view, _| found(view.session().state())) || !found(tui.session.state()) {
@@ -6541,6 +6541,9 @@ fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &
     let before = carets(&visual, &tui);
     // (a) Drag the thumb to the middle of the track: the same place, within one terminal cell's worth of lines.
     let (start, thumb) = gui.read_with(&visual, |view, _| view.painted_scrollbars[0].1.unwrap());
+    // Each adapter's own model: the thumb grabbed at its middle (window) or its first cell (terminal) follows the pointer.
+    let want_gui = gui.read_with(&visual, |view, _| view.session().state().scrollbar(0).unwrap().0).top_at(len / 2.0 - thumb / 2.0, len, 16.0);
+    let want_tui = tui.session.state().scrollbar(0).unwrap().0.top_at(f32::from(strip.height / 2), f32::from(strip.height), 1.0);
     visual.simulate_mouse_down(point(px(x), px(y0 + start + thumb / 2.0)), MouseButton::Left, Modifiers::default());
     visual.simulate_mouse_move(point(px(x), px(y0 + len / 2.0)), MouseButton::Left, Modifiers::default());
     visual.simulate_mouse_up(point(px(x), px(y0 + len / 2.0)), MouseButton::Left, Modifiers::default());
@@ -6550,8 +6553,10 @@ fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &
     mouse(&mut tui, MouseEventKind::Up(crossterm::event::MouseButton::Left), strip.y + strip.height / 2);
     draw(&mut visual, &mut tui, &mut terminal);
     let (g, t) = (gui_top(&visual), tui.session.state().top_line());
-    let cell = (total / f64::from(strip.height)).ceil() as usize + 1;
-    assert!(g.abs_diff(t) <= cell && g > 50 && t > 50, "drag: window {g}, terminal {t}, cell {cell}");
+    assert!(g.abs_diff(want_gui.round() as usize) <= 1, "window drag: {g}, its model says {want_gui}");
+    assert!(t.abs_diff(want_tui.round() as usize) <= 1, "terminal drag: {t}, its model says {want_tui}");
+    let one_cell = (total / f64::from(strip.height)).ceil() as usize + 1;
+    assert!(g.abs_diff(t) <= one_cell, "drag: window {g}, terminal {t}, one cell {one_cell}");
     assert_eq!(carets(&visual, &tui), before, "a drag moves the view, not either caret");
     // (b) One click on the track below the thumb pages down by the visible rows in both.
     reset(&mut visual, &mut tui, &mut terminal);
@@ -6562,12 +6567,16 @@ fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &
     assert_eq!((gui_top(&visual), tui.session.state().top_line()), (rows, rows), "one page down");
     // (c) The Find mark of line 150: the caret lands there in both.
     reset(&mut visual, &mut tui, &mut terminal);
+    gui.update(&mut visual, |view, cx| view.dispatch_for_test(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: None }), cx));
+    tui.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: 1, column: None }));
+    reset(&mut visual, &mut tui, &mut terminal);
+    assert_eq!(carets(&visual, &tui), (0, 0), "both carets start away from line 150");
     use lenz_content::scrollbar::place;
     let gy = gui.read_with(&visual, |view, _| {
         let (bar, marks) = view.session().state().scrollbar(0).unwrap();
         let cells = (len / 3.0).floor() as usize;
-        let cell = place(&marks, bar.total, cells).iter().position(|p| p.is_some_and(|i| marks[i].target == 150 && marks[i].kind.jumps())).unwrap();
-        y0 + (cell as f32 + 0.5) * len / cells as f32
+        let at = place(&marks, bar.total, cells).iter().position(|p| p.is_some_and(|i| marks[i].target == 150 && marks[i].kind.jumps())).unwrap();
+        y0 + (at as f32 + 0.5) * len / cells as f32
     });
     let ty = {
         let (bar, marks) = tui.session.state().scrollbar(0).unwrap();
@@ -6582,7 +6591,7 @@ fn scrollbars_replay_the_same_drag_page_and_mark_outcomes_in_both_adapters(cx: &
     assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
 }
 
-fn key_chars(tui: &mut App, text: &str) {
+fn open_find_and_type(tui: &mut App, text: &str) {
     tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL)));
     for c in text.chars() { tui.handle(Event::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))); }
 }
