@@ -143,3 +143,30 @@ fn scrollbar_pages_a_preview_and_a_table() {
     let table = a.session.state().csv(a.session.state().active().unwrap().id()).unwrap();
     assert_eq!(table.top, table.rows, "a page down the table");
 }
+
+#[test]
+fn a_held_preview_thumb_scrolls_its_own_pane_after_focus_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let md = format!("# Top\n\n{}", (0..120).map(|i| format!("Paragraph {i}.\n\n")).collect::<String>());
+    let mut a = opened(dir.path(), "doc.md", &md);
+    if !matches!(a.session.state().rendering(), Some(Rendering::Preview(_))) { a.dispatch(Command::ToggleMarkdownSource); }
+    settle(&mut a, |a| matches!(a.session.state().rendering(), Some(Rendering::Preview(_))));
+    a.dispatch(Command::Split(code_core::session::Split::Columns));
+    let long = dir.path().join("long.txt");
+    std::fs::write(&long, "text\n".repeat(300)).unwrap();
+    a.dispatch(Command::Open(long));
+    settle(&mut a, |a| a.session.state().current_source().is_some_and(|s| s.source().ends_with("long.txt")));
+    draw(&mut a, 80, 20);
+    assert_eq!(a.session.state().focused_pane(), 1);
+    let g = &a.layout.panes[0];
+    assert!(g.preview && g.preview_top == 0 && !g.strip.is_empty());
+    let strip = g.strip;
+    mouse_at(&mut a, MouseEventKind::Down(MouseButton::Left), strip.x, strip.y);
+    assert!(a.scrollbar_drag.is_some(), "a press on the preview's thumb grabs it");
+    a.dispatch(Command::FocusPane(1));
+    mouse_at(&mut a, MouseEventKind::Drag(MouseButton::Left), strip.x, strip.bottom() - 1);
+    mouse_at(&mut a, MouseEventKind::Up(MouseButton::Left), strip.x, strip.bottom() - 1);
+    draw(&mut a, 80, 20);
+    assert!(a.layout.panes[0].preview_top > 0, "the preview follows its thumb");
+    assert_eq!(a.session.state().shown(1).unwrap().top_line(), 0, "the focused pane's text stays");
+}

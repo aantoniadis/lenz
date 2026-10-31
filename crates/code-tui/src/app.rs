@@ -378,8 +378,8 @@ impl App {
             self.hover = None;
         }
         match &command {
-            Command::ScrollRows(delta) if self.scroll_preview(Some(*delta), 0) => return,
-            Command::Scroll(row) if self.scroll_preview(None, *row) => return,
+            Command::ScrollRows(delta) if self.scroll_preview(self.session.state().focused_pane(), Some(*delta), 0) => return,
+            Command::Scroll(row) if self.scroll_preview(self.session.state().focused_pane(), None, *row) => return,
             _ => {}
         }
         let preview_positions = self.preview_positions();
@@ -668,17 +668,20 @@ impl App {
             }
         }
     }
-    fn scroll_preview(&mut self, delta: Option<isize>, absolute: usize) -> bool {
+    /// Scroll pane `pane`'s preview by `delta` layout rows, or to row `absolute`; the source follows when the pane is
+    /// focused (a session scroll moves the active tab). Whether `pane` shows a preview.
+    fn scroll_preview(&mut self, pane: u8, delta: Option<isize>, absolute: usize) -> bool {
         let state = self.session.state();
+        let focused = pane == state.focused_pane();
         let Some(pane) = self
             .layout
             .panes
             .iter()
-            .find(|p| p.pane == state.focused_pane() && p.preview)
+            .find(|p| p.pane == pane && p.preview)
         else {
             return false;
         };
-        let Some(tab) = state.active() else {
+        let Some(tab) = state.shown(pane.pane) else {
             return false;
         };
         if !matches!(self.session.state().view(tab.id()).and_then(|v| v.rendering()), Some(Rendering::Preview(_))) {
@@ -699,7 +702,7 @@ impl App {
         );
         let source = pane.preview_source_lines.get(top).copied().unwrap_or(0);
         if let Some(view) = state.view(tab.id()) { self.preview_scroll.insert(tab.id(), (PreviewSource::new(&view), top)); }
-        self.session.dispatch(Command::Scroll(source));
+        if focused { self.session.dispatch(Command::Scroll(source)); }
         true
     }
     fn sync_preview_selection(&mut self) {
@@ -3618,15 +3621,15 @@ impl App {
 
     /// Scroll pane `pane` so its scrollbar top is `top`: a table's row, a preview's layout row, else a shown line.
     fn scrollbar_to(&mut self, pane: u8, top: f64) {
+        let row = top.round().max(0.0) as usize;
+        // A preview scrolls in its own rows.
+        if self.scroll_preview(pane, None, row) { return; }
         let state = self.session.state();
         let Some(tab) = state.shown(pane) else { return };
-        let row = top.round().max(0.0) as usize;
         if let Some(table) = state.csv(tab.id()) {
             let rows = row as isize - table.top as isize;
             return self.dispatch(Command::Csv(code_core::csv::Command::Scroll { rows, columns: 0 }));
         }
-        // The focused preview takes an absolute scroll in its own rows.
-        if self.layout.panes.iter().any(|g| g.pane == pane && g.preview) { return self.dispatch(Command::Scroll(row)); }
         let Some(line) = state.view(tab.id()).map(|view| view.visible().line_at_row(row)) else { return };
         self.dispatch(Command::Scroll(line));
     }
