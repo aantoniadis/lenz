@@ -66,7 +66,7 @@ pub(crate) fn draw(buf: &mut Buffer, strip: Rect, bar: Option<&(Scrollbar, Vec<M
 
 #[cfg(test)]
 mod tests {
-    use crate::app::{App, tests::{pair, ready, screen}};
+    use crate::app::{App, tests::{key, pair, ready, screen}};
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use lenz::{commands::Command, scrollbar::{Mark, MarkKind, Scrollbar}, view::{ScrollMode, Side}};
     use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
@@ -88,6 +88,26 @@ mod tests {
         screen(&mut app, 120, 30);
         assert!(app.session.view().scrollbar(Side::Left).total >= 300.0, "every line shown");
         (dir, app)
+    }
+    /// The terminal's default path: 600 lines, every 40th from line 25 changed, so Collapsed Regions fold each unchanged
+    /// run; lines 300 and 450 read `needle`, each inside a folded run.
+    fn collapsed() -> (tempfile::TempDir, App) {
+        let line = |i: usize| if i == 300 || i == 450 { format!("needle {i}\n") } else { format!("line {i}\n") };
+        let left: String = (0..600).map(line).collect();
+        let right: String = (0..600).map(|i| if i % 40 == 25 { format!("changed {i}\n") } else { line(i) }).collect();
+        let (dir, mut app) = pair(&left, &right);
+        for side in [Side::Left, Side::Right] { app.session.scroll_to(side, 0.0); }
+        screen(&mut app, 120, 30);
+        let total = app.session.view().scrollbar(Side::Right).total;
+        assert!(total < 300.0, "Collapsed Regions are on: {total} rows");
+        (dir, app)
+    }
+    /// A row on `side`'s track above its thumb and off any mark.
+    fn track_above(app: &App, side: Side) -> u16 {
+        let (s, bar, marks) = (strip(app, side), app.session.view().scrollbar(side), app.session.scrollbar_marks(side));
+        let placed = lenz::scrollbar::place(&marks, bar.total, usize::from(s.height));
+        let (start, _) = bar.thumb(f32::from(s.height), 1.0).unwrap();
+        s.y + (0..start.floor() as u16).rev().find(|&r| lenz::scrollbar::mark_at(&placed, &marks, f32::from(r) + 0.5, f32::from(s.height)).is_none()).expect("track off any mark")
     }
     fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
@@ -204,8 +224,9 @@ mod tests {
 
     #[test]
     fn scrollbar_drag_page_mark_in_each_scroll_mode() {
-        for mode in [ScrollMode::Shared, ScrollMode::Aligned, ScrollMode::Padded, ScrollMode::Independent] {
-            let (_dir, mut app) = two_way();
+        // every line shown (the window's fixture), then the terminal's default Collapsed Regions
+        for (fixture, mode) in [two_way as fn() -> (tempfile::TempDir, App), collapsed].into_iter().flat_map(|f| [ScrollMode::Shared, ScrollMode::Aligned, ScrollMode::Padded, ScrollMode::Independent].map(|m| (f, m))) {
+            let (_dir, mut app) = fixture();
             app.session.execute(Command::SetScroll(mode));
             screen(&mut app, 120, 30);
             for side in [Side::Left, Side::Right] {
@@ -219,11 +240,12 @@ mod tests {
                 drag(&mut app, s.x, from, to);
                 let want = bar.top_at(f32::from(to - s.y) + 0.5 - grab, f32::from(s.height), 1.0).round();
                 let got = top(&app, side);
-                assert!((got - want).abs() <= 1.0 && got > 50.0, "{mode:?} {side:?}: {got} vs {want}");
+                assert!((got - want).abs() <= 1.0 && got >= bar.visible, "{mode:?} {side:?}: {got} vs {want}");
                 if mode == ScrollMode::Independent && side == Side::Right { assert_eq!(top(&app, Side::Left), 0.0, "Independent: the left Side stays"); }
-                // the track above the thumb (no mark in the first cell) pages up one viewport
+                // the track above the thumb, off any mark, pages up one viewport
                 let bar = app.session.view().scrollbar(side);
-                press(&mut app, s.x, s.y);
+                let y = track_above(&app, side);
+                press(&mut app, s.x, y);
                 assert!((top(&app, side) - bar.page(false)).abs() < 0.01, "{mode:?} {side:?}: a page up: {} vs {}", top(&app, side), bar.page(false));
                 // a block's mark makes it current
                 let target = side as usize + 1;
@@ -232,6 +254,89 @@ mod tests {
                 assert_eq!(app.session.view().current_change(), Some(target), "{mode:?} {side:?}: the mark's block");
             }
         }
+    }
+
+    /// The parity scenario on the terminal's default path, Collapsed Regions on: a drag lands within a row of `top_at`,
+    /// the track pages, a block's mark makes it current, and a find hit's mark inside a folded run makes that hit
+    /// current and selected, reveals its line, and leaves the find prompt open.
+    #[test]
+    fn collapsed_regions_keep_drag_page_mark_and_reveal_find_hits() {
+        let (_dir, mut app) = collapsed();
+        typed(&mut app, "/needle");
+        screen(&mut app, 120, 30);
+        let find = app.session.find().unwrap();
+        let (side, at) = (find.side(), find.at());
+        let i = find.hits().iter().position(|h| h.0 == 450).unwrap();
+        assert_ne!(at, Some(i), "the search shows line 300 first");
+        assert!(!app.session.view().line_visible(side, 450), "line 450 is folded away");
+        let (y, mark) = side_mark(&app, side, |m| m.target == lenz::view::FIND_TARGET + i);
+        assert_eq!(mark.kind, MarkKind::Find);
+        let x = strip(&app, side).x;
+        press(&mut app, x, y);
+        assert_eq!(app.session.find().map(|f| f.at()), Some(Some(i)), "the hit is current");
+        assert!(app.session.view().line_visible(side, 450), "its folded run opens to show it");
+        let sel = app.selection.unwrap();
+        assert_eq!((sel.side, sel.anchor.line), (side, 450));
+        assert_eq!(app.prompt, Some(crate::app::Prompt::Search), "the find prompt stays");
+        key(&mut app, KeyCode::Esc);
+        // drag, page and a block's mark, as `diff_scrollbars_replay_the_same_outcomes_as_the_window` on all lines
+        for side in [Side::Left, Side::Right] { app.session.scroll_to(side, 0.0); }
+        screen(&mut app, 120, 30);
+        assert!(app.session.view().scrollbar(Side::Right).total < 300.0, "still collapsed");
+        let s = strip(&app, Side::Right);
+        let bar = app.session.view().scrollbar(Side::Right);
+        let (from, grab) = thumb_row(s, bar);
+        let mid = s.y + s.height / 2;
+        drag(&mut app, s.x, from, mid);
+        let want = bar.top_at(f32::from(mid - s.y) + 0.5 - grab, f32::from(s.height), 1.0);
+        let got = top(&app, Side::Right);
+        assert!((got - want).abs() <= 1.0 && got >= bar.visible, "{got} vs {want}");
+        let bar = app.session.view().scrollbar(Side::Right);
+        let y = track_above(&app, Side::Right);
+        press(&mut app, s.x, y);
+        assert!((top(&app, Side::Right) - bar.page(false)).abs() < 0.01, "{} vs {}", top(&app, Side::Right), bar.page(false));
+        let (y, _) = side_mark(&app, Side::Right, |m| m.target == 9);
+        press(&mut app, s.x, y);
+        assert_eq!(app.session.view().current_change(), Some(9));
+    }
+
+    /// A page from the track disarms "press again for the next file" as any scroll does, in the terminal as in the
+    /// window (`gui_scrollbar_page_disarms_press_again`): `n` at the last change then arms again rather than opening the
+    /// next file.
+    #[test]
+    fn strip_page_disarms_press_again_as_in_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let left: String = (0..300).map(|i| format!("line {i}\n")).collect();
+        let right = left.replacen("line 250\n", "changed 250\n", 1);
+        for (side, text) in [("left", &left), ("right", &right)] {
+            std::fs::create_dir(dir.path().join(side)).unwrap();
+            std::fs::write(dir.path().join(side).join("a.txt"), text).unwrap();
+            std::fs::write(dir.path().join(side).join("b.txt"), format!("{side}\n")).unwrap();
+        }
+        let args = ["--no-index".to_string(), "left".into(), "right".into()];
+        let mut app = App::open(lenz::cli::parse(&args, dir.path()).unwrap(), dir.path().into());
+        ready(&mut app);
+        app.session.execute(Command::ToggleContext);
+        ready(&mut app);
+        screen(&mut app, 120, 30);
+        assert_eq!(app.session.current(), 0);
+        app.session.go_to_change(0);
+        key(&mut app, KeyCode::Char('n'));
+        assert!(app.session.notice().is_some_and(|n| n.contains("again")), "the last change arms: {:?}", app.session.notice());
+        screen(&mut app, 120, 30);
+        // the track's last cell, below the thumb and off the mark, pages down
+        let s = strip(&app, Side::Right);
+        let bar = app.session.view().scrollbar(Side::Right);
+        let (start, size) = bar.thumb(f32::from(s.height), 1.0).unwrap();
+        assert!(start + size < f32::from(s.height) - 1.0 && side_mark(&app, Side::Right, |_| true).0 < s.bottom() - 1);
+        press(&mut app, s.x, s.bottom() - 1);
+        assert!(top(&app, Side::Right) > bar.top, "a page down");
+        key(&mut app, KeyCode::Char('n'));
+        ready(&mut app);
+        assert_eq!(app.session.current(), 0, "disarmed: n arms again instead of opening b.txt");
+        key(&mut app, KeyCode::Char('n'));
+        ready(&mut app);
+        assert_eq!(app.session.current(), 1, "armed, n opens the next file");
     }
 
     #[test]

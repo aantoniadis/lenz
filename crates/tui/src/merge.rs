@@ -53,8 +53,8 @@ pub struct Merger {
     height: u16,
     width: u16,
     preview_base: bool,
-    /// The scrollbar thumb being dragged: its pane and the file shown when it was grabbed.
-    pub(crate) scrollbar_drag: Option<crate::scrollbar::Drag<(usize,usize)>>,
+    /// The scrollbar thumb being dragged: its pane and the file, edit version and middle pane shown when it was grabbed.
+    pub(crate) scrollbar_drag: Option<crate::scrollbar::Drag<(usize,usize,u64,bool)>>,
 }
 impl Merger {
     pub fn open(request: Request, cwd: PathBuf) -> Self {
@@ -109,6 +109,7 @@ impl Merger {
         let Event::Mouse(mouse)=event else {return false};
         let (strips,current,up)=(self.merge_strips(),self.workspace.current,mouse.kind==MouseEventKind::Up(MouseButton::Left));
         let Some(FileView::Merge(m))=&mut self.workspace.file else {self.scrollbar_drag=None;return false};
+        let shown=(current,m.version,m.base_shown);
         let act=|m:&mut lenz::merge_session::MergeSession,pane,act|match act {
             Act::Scroll(top)=>m.scroll_to(pane,top),
             Act::Mark(target)=>match target.checked_sub(lenz::view::FIND_TARGET) {Some(hit)=>m.go_to_find_hit(hit),None=>m.go_to_block(target)},
@@ -116,7 +117,7 @@ impl Merger {
         // any other pointer event ends a held thumb
         if let Some(drag)=self.scrollbar_drag.take()&&open&&(up||mouse.kind==MouseEventKind::Drag(MouseButton::Left)) {
             let pane=drag.target.0;
-            if drag.target==(pane,current)&&let Some(&(_,strip))=strips.iter().find(|s|s.0==pane) {
+            if drag.target==(pane,shown.0,shown.1,shown.2)&&let Some(&(_,strip))=strips.iter().find(|s|s.0==pane) {
                 let (held,next)=crate::scrollbar::held(drag,strip,&m.scrollbar(pane),&m.scrollbar_marks(pane),mouse.row,up);
                 self.scrollbar_drag=held;
                 if let Some(next)=next {act(m,pane,next);}
@@ -125,7 +126,7 @@ impl Merger {
         }
         if !open||mouse.kind!=MouseEventKind::Down(MouseButton::Left) {return false;}
         let Some(&(pane,strip))=strips.iter().find(|s|s.1.contains((mouse.column,mouse.row).into())) else {return false};
-        match crate::scrollbar::press((pane,current),strip,&m.scrollbar(pane),&m.scrollbar_marks(pane),mouse.row) {
+        match crate::scrollbar::press((pane,shown.0,shown.1,shown.2),strip,&m.scrollbar(pane),&m.scrollbar_marks(pane),mouse.row) {
             Press::Hold(drag)=>self.scrollbar_drag=Some(drag),
             // the keys act on the panes after a mark or a page
             Press::Act(next)=>{self.files_focused=false;act(m,pane,next);}

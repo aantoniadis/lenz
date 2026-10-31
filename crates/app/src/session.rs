@@ -187,10 +187,6 @@ impl Session {
         self.comparisons().len(),self.document.as_ref().is_some_and(|d|matches!(d.placeholder_kind(),Some(Placeholder::Large{..}))))}
     pub fn resize(&mut self,rows:u16){self.state.view.set_viewport_rows(f32::from(rows.max(1)));}
     pub fn scroll(&mut self,rows:f32,side:Side){self.state.press_again.reset();self.state.view.scroll_by(rows,side);}
-    /// Scroll so `side`'s scrollbar top is `top` (a thumb drag or a track page), through [`View::scroll_to`].
-    pub fn scroll_to(&mut self,side:Side,top:f64){self.state.press_again.reset();self.state.view.scroll_to(side,top);}
-    /// Make Change Block `i` current and show it (a scrollbar mark), as the window's mark does.
-    pub fn go_to_change(&mut self,i:usize){self.state.press_again.reset();self.state.view.go_to_change(i);}
     pub fn go_to_line(&mut self,side:Side,line:u32){self.state.go_to_line(side,line);}
     pub fn expand(&mut self,side:Side,row:u16){let frame=self.state.view.frame();let rows=if side==Side::Left{frame.left}else{frame.right};
         if let Some(r)=rows.iter().find(|r|r.y>=0.0&&r.y as u16==row){match r.content{
