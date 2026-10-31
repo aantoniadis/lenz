@@ -1028,10 +1028,10 @@ fn explorer_and_tabs_show_git_letters_apart_from_the_dirty_mark() {
     let rows = lines(&draw(&mut app, 60, 12));
     let tree = app.layout.tree;
     let explorer = |name: &str| rows[usize::from(tree.y)..usize::from(tree.bottom())].iter()
-        .map(|l| l.chars().skip(usize::from(tree.x)).take(usize::from(tree.width)).collect::<String>())
-        .find(|l| l.contains(name)).unwrap().trim_end().to_string();
+        .map(|l| l.chars().skip(usize::from(tree.x)).take(usize::from(tree.width) - 1).collect::<String>())
+        .find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name}: {rows:#?}")).trim_end().to_string();
     assert!(explorer("clean.txt").ends_with(" ●") && !explorer("clean.txt").contains(" M"), "{rows:#?}");
-    assert!(explorer("edited.txt").ends_with(" M"), "{rows:#?}");
+    assert!(explorer("edited.t").ends_with(" M"), "{rows:#?}");
     assert!(explorer("new.txt").ends_with(" U"), "{rows:#?}");
     // A name longer than the explorer stops a blank cell before its letter, and nothing of it follows the letter.
     assert!(explorer("a_really").ends_with(" U"), "{rows:#?}");
@@ -1097,7 +1097,7 @@ fn editor_gutter_marks_change_letters_in_their_own_colours_against_head() {
     let pane = &app.layout.panes[0];
     let rows = |b: &Buffer| (pane.text.y..pane.text.bottom()).map(|y| (0..pane.text.x).map(|x| b[(x, y)].symbol()).collect::<String>()).collect::<Vec<_>>();
     let gutters = rows(&buffer);
-    assert!(gutters[0].contains(" M"), "the changed line's letter: {:?}", gutters);
+    assert!(gutters[0].contains("M   1"), "the changed line's letter: {:?}", gutters);
     assert!(gutters[1].contains("   ") && !gutters[1].contains('M') && !gutters[1].contains('A'), "unchanged lines: {:?}", gutters);
     // The letter carries the modified colour, distinct from the line numbers' (identified without colour too).
     let p = app.session.state().palette().clone();

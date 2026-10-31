@@ -295,9 +295,12 @@ fn explorer_right_edge_drags_its_width_and_the_layout_remembers_it() {
     std::fs::create_dir_all(root.path().join("src")).unwrap();
     for name in ["src/a.txt", "src/b.txt"] { std::fs::write(root.path().join(name), name).unwrap(); }
     let mut app = open_project(state.path(), root.path());
-    draw(&mut app, 100, 30);
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| app.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
     let tree = app.layout.tree;
     assert_eq!(tree.width, 25, "a quarter of the width by default");
+    for y in tree.top()..tree.bottom() { assert_eq!(buffer[(tree.right() - 1, y)].symbol(), "│", "the edge to drag is drawn on row {y}"); }
     let event = |app: &mut App, kind, column| app.handle(Event::Mouse(MouseEvent { kind, column, row: tree.y + 3, modifiers: KeyModifiers::NONE }));
     // A click that does not move the edge keeps the width following the window.
     event(&mut app, MouseEventKind::Down(MouseButton::Left), tree.right() - 1);
