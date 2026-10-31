@@ -12,6 +12,7 @@ pub mod appearance;
 pub mod blame;
 pub mod branches;
 pub mod display;
+pub mod double_shift;
 pub mod encoding;
 pub mod find;
 pub mod file_icons;

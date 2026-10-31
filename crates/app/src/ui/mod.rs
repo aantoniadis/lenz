@@ -340,6 +340,8 @@ pub struct Viewer {
     incoming: Option<(Arc<()>, Arc<ChangeSet>, Spec)>,
     /// The command palette over the shared catalog.
     command_palette: Option<crate::palette::Palette>,
+    /// Two bare Shift taps open the command palette, as they open Search Everywhere in Lenz Code.
+    double_shift: lenz_content::double_shift::DoubleShift,
     /// The Diff options popover under the toolbar's ⚙.
     diff_options: Option<toolbar::DiffOptions>,
     /// The `ctrl-g` go-to-line prompt.
@@ -776,6 +778,7 @@ impl Viewer {
             held_log: None,
             incoming: None,
             command_palette: None,
+            double_shift: Default::default(),
             diff_options: None,
             goto: None,
             git_prompt: None,
@@ -2130,6 +2133,7 @@ impl Viewer {
 
     /// The Ctrl+F bar stays while it is clicked; any other click does what it would and then closes the bar.
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.double_shift.interrupt();
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let outside_find = self.find_bar_box().is_some_and(|(bx, by, bw, bh)| !(x >= bx && x < bx + bw && y >= by && y < by + bh));
         // A find option toggle in the find bar or the Change Set search prompt flips that option; either stays.
@@ -2864,7 +2868,18 @@ impl Viewer {
         true
     }
 
+    /// Double Shift opens the command palette; a dialog starts the count again.
+    fn on_modifiers(&mut self, ev: &gpui::ModifiersChangedEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        let m = ev.modifiers;
+        if self.modal().is_some_and(|m| m != Modal::Menu) {
+            self.double_shift.reset();
+        } else if self.double_shift.update(m.shift, m.control || m.alt || m.platform || m.function, std::time::Instant::now()) {
+            self.open_palette(cx);
+        }
+    }
+
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if !matches!(ev.keystroke.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
         self.panes.drag=None;
         // a key other than a quit cancels a quit refused for unsaved changes
         if !matches!(ev.keystroke.key.as_str(),"q"|"w"){self.edits.keep_open();}
@@ -3099,6 +3114,7 @@ impl Viewer {
     }
 
     fn on_wheel(&mut self, ev: &ScrollEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.double_shift.interrupt();
         if self.discard_modal() || self.checkout_modal() || self.merge.as_ref().is_some_and(|s|s.ask.is_some()) || self.picker_v.as_ref().is_some_and(|s|s.ask.is_some()){return;}
         if self.theme_chooser.is_some()||self.diff_options.is_some(){return;}
         // the palette takes the wheel as row moves; nothing underneath scrolls
@@ -3451,6 +3467,8 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A tap before the window lost focus does not pair with one after.
+        if !window.is_window_active() { self.double_shift.reset(); }
         self.restore_and_record_place(cx);
         self.sync_horizontal();
         self.markdown_release_images(window);
@@ -3774,6 +3792,7 @@ impl Render for Viewer {
             )
             .child(toolbar)
             .on_key_down(cx.listener(Self::on_key))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers))
             .on_scroll(cx.listener(Self::on_wheel))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_right_down))

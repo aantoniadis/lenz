@@ -41,7 +41,7 @@ mod perf;
 use lenz::memory_probe;
 
 use std::{io::{self, IsTerminal}, process::ExitCode, time::{Duration,Instant}};
-use crossterm::{event::{self, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste, EnableFocusChange, DisableFocusChange}, execute};
+use crossterm::{event::{self, EnableMouseCapture, DisableMouseCapture, EnableBracketedPaste, DisableBracketedPaste, EnableFocusChange, DisableFocusChange, KeyboardEnhancementFlags, PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags}, execute};
 use lenz::cli::{self, Launch, Request};
 
 const HELP: &str = "Lenz terminal
@@ -62,7 +62,7 @@ lenz diff --tui report --last [--print] retrieves the last error and GitHub issu
 fn request(args:&[String],cwd:&std::path::Path)->Result<Request,String>{cli::parse(args,cwd).map_err(|e|e.0.replace("lenz-diff takes the same arguments without the diff prefix","lenz-diff-tui takes the same arguments without the diff --tui prefix").replace("lenz diff","lenz diff --tui"))}
 
 enum Screen { Diff(Box<app::App>), Merge{controller:Box<merge::Merger>,parent:Option<usize>} }
-struct Screens {themes:lenz::theme::ThemeService,chooser:Option<themes::Chooser>, views:Vec<Screen>, active:usize, exit_code:Option<u8>, /** Pixel artwork via kitty graphics (kitty, Ghostty). */ kitty:bool, about_graphics:Option<(md_images::Picture,md_images::Images)>, sixel:Option<bool>, about_sixel:Option<about_sixel::Logo>, cell_pixels:Option<crossterm::terminal::WindowSize>, sixel_repaint:bool, /** Image deletes of closed views, written with the next frame. */ backlog:Vec<String>, #[cfg(test)] _theme_scratch:Option<tempfile::TempDir> }
+struct Screens {themes:lenz::theme::ThemeService,chooser:Option<themes::Chooser>, views:Vec<Screen>, active:usize, exit_code:Option<u8>, /** Pixel artwork via kitty graphics (kitty, Ghostty). */ kitty:bool, about_graphics:Option<(md_images::Picture,md_images::Images)>, sixel:Option<bool>, about_sixel:Option<about_sixel::Logo>, cell_pixels:Option<crossterm::terminal::WindowSize>, sixel_repaint:bool, /** Image deletes of closed views, written with the next frame. */ backlog:Vec<String>, double_shift:lenz::double_shift::DoubleShift, #[cfg(test)] _theme_scratch:Option<tempfile::TempDir> }
 impl Screens {
     fn open(request:Request,cwd:std::path::PathBuf)->Self{
         #[cfg(test)] {
@@ -76,7 +76,7 @@ impl Screens {
         let mut notices=themes.take_notices();if let Some(settings)=lenz::settings::take_notice(){notices.insert(0,settings);}
         let mut view=if matches!(request.launch,Launch::Merge(_)){Screen::Merge{controller:Box::new(merge::Merger::open(request,cwd)),parent:None}}else{Screen::Diff(Box::new(app::App::open(request,cwd)))};
         if let Some(n)=notices.into_iter().next(){match &mut view{Screen::Diff(a)=>a.session.set_notice(n),Screen::Merge{controller,..}=>controller.workspace.notice=Some(n)}}
-        Self{themes,chooser:None,views:vec![view],active:0,exit_code:None,kitty:false,about_graphics:None,sixel:None,about_sixel:None,cell_pixels:None,sixel_repaint:false,backlog:Vec::new(),#[cfg(test)]_theme_scratch:None}
+        Self{themes,chooser:None,views:vec![view],active:0,exit_code:None,kitty:false,about_graphics:None,sixel:None,double_shift:Default::default(),about_sixel:None,cell_pixels:None,sixel_repaint:false,backlog:Vec::new(),#[cfg(test)]_theme_scratch:None}
     }
     fn remove(&mut self,index:usize){if let Some(Screen::Diff(app))=self.views.get_mut(index){app.markdown.images.clear();self.backlog.extend(app.markdown.images.take_graphics());}self.views.remove(index);for view in &mut self.views{if let Screen::Merge{parent:Some(parent),..}=view{if *parent==index{if let Screen::Merge{parent,..}=view{*parent=None;}}else if *parent>index{*parent-=1;}}}self.active=self.active.min(self.views.len().saturating_sub(1));}
     fn refresh_parent(&mut self,index:usize){if let Some(Screen::Diff(app))=self.views.get_mut(index){app.session.reload_set();if let Some(repo)=&mut app.repository{repo.core.execute(lenz::repository_session::RepositoryCommand::RefreshRepository);if !repo.core.picker.shown{repo.core.execute(lenz::repository_session::RepositoryCommand::TogglePicker);}}}}
@@ -109,6 +109,10 @@ impl Screens {
     fn cancel_pane_drags(&mut self){for view in &mut self.views {match view {Screen::Diff(a)=>a.cancel_pane_drag(),Screen::Merge{controller,..}=>controller.cancel_pane_drag()}}}
     fn open_themes(&mut self){self.cancel_pane_drags();self.themes.execute(lenz::theme::ThemeCommand::OpenChooser);self.chooser=Some(themes::Chooser::new(&self.themes));}
     fn handle(&mut self,event:event::Event)->bool{
+        if let event::Event::Key(key)=event && self.double_shift_key(key){return true;}
+        if matches!(event,event::Event::Key(k)if k.kind==event::KeyEventKind::Release||matches!(k.code,event::KeyCode::Modifier(_))){return false;}
+        if matches!(event,event::Event::FocusLost){self.double_shift.reset();}
+        if matches!(event,event::Event::Mouse(_)|event::Event::Paste(_)){self.double_shift.interrupt();}
         if matches!(event,event::Event::Resize(..)) && self.about_sixel.take().is_some(){self.sixel_repaint=true;}
         let quit=matches!(event,event::Event::Key(k)if k.kind!=event::KeyEventKind::Release&&k.modifiers.contains(event::KeyModifiers::CONTROL)&&!k.modifiers.contains(event::KeyModifiers::SHIFT)&&matches!(k.code,event::KeyCode::Char('c'|'q')));
         if quit {self.chooser=None;}
@@ -116,6 +120,23 @@ impl Screens {
         if let event::Event::Key(key)=event&&key.kind!=event::KeyEventKind::Release&&key.code==event::KeyCode::F(8){self.cancel_pane_drags();let len=self.views.len();self.active=if key.modifiers.contains(event::KeyModifiers::SHIFT){(self.active+len-1)%len}else{(self.active+1)%len};self.activate();return true;}
         let (handled,requested)=match &mut self.views[self.active]{Screen::Diff(a)=>(a.handle(event),std::mem::take(&mut a.theme_request)),Screen::Merge{controller,..}=>{let handled=controller.handle(event);let requested=controller.take_theme_request();(handled,requested)}};
         if requested{self.open_themes();}handled
+    }
+    /// Double Shift opens the active view's command palette, as in Lenz Code's terminal app: a Shift press and
+    /// release with nothing between (foot reports only the release, sometimes as Caps Lock). Any other key ends a tap.
+    fn double_shift_key(&mut self,key:event::KeyEvent)->bool{
+        use event::{KeyCode,KeyEventKind,KeyModifiers,ModifierKeyCode};
+        let release_as_lock=key.code==KeyCode::CapsLock&&key.kind==KeyEventKind::Release&&self.double_shift.held();
+        let shift=matches!(key.code,KeyCode::Modifier(ModifierKeyCode::LeftShift|ModifierKeyCode::RightShift))||release_as_lock;
+        if !shift {
+            if key.kind!=KeyEventKind::Release{self.double_shift.key(key.modifiers.contains(KeyModifiers::SHIFT));}
+            return false;
+        }
+        if key.kind==KeyEventKind::Repeat{self.double_shift.interrupt();return false;}
+        let other=key.modifiers.intersects(KeyModifiers::CONTROL|KeyModifiers::ALT|KeyModifiers::SUPER|KeyModifiers::HYPER|KeyModifiers::META);
+        let tapped=if key.kind==KeyEventKind::Press{self.double_shift.update(true,other,Instant::now())}else{self.double_shift.release(other,Instant::now())};
+        if !tapped||self.chooser.is_some(){return false;}
+        match &mut self.views[self.active]{Screen::Diff(a)=>a.open_palette(),Screen::Merge{controller,..}=>controller.open_palette()}
+        true
     }
     fn render(&mut self,frame:&mut ratatui::Frame){let mut snapshot=self.themes.snapshot();
         // the picker shows the highlighted theme live; a distinct revision refreshes cached drawing
@@ -184,7 +205,7 @@ fn restore_on_signal() {
 }
 
 fn restore_input_modes() {
-    let _ = execute!(io::stdout(), DisableMouseCapture, DisableBracketedPaste, DisableFocusChange);
+    let _ = execute!(io::stdout(), PopKeyboardEnhancementFlags, DisableMouseCapture, DisableBracketedPaste, DisableFocusChange);
 }
 
 /// Outside a repository: the repository picker, before any comparison opens. `None` when the user quits.
@@ -208,7 +229,10 @@ fn init_terminal() -> io::Result<ratatui::DefaultTerminal> {
     // then let Ratatui restore raw/alternate-screen state before diagnostics.
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| { restore_input_modes(); lenz::diagnostics::terminal_owned(false); previous(info); }));
-    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, EnableFocusChange)?;
+    // Bare modifier presses and releases (the enhanced keyboard protocol, as Lenz Code asks): double Shift opens
+    // the command palette. Releases and bare modifiers stop in `Screens::handle`, so no view sees a key twice.
+    execute!(io::stdout(), EnableMouseCapture, EnableBracketedPaste, EnableFocusChange, PushKeyboardEnhancementFlags(
+        KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES | KeyboardEnhancementFlags::REPORT_EVENT_TYPES | KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES))?;
     // operational errors show as notices; on stderr they would print over the screen
     lenz::diagnostics::terminal_owned(true);
     Ok(terminal)
@@ -389,6 +413,28 @@ fn main() -> ExitCode {
         panic!("terminal render failure");
     }
     #[test] fn supported_launches_parse_before_terminal_setup(){for args in [vec!["log"],vec!["pr"],vec!["merge"],vec!["--blame"]]{let args=args.into_iter().map(str::to_string).collect::<Vec<_>>();assert!(request(&args,std::path::Path::new("/tmp")).is_ok());}}
+    /// Double Shift opens the command palette, as in Lenz Code: press and release reports, release-only reports
+    /// (foot), and never a Shift used for typing; releases and bare modifiers reach no view.
+    #[test] fn double_shift_opens_the_command_palette_and_releases_reach_no_view(){
+        use event::{Event,KeyCode,KeyEvent,KeyEventKind,KeyEventState,KeyModifiers,ModifierKeyCode};
+        let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("left"),"a\n").unwrap();std::fs::write(dir.path().join("right"),"b\n").unwrap();
+        let mut screens=Screens::open(cli::parse(&["--no-index".into(),"left".into(),"right".into()],dir.path()).unwrap(),dir.path().into());
+        let key=|code,modifiers,kind|Event::Key(KeyEvent{code,modifiers,kind,state:KeyEventState::NONE});
+        let shift=|kind|key(KeyCode::Modifier(ModifierKeyCode::LeftShift),KeyModifiers::SHIFT,kind);
+        let open=|screens:&Screens|matches!(&screens.views[0],Screen::Diff(a)if a.command_palette.is_some());
+        for kind in [KeyEventKind::Press,KeyEventKind::Release,KeyEventKind::Press,KeyEventKind::Release]{screens.handle(shift(kind));}
+        assert!(open(&screens),"press and release, twice");
+        screens.handle(key(KeyCode::Esc,KeyModifiers::NONE,KeyEventKind::Press));assert!(!open(&screens));
+        // A release of Esc reaches no view: the palette stays closed and nothing else happens.
+        assert!(!screens.handle(key(KeyCode::Esc,KeyModifiers::NONE,KeyEventKind::Release)));
+        for _ in 0..2{screens.handle(shift(KeyEventKind::Release));}
+        assert!(open(&screens),"foot reports only the releases");
+        screens.handle(key(KeyCode::Esc,KeyModifiers::NONE,KeyEventKind::Press));
+        // Shift held to type a capital: not a tap.
+        screens.handle(shift(KeyEventKind::Press));screens.handle(key(KeyCode::Char('A'),KeyModifiers::SHIFT,KeyEventKind::Press));screens.handle(shift(KeyEventKind::Release));
+        screens.handle(shift(KeyEventKind::Press));screens.handle(shift(KeyEventKind::Release));
+        assert!(!open(&screens),"a typed capital, then one tap");
+    }
     #[test] fn independent_views_preserve_state_and_close_only_active_view(){
         let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("left"),"old words ".repeat(100)).unwrap();std::fs::write(dir.path().join("right"),"new words ".repeat(100)).unwrap();
         let req=cli::parse(&["--no-index".into(),"left".into(),"right".into()],dir.path()).unwrap();let mut screens=Screens::open(cli::parse(&["--no-index".into(),"left".into(),"right".into()],dir.path()).unwrap(),dir.path().into());

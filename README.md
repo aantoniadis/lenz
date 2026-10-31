@@ -283,7 +283,7 @@ Plain `lenz diff` and `lenz diff log` in a repository reopen where you left off:
 
 ### In the window
 
-- `?` lists every key binding. The command palette (Ctrl/Cmd+Shift+P, F10, `:` in the diff, or the **Commands** hint at the bottom right; `⋯` in the TUI) lists every action; type to filter, and an unavailable one shows why.
+- `?` lists every key binding. The command palette (Ctrl/Cmd+Shift+P, F10, double Shift, `:` in the diff, or the **Commands** hint at the bottom right; `⋯` in the TUI) lists every action; type to filter, and an unavailable one shows why. In the terminal, double Shift needs a terminal that reports bare Shift presses or releases (the enhanced keyboard protocol, as in Lenz Code).
 - The toolbar keeps the frequent actions, with diff options under **⚙** and app actions under **☰**; Branches, History and Files toggle from the bottom bar; the diff header switches Markdown and image modes. Right-click shows only actions for what is under the pointer.
 - Tab/Shift-Tab move focus between panes. Typing in the Files or Commits list searches it; Ctrl/Cmd+F searches the focused text side, Ctrl/Cmd+Shift+F the whole Change Set.
 - **Back / Forward** (◀ ▶, Alt+Left/Right, mouse back/forward buttons) return to the previous commit, branch, filter or file history and reopen its file and line; `[` / `]` move between files.

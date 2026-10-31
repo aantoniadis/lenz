@@ -1,6 +1,6 @@
 //! Name navigation shared by both adapters. Ranking uses the existing inventory and declaration index;
 //! no file is loaded and no language server is started just to search.
-use std::{path::PathBuf, sync::Arc, time::{Duration, Instant}};
+use std::{path::PathBuf, sync::Arc};
 use lenz_content::goto::LineColumn;
 use crate::{index::Indexed, project::Entry, session::{Action, Command, CommandId}};
 
@@ -138,44 +138,12 @@ fn file_row(path: PathBuf, detail: String, at: Option<LineColumn>) -> Row {
     Row {label: path.file_name().map_or_else(|| detail.clone(), |s| s.to_string_lossy().into_owned()), detail, kind: Kind::File, disabled: None, on: None, shortcut: None, target: Target::Open {path, at}}
 }
 
-/// Detect two bare Shift taps; shifted typing, selection, repeats and long holds do not count.
-#[derive(Default)]
-pub struct DoubleShift { down: Option<Instant>, previous: Option<Instant>, used: bool }
-impl DoubleShift {
-    pub fn update(&mut self, shift: bool, other: bool, now: Instant) -> bool {
-        if other { self.interrupt(); }
-        if shift {
-            if self.down.is_none() { self.down = Some(now); self.used = other; }
-            return false;
-        }
-        let Some(down) = self.down.take() else { return false };
-        let short = !self.used && !other && now.saturating_duration_since(down) <= Duration::from_millis(400);
-        self.used = false;
-        if !short { self.previous = None; return false; }
-        if self.previous.take().is_some_and(|last| now.saturating_duration_since(last) <= Duration::from_millis(400)) { return true; }
-        self.previous = Some(now);
-        false
-    }
-    pub fn interrupt(&mut self) { self.previous = None; self.used = true; }
-    /// A Shift release from a terminal that may not report its press (foot): a tap unless a key was typed with
-    /// Shift held. Only an actual Shift release counts this way; other modifiers' releases go through `update`.
-    pub fn release(&mut self, other: bool, now: Instant) -> bool {
-        if self.down.is_none() { self.down = Some(now); }
-        self.update(false, other, now)
-    }
-    /// A Shift press was seen and its release has not been.
-    pub fn held(&self) -> bool { self.down.is_some() }
-    /// Another key: it ends a first tap, and one typed with Shift held means that Shift was not a tap.
-    pub fn key(&mut self, shifted: bool) {
-        self.previous = None;
-        if shifted || self.down.is_some() { self.used = true; }
-    }
-    pub fn reset(&mut self) { *self = Self::default(); }
-}
+pub use lenz_content::double_shift::DoubleShift;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
     fn snapshot() -> Snapshot {
         Snapshot {root: Some("/project".into()), files: vec![vec![Entry::new("src/NetworkParserEngine.rs"),Entry::new("test/NetworkParserEngine.rs"),Entry::new("src/Other.rs")].into()], symbols: Vec::new(), recent: vec!["/project/src/Other.rs".into()], actions: vec![Action {id: CommandId::SoftWrap,label: "Soft Wrap",disabled: None,on: Some(false),shortcut: None}]}
     }
@@ -234,53 +202,5 @@ mod tests {
         assert!(rank(make(),Scope::All,"RSP",||{let n=calls.get();calls.set(n+1);n<5}).is_none());
         let cancelled=start.elapsed().as_secs_f64()*1000.0;
         println!("NAVIGATION_PERF {}",serde_json::json!({"files":100000,"declarations":10000,"old_files_ms":old,"new_files_ms":file,"all_ms":all,"cancelled_ms":cancelled,"cancellation_checks":calls.get()}));
-    }
-
-    #[test]
-    fn double_shift_requires_two_short_uninterrupted_taps() {
-        let start = Instant::now();
-        let mut d = DoubleShift::default();
-        assert!(!d.update(true,false,start));
-        assert!(!d.update(false,false,start+Duration::from_millis(30)));
-        assert!(!d.update(true,false,start+Duration::from_millis(120)));
-        assert!(d.update(false,false,start+Duration::from_millis(150)));
-        d.update(true,false,start+Duration::from_millis(180)); d.interrupt();
-        assert!(!d.update(false,false,start+Duration::from_millis(210)));
-        d.update(true,false,start+Duration::from_millis(230));
-        assert!(!d.update(false,false,start+Duration::from_millis(260)));
-        d.reset(); d.update(true,false,start);
-        assert!(!d.update(true,false,start+Duration::from_millis(50)), "repeat");
-        assert!(!d.update(false,false,start+Duration::from_secs(1)), "long hold");
-        d.update(true,true,start+Duration::from_secs(2));
-        assert!(!d.update(false,false,start+Duration::from_millis(2050)), "chord");
-    }
-
-    #[test]
-    fn double_shift_counts_release_only_reports() {
-        let start = Instant::now();
-        let at = |ms| start + Duration::from_millis(ms);
-        let mut d = DoubleShift::default();
-        // foot reports a bare Shift's release only.
-        assert!(!d.release(false,at(0)));
-        assert!(d.release(false,at(150)));
-        // A plain key between the taps ends the first; the next two taps count again.
-        assert!(!d.release(false,at(1000)));
-        d.key(false);
-        assert!(!d.release(false,at(1100)));
-        assert!(d.release(false,at(1200)));
-        // Shifted typing: its Shift release is not a tap.
-        d.key(true);
-        assert!(!d.release(false,at(2000)));
-        assert!(!d.release(false,at(2100)), "only one tap since the shifted key");
-        assert!(d.release(false,at(2200)));
-        // Taps too far apart do not count.
-        assert!(!d.release(false,at(3000)));
-        assert!(!d.release(false,at(3600)));
-        // The desktop reports every modifier change through `update`: a Ctrl release is not a Shift tap.
-        let mut d = DoubleShift::default();
-        assert!(!d.update(false,true,at(4000)));
-        assert!(!d.update(false,false,at(4050)), "Ctrl released");
-        assert!(!d.update(true,false,at(4100)));
-        assert!(!d.update(false,false,at(4150)), "one Shift tap after a Ctrl tap");
     }
 }
