@@ -1493,6 +1493,8 @@ impl App {
                 self.diff_area.width - self.left_width() - 1,
             ]
         };
+        // each pane's last column is its scrollbar
+        let widths = widths.map(|w| w - crate::scrollbar::strip_w(w));
         if let Some(set) = self.session.change_set() {
             self.markdown.images.load(&projection.pair, &set, self.session.current(), self.session.spec(), self.session.cwd());
         }
@@ -1500,7 +1502,7 @@ impl App {
             .prepare(projection, widths, self.session.view().mode(), inline);
         self.markdown.panes = [Rect::default(); 2];
         for &(side, pane) in panes {
-            self.markdown.panes[side as usize] = pane;
+            self.markdown.panes[side as usize] = Rect { width: pane.width - crate::scrollbar::strip_w(pane.width), ..pane };
         }
         if inline {
             // one pane: the new side's position, or the old side's when it is just above (a removed block)
@@ -1543,6 +1545,18 @@ impl App {
             self.horizontal,
             self.session.markdown_find_hit(),
         );
+    }
+    /// Preview pane `pane`'s scrollbar, in its layout rows; none before a layout.
+    pub(crate) fn markdown_scrollbar(&self, pane: Side) -> Option<lenz::scrollbar::Scrollbar> {
+        let i = pane as usize;
+        let layout = self.markdown.layout.as_ref()?;
+        let visible = f64::from(self.markdown.panes[i].height.max(1));
+        Some(lenz::scrollbar::Scrollbar { total: layout.rows[i].len() as f64, top: self.markdown.top[i] as f64, visible })
+    }
+    /// Scroll preview pane `pane` so its scrollbar top is `top`, as its wheel does (the other pane follows).
+    pub(crate) fn markdown_scroll_to(&mut self, pane: Side, top: f64) {
+        let delta = top.round() as isize - self.markdown.top[pane as usize] as isize;
+        self.markdown_scroll(delta, pane);
     }
     fn markdown_scroll(&mut self, delta: isize, pane: Side) {
         self.markdown.scroll(delta, pane);
@@ -1930,8 +1944,8 @@ mod tests {
         let mouse=|kind,x|Event::Mouse(crossterm::event::MouseEvent{kind,column:x,row:y,modifiers:KeyModifiers::NONE});
         app.handle(mouse(MouseEventKind::Down(MouseButton::Left),divider));app.handle(mouse(MouseEventKind::Drag(MouseButton::Left),110));app.handle(mouse(MouseEventKind::Up(MouseButton::Left),110));draw(&mut app,160,36);
         assert_eq!(app.session.markdown_selection(),selected);
-        let layout=app.markdown.layout.as_ref().unwrap();assert_eq!(layout.widths,[110,49]);assert_eq!(app.markdown.panes[1].x,111);assert_eq!(app.pointer_side(100),Side::Left);
-        app.interaction(lenz::commands::Interaction::ResetPaneSizes);draw(&mut app,160,36);assert_eq!(app.markdown.layout.as_ref().unwrap().widths,[80,79]);
+        let layout=app.markdown.layout.as_ref().unwrap();assert_eq!(layout.widths,[109,48],"less each pane's scrollbar column");assert_eq!(app.markdown.panes[1].x,111);assert_eq!(app.pointer_side(100),Side::Left);
+        app.interaction(lenz::commands::Interaction::ResetPaneSizes);draw(&mut app,160,36);assert_eq!(app.markdown.layout.as_ref().unwrap().widths,[79,78]);
         assert_eq!(std::fs::read_to_string(dir.path().join("b.md")).unwrap(),"# New\n\n```rust\nfn new() {}\n```\n");
     }
     #[test]
@@ -1992,11 +2006,12 @@ mod tests {
             if app.diff_area.height >= 4 {
                 assert_eq!(
                     app.markdown.layout.as_ref().unwrap().widths,
+                    // less each pane's scrollbar column
                     if w < 70 {
                         [w; 2]
                     } else {
                         [w / 2, w - w / 2 - 1]
-                    }
+                    }.map(|w| w - crate::scrollbar::strip_w(w))
                 );
             } else {
                 assert_eq!(app.markdown.panes, [Rect::default(); 2]);
