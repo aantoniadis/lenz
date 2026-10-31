@@ -737,8 +737,9 @@ pub enum Drag {
     Split,
     Annotations { pane: u8, tab: TabId, key: code_core::text::SnapshotKey },
     Tab { id: TabId, x: f32, y: f32, moved: bool },
-    /// A pane's scrollbar thumb, held `grab` px below its top; pressed at window `y`, `moved` once it travelled.
-    Scrollbar { pane: u8, grab: f32, y: f32, moved: bool },
+    /// A pane's scrollbar thumb, held `grab` px below its top; pressed at window `y`, `moved` once it travelled. It
+    /// ends once the pane shows another tab or file than `shown`.
+    Scrollbar { pane: u8, shown: (TabId, code_core::text::BufferId), grab: f32, y: f32, moved: bool },
 }
 
 /// The image a view shows.
@@ -4283,7 +4284,7 @@ impl ReaderView {
         if self.modal.is_some() { self.drag = None; self.terminal_ui.explorer_drag = None; self.terminal_ui.mouse_capture = None; return; }
         if self.terminal_drag_end(ev, cx) { self.drag = None; self.tab_drop = None; return; }
         self.preview_drag = false;
-        if let Some(Drag::Scrollbar { pane, moved: false, .. }) = self.drag { self.scrollbar_release(pane, f32::from(ev.position.y), cx); }
+        if let Some(Drag::Scrollbar { pane, shown, moved: false, .. }) = self.drag && self.shown_buffer(pane) == Some(shown) { self.scrollbar_release(pane, f32::from(ev.position.y), cx); }
         self.end_drag(cx);
     }
 
@@ -4341,9 +4342,10 @@ impl ReaderView {
                 self.drag = Some(Drag::Tab { id, x: x0, y: y0, moved });
                 self.tab_drop = if moved { self.drop_target(id, x, y) } else { None };
             }
-            Drag::Scrollbar { pane, grab, y: y0, moved } => {
+            Drag::Scrollbar { pane, shown, grab, y: y0, moved } => {
+                if self.shown_buffer(pane) != Some(shown) { self.drag = None; return; }
                 let moved = moved || (y - y0).abs() > 2.0;
-                self.drag = Some(Drag::Scrollbar { pane, grab, y: y0, moved });
+                self.drag = Some(Drag::Scrollbar { pane, shown, grab, y: y0, moved });
                 let Some(g) = self.panes.iter().find(|g| g.pane == pane).copied().filter(|_| moved) else { return };
                 let Some((bar, _)) = self.scrollbar(&g) else { return };
                 let len = f32::from(g.bar_strip.size.height);
@@ -4578,8 +4580,9 @@ impl ReaderView {
         let placed = scrollbar::place(&marks, bar.total, track_cells(len));
         match scrollbar::hit(&bar, &placed, &marks, at, len, THUMB_MIN) {
             Hit::Thumb => {
+                let Some(shown) = self.shown_buffer(g.pane) else { return };
                 let start = bar.thumb(len, THUMB_MIN).map_or(0.0, |t| t.0);
-                self.drag = Some(Drag::Scrollbar { pane: g.pane, grab: at - start, y, moved: false });
+                self.drag = Some(Drag::Scrollbar { pane: g.pane, shown, grab: at - start, y, moved: false });
             }
             Hit::Mark(i) => self.go_to_mark(marks[i].target, cx),
             Hit::Above => self.scrollbar_to(g.pane, bar.page(false), cx),
@@ -4594,6 +4597,13 @@ impl ReaderView {
         let len = f32::from(g.bar_strip.size.height);
         let placed = scrollbar::place(&marks, bar.total, track_cells(len));
         if let Some(i) = scrollbar::mark_at(&placed, &marks, y - f32::from(g.bar_strip.origin.y), len) { self.go_to_mark(marks[i].target, cx); }
+    }
+
+    /// What pane `pane` shows: its tab and that tab's file.
+    fn shown_buffer(&self, pane: u8) -> Option<(TabId, code_core::text::BufferId)> {
+        let state = self.session.state();
+        let tab = state.shown(pane)?.id();
+        Some((tab, state.view(tab)?.snapshot().key().buffer))
     }
 
     fn go_to_mark(&mut self, line: usize, cx: &mut Context<Self>) {

@@ -70,6 +70,22 @@ fn scrollbar_thumb_drag_scrolls_and_marks_are_painted(cx: &mut TestAppContext) {
     let got = top_line(&v, &f);
     assert!(got.abs_diff(want) <= 1 && got > 50, "{got} vs {want}");
     assert_eq!(f.view.read_with(&v, |r, _| r.drag), None);
+    // A drag whose pane shows another tab is dropped.
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(0), cx));
+    draw(&mut v);
+    let (start, size) = f.view.read_with(&v, |r, _| r.painted_scrollbars[0].1).expect("a thumb");
+    v.simulate_mouse_down(point(px(x), px(y0 + start + size / 2.0)), MouseButton::Left, Modifiers::default());
+    assert!(matches!(f.view.read_with(&v, |r, _| r.drag), Some(Drag::Scrollbar { .. })), "a press on the thumb grabs it");
+    let other = f.dir.path().join("other.txt");
+    std::fs::write(&other, "x\n".repeat(300)).unwrap();
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Open(other), cx));
+    drop(v);
+    settle(cx, &f, active_is("other.txt"));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.simulate_mouse_move(point(px(x), px(y0 + len - 1.0)), MouseButton::Left, Modifiers::default());
+    assert_eq!((top_line(&v, &f), f.view.read_with(&v, |r, _| r.drag)), (0, None), "stale: the other tab stays");
+    v.simulate_mouse_up(point(px(x), px(y0 + len - 1.0)), MouseButton::Left, Modifiers::default());
 }
 
 #[gpui::test]
