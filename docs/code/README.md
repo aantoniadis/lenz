@@ -455,7 +455,10 @@ Ctrl+\ splits the file panel side by side, Ctrl+Shift+\ one above the other (als
 and "Close Split" in the command menu's View group and the text's right-click menu). Each pane has its own tabs and shows its own place, also in the same file;
 Ctrl+1 / Ctrl+2, a click or the wheel focus a pane, and its shown tab is marked. Closing a pane's last tab, or dragging
 it into the other pane, closes the split. Tabs drag within a bar to reorder or
-into the other pane. The explorer's edge, the results panel's top and the split's divider drag; the sizes and the
+into the other pane. The explorer's edge, the results panel's top and the split's divider drag; with the explorer
+focused, Ctrl+Shift+Left/Right narrow and widen it, and with the results focused Ctrl+Shift+Up/Down make them taller
+and shorter (IntelliJ's Stretch keys). **Widen / Narrow Explorer**, **Make Results Taller / Shorter** and **Enlarge
+Left / Top Pane** / **Enlarge Right / Bottom Pane** do the same from the View menu. The sizes and the
 split are remembered in `settings.json` (a remembered split starts with an empty second pane).
 
 **Open in Editor** (File menu, right-click) opens the active file in your editor at the caret, as Lenz Diff's `o`

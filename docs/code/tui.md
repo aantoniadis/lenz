@@ -44,7 +44,10 @@ opens it and leaves the keys in the explorer, as in the desktop. Drag the explor
 width is remembered and the text keeps at least 24 columns. With two panes, drag the divider (`│`, the first pane's
 last column), or the lower pane's tab bar past its tabs, to share the space differently; the share
 is the desktop's, remembered, and each pane keeps 4 rows or 12 columns (the first pane's last one is the divider). Drag the results panel's heading, past its
-buttons, to change its height; that share is the desktop's too, and the text keeps 3 rows. Collapse
+buttons, to change its height; that share is the desktop's too, and the text keeps 3 rows. From the keys: Ctrl-Shift-Left/Right
+in the focused explorer and Ctrl-Shift-Up/Down in the focused results resize them, and F10 → View has Widen / Narrow
+Explorer, Make Results Taller / Shorter and Enlarge Left / Top Pane / Right / Bottom Pane (where the terminal reports
+Ctrl-Shift with arrows). Collapse
 and expand to refresh a listing. Type to search visible file/folder names: Up/Down cycle highlighted matches,
 Backspace edits, Enter activates and clears the query, Escape restores the earlier selection. Space still marks
 a file when no query is active. Server-retrieved sources list visited files only. See the
