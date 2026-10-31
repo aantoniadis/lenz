@@ -138,6 +138,17 @@ impl Visible {
         b - a - hidden
     }
 
+    /// The shown line `row` rows below the first (the last shown line past the end): `step(0, row)` in O(folds), the
+    /// inverse of `rows_between(0, line)`.
+    pub fn line_at_row(&self, row: usize) -> usize {
+        let mut line = row;
+        for h in &self.hidden {
+            if h.start > line { break; }
+            line += h.len();
+        }
+        self.shown(line.min(self.lines.saturating_sub(1)))
+    }
+
     /// The last shown line.
     pub fn last(&self) -> usize {
         self.shown(self.lines.saturating_sub(1))
@@ -184,6 +195,22 @@ mod tests {
         assert_eq!(v.step(0, 1000), 19);
         assert_eq!(v.step(5, 0), 2, "a hidden line steps from its fold's first line");
         assert_eq!(v.rows_between(0, 11), 6, "rows 0 1 2 7 8 9 then 10, which shows 11");
+    }
+
+    #[test]
+    fn line_at_row_matches_stepping_from_the_top() {
+        let f = |first, last| Fold { first, last, kind: Block, closes: true };
+        // Nested (2 and 3) and chained (6 inside 2's end) regions merge; 12 and 17 stand alone, 17 at the end.
+        let folds = Folds { regions: vec![f(2, 6), f(3, 5), f(6, 9), f(12, 14), f(17, 19)] };
+        for collapsed in [&[][..], &[2], &[3], &[2, 3, 6], &[2, 6, 12], &[2, 3, 6, 12, 17], &[12, 17]] {
+            let c: BTreeMap<usize, _> = collapsed.iter().map(|&l| (l, Block)).collect();
+            let v = Visible::new(Some(&folds), &c, 20);
+            for row in 0..30 {
+                assert_eq!(v.line_at_row(row), v.step(0, row as isize), "row {row} with {collapsed:?} collapsed");
+            }
+            assert_eq!(v.line_at_row(v.rows_between(0, 13)), v.shown(13));
+        }
+        assert_eq!(Visible::all(0).line_at_row(5), Visible::all(0).step(0, 5));
     }
 
     #[test]
