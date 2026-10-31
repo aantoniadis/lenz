@@ -1266,7 +1266,9 @@ fn markdown_tui_inline_shows_one_column_with_struck_and_inserted_words() {
     // one pane: no divider column in the body
     let (x, y) = locate(&screen, "Alpha");
     let line: String = (0..screen.area.width).map(|c| screen[(c, y)].symbol().to_string()).collect();
-    assert!((0..screen.area.width).all(|c| screen[(c, y)].symbol() != "│" || c < x), "{line:?}");
+    // the one `│` right of the text is the pane's scrollbar
+    let strip = app.scrollbar_strips()[0].1;
+    assert!((0..screen.area.width).all(|c| screen[(c, y)].symbol() != "│" || c < x || c == strip.x), "{line:?}");
 }
 
 #[test]

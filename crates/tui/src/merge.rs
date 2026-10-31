@@ -53,6 +53,8 @@ pub struct Merger {
     height: u16,
     width: u16,
     preview_base: bool,
+    /// The scrollbar thumb being dragged: its pane and the file shown when it was grabbed.
+    pub(crate) scrollbar_drag: Option<crate::scrollbar::Drag<(usize,usize)>>,
 }
 impl Merger {
     pub fn open(request: Request, cwd: PathBuf) -> Self {
@@ -78,6 +80,7 @@ impl Merger {
             height: 20,
             width: 80,
             preview_base: false,
+            scrollbar_drag: None,
         }
     }
     pub(crate) fn cancel_pane_drag(&mut self) {self.resizer.cancel();if let Some(app)=&mut self.diff {app.cancel_pane_drag();}}
@@ -90,6 +93,44 @@ impl Merger {
             let focus=match &self.workspace.file {Some(FileView::Merge(m))=>m.find_pane(),_=>1};
             let mut panes=[Rect::new(self.text_area.x,self.text_area.y,0,0);3];panes[focus]=self.text_area;panes
         }else{crate::panes::three(self.text_area,self.pane_ratios)}
+    }
+    /// Each merge pane's scrollbar strip: its last text column, left of the border (and grip) it keeps, beside the rows
+    /// under its header.
+    pub(crate) fn merge_strips(&self)->Vec<(usize,Rect)> {
+        if !matches!(self.workspace.file,Some(FileView::Merge(_))) {return Vec::new();}
+        let rows=self.text_area.height.saturating_sub(2);
+        self.merge_panes().into_iter().enumerate().filter(|(_,p)|p.width>0&&rows>0&&crate::scrollbar::strip_w(p.width.saturating_sub(7))>0)
+            .map(|(i,p)|(i,Rect::new(p.right()-2,p.y+1,1,rows.min(p.height.saturating_sub(1))))).collect()
+    }
+    /// A press on a merge pane's strip, and a held thumb's drags and release, ahead of the panes' clicks; a merge find
+    /// stays open, as in the window. `open`: no question, menu or dropdown takes the pointer.
+    fn scrollbar_input(&mut self,event:&Event,open:bool)->bool {
+        use crate::scrollbar::{Act,Press};
+        let Event::Mouse(mouse)=event else {return false};
+        let (strips,current,up)=(self.merge_strips(),self.workspace.current,mouse.kind==MouseEventKind::Up(MouseButton::Left));
+        let Some(FileView::Merge(m))=&mut self.workspace.file else {self.scrollbar_drag=None;return false};
+        let act=|m:&mut lenz::merge_session::MergeSession,pane,act|match act {
+            Act::Scroll(top)=>m.scroll_to(pane,top),
+            Act::Mark(target)=>match target.checked_sub(lenz::view::FIND_TARGET) {Some(hit)=>m.go_to_find_hit(hit),None=>m.go_to_block(target)},
+        };
+        // any other pointer event ends a held thumb
+        if let Some(drag)=self.scrollbar_drag.take()&&open&&(up||mouse.kind==MouseEventKind::Drag(MouseButton::Left)) {
+            let pane=drag.target.0;
+            if drag.target==(pane,current)&&let Some(&(_,strip))=strips.iter().find(|s|s.0==pane) {
+                let (held,next)=crate::scrollbar::held(drag,strip,&m.scrollbar(pane),&m.scrollbar_marks(pane),mouse.row,up);
+                self.scrollbar_drag=held;
+                if let Some(next)=next {act(m,pane,next);}
+            }
+            return true;
+        }
+        if !open||mouse.kind!=MouseEventKind::Down(MouseButton::Left) {return false;}
+        let Some(&(pane,strip))=strips.iter().find(|s|s.1.contains((mouse.column,mouse.row).into())) else {return false};
+        match crate::scrollbar::press((pane,current),strip,&m.scrollbar(pane),&m.scrollbar_marks(pane),mouse.row) {
+            Press::Hold(drag)=>self.scrollbar_drag=Some(drag),
+            // the keys act on the panes after a mark or a page
+            Press::Act(next)=>{self.files_focused=false;act(m,pane,next);}
+        }
+        true
     }
     fn pointer_pane(&self,x:u16)->usize {
         let panes=self.merge_panes();panes.iter().position(|p|p.width>0&&x>=p.x&&x<p.right()).unwrap_or_else(||match &self.workspace.file{Some(FileView::Merge(m))=>m.find_pane(),_=>1})
@@ -466,6 +507,8 @@ impl Merger {
                 MouseEventKind::Down(MouseButton::Left)=>{let area=self.menu_area;if area.contains((mouse.column,mouse.row).into())&&mouse.row>area.y&&mouse.row<area.bottom().saturating_sub(1){let slot=self.menu_first+usize::from(mouse.row-area.y-1);if let Some(&index)=self.menu_matches().get(slot){self.menu=Some(index);return self.handle(Event::Key(crossterm::event::KeyEvent::new(KeyCode::Enter,KeyModifiers::NONE)));}}else{self.menu=None;self.files_menu_target=None;self.dismiss_block_menu();}},_=>{}
             }return true;
         }
+        let open=!quit&&!asking&&self.menu.is_none()&&!self.toolbar.menu_open();
+        if self.scrollbar_input(&event,open){return true;}
         if !quit&&!editing&&!asking&&self.menu.is_none(){
             if let Event::Mouse(mouse)=event{
                 if self.files_area.width>0&&self.files_area.contains((mouse.column,mouse.row).into()){
@@ -969,6 +1012,7 @@ impl Merger {
         }
         for pane in 0..3{self.clamp_horizontal(pane);}if self.files_area.width==0{self.files_focused=false;}
         let mut question = None;
+        let strips=self.merge_strips();
         match &mut self.workspace.file {
             Some(FileView::Merge(m)) => {
                 m.set_viewport_rows(body.height.saturating_sub(2) as f32);
@@ -1025,7 +1069,7 @@ impl Merger {
                                     palette,
                                     text.get(n as usize).map(String::as_str).unwrap_or(""),
                                     self.horizontal[p],
-                                    panes[p].width.saturating_sub(7) as usize,
+                                    merge_text_w(panes[p]) as usize,
                                     style,
                                     &syntax,
                                     &r.inline,
@@ -1043,6 +1087,7 @@ impl Merger {
                         Paragraph::new(lines).block(Block::default().borders(Borders::RIGHT)),
                         panes[p],
                     );
+                    if let Some(&(_,strip))=strips.iter().find(|s|s.0==p) {crate::scrollbar::draw(frame.buffer_mut(),strip,Some(&(m.scrollbar(p),m.scrollbar_marks(p))),palette);}
                     if self.icons.nerd() && panes[p].width>1 {
                         let icon=lenz::file_icons::file(&heads[p]);
                         frame.buffer_mut()[(panes[p].x,panes[p].y)].set_fg(crate::chrome::color(icon.color_on(palette,palette.header_bg)));
@@ -1320,7 +1365,7 @@ impl Merger {
         let lines=match pane{0=>m.m.side(Some(Pick::Ours)),1=>m.mid_lines(),_=>m.m.side(Some(Pick::Theirs))};
         let widest=*self.columns[pane].get_or_insert_with(||crate::render::source_width(lines));
         let panes=self.merge_panes();
-        widest.saturating_sub(usize::from(panes[pane].width.saturating_sub(7)))
+        widest.saturating_sub(usize::from(merge_text_w(panes[pane])))
     }
     fn clamp_horizontal(&mut self,pane:usize){if self.horizontal[pane]==0{return;}let max=self.horizontal_max(pane);self.horizontal[pane]=self.horizontal[pane].min(max);}
     fn scroll_horizontal(&mut self,pane:usize,delta:isize){
@@ -1330,6 +1375,9 @@ impl Merger {
 }
 
 
+/// A merge pane's text columns: right of its line numbers, left of its scrollbar and border.
+fn merge_text_w(pane:Rect)->u16 {let text=pane.width.saturating_sub(7);text-crate::scrollbar::strip_w(text)}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1337,6 +1385,69 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend, style::Modifier};
     fn key(app: &mut Merger, code: KeyCode, mods: KeyModifiers) {
         app.handle(Event::Key(KeyEvent::new(code, mods)));
+    }
+    /// The window's merge fixture (crates/app/src/ui/scrollbar_tests.rs `merge`): 200 lines, Conflicts at lines 5 and
+    /// 150; each pane's strip is its last text column, left of the border it keeps, and drags, pages and marks as the
+    /// window's `gui_merge_scrollbars_mark_conflicts` and `gui_merge_scrollbar_drag_and_page_move_each_pane` assert.
+    #[test]
+    fn merge_border_columns_carry_scrollbars() {
+        let text=|who:&str|(0..200).map(|i|if i==5||i==150{format!("{who} {i}\n")}else{format!("line {i}\n")}).collect::<String>();
+        let (dir,mut app)=open_fixture([text("line").as_bytes(),text("ours").as_bytes(),text("theirs").as_bytes()]);
+        let disk=std::fs::read(dir.path().join("result")).unwrap();
+        let draw=|app:&mut Merger|{let mut terminal=Terminal::new(TestBackend::new(160,36)).unwrap();terminal.draw(|f|app.render(f)).unwrap();terminal.backend().buffer().clone()};
+        let mouse=|app:&mut Merger,kind,x,y|{app.handle(Event::Mouse(crossterm::event::MouseEvent{kind,column:x,row:y,modifiers:KeyModifiers::NONE}));};
+        fn session(app:&mut Merger)->&mut lenz::merge_session::MergeSession{match &mut app.workspace.file{Some(FileView::Merge(m))=>m,_=>panic!("a merge")}}
+        let buf=draw(&mut app);
+        let strips=app.merge_strips();
+        assert_eq!(strips.iter().map(|s|s.0).collect::<Vec<_>>(),[0,1,2]);
+        let palette=app.palette.clone();
+        let conflict=crate::chrome::color(lenz::theme::scrollbar_mark_color(lenz::scrollbar::MarkKind::Conflict,&palette));
+        let thumb=crate::chrome::color(lenz::scrollbar::thumb_color(&palette));
+        for &(p,s) in &strips {
+            let pane=app.merge_panes()[p];
+            assert_eq!((s.x,s.y,s.height),(pane.right()-2,pane.y+1,session(&mut app).scrollbar(p).visible as u16),"pane {p}: the last text column, under the header");
+            assert_eq!(buf[(pane.right()-1,s.y)].symbol(),"│","pane {p}: the border stays");
+            assert!((s.y..s.bottom()).any(|y|buf[(s.x,y)].symbol()=="━"&&buf[(s.x,y)].fg==conflict),"pane {p}: a Conflict cell");
+            assert!((s.y..s.bottom()).any(|y|buf[(s.x,y)].bg==thumb),"pane {p}: a thumb");
+        }
+        let grips=app.resizer.grips.iter().filter(|g|g.id==1||g.id==2).map(|g|g.area.x).collect::<Vec<_>>();
+        assert_eq!(grips,[app.merge_panes()[0].right()-1,app.merge_panes()[1].right()-1],"the grips keep the border columns");
+        // the mark of the Conflict at line 150 makes it current
+        session(&mut app).current=None;
+        let (_,s)=strips[1];
+        let m=session(&mut app);let (bar,marks)=(m.scrollbar(1),m.scrollbar_marks(1));
+        let placed=lenz::scrollbar::place(&marks,bar.total,usize::from(s.height));
+        let cell=placed.iter().rposition(|p|p.is_some_and(|i|marks[i].target==1)).unwrap() as u16;
+        assert_eq!(marks[placed[usize::from(cell)].unwrap()].kind,lenz::scrollbar::MarkKind::Conflict);
+        mouse(&mut app,MouseEventKind::Down(MouseButton::Left),s.x,s.y+cell);mouse(&mut app,MouseEventKind::Up(MouseButton::Left),s.x,s.y+cell);
+        assert_eq!(session(&mut app).current,Some(1));
+        // a merge find stays open through a press on a strip, as in the window
+        key(&mut app,KeyCode::Char('/'),KeyModifiers::NONE);
+        mouse(&mut app,MouseEventKind::Down(MouseButton::Left),s.x,s.y);mouse(&mut app,MouseEventKind::Up(MouseButton::Left),s.x,s.y);
+        assert!(session(&mut app).find_editing(),"the find stays open");
+        key(&mut app,KeyCode::Esc,KeyModifiers::NONE);
+        // each pane's thumb drags it and its track pages it
+        for (p,s) in strips {
+            session(&mut app).scroll_to(p,0.0);draw(&mut app);
+            let before=session(&mut app).scrollbar(p);
+            let (start,size)=before.thumb(f32::from(s.height),1.0).unwrap();
+            let row=(start+size/2.0).floor() as u16;let grab=f32::from(row)+0.5-start;let mid=s.y+s.height/2;
+            mouse(&mut app,MouseEventKind::Down(MouseButton::Left),s.x,s.y+row);
+            mouse(&mut app,MouseEventKind::Drag(MouseButton::Left),s.x,mid);
+            mouse(&mut app,MouseEventKind::Up(MouseButton::Left),s.x,mid);
+            let want=before.top_at(f32::from(mid-s.y)+0.5-grab,f32::from(s.height),1.0);
+            let got=session(&mut app).scrollbar(p).top;
+            assert!((got-want).abs()<=1.0&&got>50.0,"pane {p}: {got} vs {want}");
+            assert!(app.scrollbar_drag.is_none());
+            draw(&mut app);
+            let now=session(&mut app).scrollbar(p);
+            let (start,_)=now.thumb(f32::from(s.height),1.0).unwrap();
+            let m=session(&mut app);let marks=m.scrollbar_marks(p);let placed=lenz::scrollbar::place(&marks,now.total,usize::from(s.height));
+            let row=(0..start.floor() as u16).rev().find(|&r|lenz::scrollbar::mark_at(&placed,&marks,f32::from(r)+0.5,f32::from(s.height)).is_none()).expect("track off any mark");
+            mouse(&mut app,MouseEventKind::Down(MouseButton::Left),s.x,s.y+row);mouse(&mut app,MouseEventKind::Up(MouseButton::Left),s.x,s.y+row);
+            let got=session(&mut app).scrollbar(p).top;assert!((got-now.page(false)).abs()<0.01,"pane {p}: a page up: {got} vs {}",now.page(false));
+        }
+        assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),disk);
     }
     #[test]
     fn merge_source_colors_follow_conflict_and_resolution_state_without_underlining() {

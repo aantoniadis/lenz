@@ -42,8 +42,10 @@ pub(crate) struct Menu {
 }
 impl App {
     pub(crate) fn clear_context(&mut self){self.context.items.clear();self.session.cancel_discard();}
-    pub(crate) fn modal_input(&self)->bool{
-        !self.context.items.is_empty()||self.command_palette.is_some()||self.session.file_actions().busy()||self.session.file_actions().confirmation().is_some()||self.prompt.is_some()||self.about.is_some()||self.message.is_some()||self.visual.commit_visible()||self.repository.as_ref().is_some_and(|r|r.modal())||self.set_search.as_ref().is_some_and(|s|s.model.editing())
+    pub(crate) fn modal_input(&self)->bool{self.prompt.is_some()||self.modal_except_prompt()}
+    /// A modal other than a prompt takes the input.
+    pub(crate) fn modal_except_prompt(&self)->bool{
+        !self.context.items.is_empty()||self.command_palette.is_some()||self.session.file_actions().busy()||self.session.file_actions().confirmation().is_some()||self.about.is_some()||self.message.is_some()||self.visual.commit_visible()||self.repository.as_ref().is_some_and(|r|r.modal())||self.set_search.as_ref().is_some_and(|s|s.model.editing())
     }
     pub(crate) fn context_details(&self)->Option<String> {
         self.session.file_actions().confirmation().or_else(||self.context.items.get(self.context.selected).map(|item|item.reason.as_ref().map_or_else(||item.label.clone(),|reason|format!("{} — {reason}",item.label))))

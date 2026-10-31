@@ -22,14 +22,17 @@ pub(crate) fn text_geometry_ratio(area:Rect,side:Side,focus:Side,blame:bool,rati
     let width = if narrow { area.width } else if side == Side::Left { left } else { area.width.saturating_sub(left + 1) };
     let gutter = width.min(7);
     let annotation = if blame { annotation_width(width,gutter) } else { 0 };
-    Rect::new(x + gutter + annotation, area.y + 2, width - gutter - annotation, area.height.saturating_sub(4))
+    // the scrollbar takes the text's last column
+    let text = width - gutter - annotation;
+    Rect::new(x + gutter + annotation, area.y + 2, text - crate::scrollbar::strip_w(text), area.height.saturating_sub(4))
 }
 
 /// Unified: one full-width pane for both Sides.
 pub(crate) fn unified_geometry(area:Rect,blame:bool)->Rect {
     let gutter=area.width.min(7);
     let annotation=if blame {annotation_width(area.width,gutter)} else {0};
-    Rect::new(area.x+gutter+annotation,area.y+2,area.width-gutter-annotation,area.height.saturating_sub(4))
+    let text=area.width-gutter-annotation;
+    Rect::new(area.x+gutter+annotation,area.y+2,text-crate::scrollbar::strip_w(text),area.height.saturating_sub(4))
 }
 
 pub(crate) fn annotation_width(width:u16,gutter:u16)->u16 {width.saturating_sub(gutter).saturating_sub(4).min(26)}
@@ -106,10 +109,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     let unified = app.unified();
     let narrow = area.width < 70 || inline || unified;
     let left_w = if narrow { area.width } else { app.left_width() };
-    // Inline Markdown is one full-width pane of the new side
-    let panes = if inline || unified { vec![(Side::Right, Rect::new(area.x, area.y+2, area.width, body_h))] }
-        else if narrow { vec![(app.focus, Rect::new(area.x, area.y+2, area.width, body_h))] }
-        else { vec![(Side::Left, Rect::new(area.x, area.y+2, left_w, body_h)), (Side::Right, Rect::new(area.x+left_w + 1, area.y+2, area.width - left_w - 1, body_h))] };
+    let panes = app.diff_panes();
     let rendered=app.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
     let text_focused=!app.navigator.focused&&!app.commit_panel.focused&&!app.set_search.as_ref().is_some_and(|s|s.focused)
         &&app.repository.as_ref().is_none_or(|r|r.core.picker.focus==lenz::repository_session::Pane::Diff);
@@ -189,6 +189,7 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
         }
     }
     if rendered {app.markdown_draw(frame.buffer_mut(),&panes);}
+    for (side,strip) in app.scrollbar_strips() {crate::scrollbar::draw(frame.buffer_mut(),strip,app.scrollbar(side).as_ref(),palette);}
     let pane=app.pr_pane();
     if let Some(repo)=app.repository.as_mut()&&let Some(pr)=repo.core.pr.as_mut().filter(|p|p.details().is_some()){repo.pr_dialog.draw(frame,pr,pane,palette);}
     // the header row across both panes: the PR's tabs sit in its middle
@@ -433,13 +434,13 @@ mod tests {
     #[test]
     fn source_geometry_accounts_for_blame_narrow_views_and_nested_origins() {
         let area = Rect::new(10, 4, 120, 20);
-        assert_eq!(text_geometry(area, Side::Left, Side::Right, false), Rect::new(17, 6, 53, 16));
-        assert_eq!(text_geometry(area, Side::Left, Side::Right, true), Rect::new(43, 6, 27, 16));
-        assert_eq!(text_geometry(area, Side::Right, Side::Right, true), Rect::new(104, 6, 26, 16));
+        assert_eq!(text_geometry(area, Side::Left, Side::Right, false), Rect::new(17, 6, 52, 16), "the scrollbar takes the text's last column");
+        assert_eq!(text_geometry(area, Side::Left, Side::Right, true), Rect::new(43, 6, 26, 16));
+        assert_eq!(text_geometry(area, Side::Right, Side::Right, true), Rect::new(104, 6, 25, 16));
         let narrow = Rect::new(10, 4, 69, 20);
-        assert_eq!(text_geometry(narrow, Side::Right, Side::Right, true), Rect::new(43, 6, 36, 16));
+        assert_eq!(text_geometry(narrow, Side::Right, Side::Right, true), Rect::new(43, 6, 35, 16));
         assert_eq!(text_geometry(narrow, Side::Left, Side::Right, false).width, 0);
-        assert_eq!(text_geometry(Rect::new(0, 0, 70, 20), Side::Left, Side::Left, true).width, 4);
+        assert_eq!(text_geometry(Rect::new(0, 0, 70, 20), Side::Left, Side::Left, true).width, 4, "under 12 columns of text: no strip");
     }
 
     #[test]

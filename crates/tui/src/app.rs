@@ -10,6 +10,8 @@ fn caret_scroll(column:usize,offset:usize,width:usize)->usize{
 
 #[derive(Clone, Copy, PartialEq,Debug)]
 pub(crate) enum Prompt { Search, Line, Files, Help, Applied }
+/// What a held scrollbar thumb is fenced to: its Side, whether it is a preview's, and the comparison and diff shown.
+pub(crate) type BarKey=(Side,bool,usize,u64);
 
 #[derive(Clone, Copy)]
 pub(crate) enum ToolbarAction { Run(lenz::catalog::Action), Palette, Icons }
@@ -71,6 +73,8 @@ pub struct App {
     pub new_view:Option<(lenz::cli::Request,std::path::PathBuf)>,
     comparison_name:Option<String>,initial_line:Option<u32>,
     mouse_click:Option<(std::time::Instant,Side,lenz::selection::Pos,u8)>,
+    /// The scrollbar thumb being dragged, fenced to the Side, presentation, comparison and diff shown when it was grabbed.
+    pub(crate) scrollbar_drag:Option<crate::scrollbar::Drag<BarKey>>,
     /// A triple click's syntax group being found for this word (applied while the word is still selected).
     grouping:Option<(lenz::selection::Selection,std::sync::mpsc::Receiver<lenz::selection::Selection>)>,
     /// The last file clicked in Files, for a double click.
@@ -94,7 +98,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,views:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { command_palette:None,views:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,scrollbar_drag:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -320,6 +324,78 @@ impl App {
         if self.unified(){crate::render::unified_geometry(self.diff_area,self.visual.blame_enabled(side))}
         else{crate::render::text_geometry_ratio(self.diff_area,side,self.focus,self.visual.blame_enabled(side),self.pane_ratio)}
     }
+    /// Each shown Side's pane over the diff body: Unified and Inline Markdown one full-width pane (`Side::Right`), a
+    /// narrow terminal the focused Side's, else both with the divider column between them.
+    pub(crate) fn diff_panes(&self)->Vec<(Side,ratatui::layout::Rect)>{
+        use ratatui::layout::Rect;
+        let area=self.diff_area;let body_h=area.height.saturating_sub(4+self.applied_panel_height());let left_w=self.left_width();
+        if self.markdown_inline()||self.unified(){vec![(Side::Right,Rect::new(area.x,area.y+2,area.width,body_h))]}
+        else if area.width<70{vec![(self.focus,Rect::new(area.x,area.y+2,area.width,body_h))]}
+        else{vec![(Side::Left,Rect::new(area.x,area.y+2,left_w,body_h)),(Side::Right,Rect::new(area.x+left_w+1,area.y+2,area.width-left_w-1,body_h))]}
+    }
+    /// The scrollbar strips on screen by the Side each scrolls: each pane's last column, right of its text (a preview's
+    /// text, or the source's); none over an image, a details tab, a Folder Summary or a placeholder.
+    pub(crate) fn scrollbar_strips(&self)->Vec<(Side,ratatui::layout::Rect)>{
+        if self.visual.image().is_some()||self.pr_details_shown()||self.session.folders.summary().is_some()||self.session.document().is_none_or(|d|d.placeholder_kind().is_some()){return Vec::new();}
+        let rendered=self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered;
+        self.diff_panes().into_iter()
+            .filter(|&(side,pane)|pane.height>0&&if rendered{crate::scrollbar::strip_w(pane.width)>0}else{self.source_rect(side).right()<pane.right()})
+            .map(|(side,pane)|(side,ratatui::layout::Rect::new(pane.right()-1,pane.y,1,pane.height))).collect()
+    }
+    /// `side`'s scrollbar and marks: the core's Change Blocks and find hits, or a preview's own rows and no marks.
+    pub(crate) fn scrollbar(&self,side:Side)->Option<(lenz::scrollbar::Scrollbar,Vec<lenz::scrollbar::Mark>)>{
+        if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered{return self.markdown_scrollbar(side).map(|bar|(bar,Vec::new()));}
+        Some((self.session.view().scrollbar(side),self.session.scrollbar_marks(side)))
+    }
+    fn bar_key(&self,side:Side)->BarKey{(side,self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered,self.session.current(),self.session.revision())}
+    /// A press on a strip, and a held thumb's drags and release, ahead of text selection, carets and pane focus. The find
+    /// prompt and its marks stay, as in the window; other modals and an open menu take the pointer first.
+    fn scrollbar_input(&mut self,event:&Event)->bool{
+        use crate::scrollbar::Press;
+        let Event::Mouse(m)=event else{return false};
+        let open=!self.modal_except_prompt()&&matches!(self.prompt,None|Some(Prompt::Search))&&!self.toolbar.menu_open();
+        let up=m.kind==MouseEventKind::Up(MouseButton::Left);
+        // any other pointer event ends a held thumb
+        if let Some(drag)=self.scrollbar_drag.take()&&open&&(up||m.kind==MouseEventKind::Drag(MouseButton::Left)){
+            let side=drag.target.0;
+            if drag.target==self.bar_key(side)&&let Some((_,strip))=self.scrollbar_strips().into_iter().find(|s|s.0==side)&&let Some((bar,marks))=self.scrollbar(side){
+                let (held,act)=crate::scrollbar::held(drag,strip,&bar,&marks,m.row,up);
+                self.scrollbar_drag=held;
+                if let Some(act)=act{self.scrollbar_act(side,act);}
+            }
+            return true;
+        }
+        if !open||m.kind!=MouseEventKind::Down(MouseButton::Left){return false;}
+        let Some((side,strip))=self.scrollbar_strips().into_iter().find(|s|s.1.contains((m.column,m.row).into()))else{return false};
+        let Some((bar,marks))=self.scrollbar(side)else{return true};
+        match crate::scrollbar::press(self.bar_key(side),strip,&bar,&marks,m.row){
+            Press::Hold(drag)=>self.scrollbar_drag=Some(drag),
+            Press::Act(act)=>{
+                // the keys act on the diff after a mark or a page, as after a click on its text
+                self.navigator.focused=false;self.commit_panel.focused=false;
+                if let Some(search)=&mut self.set_search{search.focused=false;}
+                if let Some(repo)=&mut self.repository{repo.core.execute(lenz::repository_session::RepositoryCommand::Focus(lenz::repository_session::Pane::Diff));}
+                self.scrollbar_act(side,act);
+            }
+        }
+        true
+    }
+    /// A strip's scroll through the core's (or the preview's) scroll, or a mark's place: its Change Block made current, or
+    /// its find hit made current, shown and selected.
+    fn scrollbar_act(&mut self,side:Side,act:crate::scrollbar::Act){
+        use crate::scrollbar::Act;
+        match act {
+            Act::Scroll(top) if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered=>self.markdown_scroll_to(side,top),
+            Act::Scroll(top)=>self.session.scroll_to(side,top),
+            Act::Mark(target)=>match target.checked_sub(lenz::view::FIND_TARGET) {
+                Some(hit)=>if let Some((side,line,_))=self.session.go_to_find_hit(hit) {
+                    if !self.session.view().line_visible(side,line){self.session.go_to_line(side,line+1);}
+                    if self.session.markdown_edit_disabled().is_none(){self.selection=self.session.find_selection();}
+                },
+                None=>self.session.go_to_change(target),
+            },
+        }
+    }
     /// The Side under the pointer: by column in Split, by the row's Side in Unified (deleted rows are the left's).
     pub(crate) fn side_at(&self,column:u16,row:u16)->Side {
         if !self.unified(){return self.pointer_side(column);}
@@ -540,7 +616,9 @@ impl App {
         if mouse.kind==MouseEventKind::Down(MouseButton::Left) {
             let on_status=mouse.row==self.diff_area.bottom().saturating_sub(2)&&self.diff_area.contains((mouse.column,mouse.row).into());
             if !on_status {
-                if let Some(prompt)=self.prompt.filter(|p|matches!(p,Prompt::Search|Prompt::Line)) {self.prompt=None;if prompt==Prompt::Search{self.session.clear_find();}}
+                // find stays open for its marks on a strip
+                let on_strip=self.scrollbar_strips().iter().any(|s|s.1.contains((mouse.column,mouse.row).into()));
+                if let Some(prompt)=self.prompt.filter(|&p|p==Prompt::Line||p==Prompt::Search&&!on_strip) {self.prompt=None;if prompt==Prompt::Search{self.session.clear_find();}}
                 if self.set_search.as_ref().is_some_and(|s|s.model.editing()) {self.set_search=None;}
             }
         }
@@ -667,6 +745,7 @@ impl App {
         }
         if self.context_input(&event){return true;}
         if self.popup_mouse(&event){return true;}
+        if self.scrollbar_input(&event){return true;}
         if self.repository.as_ref().is_some_and(|r|r.core.picker.focus!=lenz::repository_session::Pane::Diff){self.navigator.focused=false;}
         if let Event::Key(key)=event && key.kind!=KeyEventKind::Release {
             let copying=key.modifiers==KeyModifiers::CONTROL&&key.code==KeyCode::Char('c');
@@ -1003,7 +1082,7 @@ impl App {
 
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]

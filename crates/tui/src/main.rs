@@ -32,6 +32,7 @@ mod context;
 mod palette;
 mod md_images;
 mod render;
+mod scrollbar;
 mod markdown;
 mod repo_picker;
 #[cfg(test)]
