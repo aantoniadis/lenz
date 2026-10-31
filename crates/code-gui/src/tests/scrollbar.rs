@@ -181,22 +181,6 @@ fn scrollbar_wheel_over_it_scrolls_the_pane(cx: &mut TestAppContext) {
     assert!(top_line(&v, &f) > 0);
 }
 
-/// Every mark a click can reach stands out from the track and from the thumb it may sit on, in both built-in palettes.
-#[test]
-fn scrollbar_marks_contrast_with_the_track_and_the_thumb() {
-    use lenz_content::theme::{contrast, DARCULA, LIGHT};
-    use MarkKind::*;
-    for (name, p) in [("Darcula", &DARCULA), ("Light", &LIGHT)] {
-        for kind in [Error, Conflict, Warning, Current, FindCurrent, Find, Added, Deleted, Modified, Bookmark].into_iter().filter(|k| k.jumps()) {
-            let c = mark_color(kind, p);
-            for (under, bg) in [("track", p.gutter_bg), ("thumb", thumb_color(p))] {
-                assert!(contrast(c, bg) >= 1.8, "{name} {kind:?} on the {under}: {:.2}", contrast(c, bg));
-            }
-        }
-        assert!(contrast(mark_color(FindCurrent, p), p.gutter_bg) > contrast(mark_color(Find, p), p.gutter_bg), "{name}: the current match is stronger");
-    }
-}
-
 #[gpui::test]
 fn scrollbar_thumb_drag_counts_a_collapsed_fold_as_one_row(cx: &mut TestAppContext) {
     let body: String = (0..100).map(|i| format!("    let x{i} = {i};\n")).collect();

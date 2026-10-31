@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use lenz_content::{branches::FileStatus, theme::Palette};
+use lenz_content::{branches::FileStatus, scrollbar::MarkKind, theme::Palette};
 
 use crate::{
     document::Document,
@@ -109,6 +109,36 @@ pub const DELETED: &str = "D";
 /// The colour of a deletion boundary's letter: the palette's deleted-file grey, beside the added and modified colours.
 pub fn deleted_color(p: &Palette) -> u32 {
     FileStatus::Deleted.color(p)
+}
+
+/// A find match's background and text, shared by both Code adapters: stronger than the theme's find colour, so it
+/// stands out over syntax colours.
+pub fn match_colors(p: &Palette) -> (u32, u32) {
+    let bg = lenz_content::theme::mix(p.found_bg, p.accent, 0.45);
+    // Black or white, whichever contrasts more (WCAG ratio: (L1 + 0.05) / (L2 + 0.05)).
+    let l = lenz_content::theme::luminance(bg);
+    (bg, if (l + 0.05) / 0.05 >= 1.05 / (l + 0.05) { 0x000000 } else { 0xFFFFFF })
+}
+
+/// A scrollbar's thumb, over its `gutter_bg` track: a border tone a little toward the track, so marks over it keep
+/// their contrast.
+pub fn scrollbar_thumb_color(p: &Palette) -> u32 {
+    lenz_content::theme::mix(p.gutter_bg, p.border, 0.8)
+}
+
+/// A scrollbar mark's colour: its kind's colour elsewhere (problems, change marks, bookmarks); find matches the text's
+/// match background, lifted toward its text colour (the current one more); the caret's dim.
+pub fn scrollbar_mark_color(kind: MarkKind, p: &Palette) -> u32 {
+    match kind {
+        MarkKind::Error | MarkKind::Conflict => p.error,
+        MarkKind::Warning | MarkKind::Current | MarkKind::Bookmark => p.accent,
+        MarkKind::FindCurrent => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.45) }
+        MarkKind::Find => { let (bg, fg) = match_colors(p); lenz_content::theme::mix(bg, fg, 0.2) }
+        MarkKind::Added => LineChange::Added.color(p),
+        MarkKind::Modified => LineChange::Modified.color(p),
+        MarkKind::Deleted => deleted_color(p),
+        MarkKind::Caret => p.dim,
+    }
 }
 
 /// A version's change blocks, sorted for a drawn line's lookup by binary search.
@@ -408,6 +438,22 @@ fn rest(rx: &Receiver<BufferId>, rest: Duration, wake: &(impl Fn() + Send + 'sta
 mod tests {
     use super::*;
     use std::time::Instant;
+
+    /// Every mark a click can reach stands out from the track and from the thumb it may sit on, in both built-in palettes.
+    #[test]
+    fn scrollbar_marks_contrast_with_the_track_and_the_thumb() {
+        use lenz_content::theme::{contrast, DARCULA, LIGHT};
+        use MarkKind::*;
+        for (name, p) in [("Darcula", &DARCULA), ("Light", &LIGHT)] {
+            for kind in [Error, Conflict, Warning, Current, FindCurrent, Find, Added, Deleted, Modified, Bookmark].into_iter().filter(|k| k.jumps()) {
+                let c = scrollbar_mark_color(kind, p);
+                for (under, bg) in [("track", p.gutter_bg), ("thumb", scrollbar_thumb_color(p))] {
+                    assert!(contrast(c, bg) >= 1.8, "{name} {kind:?} on the {under}: {:.2}", contrast(c, bg));
+                }
+            }
+            assert!(contrast(scrollbar_mark_color(FindCurrent, p), p.gutter_bg) > contrast(scrollbar_mark_color(Find, p), p.gutter_bg), "{name}: the current match is stronger");
+        }
+    }
 
     #[test]
     fn blocks_name_insertions_modifications_and_deletions_by_line() {
