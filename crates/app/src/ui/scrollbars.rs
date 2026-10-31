@@ -7,10 +7,11 @@ use crate::view::FIND_TARGET;
 
 const THUMB_MIN: f32 = 16.0;
 
-/// The strip's width on a pane `w` wide: 12 px at the default font size, none on a pane narrower than three strips.
+/// The strip's width on a pane `w` wide: 12 px at the default font size, none once the pane's text would be under two
+/// strips wide (the strip goes before the text does).
 pub(super) fn strip_w(w: f32) -> f32 {
     let s = scale_of(12.0);
-    if w < 3.0 * s { 0.0 } else { s }
+    if w - num_w() - 16.0 < 2.0 * s { 0.0 } else { s }
 }
 
 /// One track cell per 3 px.
@@ -141,9 +142,15 @@ impl Viewer {
                 let start = bar.thumb(s.h, THUMB_MIN).map_or(0.0, |t| t.0);
                 self.panes.bar = Some(BarDrag { target: s.target, grab: at - start, y, moved: false, shown: self.bar_shown() });
             }
-            Hit::Mark(i) => self.bar_mark(s.target, marks[i].target),
-            Hit::Above => self.bar_scroll_to(s.target, bar.page(false), window),
-            Hit::Below => self.bar_scroll_to(s.target, bar.page(true), window),
+            hit => {
+                // the keys act on the diff after a mark or a page, as after a click on its text
+                (self.nav_focused, self.panel_focused) = (false, false);
+                match hit {
+                    Hit::Mark(i) => self.bar_mark(s.target, marks[i].target),
+                    Hit::Above => self.bar_scroll_to(s.target, bar.page(false), window),
+                    _ => self.bar_scroll_to(s.target, bar.page(true), window),
+                }
+            }
         }
         cx.notify();
         true
