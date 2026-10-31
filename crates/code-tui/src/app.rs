@@ -3599,9 +3599,15 @@ impl App {
                 let grab = at - bar.thumb(len, 1.0).map_or(0.0, |t| t.0);
                 self.scrollbar_drag = Some(ScrollbarDrag { pane, shown, grab, row: y, moved: false });
             }
-            Hit::Mark(i) => self.go_to_mark(marks[i].target),
-            Hit::Above => self.scrollbar_to(pane, bar.page(false)),
-            Hit::Below => self.scrollbar_to(pane, bar.page(true)),
+            hit => {
+                // the keys act on the text after a mark or a page, as after a click on the text
+                self.focus = Focus::Text;
+                match hit {
+                    Hit::Mark(i) => self.go_to_mark(marks[i].target),
+                    Hit::Above => self.scrollbar_to(pane, bar.page(false)),
+                    _ => self.scrollbar_to(pane, bar.page(true)),
+                }
+            }
         }
     }
 
