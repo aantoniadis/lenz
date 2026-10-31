@@ -38,7 +38,7 @@ impl Dimensions for Size {
 struct Listener {
     responses: Arc<Mutex<Vec<u8>>>,
     size: Arc<Mutex<Size>>,
-    colors: (u32, u32),
+    colors: super::Colors,
     queries: Arc<Mutex<Vec<Event>>>,
 }
 impl EventListener for Listener {
@@ -185,7 +185,12 @@ pub(super) struct Model {
     search_runs: usize,
 }
 impl Model {
-    pub(super) fn new(colors: (u32, u32)) -> Self {
+    /// The theme changed: later frames resolve the default and ANSI colours with `colors`.
+    pub(super) fn set_colors(&mut self, colors: super::Colors) {
+        self.listener.colors = colors;
+    }
+    pub(super) fn new(colors: impl Into<super::Colors>) -> Self {
+        let colors = colors.into();
         let size = Size {
             columns: 80,
             rows: 24,
@@ -531,8 +536,8 @@ impl Model {
             let (mut fg, mut bg) = (resolve(cell.fg), resolve(cell.bg));
             if cell.flags.contains(Flags::INVERSE) {
                 (fg, bg) = (
-                    Some(bg.unwrap_or(self.listener.colors.1)),
-                    Some(fg.unwrap_or(self.listener.colors.0)),
+                    Some(bg.unwrap_or(self.listener.colors.bg)),
+                    Some(fg.unwrap_or(self.listener.colors.fg)),
                 );
             }
             cells.push(Cell {
@@ -579,13 +584,11 @@ fn rgb(color: u32) -> Rgb {
         b: color as u8,
     }
 }
-fn palette(index: usize, defaults: (u32, u32)) -> u32 {
-    const ANSI: [u32; 16] = [
-        0, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
-        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
-    ];
+/// The colour of xterm palette entry `index`: the theme's 16 ANSI colours, the standard 6×6×6 cube and grey ramp,
+/// then the default text and background and the dim ANSI colours.
+fn palette(index: usize, colors: super::Colors) -> u32 {
     match index {
-        0..=15 => ANSI[index],
+        0..=15 => colors.ansi[index],
         16..=231 => {
             let n = index - 16;
             let level = |n| if n == 0 { 0 } else { 55 + n * 40 };
@@ -595,15 +598,40 @@ fn palette(index: usize, defaults: (u32, u32)) -> u32 {
             let n = (8 + (index - 232) * 10) as u32;
             n * 0x010101
         }
-        257 => defaults.1,
-        259..=266 => (ANSI[index - 259] & 0xfefefe) >> 1,
-        _ => defaults.0,
+        257 => colors.bg,
+        259..=266 => (colors.ansi[index - 259] & 0xfefefe) >> 1,
+        _ => colors.fg,
+    }
+}
+
+/// Tests give only the default text and background; the 16 colours are xterm's.
+#[cfg(test)]
+impl From<(u32, u32)> for super::Colors {
+    fn from((fg, bg): (u32, u32)) -> Self {
+        const XTERM: [u32; 16] = [
+            0, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
+            0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff,
+        ];
+        Self { fg, bg, ansi: XTERM }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// The 16 ANSI colours and the defaults are the theme's, and a theme change recolours what is already shown.
+    #[test]
+    fn terminal_ansi_colors_are_the_themes_and_change_with_it() {
+        let theme = |base: u32| super::super::Colors { fg: base, bg: base + 1, ansi: std::array::from_fn(|i| base + 16 + i as u32) };
+        let mut model = Model::new(theme(0x100000));
+        model.advance(b"\x1b[31mR\x1b[0m\x1b[38;5;196mC\x1b[0mD");
+        let cell = |model: &Model, text: &str| model.frame().cells.iter().find(|c| c.text == text).map(|c| c.fg);
+        assert_eq!(cell(&model, "R"), Some(Some(0x100000 + 16 + 1)), "ANSI red is the theme's");
+        assert_eq!(cell(&model, "C"), Some(Some(0xff0000)), "the 256-colour cube stays standard");
+        assert_eq!(cell(&model, "D"), Some(None), "the default text colour is left to the adapter");
+        model.set_colors(theme(0x200000));
+        assert_eq!(cell(&model, "R"), Some(Some(0x200000 + 16 + 1)), "a theme change recolours shown cells");
+    }
 
     #[test]
     fn terminal_model_scalars_split_across_reads_and_combining_marks_stay_bounded() {

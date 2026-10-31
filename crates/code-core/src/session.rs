@@ -8811,6 +8811,9 @@ impl Session {
         let palette = self.theme_preview.as_deref().and_then(|id| self.themes.preview(id))
             .unwrap_or_else(|| self.themes.snapshot().palette);
         let repaint = effect.repaint || *self.state.palette != *palette;
+        if palette.terminal != self.state.palette.terminal || palette.fg != self.state.palette.fg || palette.bg != self.state.palette.bg {
+            self.recolor_terminals(crate::terminal::Colors::of(&palette));
+        }
         self.state.palette = palette;
         self.state.messages.extend(effect.notice);
         Effect { repaint, copy: None, ..Effect::default() }

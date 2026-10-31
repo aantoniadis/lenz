@@ -871,3 +871,23 @@ fn shared_override_environment_priority_and_notice_sources() {
         assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stdout));
     }
 }
+
+/// The integrated terminal's colours come from each theme: none is xterm's fully saturated default, and its hues and
+/// the colours at the far end from the background stay readable on it.
+#[test]
+fn every_theme_has_soft_readable_terminal_colors() {
+    const XTERM: [u32; 16] = [0, 0xcd0000, 0x00cd00, 0xcdcd00, 0x0000ee, 0xcd00cd, 0x00cdcd, 0xe5e5e5, 0x7f7f7f,
+        0xff0000, 0x00ff00, 0xffff00, 0x5c5cff, 0xff00ff, 0x00ffff, 0xffffff];
+    for entry in super::builtin_entries() {
+        let p = &*entry.palette;
+        for (i, color) in p.terminal.iter().enumerate() {
+            assert!(!XTERM.contains(color) || *color == p.fg, "{} colour {i} is xterm's {color:06x}", entry.id);
+        }
+        // Hues, and the far end from the background: white on a dark theme, black on a light one.
+        let far = if super::luminance(p.bg) < 0.5 { [7, 15] } else { [0, 8] };
+        for i in [1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 14].into_iter().chain(far) {
+            let ratio = super::contrast(p.terminal[i], p.bg);
+            assert!(ratio >= 1.8, "{} colour {i} {:06x} on {:06x}: {ratio:.2}", entry.id, p.terminal[i], p.bg);
+        }
+    }
+}

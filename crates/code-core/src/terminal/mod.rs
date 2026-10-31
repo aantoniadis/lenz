@@ -17,6 +17,19 @@ use std::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Id(pub u64);
 
+/// A terminal's default text and background and its 16 ANSI colours, all from the theme.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Colors {
+    pub fg: u32,
+    pub bg: u32,
+    pub ansi: [u32; 16],
+}
+impl Colors {
+    pub fn of(palette: &lenz_content::theme::Palette) -> Self {
+        Self { fg: palette.fg, bg: palette.bg, ansi: palette.terminal }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseKind {
     Press(u8),
@@ -43,6 +56,8 @@ pub enum Command {
         accept: bool,
     },
     Key(KeyPress),
+    /// The theme changed: redraw with its colours.
+    Colors(Colors),
     Text(String),
     Paste(String),
     Paths(Vec<PathBuf>),

@@ -115,7 +115,7 @@ pub fn parse_theme(text: &str, kind: ThemeInputKind) -> Result<LoadedTheme, Them
     if let Some(value) = table.get("palette") {
         let overrides = value.as_table().ok_or_else(|| invalid("palette"))?;
         for (key, value) in overrides {
-            macro_rules! scalars{($($field:ident),*)=>{match key.as_str(){$(stringify!($field)=>p.$field=rgb(value,key)?,)*"block"=>p.block=array(value,key)?,"inline"=>p.inline=array(value,key)?,"edge"=>p.edge=array(value,key)?,"status"=>p.status=array(value,key)?,_=>return Err(invalid(key))}}}
+            macro_rules! scalars{($($field:ident),*)=>{match key.as_str(){$(stringify!($field)=>p.$field=rgb(value,key)?,)*"block"=>p.block=array(value,key)?,"inline"=>p.inline=array(value,key)?,"edge"=>p.edge=array(value,key)?,"status"=>p.status=array(value,key)?,"terminal"=>p.terminal=array(value,key)?,_=>return Err(invalid(key))}}}
             scalars!(
                 bg,
                 fg,
