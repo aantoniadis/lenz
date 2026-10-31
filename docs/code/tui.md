@@ -383,6 +383,15 @@ Other/Left/Right on a comparison side keep both sides and at least one ordinary 
 The wheel over a tab bar scrolls that pane's strip without switching files or focusing the pane. The GUI also
 retains small trackpad movements. Activating a tab reveals it again, and resizing clamps the strip to its tabs.
 
+Each pane showing text, a Markdown preview or a CSV table has a one-column scrollbar right of its text (in a split by
+columns, the first pane's next to the divider): a `│` track, the thumb in the thumb colour, `━` marks and a thin `─` for
+the caret's line. It works as the window's: drag the thumb (needs mouse motion events), click the track to page one
+screen toward the click, click a mark to place the caret on its line (Back returns), and the wheel over it scrolls the
+pane. Marks are one per cell, the most important winning: errors, warnings, find matches (the current one stronger),
+changes against HEAD in their gutter colours, bookmarks, then the caret's line. A preview or table has a thumb and track
+without marks. A pane whose text would be narrower than 12 columns drops the column before any text. See
+[Lenz Code](README.md) for the window's.
+
 
 Reload, changing folders/worktrees and checking out or creating-and-checking-out a branch use the same
 Save/Discard/Cancel decisions. Their Discard decision after an uncertain Save still requires a successful

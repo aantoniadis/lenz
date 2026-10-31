@@ -233,7 +233,14 @@ Both adapters build their menus, labels, availability and disabled reasons from 
 - Terminal text selection and Linux primary selection belong to the emulator. Clipboard copy uses OSC 52 and needs terminal support; it transports exact text, and source control characters are drawn visibly.
 - Images are limited to cell geometry and colors, except where kitty graphics or Sixel apply as described above.
 - The emulator may intercept some modifier keys; the command menus offer an equivalent for every control. Dragging needs an emulator that forwards mouse press, motion and release events.
-- There are no draggable scrollbars.
+- Each text pane (each Side, the unified pane, each Merge View pane and the Markdown preview) has a one-column
+  scrollbar at its right edge: a `│` track, the thumb in the thumb colour, and `━` marks. It works as the window's:
+  drag the thumb to scroll, click the track to page one screen toward the click, click a mark to make its Change Block
+  current or go to its find match; the wheel over the column scrolls the pane. Marks are one per cell, the most
+  important winning: an unresolved conflict, the current Change Block, a find match, then the other Change Blocks in
+  their inserted, deleted and modified colours. Each Side marks its own find matches (Unified both). A merge pane's
+  column is its last text column, beside the border it keeps; the preview's has a thumb and track without marks. A
+  pane whose text would be narrower than 12 columns drops the column before any text.
 
 ## Architecture
 
