@@ -115,8 +115,9 @@ fn gui_scrollbar_mark_click_makes_the_change_current(cx: &mut TestAppContext) {
     let at = |cx: &mut TestAppContext, target: usize| f.viewer.read_with(cx, |v, _| mark_y(&s, v.comparison.view.scrollbar(Side::Right), &v.comparison.scrollbar_marks(Side::Right), |m| m.target == target));
     let (y, mark) = at(cx, 0);
     assert_eq!(mark.kind, MarkKind::Modified);
+    f.viewer.update(cx, |v, _| v.nav_focused = true);
     press(cx, &f, s.x + s.w / 2.0, y);
-    assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.current_change()), Some(0));
+    assert_eq!(f.viewer.read_with(cx, |v, _| (v.comparison.view.current_change(), v.nav_focused)), (Some(0), false), "the keys go to the diff");
     // a press on the thumb released without moving goes to the mark under it
     f.viewer.update(cx, |v, _| { v.comparison.view.set_mode(ScrollMode::Independent); v.comparison.view.scroll_to(Side::Right, 240.0); });
     let (start, size) = painted(cx, &f)[1].1.unwrap();
@@ -170,6 +171,83 @@ fn gui_merge_scrollbars_mark_conflicts(cx: &mut TestAppContext) {
     press(cx, &f, s.x + s.w / 2.0, y);
     assert_eq!(f.viewer.read_with(cx, |v, _| v.merge.as_ref().unwrap().current), Some(1));
     assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(), disk);
+}
+
+/// Each merge pane's thumb drags it and its track pages it, through each pane's own scroll path.
+#[gpui::test]
+fn gui_merge_scrollbar_drag_and_page_move_each_pane(cx: &mut TestAppContext) {
+    let f = merge(cx);
+    let disk = std::fs::read(f.dir.path().join("result")).unwrap();
+    let bar = |cx: &mut TestAppContext, pane: usize| f.viewer.read_with(cx, |v, _| v.merge.as_ref().unwrap().scrollbar(pane));
+    for (pane, key) in [(0, "ours"), (1, "middle"), (2, "theirs")] {
+        f.viewer.update(cx, |v, _| v.merge.as_mut().unwrap().scroll_to(pane, 0.0));
+        let s = strip(cx, &f, key, 0);
+        let (start, size) = painted(cx, &f)[pane].1.unwrap();
+        let before = bar(cx, pane);
+        let (x, mid, grab) = (s.x + s.w / 2.0, s.y + s.h / 2.0, size / 2.0);
+        drag(cx, &f, x, s.y + start + grab, mid);
+        let want = before.top_at(mid - s.y - grab, s.h, 16.0);
+        let got = bar(cx, pane).top;
+        assert!((got - want).abs() <= 1.0 && got > 50.0, "{key}: {got} vs {want}");
+        assert!(f.viewer.read_with(cx, |v, _| v.panes.bar.is_none()));
+        // the track between the line-5 Conflict's mark and the thumb pages up one viewport
+        let now = bar(cx, pane);
+        let (start, _) = painted(cx, &f)[pane].1.unwrap();
+        let y = s.y + start / 2.0;
+        let on_mark = f.viewer.read_with(cx, |v, _| {
+            let marks = v.merge.as_ref().unwrap().scrollbar_marks(pane);
+            let placed = crate::scrollbar::place(&marks, now.total, (s.h / 3.0).floor() as usize);
+            crate::scrollbar::mark_at(&placed, &marks, y - s.y, s.h)
+        });
+        assert_eq!(on_mark, None, "{key}: off any mark");
+        press(cx, &f, x, y);
+        let got = bar(cx, pane).top;
+        assert!((got - now.page(false)).abs() < 0.01, "{key}: {got} vs {}", now.page(false));
+    }
+    assert_eq!(std::fs::read(f.dir.path().join("result")).unwrap(), disk);
+}
+
+/// Narrowing the window drops each pane's strip before its text gets under two strips wide; text and strip always
+/// fit the pane.
+#[gpui::test]
+fn gui_scrollbars_leave_narrow_panes_before_their_text(cx: &mut TestAppContext) {
+    let s = scale_of(12.0);
+    let check = |cx: &mut TestAppContext, f: &Fixture, what: &str| {
+        for width in [1200.0, 900.0, 700.0, 560.0, 480.0, 420.0, 360.0, 300.0, 240.0, 120.0, 1.0] {
+            cx.simulate_window_resize(f.window.into(), size(px(width), px(400.0)));
+            cx.executor().run_until_parked();
+            render(cx, f);
+            let (panes, strips) = f.window.update(cx, |v, w, _| {
+                let x0 = v.diff_x();
+                let avail = f32::from(w.viewport_size().width) - x0;
+                let panes: Vec<(f32, f32)> = if v.merge.is_some() {
+                    let m = v.merge_widths(avail);
+                    vec![(x0, m[0]), (x0 + m[0] + GUTTER_W, m[1]), (x0 + m[0] + m[1] + 2.0 * GUTTER_W, m[2])]
+                } else {
+                    let c = v.comparison_widths(avail);
+                    vec![(x0, c[0]), (x0 + c[0] + GUTTER_W, c[1])]
+                };
+                (panes, v.scrollbar_strips(w))
+            }).unwrap();
+            for (px0, pw) in panes {
+                let strip = strips.iter().find(|b| b.x >= px0 && b.x + b.w <= px0 + pw + 0.01 && pw > 0.0);
+                let text = pw - num_w() - 16.0;
+                if text < 2.0 * s {
+                    assert!(strip.is_none(), "{what} at {width}: a {pw} px pane keeps no strip");
+                } else {
+                    let b = strip.unwrap_or_else(|| panic!("{what} at {width}: a {pw} px pane has a strip"));
+                    assert!((b.x + b.w - (px0 + pw)).abs() < 0.01, "{what} at {width}: at the pane's right edge");
+                }
+                assert!(text_width(pw) + strip.map_or(0.0, |b| b.w) <= pw.max(0.0) + 0.01, "{what} at {width}: text and strip fit");
+            }
+        }
+    };
+    let f = two_way(cx);
+    check(cx, &f, "two-way");
+    f.viewer.update(cx, |v, _| v.comparison.view.set_unified(true));
+    check(cx, &f, "unified");
+    let f = merge(cx);
+    check(cx, &f, "merge");
 }
 
 #[gpui::test]

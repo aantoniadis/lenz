@@ -1506,8 +1506,7 @@ impl Viewer {
         if self.markdown.syntax.as_mut().is_some_and(CodeSyntax::poll) {
             self.markdown.syntax_rev += 1;
         }
-        // the text wraps short of each pane's scrollbar strip
-        let widths = self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x()).map(|w| w - super::scrollbars::strip_w(w));
+        let widths = self.markdown_text_widths(window);
         if widths.iter().all(|w| *w <= 0.) {
             self.markdown.layout = None;
             self.markdown.building = None;
@@ -1559,7 +1558,7 @@ impl Viewer {
     /// Scroll positions from the anchors, clamped to the layout on screen and the current panes.
     fn markdown_clamp(&mut self, window: &Window) {
         let Some(l) = self.markdown.layout.clone() else { return };
-        let widths = self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x());
+        let widths = self.markdown_text_widths(window);
         let h = self.markdown_height(window);
         if l.inline {
             // one pane: the new side's anchor, or the old side's when it is just above (a removed block)
@@ -1592,6 +1591,12 @@ impl Viewer {
             self.markdown.top[i] = self.markdown.top[i].clamp(0., (l.heights[i] - h).max(0.));
             self.markdown.horizontal[i] = self.markdown.horizontal[i].clamp(0., (l.widest[i] - *width).max(0.));
         }
+    }
+
+    /// The preview panes' text widths: each pane short of its scrollbar strip, what the text wraps to, is clipped to
+    /// and scrolls across.
+    fn markdown_text_widths(&self, window: &Window) -> [f32; 2] {
+        self.comparison_widths(f32::from(window.viewport_size().width) - self.diff_x()).map(|w| w - super::scrollbars::strip_w(w))
     }
 
     /// Where pane `i`'s text starts, at the current pane widths (what paint uses).
@@ -2855,6 +2860,23 @@ mod tests {
         assert!(Arc::ptr_eq(&layout(cx, false), &settled));
         let (x, expected) = f.window.update(cx, |v, w, _| (v.markdown_pane_x(w, 1), v.diff_x() + v_widths_of(v, w)[0] + GUTTER_W)).unwrap();
         assert_eq!(x, expected);
+    }
+    /// The far right of the widest unwrapped line is reachable, short of the strip, and the next frame keeps it.
+    #[gpui::test]
+    fn gui_markdown_preview_scrolls_to_the_end_of_its_widest_line(cx: &mut TestAppContext) {
+        for inline in [false, true] {
+            let text = format!("# Wide\n\n```\n{}\n```\n", "x".repeat(400));
+            let f = if inline { rendered_inline(cx, &text) } else { rendered(cx, &text) };
+            f.window.update(cx, |v, w, cx| {
+                v.markdown_scroll(Side::Right, 0., 1e6, w);
+                let _ = v.markdown_frame(w, cx);
+                let _ = v.render(w, cx);
+                let l = v.markdown.layout.clone().unwrap();
+                assert!(l.widest[1] > l.widths[1], "the line is wider than the pane");
+                assert_eq!(l.widths, v.markdown_text_widths(w), "settled at the current panes");
+                assert_eq!(v.markdown.horizontal[1], l.widest[1] - l.widths[1], "inline {inline}");
+            }).unwrap();
+        }
     }
     fn v_widths_of(v: &Viewer, w: &Window) -> [f32; 2] {
         v.comparison_widths(f32::from(w.viewport_size().width) - v.diff_x())
