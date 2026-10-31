@@ -850,7 +850,8 @@ impl View {
 
     /// `side`'s scrollbar in the rows it paints: its display rows (a Collapsed Region or Folded Change Block is one
     /// row), plus its Filler Rows in Padded. Unified paints one column (adapters call it `Side::Right`): `side` is
-    /// ignored and the rows are the Unified rows.
+    /// ignored and the rows are the Unified rows. The view may scroll its last row up to the top, so `total` grows
+    /// to cover the rows past the end then.
     pub fn scrollbar(&self, side: Side) -> Scrollbar {
         let (total, top) = if self.unified {
             (self.unified_rows, self.unified_top())
@@ -859,19 +860,40 @@ impl View {
         } else {
             (self.lines(side), self.side_top(side))
         };
-        Scrollbar { total: f64::from(total), top: f64::from(top), visible: f64::from(self.viewport_rows) }
+        let visible = f64::from(self.viewport_rows);
+        Scrollbar { total: f64::from(total).max(f64::from(top) + visible), top: f64::from(top), visible }
     }
 
-    /// Scroll `side`'s scrollbar top to `top` through [`Self::scroll_by`] led by `side`, so the Scroll Mode moves the
-    /// other Side; the mapping is piecewise linear in Shared and Unified, so a few rounds settle it.
+    /// Scroll `side`'s scrollbar top to `top` with one [`Self::scroll_by`], so the Scroll Mode moves the other Side.
+    /// Unified in Aligned and Independent follows the left Side's lines, so a top inside lines it lacks lands at
+    /// their start.
     pub fn scroll_to(&mut self, side: Side, top: f64) {
-        // Unified rows follow the left Side's top in Aligned and Independent
-        let lead = if self.unified { Side::Left } else { side };
-        for _ in 0..4 {
-            let delta = (top - self.scrollbar(side).top) as f32;
-            if delta.abs() < 1e-3 { return; }
-            self.scroll_by(delta, lead);
+        let (rows, lead) = self.scroll_units_for(side, top);
+        self.scroll_by(rows, lead);
+    }
+
+    /// The [`Self::scroll_by`] rows, and the Side to lead with, that put `side`'s scrollbar top at `top`.
+    pub(crate) fn scroll_units_for(&self, side: Side, top: f64) -> (f32, Side) {
+        let (t, a) = (top as f32, self.anchor());
+        if self.unified {
+            // the combined row whose Unified row is `t`: the inverse of `unified_top`
+            let i = self.segs.partition_point(|s| s.u0 + s.un <= t);
+            let c = match self.segs.get(i) {
+                Some(s) => s.c0 + ((t - s.u0) / s.un).clamp(0.0, 1.0) * s.cn,
+                None => self.combined + (t - self.unified_rows),
+            };
+            return match self.mode {
+                ScrollMode::Aligned | ScrollMode::Independent => (self.combined_to_side(Side::Left, c) - self.left_top, Side::Left),
+                _ => (c - self.top, side),
+            };
         }
+        let rows = match self.mode {
+            // the inverse of `side_top`: a run `side` lacks maps to its start
+            ScrollMode::Shared => self.side_to_combined(side, t + a) - a - self.top,
+            ScrollMode::Padded => t - self.top,
+            ScrollMode::Aligned | ScrollMode::Independent => t - self.side_top(side),
+        };
+        (rows, side)
     }
 
     /// `side`'s raw line in [`Self::scrollbar`] rows (a hidden line is its region's or folded block's row).
@@ -1922,7 +1944,7 @@ mod tests {
         assert_eq!(totals(&v), (30.0, 30.0), "Unified: one column of rows, whichever Side");
         assert_eq!((v.display_row(Side::Left, 12), v.display_row(Side::Right, 32)), (27.0, 27.0), "an unchanged line is one row");
         // a b c d against a B c x d: ' a', '-b', '+B', ' c', '+x', ' d'
-        let mut v = View::new(4, 5, &[block(1..2, 1..2), block(3..3, 3..4)], 20.0);
+        let mut v = View::new(4, 5, &[block(1..2, 1..2), block(3..3, 3..4)], 4.0);
         v.set_unified(true);
         assert_eq!(v.scrollbar(Side::Left).total, 6.0);
         let rows = [(Side::Left, 1), (Side::Right, 1), (Side::Right, 3), (Side::Left, 3)].map(|(side, line)| v.display_row(side, line));
@@ -1942,6 +1964,50 @@ mod tests {
         for (mode, left, right) in [(ScrollMode::Shared, 30.0, 50.0), (ScrollMode::Aligned, 30.0, 50.0), (ScrollMode::Padded, 50.0, 30.0), (ScrollMode::Independent, 0.0, 0.0)] {
             assert!((other_top(mode, Side::Right, 50.0) - left).abs() < 1e-3, "{mode:?}: left follows the right Side");
             assert!((other_top(mode, Side::Left, 30.0) - right).abs() < 1e-3, "{mode:?}: right follows the left Side");
+        }
+    }
+
+    #[test]
+    fn scroll_to_lands_in_one_call_over_dense_insertions_and_in_unified() {
+        // the right Side inserts 9 lines after every 10th left line: 90 of its 190 rows are insertions
+        let blocks: Vec<_> = (0..10).map(|k| block(10 * k + 5..10 * k + 5, 19 * k + 5..19 * k + 14)).collect();
+        for mode in MODES {
+            for (side, targets) in [(Side::Left, [3.0, 17.5, 42.0, 77.0]), (Side::Right, [3.0, 50.0, 121.5, 170.0])] {
+                for top in targets {
+                    let mut v = View::new(100, 190, &blocks, 10.0);
+                    v.start_in(mode);
+                    v.scroll_to(side, top);
+                    let landed = v.scrollbar(side).top;
+                    assert!((landed - top).abs() <= 1.0, "{mode:?} {side:?}: {top} landed at {landed}");
+                }
+            }
+        }
+        // Unified: one 100-line block is 200 rows, its deleted lines then its inserted ones
+        for mode in [ScrollMode::Shared, ScrollMode::Padded] {
+            let mut v = View::new(100, 100, &[block(0..100, 0..100)], 10.0);
+            v.start_in(mode);
+            v.set_unified(true);
+            for top in [100.0, 37.0, 150.0] {
+                v.scroll_to(Side::Right, top);
+                assert!((v.scrollbar(Side::Right).top - top).abs() <= 1.0, "{mode:?}: {top} landed at {:?}", v.scrollbar(Side::Right));
+            }
+        }
+    }
+
+    #[test]
+    fn a_top_past_the_end_keeps_the_thumb_at_the_track_end_and_pages_down_in_place() {
+        for unified in [false, true] {
+            for mode in MODES {
+                // the last change sits at the anchor, so the top is past `total - visible`
+                let mut v = View::new(100, 100, &[block(97..98, 97..98)], 10.0);
+                v.start_in(mode);
+                v.set_unified(unified);
+                v.go_to_change(0);
+                let bar = v.scrollbar(Side::Right);
+                assert!(bar.page(true) >= bar.top, "{mode:?} unified={unified}: {bar:?}");
+                let (start, size) = bar.thumb(100.0, 4.0).unwrap();
+                assert!((start + size - 100.0).abs() < 1e-3, "{mode:?} unified={unified}: {bar:?}");
+            }
         }
     }
 
