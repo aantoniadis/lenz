@@ -80,6 +80,29 @@ pub fn place(marks: &[Mark], total: f64, cells: usize) -> Vec<Option<usize>> {
     placed
 }
 
+/// A value kept until its key changes: the cores' mark rows, so a frame reuses them instead of mapping every mark's
+/// line again. The key holds every input the value is built from. A session holding one stays `Send` and `Sync`.
+pub struct Cached<K, V>(std::sync::Mutex<Option<(K, std::sync::Arc<V>)>>);
+
+impl<K, V> Default for Cached<K, V> {
+    fn default() -> Self { Self(Default::default()) }
+}
+
+impl<K: PartialEq, V> Cached<K, V> {
+    /// The value for `key`, built by `build` only when `key` differs from the last one.
+    pub fn get(&self, key: K, build: impl FnOnce() -> V) -> std::sync::Arc<V> {
+        let mut held = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match &*held {
+            Some((k, value)) if *k == key => value.clone(),
+            _ => {
+                let value = std::sync::Arc::new(build());
+                *held = Some((key, value.clone()));
+                value
+            }
+        }
+    }
+}
+
 /// What a press on the track lands on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Hit { Thumb, Mark(usize), Above, Below }
@@ -140,6 +163,12 @@ mod tests {
         assert_eq!(hit(&bar, &placed, &marks, 100.5, 200.0, 16.0), Hit::Mark(0));
         assert_eq!(hit(&bar, &placed, &marks, 150.0, 200.0, 16.0), Hit::Below);
         assert_eq!(mark_at(&placed, &marks, 2.5, 200.0), Some(1), "a mark under the thumb, for a release that did not move");
+    }
+    #[test] fn cached_rebuilds_only_when_its_key_changes() {
+        let (cache, built) = (Cached::default(), std::cell::Cell::new(0));
+        let get = |key: u32| *cache.get(key, || { built.set(built.get() + 1); key * 10 });
+        assert_eq!((get(1), get(1), built.get()), (10, 10, 1));
+        assert_eq!((get(2), get(1), built.get()), (20, 10, 3));
     }
     #[test] fn caret_marks_are_drawn_but_never_hit() {
         let bar = Scrollbar { total: 1000.0, top: 0.0, visible: 100.0 };

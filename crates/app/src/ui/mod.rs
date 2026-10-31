@@ -2660,7 +2660,7 @@ impl Viewer {
         let side = self.diff_focus;
         let seed = if self.markdown_active(){self.comparison.markdown_selection().and_then(|selection|self.comparison.markdown_projection()?.copy_visible(selection).ok()).filter(|s|!s.is_empty()&&!s.contains('\n'))}else{self.sel.filter(|s| s.side == side && !s.is_empty() && s.anchor.line == s.head.line).map(|s| s.text(self.raw(side)))};
         let query = seed.or_else(|| self.comparison.find.as_ref().map(|f| f.query.clone())).unwrap_or_default();
-        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None, error: None, capped: false });
+        self.comparison.find = Some(FindBar { query, side, hits: Vec::new(), at: None, error: None, capped: false, id: crate::view::next_stamp() });
         self.refind();
     }
 

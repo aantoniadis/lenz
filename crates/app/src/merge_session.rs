@@ -2,7 +2,7 @@
 use crate::{
     conflicts, highlight,
     merge::{BlockState, Labels, MarkerStyle, MergeResult, Pick},
-    scrollbar::{Mark, MarkKind, Scrollbar},
+    scrollbar::{Cached, Mark, MarkKind, Scrollbar},
     view::{Connector, Content, Kind, Row, ScrollMode, Side, View},
     write::{self, WriteError},
 };
@@ -136,7 +136,17 @@ pub struct MergeSession {
     pub error: Option<String>,
     /// "Keep mine" on the changed-on-disk banner: don't raise it again until the next save or reload.
     pub disk_kept: bool,
+    /// [`Self::segments`] for the Result `version` and the middle pane it was built for.
+    padded: Cached<(u64, bool), (Vec<Seg3>, u32)>,
+    /// Per pane: each block's (row, rows) and each find hit's row on its scrollbar, for [`Self::rows_key`].
+    mark_rows: [Cached<RowsKey, MarkRows>; 3],
 }
+
+/// What a pane's mark rows are built from: the Result `version`, the middle pane, the Scroll Mode, both views'
+/// layouts and the pane's find.
+type RowsKey = (u64, bool, ScrollMode, [u64; 2], Option<u64>);
+/// Each block's (row, rows) and each find hit's row.
+type MarkRows = (Vec<(f64, f64)>, Vec<f64>);
 
 fn lines_of(text: &str) -> Vec<&str> {
     lenz_engine::split_lines(text)
@@ -515,6 +525,8 @@ impl MergeSession {
             git_output: o.git_output,
             error: None,
             disk_kept: false,
+            padded: Default::default(),
+            mark_rows: Default::default(),
         };
         if let Some(i) = current {
             s.show_block(i);
@@ -624,7 +636,9 @@ impl MergeSession {
         self.sync();
         if self.scroll == ScrollMode::Padded {
             let rows = self.views[0].viewport_rows();
-            let (segs, total) = self.segments();
+            let padded = self.padded();
+            let (segs, total) = &*padded;
+            let total = *total;
             let c = segs
                 .iter()
                 .find(|s| (s.start[1] as f32) + (s.len[1].max(1) as f32) > line)
@@ -688,7 +702,8 @@ impl MergeSession {
         }
         let rows = self.views[0].viewport_rows();
         let top = self.padded_top;
-        let (segs, _) = self.segments();
+        let padded = self.padded();
+        let segs = &padded.0;
         let mut out: [Vec<Row>; 3] = Default::default();
         let mut connectors: [Vec<Connector>; 2] = Default::default();
         let inline = |p: usize, l: u32| match p {
@@ -794,7 +809,7 @@ impl MergeSession {
 
     pub fn scroll_by(&mut self, rows: f32) {
         if self.scroll == ScrollMode::Padded {
-            let (_, total) = self.segments();
+            let total = self.padded().1;
             self.padded_top = (self.padded_top + rows).clamp(0.0, total as f32);
             return;
         }
@@ -807,7 +822,7 @@ impl MergeSession {
     pub fn scrollbar(&self, pane: usize) -> Scrollbar {
         if self.scroll == ScrollMode::Padded {
             let (top, visible) = (f64::from(self.padded_top), f64::from(self.views[0].viewport_rows()));
-            return Scrollbar { total: f64::from(self.segments().1).max(top + visible), top, visible };
+            return Scrollbar { total: f64::from(self.padded().1).max(top + visible), top, visible };
         }
         let (view, side) = self.pane_view(pane);
         view.scrollbar(side)
@@ -840,22 +855,11 @@ impl MergeSession {
     /// else `Modified` where the pane changed; then the find hits when `pane` is focused, targets offset by
     /// [`crate::view::FIND_TARGET`].
     pub fn scrollbar_marks(&self, pane: usize) -> Vec<Mark> {
-        let padded = (self.scroll == ScrollMode::Padded).then(|| self.segments());
-        // each block's (row, rows): Padded has one segment per block, in order
-        let spans: Vec<(f64, f64)> = match &padded {
-            Some((segs, _)) => segs.iter().filter(|s| s.block.is_some()).map(|s| (f64::from(s.row), f64::from(s.height()))).collect(),
-            None => (0..self.m.blocks().len())
-                .map(|i| {
-                    let range = self.pane_range(pane, i);
-                    let row = self.pane_row(pane, range.start);
-                    (row, self.pane_row(pane, range.end) - row)
-                })
-                .collect(),
-        };
-        let mut marks: Vec<Mark> = spans
-            .into_iter()
+        let rows = self.mark_rows[pane].get(self.rows_key(pane), || self.mark_rows(pane));
+        let mut marks: Vec<Mark> = rows.0
+            .iter()
             .enumerate()
-            .filter_map(|(i, (row, rows))| {
+            .filter_map(|(i, &(row, rows))| {
                 let kind = if self.m.state(i) == BlockState::Unresolved {
                     MarkKind::Conflict
                 } else if self.current == Some(i) {
@@ -868,13 +872,40 @@ impl MergeSession {
             })
             .collect();
         let at = self.find.as_ref().and_then(|f| f.search.at);
-        marks.extend(self.find_hits(pane).iter().enumerate().map(|(i, (line, _))| Mark {
-            row: match &padded { Some(padded) => f64::from(padded_row(padded, pane, *line)), None => self.pane_row(pane, *line) },
+        marks.extend(rows.1.iter().enumerate().map(|(i, &row)| Mark {
+            row,
             rows: 1.0,
             kind: if at == Some(i) { MarkKind::FindCurrent } else { MarkKind::Find },
             target: crate::view::FIND_TARGET + i,
         }));
         marks
+    }
+
+    /// The inputs of pane `pane`'s [`Self::mark_rows`]: the Result and its views change `version` and the views'
+    /// layouts; the find, its hits' id.
+    fn rows_key(&self, pane: usize) -> RowsKey {
+        let find = self.find.as_ref().filter(|_| pane == self.focus_pane).map(|f| f.search.id);
+        (self.version, self.base_shown, self.scroll, self.views.each_ref().map(View::layout_stamp), find)
+    }
+
+    /// Pane `pane`'s scrollbar rows: each block's (row, rows), Padded with one segment per block in order; then each
+    /// find hit's row.
+    fn mark_rows(&self, pane: usize) -> MarkRows {
+        let hits = self.find_hits(pane).iter().map(|(line, _)| *line);
+        if self.scroll == ScrollMode::Padded {
+            let padded = self.padded();
+            let spans = padded.0.iter().filter(|s| s.block.is_some()).map(|s| (f64::from(s.row), f64::from(s.height())));
+            return (spans.collect(), hits.map(|line| f64::from(padded_row(&padded, pane, line))).collect());
+        }
+        let (view, side) = self.pane_view(pane);
+        let bounds = (0..self.m.blocks().len()).flat_map(|i| { let r = self.pane_range(pane, i); [r.start, r.end] });
+        let rows = view.display_rows(side, bounds);
+        (rows.as_chunks::<2>().0.iter().map(|&[start, end]| (start, end - start)).collect(), view.display_rows(side, hits))
+    }
+
+    /// [`Self::segments`], built once per Result version and middle pane.
+    fn padded(&self) -> Arc<(Vec<Seg3>, u32)> {
+        self.padded.get((self.version, self.base_shown), || self.segments())
     }
 
     /// Make block `index` current and show it, as stepping to it does; nothing past the last block.
@@ -898,12 +929,6 @@ impl MergeSession {
             1 => self.mid_range(i),
             _ => self.m.blocks()[i].right.clone(),
         }
-    }
-
-    /// Pane `pane`'s line `line` in its own view's scrollbar rows (Shared).
-    fn pane_row(&self, pane: usize, line: u32) -> f64 {
-        let (view, side) = self.pane_view(pane);
-        view.display_row(side, line)
     }
 
     pub fn show_block(&mut self, i: usize) {
@@ -2433,6 +2458,7 @@ impl MergeSession {
         let found = crate::find::Find::search(lines, &query, from);
         if let Some(f) = &mut self.find {
             (f.search.hits, f.search.at, f.search.capped, f.search.error) = match found { Ok((hits, at, capped)) => (hits, at, capped, None), Err(e) => (Vec::new(), None, false, Some(e)) };
+            f.search.id = crate::view::next_stamp();
         }
         self.show_find_hit();
     }
@@ -2475,7 +2501,7 @@ impl MergeSession {
         }
         if self.scroll == ScrollMode::Padded {
             let rows = self.views[0].viewport_rows();
-            let at = padded_row(&self.segments(), pane, line);
+            let at = padded_row(&self.padded(), pane, line);
             self.padded_top = (at as f32 - rows / 3.0).max(0.0);
         } else {
             match pane {
