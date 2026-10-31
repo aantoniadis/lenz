@@ -220,6 +220,8 @@ pub(crate) struct App {
     annotation_drag: Option<(u8, TabId, code_core::text::SnapshotKey)>,
     /// The explorer's width while its right edge is dragged; remembered in the layout on release.
     pub(crate) explorer_drag: Option<u16>,
+    /// The pointer is over a pane's text: the runtime asks the terminal for an I-beam (OSC 22).
+    pub(crate) pointer_text: bool,
     /// The first file pane's share (thousandths) while the panes' boundary is dragged; remembered on release.
     pub(crate) split_drag: Option<u32>,
     /// The results panel's share of the height while its heading is dragged.
@@ -277,6 +279,7 @@ impl App {
             drag: None,
             annotation_drag: None,
             explorer_drag: None,
+            pointer_text: false,
             split_drag: None,
             results_drag: None,
             divider_from: 0,
@@ -2904,6 +2907,9 @@ impl App {
         let tree_click = matches!(event.kind, MouseEventKind::Down(_)).then(|| self.tree_click.take()).flatten();
         let (x, y) = (event.column, event.row);
         let point = ratatui::layout::Position::new(x, y);
+        let state = self.session.state();
+        self.pointer_text = self.modal.is_none() && self.layout.panes.iter().any(|g| g.text.contains(point)
+            && state.shown(g.pane).is_some_and(|tab| state.csv(tab.id()).is_none()));
         if self.modal.is_some() || matches!(event.kind, MouseEventKind::Down(_)) { self.annotation_drag = None; }
         if let Some((pane, tab, key)) = self.annotation_drag {
             let current = self.session.state().shown(pane).is_some_and(|t| t.id() == tab && t.annotation_cols() != 0)
