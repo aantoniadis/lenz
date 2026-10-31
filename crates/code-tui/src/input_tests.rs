@@ -4292,7 +4292,8 @@ fn home_and_end_move_the_editing_caret_and_shift_extends_without_writing() {
     std::fs::write(&path,text).unwrap();let mut a=app(dir.path());a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());a.enable_draft_input_for_test();
     let start=text.find("  λ").unwrap();let end=text.find("\nlast").unwrap();
     a.dispatch(Command::Select(Selection{anchor:start+4,head:start+4}));
-    key(&mut a,KeyCode::Home,KeyModifiers::NONE);assert_eq!(a.session.state().selection(),Some(Selection{anchor:start,head:start}));
+    key(&mut a,KeyCode::Home,KeyModifiers::NONE);assert_eq!(a.session.state().selection(),Some(Selection{anchor:start+2,head:start+2}),"the first non-blank character");
+    key(&mut a,KeyCode::Home,KeyModifiers::NONE);assert_eq!(a.session.state().selection(),Some(Selection{anchor:start,head:start}),"then the line's start");
     key(&mut a,KeyCode::End,KeyModifiers::SHIFT);assert_eq!(a.session.state().selection(),Some(Selection{anchor:start,head:end}));
     key(&mut a,KeyCode::Home,KeyModifiers::CONTROL);assert_eq!(a.session.state().selection(),Some(Selection{anchor:0,head:0}));
     key(&mut a,KeyCode::End,KeyModifiers::CONTROL|KeyModifiers::SHIFT);assert_eq!(a.session.state().selection(),Some(Selection{anchor:0,head:text.len()}));

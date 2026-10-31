@@ -2292,9 +2292,12 @@ impl App {
                 if !self.session.text_input_enabled() { return false; }
                 self.run(if key.code == KeyCode::Char('x') { CommandId::Cut } else { CommandId::Paste }); true
             }
-            KeyCode::Backspace | KeyCode::Delete if !control && !other => {
+            // Ctrl (where the terminal reports it with Backspace) or Alt deletes to the word stop, as IntelliJ's
+            // Ctrl+Backspace / Ctrl+Delete; a Ctrl+Backspace sent as Ctrl+H or Ctrl+W stays that key's command.
+            KeyCode::Backspace | KeyCode::Delete if !key.modifiers.intersects(KeyModifiers::SUPER | KeyModifiers::META) => {
                 if self.draft_target().is_none() { return false; }
-                self.dispatch(Command::Delete { backward: key.code == KeyCode::Backspace }); true
+                let word = key.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+                self.dispatch(Command::Delete { backward: key.code == KeyCode::Backspace, word }); true
             }
             KeyCode::Enter if !control && !other => {
                 let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
@@ -2577,7 +2580,9 @@ impl App {
             self.focus = available[(at + delta) % available.len()];
             return;
         }
-        if ctrl {
+        // Ctrl reaches the text only with the caret keys (word and document motions, a row's scroll).
+        let caret_key = matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Up | KeyCode::Down | KeyCode::Home | KeyCode::End);
+        if ctrl && !(self.focus == Focus::Text && !alt && caret_key) {
             return;
         }
         match self.focus {
@@ -2645,7 +2650,16 @@ impl App {
                 }
             }
             Focus::Text => {
+                // IntelliJ's word and document motions: Ctrl+arrows by word, Shift to select; Ctrl+Up/Down scroll a row.
+                if ctrl && !alt && !shift && matches!(key.code, KeyCode::Up | KeyCode::Down) {
+                    self.dispatch(Command::ScrollRows(if key.code == KeyCode::Up { -1 } else { 1 }));
+                    return;
+                }
                 let motion = match key.code {
+                    KeyCode::Left if ctrl => Some(Motion::WordLeft),
+                    KeyCode::Right if ctrl => Some(Motion::WordRight),
+                    KeyCode::Home if ctrl => Some(Motion::DocumentStart),
+                    KeyCode::End if ctrl => Some(Motion::DocumentEnd),
                     KeyCode::Left => Some(Motion::Left),
                     KeyCode::Right => Some(Motion::Right),
                     KeyCode::Up => Some(Motion::Up),

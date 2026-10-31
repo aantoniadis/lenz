@@ -167,7 +167,9 @@ pub enum Command {
     TakeExternal { ticket: u64 },
     Cut,
     Paste(String),
-    Delete { backward: bool },
+    /// The character before (`backward`) or after each caret, or with `word` up to the previous or next word stop
+    /// ([`Motion::WordLeft`] / [`Motion::WordRight`] within the line; at a line's edge, the line break).
+    Delete { backward: bool, word: bool },
     /// Indent (`outdent`: unindent) every line the selections touch by one step of the file's indentation; a caret
     /// alone inserts that step at itself.
     Indent { outdent: bool },
@@ -593,12 +595,17 @@ pub enum SearchIn {
     ActiveFile,
 }
 
-/// How [`Command::Extend`] moves the head: by character, by line (keeping the byte column where the line
+/// How [`Command::Extend`] moves the head: by character, by word, by line (keeping the byte column where the line
 /// allows), or to the line's ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Motion {
     Left,
     Right,
+    /// To the previous word start or end, as IntelliJ's Ctrl+Left: a run of spaces, of word characters or of other
+    /// symbols is one step, and a line break another.
+    WordLeft,
+    /// To the next word end or start, as IntelliJ's Ctrl+Right.
+    WordRight,
     Up,
     Down,
     LineStart,
@@ -5458,7 +5465,7 @@ impl Session {
             Command::SelectNextOccurrence => self.select_next_occurrence(),
             Command::CollapseSelections => self.collapse_selections(),
             Command::Paste(text) => self.paste(text),
-            Command::Delete { backward } => self.delete(backward),
+            Command::Delete { backward, word } => self.delete(backward, word),
             Command::SetReadOnly(on) => self.set_read_only(on),
             Command::Copy => {
                 if let Some(table) = self.state.active().and_then(|tab| tab.csv.as_ref()) {
@@ -10451,11 +10458,59 @@ fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize
         Motion::Up => range.start,
         Motion::Down if v.step(line, 1) > line => column(v.step(line, 1)),
         Motion::Down => range.end,
-        Motion::LineStart => range.start,
+        Motion::WordLeft if head <= range.start => if line > 0 { doc.reader_line_range(v.step(line, -1)).end } else { 0 },
+        Motion::WordRight if head >= range.end => if v.step(line, 1) > line { doc.reader_line_range(v.step(line, 1)).start } else { head },
+        Motion::WordLeft => word_stop(doc, head, true),
+        Motion::WordRight => word_stop(doc, head, false),
+        // Home goes to the line's first non-blank character, and from there to its start, as in IntelliJ.
+        Motion::LineStart => {
+            let text = skip_on(doc, range.start, range.end, |c| c == ' ' || c == '\t');
+            if head == text { range.start } else { text }
+        }
         Motion::LineEnd => range.end,
         Motion::DocumentStart => 0,
         Motion::DocumentEnd => doc.len_bytes(),
     }
+}
+
+/// The previous (`backward`) or next word stop within the head's line: the far end of the run of spaces, word
+/// characters or other symbols beside the head. At the line's edge the head stays.
+pub(crate) fn word_stop(doc: &crate::text::TextSnapshot, head: usize, backward: bool) -> usize {
+    let range = doc.reader_line_range(doc.line_of(head));
+    if backward {
+        if head <= range.start { return head; }
+        let kind = doc.range(doc.previous_char_boundary(head)..head).and_then(|t| t.chars().next()).map_or(0, word_class);
+        skip_back(doc, head, range.start, |c| word_class(c) == kind)
+    } else {
+        if head >= range.end { return head; }
+        let kind = doc.range(head..doc.next_char_boundary(head)).and_then(|t| t.chars().next()).map_or(0, word_class);
+        skip_on(doc, head, range.end, |c| word_class(c) == kind)
+    }
+}
+
+/// Spaces, word characters (as [`crate::document`]'s word at a position) and other symbols: a word motion crosses one run.
+fn word_class(c: char) -> u8 {
+    if c.is_whitespace() { 0 } else if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
+}
+
+/// The first byte at or after `at` (before `end`) whose character fails `keep`, scanning a bounded window at a time.
+fn skip_on(doc: &crate::text::TextSnapshot, mut at: usize, end: usize, keep: impl Fn(char) -> bool) -> usize {
+    while at < end {
+        let to = doc.floor_char_boundary((at + 4096).min(end)).max(doc.next_char_boundary(at).min(end));
+        let Some(text) = doc.range(at..to) else { return at };
+        match text.char_indices().find(|&(_, c)| !keep(c)) { Some((i, _)) => return at + i, None => at = to }
+    }
+    end
+}
+
+/// The byte after the last character before `at` (from `start`) that fails `keep`: [`skip_on`] backwards.
+fn skip_back(doc: &crate::text::TextSnapshot, mut at: usize, start: usize, keep: impl Fn(char) -> bool) -> usize {
+    while at > start {
+        let from = doc.floor_char_boundary(at.saturating_sub(4096).max(start));
+        let Some(text) = doc.range(from..at) else { return at };
+        match text.char_indices().rev().find(|&(_, c)| !keep(c)) { Some((i, c)) => return from + i + c.len_utf8(), None => at = from }
+    }
+    start
 }
 
 /// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).

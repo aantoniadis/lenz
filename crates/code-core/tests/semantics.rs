@@ -2792,7 +2792,7 @@ fn typing_opens_filters_and_closes_completion_without_accepting_punctuation() {
     f.type_text("Item.");
     f.settle(|s| s.state().completion().is_some());
     assert_eq!(f.s.state().completion().unwrap().word(), f.s.state().selection().unwrap().head);
-    f.s.dispatch(Command::Delete { backward: true });
+    f.s.dispatch(Command::Delete { backward: true, word: false });
     assert!(f.s.state().completion().is_none());
     // Off: typing asks nothing, the command still works, and the setting is remembered.
     f.s.dispatch(Command::SetAutoCompletion(false));
@@ -4364,11 +4364,11 @@ fn erasing_the_last_name_closes_automatic_but_preserves_manual_completion() {
     let at = original.find("    \n").unwrap() + 4;
     f.s.dispatch(Command::Select(Selection { anchor: at, head: at }));
     f.type_text("h"); f.settle(|s| s.state().completion().is_some_and(|c| c.documentation_preview().is_some()));
-    f.s.dispatch(Command::Delete { backward: true });
+    f.s.dispatch(Command::Delete { backward: true, word: false });
     assert!(f.s.state().completion().is_none(), "deleting back to indentation closes an automatic popup");
     f.s.dispatch(Command::Complete); f.settle(|s| s.state().completion().is_some());
     f.type_text("h");
-    f.s.dispatch(Command::Delete { backward: true });
+    f.s.dispatch(Command::Delete { backward: true, word: false });
     assert!(f.s.state().completion().is_some(), "an explicit request can keep showing on a blank line");
     assert_eq!(f.s.state().completion().unwrap().trigger, code_core::session::CompletionTrigger::Manual);
     assert_eq!(current_text(f.s.state()), original);
