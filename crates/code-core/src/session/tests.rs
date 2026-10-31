@@ -52,16 +52,29 @@ fn close_fixture(dir: &Path, name: &str) -> (Session, PathBuf, TabId) {
 fn text_input_adjacent_deletion_is_one_undo_group() {
     let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "delete.txt", b"abc"); let now = std::time::Instant::now();
     let mut s = session_clock(d.path(), Arc::new(move || now)); open(&mut s, Command::OpenRetained(path.clone()), "delete.txt"); s.enable_text_input_for_test();
-    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Delete { backward: true });
+    s.dispatch(Command::Select(Selection { anchor: 3, head: 3 })); s.dispatch(Command::Delete { backward: true, word: false }); s.dispatch(Command::Delete { backward: true, word: false });
     assert_eq!(source_text(s.state().current_source().unwrap()), "a"); let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), "abc");
     assert_eq!(std::fs::read(path).unwrap(), b"abc");
+}
+
+#[test]
+fn word_deletion_removes_one_run_and_then_the_line_break() {
+    let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "words.txt", b"foo_bar  baz\r\nqux"); let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "words.txt"); s.enable_text_input_for_test();
+    let mut after = |caret: Option<usize>, backward| { if let Some(at) = caret { s.dispatch(Command::Select(Selection { anchor: at, head: at })); } s.dispatch(Command::Delete { backward, word: true }); source_text(s.state().current_source().unwrap()) };
+    assert_eq!(after(Some(12), true), "foo_bar  \r\nqux");
+    assert_eq!(after(None, true), "foo_bar\r\nqux", "the spaces are one run");
+    assert_eq!(after(None, true), "\r\nqux");
+    assert_eq!(after(None, true), "\r\nqux", "nothing before the document's start");
+    assert_eq!(after(None, false), "qux", "the CRLF line break as one");
+    assert_eq!(after(Some(1), false), "q");
+    assert_eq!(std::fs::read(path).unwrap(), b"foo_bar  baz\r\nqux");
 }
 
 #[test]
 fn text_input_deletion_uses_existing_scalar_boundaries_and_keeps_crlf_atomic() {
     for (original, caret, backward, expected) in [("e\u{301}", 3, true, "e"), ("👩🏽‍💻", 15, true, "👩🏽‍"), ("a\r\nb", 3, true, "ab"), ("a\r\nb", 1, false, "ab")] {
         let d = tempfile::tempdir().unwrap(); let path = write(d.path(), "boundaries.txt", original.as_bytes()); let mut s = session(d.path()); open(&mut s, Command::OpenRetained(path.clone()), "boundaries.txt"); s.enable_text_input_for_test();
-        s.dispatch(Command::Select(Selection { anchor: caret, head: caret })); s.dispatch(Command::Delete { backward }); assert_eq!(source_text(s.state().current_source().unwrap()), expected);
+        s.dispatch(Command::Select(Selection { anchor: caret, head: caret })); s.dispatch(Command::Delete { backward, word: false }); assert_eq!(source_text(s.state().current_source().unwrap()), expected);
         let tab = s.state().active().unwrap().id(); s.dispatch(Command::Undo { tab }); assert_eq!(source_text(s.state().current_source().unwrap()), original); assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
     }
 }
@@ -224,7 +237,7 @@ fn text_input_catalogue_and_read_only_mode_share_buffer_permissions_and_preserve
     for id in [first, second] { assert!(s.state().view(id).unwrap().read_only()); }
     for action in [CommandId::Cut, CommandId::Paste, CommandId::Delete, CommandId::Undo, CommandId::Save] { assert_eq!(s.disabled(action), Some("Read-only mode is on")); }
     let copy = s.dispatch(Command::Copy); assert_eq!(copy.copy.as_deref(), Some("e\u{301}👩🏽‍💻\r\n"));
-    s.dispatch(Command::Cut); s.dispatch(Command::Delete { backward: true }); s.dispatch(Command::Paste("blocked".into()));
+    s.dispatch(Command::Cut); s.dispatch(Command::Delete { backward: true, word: false }); s.dispatch(Command::Paste("blocked".into()));
     s.dispatch(Command::SetReadOnly(false)); assert_eq!(s.disabled(CommandId::Cut), None);
     s.dispatch(Command::Cut); assert_eq!(source_text(s.state().current_source().unwrap()), "");
     s.dispatch(Command::Undo { tab: first }); assert_eq!(source_text(s.state().current_source().unwrap()), "e\u{301}👩🏽‍💻\r\n");
@@ -2805,6 +2818,31 @@ fn keyboard_motions_extend_the_selection_on_character_boundaries() {
     assert_eq!(head(Motion::Up), 0, "the first line's start stays");
     let sel = s.state().selection().unwrap();
     assert_eq!(sel.anchor, 0);
+}
+
+#[test]
+fn word_motions_stop_at_word_ends_and_starts_and_home_toggles_the_indent() {
+    let d = tempfile::tempdir().unwrap();
+    let path = write(d.path(), "w.txt", b"    let foo_bar = baz.qux;\nnext\n");
+    let mut s = session(d.path());
+    s.dispatch(Command::Open(path));
+    settle(&mut s, opened);
+    let mut head = |m| { s.dispatch(Command::Extend(m)); s.state().selection().unwrap().head };
+    let right: Vec<_> = (0..13).map(|_| head(Motion::WordRight)).collect();
+    assert_eq!(right, [4, 7, 8, 15, 16, 17, 18, 21, 22, 25, 26, 27, 31], "runs of spaces, word characters and symbols, then the line break");
+    let left: Vec<_> = (0..4).map(|_| head(Motion::WordLeft)).collect();
+    assert_eq!(left, [27, 26, 25, 22]);
+    assert_eq!([head(Motion::LineStart), head(Motion::LineStart), head(Motion::LineStart)], [4, 0, 4], "Home: first non-blank, then the line's start");
+    assert_eq!(s.state().selection().unwrap().anchor, 0, "Shift keeps the anchor");
+    s.dispatch(Command::MoveCaret(Motion::WordRight));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 7, head: 7 }), "a plain word motion collapses at the new head");
+    s.dispatch(Command::Extend(Motion::DocumentEnd));
+    assert_eq!(s.state().selection(), Some(Selection { anchor: 7, head: 32 }));
+    s.dispatch(Command::MoveCaret(Motion::WordRight));
+    assert_eq!(s.state().selection().unwrap().head, 32, "the document's end stays");
+    s.dispatch(Command::MoveCaret(Motion::DocumentStart));
+    s.dispatch(Command::MoveCaret(Motion::WordLeft));
+    assert_eq!(s.state().selection().unwrap().head, 0, "the document's start stays");
 }
 
 /// Opening and closing many files keeps reloadable content within the inactive budget and releases the rest.

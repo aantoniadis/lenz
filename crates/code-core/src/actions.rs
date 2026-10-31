@@ -260,7 +260,7 @@ impl Session {
             CommandId::Copy => Command::Copy,
             CommandId::Cut => Command::Cut,
             CommandId::Paste => return CatalogAction::Interface(InterfaceAction::Paste),
-            CommandId::Delete => Command::Delete { backward: false },
+            CommandId::Delete => Command::Delete { backward: false, word: false },
             CommandId::ReadOnlyMode => Command::SetReadOnly(!state.active().and_then(|t| state.view(t.id())).is_some_and(|view| view.read_only())),
             CommandId::SaveAs => return CatalogAction::Interface(InterfaceAction::SaveAs),
             // An untitled document has no file yet: Save chooses one.

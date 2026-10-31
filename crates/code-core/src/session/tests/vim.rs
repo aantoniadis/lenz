@@ -139,7 +139,7 @@ fn vim_insert_change_and_open_line_each_undo_and_redo_as_one_group() {
         let (_d, mut s, _) = vim_fixture("α one\r\nlast");
         keys(&mut s, command);
         s.dispatch(Command::InsertText { text: "λ".into(), kind: crate::text::EditKind::Typing });
-        s.dispatch(Command::Delete { backward: true });
+        s.dispatch(Command::Delete { backward: true, word: false });
         s.dispatch(Command::InsertText { text: "new".into(), kind: crate::text::EditKind::Paste });
         esc(&mut s);
         let changed = source_text(s.state().current_source().unwrap());

@@ -152,7 +152,7 @@ fn deleting_at_several_carets_removes_one_character_each_and_undoes_together() {
     s.dispatch(Command::AddCursorBelow);
     s.dispatch(Command::AddCursorBelow);
     assert_eq!(carets(&s), [2, 9, 15]);
-    s.dispatch(Command::Delete { backward: false });
+    s.dispatch(Command::Delete { backward: false, word: false });
     assert_eq!(source_text(s.state().current_source().unwrap()), "alha\r\nbea\r\ngama\r\n");
     let tab = s.state().active().unwrap().id();
     s.dispatch(Command::Undo { tab });
@@ -161,7 +161,7 @@ fn deleting_at_several_carets_removes_one_character_each_and_undoes_together() {
     s.dispatch(Command::Select(Selection { anchor: 5, head: 5 }));
     s.dispatch(Command::AddCursorBelow);
     assert_eq!(carets(&s), [5, 11]);
-    s.dispatch(Command::Delete { backward: false });
+    s.dispatch(Command::Delete { backward: false, word: false });
     assert_eq!(source_text(s.state().current_source().unwrap()), "alphabetagamma\r\n", "each CRLF pair goes as one character");
     s.dispatch(Command::Undo { tab });
     assert_eq!(source_text(s.state().current_source().unwrap()), "alpha\r\nbeta\r\ngamma\r\n");

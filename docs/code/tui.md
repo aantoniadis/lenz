@@ -407,8 +407,9 @@ the Last saved pane remains read-only.
 | Explorer visibility / focus | Ctrl-B / Ctrl-Shift-E |
 | Focus tree, reading area and results | Shift-Tab; click a pane (outside source input mode Tab / Shift-Tab cycle; in editable source they indent and outdent) |
 | Navigate tree or results | Arrows, PageUp/PageDown, Home/End; Enter opens |
-| Move text cursor | Up/Down/Left/Right; Home/End for line bounds; Ctrl-Home/Ctrl-End for document bounds (Shift extends selection) |
-| Scroll text | PageUp/PageDown; wheel (j/k and Home/End scroll while text input is gated) |
+| Move text cursor | Up/Down/Left/Right; Ctrl-Left/Ctrl-Right by word (word ends and starts); Home/End for line bounds (Home: first non-blank, then the line start); Ctrl-Home/Ctrl-End for document bounds (Shift extends selection; terminals that do not report Ctrl or Shift with arrows send plain arrows) |
+| Delete a word | Ctrl-Backspace / Ctrl-Delete where the terminal reports Ctrl with them (Ctrl-Backspace sent as Ctrl-H or Ctrl-W keeps that key's command); Alt-Backspace / Alt-Delete otherwise |
+| Scroll text | Ctrl-Up/Ctrl-Down a row; PageUp/PageDown; wheel (j/k and Home/End scroll while text input is gated) |
 | Select / copy | Click or drag, double click word, triple click its syntax group, Shift-arrows, Ctrl-A / Ctrl-C |
 | Git branches | Ctrl-\` (if your terminal sends it), F10 → Git, or click the branch in the top bar; type to filter, Enter checks out / opens a worktree, → or right-click for a row's actions; checkout problems: s Smart, f Force (f again to confirm), Esc cancels; new branch: Tab toggles Check out |
 | Git comparisons | F10 → Git: Show Local Changes, Compare with Branch, Tag or Revision… (a list of branches and tags; type to filter or for any revision), Compare with Base Branch, Show Changes Since Branch Start, Compare with Worktree… (the other worktrees; Enter compares); a Git Branches row's → menu: Compare with Working Tree, Show Changes Since Branching from Here. Lenz Diff's terminal app runs in this terminal until it quits |

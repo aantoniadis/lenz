@@ -161,7 +161,7 @@ fn link_destinations_complete_files_folders_and_headings_from_drafts() {
     typed(&mut s, "gu");
     assert_eq!(labels(&s), ["guide.md"]);
     s.dispatch(Command::CloseCompletion);
-    for _ in 0..2 { s.dispatch(Command::Delete { backward: true }); }
+    for _ in 0..2 { s.dispatch(Command::Delete { backward: true, word: false }); }
     // A folder goes on into it.
     s.dispatch(Command::Complete);
     choose(&mut s, "img/");

@@ -193,6 +193,70 @@ fn several_cursors_replay_the_same_text_and_selections_in_both_adapters(cx: &mut
     assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
 }
 
+/// IntelliJ's word and document motions: Ctrl+arrows by word, Shift selects, Home toggles the indent, Ctrl+Up/Down scroll.
+#[gpui::test]
+fn word_and_document_motions_select_the_same_text_in_both_adapters(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("words.txt");
+    let original = "    let foo = 1;\nend\n";
+    std::fs::write(&path, original).unwrap();
+    let gui = cx.new(|cx| ReaderView::new(Session::new(config(&dir.path().join("gui"))), Some(path.clone()), cx));
+    let window = cx.update(|cx| cx.open_window(Default::default(), |_, _| gui.clone())).unwrap();
+    let mut visual = VisualTestContext::from_window(window.into(), cx);
+    let focus = gui.read_with(&visual, |view, _| view.focus_handle());
+    visual.update(|window, cx| focus.focus(window, cx));
+    let mut tui = App::new(config(&dir.path().join("tui")), Some(path.clone()));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while gui.read_with(&visual, |view, _| view.session().state().current_source().is_none()) || tui.session.state().current_source().is_none() {
+        gui.update(&mut visual, |view, cx| view.poll(cx));
+        while let Ok(done) = tui.session.completions().try_recv() { tui.apply(done); }
+        assert!(Instant::now() < deadline);
+        std::thread::yield_now();
+    }
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 24)).unwrap();
+    visual.update(|window, cx| { let _ = window.draw(cx); });
+    terminal.draw(|frame| tui.draw(frame)).unwrap();
+    gui.update(&mut visual, |view, _| view.enable_draft_input_for_test());
+    tui.enable_draft_input_for_test();
+    let (ctrl, shift) = (KeyModifiers::CONTROL, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+    for (gui_key, code, modifiers, anchor, head) in [
+        ("ctrl-right", KeyCode::Right, ctrl, 4, 4),
+        ("ctrl-right", KeyCode::Right, ctrl, 7, 7),
+        ("ctrl-shift-right", KeyCode::Right, shift, 7, 8),
+        ("ctrl-shift-right", KeyCode::Right, shift, 7, 11),
+        ("ctrl-shift-left", KeyCode::Left, shift, 7, 8),
+        ("home", KeyCode::Home, KeyModifiers::NONE, 4, 4),
+        ("home", KeyCode::Home, KeyModifiers::NONE, 0, 0),
+        ("ctrl-shift-end", KeyCode::End, shift, 0, original.len()),
+        ("ctrl-shift-home", KeyCode::Home, shift, 0, 0),
+        ("ctrl-down", KeyCode::Down, ctrl, 0, 0),
+    ] {
+        visual.simulate_keystrokes(gui_key);
+        tui.handle(Event::Key(KeyEvent::new(code, modifiers)));
+        assert_eq!(tui.session.state().selection(), Some(code_core::session::Selection { anchor, head }), "{gui_key}");
+        assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())), "{gui_key}");
+    }
+    // macOS's Cmd+arrows (desktop only; a terminal does not receive them) go to the line's and the document's ends.
+    for (gui_key, anchor, head) in [("cmd-right", 16, 16), ("cmd-shift-left", 16, 4), ("cmd-down", original.len(), original.len()), ("cmd-up", 0, 0)] {
+        visual.simulate_keystrokes(gui_key);
+        assert_eq!(gui.read_with(&visual, |view, _| view.session().state().selection()), Some(code_core::session::Selection { anchor, head }), "{gui_key}");
+    }
+    // Ctrl+Backspace / Ctrl+Delete delete to the word stop; Alt+Backspace too (macOS's Option, a terminal's fallback).
+    for (gui_key, code, modifiers, text) in [
+        ("ctrl-right", KeyCode::Right, ctrl, original),
+        ("ctrl-right", KeyCode::Right, ctrl, original),
+        ("ctrl-backspace", KeyCode::Backspace, ctrl, "     foo = 1;\nend\n"),
+        ("ctrl-delete", KeyCode::Delete, ctrl, "    foo = 1;\nend\n"),
+        ("alt-backspace", KeyCode::Backspace, KeyModifiers::ALT, "foo = 1;\nend\n"),
+    ] {
+        visual.simulate_keystrokes(gui_key);
+        tui.handle(Event::Key(KeyEvent::new(code, modifiers)));
+        assert_eq!(snapshot(tui.session.state()).text.as_deref(), Some(text), "{gui_key}");
+        assert_eq!(snapshot(tui.session.state()), gui.read_with(&visual, |view, _| snapshot(view.session().state())), "{gui_key}");
+    }
+    assert_eq!(std::fs::read(path).unwrap(), original.as_bytes());
+}
+
 #[gpui::test]
 fn gated_drafts_share_split_history_and_keep_views_and_sessions_independent(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
@@ -6227,6 +6291,7 @@ fn home_end_and_document_bounds_edit_and_select_alike_in_both_adapters(cx:&mut T
     let start=text.find("  λ").unwrap();let end=text.find("\nlast").unwrap();
     let select=Command::Select(code_core::session::Selection{anchor:start+4,head:start+4});gui.update(&mut visual,|v,cx|v.dispatch_for_test(select.clone(),cx));tui.session.dispatch(select);
     for (keys,code,modifiers,anchor,head) in [
+        ("home",KeyCode::Home,KeyModifiers::NONE,start+2,start+2),
         ("home",KeyCode::Home,KeyModifiers::NONE,start,start),
         ("shift-end",KeyCode::End,KeyModifiers::SHIFT,start,end),
         ("ctrl-home",KeyCode::Home,KeyModifiers::CONTROL,0,0),

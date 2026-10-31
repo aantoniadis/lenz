@@ -1672,9 +1672,10 @@ impl ReaderView {
         } else if control && !key.modifiers.alt && !key.modifiers.shift && matches!(key.key.as_str(), "x" | "v") {
             if !self.session.text_input_enabled() { return false; }
             self.run(if key.key == "x" { CommandId::Cut } else { CommandId::Paste }, window, cx); true
-        } else if !control && !key.modifiers.alt && matches!(key.key.as_str(), "backspace" | "delete") {
+        } else if !key.modifiers.platform && matches!(key.key.as_str(), "backspace" | "delete") {
+            // Ctrl (or Alt, macOS's Option) deletes to the word stop, as IntelliJ's Ctrl+Backspace / Ctrl+Delete.
             if self.draft_target().is_none() { return false; }
-            self.dispatch(Command::Delete { backward: key.key == "backspace" }, cx); true
+            self.dispatch(Command::Delete { backward: key.key == "backspace", word: key.modifiers.control || key.modifiers.alt }, cx); true
         } else if !control && !key.modifiers.alt && !key.modifiers.shift && key.key == "enter" {
             let newline = self.session.state().active().and_then(|t| self.session.state().view(t.id())).map_or("\n", |v| v.input_newline());
             self.replace_draft_input(newline, code_core::text::EditKind::Typing, cx)
@@ -1839,6 +1840,21 @@ impl ReaderView {
             // Several cursors: Escape goes back to one before it closes anything else. The add-cursor and
             // next-occurrence chords come from the keymap, above, so a preset or an override moves them.
             ("escape", false, false) if self.session.disabled(CommandId::CollapseSelections).is_none() => self.run(CommandId::CollapseSelections, window, cx),
+            // macOS: Cmd+Left/Right go to the line's ends and Cmd+Up/Down to the document's, as there natively and in
+            // IntelliJ's macOS keymap; Shift selects. ponytail: no Option+arrow word motion there, Option+Left/Right is Back.
+            (arrow @ ("left" | "right" | "up" | "down"), true, shift) if k.modifiers.platform && !k.modifiers.control => {
+                let motion = match arrow { "left" => Motion::LineStart, "right" => Motion::LineEnd, "up" => Motion::DocumentStart, _ => Motion::DocumentEnd };
+                self.dispatch(if shift { Command::Extend(motion) } else { Command::MoveCaret(motion) }, cx);
+            }
+            // IntelliJ's word and document motions: Ctrl+arrows by word, Shift to select; Ctrl+Up/Down scroll a row.
+            ("left", true, true) => self.extend(Motion::WordLeft, cx),
+            ("right", true, true) => self.extend(Motion::WordRight, cx),
+            ("left", true, false) => self.dispatch(Command::MoveCaret(Motion::WordLeft), cx),
+            ("right", true, false) => self.dispatch(Command::MoveCaret(Motion::WordRight), cx),
+            ("up", true, false) => self.dispatch(Command::ScrollRows(-1), cx),
+            ("down", true, false) => self.dispatch(Command::ScrollRows(1), cx),
+            ("home", true, true) => self.extend(Motion::DocumentStart, cx),
+            ("end", true, true) => self.extend(Motion::DocumentEnd, cx),
             ("left", false, true) => self.extend(Motion::Left, cx),
             ("right", false, true) => self.extend(Motion::Right, cx),
             ("up", false, true) => self.extend(Motion::Up, cx),
