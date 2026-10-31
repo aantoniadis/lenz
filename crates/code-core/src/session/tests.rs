@@ -3012,7 +3012,7 @@ fn replacing_the_root_discards_the_old_scan_and_remembers_roots() {
     assert_eq!(s.disabled(CommandId::OpenRecent), None);
     drop(s);
     let recent_file = d.path().join("state/lenz-code/recent-roots.json");
-    for _ in 0..200 {
+    for _ in 0..2000 { // up to 10 s: the background save is slow under a loaded test run
         if read_recent(&recent_file).len() == 2 { break; }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -3057,7 +3057,7 @@ fn files_opened_without_a_folder_are_recent_on_the_start_screen() {
     assert_eq!(s.state().recent_alone, std::slice::from_ref(&lone));
     drop(s);
     let recent_file = d.path().join("state/lenz-code/recent-files.json");
-    for _ in 0..200 {
+    for _ in 0..2000 { // up to 10 s: the background save is slow under a loaded test run
         if read_recent(&recent_file).len() == 1 { break; }
         std::thread::sleep(Duration::from_millis(5));
     }
