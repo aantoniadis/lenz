@@ -803,23 +803,31 @@ impl MergeSession {
     }
 
     /// Pane `pane`'s scrollbar (0 Ours, 1 Result or Base, 2 Theirs): the rows its view paints, or in Padded the
-    /// rows across all three panes.
+    /// rows across all three panes (grown to cover a top scrolled past the end).
     pub fn scrollbar(&self, pane: usize) -> Scrollbar {
         if self.scroll == ScrollMode::Padded {
-            let visible = f64::from(self.views[0].viewport_rows());
-            return Scrollbar { total: f64::from(self.segments().1), top: f64::from(self.padded_top), visible };
+            let (top, visible) = (f64::from(self.padded_top), f64::from(self.views[0].viewport_rows()));
+            return Scrollbar { total: f64::from(self.segments().1).max(top + visible), top, visible };
         }
         let (view, side) = self.pane_view(pane);
         view.scrollbar(side)
     }
 
-    /// Scroll so pane `pane`'s scrollbar top is `top`, through [`Self::scroll_by`] so the other panes follow; the
-    /// Shared panes map piecewise linearly, so a few rounds settle it.
+    /// Scroll so pane `pane`'s scrollbar top is `top`; the other panes follow.
     pub fn scroll_to(&mut self, pane: usize, top: f64) {
-        for _ in 0..4 {
-            let delta = (top - self.scrollbar(pane).top) as f32;
-            if delta.abs() < 1e-3 { return; }
-            self.scroll_by(delta);
+        match (self.scroll, pane) {
+            (ScrollMode::Padded, _) => self.scroll_by((top - f64::from(self.padded_top)) as f32),
+            // Theirs follows the Result line at the anchor: lead with that line, as a find hit in Theirs does
+            (_, 2) => {
+                self.views[1].scroll_to(Side::Right, top);
+                let mid = self.views[1].anchor_line_on(Side::Left);
+                self.place_mid_at(mid);
+            }
+            _ => {
+                let (view, side) = self.pane_view(pane);
+                let (rows, _) = view.scroll_units_for(side, top);
+                self.scroll_by(rows);
+            }
         }
     }
 
@@ -828,8 +836,21 @@ impl MergeSession {
     /// [`crate::view::FIND_TARGET`].
     pub fn scrollbar_marks(&self, pane: usize) -> Vec<Mark> {
         let padded = (self.scroll == ScrollMode::Padded).then(|| self.segments());
-        let mut marks: Vec<Mark> = (0..self.m.blocks().len())
-            .filter_map(|i| {
+        // each block's (row, rows): Padded has one segment per block, in order
+        let spans: Vec<(f64, f64)> = match &padded {
+            Some((segs, _)) => segs.iter().filter(|s| s.block.is_some()).map(|s| (f64::from(s.row), f64::from(s.height()))).collect(),
+            None => (0..self.m.blocks().len())
+                .map(|i| {
+                    let range = self.pane_range(pane, i);
+                    let row = self.pane_row(pane, range.start);
+                    (row, self.pane_row(pane, range.end) - row)
+                })
+                .collect(),
+        };
+        let mut marks: Vec<Mark> = spans
+            .into_iter()
+            .enumerate()
+            .filter_map(|(i, (row, rows))| {
                 let kind = if self.m.state(i) == BlockState::Unresolved {
                     MarkKind::Conflict
                 } else if self.current == Some(i) {
@@ -837,17 +858,6 @@ impl MergeSession {
                 } else {
                     self.tint(pane, i)?;
                     MarkKind::Modified
-                };
-                let (row, rows) = match &padded {
-                    Some((segs, _)) => {
-                        let s = segs.iter().find(|s| s.block == Some(i))?;
-                        (f64::from(s.row), f64::from(s.height()))
-                    }
-                    None => {
-                        let range = self.pane_range(pane, i);
-                        let row = self.pane_row(pane, range.start);
-                        (row, self.pane_row(pane, range.end) - row)
-                    }
                 };
                 Some(Mark { row, rows, kind, target: i })
             })
@@ -1092,7 +1102,8 @@ pub struct Seg3 {
 
 /// Pane `pane`'s line `line` in the Padded rows of [`MergeSession::segments`]; past the last line, `total`.
 fn padded_row((segs, total): &(Vec<Seg3>, u32), pane: usize, line: u32) -> u32 {
-    segs.iter().find(|s| s.start[pane] + s.len[pane] > line).map_or(*total, |s| s.row + line.saturating_sub(s.start[pane]))
+    let i = segs.partition_point(|s| s.start[pane] + s.len[pane] <= line);
+    segs.get(i).map_or(*total, |s| s.row + line.saturating_sub(s.start[pane]))
 }
 
 impl Seg3 {
@@ -1526,6 +1537,37 @@ pub(crate) mod tests {
         let finds = |pane| s.scrollbar_marks(pane).into_iter().filter(|m| m.target >= FIND_TARGET).map(|m| (m.row, m.kind, m.target - FIND_TARGET)).collect::<Vec<_>>();
         assert_eq!(finds(2), [(30.0, MarkKind::FindCurrent, 0), (45.0, MarkKind::Find, 1)]);
         assert!(finds(0).is_empty() && finds(1).is_empty(), "find hits mark the focused pane only");
+    }
+
+    #[test]
+    fn merge_scroll_to_lands_on_each_pane_past_a_theirs_insertion() {
+        // Theirs inserts 20 lines after line 10 (taken into the Result) and changes line 50 into 21 lines where Ours
+        // changes it too (the Conflict, so the Result lacks most of them): Theirs runs ahead of the Result
+        let base: String = (0..100).map(|i| format!("l{i}\n")).collect();
+        let lines = |tag: &str| (0..20).map(|i| format!("{tag}{i}\n")).collect::<String>();
+        let ours = base.replace("l50\n", "O50\n");
+        let theirs = base.replace("l10\n", &format!("l10\n{}", lines("A"))).replace("l50\n", &format!("T50\n{}", lines("B")));
+        let (_d, mut s) = state(&base, &ours, &theirs);
+        assert_eq!(s.m.unresolved(), 1);
+        s.set_viewport_rows(10.0);
+        for padded in [false, true] {
+            for pane in 0..3 {
+                for top in [5.0, 28.0, 41.5, 60.0, 77.5, 85.0] {
+                    s.scroll_to(pane, top);
+                    let landed = s.scrollbar(pane).top;
+                    assert!((landed - top).abs() <= 1.0, "padded={padded} pane {pane}: {top} landed at {landed}");
+                }
+            }
+            // scrolled as far as it goes, past `total - visible`: the thumb ends at the track end
+            s.scroll_by(f32::INFINITY);
+            for pane in 0..3 {
+                let bar = s.scrollbar(pane);
+                assert!(bar.page(true) >= bar.top, "padded={padded} pane {pane}: {bar:?}");
+                let (start, size) = bar.thumb(100.0, 4.0).unwrap();
+                assert!((start + size - 100.0).abs() < 1e-3, "padded={padded} pane {pane}: {bar:?}");
+            }
+            s.toggle_scroll();
+        }
     }
 
     #[test]
