@@ -258,6 +258,19 @@ impl ComparisonSession {
         self.folds=std::mem::take(&mut self.folds).into_iter().filter_map(|(i,entry)|crate::changeset::comparison_identity(old,i).and_then(|key|indices.get(&key)).map(|&index|(index,entry))).collect();
     }
     pub fn view(&self) -> &View { &self.view }
+    /// `side`'s scrollbar marks: [`View::block_marks`], then the open find's hits when they are on `side` (Unified
+    /// shows both Sides' lines in one pane), targets offset by [`crate::view::FIND_TARGET`].
+    pub fn scrollbar_marks(&self, side: Side) -> Vec<crate::scrollbar::Mark> {
+        use crate::scrollbar::{Mark, MarkKind};
+        let mut marks = self.view.block_marks(side);
+        if let Some(find) = self.find.as_ref().filter(|f| f.side() == side || self.view.unified()) {
+            marks.extend(find.hits().iter().enumerate().map(|(i, (line, _))| {
+                let kind = if find.at() == Some(i) { MarkKind::FindCurrent } else { MarkKind::Find };
+                Mark { row: self.view.display_row(find.side(), *line), rows: 1.0, kind, target: crate::view::FIND_TARGET + i }
+            }));
+        }
+        marks
+    }
     pub fn options(&self) -> Options { self.options }
     pub fn revision(&self) -> u64 { self.generation }
     pub fn begin(&mut self) -> u64 {
@@ -408,6 +421,20 @@ mod tests {
         s.command(Command::SetDiffLayout(DiffLayout::Split), &[], false, false);
         assert!(!s.view.unified());
         assert_eq!(s.edit_blocked(), None);
+    }
+
+    #[test]
+    fn scrollbar_marks_add_find_hits_on_their_side() {
+        use crate::{scrollbar::MarkKind, view::FIND_TARGET};
+        let doc = TextDocument::new("a\nx\nb\nx\n", "a\nx\nc\nx\n", std::path::Path::new("a.txt"), std::path::Path::new("b.txt"));
+        let view = doc.view(&doc.line_diff(&Options::default()), 40.);
+        let mut s = ComparisonSession::new(view, Options::default());
+        s.search(&doc, "x".into(), Side::Left, Pos::new(0, 0));
+        let marks = s.scrollbar_marks(Side::Left);
+        let finds: Vec<_> = marks.iter().filter(|m| m.target >= FIND_TARGET).map(|m| (m.row, m.kind, m.target - FIND_TARGET)).collect();
+        assert_eq!(finds, [(1.0, MarkKind::FindCurrent, 0), (3.0, MarkKind::Find, 1)]);
+        assert_eq!(marks.iter().filter(|m| m.target < FIND_TARGET).count(), 1, "the Change Block b → c: {marks:?}");
+        assert!(s.scrollbar_marks(Side::Right).iter().all(|m| m.target < FIND_TARGET), "hits mark their own Side");
     }
 
     #[test]

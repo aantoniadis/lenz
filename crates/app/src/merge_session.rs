@@ -2,6 +2,7 @@
 use crate::{
     conflicts, highlight,
     merge::{BlockState, Labels, MarkerStyle, MergeResult, Pick},
+    scrollbar::{Mark, MarkKind, Scrollbar},
     view::{Connector, Content, Kind, Row, ScrollMode, Side, View},
     write::{self, WriteError},
 };
@@ -801,6 +802,95 @@ impl MergeSession {
         self.sync();
     }
 
+    /// Pane `pane`'s scrollbar (0 Ours, 1 Result or Base, 2 Theirs): the rows its view paints, or in Padded the
+    /// rows across all three panes.
+    pub fn scrollbar(&self, pane: usize) -> Scrollbar {
+        if self.scroll == ScrollMode::Padded {
+            let visible = f64::from(self.views[0].viewport_rows());
+            return Scrollbar { total: f64::from(self.segments().1), top: f64::from(self.padded_top), visible };
+        }
+        let (view, side) = self.pane_view(pane);
+        view.scrollbar(side)
+    }
+
+    /// Scroll so pane `pane`'s scrollbar top is `top`, through [`Self::scroll_by`] so the other panes follow; the
+    /// Shared panes map piecewise linearly, so a few rounds settle it.
+    pub fn scroll_to(&mut self, pane: usize, top: f64) {
+        for _ in 0..4 {
+            let delta = (top - self.scrollbar(pane).top) as f32;
+            if delta.abs() < 1e-3 { return; }
+            self.scroll_by(delta);
+        }
+    }
+
+    /// Pane `pane`'s scrollbar marks: per block `Conflict` while unresolved, else `Current` for [`Self::current`],
+    /// else `Modified` where the pane changed; then the find hits when `pane` is focused, targets offset by
+    /// [`crate::view::FIND_TARGET`].
+    pub fn scrollbar_marks(&self, pane: usize) -> Vec<Mark> {
+        let padded = (self.scroll == ScrollMode::Padded).then(|| self.segments());
+        let mut marks: Vec<Mark> = (0..self.m.blocks().len())
+            .filter_map(|i| {
+                let kind = if self.m.state(i) == BlockState::Unresolved {
+                    MarkKind::Conflict
+                } else if self.current == Some(i) {
+                    MarkKind::Current
+                } else {
+                    self.tint(pane, i)?;
+                    MarkKind::Modified
+                };
+                let (row, rows) = match &padded {
+                    Some((segs, _)) => {
+                        let s = segs.iter().find(|s| s.block == Some(i))?;
+                        (f64::from(s.row), f64::from(s.height()))
+                    }
+                    None => {
+                        let range = self.pane_range(pane, i);
+                        let row = self.pane_row(pane, range.start);
+                        (row, self.pane_row(pane, range.end) - row)
+                    }
+                };
+                Some(Mark { row, rows, kind, target: i })
+            })
+            .collect();
+        let at = self.find.as_ref().and_then(|f| f.search.at);
+        marks.extend(self.find_hits(pane).iter().enumerate().map(|(i, (line, _))| Mark {
+            row: match &padded { Some(padded) => f64::from(padded_row(padded, pane, *line)), None => self.pane_row(pane, *line) },
+            rows: 1.0,
+            kind: if at == Some(i) { MarkKind::FindCurrent } else { MarkKind::Find },
+            target: crate::view::FIND_TARGET + i,
+        }));
+        marks
+    }
+
+    /// Make block `index` current and show it, as stepping to it does; nothing past the last block.
+    pub fn go_to_block(&mut self, index: usize) {
+        if index < self.m.blocks().len() { self.show_block(index); }
+    }
+
+    /// The view painting pane `pane`, and its Side there.
+    fn pane_view(&self, pane: usize) -> (&View, Side) {
+        match pane {
+            0 => (&self.views[0], Side::Left),
+            1 => (&self.views[0], Side::Right),
+            _ => (&self.views[1], Side::Right),
+        }
+    }
+
+    /// Block `i`'s lines in pane `pane`.
+    fn pane_range(&self, pane: usize, i: usize) -> std::ops::Range<u32> {
+        match pane {
+            0 => self.m.blocks()[i].left.clone(),
+            1 => self.mid_range(i),
+            _ => self.m.blocks()[i].right.clone(),
+        }
+    }
+
+    /// Pane `pane`'s line `line` in its own view's scrollbar rows (Shared).
+    fn pane_row(&self, pane: usize, line: u32) -> f64 {
+        let (view, side) = self.pane_view(pane);
+        view.display_row(side, line)
+    }
+
     pub fn show_block(&mut self, i: usize) {
         self.current = Some(i);
         self.m.seen(i);
@@ -998,6 +1088,11 @@ pub struct Seg3 {
     start: [u32; 3],
     len: [u32; 3],
     row: u32,
+}
+
+/// Pane `pane`'s line `line` in the Padded rows of [`MergeSession::segments`]; past the last line, `total`.
+fn padded_row((segs, total): &(Vec<Seg3>, u32), pane: usize, line: u32) -> u32 {
+    segs.iter().find(|s| s.start[pane] + s.len[pane] > line).map_or(*total, |s| s.row + line.saturating_sub(s.start[pane]))
 }
 
 impl Seg3 {
@@ -1402,6 +1497,63 @@ pub(crate) mod tests {
             assert!(s.m.undo());
             assert_eq!(s.m.unresolved(), 1);
         }
+    }
+
+    /// 60 lines: Ours alone changes line 5, both change line 30 (the Conflict), Theirs alone changes line 45.
+    fn three_blocks() -> (tempfile::TempDir, MergeSession) {
+        let base: String = (0..60).map(|i| format!("l{i}\n")).collect();
+        let ours = base.replace("l5\n", "O5\n").replace("l30\n", "O30\n");
+        let theirs = base.replace("l30\n", "T30\n").replace("l45\n", "T45\n");
+        state(&base, &ours, &theirs)
+    }
+
+    #[test]
+    fn merge_marks_show_unresolved_conflicts_first() {
+        use crate::{scrollbar::{place, MarkKind}, view::FIND_TARGET};
+        let (_d, mut s) = three_blocks();
+        assert_eq!((s.m.blocks().len(), s.m.unresolved(), s.current), (3, 1, Some(1)));
+        let kinds = |s: &MergeSession, pane| s.scrollbar_marks(pane).iter().map(|m| (m.target, m.kind)).collect::<Vec<_>>();
+        // the current block is the Conflict, which outranks it
+        assert_eq!(kinds(&s, 1), [(0, MarkKind::Modified), (1, MarkKind::Conflict), (2, MarkKind::Modified)]);
+        assert_eq!(kinds(&s, 0), [(0, MarkKind::Modified), (1, MarkKind::Conflict)], "Ours is unchanged at Theirs' block");
+        s.go_to_block(2);
+        assert_eq!(kinds(&s, 2), [(1, MarkKind::Conflict), (2, MarkKind::Current)]);
+        let marks = s.scrollbar_marks(1);
+        assert_eq!(place(&marks, s.scrollbar(1).total, 1), [Some(1)], "the Conflict wins a shared cell");
+        s.focus_pane(2);
+        s.begin_find(Default::default());
+        s.type_find("T");
+        let finds = |pane| s.scrollbar_marks(pane).into_iter().filter(|m| m.target >= FIND_TARGET).map(|m| (m.row, m.kind, m.target - FIND_TARGET)).collect::<Vec<_>>();
+        assert_eq!(finds(2), [(30.0, MarkKind::FindCurrent, 0), (45.0, MarkKind::Find, 1)]);
+        assert!(finds(0).is_empty() && finds(1).is_empty(), "find hits mark the focused pane only");
+    }
+
+    #[test]
+    fn merge_scroll_to_and_go_to_block() {
+        let (_d, mut s) = three_blocks();
+        s.set_viewport_rows(10.0);
+        let tops = |s: &MergeSession| [0, 1, 2].map(|p| s.scrollbar(p).top);
+        for pane in 0..3 {
+            s.scroll_to(pane, 20.0);
+            assert!((s.scrollbar(pane).top - 20.0).abs() < 1e-3, "pane {pane}: {:?}", tops(&s));
+            assert!(tops(&s).iter().all(|t| (t - 20.0).abs() <= 1.0), "the other panes follow: {:?}", tops(&s));
+            s.scroll_to(pane, 0.0);
+            assert_eq!(tops(&s), [0.0; 3]);
+        }
+        s.go_to_block(2);
+        assert_eq!(s.current, Some(2));
+        let (bar, row) = (s.scrollbar(1), s.views[0].display_row(Side::Right, s.mid_range(2).start));
+        assert!(bar.top <= row && row < bar.top + bar.visible, "{bar:?} {row}");
+        s.go_to_block(3);
+        assert_eq!(s.current, Some(2), "there is no block 3");
+        s.toggle_scroll();
+        assert_eq!(s.scrollbar(0).total, s.segments().1 as f64);
+        s.scroll_to(2, 15.0);
+        assert_eq!((tops(&s), s.padded_top), ([15.0; 3], 15.0), "Padded panes share one top");
+        s.go_to_block(0);
+        let (bar, mark) = (s.scrollbar(0), s.scrollbar_marks(0)[0]);
+        assert_eq!((s.current, mark.target), (Some(0), 0));
+        assert!(bar.top <= mark.row && mark.row < bar.top + bar.visible, "{bar:?} {mark:?}");
     }
 
     #[test]
@@ -2251,12 +2403,8 @@ impl MergeSession {
             self.focus_block(i);
         }
         if self.scroll == ScrollMode::Padded {
-            let (segs, total) = self.segments();
             let rows = self.views[0].viewport_rows();
-            let at = segs
-                .iter()
-                .find(|s| s.start[pane] + s.len[pane] > line)
-                .map_or(total, |s| s.row + line.saturating_sub(s.start[pane]));
+            let at = padded_row(&self.segments(), pane, line);
             self.padded_top = (at as f32 - rows / 3.0).max(0.0);
         } else {
             match pane {
