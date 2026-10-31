@@ -245,7 +245,7 @@ impl ReaderView {
         true
     }
     pub(super) fn csv_wheel(&mut self, event: &ScrollEvent, cx: &mut Context<Self>) -> bool {
-        let Some(g) = self.panes.iter().find(|g| g.text.contains(&event.position)).copied() else { return false };
+        let Some(g) = self.panes.iter().find(|g| g.text.contains(&event.position) || g.bar_strip.contains(&event.position)).copied() else { return false };
         let Some(tab) = self.session.state().shown(g.pane).map(|t| t.id()).filter(|id| self.session.state().csv(*id).is_some()) else { return false; };
         if self.csv_field().is_some() { return true; }
         let (mut x, mut y) = match event.delta { ScrollDelta::Lines(l) => (-l.x, -l.y * 3.0), ScrollDelta::Pixels(p) => (-f32::from(p.x) / (18.0 * self.char_w), -f32::from(p.y) / line_h()) };

@@ -1252,7 +1252,8 @@ fn source_windows_wrapped_end_and_up_reach_the_original_tail(cx: &mut TestAppCon
     let f = fixture(cx, Some(("wrapped.txt", source.as_bytes())));
     settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
-    v.simulate_resize(size(px(400.0), px(220.0)));
+    // 400 px of text beside the scrollbar: the tail's wrapped row ends inside the window.
+    v.simulate_resize(size(px(400.0 + 12.0 * font_size() / 13.0), px(220.0)));
     draw(&mut v);
     v.simulate_keystrokes("alt-z end up");
     for _ in 0..300 {
@@ -2912,12 +2913,14 @@ fn history_returns_to_a_markdown_preview_at_its_reading_line(cx: &mut TestAppCon
     // A resize keeps the current layout until the new width has held, then reshapes once.
     v.simulate_resize(size(px(500.0), px(400.0)));
     show(&mut v);
-    assert_eq!(f.view.read_with(&v, |r, _| r.preview_width()), Some(700.0));
+    // The preview is laid out for the text's width, left of the scrollbar.
+    let strip = 12.0 * font_size() / 13.0;
+    assert_eq!(f.view.read_with(&v, |r, _| r.preview_width()), Some(700.0 - strip));
     std::thread::sleep(SETTLE);
     v.executor().advance_clock(SETTLE);
     show(&mut v);
     show(&mut v);
-    assert_eq!(f.view.read_with(&v, |r, _| r.preview_width()), Some(500.0));
+    assert_eq!(f.view.read_with(&v, |r, _| r.preview_width()), Some(500.0 - strip));
     assert_eq!(f.view.read_with(&v, |r, _| r.preview_rows()[0].0), line, "the reading line holds across the reshape");
     drop(v);
     let txt = f.dir.path().join("other.txt");
@@ -7730,6 +7733,7 @@ mod xml;
 #[path = "tests/tab_wheel.rs"]
 mod tab_wheel;
 mod csv;
+mod scrollbar;
 mod tree_errors;
 
 #[gpui::test]
