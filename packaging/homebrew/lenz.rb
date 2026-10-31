@@ -3,24 +3,24 @@
 class Lenz < Formula
   desc "Code editor, diff viewer, Git client and merge tool with GUI and terminal frontends"
   homepage "https://github.com/aantoniadis/lenz"
-  version "0.0.9"
+  version "0.0.10"
   license all_of: ["MIT", "Apache-2.0"]
 
   on_macos do
     on_arm do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-aarch64-apple-darwin.tar.gz"
-      sha256 "9aab33336b36f1c74092843812e5456350061a8470598cbd4d0fb6ce03dad36d"
+      sha256 "6302f0b290b67067e236b62c0d1e5026c58caf6e68ddc2c7669281c1d26e110a"
     end
   end
 
   on_linux do
     on_intel do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "afaa629344b657b5b93a59d9a4ef9c2fd4ac3bbfc0d69e37da670e346c2de08c"
+      sha256 "66ee7703b046ddc80d280a1b823f7420037d7d8ea69565749d648829294b810f"
     end
     on_arm do
       url "https://github.com/aantoniadis/lenz/releases/download/v#{version}/lenz-#{version}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "b3ec3998f0a1b126147d34bfc1d1a1dea1071d544a575b15ec63e3821ec89527"
+      sha256 "cd3ee89c6ed9de4b9ec7d85063adaba92a6988af40b7ea567231e49c7af3ad0f"
     end
   end
 
