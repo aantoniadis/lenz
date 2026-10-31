@@ -63,6 +63,14 @@ fn restore_on_signal() {
 /// The alternate screen in raw mode, with mouse, paste, focus and full key reporting.
 fn enter() -> io::Result<ratatui::DefaultTerminal> {
     let terminal = ratatui::try_init()?;
+    // Destructors do not run with panic=abort: give the terminal back before the report, as lenz-tui does. Each entry
+    // wraps the hook again (as Ratatui's does); only the newest layer restores, on the screen it entered.
+    static RESTORED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !RESTORED.swap(true, std::sync::atomic::Ordering::Relaxed) { leave(); }
+        previous(info);
+    }));
     execute!(
         io::stdout(),
         EnableMouseCapture,
