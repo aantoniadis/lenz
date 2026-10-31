@@ -12,6 +12,7 @@ use gpui::{
 };
 use gpui::InteractiveElement;
 use lenz_content::find::FindOption;
+use lenz_content::scrollbar::{self, Hit, Mark, MarkKind, Scrollbar};
 use lenz_content::{display, theme::{ThemeCommand, ThemeSelection}};
 use lenz_gpui::{Metrics, TextRow};
 use code_core::{
@@ -52,6 +53,9 @@ fn line_h() -> f32 { 20.0 * font_size() / 13.0 }
 /// The gutter's fold-mark column, right of the line numbers.
 fn fold_w() -> f32 { 12.0 * font_size() / 13.0 }
 fn num_w() -> f32 { 56.0 * font_size() / 13.0 + fold_w() }
+/// A scrollbar's shortest thumb, and its track's mark cells: one per 3 px.
+const THUMB_MIN: f32 = 16.0;
+fn track_cells(len: f32) -> usize { (len / 3.0).floor().max(0.0) as usize }
 /// Drawn after a collapsed region's first line (then its closing line's text, when that line only closes).
 const PLACEHOLDER: &str = " … ";
 /// The status bar along the window's bottom: one row, never taller.
@@ -272,6 +276,9 @@ pub struct ReaderView {
     painted_markers: Vec<(char, u32)>,
     #[cfg(feature = "test-support")]
     painted_inline: Vec<(u8, inline_diagnostics::Annotation)>,
+    /// Each pane's scrollbar as last painted: its thumb (start, size) and the kinds of its marks, top to bottom.
+    #[cfg(feature = "test-support")]
+    pub painted_scrollbars: Vec<PaintedScrollbar>,
     #[cfg(feature = "test-support")]
     painted_problem_bounds: inline_diagnostics::PaintedUnderlines,
     /// The browsed suggestion's documentation lines as last painted beside the completion list.
@@ -717,6 +724,8 @@ pub struct PaneGeom {
     pub rows: usize,
     /// The blame annotation column's width, left of `text` (0: none).
     pub ann: f32,
+    /// The scrollbar at the pane's right edge, right of `text` (zero-sized: none).
+    pub bar_strip: Bounds<Pixels>,
 }
 
 /// What the pointer is dragging: a divider, or a tab (from where it was pressed; `moved` once it travelled).
@@ -727,6 +736,8 @@ pub enum Drag {
     Split,
     Annotations { pane: u8, tab: TabId, key: code_core::text::SnapshotKey },
     Tab { id: TabId, x: f32, y: f32, moved: bool },
+    /// A pane's scrollbar thumb, held `grab` px below its top; pressed at window `y`, `moved` once it travelled.
+    Scrollbar { pane: u8, grab: f32, y: f32, moved: bool },
 }
 
 /// The image a view shows.
@@ -766,7 +777,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -3140,7 +3151,7 @@ impl ReaderView {
             cx.notify();
             return;
         }
-        if let Some(g) = self.panes.iter().find(|g| g.text.contains(&ev.position)).copied()
+        if let Some(g) = self.panes.iter().find(|g| g.text.contains(&ev.position) || g.bar_strip.contains(&ev.position)).copied()
             && g.pane != self.session.state().focused_pane()
         {
             self.dispatch(Command::FocusPane(g.pane), cx);
@@ -3769,6 +3780,9 @@ impl ReaderView {
             self.drag = Some(divider);
             return;
         }
+        if let Some(g) = self.panes.iter().find(|g| g.bar_strip.contains(&ev.position)).copied() {
+            return self.scrollbar_press(g, y, cx);
+        }
         // A breadcrumb: a crumb shows its folder or file or goes to its declaration; its `›` lists what is inside.
         if let Some(h) = self.crumb_hits.iter().find(|h| h.bounds.contains(&ev.position)).cloned() {
             self.crumb_focus = None;
@@ -4268,6 +4282,7 @@ impl ReaderView {
         if self.modal.is_some() { self.drag = None; self.terminal_ui.explorer_drag = None; self.terminal_ui.mouse_capture = None; return; }
         if self.terminal_drag_end(ev, cx) { self.drag = None; self.tab_drop = None; return; }
         self.preview_drag = false;
+        if let Some(Drag::Scrollbar { pane, moved: false, .. }) = self.drag { self.scrollbar_release(pane, f32::from(ev.position.y), cx); }
         self.end_drag(cx);
     }
 
@@ -4325,12 +4340,20 @@ impl ReaderView {
                 self.drag = Some(Drag::Tab { id, x: x0, y: y0, moved });
                 self.tab_drop = if moved { self.drop_target(id, x, y) } else { None };
             }
+            Drag::Scrollbar { pane, grab, y: y0, moved } => {
+                let moved = moved || (y - y0).abs() > 2.0;
+                self.drag = Some(Drag::Scrollbar { pane, grab, y: y0, moved });
+                let Some(g) = self.panes.iter().find(|g| g.pane == pane).copied().filter(|_| moved) else { return };
+                let Some((bar, _)) = self.scrollbar(&g) else { return };
+                let len = f32::from(g.bar_strip.size.height);
+                self.scrollbar_to(pane, bar.top_at(y - f32::from(g.bar_strip.origin.y) - grab, len, THUMB_MIN), cx);
+            }
         }
     }
 
     /// Where tab `id` dropped at a window point would go: a pane's tab bar (between its tabs) or its text (last).
     fn drop_target(&self, id: TabId, x: f32, y: f32) -> Option<(u8, usize, f32)> {
-        let g = self.panes.iter().find(|g| (g.bar.2..g.bar.2 + line_h()).contains(&y) && (g.bar.0..g.bar.1).contains(&x) || g.text.contains(&gpui::point(px(x), px(y))))?;
+        let g = self.panes.iter().find(|g| (g.bar.2..g.bar.2 + line_h()).contains(&y) && (g.bar.0..g.bar.1).contains(&x) || g.text.contains(&gpui::point(px(x), px(y))) || g.bar_strip.contains(&gpui::point(px(x), px(y))))?;
         let state = self.session.state();
         let in_bar = (g.bar.2..g.bar.2 + line_h()).contains(&y);
         if !in_bar && state.tabs().iter().any(|t| t.id() == id && t.pane() == g.pane) {
@@ -4355,8 +4378,8 @@ impl ReaderView {
                     self.dispatch(Command::MoveTab { tab: id, pane, index }, cx);
                 }
             }
-            Some(Drag::Tab { .. }) | None => {}
-            Some(_) => self.dispatch(Command::SetLayout(self.layout), cx),
+            Some(Drag::Tab { .. } | Drag::Scrollbar { .. }) | None => {}
+            Some(Drag::Explorer | Drag::Results | Drag::Split) => self.dispatch(Command::SetLayout(self.layout), cx),
         }
         self.tab_drop = None;
         cx.notify();
@@ -4513,6 +4536,69 @@ impl ReaderView {
         let line = self.session.state().presentation_view(self.session.state().active()?.id())?.snapshot().line_range(0)?;
         let x = f32::from(b.origin.x) + num_w() + 8.0 + (at.checked_sub(line.start)? as f32 + 0.5) * self.char_w;
         Some((x, f32::from(b.origin.y) + line_h() / 2.0))
+    }
+
+    /// Pane `g`'s scrollbar: the core's over shown lines, with its marks; a Markdown preview's (pixels) or a CSV
+    /// table's (rows) measured here, without marks. `None` without a strip or anything to measure.
+    fn scrollbar(&self, g: &PaneGeom) -> Option<(Scrollbar, Vec<Mark>)> {
+        if g.bar_strip.size.width <= px(0.0) { return None; }
+        let state = self.session.state();
+        if let Some(bar) = state.scrollbar(g.pane) { return Some(bar); }
+        if let Some(view) = state.shown(g.pane).and_then(|t| state.csv(t.id())) {
+            return Some((Scrollbar { total: view.row_count() as f64, top: view.top as f64, visible: view.rows.max(1) as f64 }, Vec::new()));
+        }
+        let m = self.markdown[g.pane as usize].as_ref()?;
+        Some((Scrollbar { total: f64::from(m.layout.as_ref()?.height), top: f64::from(m.top), visible: f64::from(g.rows as f32 * line_h()) }, Vec::new()))
+    }
+
+    /// Scroll `pane` so its [`Self::scrollbar`] top is `top`: a table's row, a preview's pixel, else a shown line.
+    fn scrollbar_to(&mut self, pane: u8, top: f64, cx: &mut Context<Self>) {
+        let state = self.session.state();
+        let Some(tab) = state.shown(pane) else { return };
+        if let Some(view) = state.csv(tab.id()) {
+            let rows = top.round() as isize - view.top as isize;
+            return self.dispatch(Command::Csv(code_core::csv::Command::Scroll { rows, columns: 0 }), cx);
+        }
+        if self.markdown[pane as usize].as_ref().is_some_and(|m| m.layout.is_some()) { return self.scroll_preview(top as f32, cx); }
+        // ponytail: `step` walks row by row (O(top row) per drag move); a direct shown-row lookup in `folds::Visible`
+        // if dragging over very long files is slow.
+        let Some(line) = state.view(tab.id()).map(|view| view.visible().step(0, top.round() as isize)) else { return };
+        self.dispatch(Command::Scroll(line), cx);
+    }
+
+    /// A press on pane `g`'s scrollbar at window `y`, its pane focused first (as the wheel does): the thumb starts a
+    /// drag, a mark goes to its line (Back returns), the track pages toward the press.
+    fn scrollbar_press(&mut self, g: PaneGeom, y: f32, cx: &mut Context<Self>) {
+        if g.pane != self.session.state().focused_pane() {
+            self.dispatch(Command::FocusPane(g.pane), cx);
+            self.rows = g.rows;
+            self.text_bounds = Some(g.text);
+        }
+        let Some((bar, marks)) = self.scrollbar(&g) else { return };
+        let (at, len) = (y - f32::from(g.bar_strip.origin.y), f32::from(g.bar_strip.size.height));
+        let placed = scrollbar::place(&marks, bar.total, track_cells(len));
+        match scrollbar::hit(&bar, &placed, &marks, at, len, THUMB_MIN) {
+            Hit::Thumb => {
+                let start = bar.thumb(len, THUMB_MIN).map_or(0.0, |t| t.0);
+                self.drag = Some(Drag::Scrollbar { pane: g.pane, grab: at - start, y, moved: false });
+            }
+            Hit::Mark(i) => self.go_to_mark(marks[i].target, cx),
+            Hit::Above => self.scrollbar_to(g.pane, bar.page(false), cx),
+            Hit::Below => self.scrollbar_to(g.pane, bar.page(true), cx),
+        }
+    }
+
+    /// A thumb released where it was pressed: the mark under it, if any, as a click on the mark.
+    fn scrollbar_release(&mut self, pane: u8, y: f32, cx: &mut Context<Self>) {
+        let Some(g) = self.panes.iter().find(|g| g.pane == pane).copied() else { return };
+        let Some((bar, marks)) = self.scrollbar(&g) else { return };
+        let len = f32::from(g.bar_strip.size.height);
+        let placed = scrollbar::place(&marks, bar.total, track_cells(len));
+        if let Some(i) = scrollbar::mark_at(&placed, &marks, y - f32::from(g.bar_strip.origin.y), len) { self.go_to_mark(marks[i].target, cx); }
+    }
+
+    fn go_to_mark(&mut self, line: usize, cx: &mut Context<Self>) {
+        self.dispatch(Command::GoToLine(lenz_content::goto::LineColumn { line: u32::try_from(line + 1).unwrap_or(u32::MAX), column: None }), cx);
     }
 
     fn scroll_preview(&mut self, to: f32, cx: &mut Context<Self>) {
@@ -5513,21 +5599,21 @@ impl Render for ReaderView {
         let area = |x: f32, y: f32, w: f32, rows: usize| Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px(w.max(0.0)), px(rows as f32 * line_h())) };
         let mut panes = Vec::new();
         match split {
-            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, text_rows), rows: text_rows, ann: 0.0 }),
+            None => panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, text_rows), rows: text_rows, ann: 0.0, bar_strip: Bounds::default() }),
             Some(Split::Columns) => {
                 let x = if fw >= 120.0 { (fx + (fw * share).round()).clamp(fx + 60.0, self.width - 60.0) } else { fx + (fw / 2.0).floor() };
                 self.split_at = x;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, toolbar_h()), text: area(fx, body_top, x - fx, text_rows), rows: text_rows, ann: 0.0 });
-                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, toolbar_h()), text: area(x + 1.0, body_top, self.width - x - 1.0, text_rows), rows: text_rows, ann: 0.0 });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, x, toolbar_h()), text: area(fx, body_top, x - fx, text_rows), rows: text_rows, ann: 0.0, bar_strip: Bounds::default() });
+                panes.push(PaneGeom { pane: 1, bar: (x + 1.0, self.width, toolbar_h()), text: area(x + 1.0, body_top, self.width - x - 1.0, text_rows), rows: text_rows, ann: 0.0, bar_strip: Bounds::default() });
             }
             Some(Split::Rows) => {
                 // Too short for two panes and a bar: the first pane alone, until there is room.
                 let top = if text_rows >= 3 { ((((text_rows - 1) as f32) * share).round() as usize).clamp(1, text_rows - 2) } else { text_rows };
                 let y = body_top + top as f32 * line_h();
                 self.split_at = y;
-                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, top), rows: top, ann: 0.0 });
+                panes.push(PaneGeom { pane: 0, bar: (nav_end, self.width, toolbar_h()), text: area(fx, body_top, fw, top), rows: top, ann: 0.0, bar_strip: Bounds::default() });
                 if text_rows >= 3 {
-                    panes.push(PaneGeom { pane: 1, bar: (fx, self.width, y), text: area(fx, y + line_h(), fw, text_rows - 1 - top), rows: text_rows - 1 - top, ann: 0.0 });
+                    panes.push(PaneGeom { pane: 1, bar: (fx, self.width, y), text: area(fx, y + line_h(), fw, text_rows - 1 - top), rows: text_rows - 1 - top, ann: 0.0, bar_strip: Bounds::default() });
                 }
             }
         }
@@ -5554,6 +5640,17 @@ impl Render for ReaderView {
                 g.ann = w;
                 g.text.origin.x += px(w);
                 g.text.size.width -= px(w);
+            }
+        }
+        // The scrollbar: a strip at the right edge of a pane showing text, a preview or a table, taken from its text
+        // (so lines wrap before it); none in a pane narrower than three strips.
+        let strip_w = 12.0 * font_size() / 13.0;
+        for g in &mut panes {
+            let state = self.session.state();
+            let scrolls = state.presentation_shown(g.pane).is_some_and(|t| state.presentation_view(t.id()).is_some_and(|view| view.snapshot().image().is_none() || t.image_source()));
+            if scrolls && f32::from(g.text.size.width) >= 3.0 * strip_w {
+                g.text.size.width -= px(strip_w);
+                g.bar_strip = Bounds { origin: gpui::point(g.text.right(), g.text.origin.y), size: gpui::size(px(strip_w), g.text.size.height) };
             }
         }
         let (crumb_hits, crumb_cells) = self.layout_crumbs(&crumb_rows);
@@ -5683,6 +5780,8 @@ impl Render for ReaderView {
         let mut marks_drawn = Vec::new();
         #[cfg(feature = "test-support")]
         let mut painted_markers = Vec::new();
+        #[cfg(feature = "test-support")]
+        let mut painted_scrollbars = Vec::new();
         // Reused each frame (the test accessor): no allocation once warm.
         let mut folds_drawn = std::mem::take(&mut self.fold_marks_drawn);
         folds_drawn.clear();
@@ -5690,6 +5789,14 @@ impl Render for ReaderView {
             let csv = self.csv_frame(*g);
             let picture = self.shown_image(g.pane, cx);
             let markdown = self.preview_frame(g.pane, window, f32::from(g.text.size.width), g.rows, cx);
+            // Its scrollbar: bounded by the marks the core holds and the track's cells.
+            let scrollbar = self.scrollbar(g).map_or_else(Default::default, |(bar, marks)| {
+                let len = f32::from(g.bar_strip.size.height);
+                let placed = scrollbar::place(&marks, bar.total, track_cells(len));
+                (bar.thumb(len, THUMB_MIN), placed.iter().enumerate().filter_map(|(cell, i)| Some((cell, marks[(*i)?].kind))).collect::<Vec<_>>())
+            });
+            #[cfg(feature = "test-support")]
+            if g.bar_strip.size.width > px(0.0) { painted_scrollbars.push((g.pane, scrollbar.0, scrollbar.1.iter().map(|m| m.1).collect())); }
             let state = self.session.state();
             let tab = state.presentation_shown(g.pane);
             let pending = matches!(tab.and_then(|tab| state.presentation_view(tab.id())).and_then(|v| v.rendering()), Some(Rendering::Pending)) || (self.markdown[g.pane as usize].is_some() && markdown.is_none());
@@ -5826,11 +5933,11 @@ impl Render for ReaderView {
             });
             #[cfg(feature = "test-support")]
             painted_markers.extend(change_marks.iter().map(|&(_, glyph, color)| (glyph, color)));
-            frames.push(PaneFrame { relative_caret: tab.and_then(|t| state.relative_number_origin(t.id())), inline: Vec::new(), csv, row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, change_marks, sticky_change, link, decor, hscroll, picture, markdown, pending, unshowable, hint, start, sticky, sticky_decor, ann });
+            frames.push(PaneFrame { relative_caret: tab.and_then(|t| state.relative_number_origin(t.id())), inline: Vec::new(), csv, row_parts, sticky_parts, preview_button: self.preview_button(*g), find: self.find_box(g), geom: *g, focused: g.pane == focused && split.is_some(), tabs, rows, marks, bookmarks, sticky_bookmarks, comparison_marks, change_marks, sticky_change, link, decor, hscroll, picture, markdown, pending, unshowable, hint, start, sticky, sticky_decor, ann, scrollbar });
             if let Some(frame) = frames.last_mut() { frame.inline = self.inline_annotations(frame, window); }
         }
         #[cfg(feature = "test-support")]
-        { self.painted_markers = painted_markers; self.painted_inline = frames.iter().flat_map(|frame| frame.inline.iter().cloned().map(|annotation| (frame.geom.pane, annotation))).collect(); }
+        { self.painted_markers = painted_markers; self.painted_scrollbars = painted_scrollbars; self.painted_inline = frames.iter().flat_map(|frame| frame.inline.iter().cloned().map(|annotation| (frame.geom.pane, annotation))).collect(); }
         self.source_geometry = [0, 1].map(|pane| self.session.state().presentation_shown(pane).filter(|tab| self.session.state().csv(tab.id()).is_none()).and_then(|tab| self.session.state().presentation_view(tab.id())).and_then(|view| SourceGeometry::new(&view, self)));
         self.sticky_hits = sticky_hits;
         self.start_hits = start_hits;
@@ -6207,6 +6314,17 @@ impl Render for ReaderView {
                                         lenz_gpui::text(window, cx, m, ax + 6.0, ty + y * m.line_h, label, if *hot || shade.is_some() { palette.fg } else { palette.dim });
                                     }
                                 });
+                            }
+                            if g.bar_strip.size.width > px(0.0) {
+                                // The scrollbar: its track, the thumb, and over both each marked cell (the caret a 1 px line).
+                                let (sx, sy, sw, sh) = (x0 + f32::from(g.bar_strip.origin.x), y0 + f32::from(g.bar_strip.origin.y), f32::from(g.bar_strip.size.width), f32::from(g.bar_strip.size.height));
+                                lenz_gpui::fill(window, sx, sy, sw, sh, palette.gutter_bg);
+                                if let Some((start, size)) = f.scrollbar.0 { lenz_gpui::fill(window, sx + 2.0, sy + start, sw - 4.0, size, palette.border); }
+                                let cell_h = sh / track_cells(sh).max(1) as f32;
+                                for &(cell, kind) in &f.scrollbar.1 {
+                                    let (y, h) = if kind == MarkKind::Caret { (sy + cell as f32 * cell_h + 1.0, 1.0) } else { (sy + cell as f32 * cell_h, 3.0) };
+                                    lenz_gpui::fill(window, sx + 1.0, y, sw - 2.0, h, mark_color(kind, &palette));
+                                }
                             }
                             window.with_content_mask(Some(gpui::ContentMask { bounds: text }), |window| {
                                 if let Some(csv) = &f.csv { csv.paint(window, cx, m, &palette); }
@@ -6639,7 +6757,15 @@ struct PaneFrame {
     start: Vec<(f32, String, bool)>,
     /// Blame annotations: row, label, age shade (`None`: not committed), of the hovered commit.
     ann: Vec<(f32, String, Option<f32>, bool)>,
+    /// The scrollbar's thumb (start, size) and each marked track cell with its mark's kind.
+    scrollbar: DrawnBar,
 }
+
+/// A scrollbar as drawn: its thumb (start, size) and each marked track cell with its mark's kind.
+type DrawnBar = (Option<(f32, f32)>, Vec<(usize, MarkKind)>);
+/// For tests: a pane's scrollbar as painted: its pane, thumb (start, size) and mark kinds top to bottom.
+#[cfg(feature = "test-support")]
+pub type PaintedScrollbar = (u8, Option<(f32, f32)>, Vec<MarkKind>);
 
 fn native_x(window: &Window, metrics: Metrics<'_>, row: &TextRow, parts: &[(std::ops::Range<usize>, f32)], at: usize) -> f32 {
     let Some((range, origin)) = parts.iter().rev().find(|(r, _)| r.start <= at && at <= r.end) else { return 0.0 };
@@ -6652,6 +6778,21 @@ fn native_x(window: &Window, metrics: Metrics<'_>, row: &TextRow, parts: &[(std:
 fn display_number(number: u32, relative_caret: Option<usize>) -> u32 {
     relative_caret.filter(|&caret| number > 0 && number as usize != caret.saturating_add(1))
         .map_or(number, |caret| number.abs_diff(caret.saturating_add(1).min(u32::MAX as usize) as u32))
+}
+
+/// A scrollbar mark's colour: its kind's colour elsewhere (problems, find matches, change marks, bookmarks); the
+/// caret's dim.
+fn mark_color(kind: MarkKind, p: &lenz_content::theme::Palette) -> u32 {
+    match kind {
+        MarkKind::Error | MarkKind::Conflict => p.error,
+        MarkKind::Warning | MarkKind::Current | MarkKind::Bookmark => p.accent,
+        MarkKind::FindCurrent => lenz_content::theme::mix(p.found_bg, p.fg, 0.4),
+        MarkKind::Find => p.found_bg,
+        MarkKind::Added => code_core::markers::LineChange::Added.color(p),
+        MarkKind::Modified => code_core::markers::LineChange::Modified.color(p),
+        MarkKind::Deleted => code_core::markers::deleted_color(p),
+        MarkKind::Caret => p.dim,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
