@@ -26,6 +26,7 @@ pub mod icons;
 pub mod lines;
 pub mod markdown;
 pub mod open;
+pub mod scrollbar;
 pub mod select;
 mod syntax_arena;
 pub mod theme;
