@@ -170,3 +170,24 @@ fn a_held_preview_thumb_scrolls_its_own_pane_after_focus_moves() {
     assert!(a.layout.panes[0].preview_top > 0, "the preview follows its thumb");
     assert_eq!(a.session.state().shown(1).unwrap().top_line(), 0, "the focused pane's text stays");
 }
+
+/// A mark or a page from the strip gives the keys back to the text, as a click on the text does.
+#[test]
+fn scrollbar_mark_click_gives_the_keys_to_the_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut a = opened(dir.path(), "long.txt", &(0..300).map(|i| format!("line {i}\n")).collect::<String>());
+    go_to(&mut a, 251);
+    a.dispatch(Command::ToggleBookmark);
+    for focus in [Focus::Tree, Focus::Results] {
+        go_to(&mut a, 1);
+        a.dispatch(Command::Scroll(0));
+        draw(&mut a, 80, 20);
+        a.focus = focus;
+        let strip = a.layout.panes[0].strip;
+        let row = mark_row(&a, 0, 250);
+        press(&mut a, strip.x, row);
+        assert_eq!((caret_line(&a), a.focus), (250, Focus::Text), "{focus:?}: the mark's line, the keys to the text");
+        key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(caret_line(&a), 251, "{focus:?}: an arrow moves the caret");
+    }
+}

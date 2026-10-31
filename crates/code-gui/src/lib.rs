@@ -4584,9 +4584,15 @@ impl ReaderView {
                 let start = bar.thumb(len, THUMB_MIN).map_or(0.0, |t| t.0);
                 self.drag = Some(Drag::Scrollbar { pane: g.pane, shown, grab: at - start, y, moved: false });
             }
-            Hit::Mark(i) => self.go_to_mark(marks[i].target, cx),
-            Hit::Above => self.scrollbar_to(g.pane, bar.page(false), cx),
-            Hit::Below => self.scrollbar_to(g.pane, bar.page(true), cx),
+            hit => {
+                // the keys act on the text after a mark or a page, as after a click on the text
+                (self.tree_focus, self.results_focus) = (false, false);
+                match hit {
+                    Hit::Mark(i) => self.go_to_mark(marks[i].target, cx),
+                    Hit::Above => self.scrollbar_to(g.pane, bar.page(false), cx),
+                    _ => self.scrollbar_to(g.pane, bar.page(true), cx),
+                }
+            }
         }
     }
 

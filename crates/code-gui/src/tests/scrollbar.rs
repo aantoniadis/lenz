@@ -290,3 +290,35 @@ fn a_held_preview_thumb_scrolls_its_own_pane_after_focus_moves(cx: &mut TestAppC
     assert!(f.view.read_with(&v, |r, _| r.markdown[0].as_ref().unwrap().top) > before + 100.0, "the preview follows its thumb");
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().shown(1).unwrap().top_line()), 0, "the focused pane's text stays");
 }
+
+/// A mark or a page from the strip gives the keys back to the text, as a click on the text does.
+#[gpui::test]
+fn scrollbar_mark_click_gives_the_keys_to_the_text(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let root = project(f.dir.path(), &["long.txt"]);
+    std::fs::write(root.join("long.txt"), lines(300, &[])).unwrap();
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    f.view.update(cx, |v, cx| v.open(root.join("long.txt"), cx));
+    settle(cx, &f, active_is("long.txt"));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(1000.0), px(400.0)));
+    draw(&mut v);
+    let go = |line| Command::GoToLine(lenz_content::goto::LineColumn { line, column: None });
+    f.view.update(&mut v, |r, cx| { r.dispatch(go(251), cx); r.dispatch(Command::ToggleBookmark, cx); r.dispatch(go(1), cx); r.dispatch(Command::Scroll(0), cx); });
+    draw(&mut v);
+    for what in ["the explorer", "the results"] {
+        if what == "the explorer" { v.simulate_keystrokes("ctrl-shift-e"); } else { f.view.update(&mut v, |r, _| r.results_focus = true); }
+        draw(&mut v);
+        assert!(f.view.read_with(&v, |r, _| r.tree_focus || r.results_focus), "{what} has the keys");
+        let s = strip(&v, &f, 0);
+        let y = mark_y(&v, &f, 250);
+        click(&mut v, s.center().x, y);
+        assert_eq!(caret_line(&v, &f), 250, "{what}: the mark's line");
+        assert!(f.view.read_with(&v, |r, _| !r.tree_focus && !r.results_focus), "{what}: the text has the keys");
+        v.simulate_keystrokes("down");
+        assert_eq!(caret_line(&v, &f), 251, "{what}: an arrow moves the caret");
+        f.view.update(&mut v, |r, cx| { r.dispatch(go(1), cx); r.dispatch(Command::Scroll(0), cx); });
+        draw(&mut v);
+    }
+}
