@@ -36,7 +36,7 @@ One `lenz` command opens both, each a separate executable:
 
 **Status:** beta (0.0.10). Diff is tested on Linux and macOS (Apple Silicon), with automated
 GUI interaction coverage on Linux. Lenz Code and the launcher are verified on Linux;
-native macOS validation is pending. Lenz Code edits existing files on verified Linux input (X11 desktop and terminal); Wayland desktop and macOS editing stay disabled. It has desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
+native macOS validation is pending. Lenz Code edits existing files in its window on Linux (X11 and Wayland) and macOS, and in the terminal on both. It has desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
 ## Screenshots
 
