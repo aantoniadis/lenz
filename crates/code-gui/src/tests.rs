@@ -3713,6 +3713,12 @@ fn right_click_opens_the_context_menu_at_the_pointer_and_runs_entries(cx: &mut T
     assert!(v.read_from_clipboard().and_then(|c| c.text()).is_some_and(|t| t.ends_with("main.rs:2")), "{:?}", v.read_from_clipboard());
     // A click on an entry runs it; a click outside the menu closes it without running anything.
     right(&mut v, at(6.5, 1.0));
+    // Rename Symbol adds a row: Copy Path can now be below this short window. Reveal it
+    // with real menu navigation before clicking, also exercising a scrolled menu's hit test.
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows());
+    let index = rows.iter().position(|r| r.0 == "Copy Path").unwrap();
+    let downs = index - rows[..index].iter().filter(|r| r.0 == "—").count();
+    for _ in 0..downs { v.simulate_keystrokes("down"); }
     draw(&mut v);
     let (menu, entry_y) = f.view.read_with(&v, |r, _| (r.context_bounds().unwrap(), r.context_row_y("Copy Path").unwrap()));
     v.simulate_click(point(menu.origin.x + px(10.0), px(entry_y + line_h() / 2.0)), Modifiers::default());
