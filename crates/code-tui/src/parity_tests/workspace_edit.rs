@@ -68,6 +68,33 @@ fn project_replace_preview_input_selection_cancel_apply_and_undo_match_in_both_a
         visual.simulate_keystrokes("ctrl-z");tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'),KeyModifiers::CONTROL)));
         assert_eq!(text(&tui.session).as_deref(),Some("λ foo\r\nfoo\n"));assert_eq!(gui.read_with(&visual,|v,_|text(v.session())),text(&tui.session));
         for root in [&gr,&tr]{assert_eq!(std::fs::read(root.join("a.txt")).unwrap(),"λ foo\r\nfoo\n".as_bytes());}
+        // PR #50's scratch-kind picker and save-on-leave operate on the replaced draft too.
+        gui.update_in(&mut visual, |v,w,cx| v.run(CommandId::SaveOnLeave,w,cx));
+        tui.run(CommandId::SaveOnLeave);
+        gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project},cx));
+        tui.dispatch(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project});
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().results().is_some_and(|r|r.done()));
+        gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::PreviewProjectReplace("saved".into()),cx));
+        tui.dispatch(Command::PreviewProjectReplace("saved".into()));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.workspace_preview().is_some());
+        visual.simulate_keystrokes("a");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'),KeyModifiers::NONE)));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|!s.workspace_busy()&&s.workspace_preview().is_none());
+        gui.update_in(&mut visual, |v,w,cx| v.run(CommandId::NewScratch,w,cx));
+        tui.run(CommandId::NewScratch);
+        visual.simulate_keystrokes("r u b enter");
+        for code in [KeyCode::Char('r'),KeyCode::Char('u'),KeyCode::Char('b'),KeyCode::Enter] {
+            tui.handle(Event::Key(KeyEvent::new(code,KeyModifiers::NONE)));
+        }
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().current_source().is_some_and(|d|d.source().ends_with("scratch_1.rb")) && s.state().tabs().iter().filter(|t|t.source().ends_with("a.txt")).all(|t|!s.state().tab_dirty(t.id())));
+        for root in [&gr,&tr] { assert_eq!(std::fs::read(root.join("a.txt")).unwrap(),"λ saved\r\nsaved\n".as_bytes()); }
+        visual.simulate_keystrokes("ctrl-tab");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::CONTROL)));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().current_source().is_some_and(|d|d.source().ends_with("a.txt")));
+        visual.simulate_keystrokes("ctrl-z");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'),KeyModifiers::CONTROL)));
+        assert_eq!(text(&tui.session).as_deref(),Some("λ foo\r\nfoo\n"));
+        assert_eq!(gui.read_with(&visual,|v,_|text(v.session())),text(&tui.session));
     }
 }
 
@@ -107,7 +134,7 @@ fn symbol_rename_prompt_and_multi_file_preview_match_in_both_adapters(cx: &mut T
             assert!(Instant::now()<until,"GUI {:?}; TUI {:?}",gui.read_with(visual,|v,_|v.session().state().notices()),tui.session.state().notices());std::thread::sleep(Duration::from_millis(2));
         }
     };
-    settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().provider().is_some_and(|p|p.offers(code_core::semantics::Question::Rename)));
+    settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().provider().is_some_and(|p|p.offers(code_core::semantics::Question::Rename)) && s.disabled(CommandId::RenameSymbol).is_none());
     let caret=code_core::session::Selection {anchor:4,head:4};
     gui.update(&mut visual,|v,cx|v.dispatch_for_test(Command::Select(caret),cx));tui.session.dispatch(Command::Select(caret));
     gui.update_in(&mut visual,|v,w,cx|v.run(CommandId::RenameSymbol,w,cx));tui.run(CommandId::RenameSymbol);

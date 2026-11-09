@@ -1,11 +1,15 @@
 use super::*;
 
 fn fixture() -> (tempfile::TempDir, PathBuf, Session) {
+    fixture_with("λ foo\r\nfoo\nlast".as_bytes())
+}
+fn fixture_with(text: &[u8]) -> (tempfile::TempDir, PathBuf, Session) {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("project"); std::fs::create_dir_all(&root).unwrap();
     let mut s = session(&dir.path().join("private-state"));
-    write(&root,"a.txt", "λ foo\r\nfoo\nlast".as_bytes());
+    write(&root,"a.txt", text);
     write(&root,"b.txt", b"foo food\n");
+    write(&root,"ignored.rs", b"foo\n");
     s.dispatch(Command::OpenRoot(root.clone())); settle(&mut s, scanned); s.enable_text_input_for_test();
     (dir,root,s)
 }
@@ -85,7 +89,7 @@ fn workspace_symbol_rename_roundtrips_a_server_reply_before_applying_multiple_dr
     settle(&mut s,|s|desired_matches_current(s,&other));
     open(&mut s,Command::OpenRetained(path.clone()),"a.rs");
     s.dispatch(Command::Select(Selection {anchor:4,head:4}));
-    settle(&mut s,|s|s.state.semantics.views().iter().any(|v|v.supports.contains(&semantics::Question::Rename)));
+    settle(&mut s,|s|s.state.provider().is_some_and(|v|v.offers(semantics::Question::Rename)) && s.disabled(CommandId::RenameSymbol).is_none());
     s.dispatch(Command::RenameSymbol("renamed".into()));settle(&mut s,|s|!s.workspace_busy());
     assert!(s.workspace_preview().is_some(),"{:?}",s.state().notices());
     assert_eq!(s.workspace_preview().unwrap().files().len(),2);
@@ -123,8 +127,10 @@ fn workspace_edit_release_probe() {
     let original="λ foo\r\n".repeat(100);
     for i in 0..40 {write(&root,&format!("{i:03}.txt"),original.as_bytes());}
     let mut s=session(&d.path().join("private-state"));s.dispatch(Command::OpenRoot(root.clone()));settle(&mut s,scanned);s.enable_text_input_for_test();
-    let duration=std::env::var("LENZ_WORKSPACE_PROBE_SECONDS").ok().and_then(|s|s.parse().ok()).unwrap_or(20.0);
+    let duration: f64=std::env::var("LENZ_WORKSPACE_PROBE_SECONDS").ok().and_then(|s|s.parse().ok()).unwrap_or(20.0);
+    assert!(duration.is_finite() && duration > 0.0);
     let start=std::time::Instant::now();let mut preparation=Vec::new();let mut application=Vec::new();let mut cycles=0;
+    let mut samples = Vec::new();
     while start.elapsed().as_secs_f64()<duration {
         search(&mut s);let now=std::time::Instant::now();
         s.dispatch(Command::PreviewProjectReplace("bar".into()));settle(&mut s,|s|!s.workspace_busy());
@@ -137,15 +143,17 @@ fn workspace_edit_release_probe() {
             assert_eq!(source_text(s.state.source(tab).unwrap()),original.replace("foo","bar"));
             s.dispatch(Command::Undo {tab});assert_eq!(source_text(s.state.source(tab).unwrap()),original);
         }
-        assert_eq!(std::fs::read(root.join("000.txt")).unwrap(),original.as_bytes());cycles+=1;
+        for i in 0..40 { assert_eq!(std::fs::read(root.join(format!("{i:03}.txt"))).unwrap(),original.as_bytes()); }
+        cycles+=1;
+        samples.push(serde_json::json!({"cycle":cycles,"seconds":start.elapsed().as_secs_f64(),"prepare_ms":preparation.last(),"apply_ms":application.last(),"rss_mib":memory_mib()}));
     }
     preparation.sort_by(f64::total_cmp);application.sort_by(f64::total_cmp);
-    eprintln!("WORKSPACE_PROBE {}",serde_json::json!({"cycles":cycles,"seconds":start.elapsed().as_secs_f64(),"files":40,"edits":4000,"prepare_ms_median":preparation[preparation.len()/2],"apply_ms_median":application[application.len()/2],"correctness":"drafts and undo exact; disk unchanged"}));
+    eprintln!("WORKSPACE_PROBE {}",serde_json::json!({"workload_version":2,"cycles":cycles,"seconds":start.elapsed().as_secs_f64(),"files":40,"edits":4000,"prepare_ms_median":preparation[preparation.len()/2],"apply_ms_median":application[application.len()/2],"memory_kind":memory_kind(),"samples":samples,"correctness":"all drafts, per-file undo and all disk bytes exact"}));
 }
 
 #[test]
 fn workspace_replace_save_preserves_legacy_encoding_and_exact_endings() {
-    let (_d,root,mut s)=fixture();let path=root.join("a.txt");std::fs::write(&path,b"caf\xe9 foo\r\n").unwrap();
+    let (_d,root,mut s)=fixture_with(b"caf\xe9 foo\r\n");let path=root.join("a.txt");
     open(&mut s,Command::OpenRetained(path.clone()),"a.txt");preview(&mut s,"bar");
     s.dispatch(Command::ApplyWorkspaceEdit);settle(&mut s,|s|!s.workspace_busy());
     assert_eq!(source_text(s.state().current_source().unwrap()),"café bar\r\n");
@@ -166,10 +174,57 @@ fn workspace_replace_reveals_an_affected_draft_when_the_original_tab_has_no_matc
 
 #[test]
 fn workspace_replace_refuses_excessive_expansion_without_changing_drafts_or_files() {
-    let (_d,root,mut s)=fixture();let path=root.join("a.txt");let original="foo ".repeat(9000);
-    std::fs::write(&path,original.as_bytes()).unwrap();
+    let original="foo ".repeat(9000);
+    let (_d,root,mut s)=fixture_with(original.as_bytes());let path=root.join("a.txt");
     search(&mut s);s.dispatch(Command::PreviewProjectReplace("x".repeat(64 << 10)));settle(&mut s,|s|!s.workspace_busy());
     assert!(s.workspace_preview().is_none());assert!(s.state().tabs().is_empty());
     assert!(s.state().notices().last().is_some_and(|n|n.contains("32 MiB")));
     assert_eq!(std::fs::read(path).unwrap(),original.as_bytes());
+}
+
+#[test]
+fn workspace_replace_respects_search_options_and_ignores_excluded_stale_files() {
+    let (_d, root, mut s) = fixture_with(b"foo FOO food\r\n");
+    s.dispatch(Command::ToggleFindOption(FindOption::Case));
+    s.dispatch(Command::ToggleFindOption(FindOption::Word));
+    preview(&mut s, "bar");
+    s.dispatch(Command::ToggleWorkspaceFile(1));
+    std::fs::write(root.join("b.txt"), b"external edit\n").unwrap();
+    s.dispatch(Command::ApplyWorkspaceEdit);
+    settle(&mut s, |s| !s.workspace_busy());
+    assert!(s.workspace_preview().is_none(), "an excluded file cannot block the selected batch");
+    assert_eq!(s.state().tabs().len(), 1);
+    assert_eq!(source_text(s.state().current_source().unwrap()), "bar FOO food\r\n");
+    assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"external edit\n");
+    assert_eq!(std::fs::read(root.join("ignored.rs")).unwrap(), b"foo\n");
+}
+
+#[test]
+fn workspace_replace_save_on_leave_and_scratch_navigation_keep_per_file_undo() {
+    let (_d, root, mut s) = fixture();
+    open(&mut s, Command::OpenRetained(root.join("a.txt")), "a.txt");
+    let a = s.state().active().unwrap().id();
+    s.dispatch(Command::SetSaveOnLeave(true));
+    preview(&mut s, "bar");
+    s.dispatch(Command::ApplyWorkspaceEdit);
+    settle(&mut s, |s| !s.workspace_busy());
+    let b = s.state().tabs().iter().find(|t| t.source().ends_with("b.txt")).unwrap().id();
+    assert_eq!(s.state().active().unwrap().id(), a);
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), "λ foo\r\nfoo\nlast".as_bytes());
+    let kind = crate::scratch::KINDS.iter().position(|k| k.label == "Plain text").unwrap();
+    s.dispatch(Command::NewScratchFile(kind));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("scratch_1.txt")) && !s.state().tab_dirty(a));
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), "λ bar\r\nbar\nlast".as_bytes());
+    assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"foo food\n", "inactive edits are still drafts");
+    s.dispatch(Command::ActivateTab(b));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("b.txt")));
+    s.dispatch(Command::Undo { tab: b });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "foo food\n");
+    s.dispatch(Command::ActivateTab(a));
+    settle(&mut s, |s| s.state().current_source().is_some_and(|d| d.source().ends_with("a.txt")));
+    s.dispatch(Command::Undo { tab: a });
+    assert_eq!(source_text(s.state().current_source().unwrap()), "λ foo\r\nfoo\nlast");
+    s.dispatch(Command::Save { tab: a });
+    settle(&mut s, |s| !s.state().tab_dirty(a));
+    assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), "λ foo\r\nfoo\nlast".as_bytes());
 }
