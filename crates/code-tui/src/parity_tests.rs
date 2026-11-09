@@ -3090,7 +3090,7 @@ fn server_details_explain_missing_assistance_alike_and_hide_environment_values(c
     let Some(crate::app::Prompt::Details { body, .. }) = tui.modal.as_ref().map(|m| &m.kind) else { panic!("no terminal details") };
     let body = body.clone();
     let offered = shown.iter().find(|r| r.starts_with("Offered by rust-analyzer: ")).unwrap_or_else(|| panic!("{shown:?}"));
-    assert!(offered.contains("Not offered by this server: type hierarchy, formatting;"), "{offered}");
+    assert!(offered.contains("Not offered by this server: type hierarchy, formatting, symbol rename;"), "{offered}");
     assert!(body.contains(offered.as_str()), "both adapters show the same assistance row");
     let env_row = shown.iter().find(|r| r.starts_with("Environment set by provider settings: ")).unwrap_or_else(|| panic!("{shown:?}"));
     for name in ["FAKE_LSP_NO_DECOR", "FAKE_LSP_NO_FORMAT", "API_TOKEN"] { assert!(env_row.contains(name) && body.contains(name), "{env_row}"); }
