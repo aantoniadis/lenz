@@ -2494,3 +2494,14 @@ README metrics are unchanged. The [validation report](research/project-replace-r
 records passing evidence, failed/interrupted attempts, cache-reuse limits and the
 outstanding acceptance ticket. Raw evidence is in `perf-results/project-replace/`;
 native macOS and Wayland remain unverified.
+
+Follow-up process checks reproduced detached Git maintenance as a source of
+orphaned children in the non-reaping container. Fixture commands now request
+synchronous maintenance, and Linux CI runs under a child-reaping supervisor.
+Three 100-commit batches left the global zombie count unchanged, with zero
+adopted children for synchronous maintenance. Eight lifecycle cases passed;
+the complete Python and new Rust regression attempts still encountered fork or
+thread-creation failures in the already-polluted environment. These are process
+cleanup checks, not application performance measurements. The validation report
+records the evidence under `perf-results/environment-process-probe/` and keeps
+fresh-environment acceptance open.

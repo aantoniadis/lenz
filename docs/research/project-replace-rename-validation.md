@@ -51,10 +51,50 @@ fewer supervising processes did not eliminate these failures. Cargo profiles,
 compiler flags and production dependencies were not changed to obtain a result.
 
 The `pg_parse` native library built normally, but its upstream pthread stress test
-failed at the same process ceiling. Its build cache was reused after checking that
+also failed while the environment was rejecting thread creation. Its build cache was reused after checking that
 copied sources and the library bytes were unchanged and restoring copied-source
 mtimes. That upstream stress test remains unpassed; cache reuse is not a successful
 test result. The proof and limitation are in `pg-cache-repair.json`.
+
+## Preventing further process accumulation
+
+A later inspection found 32,007 zombie processes adopted by PID 1, of which
+31,348 were Git. This container's PID 1 is `tail`. A disposable Git probe
+reproduced detached automatic maintenance: five commits produced five orphaned
+children; setting `maintenance.autoDetach=false` and `gc.autoDetach=false`
+produced none. The probe adopted and collected those children itself. This
+identifies a source of accumulation; it does not establish the exact system
+constraint behind EAGAIN. The visible PID cgroup reports `pids.max=max`, and the
+per-user process limit is 71,955.
+
+The shared Rust fixture helper now supplies those Git options per invocation.
+Linux local CI enters `scripts/reap-children.py`, which collects its command's
+orphaned descendants during execution and cleanup. It preserves command failures,
+forwards interruption, and fails a successful command if lingering descendants
+require forced cleanup. The optional old-Git container requests its own init.
+Production Git commands and user configuration are unchanged.
+
+Verification retained under `perf-results/environment-process-probe/`:
+
+- Eight real lifecycle tests passed, covering detached grandchildren, command
+  failures, interruption, forced cleanup, unrelated-process isolation, a missing
+  command, the local CI entrypoint and continuous reaping during a running command. No orphan escaped their outer supervisor.
+- Three batches of 100 synchronous-maintenance commits completed successfully
+  with zero adopted children. The global zombie count remained at 32,007 after
+  each batch. A separate five-commit default-maintenance control had four
+  orphaned children collected by the supervisor, also without global growth.
+- A full Python attempt ran 83 tests: two packaging cases failed on `fork`, one
+  test was skipped. Its supervisor collected five orphaned children without
+  forced cleanup. Two additional lifecycle cases were added and passed afterward;
+  there is no claim of a passing complete Python suite for the final tree.
+- The new Rust fixture regression test records actual Git Trace2 events and
+  rejects detached maintenance. Its execution was blocked while compiling the
+  `serde_core` build script because another compiler thread could not be created.
+
+These measures prevent demonstrated new accumulation; they cannot reap zombies
+already owned by PID 1. A fresh environment or full container restart is still
+needed for reliable completion of the outstanding Rust, adapter and performance
+checks. Native macOS behavior and the optional old-Git container remain unverified.
 
 ## Performance acceptance remains open
 

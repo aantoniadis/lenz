@@ -479,6 +479,9 @@ pub mod testing {
     fn command(dir: &Path, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         cmd.current_dir(dir)
+            // Detached maintenance can leave an orphan after fixture commits on
+            // recent Git. Keep it owned and waited for, including on older Git.
+            .args(["-c", "maintenance.autoDetach=false", "-c", "gc.autoDetach=false"])
             .args(args)
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -505,5 +508,32 @@ pub mod testing {
     pub fn commit_all(dir: &Path, message: &str) {
         git(dir, &["add", "-A"]);
         git(dir, &["commit", "-q", "--no-verify", "-m", message]);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn fixture_commits_do_not_request_detached_maintenance() {
+            let dir = repo();
+            let trace = tempfile::NamedTempFile::new().unwrap();
+            for _ in 0..3 {
+                let out = command(dir.path(), &["commit", "-q", "--allow-empty", "--no-verify", "-m", "fixture"])
+                    .env("GIT_TRACE2_EVENT", trace.path())
+                    .output().unwrap();
+                assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            }
+            let events = std::fs::read_to_string(trace.path()).unwrap();
+            let mut commits = 0;
+            for line in events.lines() {
+                let event: serde_json::Value = serde_json::from_str(line).unwrap();
+                if event["event"] == "cmd_name" && event["name"] == "commit" { commits += 1; }
+                if event["event"] == "child_start" && let Some(args) = event["argv"].as_array() {
+                    assert!(!args.iter().any(|arg| arg == "--detach"), "fixture detached maintenance: {event}");
+                }
+            }
+            assert_eq!(commits, 3, "the trace must cover every fixture commit");
+        }
     }
 }

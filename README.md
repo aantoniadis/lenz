@@ -625,6 +625,13 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 
 Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the Diff screenshots (Catppuccin Mocha) on a private display. Add `--reader target/release/lenz-code --only reader-code reader-markdown` to capture Lenz Code using disposable demo files.
 
+On Linux, local CI runs under a child-reaping supervisor so detached tools cannot
+accumulate exited processes when the container's PID 1 does not reap them. Fixture
+Git commands keep maintenance synchronous. For an individual validation command,
+use `python3 scripts/reap-children.py -- <command>`. It reports collected orphaned
+children and fails if lingering processes require forced cleanup; see the
+[process cleanup guide](docs/benchmarking.md#validation-process-cleanup).
+
 ## Licence
 
 The app (`crates/app`) and its shared content crate (`crates/content`: decoding, line offsets, syntax highlighting, themes) are MIT; the diff engine (`crates/engine`) is Apache-2.0 and contains ported IntelliJ Community code (see its NOTICE). Darcula and Light follow IntelliJ's schemes (JetBrains, Apache-2.0); additional base colors adapt Omarchy and upstream editor palettes under MIT. See [theme attribution](docs/themes.md) and [third-party theme notices](LICENSE-THEMES).
