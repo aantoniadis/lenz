@@ -1730,6 +1730,19 @@ impl Semantics {
         }
     }
 
+    /// Forget every decoration request about `path` (its view dropped what they gave, or would have given): pending
+    /// ones are cancelled, and showing it again asks afresh even when its version is the one already asked about.
+    pub fn forget_path(&mut self, path: &Path) {
+        for s in &mut self.servers {
+            let pending: Vec<i64> = s.decor.iter().filter(|(_, d)| d.0 == path).map(|(id, _)| *id).collect();
+            for id in pending {
+                s.decor.remove(&id);
+                s.notify("$/cancelRequest", json!({ "id": format!("{}{id}", lsp::DECORATION) }));
+            }
+            for asked in &mut s.asked { asked.remove(path); }
+        }
+    }
+
     /// The name of `doc`'s running server when it does not offer `kind` (`None`: it does, or none runs for it).
     pub fn lacks(&self, doc: &Document, kind: Decor) -> Option<&'static str> {
         self.lacks_source(doc.source(), kind)

@@ -545,9 +545,84 @@ pub struct Batch {
     pub error: Option<String>,
 }
 
+/// Where the reader works, for file ranking: the folders of the files open and recently opened (most recent first,
+/// the active file's leading) and those files themselves. A file in the same folders ranks above an equal or slightly
+/// better match elsewhere; one recently opened ranks higher too. Project-relative paths.
+#[derive(Clone, Debug, Default)]
+pub struct Nearby {
+    /// Context ranking is on (Search Everywhere: Rank by Open and Recent Files); off, ranking is by the name alone.
+    on: bool,
+    /// Each leading folder path of a recent file (`dev/`, `dev/app/`…) with what sharing it is worth, best first: a
+    /// file's folder score is that of the first one it starts with.
+    folders: Vec<(Box<str>, i64)>,
+    recent: Vec<Box<str>>,
+}
+
+/// Each folder shared with a recent file's from the root (at most [`Nearby::SHARED`]) is worth this much, a little less
+/// for each older file; it outweighs the step from a scattered match to one inside the name.
+const PER_FOLDER: i64 = 12_000;
+/// A file recently opened: worth this much (the active file's), a little less for each older one.
+const RECENT: i64 = 8_000;
+/// A file whose name, or name before its first `.`, is the whole query: first whatever the context.
+const EXACT_NAME: i64 = 1_000_000;
+
+impl Nearby {
+    /// How many leading folders count, and how many recent files.
+    const SHARED: usize = 3;
+    const FILES: usize = 10;
+
+    /// From project-relative paths, most recent first (the active file first).
+    pub fn new<'a>(recent: impl IntoIterator<Item = &'a str>) -> Self {
+        let recent: Vec<Box<str>> = recent.into_iter().take(Self::FILES).map(Into::into).collect();
+        let mut folders: Vec<(Box<str>, i64)> = Vec::new();
+        for (i, path) in recent.iter().enumerate() {
+            let mut prefix = String::new();
+            for (depth, part) in path.split('/').take(path.matches('/').count()).take(Self::SHARED).enumerate() {
+                prefix.push_str(part);
+                prefix.push('/');
+                let value = (depth as i64 + 1) * (PER_FOLDER - 400 * i as i64);
+                match folders.iter_mut().find(|(p, _)| p.as_ref() == prefix) {
+                    Some((_, v)) => *v = (*v).max(value),
+                    None => folders.push((prefix.as_str().into(), value)),
+                }
+            }
+        }
+        folders.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
+        Self { on: true, folders, recent }
+    }
+
+    /// What `path`'s folders shared with the recent files' are worth (project-relative): a few prefix comparisons.
+    pub fn folder_boost(&self, path: &str) -> i64 {
+        self.folders.iter().find(|(prefix, _)| path.starts_with(prefix.as_ref())).map_or(0, |(_, v)| *v)
+    }
+
+    /// What having opened `path` recently is worth (the recent files are ranked on their own, so only they pay this).
+    pub fn recent_boost(&self, path: &str) -> i64 {
+        self.recent.iter().position(|r| r.as_ref() == path).map_or(0, |i| RECENT - 400 * i as i64)
+    }
+}
+
+/// Whether the file name of `lower` (lowercased) is `q`, or its part before the first `.` is.
+fn exact_name(q: &str, lower: &str) -> bool {
+    let name = lower.rsplit('/').next().unwrap_or(lower);
+    name == q || name.split('.').next() == Some(q)
+}
+
+/// A file's rank for `query` (lowercased): Lenz's fuzzy score, its context, and an exact name first.
+pub fn file_score(q: &str, lower: &str, len: usize, nearby: &Nearby, path: &str) -> Option<i64> {
+    let score = lenz_content::fuzzy::score_lowered(q, lower, len)?;
+    if !nearby.on { return Some(score); }
+    Some(score + nearby.folder_boost(path) + if exact_name(q, lower) { EXACT_NAME } else { 0 })
+}
+
 /// The best [`FINDER_LIMIT`] paths in `batches` for `query`, by Lenz's file ranking (ties keep discovery order),
 /// and how many matched in all. `None` once `current` says the query or project was superseded.
 pub fn rank(batches: &[Arc<[Entry]>], query: &str, current: impl Fn() -> bool) -> Option<(Vec<Arc<str>>, usize)> {
+    rank_near(batches, query, &Nearby::default(), current)
+}
+
+/// [`rank`] with where the reader works: files near the open and recent ones first among close matches.
+pub fn rank_near(batches: &[Arc<[Entry]>], query: &str, nearby: &Nearby, current: impl Fn() -> bool) -> Option<(Vec<Arc<str>>, usize)> {
     let q = query.to_lowercase();
     let mut hits: Vec<(i64, &Arc<str>)> = Vec::new();
     let mut matched = 0;
@@ -555,7 +630,7 @@ pub fn rank(batches: &[Arc<[Entry]>], query: &str, current: impl Fn() -> bool) -
         if i % 4096 == 0 && !current() {
             return None;
         }
-        if let Some(s) = lenz_content::fuzzy::score_lowered(&q, &e.lower, e.path.len()) {
+        if let Some(s) = file_score(&q, &e.lower, e.path.len(), nearby, &e.path) {
             matched += 1;
             hits.push((s, &e.path));
             // Keep memory bounded on broad queries: drop all but the best periodically.

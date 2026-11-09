@@ -1162,8 +1162,8 @@ fn short_dialogs_keep_errors_and_consequences_above_the_actions() {
     for dark in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let mut a = app(dir.path(), dark);
-        a.run(CommandId::NewScratch);
-        a.modal.as_mut().unwrap().error = Some("That name is already in use".into());
+        a.prompt(Prompt::GoTo);
+        a.modal.as_mut().unwrap().error = Some("That line is past the file's end".into());
         draw(&mut a, 18, 8);
         assert!(a.layout.modal_rows.height > 0);
         assert!(a.layout.form_buttons.unwrap().iter().all(|b| b.y >= a.layout.modal_rows.bottom()));

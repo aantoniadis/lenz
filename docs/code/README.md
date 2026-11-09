@@ -84,7 +84,8 @@ expand, Ctrl+Shift+- / Ctrl+Shift+= collapse / expand all, arrows move the curso
 Ctrl+P find file (`name:line`), Ctrl+G go to line, Ctrl+F find (Tab: replace, Enter replaces, Alt+A replaces all), F3 / Shift+F3 next / previous match, Ctrl+Shift+F search,
 Alt+Z soft wrap, Ctrl+Shift+. breadcrumbs, Ctrl+Shift+O outline, Ctrl+T declarations, F12 / Ctrl-click definition,
 Alt+F12 peek, Ctrl+Shift+B type definition, Ctrl+Alt+B implementations, Shift+F12 usages, Ctrl+Alt+H call hierarchy,
-Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons; macOS: also Cmd+[ / Cmd+]) back/forward,
+Ctrl+H or Alt+H type hierarchy, Ctrl+Q documentation, Alt+Left/Right (or the mouse's side buttons; macOS: also Cmd+[ / Cmd+]) back/forward
+(every jump is a step, a definition in the same file too: Back returns to each place you Ctrl-clicked, in turn),
 F11 toggle bookmark, Ctrl+F11 bookmark key, Shift+F11 bookmarks, Ctrl+Shift+0–9 / Alt+0–9 set / go to a numbered
 bookmark, Ctrl+E recent files, Ctrl+Alt+E recent locations, Ctrl+Shift+V Markdown source/preview, F10 command menu,
 Ctrl+Shift+A find action; Escape closes a menu or cancels a pending definition. Ctrl+Alt+Down / Up add a cursor on the next / previous line in both keymaps (also **Add Cursor Below / Above** in the Edit menu), Alt+J selects the word under the caret and then its next occurrence, and Escape, a click or a caret move returns to one cursor; several selections are edited and undone together ([limits](tui.md)). Tab / Shift+Tab indent and outdent the selected lines with the file's EditorConfig or project step, Ctrl+/ (or Alt+/) comments, Ctrl+Shift+Down / Up move lines (VS Code keymap: Alt+Down / Up) and Alt+Shift+Down / Up duplicate them ([structural edits](tui.md)). In the GUI, Close Window
@@ -110,6 +111,10 @@ fold/unfold, F5 reload), and actions VS Code leaves unbound keep no chord there 
 language-server status, collapse/expand all) instead of reusing a key VS Code gives another action. The choice and
 every override are remembered outside the project in Lenz Code's settings file.
 
+On macOS the IntelliJ preset follows IntelliJ's macOS keymap where it differs: Cmd+Shift+N is New Scratch File there,
+so Find File is Cmd+P (and double Shift). Elsewhere it keeps IntelliJ's Linux and Windows keys (Ctrl+Shift+N finds a
+file).
+
 Both presets bind Ctrl+Alt+Down / Up to Add Cursor Below / Above and Alt+J to Select Next Occurrence; Alt+J stays
 because VS Code's Ctrl+D (select the next occurrence) is Compare Selected here. Tab and Shift+Tab are fixed editing
 keys, like Delete, and the structural edits take chords: Ctrl+/ and Alt+/ for Toggle Comment, Ctrl+Shift+Down / Up for
@@ -127,6 +132,11 @@ own answers are not chords: the recovered-draft dialog keeps `r`, `d` and Esc in
 **Recover Unsaved Draft…** command stays in the File menu without a preset chord, like Close Window.
 
 ### Vim editing and relative line numbers
+
+**Save When Leaving a File** (Edit → Editing Preferences, or Find Action; off by default, remembered) saves an edited
+file as soon as another tab, file or pane becomes active: switching tabs, opening another file, Back/Forward or a
+definition. Its exact text is written (format on save applies to Save itself); untitled documents and read-only files
+are left as they are, and closing a tab still asks, so Discard never writes.
 
 **macOS Word Motion** (Edit → Editing Preferences, or Find Action) makes Option+Left/Right move by word on macOS,
 Shift selecting, with Back/Forward on Cmd+[ / Cmd+] (and the mouse's side buttons). Word stops then cross the spaces
@@ -291,6 +301,11 @@ one popup with **All / Files / Symbols / Actions** tabs, a query, fuzzy matches 
 tab keeps matches at word starts (`nsr` finds `NewSearchResult`, not `inspector`); a single tab matches any letters in order.
 With **Search Everywhere: Letters in File Names** on (Find Action; off by default, remembered), the All tab also lists
 files whose name holds the query's letters in order (`i_summary` finds `invoice_summary.csv`).
+With **Search Everywhere: Rank by Open and Recent Files** on (Find Action; off by default, remembered), Search
+Everywhere and Find File also weigh where you work: files sharing folders with the active, open and recently opened
+files (up to three folders deep, the more recent the more) and those files themselves rank above a slightly better match
+elsewhere, while a file named exactly as the query (`foo_bar` or `foo_bar.rb`) comes first wherever it is. On
+100,000 matching files it adds about 4 ms per query with ten recent files in different folders, nothing when off.
 Double-tap bare **Shift** in the GUI, or press **Ctrl+K**, to search all three categories. Direct shortcuts are:
 
 | Search | Shortcut |
@@ -303,7 +318,8 @@ Tab / Shift+Tab cycles categories while keeping the query. Left/Right move the q
 Alt+Left/Right (macOS's Option) by word and Cmd+Left/Right (GUI) to its ends; typing goes in at the caret, and Backspace /
 Delete take a character, with Ctrl, Alt or Cmd a word. Up/Down, Page keys and Home/End select a
 result; the wheel scrolls the popup without changing selection. Enter opens/runs the selected result and Esc returns to reading. Tabs and rows are clickable. File results distinguish
-identical basenames by path and accept `name:line[:column]`. Empty queries prefer open/recent files; search
+identical basenames by path and accept `name:line[:column]`. A pasted path to an existing file, absolute or from `~/`
+(quotes and a `:line[:column]` allowed), is the first row and opens that file, outside the project too. Empty queries prefer open/recent files; search
 keeps at most the best 100 results. Action rows show shortcuts, setting values and current disabled reasons.
 Long Unicode queries keep the typed tail visible. Search opens candidates only when selected.
 
@@ -446,7 +462,9 @@ Files over 5 MiB or 100,000 lines open in large-file mode: read in full, without
 
 The explorer is its own panel left of the files panel (the tabs sit over the text). The toolbar's first button, or
 Ctrl+B, shows and hides it; Ctrl+Shift+E focuses it. Its target button selects the opened file, opening the folders
-above it. Opening a folder whose only entry is a folder opens that one too, down to a folder with more. Folders list
+above it. With **Explorer: Always Select Opened File** on (the command menu or Find Action; off by default, remembered)
+it does so by itself whenever the active file changes: opening a file, switching tabs, Back/Forward or a definition;
+a hidden explorer stays hidden and shows that file selected when it opens. Opening a folder whose only entry is a folder opens that one too, down to a folder with more. Folders list
 before files; the command menu's "Explorer: All by Name" switches to plain name order ("Explorer: Folders First" back) (bytewise:
 capitals first), saved in `$XDG_CONFIG_HOME/lenz-code/settings.json`. Explorer rows and tabs show the Git status
 letter (M, A, D, R, U, C) apart from the `●` unsaved mark, as in the [terminal editor](tui.md).
@@ -460,7 +478,11 @@ is open. Without a project it starts an untitled document; the first Save asks f
 Escape cancels without writing.
 
 **New Scratch File…** and **Scratch Files…** in the File menu create and reopen durable personal files outside
-projects. Their in-app name prompt uses the extension to choose the language. They use ordinary Save and draft recovery, remain available
+projects. New Scratch File lists the kinds of file, as IntelliJ does: Plain text, JSON, Ruby and PostgreSQL first, then
+every language Lenz reads by name (Bash to Zig, ERB and HAML templates, CSV, Dockerfile, environment files); typing
+filters by name or extension and Enter creates the next free `scratch_N.<extension>` (`scratch_1.rb`, `scratch_2.sql`…),
+opened in that language, a PostgreSQL or DuckDB one with that SQL dialect. On macOS Cmd+Shift+N opens it, as in
+IntelliJ's macOS keymap. They use ordinary Save and draft recovery, remain available
 across projects and restarts, and live in `$XDG_STATE_HOME/lenz-code/scratch-files` (default
 `~/.local/state/lenz-code/scratch-files`). Closing a tab keeps its file; there are no scratch run/debug controls.
 Right-click a tab for **Close All Tabs**, **Close Other Tabs**, **Close Tabs to Left** and **Close Tabs to Right**
@@ -609,7 +631,9 @@ Soft Wrap (Alt+Z, remembered) wraps long lines at the pane's width; continuation
 carry no number. Large files, images and previews do not wrap.
 
 Sticky Scroll pins the first lines of the declarations around the top line over each pane's text (at most five, the
-innermost kept; Rust `impl` blocks and Markdown sections count); a click goes there. A breadcrumb bar under each pane's
+innermost kept; Rust `impl` blocks and Markdown sections count); a click goes there. A jump (a definition, Go to Line,
+Back/Forward) lands with its line below them, also deep in nested modules and once a newly opened file's declarations
+arrive. A breadcrumb bar under each pane's
 tabs shows the file's path in the project, then the declarations holding the caret: a folder or file shows in the
 explorer, a declaration gets the caret, and the `›` after a crumb lists a folder's entries, the files beside a file,
 or the declarations beside a declaration (type to filter, Enter goes there). Ctrl+Shift+. gives the bar the keys (Left /

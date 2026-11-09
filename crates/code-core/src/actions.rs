@@ -345,7 +345,9 @@ impl Session {
             CommandId::AnnotateBlame => Command::SetAnnotate(state.active().is_none_or(|t| !t.annotating())),
             CommandId::InlineBlame => Command::SetInlineBlame(!state.inline_blame()),
             CommandId::MacWordMotion => Command::SetMacWordMotion(!state.mac_word_motion()),
+            CommandId::SaveOnLeave => Command::SetSaveOnLeave(!state.save_on_leave()),
             CommandId::NameLetterSearch => Command::SetNameLetterSearch(!state.name_letter_search()),
+            CommandId::RankNearbyFiles => Command::SetRankNearbyFiles(!state.rank_nearby_files()),
             CommandId::NarrowAnnotations => Command::ResizeAnnotations { width: state.layout().annotation_cols().saturating_sub(2), commit: true },
             CommandId::WidenAnnotations => Command::ResizeAnnotations { width: state.layout().annotation_cols() + 2, commit: true },
             CommandId::CloseAnnotations => Command::SetAnnotate(false),
@@ -390,6 +392,7 @@ impl Session {
             CommandId::FollowLink => Command::FollowLink,
             CommandId::LocateFile => Command::Locate,
             CommandId::FoldersFirst => Command::SetFoldersFirst(true),
+            CommandId::AlwaysSelectOpenedFile => Command::SetAlwaysSelectOpenedFile(!state.always_select_opened_file()),
             CommandId::AllByName => Command::SetFoldersFirst(false),
             CommandId::SplitRight => Command::Split(Split::Columns),
             CommandId::SplitDown => Command::Split(Split::Rows),
@@ -560,7 +563,7 @@ impl CommandId {
             Self::RelativeLineNumbers | Self::SoftWrap | Self::StickyScroll | Self::Breadcrumbs | Self::FileIcons | Self::ImageSource | Self::MarkdownSource | Self::PreviewBeside => return G::Appearance,
             Self::Collapse | Self::Expand | Self::CollapseAll | Self::ExpandAll | Self::CollapseCommentsImports => return G::Folding,
             Self::DocumentationOnHover | Self::AutoCompletion | Self::InlayTypes | Self::InlayParameters | Self::SemanticHighlighting => return G::Hints,
-            Self::LocateFile | Self::CopyExplorerName | Self::CopyExplorerFullPath | Self::CopyExplorerRelativePath | Self::CopyExplorerEntry | Self::PasteExplorerEntry | Self::CancelExplorerCopy | Self::ExplorerHistory | Self::RenameExplorerEntry | Self::MoveExplorerEntry | Self::DeleteExplorerEntry | Self::DeleteExplorerPermanently | Self::RestoreDeleted | Self::FoldersFirst | Self::AllByName => return G::Explorer,
+            Self::LocateFile | Self::CopyExplorerName | Self::CopyExplorerFullPath | Self::CopyExplorerRelativePath | Self::CopyExplorerEntry | Self::PasteExplorerEntry | Self::CancelExplorerCopy | Self::ExplorerHistory | Self::RenameExplorerEntry | Self::MoveExplorerEntry | Self::DeleteExplorerEntry | Self::DeleteExplorerPermanently | Self::RestoreDeleted | Self::FoldersFirst | Self::AllByName | Self::AlwaysSelectOpenedFile => return G::Explorer,
             Self::CsvTable | Self::CsvHeader | Self::CsvFilter | Self::CsvSort | Self::CsvClearFilter | Self::CsvMoveLeft | Self::CsvMoveRight | Self::CsvDropColumn | Self::CsvEditCell => return G::Csv,
             Self::AnnotateBlame | Self::InlineBlame | Self::CloseAnnotations | Self::NarrowAnnotations | Self::WidenAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision => return G::Annotations,
             Self::GitBranches | Self::NewBranch | Self::CheckoutRevision => return G::Branches,
@@ -572,7 +575,7 @@ impl CommandId {
             Self::MatchCase | Self::WholeWord | Self::RegularExpression => return G::FindOptions,
             Self::ExtendSelection | Self::ShrinkSelection | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections => return G::Selections,
             Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown | Self::DuplicateLinesUp | Self::DuplicateLinesDown => return G::Lines,
-            Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::VimMode | Self::MacWordMotion => return G::EditingSettings,
+            Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave => return G::EditingSettings,
             Self::WorkspaceRoot | Self::ServerRuntime | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex => return G::ServerSetup,
             Self::ConfigureSqlMetadata | Self::ConnectSqlMetadata | Self::RefreshSqlMetadata | Self::DisconnectSqlMetadata => return G::Metadata,
             Self::SqlDialect | Self::SqlDialectPostgreSql | Self::SqlDialectDuckDb | Self::SqlDialectFollowProject | Self::ProjectSqlDialectPostgreSql | Self::ProjectSqlDialectDuckDb | Self::ProjectSqlDialectUnset => return G::Dialect,
@@ -591,7 +594,7 @@ impl CommandId {
             | Self::ImageSource | Self::MarkdownSource | Self::PreviewBeside | Self::ToggleExplorer | Self::LocateFile | Self::NewExplorerFile | Self::NewExplorerFolder
             | Self::CopyExplorerName | Self::CopyExplorerFullPath | Self::CopyExplorerRelativePath | Self::CopyExplorerEntry | Self::PasteExplorerEntry | Self::CancelExplorerCopy | Self::ExplorerHistory
             | Self::RenameExplorerEntry | Self::MoveExplorerEntry | Self::DeleteExplorerEntry | Self::DeleteExplorerPermanently | Self::RestoreDeleted
-            | Self::FoldersFirst | Self::AllByName | Self::AnnotateBlame | Self::InlineBlame | Self::CloseAnnotations | Self::NarrowAnnotations | Self::WidenAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
+            | Self::FoldersFirst | Self::AllByName | Self::AlwaysSelectOpenedFile | Self::AnnotateBlame | Self::InlineBlame | Self::CloseAnnotations | Self::NarrowAnnotations | Self::WidenAnnotations | Self::ShowCommit | Self::ShowCommitDiff | Self::CopyRevision | Self::SplitRight | Self::SplitDown | Self::Unsplit
             | Self::FocusOtherPane | Self::MoveTabToOtherPane | Self::WidenExplorer | Self::NarrowExplorer | Self::TallerResults | Self::ShorterResults | Self::EnlargeFirstPane | Self::EnlargeSecondPane => G::View,
             Self::GitBranches | Self::NewBranch | Self::CheckoutRevision | Self::ShowLocalChanges | Self::CompareWithRevision | Self::CompareWithBase
             | Self::ShowBranchChanges | Self::CompareWithWorktree | Self::ResolveConflicts => G::Git,
@@ -602,7 +605,7 @@ impl CommandId {
             | Self::CallHierarchy | Self::CallHierarchyCallers | Self::CallHierarchyCallees
             | Self::TypeHierarchy | Self::TypeHierarchySupertypes | Self::TypeHierarchySubtypes
             | Self::Documentation | Self::NextProblem | Self::PreviousProblem | Self::ShowProblems | Self::CheckProjectSyntax | Self::CancelProjectSyntax | Self::ShowInSource | Self::FollowLink => G::Navigate,
-            Self::SearchEverywhere | Self::NameLetterSearch | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
+            Self::SearchEverywhere | Self::NameLetterSearch | Self::RankNearbyFiles | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ReplaceMatch | Self::ReplaceAll | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::ToggleResults | Self::StopSearch | Self::FoldAllResults | Self::NextResult | Self::PreviousResult | Self::PreviousResults | Self::NextResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,
@@ -610,7 +613,7 @@ impl CommandId {
             | Self::AddCursorBelow | Self::AddCursorAbove | Self::SelectNextOccurrence | Self::CollapseSelections
             | Self::IndentSelection | Self::OutdentSelection | Self::ToggleComment | Self::MoveLinesUp | Self::MoveLinesDown
             | Self::DuplicateLinesUp | Self::DuplicateLinesDown
-            | Self::VimMode | Self::MacWordMotion | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::OrganizeImports => G::Selection,
+            | Self::VimMode | Self::MacWordMotion | Self::SaveOnLeave | Self::EditingPreferences | Self::IndentTabs | Self::IndentTwoSpaces | Self::IndentFourSpaces | Self::IndentInherit | Self::FormatOnSave | Self::Completion | Self::ParameterInfo | Self::QuickFix | Self::FormatDocument | Self::OrganizeImports => G::Selection,
             Self::InstallServer | Self::StartServerInstall | Self::CancelServerInstall | Self::WorkspaceRoot | Self::LanguageServer | Self::ServerDetails | Self::CopyServerDetails | Self::ServerRuntime
             | Self::RestartServer | Self::ExcludeRubyTooling | Self::ResetProjectServerSettings | Self::PersistentIndex | Self::RebuildIndex
             | Self::DisableServer | Self::EnableServer => G::LanguageServers,

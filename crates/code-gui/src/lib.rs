@@ -110,7 +110,8 @@ pub enum Modal {
     ScratchFiles { files: Vec<PathBuf>, at: usize },
     /// An in-window destination prompt; the originating tab stays captured until acceptance.
     SaveAs { tab: code_core::tabs::TabId, dir: PathBuf, input: String, selected: bool, error: Option<String> },
-    NewScratch { input: String, selected: bool, error: Option<String> },
+    /// New Scratch File's kinds ([`code_core::scratch::KINDS`]): typing filters, Enter creates `scratch_N.<ext>`.
+    NewScratch { query: String, at: usize },
     RenameTerminal { id: code_core::terminal::Id, input: String, selected: bool, error: Option<String> },
     /// Unified file, symbol and command search; result targets stay in the core.
     /// Search Everywhere: the highlighted row, and the query's caret (a byte offset; `None` at the end).
@@ -315,6 +316,8 @@ pub struct ReaderView {
     /// macOS's keys: with macOS Word Motion on, Option+Left/Right move by word in the text (Back/Forward stay on
     /// Cmd+[ / Cmd+]). Tests turn it on elsewhere.
     mac_keys: bool,
+    /// The last Always Select Opened File ticket acted on.
+    follow_seen: u64,
     navigation_drawn: Option<(u64, usize, usize)>,
     /// Popup viewport and fractional wheel steps, independent of the highlighted option.
     modal_scroll: std::cell::Cell<usize>,
@@ -795,7 +798,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1115,6 +1118,16 @@ impl ReaderView {
             if !self.session.state().has_tree() { self.tree_focus = false; }
         } else if library_read && self.tree_sel == self.session.state().active_in_tree() {
             self.tree_reveal = true;
+        }
+        // Always Select Opened File: the active file's row is selected and scrolled to; a hidden explorer stays hidden.
+        if let Some((path, ticket)) = self.session.state().tree_follow()
+            && ticket > self.follow_seen {
+            self.follow_seen = ticket;
+            if let Some(i) = self.session.state().tree_rows().position(|r| r.path == path) {
+                self.tree_sel = Some(path);
+                self.tree_reveal = true;
+                self.tree_scroll = self.tree_scroll.min(i);
+            }
         }
         // A completed listing removes its Loading/retry row; keep selection in that archive.
         if let Some((selected, parent)) = archive_parent
@@ -1627,6 +1640,10 @@ impl ReaderView {
     #[cfg(feature = "test-support")]
     pub fn enable_draft_input_for_test(&mut self) { self.session.enable_text_input_for_test(); }
 
+    /// Whether the explorer panel is shown (other crates' parity tests).
+    #[cfg(feature = "test-support")]
+    pub fn explorer_shown_for_test(&self) -> bool { self.tree_shown }
+
     /// Search in Project's fields and the focused one's caret, while it is open (other crates' parity tests).
     #[cfg(feature = "test-support")]
     pub fn search_fields_for_test(&self) -> Option<(String, String, usize)> {
@@ -2056,7 +2073,11 @@ impl ReaderView {
                 Some(&(_, action)) => self.branch_action(&target, action, window, cx),
                 None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
             },
-            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
+            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
+            Some(Modal::NewScratch { query, at }) => match code_core::scratch::matching(&query).get(at) {
+                Some(&kind) => self.dispatch(Command::NewScratchFile(kind), cx),
+                None => self.modal = Some(Modal::NewScratch { query, at }),
+            },
             Some(Modal::Places { list, query, at }) => {
                 let row = self.session.state().place_rows(list, &query).into_iter().nth(at).filter(|r| !r.missing);
                 match row {
@@ -2095,7 +2116,7 @@ impl ReaderView {
                 Some(i) if i < self.session.keymap().rows().len() => *at = i,
                 _ => return,
             },
-            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
+            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. } | Modal::NewScratch { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
             },
@@ -2103,7 +2124,7 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -2537,6 +2558,26 @@ impl ReaderView {
                 }
             }
             return cx.notify();
+        }
+        // New Scratch File's kinds: typing filters (the shared field), Up/Down/Page move, Enter creates, Escape closes.
+        if let Some(Modal::NewScratch { query, at }) = self.modal.clone() {
+            let last = code_core::scratch::matching(&query).len().saturating_sub(1);
+            let at = at.min(last);
+            let set = |at: usize| Some(Modal::NewScratch { query: query.clone(), at });
+            match key {
+                "escape" => self.modal = None,
+                "up" => self.modal = set(at.saturating_sub(1)),
+                "down" => self.modal = set((at + 1).min(last)),
+                "pageup" => self.modal = set(at.saturating_sub(10)),
+                "pagedown" => self.modal = set((at + 10).min(last)),
+                "enter" => {
+                    self.modal = set(at);
+                    self.modal_accept(window, cx);
+                }
+                _ => {}
+            }
+            cx.notify();
+            return;
         }
         // A list of places: typing filters, Up/Down move, Enter goes there, F6 forgets, Escape back to the text.
         if let Some(Modal::Places { list, query, at }) = self.modal.clone() {
@@ -5555,9 +5596,17 @@ impl ReaderView {
                 vec![(format!("› {input}{}", if *selected { "  (selected)" } else { "" }), None),
                     (error.clone().unwrap_or_else(|| "Save As — type a path; Enter saves, Escape cancels; Ctrl+A selects all".into()), None)]
             }
-            Some(Modal::NewScratch { input, selected, error } | Modal::RenameTerminal { input, selected, error, .. }) => {
+            Some(Modal::RenameTerminal { input, selected, error, .. }) => {
                 vec![(format!("› {input}{}", if *selected { "  (selected)" } else { "" }), None),
-                    (error.clone().unwrap_or_else(|| "New scratch file — name with extension chooses language; Enter creates, Escape cancels; Ctrl+A selects all".into()), None)]
+                    (error.clone().unwrap_or_else(|| "Rename terminal tab — Enter renames, Escape cancels; Ctrl+A selects all".into()), None)]
+            }
+            Some(Modal::NewScratch { query, .. }) => {
+                let mut rows = vec![(format!("› {query}"), None), ("New Scratch File — type to filter; Enter creates the next scratch_N file in the personal scratch folder, Escape cancels".to_string(), None)];
+                rows.extend(code_core::scratch::matching(query).into_iter().map(|i| {
+                    let kind = &code_core::scratch::KINDS[i];
+                    (format!("{}  .{}", kind.label, kind.extension), None)
+                }));
+                rows
             }
             Some(Modal::Create { kind, dir, name, error }) => {
                 let where_ = if dir.is_empty() { "the project root" } else { dir.as_str() };
@@ -7093,7 +7142,7 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
 
 impl Modal {
     fn is_form(&self) -> bool {
-        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::NewScratch { .. } | Self::RenameTerminal { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. })
+        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::RenameTerminal { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. })
     }
 
     /// The highlighted row of [`ReaderView::modal_rows`].
@@ -7103,9 +7152,9 @@ impl Modal {
             Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Recent { at } => *at,
             Modal::ScratchFiles { at, .. } => *at + 1,
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
-            Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } => *at + FINDER_HEADER_ROWS,
+            Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::NewScratch { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,

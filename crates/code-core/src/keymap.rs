@@ -319,10 +319,26 @@ fn preset_chords(preset: KeymapPreset) -> &'static [Preset] {
     }
 }
 
+/// IntelliJ's macOS keymap where it differs from the Linux one the preset follows: Cmd+Shift+N is New Scratch File
+/// there, so Find File keeps Cmd+P (and double Shift). Ctrl is the GUI's Cmd on macOS.
+const INTELLIJ_MACOS: &[Preset] = &[(CommandId::FindFile, &["Ctrl+P"]), (CommandId::NewScratch, &["Ctrl+Shift+N"])];
+
+/// A preset's chords on this platform (`macos`: IntelliJ's macOS differences applied).
+fn platform_chords(preset: KeymapPreset, macos: bool) -> Vec<Preset> {
+    let base = preset_chords(preset);
+    if !(macos && preset == KeymapPreset::IntelliJ) { return base.to_vec(); }
+    let changed = |id: CommandId| INTELLIJ_MACOS.iter().find(|(m, _)| *m == id).copied();
+    base.iter().map(|&(id, chords)| changed(id).unwrap_or((id, chords)))
+        .chain(INTELLIJ_MACOS.iter().copied().filter(|(m, _)| !base.iter().any(|(id, _)| id == m)))
+        .collect()
+}
+
 /// The resolved chords of one keymap: presets with the overrides applied.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Keymap {
     preset: KeymapPreset,
+    /// IntelliJ's macOS chords apply (the GUI on macOS; tests choose).
+    macos: bool,
     overrides: BTreeMap<CommandId, Option<Chord>>,
     bindings: Vec<(Chord, CommandId)>,
     /// Preset chords an override took from their command, reported when the override is made.
@@ -337,6 +353,11 @@ impl Default for Keymap {
 
 impl Keymap {
     pub fn new(preset: KeymapPreset, overrides: BTreeMap<CommandId, Option<Chord>>) -> Self {
+        Self::for_platform(preset, overrides, cfg!(target_os = "macos"))
+    }
+
+    /// [`Keymap::new`] for macOS (`macos`) or another platform, whichever this one is.
+    pub fn for_platform(preset: KeymapPreset, overrides: BTreeMap<CommandId, Option<Chord>>, macos: bool) -> Self {
         let mut bindings: Vec<(Chord, CommandId)> = Vec::new();
         let mut lost = Vec::new();
         // An explicit override is the user's decision and always resolves; a second override of the same chord stays
@@ -348,7 +369,7 @@ impl Keymap {
                 None => bindings.push((chord.clone(), id)),
             }
         }
-        for &(id, chords) in preset_chords(preset) {
+        for (id, chords) in platform_chords(preset, macos) {
             if overrides.contains_key(&id) {
                 continue;
             }
@@ -360,7 +381,7 @@ impl Keymap {
                 }
             }
         }
-        Self { preset, overrides, bindings, lost }
+        Self { preset, macos, overrides, bindings, lost }
     }
 
     pub fn preset(&self) -> KeymapPreset {
@@ -413,19 +434,19 @@ impl Keymap {
         }
         let mut overrides = self.overrides.clone();
         overrides.insert(id, Some(chord));
-        Ok(Self::new(self.preset, overrides))
+        Ok(Self::for_platform(self.preset, overrides, self.macos))
     }
 
     /// Forget `id`'s override, returning it to the preset.
     pub fn reset(&self, id: CommandId) -> Self {
         let mut overrides = self.overrides.clone();
         overrides.remove(&id);
-        Self::new(self.preset, overrides)
+        Self::for_platform(self.preset, overrides, self.macos)
     }
 
     /// Keep the overrides and change the preset.
     pub fn with_preset(&self, preset: KeymapPreset) -> Self {
-        Self::new(preset, self.overrides.clone())
+        Self::for_platform(preset, self.overrides.clone(), self.macos)
     }
 
     /// Persistable overrides: command slug → chord label, or `none` for a command the user unbound.
@@ -496,6 +517,21 @@ mod tests {
     fn press(text: &str) -> KeyPress {
         let chord = Chord::parse(text).unwrap();
         KeyPress::new(&chord.key, chord.ctrl, chord.shift, chord.alt).unwrap()
+    }
+
+    #[test]
+    fn on_macos_cmd_shift_n_is_new_scratch_file_and_find_file_keeps_cmd_p() {
+        let mac = Keymap::for_platform(KeymapPreset::IntelliJ, BTreeMap::new(), true);
+        assert!(mac.lost.is_empty(), "{:?}", mac.lost);
+        assert_eq!(mac.command(&press("Ctrl+Shift+N")), Some(CommandId::NewScratch));
+        assert_eq!(mac.command(&press("Ctrl+P")), Some(CommandId::FindFile));
+        assert_eq!(mac.labels(CommandId::FindFile).as_deref(), Some("Ctrl+P"));
+        let linux = Keymap::for_platform(KeymapPreset::IntelliJ, BTreeMap::new(), false);
+        assert_eq!(linux.command(&press("Ctrl+Shift+N")), Some(CommandId::FindFile), "elsewhere IntelliJ's Linux keys stay");
+        assert_eq!(Keymap::for_platform(KeymapPreset::VsCode, BTreeMap::new(), true).command(&press("Ctrl+Shift+N")), None, "VS Code's are its own");
+        // A rebinding keeps the platform.
+        let rebound = mac.bind(CommandId::Save, Chord::parse("Ctrl+Alt+S").unwrap()).unwrap();
+        assert_eq!(rebound.command(&press("Ctrl+Shift+N")), Some(CommandId::NewScratch));
     }
 
     #[test]

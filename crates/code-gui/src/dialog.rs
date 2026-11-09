@@ -34,7 +34,6 @@ impl ReaderView {
             Modal::Create { kind, dir, name, error } => (Form::Create(*kind, dir), name.as_str(), false, None, error.as_deref()),
             Modal::SaveAs { input, selected, error, .. } => (Form::SaveAs, input.as_str(), *selected, None, error.as_deref()),
             Modal::RenameTerminal { input, selected, error, .. } => (Form::RenameTerminal, input.as_str(), *selected, None, error.as_deref()),
-            Modal::NewScratch { input, selected, error } => (Form::Scratch, input.as_str(), *selected, None, error.as_deref()),
             Modal::Relocate { kind, from, input, error } => (Form::Relocate(*kind, from), input.as_str(), false, None, error.as_deref()),
             Modal::PasteEntry { request, name, selected, error } => (Form::Paste(request), name.as_str(), *selected, None, error.as_deref()),
             Modal::ConfirmDelete { removal, from, error } => (Form::Delete(*removal, from), "", false, None, error.as_deref()),

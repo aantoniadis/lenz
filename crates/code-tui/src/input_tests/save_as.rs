@@ -93,22 +93,27 @@ fn scratch_commands_and_tab_context_menu_use_real_terminal_input() {
     let d = tempfile::tempdir().unwrap();
     let mut a = App::new(config(d.path()), Some(d.path().to_owned()));
     draw(&mut a, 100, 18);
-    // The shared command menu opens the name prompt.
+    // The shared command menu opens the list of kinds: pinned ones first, typing filters, Enter creates the next one.
     key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
     a.handle(Event::Paste("New Scratch File".into()));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     assert!(matches!(a.modal.as_ref().map(|m| &m.kind), Some(Prompt::NewScratch)));
-    a.handle(Event::Paste("personal.rs".into()));
+    assert_eq!(a.choices().iter().take(4).map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Plain text", "JSON", "Ruby", "PostgreSQL"]);
+    let screen = draw_screen(&mut a, 100, 18);
+    assert!(screen.contains("PostgreSQL") && screen.contains(".sql"), "{screen}");
+    for c in "rub".chars() { key(&mut a, KeyCode::Char(c), KeyModifiers::NONE); }
+    assert_eq!(a.choices().first().map(|c| c.label.as_str()), Some("Ruby"));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     settle(&mut a, |a| a.session.state().current_source().is_some());
     let scratch = a.session.state().active().unwrap().source().to_owned();
     assert!(scratch.exists() && !scratch.starts_with(d.path().join("project")));
-    assert!(draw_screen(&mut a, 100, 18).contains("personal.rs"));
+    assert_eq!(scratch.file_name().and_then(|n| n.to_str()), Some("scratch_1.rb"));
+    assert!(draw_screen(&mut a, 100, 18).contains("scratch_1.rb"));
     a.run(CommandId::Close);
     key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
     a.handle(Event::Paste("Scratch Files".into()));
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
-    assert!(draw_screen(&mut a, 100, 18).contains("personal.rs"));
+    assert!(draw_screen(&mut a, 100, 18).contains("scratch_1.rb"));
     for (w, h) in [(1, 1), (20, 5), (100, 18)] { draw(&mut a, w, h); key(&mut a, KeyCode::End, KeyModifiers::NONE); key(&mut a, KeyCode::Up, KeyModifiers::NONE); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.source() == scratch));

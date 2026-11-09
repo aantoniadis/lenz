@@ -105,18 +105,22 @@ fn gui_scratch_and_bulk_close_use_menus_and_tab_right_clicks(cx: &mut TestAppCon
     v.simulate_keystrokes("escape");
     choose_menu_command(&mut v, &f, CommandId::NewScratch);
     assert!(!cx.did_prompt_for_new_path());
-    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|r| r.0.contains("New scratch file"))));
-    v.simulate_keystrokes("ctrl-a");
-    type_text(&mut v, "personal.rs");
+    // The kinds, pinned ones first; typing filters, Enter creates the next numbered scratch file of the kind.
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
+    assert!(rows[1].contains("New Scratch File"), "{rows:?}");
+    assert_eq!(&rows[2..6], ["Plain text  .txt", "JSON  .json", "Ruby  .rb", "PostgreSQL  .sql"]);
+    type_text(&mut v, "rub");
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows().get(2).map(|r| r.0.clone())).as_deref(), Some("Ruby  .rb"));
     v.simulate_keystrokes("enter");
-    settle(cx, &f, active_is("personal.rs"));
+    settle(cx, &f, active_is("scratch_1.rb"));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().and_then(|d| d.language())), Some(lenz_content::highlight::Language::Ruby));
     let scratch = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().source().to_owned());
     assert!(scratch.exists());
     choose_menu_command(&mut v, &f, CommandId::Close);
     choose_menu_command(&mut v, &f, CommandId::ScratchFiles);
-    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|r| r.0 == "personal.rs")));
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|r| r.0 == "scratch_1.rb")));
     v.simulate_keystrokes("enter");
-    settle(cx, &f, active_is("personal.rs"));
+    settle(cx, &f, active_is("scratch_1.rb"));
     v.simulate_keystrokes("ctrl-n");
     draw(&mut v);
     let p = f.view.read_with(&v, |r, _| { let (x0, x1, _) = r.tab_hits[0]; point(px((x0 + x1) / 2.0), px(r.panes[0].bar.2 + line_h() / 2.0)) });
@@ -183,13 +187,15 @@ fn gui_file_prompts_capture_input_and_save_the_originating_tab(cx: &mut TestAppC
     assert!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().id() == other && r.session().state().active().unwrap().untitled()));
     assert_eq!(text(&v, &f), "");
 
+    // The kind list owns its keys, at any size; a filter with no kind creates nothing, and Escape cancels.
     choose_menu_command(&mut v, &f, CommandId::NewScratch);
-    v.simulate_keystrokes("ctrl-a"); type_text(&mut v, "../refused.rs"); v.simulate_keystrokes("enter");
-    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewScratch { error: Some(e), .. }) if e.contains("path separator"))));
-    for (w, h) in [(1.0, 1.0), (220.0, 100.0), (800.0, 400.0)] { v.simulate_resize(size(px(w), px(h))); draw(&mut v); v.simulate_keystrokes("end up ctrl-z ctrl-s"); }
+    type_text(&mut v, "zzz"); v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewScratch { query, .. }) if query == "zzz")));
+    for (w, h) in [(1.0, 1.0), (220.0, 100.0), (800.0, 400.0)] { v.simulate_resize(size(px(w), px(h))); draw(&mut v); v.simulate_keystrokes("pagedown up ctrl-z ctrl-s"); }
     assert_eq!(text(&v, &f), "");
-    v.simulate_keystrokes("ctrl-a"); type_text(&mut v, "cancel.rs"); v.simulate_keystrokes("escape");
-    assert!(!f.view.read_with(&v, |r, _| r.session().scratch_directory().join("cancel.rs").exists()));
+    v.simulate_keystrokes("escape");
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none()));
+    assert!(f.view.read_with(&v, |r, _| r.session().scratch_files().unwrap().is_empty()), "nothing was created");
     assert!(!cx.did_prompt_for_new_path());
 }
 

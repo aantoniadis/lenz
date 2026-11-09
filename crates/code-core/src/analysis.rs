@@ -279,6 +279,12 @@ impl Analysis {
         }
     }
 
+    /// A view's derived content (syntax, Markdown preview, semantic colours and hints) was dropped while its edited
+    /// draft stays analysed: those results are asked again when it is shown, not taken as already delivered.
+    pub(crate) fn release_derived(&mut self, id: BufferId) {
+        for consumer in [Consumer::Syntax, Consumer::Markdown, Consumer::Decode(crate::decor::Decor::Hints), Consumer::Decode(crate::decor::Decor::Tokens)] { self.cancel_consumer(id, consumer); }
+    }
+
     pub(crate) fn forget(&mut self, id: BufferId) {
         self.dirty = true;
         if let Some(entry) = self.entries.get_mut(&id) { entry.live = false; entry.pending = None; entry.queued = false; entry.group.cancel(); }

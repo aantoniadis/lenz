@@ -149,6 +149,8 @@ pub(crate) enum ChoiceTarget {
     Path(PathBuf),
     Theme(String),
     Place(Place),
+    /// New Scratch File's kind ([`code_core::scratch::KINDS`] index).
+    ScratchKind(usize),
     Sibling {
         pane: u8,
         crumb: usize,
@@ -190,6 +192,8 @@ pub(crate) struct App {
     pub icons_override: Option<bool>,
     /// macOS's keys: with macOS Word Motion on, Alt (Option)+Left/Right move by word in the text.
     pub mac_keys: bool,
+    /// The last Always Select Opened File ticket acted on.
+    follow_seen: u64,
     pub session: Session,
     pub modal: Option<Modal>,
     pub focus: Focus,
@@ -262,6 +266,7 @@ impl App {
             // Unit tests read plain labels unless they choose glyphs (the default has its own test).
             icons_override: if cfg!(test) { Some(false) } else { std::env::var("LENZ_ICONS").ok().map(|v| v == "nerd") },
             mac_keys: cfg!(target_os = "macos"),
+            follow_seen: 0,
             session: Session::with_text_input(config, enabled),
             modal: None,
             focus: Focus::Text,
@@ -367,6 +372,19 @@ impl App {
             // A restored view keeps its saved scroll, even when its highlight is off screen.
             self.tree_seen = self.tree_at;
             self.pending_explorer = None;
+        }
+    }
+
+    /// Always Select Opened File: highlight the active file's row and scroll to it, once per ticket; a hidden explorer
+    /// stays hidden.
+    pub(crate) fn sync_follow(&mut self) {
+        let Some((path, ticket)) = self.session.state().tree_follow() else { return };
+        if ticket <= self.follow_seen { return; }
+        self.follow_seen = ticket;
+        if let Some(at) = self.session.state().tree_rows().position(|r| r.path == path) {
+            self.tree_at = at;
+            self.tree_seen = usize::MAX;
+            self.tree_top = self.tree_top.min(at);
         }
     }
 
@@ -478,6 +496,7 @@ impl App {
             self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
         }
         self.sync_reveal();
+        self.sync_follow();
         if let Some(plan) = effect.external { self.start(plan.launch,plan.toast); }
         if let Some(copy) = effect.copy {
             self.copy = Some(copy);
@@ -572,6 +591,7 @@ impl App {
                 .or_else(|| tree_parent.and_then(|parent| self.session.state().tree_rows().position(|row| row.path == parent))).unwrap_or(0);
         }
         self.sync_reveal();
+        self.sync_follow();
         if self.session.state().results().map(|r| r.id()) != results_id {
             self.results_at = 0;
             self.results_top = 0;
@@ -1275,6 +1295,13 @@ impl App {
                     .map(|e| simple(e.label.clone(), ChoiceTarget::Theme(e.id.clone()))),
             )
             .collect(),
+            Prompt::NewScratch => code_core::scratch::matching(&modal.input)
+                .into_iter()
+                .map(|i| {
+                    let kind = &code_core::scratch::KINDS[i];
+                    Choice { label: kind.label.to_string(), detail: Some(format!(".{}", kind.extension)), disabled: None, target: ChoiceTarget::ScratchKind(i) }
+                })
+                .collect(),
             Prompt::Places(list) => self
                 .session
                 .state()
@@ -1317,7 +1344,7 @@ impl App {
         };
         if matches!(
             modal.kind,
-            Prompt::Places(_) | Prompt::ServerRuntime | Prompt::Themes | Prompt::Branches | Prompt::BranchMenu { .. }
+            Prompt::Places(_) | Prompt::NewScratch | Prompt::ServerRuntime | Prompt::Themes | Prompt::Branches | Prompt::BranchMenu { .. }
         ) || query.is_empty()
         {
             choices
@@ -1337,7 +1364,7 @@ impl App {
                 Prompt::Open => "Open file · enter path",
                 Prompt::RenameTerminal { .. } => "Rename terminal tab · Enter renames · Esc cancels",
                 Prompt::TerminalPath => "Paste path into terminal · Enter pastes · no Enter is sent to the shell",
-                Prompt::NewScratch => "New scratch file · name with extension chooses language · Enter creates · Esc cancels",
+                Prompt::NewScratch => "New scratch file · type to filter · Enter creates the next scratch_N file · Esc cancels",
                 Prompt::ScratchFiles(_) => "Personal scratch files · type to filter · Enter opens · Esc cancels",
                 Prompt::SaveAs(_) => "Save As · enter the new file's path",
                 Prompt::Create { kind, dir } => {
@@ -2034,10 +2061,10 @@ impl App {
                 }
             }
             Prompt::NewScratch => {
-                let name = input.trim().to_owned();
-                if let Some(why) = code_core::create::name_refusal(&name) {
-                    if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }
-                } else { self.close_modal(); self.dispatch(Command::NewScratch(name)); }
+                if let Some(Choice { target: ChoiceTarget::ScratchKind(kind), .. }) = self.choices().get(at).cloned() {
+                    self.close_modal();
+                    self.dispatch(Command::NewScratchFile(kind));
+                }
             }
             Prompt::SaveAs(tab) => {
                 if input.is_empty() {
@@ -2229,6 +2256,7 @@ impl App {
                         }
                     }
                     ChoiceTarget::Place(place) => self.dispatch(Command::GoToPlace(place)),
+                    ChoiceTarget::ScratchKind(kind) => self.dispatch(Command::NewScratchFile(kind)),
                     ChoiceTarget::Branch(target) => match target {
                         code_core::branches::BranchTarget::Action(id) => self.run(id),
                         t => {

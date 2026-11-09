@@ -56,6 +56,7 @@ pub mod workspace;
 
 pub mod navigation;
 pub mod line_edit;
+pub mod scratch;
 
 pub mod text;
 

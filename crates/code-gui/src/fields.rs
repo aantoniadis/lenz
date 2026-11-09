@@ -39,9 +39,6 @@ impl ReaderView {
             Modal::SaveAs {
                 input, selected, ..
             }
-            | Modal::NewScratch {
-                input, selected, ..
-            }
             | Modal::RenameTerminal {
                 input, selected, ..
             } => (input.as_str(), None, *selected, 0),
@@ -57,6 +54,7 @@ impl ReaderView {
             | Modal::ServerRuntime { path, .. } => (path.as_str(), None, false, 0),
             Modal::Branches { query, .. }
             | Modal::Places { query, .. }
+            | Modal::NewScratch { query, .. }
             | Modal::Siblings { query, .. }
             | Modal::Declarations { query, .. } => (query.as_str(), None, false, 0),
             _ => return None,
@@ -136,7 +134,6 @@ impl ReaderView {
                     }
                 }
                 Modal::SaveAs { input, .. }
-                | Modal::NewScratch { input, .. }
                 | Modal::RenameTerminal { input, .. }
                 | Modal::Revision { input, .. }
                 | Modal::GoTo { input, .. }
@@ -149,6 +146,7 @@ impl ReaderView {
                 | Modal::ServerRuntime { path, .. } => path,
                 Modal::Branches { query, .. }
                 | Modal::Places { query, .. }
+                | Modal::NewScratch { query, .. }
                 | Modal::Siblings { query, .. }
                 | Modal::Declarations { query, .. } => query,
                 _ => return false,
@@ -164,7 +162,6 @@ impl ReaderView {
                     *caret = cursor.caret;
                 }
                 Modal::SaveAs { selected, .. }
-                | Modal::NewScratch { selected, .. }
                 | Modal::RenameTerminal { selected, .. }
                 | Modal::PasteEntry { selected, .. } => *selected = all_selected,
                 _ => {}
@@ -173,7 +170,6 @@ impl ReaderView {
                 match modal {
                     Modal::Search { .. } => {}
                     Modal::SaveAs { error, .. }
-                    | Modal::NewScratch { error, .. }
                     | Modal::RenameTerminal { error, .. }
                     | Modal::PasteEntry { error, .. }
                     | Modal::Revision { error, .. }
@@ -184,6 +180,7 @@ impl ReaderView {
                     Modal::ServerRuntime { at, .. }
                     | Modal::Branches { at, .. }
                     | Modal::Places { at, .. }
+                    | Modal::NewScratch { at, .. }
                     | Modal::Siblings { at, .. } => *at = 0,
                     Modal::Declarations { query, semantic } => {
                         let command = if *semantic {

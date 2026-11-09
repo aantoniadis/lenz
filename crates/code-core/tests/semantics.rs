@@ -4373,3 +4373,106 @@ fn erasing_the_last_name_closes_automatic_but_preserves_manual_completion() {
     assert_eq!(f.s.state().completion().unwrap().trigger, code_core::session::CompletionTrigger::Manual);
     assert_eq!(current_text(f.s.state()), original);
 }
+
+/// Each Go to Definition is a Back step, also within one file: Back returns to every place a definition was asked
+/// from, in turn, and Forward retraces the steps.
+#[test]
+fn back_returns_to_each_place_a_definition_was_asked_from_in_the_same_file() {
+    let main = "fn main() {\n    first();\n}\nfn first() {\n    second();\n}\nfn second() {}\n";
+    let mut f = fixture(&[], &[("src/main.rs", main)]);
+    f.open("src/main.rs");
+    let caret = |f: &Fixture| f.s.state().selection().unwrap().head;
+    let first_call = f.caret("first();") + 1;
+    f.s.dispatch(Command::Definition { peek: false });
+    f.settle(|s| s.state().asking().is_none() && s.state().selection().is_some_and(|sel| sel.range().start == main.find("fn first").unwrap() + 3));
+    assert_eq!(f.selected_text(), "first");
+    let second_call = f.caret("second();") + 1;
+    f.s.dispatch(Command::Definition { peek: false });
+    f.settle(|s| s.state().asking().is_none() && s.state().selection().is_some_and(|sel| sel.range().start == main.find("fn second").unwrap() + 3));
+    assert!(f.s.state().can_back());
+    f.s.dispatch(Command::Back);
+    assert_eq!(caret(&f), second_call, "back to the second click");
+    f.s.dispatch(Command::Back);
+    assert_eq!(caret(&f), first_call, "back to the first click");
+    // Forward retraces the steps: where the second definition was asked from (the place left), then that definition.
+    f.s.dispatch(Command::Forward);
+    assert_eq!(caret(&f), second_call, "forward to the second click");
+    f.s.dispatch(Command::Forward);
+    assert_eq!(f.selected_text(), "second", "forward to the second definition");
+    assert!(!f.s.state().can_forward());
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), main);
+}
+
+/// A definition deep in nested modules lands with its line in view below the sticky headers of the modules around
+/// it, not under them, in the same file and from another one.
+#[test]
+fn a_definition_in_nested_modules_lands_below_the_sticky_headers() {
+    let body = "                    let _ = 1;\n".repeat(12);
+    // The methods before it push `fn deep` far below the headers, as in a long class.
+    let before = "                pub fn filler() {}\n".repeat(30);
+    let nested = format!("pub mod a {{\n    pub mod b {{\n        pub mod c {{\n            pub mod d {{\n{before}                pub fn deep() {{\n{body}                }}\n            }}\n        }}\n    }}\n}}\n");
+    let main = format!("{nested}fn main() {{\n{}    a::b::c::d::deep();\n}}\n", "    let _ = 0;\n".repeat(40));
+    let other = "mod lib;\nfn caller() { lib::a::b::c::d::deeper(); }\n";
+    let mut f = fixture(&[], &[("src/main.rs", &main), ("src/lib.rs", &nested.replace("fn deep", "fn deeper")), ("src/other.rs", other)]);
+    let def_line = 34;
+    for (file, needle, name) in [("src/main.rs", "deep();", "deep"), ("src/other.rs", "deeper();", "deeper")] {
+        f.open(file);
+        f.s.dispatch(Command::SetTextSize { pane: 0, cols: 100, rows: 20 });
+        f.s.dispatch(Command::Scroll(usize::MAX));
+        f.definition(needle, false);
+        f.settle(|s| s.state().asking().is_none() && s.state().current_source().is_some_and(|d| d.line_of(s.state().selection().map_or(0, |sel| sel.head)) == def_line && !d.source().ends_with("other.rs")));
+        // Its sticky headers, once the file's declarations are known.
+        f.settle(|s| s.state().active().is_some_and(|t| s.state().view(t.id()).is_some_and(|v| v.declarations().is_some())));
+        let (top, band) = {
+            let state = f.s.state();
+            let view = state.view(state.active().unwrap().id()).unwrap();
+            let code_core::layout::Query::Ready(sticky) = view.layout_sticky(code_core::tabs::sticky_cap(20), None) else { panic!("sticky layout pending") };
+            (view.tab().top_line(), sticky.len())
+        };
+        assert!(def_line >= top + band, "{file}: `fn deep` (line {def_line}) is under the {band} sticky header(s) from top line {top}");
+        assert_eq!(f.selected_text(), name, "{file}");
+    }
+}
+
+/// Leaving an edited file for another of its language and coming back: its semantic colours and hints come back with
+/// its syntax colours, and the other file has its own.
+#[test]
+fn an_edited_file_shown_again_gets_its_semantic_colours_and_hints_back() {
+    let mut f = fixture(&[], &[("src/main.rs", HINTED), ("src/other.rs", HINTED)]);
+    f.open("src/main.rs");
+    f.settle(decorated);
+    let tab = f.s.state().active().unwrap().id();
+    let doc = f.s.state().current_source().unwrap().clone();
+    let end = doc.len_bytes();
+    f.s.dispatch(Command::Edit { tab, expected: doc.key(), edits: vec![code_core::text::TextEdit { range: end..end, text: "fn broken( {\n".into() }], kind: code_core::text::EditKind::Typing });
+    f.settle(|s| s.state().tab_dirty(tab));
+    f.s.dispatch(Command::Open(f.root.join("src/other.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("other.rs")));
+    f.settle(decorated);
+    f.s.dispatch(Command::ActivateTab(tab));
+    assert!(f.s.state().active().is_some_and(|t| t.id() == tab && t.source().ends_with("main.rs")), "back on the edited file: {:?}", f.s.state().active().map(|t| t.source().to_owned()));
+    f.settle(|s| decorated(s) && active_view(s).is_some_and(|v| v.highlights().is_some()));
+    assert!(f.s.state().tab_dirty(tab), "still unsaved");
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), HINTED);
+}
+
+/// The same with a server that sends no semantic colours: the edited file's syntax colours come back on their own.
+#[test]
+fn an_edited_file_shown_again_is_highlighted_with_a_server_without_decorations() {
+    let mut f = fixture(&[("FAKE_LSP_NO_DECOR", "1")], &[("src/main.rs", HINTED), ("src/other.rs", HINTED)]);
+    f.open("src/main.rs");
+    let colored = |s: &Session| active_view(s).is_some_and(|v| v.highlights().is_some_and(|h| h.spans(0..1).iter().any(|l| !l.is_empty())));
+    f.settle(colored);
+    let tab = f.s.state().active().unwrap().id();
+    let doc = f.s.state().current_source().unwrap().clone();
+    let end = doc.len_bytes();
+    f.s.dispatch(Command::Edit { tab, expected: doc.key(), edits: vec![code_core::text::TextEdit { range: end..end, text: "fn broken( {\n".into() }], kind: code_core::text::EditKind::Typing });
+    f.settle(|s| s.state().tab_dirty(tab));
+    f.s.dispatch(Command::Open(f.root.join("src/other.rs")));
+    f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("other.rs")));
+    f.settle(colored);
+    f.s.dispatch(Command::ActivateTab(tab));
+    assert!(f.s.state().active().is_some_and(|t| t.id() == tab && t.source().ends_with("main.rs")));
+    f.settle(colored);
+    assert_eq!(std::fs::read_to_string(f.root.join("src/main.rs")).unwrap(), HINTED);
+}

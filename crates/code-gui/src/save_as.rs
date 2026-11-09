@@ -15,7 +15,7 @@ impl ReaderView {
 
     /// File prompts own all input; the core still validates and writes, including the captured Save As tab.
     pub(super) fn file_prompt_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        let Some(Modal::SaveAs { input, selected, error, .. } | Modal::NewScratch { input, selected, error } | Modal::RenameTerminal { input, selected, error, .. }) = &mut self.modal else { return false };
+        let Some(Modal::SaveAs { input, selected, error, .. } | Modal::RenameTerminal { input, selected, error, .. }) = &mut self.modal else { return false };
         let key = ev.keystroke.key.as_str();
         let ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
         if key == "escape" { self.modal = None; cx.notify(); return true; }
@@ -31,13 +31,6 @@ impl ReaderView {
                     match self.session.terminal_rename_refusal(*id, input) {
                         Some(why) => { *error = Some(why); None }
                         None => Some(Command::Terminal(code_core::terminal::Command::Rename { id: *id, label: input.clone() })),
-                    }
-                }
-                Some(Modal::NewScratch { input, error, .. }) => {
-                    let name = input.trim();
-                    match code_core::create::name_refusal(name) {
-                        Some(why) => { *error = Some(why); None }
-                        None => Some(Command::NewScratch(name.into())),
                     }
                 }
                 _ => None,
@@ -83,7 +76,7 @@ impl ReaderView {
     pub(super) fn prompt_new_scratch(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         if let Err(why) = self.session.scratch_files() { self.dispatch(Command::Notice(format!("Scratch files: {why}")), cx); return; }
         self.modal_scroll.set(0);
-        self.modal = Some(Modal::NewScratch { input: "scratch.txt".into(), selected: true, error: None });
+        self.modal = Some(Modal::NewScratch { query: String::new(), at: 0 });
         cx.notify();
     }
 

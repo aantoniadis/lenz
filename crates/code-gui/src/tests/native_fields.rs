@@ -185,7 +185,9 @@ fn closing_a_composing_field_keeps_queued_native_callbacks_out_of_the_source(
         let mut v = visual(cx, &f);
         if popup {
             f.view.update(&mut v, |view, _| {
-                view.modal = Some(Modal::NewScratch {
+                view.modal = Some(Modal::SaveAs {
+                    tab: view.session.state().active().unwrap().id(),
+                    dir: std::path::PathBuf::from("/"),
                     input: String::new(),
                     selected: false,
                     error: None,

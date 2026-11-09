@@ -45,13 +45,25 @@ impl State {
     pub fn relative_line_numbers(&self) -> bool {
         self.settings.relative_line_numbers
     }
+    /// Save When Leaving a File is on.
+    pub fn save_on_leave(&self) -> bool {
+        self.settings.save_on_leave
+    }
     /// macOS Word Motion is on: Option+Left/Right move by word and word stops cross spaces.
     pub fn mac_word_motion(&self) -> bool {
         self.settings.mac_word_motion
     }
+    /// Search Everywhere ranks files near the open and recent ones higher.
+    pub fn rank_nearby_files(&self) -> bool {
+        self.settings.rank_nearby_files
+    }
     /// Search Everywhere's All tab also lists files by letters in order in their name.
     pub fn name_letter_search(&self) -> bool {
         self.settings.name_letter_search
+    }
+    /// Always Select Opened File is on: the explorer follows the active file.
+    pub fn always_select_opened_file(&self) -> bool {
+        self.settings.always_select_opened_file
     }
     /// Inline blame is on: the caret line's commit shows after its end.
     pub fn inline_blame(&self) -> bool {

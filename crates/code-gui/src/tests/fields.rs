@@ -51,7 +51,9 @@ fn popup_fields_copy_cut_paste_ranges_and_leave_source_untouched(cx: &mut TestAp
     settle(cx, &f, |v| v.session.state().current_source().is_some());
     let mut visual = visual(cx, &f);
     f.view.update(&mut visual, |v, _| {
-        v.modal = Some(Modal::NewScratch {
+        v.modal = Some(Modal::SaveAs {
+            tab: v.session.state().active().unwrap().id(),
+            dir: std::path::PathBuf::from("/"),
             input: "one é👩🏽‍💻 two".into(),
             selected: false,
             error: None,
@@ -67,19 +69,19 @@ fn popup_fields_copy_cut_paste_ranges_and_leave_source_untouched(cx: &mut TestAp
     visual.simulate_keystrokes("ctrl-x");
     assert!(f.view.read_with(
         &visual,
-        |v, _| matches!(&v.modal,Some(Modal::NewScratch{input,..})if input=="one  two")
+        |v, _| matches!(&v.modal,Some(Modal::SaveAs{input,..})if input=="one  two")
     ));
     visual.simulate_keystrokes("ctrl-v");
     assert!(f.view.read_with(
         &visual,
-        |v, _| matches!(&v.modal,Some(Modal::NewScratch{input,..})if input=="one é👩🏽‍💻 two")
+        |v, _| matches!(&v.modal,Some(Modal::SaveAs{input,..})if input=="one é👩🏽‍💻 two")
     ));
     visual.simulate_keystrokes("ctrl-a");
     visual.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(String::new())));
     visual.simulate_keystrokes("ctrl-v");
     assert!(f.view.read_with(
         &visual,
-        |v, _| matches!(&v.modal,Some(Modal::NewScratch{input,..})if input=="one é👩🏽‍💻 two")
+        |v, _| matches!(&v.modal,Some(Modal::SaveAs{input,..})if input=="one é👩🏽‍💻 two")
     ));
     visual.simulate_resize(size(px(240.), px(180.)));
     draw(&mut visual);
@@ -145,7 +147,9 @@ fn popup_character_and_word_selection_matches_the_text_editor(cx: &mut TestAppCo
     visual.simulate_keystrokes("home ctrl-right right shift-right shift-right ctrl-c");
     let from_editor = visual.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
     f.view.update(&mut visual, |v, _| {
-        v.modal = Some(Modal::NewScratch {
+        v.modal = Some(Modal::SaveAs {
+            tab: v.session.state().active().unwrap().id(),
+            dir: std::path::PathBuf::from("/"),
             input: "one é👩🏽‍💻 two".into(),
             selected: false,
             error: None,
@@ -181,12 +185,12 @@ fn option_printable_text_reaches_fields_without_stealing_reserved_find_actions(c
     assert_eq!((after.case, after.word, after.regex), (!before.case, !before.word, !before.regex));
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query().to_owned()), "™");
     v.simulate_keystrokes("escape");
-    f.view.update(&mut v, |r, _| { r.modal = Some(Modal::NewScratch { input: String::new(), selected: false, error: None }); });
+    f.view.update(&mut v, |r, _| { r.modal = Some(Modal::SaveAs { tab: r.session.state().active().unwrap().id(), dir: std::path::PathBuf::from("/"), input: String::new(), selected: false, error: None }); });
     draw(&mut v);
     v.simulate_event(option("2", "™"));
     #[cfg(target_os = "macos")]
     ime_handler(&f, &mut v).replace_text_in_range(None, "™");
-    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewScratch { input, .. }) if input == "™")));
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { input, .. }) if input == "™")));
     assert_eq!(std::fs::read(f.dir.path().join("original.txt")).unwrap(), b"original\n");
 }
 
@@ -199,7 +203,7 @@ fn popup_mouse_places_and_extends_a_unicode_selection(cx: &mut TestAppContext) {
         v.simulate_resize(size(px(width), px(300.)));
         f.view.update(&mut v, |r, _| {
             r.popup_fields.clear(); r.cancel_field_native();
-            r.modal = Some(Modal::NewScratch { input: "aé😀z".into(), selected: false, error: None });
+            r.modal = Some(Modal::SaveAs { tab: r.session.state().active().unwrap().id(), dir: std::path::PathBuf::from("/"), input: "aé😀z".into(), selected: false, error: None });
         });
         draw(&mut v);
         let at = |byte: usize, v: &mut VisualTestContext| {
@@ -215,7 +219,7 @@ fn popup_mouse_places_and_extends_a_unicode_selection(cx: &mut TestAppContext) {
         v.simulate_keystrokes("ctrl-c");
         assert_eq!(v.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text())).as_deref(), Some("é😀"), "width {width}");
         v.simulate_keystrokes("X");
-        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewScratch { input, .. }) if input == "aXz")));
+        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { input, .. }) if input == "aXz")));
     }
     assert_eq!(std::fs::read(f.dir.path().join("original.txt")).unwrap(), b"original\n");
 }
@@ -255,14 +259,14 @@ fn popup_native_input_registers_over_an_activity_log_focus(cx: &mut TestAppConte
     let mut v = visual(cx, &f);
     f.view.update(&mut v, |r, _| {
         r.log_focus = true;
-        r.modal = Some(Modal::NewScratch { input: String::new(), selected: false, error: None });
+        r.modal = Some(Modal::SaveAs { tab: r.session.state().active().unwrap().id(), dir: std::path::PathBuf::from("/"), input: String::new(), selected: false, error: None });
     });
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.input_state.registered.get()));
     let mut input = ime_handler(&f, &mut v);
     input.replace_and_mark_text_in_range(None, "仮", None);
     input.replace_text_in_range(None, "確定");
-    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewScratch { input, .. }) if input == "確定")));
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { input, .. }) if input == "確定")));
     assert_eq!(std::fs::read(f.dir.path().join("original.txt")).unwrap(), b"original\n");
 }
 

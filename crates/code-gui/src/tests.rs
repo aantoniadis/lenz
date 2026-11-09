@@ -2422,6 +2422,98 @@ fn indexing_percentage_is_visible_in_the_footer_and_status_dialog(cx: &mut TestA
 }
 
 #[gpui::test]
+fn back_returns_to_each_cmd_click_on_a_definition_in_the_same_file(cx: &mut TestAppContext) {
+    let source = "fn main() {\n    first();\n}\nfn first() {\n    second();\n}\nfn second() {}\n";
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = f.dir.path().join("pkg");
+    std::fs::create_dir_all(pkg.join("src")).unwrap();
+    std::fs::write(pkg.join("Cargo.toml"), "[package]\nname = \"pkg\"\n").unwrap();
+    let main = pkg.join("src/main.rs");
+    std::fs::write(&main, source).unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
+    f.view.update(cx, |v, cx| v.dispatch(Command::Open(main.clone()), cx));
+    settle(cx, &f, |r| r.session().state().current_source().is_some() && r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let char_w = f.view.read_with(&v, |r, _| r.char_w);
+    let at = |line: f32, col: f32| point(px(f32::from(text.origin.x) + num_w() + 8.0 + col * char_w), text.origin.y + px((line + 0.5) * line_h()));
+    let caret = |v: &mut VisualTestContext| f.view.read_with(v, |r, _| r.session().state().selection().unwrap().head);
+    let selected = |r: &ReaderView| r.session().state().selection().map(|s| s.range());
+    let cmd = Modifiers { platform: true, ..Default::default() };
+    // Cmd-click `first();` (line 2), then `second();` in first's body (line 5): each lands on its definition.
+    v.simulate_click(at(1.0, 6.5), cmd);
+    let first_click = caret(&mut v);
+    drop(v);
+    let first = source.find("fn first").unwrap() + 3;
+    settle(cx, &f, |r| r.session().state().asking().is_none() && selected(r) == Some(first..first + 5));
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    v.simulate_click(at(4.0, 6.5), cmd);
+    let second_click = caret(&mut v);
+    drop(v);
+    let second = source.find("fn second").unwrap() + 3;
+    settle(cx, &f, |r| r.session().state().asking().is_none() && selected(r) == Some(second..second + 6));
+    let mut v = visual(cx, &f);
+    // Cmd+[ goes back to each click in turn; Cmd+] forward again.
+    v.simulate_keystrokes("cmd-[");
+    assert_eq!(caret(&mut v), second_click, "back to the second Cmd-click");
+    v.simulate_keystrokes("cmd-[");
+    assert_eq!(caret(&mut v), first_click, "back to the first Cmd-click");
+    v.simulate_keystrokes("cmd-] cmd-]");
+    assert_eq!(f.view.read_with(&v, |r, _| selected(r)), Some(second..second + 6), "forward to the second definition");
+    assert_eq!(std::fs::read(&main).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
+fn a_cmd_click_into_nested_modules_shows_the_definition_below_the_sticky_headers(cx: &mut TestAppContext) {
+    let filler = "                pub fn filler() {}\n".repeat(30);
+    let body = "                    let _ = 1;\n".repeat(12);
+    let source = format!("pub mod a {{\n    pub mod b {{\n        pub mod c {{\n            pub mod d {{\n{filler}                pub fn deep() {{\n{body}                }}\n            }}\n        }}\n    }}\n}}\nfn main() {{ a::b::c::d::deep(); }}\n");
+    let f = fixture_with(cx, None, &fake_lsp());
+    let pkg = f.dir.path().join("pkg");
+    std::fs::create_dir_all(pkg.join("src")).unwrap();
+    std::fs::write(pkg.join("Cargo.toml"), "[package]\nname = \"pkg\"\n").unwrap();
+    let main = pkg.join("src/main.rs");
+    std::fs::write(&main, &source).unwrap();
+    f.view.update(cx, |v, cx| v.dispatch(Command::OpenRoot(pkg.clone()), cx));
+    f.view.update(cx, |v, cx| v.dispatch(Command::Open(main.clone()), cx));
+    settle(cx, &f, |r| r.session().state().current_source().is_some() && r.session().state().provider().is_some_and(|p| p.status == code_core::semantics::Status::Ready));
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(400.0)));
+    draw(&mut v);
+    // Cmd-click `deep` in `fn main` (the last line, at the bottom of the pane).
+    let last = source.lines().count() - 1;
+    let rows = f.view.read_with(&v, |r, _| r.rows);
+    f.view.update(&mut v, |r, cx| r.dispatch(Command::Scroll(last + 2 - rows), cx));
+    draw(&mut v);
+    let top = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().top_line());
+    assert!(last >= top && last - top < rows, "the call is in view");
+    let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
+    let char_w = f.view.read_with(&v, |r, _| r.char_w);
+    let col = source.lines().nth(last).unwrap().find("deep").unwrap() as f32 + 1.5;
+    let at = point(px(f32::from(text.origin.x) + num_w() + 8.0 + col * char_w), text.origin.y + px(((last - top) as f32 + 0.5) * line_h()));
+    v.simulate_click(at, Modifiers { platform: true, ..Default::default() });
+    drop(v);
+    let def_line = 34;
+    settle(cx, &f, |r| r.session().state().asking().is_none() && r.session().state().current_source().is_some_and(|d| r.session().state().selection().is_some_and(|s| d.line_of(s.head) == def_line)));
+    // The headers come from the file's declarations, parsed in the background.
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| r.session().state().view(t.id()).is_some_and(|v| v.declarations().is_some())));
+    let mut v = visual(cx, &f);
+    for _ in 0..3 { draw(&mut v); f.view.update(&mut v, |r, cx| r.poll(cx)); }
+    let (top, band) = f.view.read_with(&v, |r, _| {
+        let state = r.session().state();
+        let view = state.view(state.active().unwrap().id()).unwrap();
+        let code_core::layout::Query::Ready(sticky) = view.layout_sticky(code_core::tabs::sticky_cap(r.rows), None) else { panic!("sticky layout pending") };
+        (view.tab().top_line(), sticky.len())
+    });
+    assert!(band > 0, "the modules around it are pinned");
+    assert!(def_line >= top + band, "`fn deep` (line {def_line}) is under {band} sticky header(s) from top line {top}");
+    assert_eq!(std::fs::read(&main).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
 fn definition_candidates_and_peek_preview_in_the_panel_and_open_on_enter(cx: &mut TestAppContext) {
     let f = fixture_with(cx, None, &fake_lsp());
     let pkg = f.dir.path().join("pkg");

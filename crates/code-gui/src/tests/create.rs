@@ -234,7 +234,7 @@ fn gui_short_dialogs_keep_errors_and_consequences_above_the_actions(cx: &mut Tes
     for theme in ["darcula", "github-light"] {
         f.view.update(&mut v, |r, cx| r.dispatch(Command::Theme(ThemeCommand::Select(ThemeSelection::from_id(theme).unwrap())), cx));
         v.simulate_resize(size(px(180.0), px(140.0)));
-        f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::NewScratch { input: "sample.txt".into(), selected: false, error: Some("That name is already in use".into()) }); cx.notify(); });
+        f.view.update(&mut v, |r, cx| { r.modal = Some(Modal::SaveAs { tab: r.session().state().active().unwrap().id(), dir: std::path::PathBuf::from("/"), input: "sample.txt".into(), selected: false, error: Some("That name is already in use".into()) }); cx.notify(); });
         draw(&mut v);
         f.view.read_with(&v, |r, _| {
             let l = r.form_layout().unwrap();

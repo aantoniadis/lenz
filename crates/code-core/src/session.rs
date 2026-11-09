@@ -208,6 +208,9 @@ pub enum Command {
     NewDocument,
     /// Create a durable personal file in app-owned storage.
     NewScratch(String),
+    /// A new scratch file of [`crate::scratch::KINDS`]`[kind]`, named `scratch_N.<extension>` (the next free N), opened
+    /// with its SQL dialect when it has one.
+    NewScratchFile(usize),
     OpenScratch(PathBuf),
     /// Create `kind` named `name` in folder `dir` (project-relative, `""` the root) and open or select it.
     CreateEntry { kind: crate::create::Kind, dir: Arc<str>, name: String },
@@ -301,10 +304,17 @@ pub enum Command {
     SetRelativeLineNumbers(bool),
     /// The caret line's commit, faint after the line's end (author, date and summary); remembered.
     SetInlineBlame(bool),
+    /// The explorer follows the active file: whenever it changes, the explorer selects it; remembered.
+    SetAlwaysSelectOpenedFile(bool),
     /// macOS-style word motion: Option+Left/Right move by word, and word stops cross the spaces between words; remembered.
     SetMacWordMotion(bool),
+    /// Leaving a file (another tab, file or pane becomes active) saves its edits as Save does; remembered.
+    SetSaveOnLeave(bool),
     /// Search Everywhere's All tab also lists files whose name holds the query's letters in order; remembered.
     SetNameLetterSearch(bool),
+    /// Search Everywhere ranks files near the open and recent ones higher (and a file named exactly as the query
+    /// first); remembered.
+    SetRankNearbyFiles(bool),
     SetVimEnabled(bool),
     VimKey(keymap::KeyPress),
     /// Show a project file or folder (project-relative) in the explorer, opening the folders above it.
@@ -659,8 +669,12 @@ pub enum CommandId {
     VimMode,
     /// Option+Left/Right move by word (macOS), word stops crossing spaces; remembered, off by default.
     MacWordMotion,
+    /// Save a file's edits, as Save does, when another tab, file or pane becomes active; remembered, off by default.
+    SaveOnLeave,
     /// Search Everywhere's All tab finds files by letters in order in their name; remembered, off by default.
     NameLetterSearch,
+    /// Search Everywhere and Find File rank files near the open and recent ones higher; remembered, off by default.
+    RankNearbyFiles,
     /// Pin the enclosing declarations at the top of each pane; remembered.
     StickyScroll,
     /// The path and declarations bar above each pane's text; remembered.
@@ -867,6 +881,8 @@ pub enum CommandId {
     /// The tree's order: each folder's folders before its files, or everything by name.
     FoldersFirst,
     AllByName,
+    /// The explorer selects the active file whenever it changes (IntelliJ's Always Select Opened File); remembered.
+    AlwaysSelectOpenedFile,
     GitBranches,
     NewBranch,
     CheckoutRevision,
@@ -964,7 +980,7 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 253] = [
+    pub const ALL: [CommandId; 256] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
@@ -986,7 +1002,9 @@ impl CommandId {
         Self::RelativeLineNumbers,
         Self::VimMode,
         Self::MacWordMotion,
+        Self::SaveOnLeave,
         Self::NameLetterSearch,
+        Self::RankNearbyFiles,
         Self::StickyScroll,
         Self::Breadcrumbs,
         Self::FocusBreadcrumbs,
@@ -1140,6 +1158,7 @@ impl CommandId {
         Self::LocateFile,
         Self::FoldersFirst,
         Self::AllByName,
+        Self::AlwaysSelectOpenedFile,
         Self::GitBranches,
         Self::NewBranch,
         Self::CheckoutRevision,
@@ -1392,7 +1411,9 @@ impl CommandId {
             Self::AnnotateBlame => "Annotate with Git Blame",
             Self::InlineBlame => "Inline Blame",
             Self::MacWordMotion => "macOS Word Motion",
+            Self::SaveOnLeave => "Save When Leaving a File",
             Self::NameLetterSearch => "Search Everywhere: Letters in File Names",
+            Self::RankNearbyFiles => "Search Everywhere: Rank by Open and Recent Files",
             Self::CloseAnnotations => "Close Annotations",
             Self::NarrowAnnotations => "Narrow Annotation Gutter",
             Self::WidenAnnotations => "Widen Annotation Gutter",
@@ -1437,6 +1458,7 @@ impl CommandId {
             Self::ToggleExplorer => "Show / Hide Explorer",
             Self::LocateFile => "Select Opened File in Explorer",
             Self::FoldersFirst => "Explorer: Folders First",
+            Self::AlwaysSelectOpenedFile => "Explorer: Always Select Opened File",
             Self::AllByName => "Explorer: All by Name",
             Self::SplitRight => "Split Right",
             Self::SplitDown => "Split Down",
@@ -1809,6 +1831,9 @@ pub struct State {
     tree_revision: u64,
     /// The explorer row the session asked the adapters to show and select, with its ticket.
     tree_reveal: Option<(Arc<str>, u64)>,
+    /// Always Select Opened File: the active file's row for the adapters to select (and scroll to, not show the
+    /// explorer for), once per ticket.
+    tree_follow: Option<(Arc<str>, u64)>,
     explorer: crate::workspace::Explorer,
     explorer_search: ExplorerSearch,
     workspace_revision: u64,
@@ -2465,6 +2490,9 @@ impl State {
     /// The explorer row the session asked the adapters to show and select, and its ticket:
     /// adapters apply it when the ticket changes, after any revision reset.
     pub fn tree_reveal(&self) -> Option<(Arc<str>, u64)> { self.tree_reveal.clone() }
+    /// Always Select Opened File's row to select (the active file's), and its ticket: a newer ticket asks again. The
+    /// explorer stays hidden if it is.
+    pub fn tree_follow(&self) -> Option<(Arc<str>, u64)> { self.tree_follow.clone() }
     pub fn active_in_tree(&self) -> Option<Arc<str>> {
         let t = self.active()?;
         if self.archive_tree.contains_source(&t.source) { return Some(t.source.to_string_lossy().as_ref().into()); }
@@ -2694,8 +2722,11 @@ impl State {
             CommandId::FileIcons => Some(self.settings.file_icons),
             CommandId::AnnotateBlame => Some(self.active().is_some_and(|t| t.annotating())),
             CommandId::InlineBlame => Some(self.settings.inline_blame),
+            CommandId::AlwaysSelectOpenedFile => Some(self.settings.always_select_opened_file),
             CommandId::MacWordMotion => Some(self.settings.mac_word_motion),
+            CommandId::SaveOnLeave => Some(self.settings.save_on_leave),
             CommandId::NameLetterSearch => Some(self.settings.name_letter_search),
+            CommandId::RankNearbyFiles => Some(self.settings.rank_nearby_files),
             CommandId::IndentTabs | CommandId::IndentTwoSpaces | CommandId::IndentFourSpaces | CommandId::IndentInherit => {
                 let indent = self.project_preferences()?.indent;
                 Some(indent == match id { CommandId::IndentTabs => Some(Indent::Tabs), CommandId::IndentTwoSpaces => Some(Indent::Spaces(2)), CommandId::IndentFourSpaces => Some(Indent::Spaces(4)), _ => None })
@@ -2927,6 +2958,12 @@ pub struct Session {
     projections: crate::projection_jobs::Scheduler,
     layouts: crate::layout_jobs::Scheduler,
     layout_intents: [Option<LayoutIntent>; 2],
+    /// A navigation's landing (a definition, Back/Forward) whose caret line must end below the sticky headers: kept
+    /// until the tab's declarations, which make the headers, are known; any later user input gives it up.
+    band_goal: Option<TabId>,
+    /// Always Select Opened File: the active file it last revealed, and whether its row was selected (a library's
+    /// folders may still be read).
+    followed: Option<(Arc<str>, bool)>,
     native: crate::native::Reveals,
     jobs: Jobs,
     analysis: crate::analysis::Analysis,
@@ -3196,6 +3233,7 @@ impl Session {
             archive_tree: Default::default(),
             tree_revision: 0,
             tree_reveal: None,
+            tree_follow: None,
                 explorer: Default::default(), explorer_search: Default::default(), workspace_revision: 0,
                 recent,
                 recent_alone,
@@ -3261,7 +3299,7 @@ impl Session {
             semantic_wait: Default::default(),
             projections: Default::default(),
             layouts: Default::default(),
-            layout_intents: Default::default(), native: Default::default(),
+            layout_intents: Default::default(), band_goal: None, followed: None, native: Default::default(),
             themes,
             theme_preview: None,
             request: 0,
@@ -3476,7 +3514,7 @@ impl Session {
             CommandId::ShowTerminal | CommandId::NewTerminal | CommandId::FocusTerminal | CommandId::FocusEditor | CommandId::SendSelectionToTerminal | CommandId::PasteTerminalPath | CommandId::CloseTerminal | CommandId::StopTerminal | CommandId::RenameTerminal | CommandId::RestartTerminal | CommandId::NextTerminal | CommandId::PreviousTerminal | CommandId::CopyTerminalSelection | CommandId::FindTerminal => self.terminal_disabled(id),
 
             CommandId::CsvTable | CommandId::CsvHeader | CommandId::CsvFilter | CommandId::CsvSort | CommandId::CsvClearFilter | CommandId::CsvMoveLeft | CommandId::CsvMoveRight | CommandId::CsvDropColumn | CommandId::CsvEditCell => self.csv_disabled(id),
-            CommandId::RelativeLineNumbers | CommandId::InlineBlame | CommandId::MacWordMotion | CommandId::NameLetterSearch | CommandId::VimMode | CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow | CommandId::CloseWindow | CommandId::QuitAll => None,
+            CommandId::RelativeLineNumbers | CommandId::InlineBlame | CommandId::AlwaysSelectOpenedFile | CommandId::MacWordMotion | CommandId::SaveOnLeave | CommandId::NameLetterSearch | CommandId::RankNearbyFiles | CommandId::VimMode | CommandId::StatusDetails | CommandId::FindFile | CommandId::SearchEverywhere | CommandId::FindSymbol | CommandId::FindAction | CommandId::Open | CommandId::OpenFolder | CommandId::ChooseTheme | CommandId::About | CommandId::NewWindow | CommandId::CloseWindow | CommandId::QuitAll => None,
             CommandId::SplitRight => (self.state.settings.split == Some(Split::Columns)).then_some("Already split side by side"),
             CommandId::SplitDown => (self.state.settings.split == Some(Split::Rows)).then_some("Already split one above the other"),
             CommandId::Unsplit | CommandId::FocusOtherPane | CommandId::EnlargeFirstPane | CommandId::EnlargeSecondPane => self.state.settings.split.is_none().then_some("The file panel is not split"),
@@ -4449,6 +4487,7 @@ impl Session {
         // (Home while an End seek is pending, for example). Adapter layout/metric feedback is not user input.
         if matches!(&input, Input::Command(command) if !matches!(command, Command::PrepareLayout { .. } | Command::PrepareProjection(_) | Command::CancelProjection { .. } | Command::ClampColumn { .. } | Command::SetTextSize { .. } | Command::SetNativeContext { .. } | Command::MeasuredReveal { .. } | Command::TakeExternal { .. })) {
             self.layout_intents = Default::default();
+            self.band_goal = None;
             self.native.cancel();
         }
         if !self.vim_group_edit && matches!(&input, Input::Command(command) if !matches!(command, Command::Edit { .. } | Command::Delete { .. } | Command::InsertText { .. }
@@ -4459,7 +4498,7 @@ impl Session {
             }
         }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
-        if matches!(&input, Input::Command(Command::CompareSaved | Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. } | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::AddCursorBelow | Command::AddCursorAbove | Command::CollapseSelections | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::ResizeAnnotations { .. } | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::CompareSaved | Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::NewScratchFile(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. } | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::AddCursorBelow | Command::AddCursorAbove | Command::CollapseSelections | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::ResizeAnnotations { .. } | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
             Input::Completion(Completion::SelectionSteps { request, .. }) => Some(*request),
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
@@ -4474,7 +4513,7 @@ impl Session {
         let retire_messages = matches!(&input, Input::Command(_)) && (edit_reveal || reveal_selection) && !self.state.messages.is_empty();
         if retire_messages { self.state.messages.clear(); }
         // Tabs and layout, not each caret move: what an interrupted session reopens.
-        let arranged = matches!(&input, Input::Command(Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::ActivateTree { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. }
+        let arranged = matches!(&input, Input::Command(Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::ActivateTree { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::NewScratchFile(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. }
             | Command::Pin(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_)
             | Command::SetLayout(_) | Command::ResizeAnnotations { commit: true, .. } | Command::SetSoftWrap(_) | Command::ChooseRecoveredDraft { .. }));
         let input = match input {
@@ -4519,6 +4558,8 @@ impl Session {
         }
         self.invalidate_result_analysis();
         self.sync_project_syntax();
+        effect.repaint |= self.settle_band_goal();
+        effect.repaint |= self.follow_active_file();
         self.sync_inline_blame();
         self.refresh_blame();
         // A shown draft's change markers follow its text: only a version or baseline that changed is compared again.
@@ -4765,6 +4806,7 @@ impl Session {
             Command::ChooseReplace { ticket, choice } => self.choose_replace(ticket, choice),
             Command::NewDocument => self.new_document(),
             Command::NewScratch(name) => self.new_scratch(name),
+            Command::NewScratchFile(kind) => self.new_scratch_file(kind),
             Command::OpenScratch(path) => self.open_scratch(path),
             Command::CopyExplorerPath { kind } => self.copy_explorer_path(kind),
             Command::CopyExplorerEntry => self.copy_explorer_entry(),
@@ -5046,13 +5088,29 @@ impl Session {
                 self.save_settings();
                 Effect { repaint: true, ..Effect::default() }
             }
+            Command::SetSaveOnLeave(on) => {
+                self.state.settings.save_on_leave = on;
+                self.save_settings();
+                Effect { repaint: true, ..Effect::default() }
+            }
             Command::SetMacWordMotion(on) => {
                 self.state.settings.mac_word_motion = on;
                 self.save_settings();
                 Effect { repaint: true, ..Effect::default() }
             }
+            Command::SetRankNearbyFiles(on) => {
+                self.state.settings.rank_nearby_files = on;
+                self.save_settings();
+                Effect { repaint: true, ..Effect::default() }
+            }
             Command::SetNameLetterSearch(on) => {
                 self.state.settings.name_letter_search = on;
+                self.save_settings();
+                Effect { repaint: true, ..Effect::default() }
+            }
+            Command::SetAlwaysSelectOpenedFile(on) => {
+                self.state.settings.always_select_opened_file = on;
+                self.followed = None;
                 self.save_settings();
                 Effect { repaint: true, ..Effect::default() }
             }
@@ -8909,6 +8967,7 @@ impl Session {
             recent,
             actions: if matches!(scope, navigation::Scope::All | navigation::Scope::Actions) { self.actions() } else { Vec::new() },
             name_letters: self.state.settings.name_letter_search,
+            nearby: self.state.settings.rank_nearby_files,
         };
         // Recent files are bounded to fifty entries; populate immediately for Ctrl-E followed by Enter.
         if scope == navigation::Scope::Recent {
@@ -9223,6 +9282,50 @@ impl Session {
         self.native.issue(&self.state, tab, source);
     }
 
+    /// Save When Leaving a File: the tab another one replaces as the active tab is saved, while its draft is still
+    /// shown, if it is an edited file that can be saved. Its exact text is written (no format on save: a server's
+    /// answer would come for a tab no longer shown). Untitled documents and read-only, busy or blocked files are
+    /// left for the user; closing a tab is the close prompt's, not this.
+    fn save_on_leave(&mut self, tab: TabId) {
+        let saveable = self.state.tabs.iter().any(|t| t.id == tab && t.is_file() && !t.untitled()) && self.state.tab_dirty(tab) && self.save_disabled(tab).is_none();
+        if saveable { self.save(tab); }
+    }
+
+    /// Always Select Opened File: when the active file changes, its folders open (as the explorer's target button
+    /// does) and its row is offered to the adapters to select. A library's row waits for its folder to be read.
+    fn follow_active_file(&mut self) -> bool {
+        if !self.state.settings.always_select_opened_file { return false; }
+        let Some(rel) = self.state.active_in_tree() else { return false };
+        let mut repaint = false;
+        if self.followed.as_ref().is_none_or(|(path, _)| *path != rel) {
+            self.followed = Some((rel.clone(), false));
+            repaint |= self.command(Command::Locate).repaint;
+        }
+        if self.followed.as_ref().is_some_and(|(_, selected)| !selected) && self.state.tree_rows().any(|row| row.path == rel) {
+            let ticket = self.state.tree_follow.as_ref().map_or(1, |(_, t)| t + 1);
+            self.state.tree_follow = Some((rel.clone(), ticket));
+            self.followed = Some((rel, true));
+            repaint = true;
+        }
+        repaint
+    }
+
+    /// A navigation's landing kept clear of the sticky band ([`Session::band_goal`]): done once the tab shows its
+    /// placed caret with its declarations parsed and a laid-out pane; given up when sticky scroll is off. Whether the
+    /// view moved.
+    fn settle_band_goal(&mut self) -> bool {
+        let Some(id) = self.band_goal else { return false };
+        if !self.state.settings.sticky_scroll || !self.is_shown(id) { self.band_goal = None; return false; }
+        let Some(view) = self.state.view(id) else { return false };
+        let pane = view.tab().pane() as usize;
+        if view.tab().restore.is_some() || view.declarations().is_none() || self.state.text_size[pane].1 == 0 { return false; }
+        let Some(line) = view.tab().selection().map(|s| view.snapshot().line_of(s.head)) else { self.band_goal = None; return false };
+        self.band_goal = None;
+        let top = (view.tab().top_line(), view.tab().top_row());
+        self.clear_of_band(id, line, 0);
+        self.state.view(id).is_some_and(|v| (v.tab().top_line(), v.tab().top_row()) != top)
+    }
+
     /// Keep a known exact row below the sticky band. Cold layout resumes through the same bounded lane.
     fn clear_of_band(&mut self, tab: TabId, line: usize, row: usize) {
         use crate::layout::Query;
@@ -9366,8 +9469,12 @@ impl Session {
                 Some(snapshot) => t.restore_to(to, &snapshot),
                 None => { t.restore = Some(to.clone()); t.top_line = to.top_line; }
             }
+            // Its line goes below the sticky headers of the declarations around it, once they are known.
+            self.band_goal = Some(id);
         }
-        if record && !same && let Some(to) = self.here() {
+        // A step for another tab, or for another line of this one (a definition in the same file, as Go to Line).
+        let moved = !same || from.as_ref().zip(restore.as_ref()).is_some_and(|(from, to)| from.line != to.line);
+        if record && moved && let Some(to) = self.here() {
             self.visit(from, to);
         }
         self.rewatch();
@@ -9518,6 +9625,7 @@ impl Session {
                 self.state.semantics.cancel();
             }
             if let Some(old) = self.state.active {
+                if self.state.settings.save_on_leave { self.save_on_leave(old); }
                 self.release(old);
             }
             self.state.active = Some(id);
@@ -9667,6 +9775,13 @@ impl Session {
             let last = !self.state.tabs.iter().any(|tab| tab.id != id && tab.buffer == Some(buffer) && self.is_shown(tab.id));
             let dirty = self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty);
             self.analysis.release_view(buffer, id, last && !dirty);
+            // An edited draft stays analysed, but this tab drops what was derived from it (below): with no other view
+            // holding them, those results must run again when it is shown, or it stays without syntax and semantic
+            // colours (each request would match the one already delivered).
+            if last && dirty { self.analysis.release_derived(buffer); }
+            // The semantic colours and hints go with the content below; with no other view of the file shown, they are
+            // asked again when it is: a version already asked about would otherwise never be asked again.
+            if last && let Some(source) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone()) { self.state.semantics.forget_path(&source); }
         }
         if let Some(t) = self.state.tabs.iter().find(|t| t.id == id).filter(|t| t.is_file() && !t.before_root) {
             let (source, at) = (t.source.clone(), shows_text(&self.state, t).then(|| self.state.location(t)));
@@ -10467,12 +10582,18 @@ struct Settings {
     /// Long lines wrap at the pane's width.
     soft_wrap: bool,
     relative_line_numbers: bool,
+    /// The explorer selects the active file whenever it changes.
+    always_select_opened_file: bool,
     /// The caret line's commit shows faintly after the line's end.
     inline_blame: bool,
     /// Option+Left/Right move by word (macOS) and word stops cross the spaces between words.
     mac_word_motion: bool,
+    /// Leaving a file saves its edits as Save does.
+    save_on_leave: bool,
     /// Search Everywhere's All tab also lists files whose name holds the query's letters in order.
     name_letter_search: bool,
+    /// Search Everywhere ranks files near the open and recent ones higher.
+    rank_nearby_files: bool,
     vim_enabled: bool,
     /// The enclosing declarations stay pinned at the top of each pane.
     sticky_scroll: bool,
@@ -10503,7 +10624,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, relative_line_numbers: false, inline_blame: false, mac_word_motion: false, name_letter_search: false, vim_enabled: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), sql_dialects: Default::default(), duckdb_executable: None, keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
+        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, relative_line_numbers: false, always_select_opened_file: false, inline_blame: false, mac_word_motion: false, save_on_leave: false, name_letter_search: false, rank_nearby_files: false, vim_enabled: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), sql_dialects: Default::default(), duckdb_executable: None, keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
     }
 }
 

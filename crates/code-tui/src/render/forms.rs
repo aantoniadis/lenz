@@ -8,7 +8,6 @@ impl App {
             Prompt::Create { kind, dir } => Form::Create(*kind, dir),
             Prompt::SaveAs(_) => Form::SaveAs,
             Prompt::RenameTerminal { .. } => Form::RenameTerminal,
-            Prompt::NewScratch => Form::Scratch,
             Prompt::Relocate { kind, from } => Form::Relocate(*kind, from),
             Prompt::PasteEntry(request) => Form::Paste(request),
             Prompt::ConfirmDelete { removal, from } => Form::Delete(*removal, from),

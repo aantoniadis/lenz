@@ -4798,7 +4798,7 @@ fn the_pointer_is_text_over_pane_text_only() {
 fn popup_fields_edit_ranges_and_preserve_document_and_both_carets() {
     let dir=tempfile::tempdir().unwrap();let path=dir.path().join("original.txt");std::fs::write(&path,"original\n").unwrap();
     let mut a=app(dir.path());a.dispatch(Command::OpenRetained(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());
-    a.prompt(Prompt::NewScratch);a.modal.as_mut().unwrap().input="one é👩🏽‍💻 two".into();a.modal.as_mut().unwrap().selected=false;
+    let tab=a.session.state().active().unwrap().id();a.prompt(Prompt::SaveAs(tab));a.modal.as_mut().unwrap().input="one é👩🏽‍💻 two".into();a.modal.as_mut().unwrap().selected=false;
     key(&mut a,KeyCode::Home,KeyModifiers::NONE);key(&mut a,KeyCode::Right,KeyModifiers::CONTROL);key(&mut a,KeyCode::Right,KeyModifiers::NONE);
     for _ in 0..2 {key(&mut a,KeyCode::Right,KeyModifiers::SHIFT);}
     assert_eq!(App::field_cursor(a.modal.as_ref().unwrap()).selected(&a.modal.as_ref().unwrap().input),Some("é👩🏽‍💻"));
