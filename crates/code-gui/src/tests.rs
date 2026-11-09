@@ -5367,10 +5367,13 @@ fn wait_until(cx: &mut TestAppContext, f: &Fixture, done: impl Fn(&ReaderView) -
 #[gpui::test]
 fn the_lower_panes_close_mark_closes_its_tab(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
-    let root = project(f.dir.path(), &["a.rs", "b.rs", "c.rs"]);
+    // The active lower tab includes its close mark. A wider first upper title keeps the
+    // intended overlap independent of inactive-tab close marks and optional icon widths.
+    let names = ["a_much_longer_first_file.rs", "other_file.rs", "third_file.rs"];
+    let root = project(f.dir.path(), &names);
     f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
     settle(cx, &f, scanned);
-    for name in ["a.rs", "b.rs", "c.rs"] {
+    for name in names {
         f.view.update(cx, |v, cx| v.dispatch(Command::OpenRetained(root.join(name)), cx));
         settle(cx, &f, active_is(name));
     }
@@ -5391,7 +5394,7 @@ fn the_lower_panes_close_mark_closes_its_tab(cx: &mut TestAppContext) {
     // The lower tab's close mark, where the upper bar's first tab (starting after its buttons) also lies.
     let (upper, char_w) = f.view.read_with(&v, |r, _| (r.tab_hits[0], r.char_w));
     let x = hit.1 - char_w;
-    assert!(x > upper.0 && x < upper.1, "precondition: both bars' tabs span the point");
+    assert!(x > upper.0 && x < upper.1, "precondition: both bars' tabs span the point: lower={hit:?}, upper={upper:?}, x={x}, char_w={char_w}; hits {:?}", f.view.read_with(&v, |r, _| r.tab_hits.clone()));
     v.simulate_click(point(px(x), px(panes[1].bar.2 + line_h() / 2.0)), Modifiers::default());
     let lower: Vec<_> = f.view.read_with(&v, |r, _| r.session().state().pane_tabs(1).map(|t| t.id()).collect());
     assert!(!lower.contains(&id), "the lower tab closed; focused pane {}", f.view.read_with(&v, |r, _| r.session().state().focused_pane()));
