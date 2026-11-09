@@ -106,6 +106,9 @@ use lenz_content::{
 };
 
 mod project_search;
+#[path = "session/workspace_edit.rs"]
+mod workspace_edit;
+pub use workspace_edit::WorkspacePlan;
 #[path = "session/project_syntax.rs"]
 mod project_syntax;
 mod navigation_query;
@@ -161,6 +164,13 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    PreviewProjectReplace(String),
+    RenameSymbol(String),
+    ApplyWorkspaceEdit,
+    CancelWorkspaceEdit,
+    ToggleWorkspaceFile(usize),
+    MoveWorkspaceFile(isize),
+    ToggleCurrentWorkspaceFile,
     OpenArchiveEntry(crate::archive::Location),
     ArchiveTreeParent { path: Arc<str> },
     Terminal(crate::terminal::Command),
@@ -639,6 +649,7 @@ pub enum Motion {
 /// The user-facing commands, as menus list them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CommandId {
+    ProjectReplace, RenameSymbol, ApplyWorkspaceEdit, CancelWorkspaceEdit,
     ShowTerminal, NewTerminal, FocusTerminal, FocusEditor, SendSelectionToTerminal, PasteTerminalPath, CloseTerminal, StopTerminal, RenameTerminal, RestartTerminal, NextTerminal, PreviousTerminal, CopyTerminalSelection, FindTerminal,
     CsvTable, CsvHeader, CsvFilter, CsvSort, CsvClearFilter, CsvMoveLeft, CsvMoveRight, CsvDropColumn, CsvEditCell,
     Open,
@@ -980,13 +991,13 @@ impl Layout {
 }
 
 impl CommandId {
-    pub const ALL: [CommandId; 256] = [
+    pub const ALL: [CommandId; 260] = [
         Self::ShowTerminal, Self::NewTerminal, Self::FocusTerminal, Self::FocusEditor, Self::SendSelectionToTerminal, Self::PasteTerminalPath, Self::CloseTerminal, Self::StopTerminal, Self::RenameTerminal, Self::RestartTerminal, Self::NextTerminal, Self::PreviousTerminal, Self::CopyTerminalSelection, Self::FindTerminal,
         Self::Open,
         Self::OpenFolder,
         Self::OpenRecent,
         Self::FindFile,
-        Self::SearchProject,
+        Self::SearchProject, Self::ProjectReplace, Self::RenameSymbol, Self::ApplyWorkspaceEdit, Self::CancelWorkspaceEdit,
         Self::FindInFile,
         Self::NextMatch,
         Self::PreviousMatch,
@@ -1258,6 +1269,10 @@ impl CommandId {
             Self::OpenRecent => "Open Recent Folder…",
             Self::FindFile => "Find File…",
             Self::SearchProject => "Search in Project…",
+            Self::ProjectReplace => "Replace in Project…",
+            Self::RenameSymbol => "Rename Symbol…",
+            Self::ApplyWorkspaceEdit => "Apply Previewed Edits",
+            Self::CancelWorkspaceEdit => "Cancel Edit Preview",
             Self::FindInFile => "Find in File…",
             Self::NextMatch => "Next Match",
             Self::PreviousMatch => "Previous Match",
@@ -1552,6 +1567,7 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    WorkspacePrepared { request: u64, apply: bool, result: Result<WorkspacePlan, String> },
     ArchiveListed(crate::archive_tree::Listed),
     ArchiveLoaded(Box<archive_save_work::Loaded>),
     ArchiveSaved(Box<archive_save_work::Saved>),
@@ -1731,6 +1747,7 @@ impl Input {
                 Completion::PlacesMerged { .. } => "places merged",
                 Completion::PlacesChecked { .. } => "places checked",
                 Completion::Checked { .. } => "checked",
+                Completion::WorkspacePrepared { .. } => "workspace edits",
                 Completion::Loaded { .. } => "loaded",
                 Completion::Highlighted { .. } => "highlighted",
                 Completion::Decorated { .. } => "decorated",
@@ -3076,6 +3093,7 @@ pub struct Session {
     find_options: lenz_content::find::FindOptions,
     /// What Replace and Replace All write instead of a match, while the reader runs.
     replace_text: String,
+    workspace_edit: workspace_edit::Work,
     find_seq: u64,
     /// Where to go once a source opened by [`Command::OpenAt`] or a place jump is shown.
     pending_goto: Option<(PathBuf, Goto)>,
@@ -3357,6 +3375,7 @@ impl Session {
             results_forward: Vec::new(),
             find_options: Default::default(),
             replace_text: String::new(),
+            workspace_edit: Default::default(),
             find_seq: 0,
             pending_goto: None,
             search_seq: 0,
@@ -3553,6 +3572,7 @@ impl Session {
             CommandId::CloseAllTabs | CommandId::CloseOtherTabs | CommandId::CloseTabsLeft | CommandId::CloseTabsRight => self.bulk_close_disabled(id),
             CommandId::NewScratch | CommandId::ScratchFiles => None,
             CommandId::OpenRecent => self.state.recent.is_empty().then_some("No recent folders"),
+            CommandId::ProjectReplace | CommandId::RenameSymbol | CommandId::ApplyWorkspaceEdit | CommandId::CancelWorkspaceEdit => self.workspace_disabled(id),
             CommandId::SearchProject => self.state.project.is_none().then_some("No folder is open"),
             CommandId::FindInFile => match self.state.active() {
                 _ if !open => Some("No file is open"),
@@ -4160,7 +4180,7 @@ impl Session {
         let text = tab.is_some_and(|t| t.loaded) && !matches!(self.state.rendering(), Some(Rendering::Preview(_) | Rendering::Pending));
         let mut entries = Vec::new();
         if text {
-            entries.extend([CommandId::Definition, CommandId::PeekDefinition, CommandId::TypeDefinition, CommandId::Implementation, CommandId::Usages, CommandId::CallHierarchy, CommandId::TypeHierarchy, CommandId::Documentation].map(C));
+            entries.extend([CommandId::Definition, CommandId::PeekDefinition, CommandId::TypeDefinition, CommandId::Implementation, CommandId::Usages, CommandId::CallHierarchy, CommandId::TypeHierarchy, CommandId::Documentation, CommandId::RenameSymbol].map(C));
             entries.extend([Separator, C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll)]);
             entries.extend([Separator, C(CommandId::Copy), C(CommandId::SendSelectionToTerminal), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode), C(CommandId::CopyPath), C(CommandId::CopyPathLine)]);
         } else {
@@ -4787,6 +4807,13 @@ impl Session {
 
         let repaint = Effect { repaint: true, copy: None, ..Effect::default() };
         match command {
+            Command::PreviewProjectReplace(text) => self.preview_project_replace(text),
+            Command::RenameSymbol(name) => self.rename_symbol(name),
+            Command::ApplyWorkspaceEdit => self.apply_workspace_edit(),
+            Command::CancelWorkspaceEdit => self.cancel_workspace_edit(),
+            Command::MoveWorkspaceFile(by) => self.move_workspace_file(by),
+            Command::ToggleCurrentWorkspaceFile => self.toggle_current_workspace_file(),
+            Command::ToggleWorkspaceFile(i) => self.toggle_workspace_file(i),
             Command::Terminal(command) => self.terminal_command(command),
             Command::Csv(command) => self.csv_command(command),
             Command::PresentText { tab, base, base_selection, edit, selected } => self.present_text(tab, base, base_selection, edit, selected),
@@ -6145,13 +6172,13 @@ impl Session {
                 semantics::Lane::CodeAction => self.pending_code_action.as_ref().is_some_and(|p| p.request() == wait.request),
                 semantics::Lane::Format => self.state.formatting.as_ref().is_some_and(|f| f.request() == wait.request),
                 semantics::Lane::AutoInsert => self.pending_auto_insert.as_ref().is_some_and(|p| p.request() == wait.request),
-                semantics::Lane::CompletionDetail => false,
+                semantics::Lane::CompletionDetail | semantics::Lane::Rename => false,
             };
             if !current || !requested {
                 if requested { match lane { semantics::Lane::Foreground => { self.state.asking = None; repaint = true; }, semantics::Lane::Hover => self.cancel_documentation(), semantics::Lane::Highlight => self.pending_highlight = None, semantics::Lane::Completion => self.cancel_completion(), semantics::Lane::Signature => self.cancel_signature(), semantics::Lane::CodeAction => self.cancel_code_action(), semantics::Lane::Format => {
                     let why = if self.state.formatting.as_ref().is_some_and(|f| f.tool()) { "the file changed before the project's formatter could run" } else { "the file changed before the language server could be asked" };
                     repaint |= self.format_unavailable(why.into()).repaint;
-                } semantics::Lane::AutoInsert => self.cancel_auto_insert(), semantics::Lane::Hierarchy | semantics::Lane::CompletionDetail => {} } }
+                } semantics::Lane::AutoInsert => self.cancel_auto_insert(), semantics::Lane::Hierarchy | semantics::Lane::CompletionDetail | semantics::Lane::Rename => {} } }
                 continue;
             }
             let Some(doc) = self.admitted_document(wait.tab, Priority::Visible) else { self.semantic_wait.insert(lane, wait); continue };
@@ -6172,7 +6199,7 @@ impl Session {
                     semantics::Lane::Signature => { let manual = self.pending_signature.as_ref().map(|p| p.manual()); if let Some(manual) = manual { repaint |= self.signature_unavailable(manual, why).repaint; } }
                     semantics::Lane::CodeAction => { if self.pending_code_action.is_some() { repaint |= self.code_action_unavailable(why).repaint; } }
                     semantics::Lane::Format => repaint |= self.format_unavailable(why).repaint,
-                    semantics::Lane::Foreground | semantics::Lane::Hierarchy | semantics::Lane::CompletionDetail | semantics::Lane::AutoInsert => {}
+                    semantics::Lane::Foreground | semantics::Lane::Hierarchy | semantics::Lane::CompletionDetail | semantics::Lane::AutoInsert | semantics::Lane::Rename => {}
                 }
             }
         }
@@ -6577,7 +6604,7 @@ impl Session {
                     semantics::Lane::Foreground => state.asking.as_ref().is_some_and(|asking| asking.request == fence.request && asking.project == fence.project && asking.source == fence.source),
                     semantics::Lane::Hierarchy => state.results.as_ref().is_some_and(|r| Some(r.id) == fence.result_set && r.hierarchy.as_ref().is_some_and(|h| h.session == server && h.loading(fence.request) == fence.node
                         && fence.node.and_then(|node| h.nodes.get(node)).is_some_and(|node| Self::hierarchy_item_current(state, &node.call)))),
-                    semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion | semantics::Lane::CompletionDetail | semantics::Lane::Signature | semantics::Lane::CodeAction | semantics::Lane::Format | semantics::Lane::AutoInsert => false,
+                    semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion | semantics::Lane::CompletionDetail | semantics::Lane::Signature | semantics::Lane::CodeAction | semantics::Lane::Format | semantics::Lane::AutoInsert | semantics::Lane::Rename => false,
                 }
             }
         }
@@ -6692,7 +6719,7 @@ impl Session {
                         && let Some(node) = h.loading(fence.request).filter(|node| Some(*node) == fence.node)
                     { h.failed(node, fence.request, why); r.rebuild_hierarchy(); return Effect { repaint: true, copy: None, ..Effect::default() }; }
                 }
-                semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion | semantics::Lane::CompletionDetail | semantics::Lane::Signature | semantics::Lane::CodeAction | semantics::Lane::Format | semantics::Lane::AutoInsert => {}
+                semantics::Lane::Hover | semantics::Lane::Highlight | semantics::Lane::Completion | semantics::Lane::CompletionDetail | semantics::Lane::Signature | semantics::Lane::CodeAction | semantics::Lane::Format | semantics::Lane::AutoInsert | semantics::Lane::Rename => {}
             },
         }
         Effect::default()
@@ -6716,6 +6743,7 @@ impl Session {
             semantics::Lane::Signature => return self.signature_reply(reply),
             semantics::Lane::CodeAction => return self.code_action_reply(reply),
             semantics::Lane::Format => return self.format_reply(reply),
+            semantics::Lane::Rename => return self.rename_reply(reply),
             semantics::Lane::AutoInsert => return self.auto_insert_reply(reply),
         }
         let project = self.state.project.as_ref().map_or(0, |p| p.generation());
@@ -6841,6 +6869,7 @@ impl Session {
 
     fn complete_source(&mut self, completion: Completion, buffer: Option<crate::text::BufferId>) -> Effect {
         match completion {
+            Completion::WorkspacePrepared { request, apply, result } => self.workspace_prepared(request, apply, result),
             Completion::ArchiveListed(listed) => self.archive_listed(listed),
             Completion::ArchiveLoaded(loaded) => self.archive_loaded(*loaded),
             Completion::ArchiveSaved(saved) => self.archive_saved(*saved),

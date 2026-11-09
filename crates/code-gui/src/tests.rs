@@ -5502,7 +5502,9 @@ fn hovering_a_context_menu_entry_highlights_it(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("main.rs", b"fn main() {\n    helper();\n}\nfn helper() {}\n")));
     settle(cx, &f, active_is("main.rs"));
     let mut v = visual(cx, &f);
-    v.simulate_resize(size(px(800.0), px(400.0)));
+    // Keep the target row visible as the navigation menu grows. Narrow-menu
+    // scrolling has its own interaction coverage.
+    v.simulate_resize(size(px(800.0), px(700.0)));
     draw(&mut v);
     let text = f.view.read_with(&v, |r, _| r.text_bounds.unwrap());
     let p = point(text.origin.x + px(num_w() + 40.0), text.origin.y + px(line_h() * 1.5));

@@ -112,6 +112,7 @@ pub enum Modal {
     SaveAs { tab: code_core::tabs::TabId, dir: PathBuf, input: String, selected: bool, error: Option<String> },
     /// New Scratch File's kinds ([`code_core::scratch::KINDS`]): typing filters, Enter creates `scratch_N.<ext>`.
     NewScratch { query: String, at: usize },
+    WorkspaceInput { rename: bool, input: String, selected: bool, error: Option<String> },
     RenameTerminal { id: code_core::terminal::Id, input: String, selected: bool, error: Option<String> },
     /// Unified file, symbol and command search; result targets stay in the core.
     /// Search Everywhere: the highlighted row, and the query's caret (a byte offset; `None` at the end).
@@ -162,6 +163,7 @@ pub enum Modal {
 /// What a details dialog is: plain text, the core's commit popup, or its checkout-problem dialog.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Details {
+    Workspace,
     Install,
     Terminal { ticket: u64 },
     Text,
@@ -963,6 +965,7 @@ impl ReaderView {
             Some(Modal::StatusDetails { kind: Details::Replace, .. }) => self.choose_replace(code_core::save::ReplaceChoice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Close, .. }) => self.choose_close(code_core::close::Choice::Cancel,cx),
             Some(Modal::StatusDetails { kind: Details::Recovered, .. }) => self.choose_recovery(code_core::recovery::Choice::Later,cx),
+            Some(Modal::StatusDetails { kind: Details::Workspace, .. }) => self.dispatch(Command::CancelWorkspaceEdit, cx),
             Some(Modal::StatusDetails { kind: Details::Change, .. }) => self.dispatch(Command::CloseChange, cx),
             Some(Modal::StatusDetails { kind: Details::Commit, .. }) => self.dispatch(Command::CloseCommit, cx),
             Some(Modal::Branches { .. } | Modal::BranchMenu { .. }) => self.dispatch(Command::CloseBranches, cx),
@@ -1185,10 +1188,13 @@ impl ReaderView {
             _ => {}
         }
         // So do the checkout-problem dialog's.
-        for (kind, title, now) in [(Details::Change, "Marked change", self.session.inspected_change_text()), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+        for (kind, title, now) in [(Details::Workspace, "Edit Preview", self.session.workspace_preview().map(|p| p.text())), (Details::Change, "Marked change", self.session.inspected_change_text()), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
             match (now, &mut self.modal) {
                 (Some(t), Some(Modal::StatusDetails { kind: k, text, .. })) if *k == kind => *text = t,
-                (None, Some(Modal::StatusDetails { kind: k, .. })) if *k == kind => self.modal = None,
+                (None, Some(Modal::StatusDetails { kind: k, .. })) if *k == kind => {
+                    if kind == Details::Workspace { self.results_focus = false; self.tree_focus = false; }
+                    self.modal = None;
+                },
                 (Some(text), None) => {
                     self.modal_scroll.set(0);
                     self.modal = Some(Modal::StatusDetails { title, text, logo: None, kind });
@@ -1469,6 +1475,10 @@ impl ReaderView {
                 InterfaceAction::GoToLine => {
                     self.modal = Some(Modal::GoTo { input: String::new(), error: None });
                     cx.notify();
+                }
+                InterfaceAction::WorkspaceInput { rename } => {
+                    let input = if rename { self.session.find_seed() } else { self.session.replace_text().to_owned() };
+                    self.modal = Some(Modal::WorkspaceInput { rename, selected: !input.is_empty(), input, error: None }); cx.notify();
                 }
                 InterfaceAction::SearchProject => {
                     let results = self.session.state().results();
@@ -1792,6 +1802,9 @@ impl ReaderView {
             cx.stop_propagation();
             return;
         }
+        if key == "escape" && !ctrl && !k.modifiers.alt && self.session.workspace_busy() {
+            self.dispatch(Command::CancelWorkspaceEdit, cx); cx.stop_propagation(); return;
+        }
         if self.terminal_key(ev, window, cx) { return; }
         if self.activity_key(ev, window, cx) { return; }
         // A focused find box takes its own keys before the keymap (Alt+Enter lists every match there, not Quick Fix);
@@ -2073,7 +2086,7 @@ impl ReaderView {
                 Some(&(_, action)) => self.branch_action(&target, action, window, cx),
                 None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
             },
-            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
+            m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
             Some(Modal::NewScratch { query, at }) => match code_core::scratch::matching(&query).get(at) {
                 Some(&kind) => self.dispatch(Command::NewScratchFile(kind), cx),
                 None => self.modal = Some(Modal::NewScratch { query, at }),
@@ -2124,7 +2137,7 @@ impl ReaderView {
                 Some(i) => *at = i,
                 None => return,
             },
-            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
+            Some(Modal::StatusDetails { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) | None => return,
         }
         self.modal_accept(window, cx);
     }
@@ -2255,6 +2268,10 @@ impl ReaderView {
             let ctrl=ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
             let choice=match key {"s" if !ctrl && !ev.keystroke.modifiers.alt=>Some(code_core::close::Choice::Save),"d" if !ctrl && !ev.keystroke.modifiers.alt=>Some(code_core::close::Choice::Discard),"escape"=>Some(code_core::close::Choice::Cancel),_=>None};
             if let Some(choice)=choice {self.choose_close(choice,cx);return;}
+        }
+        if matches!(self.modal, Some(Modal::StatusDetails { kind: Details::Workspace, .. })) && !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.alt {
+            match key { "n" | "p" => { self.modal_scroll.set(0); self.dispatch(Command::MoveWorkspaceFile(if key == "n" { 1 } else { -1 }), cx); return; }, "space" | " " => { self.dispatch(Command::ToggleCurrentWorkspaceFile, cx); return; }, "a" => { self.dispatch(Command::ApplyWorkspaceEdit, cx); return; }, _ => {} }
+            if let Ok(number) = key.parse::<usize>() && number > 0 { self.dispatch(Command::ToggleWorkspaceFile(number - 1), cx); return; }
         }
         if matches!(self.modal,Some(Modal::StatusDetails {kind:Details::Change,..})) && !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.alt {
             match key { "d" => return self.run(CommandId::ShowChangeDiff,window,cx), "r" => return self.run(CommandId::RevertChange,window,cx), _=>{} }
@@ -2801,7 +2818,7 @@ impl ReaderView {
         }
         let len = match &self.modal {
             // Handled above.
-            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } | Modal::Keymap { .. }) => 0,
+            Some(Modal::StatusDetails { .. } | Modal::Navigation { .. } | Modal::Search { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::Context { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Siblings { .. } | Modal::Places { .. } | Modal::Mnemonic | Modal::Branches { .. } | Modal::BranchMenu { .. } | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::NewScratch { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } | Modal::Keymap { .. }) => 0,
             Some(Modal::ServerRuntime { .. }) => self.modal_rows().len().saturating_sub(FINDER_HEADER_ROWS),
             Some(Modal::LanguageServer { .. }) => self.server_rows().len(),
             Some(Modal::Commands { .. }) => CommandId::ALL.len(),
@@ -3390,6 +3407,7 @@ impl ReaderView {
     /// A details dialog's buttons: the core's checkout choices, the commit popup's actions, else Copy and Close.
     pub(crate) fn details_labels(&self, kind: Details) -> Vec<&'static str> {
         match kind {
+            Details::Workspace => vec!["Previous (P)", "Next (N)", "Include/exclude", "Apply (A)", "Cancel"],
             Details::Install => self.session.server_install_actions().into_iter().map(CommandId::label).chain(std::iter::once("Close")).collect(),
             Details::Checkout => self.session.checkout_choices().into_iter().map(|c| c.0).collect(),
             Details::Change => vec!["Show Diff (D)", "Revert This Change (R)", "Close"],
@@ -3799,6 +3817,7 @@ impl ReaderView {
                                     self.dispatch(Command::CheckoutChoice(c), cx);
                                 }
                             }
+                            (Details::Workspace, Some(i)) => { if i < 2 { self.modal_scroll.set(0); } self.dispatch(match i { 0 => Command::MoveWorkspaceFile(-1), 1 => Command::MoveWorkspaceFile(1), 2 => Command::ToggleCurrentWorkspaceFile, 3 => Command::ApplyWorkspaceEdit, _ => Command::CancelWorkspaceEdit }, cx); },
                             (Details::Change, Some(0)) => self.run(CommandId::ShowChangeDiff,window,cx),
                             (Details::Change, Some(1)) => self.run(CommandId::RevertChange,window,cx),
                             (Details::Commit, Some(0)) => self.run(CommandId::ShowCommitDiff, window, cx),
@@ -5596,6 +5615,7 @@ impl ReaderView {
                 vec![(format!("› {input}{}", if *selected { "  (selected)" } else { "" }), None),
                     (error.clone().unwrap_or_else(|| "Save As — type a path; Enter saves, Escape cancels; Ctrl+A selects all".into()), None)]
             }
+            Some(Modal::WorkspaceInput { rename, input, error, .. }) => vec![(format!("› {input}"), None), (error.clone().unwrap_or_else(|| if *rename { "Rename Symbol — Enter previews the new name; Esc cancels".into() } else { "Replace in Project — Enter previews; empty deletes matches; Esc cancels".into() }), None)],
             Some(Modal::RenameTerminal { input, selected, error, .. }) => {
                 vec![(format!("› {input}{}", if *selected { "  (selected)" } else { "" }), None),
                     (error.clone().unwrap_or_else(|| "Rename terminal tab — Enter renames, Escape cancels; Ctrl+A selects all".into()), None)]
@@ -7142,7 +7162,7 @@ pub fn wrap(text: &str, cols: usize) -> Vec<String> {
 
 impl Modal {
     fn is_form(&self) -> bool {
-        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::RenameTerminal { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. })
+        matches!(self, Self::OpenPath { .. } | Self::Create { .. } | Self::SaveAs { .. } | Self::RenameTerminal { .. } | Self::WorkspaceInput { .. } | Self::Relocate { .. } | Self::PasteEntry { .. } | Self::ConfirmDelete { .. } | Self::NewBranch { .. } | Self::Revision { .. } | Self::GoTo { .. } | Self::Root { .. } | Self::SqlMetadata { .. })
     }
 
     /// The highlighted row of [`ReaderView::modal_rows`].
@@ -7154,7 +7174,7 @@ impl Modal {
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
             Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::NewScratch { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
-            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
+            Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
             Modal::Context { at, .. } => *at,
             Modal::Branches { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::BranchMenu { at, .. } => *at + 1,

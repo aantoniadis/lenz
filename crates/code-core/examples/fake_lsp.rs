@@ -453,6 +453,7 @@ fn main() {
                 if env("FAKE_LSP_NO_CODE_ACTION").is_none() {
                     caps["codeActionProvider"] = json!({ "codeActionKinds": ["quickfix", "refactor", "source.organizeImports"] });
                 }
+                if env("FAKE_LSP_RENAME").is_some() { caps["renameProvider"] = json!(true); }
                 if env("FAKE_LSP_NO_FORMAT").is_none() {
                     caps["documentFormattingProvider"] = json!(true);
                 }
@@ -677,6 +678,24 @@ fn main() {
                     }
                 });
                 reply(&mut out, found.unwrap_or(Value::Null));
+            }
+            "textDocument/rename" => {
+                let p = &m["params"];
+                let uri = p["textDocument"]["uri"].as_str().unwrap_or_default();
+                let name = fake.name_at(uri, &p["position"]).unwrap_or_default();
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                let mut changes = serde_json::Map::new();
+                for (uri, text) in fake.files() {
+                    let mut edits = Vec::new();
+                    for (line_number, line) in text.split('\n').enumerate() {
+                        for (i, _) in line.match_indices(&name).filter(|_| !name.is_empty()) {
+                            if line[..i].chars().next_back().is_some_and(word) || line[i + name.len()..].chars().next().is_some_and(word) { continue; }
+                            edits.push(json!({"range":{"start":{"line":line_number,"character":fake.units(&line[..i])},"end":{"line":line_number,"character":fake.units(&line[..i+name.len()])}},"newText":p["newName"]}));
+                        }
+                    }
+                    if !edits.is_empty() { changes.insert(uri,json!(edits)); }
+                }
+                reply(&mut out, json!({"changes":changes}));
             }
             "textDocument/formatting" => {
                 let p = &m["params"];

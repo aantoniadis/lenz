@@ -53,6 +53,7 @@ pub(crate) enum Prompt {
     Open,
     OpenFolder,
     TerminalPath,
+    WorkspaceInput { rename: bool },
     RenameTerminal { id: code_core::terminal::Id },
     /// Save As: the destination path for this tab's document.
     SaveAs(code_core::tabs::TabId),
@@ -103,6 +104,7 @@ pub(crate) enum Prompt {
 /// What a details prompt is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Details {
+    Workspace,
     Terminal(u64),
     Install,
     Sql,
@@ -612,10 +614,13 @@ impl App {
     }
     pub(crate) fn show_documentation(&mut self) {
         // The core's commit popup opens, follows and closes its dialog.
-        for (kind, title, now) in [(Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
+        for (kind, title, now) in [(Details::Workspace, "Edit Preview · A applies · Esc cancels · 1–9 toggle files", self.session.workspace_preview().map(|p|p.text())), (Details::Commit, "Commit", self.session.commit_text()), (Details::Checkout, "Checkout", self.session.checkout_text())] {
             match (now, self.modal.as_mut()) {
                 (Some(text), Some(Modal { kind: Prompt::Details { kind: k, body, .. }, .. })) if *k == kind => *body = text,
-                (None, Some(Modal { kind: Prompt::Details { kind: k, .. }, .. })) if *k == kind => self.modal = None,
+                (None, Some(Modal { kind: Prompt::Details { kind: k, .. }, .. })) if *k == kind => {
+                    if kind == Details::Workspace { self.focus = Focus::Text; }
+                    self.modal = None;
+                },
                 (Some(body), None) => self.prompt(Prompt::Details { title, body, logo: false, kind }),
                 _ => {}
             }
@@ -820,6 +825,7 @@ impl App {
             InterfaceAction::QuitAll => { self.quit_all = true; return; }
             InterfaceAction::Open => Prompt::Open,
             InterfaceAction::PasteTerminalPath => Prompt::TerminalPath,
+            InterfaceAction::WorkspaceInput { rename } => Prompt::WorkspaceInput { rename },
             InterfaceAction::RenameTerminal(id) => Prompt::RenameTerminal { id },
             InterfaceAction::NewScratch => Prompt::NewScratch,
             InterfaceAction::ScratchFiles => {
@@ -1011,13 +1017,14 @@ impl App {
                 let (dir, name) = self.session.save_as_start();
                 input = dir.join(name.unwrap_or_default()).display().to_string();
             }
+            Prompt::WorkspaceInput { rename } => input = if rename { self.session.find_seed() } else { self.session.replace_text().to_owned() },
             Prompt::RenameTerminal { id, .. } => input = self.session.state().terminal().tabs().iter().find(|tab| tab.id() == id).map_or(String::new(), |tab| tab.label().into()),
             Prompt::PasteEntry(ref request) => input = self.session.paste_entry_start(request),
             Prompt::Relocate { kind, ref from } => input = self.session.relocate_start(kind, from),
             Prompt::ConfirmDelete { removal, ref from } => error = self.session.delete_refusal(removal, from),
             _ => {}
         }
-        let selected = matches!(kind, Prompt::RenameTerminal { .. } | Prompt::Search) && !input.is_empty();
+        let selected = matches!(kind, Prompt::WorkspaceInput { .. } | Prompt::RenameTerminal { .. } | Prompt::Search) && !input.is_empty();
         self.modal = Some(Modal {
             kind,
             input,
@@ -1136,6 +1143,7 @@ impl App {
                 Prompt::Details { kind: Details::Replace, .. } => self.choose_replace(code_core::save::ReplaceChoice::Cancel),
                 Prompt::Details { kind: Details::Close, .. } => self.choose_close(code_core::close::Choice::Cancel),
                 Prompt::Details { kind: Details::Recovered, .. } => self.choose_recovery(code_core::recovery::Choice::Later),
+                Prompt::Details { kind: Details::Workspace, .. } => self.dispatch(Command::CancelWorkspaceEdit),
                 Prompt::Details { kind: Details::Change, .. } => self.dispatch(Command::CloseChange),
                 Prompt::Details { kind: Details::Commit, .. } => self.dispatch(Command::CloseCommit),
                 Prompt::Details { kind: Details::Checkout, .. } => self.dispatch(Command::CheckoutChoice(code_core::branches::CheckoutChoice::Cancel)),
@@ -1362,6 +1370,8 @@ impl App {
                 Prompt::Commands => "Commands · type to filter",
                 Prompt::Context { .. } | Prompt::Menu(_) => "",
                 Prompt::Open => "Open file · enter path",
+                Prompt::WorkspaceInput { rename: true } => "Rename symbol · new name · Enter previews · Esc cancels",
+                Prompt::WorkspaceInput { rename: false } => "Replace in Project · literal replacement · Enter previews · empty deletes · Esc cancels",
                 Prompt::RenameTerminal { .. } => "Rename terminal tab · Enter renames · Esc cancels",
                 Prompt::TerminalPath => "Paste path into terminal · Enter pastes · no Enter is sent to the shell",
                 Prompt::NewScratch => "New scratch file · type to filter · Enter creates the next scratch_N file · Esc cancels",
@@ -1674,6 +1684,15 @@ impl App {
                 _=>None,
             };
             if let Some(choice)=choice { self.choose_close(choice); return; }
+        }
+        if matches!(kind, Prompt::Details { kind: Details::Workspace, .. }) && !control && !alt {
+            match key.code {
+                KeyCode::Char(c @ ('n'|'N'|'p'|'P')) => { if let Some(m) = &mut self.modal { m.top = 0; } self.dispatch(Command::MoveWorkspaceFile(if matches!(c, 'n'|'N') { 1 } else { -1 })); return; }
+                KeyCode::Char(' ') => { self.dispatch(Command::ToggleCurrentWorkspaceFile); return; }
+                KeyCode::Char('a'|'A') => { self.dispatch(Command::ApplyWorkspaceEdit); return; }
+                KeyCode::Char(c @ '1'..='9') => { self.dispatch(Command::ToggleWorkspaceFile((c as u8 - b'1') as usize)); return; }
+                _ => {}
+            }
         }
         if matches!(kind,Prompt::Details {kind:Details::Change,..}) && !control && !alt {
             match key.code { KeyCode::Char('d'|'D') => return self.run(CommandId::ShowChangeDiff),KeyCode::Char('r'|'R') => return self.run(CommandId::RevertChange),_=>{} }
@@ -2111,6 +2130,10 @@ impl App {
                     }
                 }
             }
+            Prompt::WorkspaceInput { rename } => {
+                if rename && input.is_empty() { if let Some(m) = &mut self.modal { m.error = Some("Enter the new symbol name".into()); } }
+                else { self.close_modal(); self.dispatch(if rename { Command::RenameSymbol(input) } else { Command::PreviewProjectReplace(input) }); }
+            }
             Prompt::RenameTerminal { id, .. } => {
                 if let Some(why) = self.session.terminal_rename_refusal(id, &input) {
                     if let Some(modal) = self.modal.as_mut() { modal.error = Some(why); }
@@ -2444,6 +2467,9 @@ impl App {
     }
 
     fn key(&mut self, key: KeyEvent) {
+        if key.code == KeyCode::Esc && key.modifiers.is_empty() && self.session.workspace_busy() {
+            self.dispatch(Command::CancelWorkspaceEdit); return;
+        }
         if self.log_focus && self.session.state().activity_log_shown() {
             if key_press(key).and_then(|press| self.session.key_command(&press)) == Some(CommandId::FindAction) { self.log_focus = false; return self.key(key); }
             let page = self.layout.activity.height.saturating_sub(1) as usize;
@@ -3206,6 +3232,13 @@ impl App {
             if matches!(event.kind, MouseEventKind::Down(MouseButton::Left))
                 && let Some(Modal { kind: Prompt::Details { body, kind, .. }, .. }) = &self.modal
             {
+                if *kind == Details::Workspace {
+                    if let Some(i) = self.layout.details_choices.iter().position(|r|r.contains(point)) {
+                        if i < 2 && let Some(m) = &mut self.modal { m.top = 0; }
+                        self.dispatch(match i { 0 => Command::MoveWorkspaceFile(-1), 1 => Command::MoveWorkspaceFile(1), 2 => Command::ToggleCurrentWorkspaceFile, 3 => Command::ApplyWorkspaceEdit, _ => Command::CancelWorkspaceEdit });
+                    }
+                    return;
+                }
                 if *kind == Details::Install {
                     if let Some(i) = self.layout.details_choices.iter().position(|rect| rect.contains(point)) {
                         if let Some(id) = self.session.server_install_actions().get(i).copied() { return self.run(id); }

@@ -33,6 +33,7 @@ impl ReaderView {
             Modal::OpenPath { kind, input, error } => (Form::OpenPath(*kind), input.text(), input.selected(), None, error.as_deref()),
             Modal::Create { kind, dir, name, error } => (Form::Create(*kind, dir), name.as_str(), false, None, error.as_deref()),
             Modal::SaveAs { input, selected, error, .. } => (Form::SaveAs, input.as_str(), *selected, None, error.as_deref()),
+            Modal::WorkspaceInput { rename, input, selected, error } => (Form::WorkspaceInput(*rename), input.as_str(), *selected, None, error.as_deref()),
             Modal::RenameTerminal { input, selected, error, .. } => (Form::RenameTerminal, input.as_str(), *selected, None, error.as_deref()),
             Modal::Relocate { kind, from, input, error } => (Form::Relocate(*kind, from), input.as_str(), false, None, error.as_deref()),
             Modal::PasteEntry { request, name, selected, error } => (Form::Paste(request), name.as_str(), *selected, None, error.as_deref()),

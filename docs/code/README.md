@@ -781,3 +781,24 @@ scrolled there. This is application activity, not an unrestricted capture of eve
 
 
 Search and popup fields support selection, copy/cut/paste, character/word movement, Home/End and Shift-selection in both interfaces. See [text input controls and terminal clipboard behavior](../tui.md#text-in-searches-and-dialogs). Reader branch-row actions use Alt+Enter while a filter is nonempty; F6 forgets a recent item/bookmark or resets a keybinding.
+
+### Project replacement and symbol rename
+
+Run **Search in Project…** with the desired query, file filter and match options, then
+choose **Replace…** above the results or **Replace in Project…** from Commands. Enter the replacement and press Enter
+for a preview. Replacement text is literal, including `$1`; an empty value deletes matches.
+The search must be complete and current before a replacement can be prepared.
+
+**Rename Symbol…** asks the active file's language server to rename the symbol at the
+caret. Enter the new name to preview its proposed changes. Availability depends on the
+server's rename support and readiness. Rename accepts text edits to project files;
+file creation/moves/deletion, annotated edits and projected template sources are refused.
+
+In either preview, **Previous/Next** (`P`/`N`) selects a file, **Include/exclude** (Space)
+changes whether it will be applied, **Apply** (`A`) edits the selected drafts, and Escape
+cancels, including while the preview is being prepared. Excluding files from a symbol rename may leave references inconsistent.
+The preview supports at most 100 files, 10,000 edits, 4 MiB per file and 32 MiB of source
+and replacement text. The selected file appears first; very long preview text is truncated
+with a notice, so narrow the search to inspect a smaller change set. A changed draft, project or disk file refuses application; prepare
+another preview to review current contents. Applying never writes files: use normal Save
+for each changed draft. Undo in an affected file reverts that file's replacement in one step.

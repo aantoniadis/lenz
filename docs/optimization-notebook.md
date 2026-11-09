@@ -2476,3 +2476,21 @@ timing because `/usr/bin/time` was absent; the scratch collector fallback and un
 profile/features, source/rlib/probe hashes, every raw sample and actual durations are retained. Evidence
 is under `perf-results/archive-editor/` and `perf-results/fix-rigorous-2026-11-09/`, including source
 archives, binary identities, final gate records, native screenshots, frontend repeats and word probes.
+
+## Project replacement and symbol rename — 2026-11-09
+
+Project replacement and language-server rename share a bounded preview/apply path
+in the editor core. The implementation retains source identities, validates the
+whole selected batch before editing drafts, shares replacement text and caches
+bounded preview rendering. Correctness checks exposed and fixed duplicate tab
+identities and preservation of earlier unsaved edits. Earlier core and paired
+adapter checks passed; final acceptance is still open.
+
+Production builds and final test runs were blocked by process/thread exhaustion
+in this environment, including compiler worker failures. Reducing concurrency did
+not remove the failures. The planned final paired performance and sustained
+apply/undo workloads did not run, so there is no new performance conclusion and
+README metrics are unchanged. The [validation report](research/project-replace-rename-validation.md)
+records passing evidence, failed/interrupted attempts, cache-reuse limits and the
+outstanding acceptance ticket. Raw evidence is in `perf-results/project-replace/`;
+native macOS and Wayland remain unverified.

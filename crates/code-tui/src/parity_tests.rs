@@ -7117,3 +7117,5 @@ fn save_when_leaving_a_file_writes_it_on_a_tab_switch_in_both_adapters(cx: &mut 
     assert_eq!(std::fs::read_to_string(&gui_a).unwrap(), std::fs::read_to_string(&tui_a).unwrap());
     assert_eq!(std::fs::read_to_string(&tui_a).unwrap(), "start\nx");
 }
+
+mod workspace_edit;

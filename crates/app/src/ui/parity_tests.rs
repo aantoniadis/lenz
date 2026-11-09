@@ -4387,7 +4387,16 @@ fn check_shortcuts(cx:&mut TestAppContext,make:&dyn Fn(&mut TestAppContext)->Fix
         let (k,c)=(by_key.viewer.read_with(cx,|v,_|fingerprint(v)),by_cmd.viewer.read_with(cx,|v,_|fingerprint(v)));
         let untouched=probe.viewer.read_with(cx,|v,_|fingerprint(v));
         if k!=c {wrong.push(format!("{shortcut} for {:?} ({}) — key changed {}",e.action,e.label,if k==untouched {"nothing"} else {"something else"}));}
+        // TestAppContext retains windows until they close. Retire each pair (and
+        // any auxiliary windows its actions opened) before constructing another.
+        let keep = probe.window.window_id();
+        for window in cx.update(|cx|cx.windows()) {
+            if window.window_id() != keep { let _ = window.update(cx,|_,w,_|w.remove_window()); }
+        }
+        drop(by_key); drop(by_cmd);
+        cx.executor().run_until_parked();
     }
+    let _ = probe.window.update(cx,|_,w,_|w.remove_window());
 }
 
 #[gpui::test]

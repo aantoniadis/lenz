@@ -52,6 +52,7 @@ impl Session {
             controls.extend([(CommandId::PreviousResults, "‹"), (CommandId::NextResults, "›")]);
         }
         if self.disabled(CommandId::StopSearch).is_none() { controls.push((CommandId::StopSearch, "Stop")); }
+        if self.disabled(CommandId::ProjectReplace).is_none() { controls.push((CommandId::ProjectReplace, "Replace…")); }
         if self.disabled(CommandId::RerunSearch).is_none() { controls.push((CommandId::RerunSearch, "Rerun")); }
         if self.disabled(CommandId::FoldAllResults).is_none() {
             controls.push((CommandId::FoldAllResults, if r.all_folded() { "Expand" } else { "Collapse" }));

@@ -39,6 +39,7 @@ impl ReaderView {
             Modal::SaveAs {
                 input, selected, ..
             }
+            | Modal::WorkspaceInput { input, selected, .. }
             | Modal::RenameTerminal {
                 input, selected, ..
             } => (input.as_str(), None, *selected, 0),
@@ -134,6 +135,7 @@ impl ReaderView {
                     }
                 }
                 Modal::SaveAs { input, .. }
+                | Modal::WorkspaceInput { input, .. }
                 | Modal::RenameTerminal { input, .. }
                 | Modal::Revision { input, .. }
                 | Modal::GoTo { input, .. }
@@ -162,6 +164,7 @@ impl ReaderView {
                     *caret = cursor.caret;
                 }
                 Modal::SaveAs { selected, .. }
+                | Modal::WorkspaceInput { selected, .. }
                 | Modal::RenameTerminal { selected, .. }
                 | Modal::PasteEntry { selected, .. } => *selected = all_selected,
                 _ => {}
@@ -170,6 +173,7 @@ impl ReaderView {
                 match modal {
                     Modal::Search { .. } => {}
                     Modal::SaveAs { error, .. }
+                    | Modal::WorkspaceInput { error, .. }
                     | Modal::RenameTerminal { error, .. }
                     | Modal::PasteEntry { error, .. }
                     | Modal::Revision { error, .. }

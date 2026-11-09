@@ -68,6 +68,9 @@ directions. This is core computation, not popup latency; see the [SQL completion
   Dependency definitions reveal a lazy **Libraries** section for browsing their source files.
   F2 offers [project-scoped LSP settings](docs/code/providers.md#project-language-server-settings),
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
+- **Replace across a project** with a preview of each affected file, inclusion controls and undoable draft edits.
+  **Rename Symbol…** uses the language server and the same preview before applying changes. See the
+  [replacement and rename guide](docs/code/README.md#project-replacement-and-symbol-rename).
 - **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
   step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
