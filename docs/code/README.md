@@ -800,5 +800,6 @@ cancels, including while the preview is being prepared. Excluding files from a s
 The preview supports at most 100 files, 10,000 edits, 4 MiB per file and 32 MiB of source
 and replacement text. The selected file appears first; very long preview text is truncated
 with a notice, so narrow the search to inspect a smaller change set. A changed draft, project or disk file refuses application; prepare
-another preview to review current contents. Applying never writes files: use normal Save
-for each changed draft. Undo in an affected file reverts that file's replacement in one step.
+another preview to review current contents. Apply edits drafts; normal Save, Save As and an enabled
+**Save When Leaving a File** control when those drafts reach disk. Undo in an affected file
+reverts that file's replacement in one step.

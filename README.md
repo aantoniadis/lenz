@@ -58,6 +58,10 @@ A bounded SQL completion check (512 tables × 16 columns, Linux release, ten alt
 measured **1.84→1.86 ms per completion** after the default-schema fix; paired differences varied in both
 directions. This is core computation, not popup latency; see the [SQL completion notes](docs/optimization-notebook.md#sql-metadata-completion--2026-10-29).
 
+A Linux release project-edit check completed **4,220 cycles in 120 seconds**, each replacing
+4,000 matches across 40 files and checking exact per-file Undo and disk bytes. Core preview/Apply
+medians were **2.33/10.45 ms**; see [validation results and frontend measurement limits](docs/research/project-replace-rename-validation.md).
+
 - **Explore code** with a project tree, file finder, tabs, independent split panes,
   breadcrumbs, outline, folding and sticky declarations.
 - **Edit archive members** by opening a ZIP or tarball, including nested archives. Open a member,
@@ -70,7 +74,8 @@ directions. This is core computation, not popup latency; see the [SQL completion
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
 - **Replace across a project** with a preview of each affected file, inclusion controls and undoable draft edits.
   **Rename Symbol…** uses the language server and the same preview before applying changes. See the
-  [replacement and rename guide](docs/code/README.md#project-replacement-and-symbol-rename).
+  [replacement and rename guide](docs/code/README.md#project-replacement-and-symbol-rename) and
+  [Linux validation results](docs/research/project-replace-rename-validation.md).
 - **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
   step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.

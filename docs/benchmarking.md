@@ -187,6 +187,24 @@ PID 1, so a polluted environment still needs recreation or a full restart.
 A supervisor also cannot clean up after its own uncatchable SIGKILL; a proper
 reaping container init remains the preferred outer boundary.
 
+The project replacement acceptance probe runs alone after a normal release test
+build (build the standalone terminal binaries separately from GUI features):
+
+```sh
+python3 scripts/reap-children.py -- cargo test --locked --release -p code-core \
+  workspace_edit_release_probe --no-run
+LENZ_WORKSPACE_PROBE_SECONDS=120 python3 scripts/reap-children.py -- \
+  cargo test --locked --release -p code-core workspace_edit_release_probe -- --ignored --nocapture
+```
+
+`WORKSPACE_PROBE` workload version 2 retains every cycle's completed preview/apply
+wall time, elapsed timestamp and process memory sample. Each cycle replaces 4,000
+matches across 40 files, verifies every draft and its independent Undo, and checks
+all 40 disk files remain byte-identical. Timing includes completion polling;
+it excludes frontend rendering, language-server requests and Save. RSS includes
+the probe's retained samples and allocator residency, and does not prove leak
+freedom. Keep the actual duration, raw samples and test executable/source identity.
+
 ## Linux and macOS
 
 | Capability | Linux | macOS |
