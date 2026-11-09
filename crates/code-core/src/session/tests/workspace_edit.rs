@@ -95,7 +95,9 @@ fn workspace_symbol_rename_roundtrips_a_server_reply_before_applying_multiple_dr
     assert_eq!(s.workspace_preview().unwrap().files().len(),2);
     assert_eq!(std::fs::read(&other).unwrap(),b"fn caller() { target(); }\n");
     s.dispatch(Command::ApplyWorkspaceEdit);settle(&mut s,|s|!s.workspace_busy());
-    assert_eq!(s.state().tabs().iter().filter_map(|t|s.state.source(t.id()).map(|s|s.key().buffer)).collect::<std::collections::HashSet<_>>().len(),2);
+    assert!(s.workspace_preview().is_none(), "{:?}", s.state().notices());
+    assert_eq!(s.state().tabs().iter().filter_map(|t|s.state.source(t.id()).map(|s|s.key().buffer)).collect::<std::collections::HashSet<_>>().len(),2,
+        "tabs {:?}; notices {:?}", s.state().tabs().iter().map(|t|(t.id(),t.source(),s.state.source(t.id()).map(|s|s.key()))).collect::<Vec<_>>(),s.state().notices());
     for tab in s.state().tabs() {
         let source=s.state.source(tab.id()).unwrap();assert_eq!(source.source(),tab.source());
         let expected=if tab.source()==path { "fn renamed() {}\n" } else { "// unsaved λ\nfn caller() { renamed(); }\n" };
@@ -118,6 +120,45 @@ fn workspace_replace_keeps_existing_unsaved_text_and_undo_history() {
     s.dispatch(Command::Undo {tab});
     assert_eq!(source_text(s.state().current_source().unwrap()),"unsaved λ foo\r\nfoo\nlast");
     assert_eq!(std::fs::read(path).unwrap(),"λ foo\r\nfoo\nlast".as_bytes());
+}
+
+#[test]
+fn workspace_replace_restores_inactive_dirty_cached_and_evicted_tabs_before_editing() {
+    for (dirty, evict) in [(true, false), (false, false), (false, true)] {
+        let (_d, root, mut s) = fixture();
+        open(&mut s, Command::OpenRetained(root.join("b.txt")), "b.txt");
+        let b = s.state().active().unwrap().id();
+        if dirty { s.dispatch(Command::InsertText {text:"unsaved ".into(),kind:crate::text::EditKind::Paste}); }
+        open(&mut s, Command::OpenRetained(root.join("a.txt")), "a.txt");
+        assert!(s.state.view(b).is_none(), "the inactive tab released its view");
+        if evict { s.cache = InactiveCache::new(0); s.release_current(); }
+        preview(&mut s, "bar");
+        s.dispatch(Command::ApplyWorkspaceEdit);
+        settle(&mut s, |s| !s.workspace_busy());
+        assert!(s.workspace_preview().is_none(), "{:?}", s.state().notices());
+        assert_eq!(s.state().tabs().len(), 2, "reuse both original tabs");
+        let prefix = if dirty { "unsaved " } else { "" };
+        assert_eq!(source_text(s.state.source(b).unwrap()), format!("{prefix}bar bard\n"));
+        s.dispatch(Command::Undo {tab:b});
+        assert_eq!(source_text(s.state.source(b).unwrap()), format!("{prefix}foo food\n"));
+        assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"foo food\n");
+    }
+}
+
+#[test]
+fn workspace_replace_rejects_an_inactive_read_only_buffer_without_partial_edits() {
+    let (_d, root, mut s) = fixture();
+    open(&mut s, Command::OpenRetained(root.join("b.txt")), "b.txt");
+    s.dispatch(Command::SetReadOnly(true));
+    open(&mut s, Command::OpenRetained(root.join("a.txt")), "a.txt");
+    s.cache = InactiveCache::new(0); s.release_current();
+    preview(&mut s, "bar");
+    s.dispatch(Command::ApplyWorkspaceEdit);
+    settle(&mut s, |s| !s.workspace_busy());
+    assert!(s.workspace_preview().is_some());
+    assert!(s.state().tabs().iter().all(|t| !s.state().tab_dirty(t.id())));
+    assert_eq!(source_text(s.state().current_source().unwrap()), "λ foo\r\nfoo\nlast");
+    assert_eq!(std::fs::read(root.join("b.txt")).unwrap(), b"foo food\n");
 }
 
 #[test]

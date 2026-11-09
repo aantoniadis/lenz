@@ -194,27 +194,41 @@ impl Session {
             let canonical = file.doc.source_meta().canonical();
             let tab = self.state.tabs.iter().find(|t| t.read_only_side().is_none() && (t.source == file.path || canonical.is_some() && t.canonical.as_deref() == canonical)).map(|t| t.id);
             if let Some(tab) = tab {
-                let Some(view) = self.state.view(tab) else { return self.workspace_notice("An affected file is loading; prepare a new preview"); };
+                let Some(t) = self.state.tabs.iter().find(|t|t.id == tab) else { return self.workspace_notice("An affected tab was closed"); };
+                let Some(buffer) = t.buffer else { return self.workspace_notice("An affected file is loading; prepare a new preview"); };
+                let Some(entry) = self.state.sources.buffers.get(&buffer) else { return self.workspace_notice("An affected source was released; prepare a new preview"); };
+                // Inactive tabs release their view even when their dirty/undoable buffer is pinned.
+                // An evicted clean buffer can instead use the disk source just validated by the worker.
+                let reload = entry.snapshot.is_none();
+                if reload && (t.loaded || entry.pinned() || file.snapshot.is_some() || self.pending.is_some_and(|(id,_)|id == tab) || t.canonical.as_deref() != canonical) {
+                    return self.workspace_notice("An affected file is loading or changed; prepare a new preview");
+                }
+                let snapshot = entry.snapshot.clone().unwrap_or_else(|| Arc::new(TextSnapshot::from_document(buffer, &file.doc)));
+                let view = self.state.view_of_snapshot(t, entry, &snapshot);
                 let current = view.snapshot();
                 if view.edit_disabled().is_some() || file.snapshot.as_ref().map_or_else(|| !current.matches_document(&file.doc), |old| old.key() != current.key()) { return self.workspace_notice(format!("{} changed or is busy; prepare a new preview", file.path.display())); }
+                targets.push(Some((tab, snapshot, entry.stamp, reload)));
             } else if file.snapshot.is_some() { return self.workspace_notice("An affected draft was closed; prepare a new preview"); }
-            targets.push(tab);
+            else { targets.push(None); }
         }
         let count = targets.len();
-        let active_changed = targets.iter().flatten().any(|tab| {
-            self.state.source(*tab).zip(self.state.current_source())
-                .is_some_and(|(affected, active)| affected.key().buffer == active.key().buffer)
+        let active_changed = targets.iter().flatten().any(|(_, snapshot, _, _)| {
+            self.state.current_source().is_some_and(|active| snapshot.key().buffer == active.key().buffer)
         });
         let mut first = None;
         for (file, existing) in plan.files.into_iter().filter(|f| f.selected).zip(targets) {
-            let tab = existing.unwrap_or_else(|| {
+            let tab = if let Some((tab, snapshot, stamp, reload)) = existing {
+                if reload { self.show(tab, file.doc, file.stamp, false); }
+                else if self.state.view(tab).is_none() { self.show_snapshot(tab, snapshot, stamp, false); }
+                tab
+            } else {
                 self.next_tab += 1; let id = TabId(self.next_tab);
                 let mut tab = self.fresh_tab(id, &file.path, &file.path, true, true);
                 tab.canonical = file.doc.source_meta().canonical().map(Path::to_owned);
                 self.state.tabs.push(tab);
                 self.show(id, file.doc, file.stamp, false);
                 id
-            });
+            };
             first.get_or_insert(tab);
             if let Some(key) = self.state.source(tab).map(|s| s.key()) { self.edit(tab, key, file.edits, EditKind::Replace); }
         }

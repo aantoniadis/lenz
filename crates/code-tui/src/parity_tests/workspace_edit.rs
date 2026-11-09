@@ -95,6 +95,28 @@ fn project_replace_preview_input_selection_cancel_apply_and_undo_match_in_both_a
         tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('z'),KeyModifiers::CONTROL)));
         assert_eq!(text(&tui.session).as_deref(),Some("λ foo\r\nfoo\n"));
         assert_eq!(gui.read_with(&visual,|v,_|text(v.session())),text(&tui.session));
+        // Leave that Undo unsaved, then replace the inactive pinned draft from the scratch tab.
+        gui.update_in(&mut visual, |v,w,cx| v.run(CommandId::SaveOnLeave,w,cx));
+        tui.run(CommandId::SaveOnLeave);
+        visual.simulate_keystrokes("ctrl-tab");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::CONTROL)));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().current_source().is_some_and(|d|d.source().ends_with("scratch_1.rb")));
+        gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project},cx));
+        tui.dispatch(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project});
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().results().is_some_and(|r|r.done()));
+        gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::PreviewProjectReplace("again".into()),cx));
+        tui.dispatch(Command::PreviewProjectReplace("again".into()));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.workspace_preview().is_some());
+        visual.simulate_keystrokes("a");
+        tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'),KeyModifiers::NONE)));
+        settle(&mut visual,&mut tui,&mut terminal,&|s|!s.workspace_busy()&&s.workspace_preview().is_none());
+        assert_eq!(text(&tui.session).as_deref(),Some("λ again\r\nagain\n"));
+        assert_eq!(gui.read_with(&visual,|v,_|text(v.session())),text(&tui.session));
+        for root in [&gr,&tr] { assert_eq!(std::fs::read(root.join("a.txt")).unwrap(),"λ saved\r\nsaved\n".as_bytes()); }
+        visual.simulate_keystrokes("ctrl-z ctrl-s");
+        for c in ['z','s'] { tui.handle(Event::Key(KeyEvent::new(KeyCode::Char(c),KeyModifiers::CONTROL))); }
+        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().active().is_some_and(|t|!s.state().tab_dirty(t.id())));
+        for root in [&gr,&tr] { assert_eq!(std::fs::read(root.join("a.txt")).unwrap(),"λ foo\r\nfoo\n".as_bytes()); }
     }
 }
 

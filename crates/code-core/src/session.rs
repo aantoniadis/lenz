@@ -2385,11 +2385,16 @@ impl State {
     pub fn view(&self, id: TabId) -> Option<View<'_>> {
         let tab = self.tabs.iter().find(|tab| tab.id == id)?;
         let buffer = tab.buffer?;
-        let snapshot = self.sources.buffers.get(&buffer)?.snapshot.as_ref()?;
+        let entry = self.sources.buffers.get(&buffer)?;
+        let snapshot = entry.snapshot.as_ref()?;
         if !tab.loaded { return None; }
+        Some(self.view_of_snapshot(tab, entry, snapshot))
+    }
+    /// The same editing guards for an inactive retained buffer or a validated reload candidate.
+    fn view_of_snapshot<'a>(&'a self, tab: &'a Tab, entry: &'a CurrentSource, snapshot: &'a Arc<crate::text::TextSnapshot>) -> View<'a> {
         let undecided = !self.undecided_recovery.is_empty() && tab.is_file()
             && self.undecided_recovery.iter().any(|path| *path == tab.source || tab.canonical.as_deref() == Some(path.as_path()));
-        Some(View { snapshot, tab, read_only: self.sources.buffers.get(&buffer)?.read_only, draft: self.sources.buffers.get(&buffer)?.draft.as_ref(), save: &self.sources.buffers.get(&buffer)?.save, undecided })
+        View { snapshot, tab, read_only: entry.read_only, draft: entry.draft.as_ref(), save: &entry.save, undecided }
     }
 
     fn admit_current(&mut self, id: TabId, doc: &Arc<Document>, stamp: Option<Stamp>) -> Vec<TabId> {
