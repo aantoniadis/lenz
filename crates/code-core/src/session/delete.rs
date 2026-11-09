@@ -9,7 +9,8 @@ impl Session {
     pub fn delete_prompt(&self, removal: Removal, from: &str) -> String {
         let source = self.state.project.as_ref().map(|p| p.root().join(from));
         let folder = source.as_deref().is_some_and(Path::is_dir);
-        let open = source.as_deref().map_or(0, |source| self.state.tabs.iter().filter(|t| t.retrieved.is_none() && !t.untitled() && t.source.starts_with(source)).count());
+        let scope = source.as_deref().map(super::relocate_work::EntryScope::new);
+        let open = scope.as_ref().map_or(0, |scope| self.state.tabs.iter().filter(|t| t.retrieved.is_none() && !t.untitled() && scope.contains(t)).count());
         let what = if folder { format!("the folder {from} and everything in it") } else { from.to_string() };
         let how = match removal {
             Removal::Trash => "It moves to the trash; Restore Last Deleted Entry (or the desktop's trash) puts it back.",
@@ -25,7 +26,8 @@ impl Session {
         if from.is_empty() || !crate::create::is_relative(from) { return Some("Choose a file or folder of the open project".into()); }
         let source = project.root().join(from);
         if std::fs::symlink_metadata(&source).is_err() { return Some(format!("{from} is no longer there")); }
-        if let Some(tab) = self.state.tabs.iter().find(|t| t.is_file() && t.source.starts_with(&source) && self.state.tab_dirty(t.id)) {
+        let scope = super::relocate_work::EntryScope::new(&source);
+        if let Some(tab) = self.state.tabs.iter().find(|t| t.is_file() && scope.contains(t) && self.state.tab_dirty(t.id)) {
             return Some(format!("{} has unsaved changes: save or discard them first", tab.title()));
         }
         self.relocate_blocked(&source)
@@ -38,6 +40,7 @@ impl Session {
             return repaint;
         }
         let Some(source) = self.state.project.as_ref().map(|p| p.root().join(&from)) else { return Effect::default() };
+        let scope = super::relocate_work::EntryScope::new(&source);
         let outcome = match removal {
             Removal::Trash => trash::trash(&source, self.trash_home.as_deref()).map(|trashed| self.trashed.push(trashed)),
             Removal::Permanent => match std::fs::symlink_metadata(&source) {
@@ -47,7 +50,7 @@ impl Session {
         };
         // What is gone is reconciled even after a partial failure; what remains stays open and listed.
         let gone = std::fs::symlink_metadata(&source).is_err();
-        self.forget_deleted(&source);
+        self.forget_deleted(&scope);
         if gone { if let Some(p) = &mut self.state.project { p.remove(&from); } } else { self.rescan(); }
         self.state.tree_revision += 1;
         let parent = crate::relocate::split(&from).0;
@@ -67,10 +70,10 @@ impl Session {
 
     /// Open documents whose files are gone close (they are clean: a draft refuses the delete), their cached text
     /// goes, and recovery cannot offer them back.
-    fn forget_deleted(&mut self, source: &Path) {
-        if self.state.tabs.iter().any(|t| t.comparison_side.is_some() && t.source.starts_with(source)) { self.close_saved_comparison(); }
+    fn forget_deleted(&mut self, scope: &super::relocate_work::EntryScope) {
+        if self.state.tabs.iter().any(|t| t.comparison_side.is_some() && scope.contains(t)) { self.close_saved_comparison(); }
         let closing: Vec<(TabId, PathBuf, Option<crate::text::BufferId>)> = self.state.tabs.iter()
-            .filter(|t| t.retrieved.is_none() && !t.untitled() && t.source.starts_with(source) && std::fs::symlink_metadata(&t.source).is_err())
+            .filter(|t| t.retrieved.is_none() && !t.untitled() && scope.contains(t) && Stamp::of(&t.source).is_none())
             .map(|t| (t.id, t.source.clone(), t.buffer)).collect();
         for (id, path, buffer) in closing {
             self.release(id);

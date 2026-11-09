@@ -78,7 +78,7 @@ pub(crate) fn rank_with_total(snapshot: Snapshot, scope: Scope, query: &str, cur
         for (i, path) in snapshot.recent.iter().take(LIMIT).enumerate() {
             if !current() { return None; }
             let rel = snapshot.root.as_ref().and_then(|root| path.strip_prefix(root).ok()).unwrap_or(path);
-            let detail = rel.to_string_lossy();
+            let detail = crate::archive::Location::from_uri(path).map_or_else(|| rel.to_string_lossy(), |location| std::borrow::Cow::Owned(location.display_path()));
             if let Some(score) = lenz_content::fuzzy::score(file_query, &detail) {
                 if !seen.insert(path.clone()) { continue; }
                 let mut row = file_row(path.clone(), detail.into_owned(), at);
@@ -90,9 +90,9 @@ pub(crate) fn rank_with_total(snapshot: Snapshot, scope: Scope, query: &str, cur
     }
     if matches!(scope, Scope::All | Scope::Files) {
         for (i, path) in snapshot.recent.iter().take(LIMIT).enumerate() {
-            if snapshot.root.as_ref().is_some_and(|root| !path.starts_with(root)) { continue; }
+            if snapshot.root.as_ref().is_some_and(|root| !crate::archive::physical_path(path).starts_with(root)) { continue; }
             let rel = snapshot.root.as_ref().and_then(|root| path.strip_prefix(root).ok()).unwrap_or(path);
-            let detail = rel.to_string_lossy();
+            let detail = crate::archive::Location::from_uri(path).map_or_else(|| rel.to_string_lossy(), |location| std::borrow::Cow::Owned(location.display_path()));
             if let Some(score) = lenz_content::fuzzy::score(file_query, &detail).filter(|_| loose_file(file_query, &detail)) {
                 if !seen.insert(path.clone()) { continue; }
                 ranked.push((if query.is_empty() { 1_000_000 - i as i64 } else { score }, file_row(path.clone(), detail.into_owned(), at)));
@@ -141,7 +141,10 @@ pub(crate) fn rank_with_total(snapshot: Snapshot, scope: Scope, query: &str, cur
 }
 
 fn file_row(path: PathBuf, detail: String, at: Option<LineColumn>) -> Row {
-    Row {label: path.file_name().map_or_else(|| detail.clone(), |s| s.to_string_lossy().into_owned()), detail, kind: Kind::File, disabled: None, on: None, shortcut: None, target: Target::Open {path, at}}
+    let archive = crate::archive::Location::from_uri(&path);
+    let label = archive.as_ref().and_then(|location| location.member_name()).and_then(|name| std::path::Path::new(name).file_name())
+        .map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| path.file_name().map_or_else(|| detail.clone(), |name| name.to_string_lossy().into_owned()));
+    Row {label, detail, kind: Kind::File, disabled: None, on: None, shortcut: None, target: Target::Open {path, at}}
 }
 
 pub use lenz_content::double_shift::DoubleShift;

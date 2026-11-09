@@ -49,12 +49,16 @@ use lenz::cli::{self, Launch, Request};
 const HELP: &str = "Lenz terminal
 usage: lenz diff --tui [options] [--staged] [<rev> [<rev>]] [-- <path>...]
        lenz diff --tui [options] [--no-index] <left> <right>
+       lenz diff --tui show <commit> [options] [-- <path>...]
+       lenz diff --tui --new-comparison
        lenz diff --tui log [<rev>...] [-- <path>...] | log --follow <file>
        lenz diff --tui pr [<number>|<url>]
        lenz diff --tui merge [[--] <path>...] | merge <base> <local> <remote> <merged>
 lenz-diff-tui takes the same arguments without the diff --tui prefix.
 
 Same comparison options as lenz diff, including --blame and --line N.
+show compares a commit with its first parent (the empty tree for a root commit).
+--new-comparison chooses files, folders or a repository in an independent view.
 Icons: Nerd Font Mono glyphs by default; LENZ_ICONS=plain (or [tools] icons = plain) turns them off, and the ☰ menu toggles them.
 n/p changes; [/] files; / find; f files; : commands; Ctrl-R repository;
 A applied history; Ctrl-Z/Ctrl-Y undo/redo drafts; Ctrl-S saves;

@@ -280,6 +280,13 @@ struct Labels {
 pub struct Viewer {
     field_inputs:crate::field_edit::Fields,
     field_input_modal:Option<Modal>,
+    field_native:crate::field_edit::Native,
+    field_native_owner:Option<u64>,
+    field_native_stale:bool,
+    field_native_registered:std::rc::Rc<std::cell::Cell<bool>>,
+    field_native_observed:bool,
+    field_native_changes:u8,
+    field_native_suppress:Option<(u64,String)>,
     #[cfg(all(test, feature="gui-test"))]
     spawned_comparisons: Vec<(Vec<String>, PathBuf)>,
     panes: PaneSizes,
@@ -480,6 +487,20 @@ impl Viewer {
     }
 }
 
+/// Both identities matter: while a recompare runs, a menu can still target the preceding diff.
+#[derive(Clone, Copy)]
+struct HunkTarget {
+    block: usize,
+    generation: u64,
+    diffed: u64,
+}
+
+impl HunkTarget {
+    fn is_current(self, comparison: &crate::comparison_session::ComparisonSession) -> bool {
+        self.generation == comparison.generation && self.diffed == comparison.diffed
+    }
+}
+
 enum MenuAction {
     /// A catalog action, as the ☰ menu lists them.
     Run(crate::catalog::Action),
@@ -490,9 +511,9 @@ enum MenuAction {
     InteractionCommand(commands::Interaction),
     TextCopy(commands::Interaction,Side,Option<Selection>,u64),
     ToggleBlame,
-    Fold(usize),
+    Fold(HunkTarget),
     /// Copy a Change Block onto this Side.
-    Move(usize, Side),
+    Move(HunkTarget, Side),
     /// A Merge View action on one merge block.
     Merge(merge_view::Control),
     /// Comparison, Side, 1-based line, and whether to use the system default app.
@@ -746,6 +767,7 @@ impl Viewer {
         comparison.banner = gave_up.then(|| "Unable to calculate diff — file too big / too many changes".into());
         let mut viewer = Viewer {
             field_inputs:Default::default(),field_input_modal:None,
+            field_native:Default::default(),field_native_owner:None,field_native_stale:false,field_native_registered:Default::default(),field_native_observed:false,field_native_changes:0,field_native_suppress:None,
             #[cfg(all(test, feature="gui-test"))]
             spawned_comparisons: Vec::new(),
             palette: cx.global::<themes::GuiThemes>().0.snapshot().palette,
@@ -2036,7 +2058,7 @@ impl Viewer {
         let o = self.comparison.find_options;
         Some(lenz_gpui::find::FindBox {
             bounds: Bounds::default(), toggles: [(FindOption::Case, Bounds::default()); 3],
-            on: [o.case, o.word, o.regex], query: f.query.clone(), query_cursor:self.field_inputs.cursor(Modal::Find as u64,0).unwrap_or_default(), replace_cursor:Default::default(), counter: f.counter(),
+            on: [o.case, o.word, o.regex], query: self.projected_field(Modal::Find as u64,&f.query,self.field_inputs.cursor(Modal::Find as u64,0).unwrap_or_default(),(widths[side as usize]/self.text_char_w()).max(0.0) as usize).text, query_cursor:self.projected_field(Modal::Find as u64,&f.query,self.field_inputs.cursor(Modal::Find as u64,0).unwrap_or_default(),(widths[side as usize]/self.text_char_w()).max(0.0) as usize).cursor, replace_cursor:Default::default(), counter: f.counter(),
             error: f.error().is_some(), focused: self.modal() == Some(Modal::Find),
             // Diff's find bar searches the comparison; it has no replace.
             show_replace: false, replace_label: String::new(), replace: String::new(), replace_focused: false, replace_row: Bounds::default(),
@@ -2137,8 +2159,9 @@ impl Viewer {
                     (_, MenuAction::ToggleBlame) => self.toggle_blame(cx),
                     (_, MenuAction::Command(command)) => self.comparison_command(*command, cx),
                     (_, MenuAction::InteractionCommand(command))=>self.interaction(*command,cx),
-                    (_, MenuAction::Fold(i)) => self.fold(Some(*i), cx),
-                    (_, MenuAction::Move(i, onto)) => self.move_change(*i, *onto, cx),
+                    (_, MenuAction::Fold(target)) if target.is_current(&self.comparison) => self.fold(Some(target.block), cx),
+                    (_, MenuAction::Move(target, onto)) if target.is_current(&self.comparison) => self.move_change(target.block, *onto, cx),
+                    (_, MenuAction::Fold(_) | MenuAction::Move(..)) => self.toast("Comparison changed — reopen the menu".into(), cx),
                     (_, MenuAction::Merge(c)) => self.merge_control(*c, cx),
                     (_, MenuAction::Open(index, side, line, default_app)) => self.open_file(*index, *side, *line, None, *default_app, cx),
                     (_, MenuAction::MarkResolved(path)) => self.mark_resolved(path.clone(), cx),
@@ -2157,6 +2180,7 @@ impl Viewer {
     /// The Ctrl+F bar stays while it is clicked; any other click does what it would and then closes the bar.
     fn on_mouse_down(&mut self, ev: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         self.double_shift.interrupt();
+        if self.native_field_click(ev,window,cx){return;}
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
         let outside_find = self.find_bar_box().is_some_and(|(bx, by, bw, bh)| !(x >= bx && x < bx + bw && y >= by && y < by + bh));
         // A find option toggle in the find bar or the Change Set search prompt flips that option; either stays.
@@ -2539,16 +2563,17 @@ impl Viewer {
             _ => None,
         };
         if let Some(i) = block {
+            let target = HunkTarget { block: i, generation: self.comparison.generation, diffed: self.comparison.diffed };
             if self.comparison.view.can_fold(i) {
                 let label = crate::catalog::pointer::fold(self.comparison.view.folded(i));
-                items.push((label.into(), MenuAction::Fold(i)));
+                items.push((label.into(), MenuAction::Fold(target)));
             }
             let writable = self.doc().map_or([false, false], |d| d.writable.each_ref().map(|w| w.is_ok()));
             if writable[1] {
-                items.push((crate::catalog::pointer::move_change(Side::Right).into(), MenuAction::Move(i, Side::Right)));
+                items.push((crate::catalog::pointer::move_change(Side::Right).into(), MenuAction::Move(target, Side::Right)));
             }
             if writable[0] {
-                items.push((crate::catalog::pointer::move_change(Side::Left).into(), MenuAction::Move(i, Side::Left)));
+                items.push((crate::catalog::pointer::move_change(Side::Left).into(), MenuAction::Move(target, Side::Left)));
             }
         }
         let at = match self.content_at(side, y) {
@@ -2908,6 +2933,7 @@ impl Viewer {
     }
 
     fn on_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native_field_key(ev,window,cx){return;}
         if !matches!(ev.keystroke.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
         self.panes.drag=None;
         // a key other than a quit cancels a quit refused for unsaved changes
@@ -3498,6 +3524,10 @@ impl Viewer {
 
 impl Render for Viewer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !std::mem::replace(&mut self.field_native_observed,true) {
+            cx.on_blur(&self.focus,window,|v,_,cx|{v.field_native.cancel();v.field_native_stale=true;cx.notify();}).detach();
+            cx.observe_window_activation(window,|v,window,cx|{if !window.is_window_active(){v.field_native.cancel();v.field_native_stale=true;cx.notify();}}).detach();
+        }
         // A tap before the window lost focus does not pair with one after.
         if !window.is_window_active() { self.double_shift.reset(); }
         self.restore_and_record_place(cx);
@@ -3684,7 +3714,8 @@ impl Render for Viewer {
             let tip: Vec<String> = renamed.into_iter().chain(edited).collect();
             (!tip.is_empty()).then(|| (row, tip.join(" · ")))
         });
-        let self_cursor=self.field_inputs.cursor(Modal::Switcher as u64,0).unwrap_or_default();
+        let switcher_input=self.field_snapshot((self.panes.viewport[0]/char_w.max(1.0)).max(0.0) as usize);
+        let self_cursor=switcher_input.as_ref().map_or_else(||self.field_inputs.cursor(Modal::Switcher as u64,0).unwrap_or_default(),|s|s.cursor);
         let switcher = self.switcher.as_ref().map(|sw| {
             let hits: Vec<(String, String, u32)> = sw
                 .hits
@@ -3696,7 +3727,7 @@ impl Render for Viewer {
                     Some((format!("{} {name}", navigator::badge(&c.status)), dir.to_string(), status_color(&palette, &c.status)))
                 })
                 .collect();
-            (sw.query.clone(), sw.selected, hits)
+            (switcher_input.as_ref().map_or_else(||sw.query.clone(),|s|s.text.clone()), sw.selected, hits)
         });
         let (sw_w, nav_scroll) = (self.sidebar_w(), self.nav_scroll);
         let labels = self.labels(self.comparison.current);
@@ -3796,6 +3827,12 @@ impl Render for Viewer {
                 }).size_full())
         });
         let toolbar = self.toolbar(cx);
+        self.sync_native_field();
+        let native_changes=std::mem::take(&mut self.field_native_changes);
+        if native_changes&1!=0 {window.notify_text_input_changed(&self.focus);}
+        if native_changes&2!=0 {window.notify_text_selection_changed(&self.focus);}
+        self.field_native_registered.set(false);
+        let native_input=self.native_field().is_some().then(||(self.focus.clone(),cx.entity().clone(),self.field_native_registered.clone()));
         let footer = self.footer();
         if let Some(about)=&mut self.about{about.scroll=about.scroll.min(about::About::max_scroll(window.viewport_size(),self.char_w));}
         let about_palette=palette.clone();
@@ -3816,6 +3853,7 @@ impl Render for Viewer {
             .flex_col()
             .bg(rgb(palette.bg))
             .track_focus(&self.focus)
+            .child(canvas(|_,_,_|{},move|bounds,_,window,cx|{if let Some((focus,entity,registered))=&native_input{window.handle_input(focus,gpui::ElementInputHandler::new(bounds,entity.clone()),cx);registered.set(true);}}).absolute().size_full())
             // capture phase: before any handler can stop propagation
             .capture_key_down(|_, window, _| present::soon(window))
             .capture_any_mouse_down(|_, window, _| present::soon(window))

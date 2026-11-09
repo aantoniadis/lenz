@@ -103,3 +103,68 @@ fn deleted_work_is_not_offered_back_by_recovery_and_a_blocked_restore_keeps_the_
     let next = session(d.path());
     assert!(next.recovered_drafts().is_empty(), "discarded and deleted work does not come back");
 }
+
+#[test]
+fn deleting_a_real_entry_protects_its_dirty_alias_but_deleting_the_alias_leaves_the_real_document() {
+    for removal in [Removal::Trash, Removal::Permanent] {
+        for dirty_alias in [true, false] {
+            let d = tempfile::tempdir().unwrap();
+            let root = d.path().join("proj");
+            std::fs::create_dir(&root).unwrap();
+            let real = write(&root, "real.txt", b"saved\n");
+            let alias = root.join("alias.txt");
+            std::os::unix::fs::symlink(&real, &alias).unwrap();
+            let mut s = session(d.path());
+            s.set_trash_home_for_test(d.path().join("data/Trash"));
+            open_project(&mut s, &root, if dirty_alias { "alias.txt" } else { "real.txt" });
+            assert!(s.state().tree_rows().any(|row| &*row.path == "alias.txt"));
+            let tab = s.state().active().unwrap().id();
+            let expected = s.state().current_source().unwrap().key();
+            s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "draft ".into() }], kind: crate::text::EditKind::Paste });
+            let draft = source_text(s.state().current_source().unwrap());
+            if dirty_alias {
+                assert!(s.delete_prompt(removal, "real.txt").contains("Its open tab closes"));
+                assert!(s.delete_refusal(removal, "real.txt").unwrap().contains("unsaved changes"));
+                delete(&mut s, removal, "real.txt");
+                assert_eq!(std::fs::read(&real).unwrap(), b"saved\n");
+                assert_eq!(source_text(s.state().current_source().unwrap()), draft);
+                assert!(s.state().tab_dirty(tab));
+                s.dispatch(Command::Undo { tab });
+                delete(&mut s, removal, "real.txt");
+                assert!(!real.exists());
+                assert!(std::fs::symlink_metadata(&alias).is_ok(), "the dangling symlink entry itself remains");
+                assert!(s.state().tabs().iter().all(|t| t.id() != tab), "the clean alias tab closes with its deleted target");
+            } else {
+                assert_eq!(s.delete_refusal(removal, "alias.txt"), None);
+                assert!(!s.delete_prompt(removal, "alias.txt").contains("open tab"));
+                delete(&mut s, removal, "alias.txt");
+                assert_eq!(std::fs::read(&real).unwrap(), b"saved\n");
+                assert!(std::fs::symlink_metadata(&alias).is_err());
+                assert!(s.state().tab_dirty(tab));
+                assert_eq!(source_text(s.state().current_source().unwrap()), draft);
+            }
+        }
+    }
+}
+
+#[test]
+fn deleting_a_real_entry_checks_saves_and_undecided_recovery_through_aliases() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let real = write(&root, "real.txt", b"saved\n");
+    let alias = root.join("alias.txt");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let mut s = session(d.path());
+    open_project(&mut s, &root, "alias.txt");
+    let buffer = s.state().current_source().unwrap().key().buffer;
+    for status in [crate::save::Status::Saving, crate::save::Status::Uncertain("unknown".into())] {
+        s.state.sources.buffers.get_mut(&buffer).unwrap().save.status = status;
+        assert!(s.delete_refusal(Removal::Permanent, "real.txt").is_some());
+        delete(&mut s, Removal::Permanent, "real.txt");
+        assert_eq!(std::fs::read(&real).unwrap(), b"saved\n");
+    }
+    s.state.sources.buffers.get_mut(&buffer).unwrap().save.status = crate::save::Status::Ready;
+    s.state.undecided_recovery = vec![alias];
+    assert!(s.delete_refusal(Removal::Permanent, "real.txt").unwrap().contains("recovered draft"));
+}

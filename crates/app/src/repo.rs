@@ -65,10 +65,10 @@ pub(crate) fn local_changes_paths(dir: &Path, conflicted: bool, paths: &[String]
     let root = toplevel(dir)?;
     let keep = |c: &crate::changeset::Comparison| conflicted || c.status != Status::Conflicted;
     // On an unborn branch `--cached` compares with the empty tree.
-    let mut staged = list_git(&root, &root, true, &[], paths, false)?;
+    let mut staged = list_git(dir, &root, true, &[], paths, false)?;
     staged.retain(keep);
     let (untracked, unstaged) =
-        list_git(&root, &root, false, &[], paths, true)?.into_iter().filter(keep).partition(|c| c.status == Status::Untracked);
+        list_git(dir, &root, false, &[], paths, true)?.into_iter().filter(keep).partition(|c| c.status == Status::Untracked);
     ChangeSet::grouped(root, vec![("Staged".into(), staged), ("Unstaged".into(), unstaged), ("Untracked".into(), untracked)])
 }
 

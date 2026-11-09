@@ -3538,6 +3538,89 @@ fn gui_text_context_menu_lists_only_what_is_under_the_pointer(cx:&mut TestAppCon
 }
 
 #[gpui::test]
+fn gui_hunk_menu_rejects_replaced_diff_and_fresh_actions_work(cx: &mut TestAppContext) {
+    let left = "space\nsecond\nkeep1\nkeep2\nkeep3\nold1\nold2\n";
+    let right = "space \nsecond \nkeep1\nkeep2\nkeep3\nnew1\nnew2\n";
+    for fold in [false, true] {
+        let f = fixture(cx, left, right);
+        let is_action = |action: &MenuAction| match action {
+            MenuAction::Fold(_) => fold,
+            MenuAction::Move(_, Side::Right) => !fold,
+            _ => false,
+        };
+        f.window.update(cx, |v, w, cx| {
+            let _ = v.render(w, cx);
+            assert_eq!(v.comparison.view.change_count(), 2);
+            // The request is new, but the visible hunk indices still belong to the old diff.
+            v.on_key(&event("w", false, false, false), w, cx);
+            assert_eq!(v.comparison.options.whitespace, WhitespaceMode::Trim);
+            assert_ne!(v.comparison.generation, v.comparison.diffed);
+            let (x, y) = v.point_on_line(w, Side::Right, 0);
+            v.on_right_down(&MouseDownEvent {
+                position: point(px(x), px(y)), button: MouseButton::Right, ..Default::default()
+            }, w, cx);
+            let menu = v.menu.as_mut().unwrap();
+            menu.hover = Some(menu.items.iter().position(|(_, action)| is_action(action)).unwrap());
+        }).unwrap();
+        workflow_wait(cx, &f, |v| v.comparison.diffed == v.comparison.generation);
+        assert_eq!(f.viewer.read_with(cx, |v, _| v.comparison.view.change_count()), 1);
+        key(cx, &f, "enter", false, false, false);
+        f.viewer.read_with(cx, |v, _| {
+            assert_eq!(v.doc().unwrap().text(Side::Right), right, "a stale menu must not apply the remaining unrelated hunk");
+            assert!(!v.edits.has_dirty());
+            assert!(!v.comparison.view.folded(0), "a stale menu must not fold the remaining unrelated hunk");
+            assert!(v.toast.as_ref().is_some_and(|t| t.0 == "Comparison changed — reopen the menu"));
+        });
+        assert_eq!(text(&f), right);
+
+        // Reopening the menu on the surviving hunk makes the same actions usable again.
+        f.window.update(cx, |v, w, cx| {
+            let (x, y) = v.point_on_line(w, Side::Right, 5);
+            v.on_right_down(&MouseDownEvent {
+                position: point(px(x), px(y)), button: MouseButton::Right, ..Default::default()
+            }, w, cx);
+            let menu = v.menu.as_mut().unwrap();
+            menu.hover = Some(menu.items.iter().position(|(_, action)| is_action(action)).unwrap());
+        }).unwrap();
+        key(cx, &f, "enter", false, false, false);
+        if fold {
+            assert!(f.viewer.read_with(cx, |v, _| v.comparison.view.folded(0)));
+            assert_eq!(text(&f), right);
+        } else {
+            let expected = "space \nsecond \nkeep1\nkeep2\nkeep3\nold1\nold2\n";
+            assert_eq!(f.viewer.read_with(cx, |v, _| v.doc().unwrap().text(Side::Right).to_owned()), expected);
+            assert_eq!(text(&f), right, "the valid menu move changes only the draft until Save");
+            key(cx, &f, "s", true, false, false);
+            assert_eq!(text(&f), expected);
+        }
+    }
+}
+
+#[gpui::test]
+fn gui_hunk_menu_saved_action_rejects_reloaded_document(cx: &mut TestAppContext) {
+    let f = fixture(cx, "left\n", "old right\n");
+    let menu = f.window.update(cx, |v, w, cx| {
+        let _ = v.render(w, cx);
+        let (x, y) = v.point_on_line(w, Side::Right, 0);
+        v.on_right_down(&MouseDownEvent {
+            position: point(px(x), px(y)), button: MouseButton::Right, ..Default::default()
+        }, w, cx);
+        let mut menu = v.menu.take().unwrap();
+        menu.hover = Some(menu.items.iter().position(|(_, action)| matches!(action, MenuAction::Move(_, Side::Right))).unwrap());
+        menu
+    }).unwrap();
+    std::fs::write(f.dir.path().join("right.txt"), "fresh right\n").unwrap();
+    run(cx, &f, crate::catalog::Action::Interaction(commands::Interaction::Reload));
+    workflow_wait(cx, &f, |v| v.doc().is_some() && v.comparison.diffed == v.comparison.generation);
+    // Even a retained action cannot use the new document's block at the same index.
+    f.viewer.update(cx, |v, _| v.menu = Some(menu));
+    key(cx, &f, "enter", false, false, false);
+    assert_eq!(f.viewer.read_with(cx, |v, _| v.doc().unwrap().text(Side::Right).to_owned()), "fresh right\n");
+    assert!(!f.viewer.read_with(cx, |v, _| v.edits.has_dirty()));
+    assert_eq!(text(&f), "fresh right\n");
+}
+
+#[gpui::test]
 fn gui_single_line_block_has_no_fold_item(cx:&mut TestAppContext) {
     let f=fixture(cx,"a\nb\nkeep\n","a\nB\nkeep\n");
     let labels=right_click_labels(cx,&f,Side::Right,1);

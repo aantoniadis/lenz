@@ -21,6 +21,10 @@ impl Session {
         if entry.save.status.busy() { return Some("A save operation is running"); }
         if entry.save.status.blocked() { return Some("Recheck and confirm the disk outcome before saving again"); }
         if entry.untitled { return Some(UNTITLED_SAVE); }
+        if source.source_meta().archive().is_some() {
+            if source.source_meta().archive_read_only_reason().is_some() { return Some("This archive cannot be rewritten without losing information; use Save As to export the draft"); }
+            return self.archive_save_disabled(buffer);
+        }
         let Some(read) = &entry.save.read else { return Some("This source has no confirmed write target; reopen the file before saving") };
         if read.snapshot.path != source.source() { return Some("The saved target path changed; recheck and confirm the current file before saving"); }
         if !entry.draft.as_ref().is_some_and(crate::draft::Draft::dirty) { return Some("No unsaved changes"); }
@@ -37,6 +41,7 @@ impl Session {
     }
     pub(super) fn save_buffer(&mut self, buffer: crate::text::BufferId) -> Effect {
         if let Some(why) = self.save_buffer_disabled(buffer) { self.state.messages.push(why.into()); return Effect { repaint: true, copy: None, ..Effect::default() }; }
+        if self.state.sources.buffers.get(&buffer).is_some_and(|entry| entry.save.archive.is_some()) { return self.save_archive_buffer(buffer); }
         let project = self.project_generation.load(Ordering::Acquire);
         self.save_seq += 1; let request = self.save_seq;
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
@@ -55,6 +60,7 @@ impl Session {
         Effect { repaint: true, copy: None, ..Effect::default() }
     }
     pub(super) fn recheck_save(&mut self, tab: TabId) -> Effect {
+        if self.state.view(tab).is_some_and(|view| view.snapshot().source_meta().archive().is_some()) { return self.recheck_archive_save(tab); }
         let Some(view) = self.state.view(tab) else { return Effect::default() };
         if view.edit_disabled().is_some() { return Effect::default(); }
         if view.save.status.busy() || !view.write_path_changed() && !matches!(view.save.status, Status::Rejected(_) | Status::Uncertain(_) | Status::Checked(_)) { return Effect::default(); }
@@ -81,6 +87,7 @@ impl Session {
     pub(super) fn confirm_rechecked_save(&mut self, tab: TabId) -> Effect {
         if self.state.view(tab).is_some_and(|view| view.edit_disabled().is_some()) { return Effect::default(); }
         let Some(buffer) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.buffer) else { return Effect::default() };
+        if self.state.sources.buffers.get(&buffer).is_some_and(|entry| entry.save.archive_checked.is_some()) { return self.confirm_archive_recheck(buffer); }
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return Effect::default() };
         if !matches!(entry.save.status, Status::Checked(DiskMatch::Baseline | DiskMatch::Attempted)) { return Effect::default(); }
         let Some(checked) = entry.save.checked.take() else { return Effect::default() };
@@ -92,7 +99,7 @@ impl Session {
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         if let (Some(draft), Some(current)) = (&mut entry.draft, &entry.snapshot) { draft.confirm_baseline(captured.clone(), current); }
         entry.saved = Some(SemanticSource::new(&captured));
-        entry.stamp = Some(stamp); entry.save.read = Some(read); entry.save.status = Status::Ready;
+        entry.stamp = Some(stamp); entry.save.read = Some(read); entry.save.archive = None; entry.save.archive_checked = None; entry.save.status = Status::Ready;
         entry.save.attempted = None; entry.save.checked = None; entry.save.revalidated = None;
         for tab in self.state.tabs.iter_mut().filter(|tab| tab.buffer == Some(buffer)) {
             tab.stamp = Some(stamp); tab.stale_on_disk = false; tab.unavailable = None;
@@ -100,11 +107,16 @@ impl Session {
         self.compact_saved_backing(buffer);
         self.synced = 0;
         self.refresh_blame();
-        // The file now holds this work: there is nothing left to recover.
-        self.forget_recovery(buffer);
+        // Save confirms its captured version, not edits made while the write was pending.
+        // Keep those newer edits recoverable against the newly confirmed baseline.
+        if self.state.sources.buffers.get(&buffer).and_then(|entry| entry.draft.as_ref()).is_some_and(crate::draft::Draft::dirty) {
+            self.recovery_changed(buffer);
+        } else {
+            self.forget_recovery(buffer);
+        }
         self.analysis.pump_requested(&self.jobs, &self.tx, &self.project_generation);
     }
-    fn compact_saved_backing(&mut self, buffer: crate::text::BufferId) {
+    pub(super) fn compact_saved_backing(&mut self, buffer: crate::text::BufferId) {
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         let (Some(current), Some(draft)) = (&entry.snapshot, &entry.draft) else { return };
         if !current.needs_compaction() && !draft.baseline.needs_compaction() { return; }

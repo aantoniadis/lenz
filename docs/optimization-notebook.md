@@ -2367,3 +2367,112 @@ The retained baseline includes the preceding journey fixes and `diff show`, with
 Evidence: `perf-results/popup-inputs/validation.md`, `metrics.json`, source/binary identities, native screenshots/events, PTY raw output, and initial/paired performance samples. Paired terminal search feedback was 0.314 → 0.315 ms. Repeated source-navigation stress was 0.696 → 0.726 ms (initially 0.673 → 0.760 ms), so a small feedback cost remains in that workload. Reader GUI mapped-window and damage timing samples varied by run. Fixed-viewport anonymous RSS overlapped; approximately 1.4 MiB more executable pages remain resident (smaps), with approximately 1.4 MiB higher total RSS in that diagnostic. This residual is reported, not called zero overhead. There is no new unbounded field history/cache. RSS does not measure GPU allocation or prove absence of leaks.
 
 Early native harness assertions relied on OCR and a simple terminal screen approximation; the final checks use exact clipboard bytes plus adapter cell/paint assertions and inspected screenshots. The 20-second sustained runs passed; longer leak runs, native macOS/Wayland and physical-display timing remain unverified.
+
+## Review fixes after 0.0.13 — 2026-11-09
+
+Save completion now retains recovery for newer dirty edits against the baseline actually written, including Save As. Comparison and typed Open Path inputs preserve exact whitespace. Search/popup fields use isolated native preedit with UTF-16 ranges and shaped click/Shift-click geometry; queries change only on commit. Stale callbacks, modal dismissal, focus loss, replacement limits and reserved Alt shortcuts have explicit regression coverage. Registered macOS Option input goes through AppKit so spacing accents can remain dead keys; reserved shortcuts reach the application first. The short comparison chooser keeps its fields and mode controls above its footer.
+
+Linux's empty replacement of the marked range cancels preedit without deleting the original selection. A physical key name with no committed character stays outside text insertion, including when preedit arrives before the raw key event. Production private-X11 replays verify exact dead-acute + `e` → `é`, independent UTF-8 clipboard paste/copy, emoji grapheme selection/cut, field switching and 240 × 180 layouts. Reader drafts and all fixture bytes stay unchanged. The compact standalone chooser exposes both fields, modes and footer at that size and retains a trailing-space path exactly.
+
+Folder listing retains size/CRC-32/path metadata instead of whole deleted files. Fingerprint matches are verified byte for byte, including real CRC collisions. A 1 MiB total cache, with a 4 KiB per-file cap, preserves the small-file path; two reused 64 KiB buffers handle larger bodies. The index still scales with the number of paths. Duplicate pairing order, empty-file behavior, links, short reads and proc-like files retain their semantics.
+
+The paired detector probe compiles the previous detector and the new one in the same release test executable. Seven alternating pairs measured 128 MiB of renames at **231.50 → 74.94 ms**, peak RSS **138.49 → 7.02 MiB**; pure deletions at **167.73 → 35.79 ms**, **134.59 → 7.03 MiB**; 64 MiB of unchanged paths at **36.13 → 25.04 ms**. Every comparison signature matched. These endpoints include inventory, equality and rename pairing, and exclude archive expansion and frontend painting.
+
+The initial streaming implementation added about 1.5 ms on 100 × 1 KiB renames. Reusing buffers and the bounded tiny-file cache addressed that cost. A 31-pair repeat measured small renames at **14.45 → 14.43 ms** and unchanged paths at **14.17 → 14.00 ms**. Paired differences varied in sign; this is not a speedup claim. The final repeated-process stress lasted **20.18 seconds / 61 pairs** with identical signatures; it does not establish long-lived application leak freedom.
+
+A separate absolute native-model probe ran two 20-second workloads. Its callback bundle (UTF-16 selection/context, marked range and bounded paint projections) measured about **0.007 ms median** on a 512-byte query, and **9.50 ms median / 10.95 ms p95** on a million-byte query. Native surrounding-text replies contain at most 4 KiB and paint results are viewport-sized; a marked projection can temporarily copy up to 4 KiB on each side of its bounded preedit. UTF-16 mapping and marked-source validation still scan long queries. This is an absolute model measurement, with no previous native-field implementation or GUI/display endpoint to compare against.
+
+The final full local CI gate passed, including workspace, GUI, terminal parity, serial memory and Python collector checks. Production binaries exclude test/probe features. Frontend comparisons use the same normal release package feature graph as the retained baseline; terminals were built separately. That baseline reports 0.0.12, but its runtime source matches 0.0.13 before these fixes, apart from version metadata. The published 0.0.13 distribution uses a different LTO profile and was not used for timing comparisons.
+
+| Frontend workload | Baseline → fixed | Interpretation |
+| --- | --- | --- |
+| Diff Find, six alternating runs with 20-second final trials | 17.84 → 17.66 ms median first XDamage; anonymous RSS 61.70–61.93 → 61.35–61.80 MiB | No measured regression; total RSS ranges overlap. |
+| Reader navigation, same alternating schedule | 8.69 → 8.59 ms first XDamage; total RSS 135.07–137.91 → 133.92–136.82 MiB | Ranges overlap; mapped-window timing is noisy and does not measure first readable content. |
+| Reader long search, initial 20-second input/resize pair | 22.69 → 23.26 ms first XDamage; RSS 132.82 → 134.73 MiB | Repeated because of the memory increase. |
+| Long search repeat, ABBA order, fixed 640 × 480 settlement | Baseline 22.93–23.35 ms / 132.05–136.02 MiB; fixed 22.51–22.77 ms / 132.50–134.14 MiB | The initial memory increase did not repeat consistently; raw anonymous/file/shared splits are retained. |
+| Reader terminal long search | 0.320 → 0.311 ms first PTY bytes; RSS 14.50 → 14.49 MiB | Exact edited prefix and terminal restoration passed. |
+| Reader terminal navigation, original then reverse-order repeat | Stress feedback 0.703 → 0.722 ms, then 0.732 → 0.652 ms | No consistent latency increase. Settled RSS remains about 0.10–0.21 MiB higher in these two pairs; this small residual is unassigned, not called zero overhead. |
+| Diff warm startup, three alternating samples | First paint 117–138 → 118–151 ms; settled RSS 144.0–144.6 → 144.0–144.8 MiB | Overlapping ranges; no speedup claim. |
+
+Each sustained frontend run lasted at least 20 seconds; the raw durations, samples and fixture assertions are retained. XDamage and PTY bytes are first-feedback endpoints, not completed actions or physical display latency. The fixed-viewport search repeat records its changed settlement method separately. An early native replay used a test-support binary that disables background updates; that run was discarded, and the final functional replays use production release executables.
+
+Ignored evidence is under `perf-results/fix-review-0.0.13/`: source/binary identities, failed and final regression runs, folder probe variants and raw samples, and native-model samples. Native macOS and Wayland input methods, physical displays and long-duration leak behavior remain unverified. Linux input-handler tests establish transport and state behavior, not native Mac release acceptance.
+
+## Archive editing and recovery checks (2026-11-09)
+
+Code now browses ZIP and TAR containers, including gzip, bzip2, XZ and Zstandard wrappers and nested
+archives. Members use ordinary drafts, editing, Undo/Redo and captured Save receipts. Structured archive
+locations keep virtual member names separate from physical paths; no files are extracted. One writer
+per canonical outer container serializes member saves, rebasing only siblings that shared its confirmed
+prior bytes. Unsupported preserving rewrites stay read-only; valid text can be exported with Save As.
+Restart recovery retains member identity, encoding and draft text. Container writes use guarded atomic
+replacement with no in-place fallback, and uncertain outcomes keep the draft and expose rechecking.
+
+The rigorous review fixes also cover stale selective Undo after external reload, stale hunk menus,
+exact path whitespace, dirty canonical aliases and Save As reservations, per-tab Find cursors, XKB Escape
+cancellation, grapheme-safe word motions, bounded native replacement, launch-relative Git pathspecs,
+commit-history anchors and narrow terminal dialogs. Recovery scanning now retains the newest bounded
+tail instead of collecting every record first; presentation titles cannot invalidate recoverable work.
+
+The local checks passed: workspace tests, all three panic budgets, both strict lint configurations,
+six serial memory checks, Diff GUI tests, Code GUI tests (309 passed), terminal parity (309 passed),
+77 Python collector tests (one conditional skip), standalone terminal builds and the stripped Diff size
+gate. The final GUI-union Diff binary is 69,054,304 bytes stripped. Several early runs found test
+readiness/geometry errors and workspace disk exhaustion; their logs are retained. Final GUI waits
+observe completed source/listing loads and fresh hit geometry, without weakening byte assertions.
+
+Production private-X11 and owned-PTY replays cover actual constructors, typing, Unicode paste,
+copy/paste, Undo/Redo, Save and reopen, nested saves, preserved siblings/comments/metadata and small
+dark/light error/retry/empty/close routes. Separate pre-archive production replays verify the review
+fixes. All owned processes/displays closed and terminal attributes were restored. Native macOS and
+Wayland composition remain unverified.
+
+Performance uses the retained 0.0.13 review baseline and normal release builds with matching package
+feature unions; terminals were built separately. No compiler, other benchmark or unrelated OCR workload
+ran during measurements. First XDamage and PTY bytes measure first feedback, not completed display
+frames. Startup uses fresh processes with warm filesystem caches; memory samples are taken after the
+workload. These are not hardware display measurements or leak proof.
+
+| Ordinary workload | Baseline → candidate | Observation |
+| --- | --- | --- |
+| Diff Find, six alternating runs | 19.29 → 19.05 ms median first XDamage | Final runs lasted 20.09 / 20.09 seconds; RSS ranges overlap. |
+| Code navigation, six alternating runs | 8.99 → 8.66 ms first XDamage | RSS 132.74–137.04 → 133.82–137.60 MiB; a small residency difference remains, not zero overhead. |
+| Code long project search, initial pair | 23.44 → 22.89 ms first XDamage; RSS 131.13 → 134.66 MiB | Repeated because window settlement and RSS differed. |
+| Same search, ABBA repeat settled at 640 × 480 | 23.04–23.33 → 23.05–23.19 ms; RSS 133.51–134.68 → 134.41–134.47 MiB | Ranges overlap; the initial 3.53 MiB increase did not repeat consistently. |
+| Code terminal long search | 0.352 → 0.354 ms first PTY bytes; RSS 14.86 → 15.45 MiB | About 0.49 MiB of the 0.58 MiB increase is file-backed; anonymous RSS rises about 0.09 MiB. |
+| Code terminal navigation | 0.699 → 0.657 ms stress feedback; RSS 15.82 → 16.45 MiB | Both sustained runs lasted at least 20 seconds; terminal restoration and fixture assertions passed. |
+| Code terminal startup, ten alternating pairs after warmup | 9.11 → 7.62 ms median first content | Repeated after a single 8.28 → 11.30 ms pair; no consistent startup slowdown. |
+| Diff startup, three alternating samples | First paint 126–136 → 121–128 ms; RSS 144.1–144.7 → 143.8–144.3 MiB | No speedup claim from this small sample. |
+
+The direct word-stop probe compares the previous contiguous character algorithm with the new borrowed
+4 KiB chunk implementation, in one executable. Five alternating pairs measured a million ASCII bytes at
+4.663 → 2.797 ms and emoji/symbol input at 0.478 → 0.320 ms. A short-word sample initially measured
+31.92 → 35.87 ns; ten further alternating pairs measured 29.30 → 29.21 ns, so that small increase was
+not reproducible. Separate sustained ASCII runs each exceeded 20 seconds with equal results. Decomposed
+Unicode words intentionally have different stops and are excluded from speed comparisons. The probe's
+cursor declaration shim is unmeasured; the measured word/display source and executable hashes are retained.
+
+Archive codec measurements use seven independent processes per format, 5,000 small files, a 4 MiB
+random sibling and a 4 MiB repeated sibling. Listing/read/replace/reparse are completed in-memory API
+calls; they exclude filesystem reads, atomic writes, UI queues and rendering. Replacement changes two
+small members, checks untouched data/metadata and reparses the result.
+
+| Format | List / selected read / replace / reparse | Retained index estimate | Per-process peak RSS |
+| --- | --- | --- | --- |
+| Stored ZIP | 3.323 / 0.039 / 22.349 / 4.409 ms | 15.76 MiB | 86.11 MiB |
+| gzip TAR | 17.096 / 0.009 / 125.209 / 17.265 ms | 19.05 MiB | 128.19 MiB |
+| Zstd TAR | 16.551 / 0.031 / 140.497 / 14.842 ms | 19.02 MiB | 124.41 MiB |
+
+Peak RSS includes fixed input/expected buffers and the four-index cache phase. The browser budget is
+four indexes / 256 MiB, with separately bounded tree metadata. A 32 MiB pressure-cache run completed
+170 checked cycles in 21.118 seconds (21.267 seconds including process overhead), retaining at most
+19.152 MiB of estimated cache data and peaking at 123.77 MiB RSS. First/last thirty sampled RSS medians
+were 104.78 / 103.14 MiB. This finite run does not establish leak freedom. An independent Python/libzstd
+reader verified outputs for all six supported formats; a corrupt unopened ZIP payload also confirmed
+that listing and replacement of another member do not decompress it.
+
+Archive peak RSS uses per-child Linux `os.wait4().ru_maxrss` (KiB). The first attempt stopped before
+timing because `/usr/bin/time` was absent; the scratch collector fallback and unchanged workload,
+profile/features, source/rlib/probe hashes, every raw sample and actual durations are retained. Evidence
+is under `perf-results/archive-editor/` and `perf-results/fix-rigorous-2026-11-09/`, including source
+archives, binary identities, final gate records, native screenshots, frontend repeats and word probes.

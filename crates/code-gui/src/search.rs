@@ -60,6 +60,9 @@ impl ReaderView {
         // Centered; a window too short for it shows its top.
         let top = ((self.height - h) / 2.0).max(0.0);
         let down = |b: Bounds<Pixels>| Bounds { origin: gpui::point(b.origin.x, b.origin.y + px(top)), size: b.size };
+        let active = usize::from(*in_files);
+        let cursor = self.popup_field().map(|(_, cursor, _)| cursor).unwrap_or_default();
+        let snapshot = self.field_paint_snapshot(active, if *in_files { files } else { query }, cursor, self.columns((right - field_x - 20.0).max(0.0)));
         Some(Layout {
             bounds: rect(x, top, w, h.min(self.height - top)),
             fields: fields.map(down),
@@ -67,10 +70,10 @@ impl ReaderView {
             hint_y: top + hint_y,
             hint,
             refused: refused.is_some(),
-            query: query.clone(),
-            files: files.clone(),
+            query: if *in_files { query.clone() } else { snapshot.text.clone() },
+            files: if *in_files { snapshot.text.clone() } else { files.clone() },
             in_files: *in_files,
-            cursor: self.popup_field().map(|(_,cursor,_)|cursor).unwrap_or_default(),
+            cursor: snapshot.cursor,
             on: [o.case, o.word, o.regex],
             char_w: cw,
         })

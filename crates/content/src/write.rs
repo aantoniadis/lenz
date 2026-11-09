@@ -21,6 +21,11 @@ use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8};
 
 use crate::encoding::{Decoded, decode};
 
+mod raw;
+pub use raw::{write_bytes_exact, write_bytes_exact_from};
+mod bounded;
+pub use bounded::read_exact_bytes_bounded;
+
 /// Why a write failed. I/O errors alone do not establish whether disk changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WriteError {
@@ -228,7 +233,16 @@ pub struct ExactRead {
 }
 impl ExactRead {
     pub fn bytes(&self) -> &[u8] { &self.bytes }
+    /// Transfer the captured bytes to a decoder without copying the file again.
+    pub fn into_bytes(self) -> Vec<u8> { self.bytes }
     pub fn metadata(&self) -> &fs::Metadata { &self.metadata }
+    /// A raw-byte baseline without decoding. Text writers deliberately refuse this snapshot;
+    /// use [`write_bytes_exact`] or [`write_bytes_exact_from`] to replace its binary contents.
+    pub fn bytes_snapshot(&self) -> Snapshot {
+        Snapshot { path: self.path.clone(), hash: Some(hash(&self.bytes)), size: self.bytes.len() as u64,
+            mtime: self.metadata.modified().ok(), encoding: UTF_8, bom: false, crlf: false,
+            lossy: true, repository_root: None }
+    }
     /// Construct the writer baseline from borrowed facts of this exact decoded read.
     pub fn snapshot(&self, text: &str, encoding: &'static str, bom: bool, lossy: bool) -> Snapshot {
         let crlf = text.matches("\r\n").count();

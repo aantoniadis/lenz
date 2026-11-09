@@ -11,6 +11,8 @@ pub(crate) const UNDECIDED: &str = "A recovered draft of this file is undecided:
 pub(crate) const RESTORING: &str = "The project's last tabs are still being restored";
 /// Why Save stays closed for a draft whose baseline no longer matches the file.
 pub(crate) const DISK_CHANGED: &str = "Recovered draft: the file on disk differs from its confirmed baseline. Recheck the current file before saving";
+const ARCHIVE_LOADING: &str = "Checking the recovered archive member…";
+const RESTORE_BUSY: &str = "This document has a save or recheck in progress; wait for it before restoring";
 
 impl Session {
     /// The recovered drafts read at start, newest first.
@@ -58,6 +60,17 @@ impl Session {
             }
             Choice::Restore => {
                 if let Some(why) = self.recovery_restore_disabled(offer) { self.state.messages.push(why.into()); return repaint; }
+                if let Key::Archive { location } = offer.record().key() {
+                    let location = location.clone();
+                    self.recovery.begin_restore(ticket);
+                    let (tx, versions) = (self.tx.clone(), self.versions.clone());
+                    self.jobs.submit(Priority::Visible, move || {
+                        let result = crate::archive::read_location(&location, versions.fetch_add(1, Ordering::Relaxed) + 1);
+                        let _ = tx.send_blocking(Completion::ArchiveRecovered { ticket, result });
+                    });
+                    self.state.messages.push(ARCHIVE_LOADING.into());
+                    return repaint;
+                }
                 let Some(offer) = self.recovery.take(ticket) else { return repaint };
                 self.state.undecided_recovery = self.recovery.undecided_paths();
                 return self.restore_recovered(offer);
@@ -67,9 +80,12 @@ impl Session {
     }
 
     pub(super) fn recovery_restore_disabled(&self, offer: &Offer) -> Option<&'static str> {
-        let path = offer.record().key().path()?;
-        self.state.tabs.iter().any(|t| t.is_file() && (t.source == path || t.canonical.as_deref() == Some(path)) && self.state.tab_dirty(t.id))
-            .then_some(RESTORE_DIRTY)
+        if self.recovery.restoring(offer.id()) { return Some(ARCHIVE_LOADING); }
+        let path = offer.record().key().identity()?;
+        let same = || self.state.tabs.iter().filter(|t| t.is_file() && (t.source == path || t.canonical.as_deref() == Some(path.as_path())));
+        if same().any(|t| self.state.tab_dirty(t.id)) { return Some(RESTORE_DIRTY); }
+        same().any(|t| t.buffer.and_then(|buffer| self.state.sources.buffers.get(&buffer))
+            .is_some_and(|entry| entry.save.status.busy() || entry.save.captured.is_some())).then_some(RESTORE_BUSY)
     }
 
     /// A buffer's recovery identity: its path, or a New File document's own token.
@@ -77,6 +93,10 @@ impl Session {
         let entry = self.state.sources.buffers.get(&buffer)?;
         if entry.untitled { return Some(Key::Untitled { token: entry.recovery.clone()? }); }
         let source = entry.snapshot.as_ref().filter(|source| source.image().is_none() && !source.source_meta().is_binary() && !source.source_meta().is_lossy())?;
+        if let Some(location) = source.source_meta().archive() {
+            let location = source.source_meta().canonical().and_then(crate::archive::Location::from_uri).unwrap_or_else(|| location.clone());
+            return Some(Key::Archive { location });
+        }
         (!is_virtual(source.source()) && source.source().is_absolute()).then(|| Key::File { path: normalized(source.source()) })
     }
 
@@ -110,6 +130,7 @@ impl Session {
         let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
         match record.key().clone() {
             Key::File { path } => self.restore_file_draft(&record, &path, version),
+            Key::Archive { .. } => Effect::default(), // Archive restoration reads on a worker before taking the offer.
             Key::Untitled { token } => self.restore_untitled_draft(&record, &token, version),
         }
     }
@@ -118,14 +139,51 @@ impl Session {
     /// file leaves Save closed until the user rechecks and compares.
     fn restore_file_draft(&mut self, record: &Record, path: &Path, version: u64) -> Effect {
         let path = normalized(path);
-        self.close_saved_comparison();
         let disk = read(&path).ok().map(|(stamp, exact)| (stamp, Arc::new(decode_read(path.clone(), version, &exact))));
+        self.restore_document_draft(record, path, version, disk)
+    }
+
+    pub(super) fn restore_archive_loaded(&mut self, ticket: u64, result: Result<Document, String>) -> Effect {
+        self.recovery.finish_restore(ticket);
+        let Some(offer) = self.recovery.offer(ticket) else { return Effect::default() };
+        if let Some(why) = self.recovery_restore_disabled(offer) {
+            self.state.messages.push(why.into());
+            return Effect { repaint: true, ..Effect::default() };
+        }
+        let Some(offer) = self.recovery.take(ticket) else { return Effect::default() };
+        self.state.undecided_recovery = self.recovery.undecided_paths();
+        let record = offer.record();
+        let Key::Archive { location } = record.key() else { return Effect::default() };
+        let read_error = result.as_ref().err().cloned();
+        let disk = result.ok().and_then(|doc| {
+            let stamp = doc.archive_baseline.as_ref()?.container.stamp();
+            Some((stamp, Arc::new(doc)))
+        });
+        let version = self.versions.fetch_add(1, Ordering::Relaxed) + 1;
+        let effect = self.restore_document_draft(record, location.to_uri(), version, disk);
+        if let Some(why) = read_error {
+            self.state.messages.push(format!("Archive member could not be checked: {why}. The recovered draft is retained; Save As exports it to a regular file."));
+        }
+        effect
+    }
+
+    fn restore_document_draft(&mut self, record: &Record, path: PathBuf, version: u64, disk: Option<(Stamp, Arc<Document>)>) -> Effect {
+        self.close_saved_comparison();
         let matches = disk.as_ref().is_some_and(|(_, doc)| doc.image().is_none() && !doc.source_meta().is_lossy() && &**doc.text() == record.baseline());
         let baseline = match (&disk, matches) {
             (Some((_, doc)), true) => doc.clone(),
-            _ => Arc::new(record_document(path.clone(), version, record.baseline(), record.encoding(), record.bom())),
+            _ => {
+                let mut doc = record_document(path.clone(), version, record.baseline(), record.encoding(), record.bom());
+                if let Key::Archive { location } = record.key() {
+                    let reason = disk.as_ref().and_then(|(_, current)| current.source_meta().archive_read_only_reason().map(str::to_owned));
+                    doc = doc.with_archive(location.clone(), reason, None);
+                }
+                Arc::new(doc)
+            }
         };
-        let draft = Arc::new(Document::from_snapshot_parts(baseline.source_meta().clone(), version, record.draft().into()));
+        let mut draft = Document::from_snapshot_parts(baseline.source_meta().clone(), version, record.draft().into());
+        draft.archive_baseline = baseline.archive_baseline.clone();
+        let draft = Arc::new(draft);
         // Tabs the project restored for this file keep their pane and place; the shown one (else the first) takes
         // the draft, and the others share its buffer.
         let same: Vec<TabId> = self.state.tabs.iter().filter(|t| t.is_file() && (t.source == path || t.canonical.as_deref() == Some(path.as_path()))).map(|t| t.id).collect();
@@ -151,15 +209,18 @@ impl Session {
         entry.save = crate::save::State::default();
         entry.stamp = stamp;
         if matches {
-            if let Some((_, doc)) = &disk { entry.save.read = doc.write_baseline.as_deref().cloned(); }
-        } else if disk.is_some() {
+            if let Some((_, doc)) = &disk {
+                entry.save.read = doc.write_baseline.as_deref().cloned();
+                entry.save.archive = doc.archive_baseline.clone();
+            }
+        } else if disk.is_some() || matches!(record.key(), Key::Archive { .. }) {
             entry.save.status = crate::save::Status::Rejected(DISK_CHANGED.into());
         }
         let language = draft.language();
         let canonical = disk.as_ref().and_then(|(_, doc)| doc.source_meta().canonical().map(Path::to_path_buf));
         let tab = match existing {
             Some(id) => id,
-            None => self.insert_document_tab(path.clone(), path.clone(), Some(language), canonical),
+            None => self.insert_document_tab(path.clone(), match record.key() { Key::Archive { location } => PathBuf::from(location.display_path()), _ => path.clone() }, Some(language), canonical),
         };
         let (len, last) = (draft_snapshot.len_bytes(), draft_snapshot.line_count() - 1);
         let clamp = |at: usize| draft_snapshot.floor_char_boundary(at.min(len));
@@ -194,6 +255,7 @@ impl Session {
         let state = match (matches, disk.is_some()) {
             (true, _) => "The file on disk still matches its confirmed baseline.",
             (_, true) => "The file on disk has changed since its confirmed baseline; Save stays closed until you recheck and compare it.",
+            _ if matches!(record.key(), Key::Archive { .. }) => "The archive member is unavailable; Save As writes the draft elsewhere.",
             _ => "The file is not on disk; Save As writes the draft elsewhere.",
         };
         self.state.messages.push(format!("Restored the recovered draft for {}. {state}", record.title()));

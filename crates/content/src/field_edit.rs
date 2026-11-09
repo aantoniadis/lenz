@@ -1,22 +1,38 @@
 //! Editing a single-line field. Adapters translate keys and transport clipboard text; selection and edits live here.
 use crate::line_edit::{self, Edit};
 use std::ops::Range;
+mod native;
+pub use native::Native;
+#[cfg(test)]
+mod native_tests;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
-    Edit { edit: Edit, extend: bool },
+    Edit {
+        edit: Edit,
+        extend: bool,
+    },
     SelectAll,
     Copy,
     Cut,
     Paste,
     Insert(String),
     Clear,
+    Select {
+        anchor: usize,
+        caret: usize,
+    },
+    Replace {
+        range: Range<usize>,
+        text: String,
+        selection: Option<Range<usize>>,
+    },
 }
 
 impl Command {
     /// Path/name prompts retain the first pasted line; query fields can keep line breaks as spaces.
     pub fn first_line(mut self) -> Self {
-        if let Self::Insert(text) = &mut self
+        if let Self::Insert(text) | Self::Replace { text, .. } = &mut self
             && let Some(end) = text.find(['\r', '\n'])
         {
             text.truncate(end);
@@ -72,7 +88,11 @@ impl Key<'_> {
                 return self
                     .text
                     .or_else(|| (self.name.chars().count() == 1).then_some(self.name))
-                    .filter(|s| !primary && !self.alt && !s.chars().any(char::is_control))
+                    .filter(|s| {
+                        !primary
+                            && (!self.alt || self.text.is_some_and(|text| text != self.name))
+                            && !s.chars().any(char::is_control)
+                    })
                     .map(|s| Command::Insert(s.into()));
             }
         };
@@ -151,6 +171,9 @@ impl Cursor {
     }
     /// Apply one field command. Paste transport is resolved by the adapter into Insert, without reading host clipboard here.
     pub fn execute(&mut self, text: &mut String, command: Command) -> Outcome {
+        self.execute_prepared(text, command, false)
+    }
+    fn execute_prepared(&mut self, text: &mut String, command: Command, normalized: bool) -> Outcome {
         let before = self.caret(text);
         let selection = self.selection(text);
         let mut outcome = Outcome::default();
@@ -168,7 +191,7 @@ impl Cursor {
                 }
             }
             Command::Insert(value) => {
-                let value = crate::display::one_line(&value);
+                let value = if normalized { value } else { crate::display::one_line(&value) };
                 if !value.is_empty() {
                     let range = selection.unwrap_or(before..before);
                     outcome.changed = text.get(range.clone()) != Some(value.as_str());
@@ -221,6 +244,25 @@ impl Cursor {
                     self.anchor = None;
                 }
             }
+            Command::Select { anchor, caret } => {
+                self.caret = Some(line_edit::clamp(text, caret));
+                self.anchor = Some(line_edit::clamp(text, anchor));
+            }
+            Command::Replace {
+                range,
+                text: value,
+                selection,
+            } => {
+                if range.start <= range.end && text.get(range.clone()).is_some() {
+                    let value = if normalized { value } else { crate::display::one_line(&value) };
+                    outcome.changed = text.get(range.clone()) != Some(value.as_str());
+                    self.replace(text, range, &value);
+                    if let Some(range) = selection {
+                        self.caret = Some(line_edit::clamp(text, range.end));
+                        self.anchor = Some(line_edit::clamp(text, range.start));
+                    }
+                }
+            }
             Command::Paste => {}
         }
         outcome
@@ -231,14 +273,31 @@ impl Cursor {
         mut command: Command,
         maximum: usize,
     ) -> Outcome {
-        if let Command::Insert(value) = &mut command {
-            let retained = text
-                .len()
-                .saturating_sub(self.selection(text).map_or(0, |r| r.len()));
-            let end = value.floor_char_boundary(maximum.saturating_sub(retained).min(value.len()));
-            value.truncate(end);
+        let replaced = match &command {
+            Command::Replace { range, .. } => text.get(range.clone()).map_or(0, |s| s.len()),
+            _ => self.selection(text).map_or(0, |r| r.len()),
+        };
+        if let Command::Insert(value) | Command::Replace { text: value, .. } = &mut command {
+            let retained = text.len().saturating_sub(replaced);
+            let prepared = one_line_prefix(value, maximum.saturating_sub(retained));
+            // A rejected insertion must not turn into deletion of the old selection. Explicit empty
+            // replacements remain deletions; a nonempty native commit has the same limit as paste.
+            if !value.is_empty() && prepared.is_empty() {
+                return Outcome::default();
+            }
+            *value = prepared;
         }
-        self.execute(text, command)
+        if let Command::Replace {
+            range,
+            text: value,
+            selection: Some(selection),
+        } = &mut command
+        {
+            let end = range.start.saturating_add(value.len());
+            selection.start = selection.start.min(end);
+            selection.end = selection.end.min(end);
+        }
+        self.execute_prepared(text, command, true)
     }
     fn replace(&mut self, text: &mut String, range: Range<usize>, value: &str) {
         let at = range.start;
@@ -246,6 +305,28 @@ impl Cursor {
         self.caret = Some(at + value.len());
         self.anchor = None;
     }
+}
+
+/// The same one-line normalization as display::one_line, allocating only the accepted byte budget.
+/// Budgeting the normalized prefix avoids treating discarded controls as an explicit empty deletion.
+fn one_line_prefix(value: &str, maximum: usize) -> String {
+    let value = value.trim_end_matches(['\n', '\r']);
+    let mut output = String::with_capacity(maximum.min(value.len()));
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        let ch = match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') { chars.next(); }
+                ' '
+            }
+            '\n' | '\t' => ' ',
+            ch if ch.is_control() => continue,
+            ch => ch,
+        };
+        if ch.len_utf8() > maximum.saturating_sub(output.len()) { break; }
+        output.push(ch);
+    }
+    output
 }
 
 /// Two fields of the active popup. Switching fields retains both carets; changing popup resets them.
@@ -304,6 +385,37 @@ impl Fields {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn option_produced_printable_text_is_distinct_from_alt_shortcuts() {
+        let text = Key {
+            name: "2",
+            text: Some("™"),
+            alt: true,
+            ..Default::default()
+        };
+        assert_eq!(text.command(), Some(Command::Insert("™".into())));
+        assert_eq!(
+            Key {
+                name: "c",
+                text: Some("c"),
+                alt: true,
+                ..Default::default()
+            }
+            .command(),
+            None
+        );
+        assert_eq!(
+            Key {
+                name: "v",
+                text: Some("√"),
+                control: true,
+                alt: true,
+                ..Default::default()
+            }
+            .command(),
+            None
+        );
+    }
     fn motion(edit: Edit, extend: bool) -> Command {
         Command::Edit { edit, extend }
     }
@@ -443,5 +555,53 @@ mod tests {
         cursor.execute(&mut text, Command::SelectAll);
         cursor.execute(&mut text, Command::Insert("x\nnever inserted".into()));
         assert_eq!(text, "x never inserted");
+    }
+
+    #[test]
+    fn native_and_paste_limit_rejection_preserves_selection_but_explicit_deletion_still_works() {
+        for maximum in [0, 3] {
+            let mut paste = "abc".to_string();
+            let mut native = paste.clone();
+            let original = Cursor { caret: Some(2), anchor: Some(1) };
+            let (mut a, mut b) = (original, original);
+            assert!(!a.execute_limited(&mut paste, Command::Insert("😀".into()), maximum).changed);
+            assert!(!b.execute_limited(&mut native, Command::Replace {
+                range: 1..2, text: "😀".into(), selection: Some(5..5),
+            }, maximum).changed);
+            assert_eq!(paste, "abc");
+            assert_eq!(native, paste);
+            assert_eq!(a, original);
+            assert_eq!(b, original);
+            assert!(b.execute_limited(&mut native, Command::Replace {
+                range: 1..2, text: String::new(), selection: None,
+            }, maximum).changed);
+            assert_eq!(native, "ac");
+        }
+    }
+
+    #[test]
+    fn bounded_insert_and_native_replace_budget_the_normalized_prefix() {
+        for (incoming, expected) in [
+            ("\0😀", "abc"), ("\0", "abc"), ("\u{85}😀", "abc"),
+            ("\0A", "aAc"), ("\u{85}A", "aAc"), ("\r\nA", "a c"),
+        ] {
+            let original = Cursor { caret: Some(2), anchor: Some(1) };
+            for native in [false, true] {
+                let mut text = "abc".to_string();
+                let mut cursor = original;
+                let command = if native {
+                    Command::Replace { range: 1..2, text: incoming.into(), selection: None }
+                } else { Command::Insert(incoming.into()) };
+                cursor.execute_limited(&mut text, command, 3);
+                assert_eq!(text, expected, "{incoming:?}, native {native}");
+                if expected == "abc" { assert_eq!(cursor, original); }
+            }
+        }
+        for raw in ["", "\0", "\r\n", "a\r\nb\nc\rd\t😀\n", "\u{85}é\0😀\r\n"] {
+            let normalized = crate::display::one_line(raw);
+            for maximum in 0..=normalized.len() + 1 {
+                assert_eq!(one_line_prefix(raw, maximum), normalized[..normalized.floor_char_boundary(maximum.min(normalized.len()))]);
+            }
+        }
     }
 }

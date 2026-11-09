@@ -20,7 +20,7 @@ pub struct View {
     /// Recent rows as last drawn: (index into matches, row).
     hits: Vec<(usize, Rect)>,
     modes: Vec<(Mode, Rect)>,
-    fields: Vec<Rect>,
+    fields: Vec<(usize, Rect)>,
     submit: Rect,
 }
 
@@ -109,8 +109,8 @@ impl View {
                 if let Some((mode, _)) = self.modes.iter().find(|(_, r)| r.contains(at.into())) {
                     return self.run(PickerCommand::Mode(*mode));
                 }
-                if let Some(field) = self.fields.iter().position(|r| r.contains(at.into())) {
-                    return self.run(PickerCommand::Field(field));
+                if let Some((field, _)) = self.fields.iter().find(|(_, r)| r.contains(at.into())) {
+                    return self.run(PickerCommand::Field(*field));
                 }
                 let hit = self
                     .hits
@@ -133,6 +133,11 @@ impl View {
         self.hits.clear();
         self.fields.clear();
         self.modes.clear();
+        self.submit = Rect::default();
+        if area.height < 12 || area.width < 32 {
+            self.draw_compact(frame, palette);
+            return;
+        }
         let width = area.width.saturating_sub(2);
         if width == 0 || area.height == 0 {
             return;
@@ -198,7 +203,7 @@ impl View {
             let label = self.core.mode.field(i);
             line(frame,y,&format!("{label}: "),base);
             if y<area.bottom(){
-                self.fields.push(Rect::new(area.x+1,y,width,1));
+                self.fields.push((i, Rect::new(area.x+1,y,width,1)));
                 let offset=(label.len() as u16+2).min(width);
                 let field=Rect::new(area.x+1+offset,y,width.saturating_sub(offset),1);
                 lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:input.text(),cursor:input.cursor(),area:field,active:self.core.field==i},base.bg(color(palette.status_bg)),base.bg(color(palette.selected_bg)));
@@ -281,6 +286,92 @@ impl View {
             1,
         );
     }
+
+    /// Short terminals prioritize the editable paths, validation and the action row.
+    fn draw_compact(&mut self, frame: &mut Frame, palette: &Palette) {
+        let area = frame.area();
+        if area.width == 0 || area.height == 0 { return; }
+        let inset = u16::from(area.width > 2);
+        let x = area.x + inset;
+        let width = area.width - 2 * inset;
+        let base = style_with(palette);
+        let accent = base.fg(color(palette.accent));
+        let line = |frame: &mut Frame, y, text: &str, style| {
+            crate::visual::safe_text(frame.buffer_mut(), Rect::new(x, y, width, 1), text, style);
+        };
+        let mut y = area.y;
+        if area.height >= 6 {
+            line(frame, y, if self.core.comparisons { "New comparison" } else { "Open a repository" }, accent);
+            y += 1;
+        }
+        if self.core.comparisons && area.height >= 5 {
+            let labels = if width >= 34 { ["F1 Files", "F2 Folders", "F3 Repository"] } else { ["F1 File", "F2 Dir", "F3 Repo"] };
+            for (i, mode) in Mode::ALL.into_iter().enumerate() {
+                let left = width as usize * i / 3;
+                let right = width as usize * (i + 1) / 3;
+                let r = Rect::new(x + left as u16, y, (right-left) as u16, 1);
+                let style = if mode == self.core.mode { accent.bg(color(palette.selected_bg)) } else { accent };
+                frame.buffer_mut().set_style(r, style);
+                crate::visual::safe_text(frame.buffer_mut(), r, labels[i], style);
+                self.modes.push((mode, r));
+            }
+            y += 1;
+        } else if !self.core.comparisons && area.height >= 6 {
+            line(frame, y, &format!("Paths relative to {}", self.core.cwd().display()), base);
+            y += 1;
+        }
+        // At three rows the active path still owns its whole row; Tab exposes the other path.
+        let all_fields = self.core.fields() == 1 || area.height >= 4;
+        for i in 0..self.core.fields() {
+            if !all_fields && i != self.core.field { continue; }
+            let input = if i == 0 { &self.core.input } else { &self.core.right };
+            let label = self.core.mode.field(i);
+            let prefix = if width >= 14 { format!("{label}: ") } else { format!("{}>", label.chars().next().unwrap_or('P')) };
+            let offset = (prefix.len() as u16).min(width.saturating_sub(1));
+            line(frame, y, &prefix, base);
+            self.fields.push((i, Rect::new(x, y, width, 1)));
+            lenz_terminal_ui::paint(frame, lenz_terminal_ui::Field {
+                text: input.text(), cursor: input.cursor(),
+                area: Rect::new(x + offset, y, width - offset, 1), active: self.core.field == i,
+            }, base.bg(color(palette.status_bg)), base.bg(color(palette.selected_bg)));
+            y += 1;
+        }
+        let footer = area.bottom().saturating_sub(1);
+        if let Some(error) = self.core.error.as_deref() {
+            let starts = lenz::wrap::wrap_starts(error, width as usize);
+            for (start, end) in std::iter::once(0).chain(starts.iter().copied())
+                .zip(starts.iter().copied().chain(std::iter::once(error.len())))
+                .take(footer.saturating_sub(y) as usize)
+            {
+                line(frame, y, error.get(start..end).unwrap_or_default(), base.fg(color(palette.error)));
+                y += 1;
+            }
+        } else if self.core.mode == Mode::Repository && y < footer {
+            let matches = self.core.matches();
+            let visible = (footer-y) as usize;
+            let selected = self.core.selected.min(matches.len().saturating_sub(1));
+            self.scroll = self.scroll.min(selected);
+            if selected >= self.scroll + visible { self.scroll = selected + 1 - visible; }
+            self.scroll = self.scroll.min(matches.len().saturating_sub(visible));
+            if matches.is_empty() { line(frame, y, "No recent repositories", base); }
+            for (i, path) in matches.iter().enumerate().skip(self.scroll).take(visible) {
+                let style = if i == selected { base.bg(color(palette.selected_bg)) } else { base };
+                line(frame, y, &path.display().to_string(), style);
+                self.hits.push((i, Rect::new(x, y, width, 1)));
+                y += 1;
+            }
+        } else if y < footer {
+            line(frame, y, "Tab next path · F1/F2/F3 type", base);
+        }
+        if area.height >= 2 {
+            let action = format!("[{}: Enter]", self.core.mode.submit());
+            let hint = if width >= 24 {
+                if self.core.mode == Mode::Repository { " Tab complete · Esc cancel" } else { " Tab next · Esc cancel" }
+            } else { " Esc" };
+            line(frame, footer, &format!("{action}{hint}"), accent);
+            self.submit = Rect::new(x, footer, (action.len() as u16).min(width), 1);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -307,10 +398,13 @@ mod tests {
         );
     }
     fn screen(view: &mut View, w: u16, h: u16) -> String {
+        screen_with_palette(view, w, h, &lenz::theme::DARCULA)
+    }
+    fn screen_with_palette(view: &mut View, w: u16, h: u16, palette: &Palette) -> String {
         let mut terminal =
             ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
         terminal
-            .draw(|f| view.draw(f, &lenz::theme::DARCULA))
+            .draw(|f| view.draw(f, palette))
             .unwrap();
         terminal
             .backend()
@@ -323,6 +417,57 @@ mod tests {
             .map(|r| r.concat())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn short_comparison_chooser_keeps_paths_errors_and_actions_accessible() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["left ", " right"] { std::fs::write(dir.path().join(name), name).unwrap(); }
+        for palette in [&lenz::theme::DARCULA, &lenz::theme::LIGHT] {
+            let mut view = View::new(RepoPicker::with_recent(dir.path().into(), Vec::new()).with_comparisons(true));
+            view.handle(&Event::Paste("left \nignored".into()));
+            view.handle(&key(KeyCode::Tab));
+            view.handle(&Event::Paste("missing".into()));
+            assert!(matches!(view.handle(&key(KeyCode::Enter)), Outcome::None));
+            for width in [5, 24, 80] {
+                for height in (1..=12).chain([18]) {
+                    let text = screen_with_palette(&mut view, width, height, palette);
+                    let active = view.fields.iter().find(|(i, _)| *i == 1).expect("active path remains visible").1;
+                    assert!(active.y < height, "{text}");
+                    if height >= 3 {
+                        let error = text.lines().nth((height-2) as usize).unwrap();
+                        // At taller sizes an error may wrap across several rows instead.
+                        assert!(text.lines().skip((active.y+1) as usize).take((height-active.y-2) as usize).any(|row| !row.trim().is_empty()), "validation remains visible: {text}; last status {error}");
+                    }
+                    if height >= 2 { assert!(text.lines().last().unwrap().contains("[Co"), "{text}"); }
+                    if height >= 4 { assert_eq!(view.fields.len(), 2, "{text}"); }
+                }
+            }
+            // A short layout drawing only Right must not remap its mouse hit to Left.
+            screen_with_palette(&mut view, 24, 3, palette);
+            let (_, right) = view.fields[0];
+            assert!(matches!(view.handle(&Event::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left), column: right.x, row: right.y, modifiers: KeyModifiers::NONE,
+            })), Outcome::None));
+            assert_eq!(view.core.field, 1);
+            view.handle(&key(KeyCode::F(2)));
+            assert_eq!(view.core.mode, Mode::Folders);
+            view.handle(&key(KeyCode::F(3)));
+            assert_eq!(view.core.mode, Mode::Repository);
+            view.handle(&key(KeyCode::F(1)));
+            assert_eq!(view.core.mode, Mode::Files);
+            view.handle(&key(KeyCode::Tab));
+            view.core.execute(PickerCommand::SelectAll);
+            view.handle(&Event::Paste(" right\nignored".into()));
+            match view.handle(&key(KeyCode::Enter)) {
+                Outcome::Chosen(Choice::Comparison { left, right }) => {
+                    assert_eq!(left, dir.path().join("left "));
+                    assert_eq!(right, dir.path().join(" right"));
+                }
+                _ => panic!("comparison remains usable after tiny resizes"),
+            }
+            assert!(matches!(view.handle(&key(KeyCode::Esc)), Outcome::Quit));
+        }
     }
 
     #[test]
@@ -358,6 +503,28 @@ mod tests {
             _ => panic!("repository not chosen"),
         }
         assert!(matches!(view.handle(&key(KeyCode::Esc)), Outcome::Quit));
+    }
+
+    #[test]
+    fn pasted_comparison_paths_keep_whitespace_instead_of_selecting_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["left", "left ", " right"] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+        }
+        let mut view = View::new(
+            RepoPicker::with_recent(dir.path().into(), Vec::new()).with_comparisons(true),
+        );
+        view.handle(&Event::Paste("left ".into()));
+        view.handle(&key(KeyCode::Tab));
+        view.handle(&Event::Paste(" right".into()));
+        match view.handle(&key(KeyCode::Enter)) {
+            Outcome::Chosen(Choice::Comparison { left, right }) => {
+                assert_eq!(left, dir.path().join("left "));
+                assert_eq!(right, dir.path().join(" right"));
+                assert_eq!(std::fs::read(left).unwrap(), b"left ");
+            }
+            _ => panic!("exact comparison paths were not chosen"),
+        }
     }
 
     #[test]

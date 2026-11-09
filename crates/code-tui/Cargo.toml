@@ -33,6 +33,7 @@ code-gui = { path = "../code-gui", optional = true, features = ["test-support"] 
 gpui = { workspace = true, optional = true, features = ["test-support"] }
 
 [dev-dependencies]
+lenz-archive = { path = "../archive", features = ["testing"] }
 code-core = { path = "../code-core", features = ["test-support"] }
 tempfile = "3"
 # Throwaway git repositories for the blame tests.

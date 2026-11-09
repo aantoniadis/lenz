@@ -4,6 +4,11 @@
 //! and returns hit locations; each product computes its own rows, decorations and commands.
 #![deny(unsafe_code)]
 
+// Exercise the actual vendored transport policy in the ordinary workspace test gate.
+#[cfg(all(test, any(target_os = "linux", target_os = "freebsd")))]
+#[path = "../../../vendor/gpui_linux/src/linux/x11/compose.rs"]
+mod xkb_compose_test;
+
 pub mod find;
 pub mod field;
 pub mod image;

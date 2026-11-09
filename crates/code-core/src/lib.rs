@@ -4,6 +4,8 @@
 #![deny(unsafe_code)] // audited FFI only: the macOS terminal's `os` module in `terminal/worker.rs`
 
 pub mod actions;
+pub mod archive;
+pub mod archive_tree;
 mod analysis;
 mod draft;
 pub mod save;

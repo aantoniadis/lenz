@@ -18,6 +18,8 @@ pub struct Spot {
     pub filter: String,
     pub file_history: Option<String>,
     pub picked: Option<Picked>,
+    /// Exact comparison and the directory whose Git pathspec semantics it uses.
+    pub comparison: Option<(crate::changeset::Spec, std::path::PathBuf)>,
     pub file: Option<String>,
     pub line: Option<u32>,
 }
@@ -25,7 +27,7 @@ pub struct Spot {
 impl Spot {
     /// The same place for Back/Forward: the file and line move freely within it.
     pub fn same_place(&self, other: &Spot) -> bool {
-        (&self.branches, &self.filter, &self.file_history, &self.picked) == (&other.branches, &other.filter, &other.file_history, &other.picked)
+        (&self.branches, &self.filter, &self.file_history, &self.picked, &self.comparison) == (&other.branches, &other.filter, &other.file_history, &other.picked, &other.comparison)
     }
 }
 
@@ -63,7 +65,7 @@ mod tests {
     use super::*;
 
     fn at(commit: &str) -> Spot {
-        Spot { branches: Branches::All, filter: String::new(), file_history: None, picked: Some(Picked::Commits { anchor: commit.into(), second: None, range: false }), file: None, line: None }
+        Spot { branches: Branches::All, filter: String::new(), file_history: None, picked: Some(Picked::Commits { anchor: commit.into(), second: None, range: false }), comparison: None, file: None, line: None }
     }
 
     #[test]

@@ -4,6 +4,40 @@
 use super::*;
 use crate::relocate::{self, Kind};
 
+/// The entry being removed or moved, captured before its path disappears. A symlink entry only
+/// affects its own spelling; a real entry also affects tabs opened through canonical aliases.
+pub(super) struct EntryScope {
+    source: PathBuf,
+    canonical: Option<PathBuf>,
+}
+impl EntryScope {
+    pub(super) fn new(source: &Path) -> Self {
+        let canonical = std::fs::symlink_metadata(source).ok()
+            .filter(|metadata| !metadata.file_type().is_symlink())
+            .and_then(|_| std::fs::canonicalize(source).ok());
+        Self { source: source.to_path_buf(), canonical }
+    }
+    pub(super) fn contains(&self, tab: &Tab) -> bool {
+        crate::archive::physical_path(&tab.source).starts_with(&self.source) || self.canonical.as_deref().is_some_and(|source|
+            tab.canonical.as_deref().is_some_and(|path| crate::archive::physical_path(path).starts_with(source)))
+    }
+    fn contains_path(&self, path: &Path) -> bool {
+        let path = crate::archive::physical_path(path);
+        path.starts_with(&self.source) || self.canonical.as_deref().is_some_and(|source|
+            path.starts_with(source) || std::fs::canonicalize(&path).is_ok_and(|path| path.starts_with(source)))
+    }
+    fn moved_path(&self, tab: &Tab, target: &Path) -> Option<PathBuf> {
+        let named = crate::archive::physical_path(&tab.source);
+        let canonical = tab.canonical.as_deref().map(crate::archive::physical_path);
+        let relative = named.strip_prefix(&self.source).ok().or_else(||
+            canonical.as_deref()?.strip_prefix(self.canonical.as_deref()?).ok())?;
+        let path = if relative.as_os_str().is_empty() { target.to_path_buf() } else { target.join(relative) };
+        Some(if let Some(location) = crate::archive::Location::from_uri(&tab.source) {
+            crate::archive::Location::new(path, location.members).ok()?.to_uri()
+        } else { path })
+    }
+}
+
 impl Session {
     /// The explorer's highlighted entry, project-relative: what Rename and Move act on. `None` when no folder is
     /// open or nothing but the root is highlighted.
@@ -44,13 +78,14 @@ impl Session {
     /// Why a document at or inside `source` must not move now: its save is running or its outcome is unknown, or
     /// its recovered draft is still undecided. A draft that is simply unsaved moves with its file.
     pub(super) fn relocate_blocked(&self, source: &Path) -> Option<String> {
-        for tab in self.state.tabs.iter().filter(|t| t.is_file() && t.source.starts_with(source)) {
+        let scope = EntryScope::new(source);
+        for tab in self.state.tabs.iter().filter(|t| t.is_file() && scope.contains(t)) {
             let name = tab.title();
             let save = tab.buffer.and_then(|b| self.state.sources.buffers.get(&b)).map(|entry| &entry.save.status);
             if save.is_some_and(crate::save::Status::busy) { return Some(format!("{name} is being saved; wait for the save to finish")); }
             if save.is_some_and(crate::save::Status::blocked) { return Some(format!("{name} has a save whose outcome is not confirmed; recheck it first")); }
         }
-        if self.state.undecided_recovery.iter().any(|path| path.starts_with(source)) {
+        if self.state.undecided_recovery.iter().any(|path| scope.contains_path(path)) {
             return Some("A recovered draft inside it is undecided: restore or discard it first (Recover Unsaved Draft…)".into());
         }
         None
@@ -67,10 +102,10 @@ impl Session {
             return Effect::default();
         };
         let (source, target) = (root.join(&from), root.join(&to));
+        let scope = EntryScope::new(&source);
         // Each open document's confirmed file, as it was before the move: only that same file is followed as it.
-        let affected: Vec<(TabId, PathBuf)> = self.state.tabs.iter().filter(|t| t.retrieved.is_none() && !t.untitled() && t.source.starts_with(&source))
-            .filter_map(|t| Some((t.id, target.join(t.source.strip_prefix(&source).ok()?))))
-            .map(|(id, path)| (id, if path.as_os_str().is_empty() { target.clone() } else { path }))
+        let affected: Vec<(TabId, PathBuf)> = self.state.tabs.iter().filter(|t| t.retrieved.is_none() && !t.untitled())
+            .filter_map(|t| Some((t.id, scope.moved_path(t, &target)?)))
             .collect();
         if let Err(e) = lenz_content::write::rename_noclobber(&source, &target) {
             let why = if e.kind() == std::io::ErrorKind::AlreadyExists { format!("{to} already exists") } else { e.to_string() };
@@ -79,15 +114,26 @@ impl Session {
         }
         for (tab, path) in affected {
             let path = normalized(&path);
+            let previous = self.state.tabs.iter().find(|item| item.id == tab).map(|tab| tab.source.clone());
             let token = self.next_refresh();
             if let Some(t) = self.tab_mut(tab) { t.refresh = token; } // a check started before the move is stale
-            let canonical = std::fs::canonicalize(&path).ok();
+            let canonical = match crate::archive::Location::from_uri(&path) {
+                Some(location) => location.canonical_source().ok(),
+                None => std::fs::canonicalize(&path).ok(),
+            };
             self.follow_move(tab, path.clone(), Stamp::of(&path), canonical.clone());
             self.retarget_saved(tab, &path, canonical.as_deref());
+            self.retarget_archive_saved(tab, &path);
             self.redetect_language(tab, &path);
+            if let Some(previous) = previous.filter(|source| crate::archive::Location::from_uri(source).is_some()) {
+                self.state.history.rename(&previous, &path);
+            }
         }
         self.state.history.rename_tree(&source, &target);
         if Arc::make_mut(&mut self.state.places).rename_tree(&source, &target) { self.places_changed(); }
+        self.archive_container_moved(&source, &target);
+        if let Some(canonical) = scope.canonical.as_deref().filter(|canonical| *canonical != source)
+            && let Ok(destination) = std::fs::canonicalize(&target) { self.archive_container_moved(canonical, &destination); }
         if let Some(p) = &mut self.state.project { p.rename(&from, &to); }
         self.state.tree_revision += 1;
         self.show_created(to.clone().into());
@@ -104,7 +150,8 @@ impl Session {
         let Some(buffer) = self.state.tabs.iter().find(|t| t.id == tab).and_then(|t| t.buffer) else { return };
         let Some(snapshot) = self.state.sources.buffers.get(&buffer).and_then(|e| e.snapshot.clone()) else { return };
         let first = snapshot.reader_line_range(0);
-        let language = highlight::detect(path, &snapshot.copy_range(first.start..first.end.min(first.start + 4096)).unwrap_or_default());
+        let name = snapshot.source_meta().archive().and_then(|location| location.member_name()).map(Path::new).unwrap_or(path);
+        let language = highlight::detect(name, &snapshot.copy_range(first.start..first.end.min(first.start + 4096)).unwrap_or_default());
         if snapshot.language() == language { return; }
         let renamed = Arc::new(snapshot.with_source_meta(Arc::new((**snapshot.source_meta()).clone().with_language(language))));
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) {

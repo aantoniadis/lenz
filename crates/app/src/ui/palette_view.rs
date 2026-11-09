@@ -198,6 +198,7 @@ impl Viewer {
     /// disabled reason.
     pub(super) fn palette_paint(&mut self)->Option<PalettePaint>{
         let (x,y,width,rows)=self.palette_layout();
+        let active=self.modal()==Some(Modal::Palette);
         let p=self.command_palette.as_mut()?;
         let range=p.window(rows);let selected=p.selected();
         let lines=p.rows().enumerate().skip(range.start).take(range.len()).map(|(i,row)|{
@@ -209,7 +210,9 @@ impl Viewer {
             (format!("{mark}{}{reason}",row.entry.label),right,row.disabled.is_some(),selected==Some(i))
         }).collect();
         let empty=p.is_empty();
-        Some(PalettePaint{x,y,width,query:p.query().to_string(),cursor:p.input().cursor(),lines,empty})
+        let columns=(width/self.char_w.max(1.0)).max(0.0) as usize;
+        let snapshot=if active {self.field_native.snapshot(p.query(),p.input().cursor(),columns)}else{p.input().cursor().snapshot(p.query(),columns)};
+        Some(PalettePaint{x,y,width,query:snapshot.text,cursor:snapshot.cursor,lines,empty})
     }
 }
 

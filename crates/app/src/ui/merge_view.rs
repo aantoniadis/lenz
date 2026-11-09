@@ -112,6 +112,7 @@ impl Viewer {
 
     /// Lay out the Merge View for this frame (and remember the gutter controls and rows for clicks).
     pub(super) fn merge_frame(&mut self, rows: f32, pane_w: [f32;3]) -> Option<MergeFrame> {
+        let native_active=self.modal()==Some(Modal::MergeFind);
         let s = self.merge.as_mut()?;
         s.pane_w=pane_w;
         for p in 0..3{s.scroll_horizontal(p,0.0,self.char_w);}
@@ -287,7 +288,7 @@ impl Viewer {
             controls,
             headers,
             ask,
-            find_input:if s.ask.is_none()&&s.error.is_none()&&s.find_editing(){s.find_query().map(|q|s.find_cursor().snapshot(q,(self.panes.viewport[0]/self.char_w.max(1.0)).max(0.0) as usize))}else{None},
+            find_input:if s.ask.is_none()&&s.error.is_none()&&s.find_editing(){s.find_query().map(|q|if native_active {self.field_native.snapshot(q,s.find_cursor(),(self.panes.viewport[0]/self.char_w.max(1.0)).max(0.0) as usize)} else {s.find_cursor().snapshot(q,(self.panes.viewport[0]/self.char_w.max(1.0)).max(0.0) as usize)})}else{None},
             current,
             auto,
             outside,

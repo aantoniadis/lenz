@@ -5,6 +5,33 @@ fn text(v: &VisualTestContext, f: &Fixture) -> String {
 }
 
 #[gpui::test]
+fn gui_save_as_keeps_exact_path_whitespace_and_first_pasted_line(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let sibling = f.dir.path().join("result");
+    std::fs::write(&sibling, b"keep sibling").unwrap();
+    let mut v = visual(cx, &f);
+    draw(&mut v);
+    f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
+    v.simulate_keystrokes("ctrl-n");
+    v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string("draft contents".into())));
+    v.simulate_keystrokes("ctrl-v");
+    for name in ["result ", " result", " "] {
+        let target = f.dir.path().join(name);
+        v.simulate_keystrokes("ctrl-shift-s ctrl-u enter");
+        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { error: Some(_), .. }))));
+        let pasted = format!("{}\nignored", target.display());
+        v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(pasted)));
+        v.simulate_keystrokes("ctrl-v");
+        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { input, .. }) if input == &target.display().to_string())));
+        v.simulate_keystrokes("enter");
+        assert!(f.view.read_with(&v, |r, _| r.session().save_as_prompt().is_none()), "the trimmed sibling must not request replacement");
+        settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source() == target));
+        assert_eq!(std::fs::read(&target).unwrap(), b"draft contents");
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"keep sibling");
+    }
+}
+
+#[gpui::test]
 fn gui_new_file_and_save_as_use_real_keys_dialogs_and_the_core_replace_decision(cx: &mut TestAppContext) {
     let f = fixture(cx, None);
     let existing = f.dir.path().join("existing.txt");

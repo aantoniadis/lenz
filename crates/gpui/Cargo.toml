@@ -10,5 +10,8 @@ publish.workspace = true
 gpui.workspace = true
 lenz-content = { path = "../content" }
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
+xkbcommon = { version = "0.8", default-features = false }
+
 [lints]
 workspace = true

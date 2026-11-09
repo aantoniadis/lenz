@@ -1,6 +1,14 @@
 //! Validation shared by the reader's typed Open File / Open Folder prompts. No document or file is changed here.
 use std::path::{Path, PathBuf};
 
+/// Resolve an exact typed path for Open or Save As. Whitespace belongs to the file name.
+pub fn expand(text: &str, cwd: &Path) -> PathBuf {
+    match text.strip_prefix("~/").zip(std::env::var_os("HOME")) {
+        Some((rest, home)) => PathBuf::from(home).join(rest),
+        None => cwd.join(text),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     File,
@@ -33,21 +41,28 @@ impl Kind {
         }
     }
     pub fn resolve(self, text: &str, cwd: &Path) -> Result<PathBuf, String> {
-        let text = text.trim();
         if text.is_empty() {
             return Err("Enter a path to open".into());
         }
-        let path = match text.strip_prefix("~/").zip(std::env::var_os("HOME")) {
-            Some((rest, home)) => PathBuf::from(home).join(rest),
-            None => cwd.join(text),
-        };
-        self.validate(path)
+        self.validate(expand(text, cwd))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn typed_paths_do_not_open_a_trimmed_sibling() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["file", "file ", " file", " "] {
+            std::fs::write(dir.path().join(name), name).unwrap();
+            assert_eq!(Kind::File.resolve(name, dir.path()), Ok(dir.path().join(name)));
+        }
+        for name in ["folder", "folder ", " folder"] {
+            std::fs::create_dir(dir.path().join(name)).unwrap();
+            assert_eq!(Kind::Folder.resolve(name, dir.path()), Ok(dir.path().join(name)));
+        }
+    }
     #[test]
     fn typed_paths_keep_the_dialog_open_on_wrong_kind_or_missing_input() {
         let dir = tempfile::tempdir().unwrap();

@@ -34,6 +34,7 @@ pub struct Applied {
     before: String,
     after_hash: u64,
     valid: bool,
+    stale_source: bool,
 }
 impl Applied {
     pub fn label(&self) -> String {
@@ -41,7 +42,7 @@ impl Applied {
             if self.side == Side::Right { "→ right" } else { "← left" }, self.line + 1, self.old_lines, self.new_lines)
     }
     pub fn undo_reason(&self) -> Option<&'static str> {
-        if !self.active { Some("already undone") } else if !self.valid { Some("overlaps a later change; use normal undo") } else { None }
+        if !self.active { Some("already undone") } else if self.stale_source { Some("file changed outside this edit history; selective Undo is unavailable") } else if !self.valid { Some("overlaps a later change; use normal undo") } else { None }
     }
 }
 #[derive(Default)]
@@ -56,13 +57,13 @@ pub struct EditSession {
 /// What a quit with unsaved drafts says, in both adapters.
 pub const QUIT_QUESTION: &str = "Unsaved changes — Save keeps them; quit again to close without saving";
 #[derive(Default)]
-struct History { edits: moves::Edits, applied: Vec<Applied>, undo: Vec<(u64, bool)>, redo: Vec<(u64, bool)>, pending: Option<Pending>, saved_steps: Option<Checkpoint> }
+struct History { edits: moves::Edits, applied: Vec<Applied>, undo: Vec<(u64, bool)>, redo: Vec<(u64, bool)>, pending: Option<Pending>, saved_steps: Option<Checkpoint>, source_hash: [Option<u64>; 2] }
 struct Pending { current: [Arc<str>; 2], saved: [Arc<str>; 2], snapshots: [Result<write::Snapshot, &'static str>; 2], targets:[Option<PathBuf>;2], encodings:[Option<String>;2], notes:Vec<String> }
 #[derive(Clone)]
-struct Checkpoint { edits: moves::Edits, applied: Vec<Applied>, undo: Vec<(u64,bool)>, redo: Vec<(u64,bool)> }
+struct Checkpoint { edits: moves::Edits, applied: Vec<Applied>, undo: Vec<(u64,bool)>, redo: Vec<(u64,bool)>, source_hash: [Option<u64>; 2] }
 impl Checkpoint {
-    fn capture(h: &History) -> Self { Self { edits:h.edits.clone(),applied:h.applied.clone(),undo:h.undo.clone(),redo:h.redo.clone() } }
-    fn restore(self,h:&mut History) { h.edits=self.edits;h.applied=self.applied;h.undo=self.undo;h.redo=self.redo; }
+    fn capture(h: &History) -> Self { Self { edits:h.edits.clone(),applied:h.applied.clone(),undo:h.undo.clone(),redo:h.redo.clone(),source_hash:h.source_hash } }
+    fn restore(self,h:&mut History) { h.edits=self.edits;h.applied=self.applied;h.undo=self.undo;h.redo=self.redo;h.source_hash=self.source_hash; }
 }
 impl Pending {
     fn new(doc:&TextDocument)->Self { let current=[doc.text_arc(Side::Left),doc.text_arc(Side::Right)];Self {saved:current.clone(),current,snapshots:doc.writable.clone(),targets:doc.writable.each_ref().map(|s|s.as_ref().ok().and_then(|s|std::fs::canonicalize(&s.path).ok())),encodings:doc.encodings.clone(),notes:doc.notes.clone()} }
@@ -78,7 +79,8 @@ impl EditSession {
     pub fn keep_open(&mut self) {self.quit_asked=false;}
     pub fn dirty_files(&self)->Vec<usize> {let mut files=self.histories.keys().copied().filter(|&i|self.dirty(i)).collect::<Vec<_>>();files.sort_unstable();files}
     /// Rehydrate pending text after switching files, refresh or cache eviction.
-    pub fn overlay(&self,index:usize,doc:&TextDocument,paths:[&Path;2])->Option<TextDocument> {
+    pub fn overlay(&mut self,index:usize,doc:&TextDocument,paths:[&Path;2])->Option<TextDocument> {
+        self.reconcile_loaded(index,doc);
         if !self.dirty(index){return None;}
         if doc.placeholder_kind().is_some(){return self.recover(index,paths);}
         let p=self.histories.get(&index)?.pending.as_ref()?;
@@ -87,6 +89,25 @@ impl EditSession {
             let source=over.as_ref().unwrap_or(doc);over=Some(source.edited(side,&p.current[side as usize],snapshot.clone(),paths[0],paths[1]));
         }}
         over
+    }
+
+    /// Retained byte ranges belong to the last text this history produced. A disk reload may replace that text
+    /// while leaving the file's identity intact. Keep its records visible, but never apply their old offsets.
+    fn reconcile_loaded(&mut self,index:usize,doc:&TextDocument) {
+        let Some(history)=self.histories.get_mut(&index) else{return};
+        for side in [Side::Left,Side::Right] {
+            if history.pending.as_ref().is_some_and(|p|p.dirty(side)){continue;}
+            let Some(expected)=history.source_hash[side as usize] else{continue};
+            if doc.placeholder_kind().is_some(){continue;}
+            let actual=doc.fingerprint(side);
+            if actual!=expected {
+                for record in history.applied.iter_mut().filter(|r|r.side==side){record.stale_source=true;}
+                if let Some(saved)=&mut history.saved_steps {
+                    for record in saved.applied.iter_mut().filter(|r|r.side==side){record.stale_source=true;}
+                }
+                history.source_hash[side as usize]=Some(actual);
+            }
+        }
     }
 
     /// Recover a retained draft even when its disk source can no longer be loaded.
@@ -136,6 +157,7 @@ impl EditSession {
     }
     pub fn execute(&mut self, index: usize, doc: &TextDocument, view: &View, command: EditCommand, paths: [&Path; 2]) -> Result<Written, EditError> {
     crate::diagnostics::breadcrumb("Edit comparison draft");
+        self.reconcile_loaded(index,doc);
         if matches!(command,EditCommand::Save|EditCommand::Discard) { return self.finish(index,doc,view,command,paths); }
         let mut anchor = view.anchor_line();
         let (side, text, event, line_counts) = match command {
@@ -186,10 +208,12 @@ impl EditSession {
         pending.current[side as usize]=document.text_arc(side);
         // A compact inverse patch also describes how existing retained ranges shift.
         let mut delta = moves::Edits::default();
-        let (range,replaced) = delta.record_detail(side,before,after);
+        let (range,replaced,source_hash) = delta.record_detail(side,before,after);
+        document.remember_fingerprint(side,source_hash);
+        history.source_hash[side as usize]=Some(source_hash);
         let old = range.start..range.start + replaced.len();
         let shift = range.len() as isize - old.len() as isize;
-        for record in history.applied.iter_mut().filter(|r| r.active && r.side == side && Some(r.id) != event.map(|e|e.0)) {
+        for record in history.applied.iter_mut().filter(|r| r.active && !r.stale_source && r.side == side && Some(r.id) != event.map(|e|e.0)) {
             if record.range.end <= old.start { continue; }
             if record.range.start >= old.end && !(old.is_empty() && record.range.is_empty() && record.range.start == old.start) {
                 record.range = record.range.start.saturating_add_signed(shift)..record.range.end.saturating_add_signed(shift);
@@ -200,7 +224,7 @@ impl EditSession {
                 self.next_id += 1;
                 let (line,old_lines,new_lines) = line_counts.expect("apply has block ranges");
                 history.applied.push(Applied { id:self.next_id,side,line,old_lines,new_lines,active:true,
-                    after_hash:moves::fingerprint(&after[range.clone()]),range,before:replaced,valid:true });
+                    after_hash:moves::fingerprint(&after[range.clone()]),range,before:replaced,valid:true,stale_source:false });
                 history.edits.record(side,before,after); history.undo.push((self.next_id,true)); history.redo.clear();
             }
             EditCommand::UndoApplied(id) => {
@@ -214,7 +238,7 @@ impl EditSession {
                 if let Some((id,active)) = event {
                     if let Some(record) = history.applied.iter_mut().find(|r|r.id == id) {
                         record.active = if redo { active } else { !active };
-                        record.range=range; record.valid=true; record.after_hash=moves::fingerprint(&after[record.range.clone()]);
+                        record.range=range; record.valid=true; record.stale_source=false; record.after_hash=moves::fingerprint(&after[record.range.clone()]);
                     }
                     if redo { history.undo.push((id,active)); } else { history.redo.push((id,active)); }
                 }
@@ -304,6 +328,66 @@ mod tests {
     fn save(history:&mut EditSession,index:usize,doc:TextDocument,l:&Path,r:&Path)->TextDocument {
         if !history.dirty(index){return doc;}
         let view=doc.view(&[],20.0);history.execute(index,&doc,&view,EditCommand::Save,[l,r]).unwrap().document
+    }
+    fn reread(l:&Path,r:&Path)->TextDocument {
+        let(left,decoded_left)=write::Snapshot::read(l,None).unwrap();
+        let(right,decoded_right)=write::Snapshot::read(r,None).unwrap();
+        let mut doc=TextDocument::new(&decoded_left.text,&decoded_right.text,l,r);
+        doc.writable=[Ok(left),Ok(right)];doc
+    }
+    #[test]
+    fn saved_deletion_undo_rejects_external_reload_without_splitting_unrelated_text(){
+        let dir=tempfile::tempdir().unwrap();let(l,r)=(dir.path().join("left"),dir.path().join("right"));
+        let mut current=doc("a\nc\n","a\nDELETED\nc\n",&l,&r);let mut history=EditSession::default();
+        let view=current.view(&current.line_diff(&Options::default()),20.0);
+        current=history.execute(0,&current,&view,EditCommand::Apply{block:0,onto:Side::Right},[&l,&r]).unwrap().document;
+        current=save(&mut history,0,current,&l,&r);assert_eq!(current.text(Side::Right),"a\nc\n");
+        let record=history.applied(0)[0].clone();assert!(record.range.is_empty());
+        let external="EXTERNAL\na\nc\n";std::fs::write(&r,external).unwrap();
+        current=reread(&l,&r);assert!(history.overlay(0,&current,[&l,&r]).is_none());
+        assert_eq!(history.applied(0).len(),1);assert!(history.applied(0)[0].active);
+        assert!(history.applied(0)[0].undo_reason().unwrap().contains("outside"));
+        let view=current.view(&current.line_diff(&Options::default()),20.0);
+        assert!(matches!(history.execute(0,&current,&view,EditCommand::UndoApplied(record.id),[&l,&r]),Err(EditError::Unavailable(why))if why.contains("outside")));
+        assert!(!history.dirty(0));assert_eq!(std::fs::read_to_string(&r).unwrap(),external);
+        // A later deliberate apply establishes its own safe history without blessing old byte offsets.
+        current=history.execute(0,&current,&view,EditCommand::Apply{block:0,onto:Side::Right},[&l,&r]).unwrap().document;
+        assert!(history.applied(0)[0].undo_reason().unwrap().contains("outside"));
+        assert!(history.applied(0)[1].undo_reason().is_none());
+        let latest=history.applied(0)[1].id;let view=current.view(&[],20.0);
+        current=history.execute(0,&current,&view,EditCommand::UndoApplied(latest),[&l,&r]).unwrap().document;
+        let _=save(&mut history,0,current,&l,&r);assert_eq!(std::fs::read_to_string(&r).unwrap(),external);
+    }
+    #[test]
+    fn selective_undo_validates_the_whole_side_even_when_the_old_substring_still_matches(){
+        let dir=tempfile::tempdir().unwrap();let(l,r)=(dir.path().join("left"),dir.path().join("right"));
+        let mut current=doc("new\nsame\n","old\nsame\n",&l,&r);let mut history=EditSession::default();
+        let view=current.view(&current.line_diff(&Options::default()),20.0);
+        current=history.execute(0,&current,&view,EditCommand::Apply{block:0,onto:Side::Right},[&l,&r]).unwrap().document;
+        let _=save(&mut history,0,current,&l,&r);let id=history.applied(0)[0].id;
+        let external="new\nOUTSIDE\nnew\nsame\n";std::fs::write(&r,external).unwrap();
+        let current=reread(&l,&r);let view=current.view(&[],20.0);
+        // Exercise execute directly too: safety does not depend on an adapter calling overlay first.
+        assert!(matches!(history.execute(0,&current,&view,EditCommand::UndoApplied(id),[&l,&r]),Err(EditError::Unavailable(why))if why.contains("outside")));
+        assert_eq!(std::fs::read_to_string(&r).unwrap(),external);assert!(!history.has_dirty());
+    }
+    #[test]
+    fn selective_undo_survives_unchanged_reload_and_external_edits_to_the_other_side(){
+        for ending in ["\n","\r\n"] {
+            let dir=tempfile::tempdir().unwrap();let(l,r)=(dir.path().join("left"),dir.path().join("right"));
+            let original=format!("old{ending}same{ending}");let mut current=doc("new\nsame\n",&original,&l,&r);let mut history=EditSession::default();
+            let view=current.view(&current.line_diff(&Options::default()),20.0);
+            current=history.execute(0,&current,&view,EditCommand::Apply{block:0,onto:Side::Right},[&l,&r]).unwrap().document;
+            let _=save(&mut history,0,current,&l,&r);let id=history.applied(0)[0].id;
+            let current=reread(&l,&r);assert!(history.overlay(0,&current,[&l,&r]).is_none());
+            assert!(history.applied(0)[0].undo_reason().is_none());
+            std::fs::write(&l,"external left\n").unwrap();let current=reread(&l,&r);
+            assert!(history.overlay(0,&current,[&l,&r]).is_none());assert!(history.applied(0)[0].undo_reason().is_none());
+            let view=current.view(&[],20.0);let current=history.execute(0,&current,&view,EditCommand::UndoApplied(id),[&l,&r]).unwrap().document;
+            let _=save(&mut history,0,current,&l,&r);
+            assert_eq!(std::fs::read_to_string(&r).unwrap(),original);assert_eq!(std::fs::read_to_string(&l).unwrap(),"external left\n");
+            assert!(!history.applied(0)[0].active,"the retained record stays visible as Undone");
+        }
     }
     #[test]
     fn refresh_remaps_history_and_keeps_fully_applied_files_navigable(){

@@ -517,9 +517,14 @@ impl App {
         );
         self.draw_activity(frame, &mut geometry, &mut body, p);
         self.draw_terminal(frame, &mut geometry, &mut body, p);
-        // A quarter of the width unless its right edge was dragged; the text keeps at least 24 columns.
+        // A browser with no document uses the available cells; a focused virtual tree also remains
+        // usable below the usual split threshold. Opening a member returns narrow windows to text.
+        let archive_browser = !self.session.state().archive_tree().rows().is_empty()
+            && (self.session.state().active().is_none() || area.width < 36 && self.focus == Focus::Tree
+                && self.session.state().tree_rows().nth(self.tree_at).is_some_and(|row| self.session.state().archive_tree().is_virtual(&row.path)));
         let tree_width =
-            if self.tree_shown && self.session.state().has_tree() && area.width >= 36 {
+            if self.tree_shown && self.session.state().has_tree() && archive_browser { body.width }
+            else if self.tree_shown && self.session.state().has_tree() && area.width >= 36 {
                 let dragged = self.explorer_drag.or_else(|| self.session.state().layout().explorer_columns.map(|w| w.min(u32::from(u16::MAX)) as u16));
                 dragged.map_or((area.width / 4).clamp(16, 32), |w| w.clamp(12, area.width - 24))
             } else {
@@ -775,6 +780,15 @@ impl App {
             style(p.fg, p.status_bg).add_modifier(Modifier::UNDERLINED),
         );
         geometry.command_menus.push(commands_rect);
+        if self.focus == Focus::Tree && let Some(row) = self.session.state().tree_rows().nth(self.tree_at)
+            && let Some(hint) = self.session.state().archive_tree().hint(&row.path) {
+            let message = if area.width >= 80 {
+                self.session.state().archive_tree().display_path(&row.path).map_or_else(|| hint.to_owned(), |path| format!("{hint} · {path}"))
+            } else { hint.to_owned() };
+            let rect = Rect::new(area.x, area.y, area.width.saturating_sub(commands_width), 1);
+            line(frame.buffer_mut(), rect, &code_core::chrome::ellipsize(&message, rect.width as usize), style(p.fg, p.status_bg));
+            return;
+        }
         let log_width = 10.min(area.width.saturating_sub(commands_width));
         let log_rect = Rect::new(commands_rect.x.saturating_sub(log_width), area.y, log_width, 1);
         line(frame.buffer_mut(), log_rect, &format!("Logs ({})", self.session.state().activity_log().len()), style(p.accent, p.status_bg));
@@ -877,7 +891,10 @@ impl App {
             return;
         }
         fill(frame.buffer_mut(), area, style(p.fg, p.sidebar_bg));
-        let title = self.session.state().explorer_search().label().map(std::borrow::Cow::Owned).unwrap_or_else(|| self.session.state().project().map(|p| p.root().file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Files".into()));
+        let state = self.session.state();
+        let archive = state.project().is_none() || state.tree_rows().nth(self.tree_at).is_some_and(|row| state.archive_tree().is_virtual(&row.path));
+        let title = state.explorer_search().label().or_else(|| if archive { state.archive_tree().title() } else { None }).map(std::borrow::Cow::Owned)
+            .unwrap_or_else(|| state.project().map(|p| p.root().file_name().unwrap_or_default().to_string_lossy()).unwrap_or_else(|| "Files".into()));
         line(
             frame.buffer_mut(),
             area,
@@ -1908,7 +1925,7 @@ fn draw_start(frame: &mut ratatui::Frame, app: &App, items: &[StartItem], geomet
     for (i, item) in items.iter().enumerate() {
         let label = match item {
             StartItem::Command(id) => app.session.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
-            StartItem::RecentFolder(path) | StartItem::RecentFile(path) => path.display().to_string(),
+            StartItem::RecentFolder(path) | StartItem::RecentFile(path) => crate::app::source_path_label(path),
         };
         // Each group of recents under a blank row and its heading.
         if item.heading() != heading {

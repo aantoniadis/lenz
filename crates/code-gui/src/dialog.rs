@@ -79,9 +79,10 @@ impl ReaderView {
         let visible = (((footer_y - pad - body_y).max(0.0) / lh).floor() as usize).min(lines.len());
         let first = self.modal_first(0, 0..0, lines.len(), visible);
         let label_width = if compact { text.field.map_or(0.0, |label| ((lenz_content::wrap::width(label) as f32 + 1.0) * self.char_w).min((w - 2.0 * pad) / 3.0)) } else { 0.0 };
+        let snapshot = self.popup_field_snapshot(self.columns((w - 2.0 * pad - label_width - 20.0).max(0.0)));
         Some(FormLayout { bounds, field: text.field.map(|_| { let fy = y + header_h + if compact { 0.0 } else { lh + 4.0 }; fit(x + pad + label_width, fy, w - 2.0 * pad - label_width, (lh + if compact { 4.0 } else { 8.0 }).min((footer_y - 4.0 - fy).max(0.0))) }),
             checkbox: check.map(|_| fit(x + pad, y + header_h + field_h, w - 2.0 * pad, lh + 4.0)),
-            buttons, text, value: value.into(), cursor: self.popup_field().map_or_else(|| lenz_content::field_edit::Cursor::at(None, selected, value), |(_,cursor,_)| cursor), checked: check.unwrap_or(false),
+            buttons, text, value: snapshot.as_ref().map_or_else(|| value.into(), |s| s.text.clone()), cursor: snapshot.map_or_else(|| lenz_content::field_edit::Cursor::at(None, selected, value), |s| s.cursor), checked: check.unwrap_or(false),
             max_scroll: lines.len().saturating_sub(visible), lines, first, visible, body_y, char_w: self.char_w, pad, invalid: error.is_some(), inline_field: compact, label_width })
     }
 

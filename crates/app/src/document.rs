@@ -1,10 +1,12 @@
 //! Decoded text and comparison preparation shared by GUI and terminal adapters.
-use std::{ops::Range, path::Path, sync::Arc};
+use std::{ops::Range, path::Path, sync::{Arc, OnceLock}};
 use lenz_engine::{Budget, LineEnding, Options, Refinement};
 use crate::{changeset::{ChangeSet, Content as Source, SideBytes}, encoding, highlight::{self, Language}, moves,
     view::{Side, View}, write::Snapshot};
 
 pub struct TextDocument {
+    /// Computed only when retained edit history needs to validate a loaded Side.
+    fingerprints: [OnceLock<u64>; 2],
     pub(crate) text_left: Arc<str>,
     pub(crate) text_right: Arc<str>,
     pub(crate) lang_left: Option<Language>,
@@ -99,6 +101,7 @@ impl TextDocument {
         let differ = el != er && el != LineEnding::None && er != LineEnding::None;
         let lang = |path: &Path, lines: &[String]| highlight::detect(path, lines.first().map_or("", String::as_str));
         TextDocument {
+            fingerprints: Default::default(),
             text_left: left.into(),
             text_right: right.into(),
             lang_left: lang(left_path, &raw_left),
@@ -231,6 +234,12 @@ impl TextDocument {
     }
     pub fn text_arc(&self, side: Side) -> Arc<str> { if side == Side::Left { self.text_left.clone() } else { self.text_right.clone() } }
     pub fn text(&self, side: Side) -> &str { if side == Side::Left { &self.text_left } else { &self.text_right } }
+    pub(crate) fn fingerprint(&self, side: Side) -> u64 {
+        *self.fingerprints[side as usize].get_or_init(|| moves::fingerprint(self.text(side)))
+    }
+    pub(crate) fn remember_fingerprint(&self, side: Side, hash: u64) {
+        let _ = self.fingerprints[side as usize].set(hash);
+    }
     pub fn lines_on(&self, side: Side) -> &[String] {
         match side { Side::Left => &self.raw_left, Side::Right => &self.raw_right }
     }

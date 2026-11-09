@@ -124,6 +124,13 @@ pub fn clamp(text: &str, caret: usize) -> usize {
     text.floor_char_boundary(caret.min(text.len()))
 }
 
+/// Grapheme boundaries for bounded native field hit-testing, including the final insertion point.
+pub fn boundaries(text: &str) -> impl Iterator<Item = usize> + '_ {
+    text.grapheme_indices(true)
+        .map(|(at, _)| at)
+        .chain(std::iter::once(text.len()))
+}
+
 /// Apply `edit` at `caret`; whether `text` changed.
 pub fn apply(text: &mut String, caret: &mut usize, edit: Edit) -> bool {
     let at = clamp(text, *caret);
@@ -207,47 +214,180 @@ fn next(text: &str, at: usize) -> usize {
 
 /// Spaces, then a run of word characters (letters, digits, `_`) or of other symbols.
 fn word_stop(text: &str, at: usize, backward: bool) -> usize {
-    let class = |c: char| {
-        if c.is_alphanumeric() || c == '_' {
-            1
+    word_stop_chunks(text.len(), 0..text.len(), at, backward, true, |_| Some((0, text)))
+}
+
+/// A word stop over borrowed UTF-8 chunks. Graphemes, including ones spanning chunk boundaries, are
+/// classified by their first scalar; combining marks never become separate word/deletion stops.
+/// `chunk` returns the complete source chunk containing a byte (which need not itself be a character boundary).
+/// No source text is assembled, and only the word/space runs beside the caret and required grapheme context
+/// are visited. `spaces` retains the editor's option to cross an adjacent whitespace run as part of the step.
+pub fn word_stop_chunks<'a>(
+    length: usize,
+    bounds: std::ops::Range<usize>,
+    at: usize,
+    backward: bool,
+    spaces: bool,
+    chunk: impl FnMut(usize) -> Option<(usize, &'a str)>,
+) -> usize {
+    if bounds.start > bounds.end || bounds.end > length { return at.min(length); }
+    let at = at.clamp(bounds.start, bounds.end);
+    let edge = if backward { bounds.start } else { bounds.end };
+    if at == edge { return at; }
+    let Some(mut graphemes) = ChunkGraphemes::new(length, at, backward, chunk) else { return at };
+    let mut position = at;
+    let mut kind = None;
+    loop {
+        let (next, current) = if let Some(run) = graphemes.ascii_run(position, backward, &bounds, kind) {
+            run
         } else {
-            2
+            let Some(next) = graphemes.step(backward) else { return position };
+            let next = next.clamp(bounds.start, bounds.end);
+            let start = if backward { next } else { position };
+            let Some(current) = graphemes.class(start) else { return position };
+            (next, current)
+        };
+        if next == position { return position; }
+        if kind.is_none() && spaces && current == 0 {
+            position = next;
+        } else {
+            if kind.is_some_and(|kind| kind != current) { return position; }
+            kind = Some(current);
+            position = next;
         }
-    };
-    if backward {
-        let mut chars = text
-            .get(..at)
-            .unwrap_or_default()
-            .char_indices()
-            .rev()
-            .skip_while(|(_, c)| c.is_whitespace())
-            .peekable();
-        let Some(&(_, first)) = chars.peek() else {
-            return 0;
-        };
-        chars
-            .take_while(|(_, c)| !c.is_whitespace() && class(*c) == class(first))
-            .last()
-            .map_or(at, |(i, _)| i)
-    } else {
-        let mut chars = text
-            .get(at..)
-            .unwrap_or_default()
-            .char_indices()
-            .skip_while(|(_, c)| c.is_whitespace())
-            .peekable();
-        let Some(&(_, first)) = chars.peek() else {
-            return text.len();
-        };
-        chars
-            .find(|(_, c)| c.is_whitespace() || class(*c) != class(first))
-            .map_or(text.len(), |(i, _)| at + i)
+        if position == edge { return position; }
     }
+}
+
+struct ChunkGraphemes<'a, F> {
+    source: F,
+    chunk: (usize, &'a str),
+    cursor: unicode_segmentation::GraphemeCursor,
+    length: usize,
+}
+impl<'a, F: FnMut(usize) -> Option<(usize, &'a str)>> ChunkGraphemes<'a, F> {
+    fn new(length: usize, at: usize, backward: bool, mut source: F) -> Option<Self> {
+        let chunk = source(if backward { at.checked_sub(1)? } else { at })?;
+        Some(Self { source, chunk, cursor: unicode_segmentation::GraphemeCursor::new(at, length, true), length })
+    }
+    /// Consecutive ASCII bytes have grapheme boundaries except CRLF. Leave the byte adjoining an
+    /// unknown/non-ASCII neighbour to GraphemeCursor: it may share a cluster with a Prepend or mark.
+    fn ascii_run(&mut self, at: usize, backward: bool, bounds: &std::ops::Range<usize>, kind: Option<u8>) -> Option<(usize, u8)> {
+        let byte = if backward { at.checked_sub(1)? } else { at };
+        if byte < self.chunk.0 || byte >= self.chunk.0 + self.chunk.1.len() {
+            self.chunk = (self.source)(byte)?;
+        }
+        let (start, text) = self.chunk;
+        let bytes = text.as_bytes();
+        let mut index = at.checked_sub(start)?;
+        let first = *bytes.get(if backward { index.checked_sub(1)? } else { index })?;
+        let class = ascii_word_class(first)?;
+        let low = bounds.start.saturating_sub(start);
+        let high = bounds.end.saturating_sub(start).min(bytes.len());
+        loop {
+            let offset = if backward {
+                let Some(offset) = index.checked_sub(1) else { break };
+                offset
+            } else { index };
+            if offset < low || offset >= high { break; }
+            if ascii_word_class(bytes[offset]) != Some(class) { break; }
+            let safe = if backward {
+                if offset == 0 { start == 0 } else { bytes[offset - 1].is_ascii() }
+            } else {
+                if offset + 1 == bytes.len() { start + bytes.len() == self.length }
+                else { bytes[offset + 1].is_ascii() }
+            };
+            if !safe { break; }
+            if kind.is_some_and(|kind| kind != class) { return Some((at, class)); }
+            if backward { index -= 1; } else { index += 1; }
+        }
+        let next = start + index;
+        if next == at { return None; }
+        self.cursor.set_cursor(next);
+        Some((next, class))
+    }
+    fn step(&mut self, backward: bool) -> Option<usize> {
+        use unicode_segmentation::GraphemeIncomplete;
+        loop {
+            let boundary = if backward {
+                self.cursor.prev_boundary(self.chunk.1, self.chunk.0)
+            } else {
+                self.cursor.next_boundary(self.chunk.1, self.chunk.0)
+            };
+            match boundary {
+                Ok(boundary) => return boundary,
+                Err(GraphemeIncomplete::PrevChunk) => {
+                    self.chunk = (self.source)(self.cursor.cur_cursor().checked_sub(1)?)?;
+                }
+                Err(GraphemeIncomplete::NextChunk) => {
+                    self.chunk = (self.source)(self.cursor.cur_cursor())?;
+                }
+                Err(GraphemeIncomplete::PreContext(end)) => {
+                    let (start, text) = (self.source)(end.checked_sub(1)?)?;
+                    let context = text.get(..end.checked_sub(start)?)?;
+                    if context.is_empty() { return None; }
+                    self.cursor.provide_context(context, start);
+                }
+                Err(GraphemeIncomplete::InvalidOffset) => return None,
+            }
+        }
+    }
+    fn class(&mut self, at: usize) -> Option<u8> {
+        let (start, text) = if self.chunk.0 <= at && at < self.chunk.0 + self.chunk.1.len() {
+            self.chunk
+        } else { (self.source)(at)? };
+        let first = text.get(at.checked_sub(start)?..)?.chars().next()?;
+        Some(if first.is_whitespace() { 0 } else if first.is_alphanumeric() || first == '_' { 1 } else { 2 })
+    }
+}
+
+fn ascii_word_class(byte: u8) -> Option<u8> {
+    if !byte.is_ascii() || matches!(byte, b'\r' | b'\n') { return None; }
+    Some(if matches!(byte, b' ' | b'\t'..=b'\r') { 0 }
+         else if byte.is_ascii_alphanumeric() || byte == b'_' { 1 } else { 2 })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unicode_word_stops_and_deletions_keep_whole_graphemes() {
+        for token in ["cafe\u{301}", "नमस्ते", "👩🏽‍💻", "🇬🇷🇯🇵", "1\u{fe0f}\u{20e3}"] {
+            assert_eq!(run(token, token.len(), &[Edit::WordLeft]).1, 0, "{token}");
+            assert_eq!(run(token, 0, &[Edit::WordRight]).1, token.len(), "{token}");
+            assert_eq!(run(token, token.len(), &[Edit::BackspaceWord]), (String::new(), 0), "{token}");
+            assert_eq!(run(token, 0, &[Edit::DeleteWord]), (String::new(), 0), "{token}");
+        }
+    }
+
+    #[test]
+    fn borrowed_word_chunks_preserve_graphemes_and_whitespace_policy() {
+        for text in ["foo cafe\u{301}  👩🏽‍💻🇬🇷1\u{fe0f}\u{20e3} end",
+            "\u{600}abc \u{600}!def", "a\r\nb\t\u{b}c", "ab\u{301}cd \u{600}abc",
+            "\u{600}a\u{301}z", "x\u{200d}abcdef", "12\u{fe0f}\u{20e3}345"] {
+        for size in 1..=16 {
+            let mut chunks = Vec::new();
+            let mut start = 0;
+            while start < text.len() {
+                let end = text.floor_char_boundary((start + size).min(text.len()));
+                let end = if end == start { start + text.get(start..).unwrap().chars().next().unwrap().len_utf8() } else { end };
+                chunks.push((start, &text[start..end]));
+                start = end;
+            }
+            for at in boundaries(text) { for backward in [false, true] { for spaces in [false, true] {
+                let expected = word_stop_chunks(text.len(), 0..text.len(), at, backward, spaces, |_| Some((0, text)));
+                let actual = word_stop_chunks(text.len(), 0..text.len(), at, backward, spaces, |byte| {
+                    chunks.get(chunks.partition_point(|(start, _)| *start <= byte).checked_sub(1)?).copied()
+                });
+                assert_eq!(actual, expected, "chunk size {size}, at {at}, backward {backward}, spaces {spaces}");
+                assert!(boundaries(text).any(|boundary| boundary == actual));
+            }}}
+        }
+        }
+        assert_eq!(word_stop_chunks(7, 0..7, 4, true, false, |_| Some((0, "one two"))), 3);
+        assert_eq!(word_stop_chunks(7, 0..7, 4, true, true, |_| Some((0, "one two"))), 0);
+    }
 
     #[test]
     fn long_fields_reveal_home_middle_and_end_without_splitting_unicode() {

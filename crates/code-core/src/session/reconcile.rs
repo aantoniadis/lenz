@@ -5,9 +5,11 @@ use crate::reconcile::{Check, Choice, Disk, DiskChange, Prompt, Side, NO_CONFLIC
 
 /// Whether a fresh read holds the same file and content the dialog showed; its own stamp is checked by the write.
 fn same_file(fresh: &Disk, shown: &Disk) -> bool {
-    fresh.text.content_eq(&shown.text)
-        && fresh.baseline.target.device == shown.baseline.target.device
-        && fresh.baseline.target.inode == shown.baseline.target.inode
+    fresh.text.content_eq(&shown.text) && match (&fresh.archive, &shown.archive, &fresh.baseline, &shown.baseline) {
+        (Some(fresh), Some(shown), _, _) => fresh.container.same(&shown.container),
+        (None, None, Some(fresh), Some(shown)) => fresh.target.device == shown.target.device && fresh.target.inode == shown.target.inode,
+        _ => false,
+    }
 }
 
 /// The open dialog, as captured when it was opened.
@@ -26,6 +28,12 @@ pub(super) struct Pending {
 
 /// Read a regular file as the exact writable text this session would write, for `buffer`.
 fn read_disk(path: &Path, versions: &AtomicU64, buffer: crate::text::BufferId) -> Result<Disk, String> {
+    if let Some(location) = crate::archive::Location::from_uri(path) {
+        let entry = crate::archive::read_entry(&location, versions.fetch_add(1, Ordering::Relaxed) + 1, &|| false)?;
+        let meta = entry.document.source_meta();
+        if entry.document.image().is_some() || meta.is_binary() || meta.is_lossy() || meta.archive_read_only_reason().is_some() { return Err("the archive entry is not writable text".into()); }
+        return Ok(Disk { baseline: None, archive: Some(entry.baseline), text: Arc::new(crate::text::TextSnapshot::from_document(buffer, &entry.document)) });
+    }
     let (_, bytes) = read(path).map_err(|why| match why {
         ReadError::Failed(why) => why,
         ReadError::Unstable => "the file kept changing while it was read".into(),
@@ -35,7 +43,7 @@ fn read_disk(path: &Path, versions: &AtomicU64, buffer: crate::text::BufferId) -
         return Err("it is not writable text".into());
     }
     let baseline = doc.write_baseline.as_deref().ok_or_else(|| "it has no writable exact baseline".to_owned())?.clone();
-    Ok(Disk { baseline, text: Arc::new(crate::text::TextSnapshot::from_document(buffer, &doc)) })
+    Ok(Disk { baseline: Some(baseline), archive: None, text: Arc::new(crate::text::TextSnapshot::from_document(buffer, &doc)) })
 }
 
 impl Session {
@@ -213,7 +221,8 @@ impl Session {
             return effect;
         }
         let taken = Arc::new(disk.text.with_buffer(pending.buffer));
-        self.saved_baseline(pending.buffer, taken, disk.baseline);
+        if let Some(baseline) = disk.archive { self.archive_confirm_baseline(pending.buffer, taken, baseline); }
+        else if let Some(baseline) = disk.baseline { self.saved_baseline(pending.buffer, taken, baseline); }
         self.state.messages.push("Took the file on disk as the draft's text and confirmed baseline; Undo restores the previous draft.".into());
         effect
     }
@@ -226,7 +235,9 @@ impl Session {
         let Some(entry) = self.state.sources.buffers.get_mut(&pending.buffer) else { return repaint };
         // The observed version becomes the write target only because the user chose it; the confirmed baseline
         // stays the last confirmed save until a write is confirmed.
-        entry.save.read = Some(disk.baseline);
+        entry.save.read = disk.baseline;
+        entry.save.archive = disk.archive;
+        if let Some(baseline) = &entry.save.archive { self.archive_saves.clear_uncertain(&baseline.location.container); }
         entry.save.status = crate::save::Status::Ready;
         entry.save.checked = None;
         entry.save.revalidated = None;

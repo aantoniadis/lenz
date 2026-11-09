@@ -24,9 +24,13 @@ use code_core::{
 use code_core::text::{EditKind, SnapshotKey};
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+
+pub(crate) fn source_path_label(path: &Path) -> String {
+    code_core::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Focus {
@@ -376,6 +380,9 @@ impl App {
             self.tree_seen = usize::MAX; // revealed even if it was already the highlight
             self.tree_shown = true;
             self.tree_top = self.tree_top.min(at);
+            if self.session.state().archive_tree().is_virtual(&path) && !self.session.state().archive_tree().is_member(&path) {
+                self.focus = Focus::Tree;
+            }
         }
     }
 
@@ -422,6 +429,7 @@ impl App {
             command,
             Command::Open(_)
                 | Command::OpenRetained(_)
+                | Command::OpenArchiveEntry(_)
                 | Command::NewScratch(_)
                 | Command::OpenScratch(_)
                 | Command::ActivateTree { .. }
@@ -538,6 +546,7 @@ impl App {
     pub fn apply(&mut self, completion: Completion) -> bool {
         let theme = self.highlighted_theme();
         let tree_path = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
+        let tree_parent = tree_path.as_deref().and_then(|path| self.session.state().archive_tree().parent(path));
         let tree_revision = self.session.state().tree_revision();
         let restoring = self.pending_explorer.is_some();
         let results_id = self.session.state().results().map(|r| r.id());
@@ -559,7 +568,8 @@ impl App {
             self.tree_at = self.session.state().active_in_tree().and_then(|path| self.session.state().tree_rows().position(|r| r.path == path)).unwrap_or(0);
         } else if !restoring && let Some(path) = tree_path
             && self.session.state().tree_rows().nth(self.tree_at).is_none_or(|r| r.path != path) {
-            self.tree_at = self.session.state().tree_rows().position(|r| r.path == path).unwrap_or(0);
+            self.tree_at = self.session.state().tree_rows().position(|r| r.path == path)
+                .or_else(|| tree_parent.and_then(|parent| self.session.state().tree_rows().position(|row| row.path == parent))).unwrap_or(0);
         }
         self.sync_reveal();
         if self.session.state().results().map(|r| r.id()) != results_id {
@@ -1252,7 +1262,7 @@ impl App {
                 .state()
                 .recent()
                 .iter()
-                .map(|p| simple(p.display().to_string(), ChoiceTarget::Path(p.clone())))
+                .map(|p| simple(source_path_label(p), ChoiceTarget::Path(p.clone())))
                 .collect(),
             Prompt::Themes => std::iter::once(simple(
                 "Follow system".into(),
@@ -1745,6 +1755,17 @@ impl App {
                 return;
             }
         }
+        if alt && matches!(key.code, KeyCode::Home | KeyCode::End)
+            && matches!(kind, Prompt::Navigation | Prompt::Commands | Prompt::Branches | Prompt::Declarations | Prompt::Symbols | Prompt::Places(_) | Prompt::Keymap | Prompt::ScratchFiles(_) | Prompt::ServerRuntime | Prompt::Siblings { .. } | Prompt::Themes | Prompt::RecentRoots | Prompt::LanguageServer | Prompt::Menu(_) | Prompt::Context { .. } | Prompt::BranchMenu { .. })
+        {
+            let count = self.modal_len();
+            if let Some(modal) = self.modal.as_mut() {
+                modal.at = if key.code == KeyCode::Home { 0 } else { count.saturating_sub(1) };
+                modal.reveal_selection = true;
+            }
+            self.clamp();
+            return;
+        }
         if alt {
             let command = match key.code {
                 KeyCode::Char('c') => Some(CommandId::MatchCase),
@@ -1995,7 +2016,7 @@ impl App {
             },
             Prompt::Compare(left) => {
                 let exe = self.exe();
-                let launch = match input.trim().is_empty() {
+                let launch = match input.is_empty() {
                     true => Err("Enter a file or folder path".to_string()),
                     false => self.session.compare_launch(&left, &self.resolve_path(&input), &exe, true),
                 };
@@ -2019,7 +2040,7 @@ impl App {
                 } else { self.close_modal(); self.dispatch(Command::NewScratch(name)); }
             }
             Prompt::SaveAs(tab) => {
-                if input.trim().is_empty() {
+                if input.is_empty() {
                     if let Some(modal) = self.modal.as_mut() { modal.error = Some("Enter the new file's path".into()); }
                 } else {
                     let path = self.resolve_path(&input);
@@ -2072,7 +2093,7 @@ impl App {
                 }
             }
             Prompt::TerminalPath => {
-                if input.trim().is_empty() {
+                if input.is_empty() {
                     if let Some(modal) = &mut self.modal { modal.error = Some("Enter a file or folder path".into()); }
                 }
                 else {
@@ -2084,7 +2105,7 @@ impl App {
             Prompt::Open | Prompt::OpenFolder => {
                 let path = self.resolve_path(&input);
                 let target = if kind == Prompt::OpenFolder { code_core::open_path::Kind::Folder } else { code_core::open_path::Kind::File };
-                if input.trim().is_empty() || target.validate(path.clone()).is_err() {
+                if input.is_empty() || target.validate(path.clone()).is_err() {
                     self.modal.as_mut().unwrap().error = Some("Enter an existing file or folder path".into());
                 } else {
                     self.close_modal();
@@ -2114,7 +2135,7 @@ impl App {
                 self.dispatch(Command::ConfigureSqlMetadata(input));
             }
             Prompt::WorkspaceRoot => {
-                let path = (!input.trim().is_empty()).then(|| self.resolve_path(&input));
+                let path = (!input.is_empty()).then(|| self.resolve_path(&input));
                 if path.as_ref().is_some_and(|p| !p.is_dir()) {
                     self.modal.as_mut().unwrap().error =
                         Some("Workspace root must be a folder".into());
@@ -2227,7 +2248,10 @@ impl App {
                                     self.focus = Focus::Tree;
                                 }
                                 SiblingTarget::File(path) => {
-                                    if let Some(project) = self.session.state().project() {
+                                    if let Some(location) = code_core::archive::Location::from_uri(Path::new(path.as_ref())) {
+                                        self.focus = Focus::Text;
+                                        self.dispatch(Command::OpenArchiveEntry(location));
+                                    } else if let Some(project) = self.session.state().project() {
                                         self.dispatch(Command::Open(project.root().join(&*path)));
                                     }
                                 }
@@ -2245,21 +2269,10 @@ impl App {
         }
     }
     fn resolve_path(&self, input: &str) -> PathBuf {
-        let input = input.trim();
-        if let Some(rest) = input.strip_prefix("~/")
-            && let Some(home) = std::env::var_os("HOME")
-        {
-            return PathBuf::from(home).join(rest);
-        }
-        let path = PathBuf::from(input);
-        if path.is_relative() {
-            self.session.state().project().map_or_else(
-                || std::env::current_dir().unwrap_or_default().join(&path),
-                |p| p.root().join(&path),
-            )
-        } else {
-            path
-        }
+        let cwd = self.session.state().project().map_or_else(
+            || std::env::current_dir().unwrap_or_default(), |p| p.root().to_owned(),
+        );
+        code_core::open_path::expand(input, &cwd)
     }
     #[cfg(test)]
     pub(crate) fn enable_draft_input_for_test(&mut self) { self.session.enable_text_input_for_test(); }
@@ -2394,6 +2407,10 @@ impl App {
             _ => return false,
         };
         self.remember_explorer();
+        if matches!(&input, Search::Activate) && self.session.state().tree_rows().nth(self.tree_at)
+            .is_some_and(|row| self.session.state().archive_tree().is_member(&row.path)) {
+            self.focus = Focus::Text;
+        }
         self.dispatch(Command::ExplorerSearch(input));
         true
     }
@@ -2573,6 +2590,10 @@ impl App {
             return;
         }
         if key.code == KeyCode::Esc {
+            let archive_parent = if self.focus == Focus::Tree && self.session.state().active().is_none() {
+                self.session.state().tree_rows().nth(self.tree_at)
+                    .filter(|row| self.session.state().archive_tree().is_virtual(&row.path)).map(|row| row.path.clone())
+            } else { None };
             if self.session.state().documentation().is_some() {
                 self.dispatch(Command::CloseDocumentation);
             } else if self.session.state().asking().is_some() {
@@ -2584,6 +2605,8 @@ impl App {
             } else if self.focus == Focus::Tree && !self.session.state().tree_marks().is_empty() {
                 // First the explorer's marks, as in the GUI; the next Esc leaves the explorer.
                 self.dispatch(Command::ClearTreeMarks);
+            } else if let Some(path) = archive_parent {
+                self.dispatch(Command::ArchiveTreeParent { path });
             } else if self.focus == Focus::Text && self.session.disabled(CommandId::CollapseSelections).is_none() {
                 // Several cursors go back to one before Esc means leaving the text.
                 self.run(CommandId::CollapseSelections);
@@ -2599,7 +2622,8 @@ impl App {
             return;
         }
         if key.code == KeyCode::Tab || key.code == KeyCode::BackTab {
-            let mut available = vec![Focus::Text];
+            let browser_only = self.tree_shown && self.session.state().active().is_none() && !self.session.state().archive_tree().rows().is_empty();
+            let mut available = if browser_only { Vec::new() } else { vec![Focus::Text] };
             if self.tree_shown && self.session.state().has_tree() {
                 available.push(Focus::Tree);
             }
@@ -2754,13 +2778,20 @@ impl App {
     }
     fn tree_activate(&mut self, key: KeyCode) {
         let Some(row) = self.session.state().tree_rows().nth(self.tree_at).cloned() else { return };
+        let virtual_row = self.session.state().archive_tree().is_virtual(&row.path);
+        if key == KeyCode::Left && virtual_row && row.dir != Some(true) {
+            self.dispatch(Command::ArchiveTreeParent { path: row.path });
+            return;
+        }
         if let Some(open) = row.dir {
             if !(key == KeyCode::Left && !open || key == KeyCode::Right && open) {
                 self.dispatch(Command::ToggleDir(row.path.to_string()));
             }
         } else if key != KeyCode::Left {
+            // Browse/retry/up rows keep the explorer's keys. Opening an ordinary file gives them to
+            // the editor first, so a core archive-browser reveal can take them back when needed.
+            if !virtual_row || self.session.state().archive_tree().is_member(&row.path) { self.focus = Focus::Text; }
             self.dispatch(Command::ActivateTree { path: row.path, retain: false });
-            self.focus = Focus::Text;
         }
     }
     /// What Tab does in the results panel: the outline's other view, or the hierarchy's other direction.
@@ -3336,7 +3367,8 @@ impl App {
                     self.remember_explorer();
                     let Some(entry) = self.session.state().tree_rows().nth(row) else { return };
                     let arrow = self.layout.tree.x + 1 + (entry.depth.min(20) * 2) as u16;
-                    let path = self.session.state().project().map(|p| p.root().join(&*entry.path));
+                    let path = if self.session.state().archive_tree().is_virtual(&entry.path) { Some(PathBuf::from(entry.path.as_ref())) }
+                        else { self.session.state().project().map(|p| p.root().join(&*entry.path)) };
                     let now = Instant::now();
                     let double = tree_click.is_some_and(|(when, prior)| path.as_ref() == Some(&prior) && now.duration_since(when) < Duration::from_millis(400));
                     if entry.dir.is_none() || x == arrow || double {

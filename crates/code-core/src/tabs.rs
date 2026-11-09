@@ -418,6 +418,12 @@ impl Tab {
     pub(crate) fn is_file(&self) -> bool { self.read_only_side().is_none() && self.retrieved.is_none() && !self.untitled() }
     pub fn title(&self) -> String {
         if let Some(side) = self.comparison_side { return side.label().into(); }
+        if let Some(location) = crate::archive::Location::from_uri(&self.source) {
+            let leaf = location.member_name().and_then(|name| std::path::Path::new(name).file_name()).unwrap_or_default().to_string_lossy();
+            let outer = location.members.iter().rev().nth(1).map(std::path::Path::new).unwrap_or(&location.container);
+            let archive = outer.file_name().unwrap_or_default().to_string_lossy();
+            return format!("{} · {}", leaf.chars().take(120).collect::<String>(), archive.chars().take(80).collect::<String>());
+        }
         self.display.file_name().map_or_else(|| self.display.display().to_string(), |n| n.to_string_lossy().into_owned())
     }
     /// Whether an SVG shows its source text (else it is rendered).
@@ -745,6 +751,13 @@ impl History {
     /// `from` (a file or a folder) was moved to `to`: Back and Forward reach everything inside it at its new path.
     pub(crate) fn rename_tree(&mut self, from: &std::path::Path, to: &std::path::Path) {
         for at in self.entries.iter_mut() {
+            if let Some(mut location) = crate::archive::Location::from_uri(&at.source) {
+                if let Ok(rest) = location.container.strip_prefix(from) {
+                    location.container = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
+                    at.source = location.to_uri();
+                }
+                continue;
+            }
             if let Ok(rest) = at.source.strip_prefix(from) { at.source = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) }; }
         }
     }

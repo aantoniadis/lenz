@@ -33,6 +33,8 @@ const TITLE_CHARS: usize = 1024;
 pub enum Key {
     /// A document with this absolute path.
     File { path: PathBuf },
+    /// A text member inside one physical archive, including any enclosing nested members.
+    Archive { location: crate::archive::Location },
     /// A New File document's own token: it has no path until Save As.
     Untitled { token: String },
 }
@@ -42,6 +44,7 @@ impl Key {
     fn file_name(&self) -> String {
         let seed: Vec<u8> = match self {
             Self::File { path } => [b"f".as_slice(), path.as_os_str().as_encoded_bytes()].concat(),
+            Self::Archive { location } => [b"a".as_slice(), location.to_uri().as_os_str().as_encoded_bytes()].concat(),
             Self::Untitled { token } => [b"u".as_slice(), token.as_bytes()].concat(),
         };
         format!("{}.json", digest(&seed))
@@ -50,6 +53,14 @@ impl Key {
     pub fn path(&self) -> Option<&Path> {
         match self {
             Self::File { path } => Some(path),
+            Self::Archive { .. } | Self::Untitled { .. } => None,
+        }
+    }
+    /// A document key used by open tabs. Archive identities never masquerade as physical files.
+    pub(crate) fn identity(&self) -> Option<PathBuf> {
+        match self {
+            Self::File { path } => Some(path.clone()),
+            Self::Archive { location } => Some(location.to_uri()),
             Self::Untitled { .. } => None,
         }
     }
@@ -98,6 +109,8 @@ impl std::fmt::Debug for Record {
 /// What the document's file looks like now, compared with the record's confirmed baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disk {
+    /// An archive member is read on a worker only when Restore is chosen.
+    Unchecked,
     /// Untouched since the draft's confirmed baseline.
     Matches,
     /// Changed, or unreadable in a way that cannot be compared: Save must not assume either version.
@@ -173,6 +186,7 @@ impl Prompt {
     pub fn text(&self) -> String {
         let mut text = format!("{}\n\nRecorded {}.\n\n", self.label, age(self.recorded));
         text.push_str(match self.disk {
+            Disk::Unchecked => "The archive member will be checked when you restore. Restoring keeps your draft and does not write the archive.\n",
             Disk::Matches => "The file on disk still matches this draft's confirmed baseline (the last saved version).\n",
             Disk::Differs => "The file on disk has changed since this draft's confirmed baseline. Compare the restored draft with the file before saving; Save stays closed until the current file is rechecked.\n",
             Disk::Missing => "The file is no longer on disk; the recovered draft can still be restored and saved elsewhere.\n",
@@ -199,6 +213,7 @@ pub(crate) struct Recovery {
     saver: Saver,
     /// The user chose Later: the dialog stays closed until they ask for it again.
     postponed: bool,
+    restoring: Option<u64>,
     /// Released after the saver has written what is pending.
     _owner: Option<Owner>,
 }
@@ -210,14 +225,15 @@ impl Recovery {
         let owner = Owner::claim(&dir);
         let mut offers: Vec<Offer> = Vec::new();
         for record in std::mem::take(&mut loaded.records).into_iter().rev() {
-            let disk = match record.key().path() {
-                Some(path) => compare(path, &record),
-                None => Disk::Unsaved,
+            let disk = match record.key() {
+                Key::File { path } => compare(path, &record),
+                Key::Archive { .. } => Disk::Unchecked,
+                Key::Untitled { .. } => Disk::Unsaved,
             };
             offers.push(Offer { id: offers.len() as u64 + 1, record, disk });
         }
         let saver = Saver::new(dir, &loaded, Some(owner.token.clone()));
-        Self { offers, saver, postponed: false, _owner: Some(owner) }
+        Self { offers, saver, postponed: false, restoring: None, _owner: Some(owner) }
     }
 
     /// Whether a document's recovered draft still waits for Restore or Discard. Its record is kept as it is until
@@ -225,12 +241,16 @@ impl Recovery {
     pub(crate) fn undecided(&self, key: &Key) -> bool { self.offers.iter().any(|offer| offer.record.key == *key) }
 
     /// The files whose recovered drafts are undecided.
-    pub(crate) fn undecided_paths(&self) -> Vec<PathBuf> { self.offers.iter().filter_map(|offer| offer.record.key.path().map(Path::to_path_buf)).collect() }
+    pub(crate) fn undecided_paths(&self) -> Vec<PathBuf> { self.offers.iter().filter_map(|offer| offer.record.key.identity()).collect() }
 
     /// The recovered drafts still undecided, newest first.
     pub(crate) fn offers(&self) -> &[Offer] { &self.offers }
 
     pub(crate) fn offer(&self, id: u64) -> Option<&Offer> { self.offers.iter().find(|offer| offer.id == id) }
+
+    pub(crate) fn restoring(&self, id: u64) -> bool { self.restoring == Some(id) }
+    pub(crate) fn begin_restore(&mut self, id: u64) { self.restoring = Some(id); }
+    pub(crate) fn finish_restore(&mut self, id: u64) { if self.restoring == Some(id) { self.restoring = None; } }
 
     /// The offer the dialog shows: the newest one, until the user postpones the rest.
     pub(crate) fn prompt_offer(&self) -> Option<&Offer> { (!self.postponed).then(|| self.offers.first()).flatten() }
@@ -289,7 +309,9 @@ impl Version {
         if draft.text() == baseline.text() || (draft.text().len() + baseline.text().len()) as u64 > RECORD_BYTES {
             return None;
         }
-        Some(Record { key: self.key, seq, title: self.title, draft: draft.text().clone(), baseline: baseline.text().clone(), encoding: self.encoding, bom: self.bom, recorded: now(), owner })
+        // File/member names may contain controls, but the dialog title is plain bounded presentation text.
+        let title = self.title.chars().take(TITLE_CHARS).map(|c| if c.is_control() { ' ' } else { c }).collect();
+        Some(Record { key: self.key, seq, title, draft: draft.text().clone(), baseline: baseline.text().clone(), encoding: self.encoding, bom: self.bom, recorded: now(), owner })
     }
 }
 
@@ -313,11 +335,11 @@ impl Store {
     pub(crate) fn load(&self) -> Loaded {
         let (tombstones, mut high) = read_tombstones(&self.dir.join("tombstones.json")).unwrap_or_default();
         let mut records = Vec::new();
+        let mut text_bytes = 0;
         if let Ok(entries) = std::fs::read_dir(&self.dir) {
-            let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path())
+            let files = entries.flatten().map(|e| e.path())
                 .filter(|p| p.extension().is_some_and(|e| e == "json") && p.file_name().is_none_or(|n| n != "tombstones.json"))
-                .filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_file())).collect();
-            files.sort();
+                .filter(|p| p.symlink_metadata().is_ok_and(|m| m.is_file()));
             for file in files {
                 let Some(record) = std::fs::File::open(&file).ok().and_then(read_record) else { continue };
                 high = high.max(record.seq);
@@ -327,18 +349,11 @@ impl Store {
                 }
                 // Another running session's draft is its live work, not recovered work.
                 if record.owner.as_deref().is_some_and(|owner| live(&self.dir, owner)) { continue; }
-                records.push(record);
+                keep_newest(&mut records, &mut text_bytes, file, record);
             }
         }
         forget_ended_owners(&self.dir);
-        records.sort_by_key(|record| (record.recorded, record.seq));
-        records.truncate(MAX_RECORDS);
-        let mut text = 0;
-        records.retain(|record| {
-            if text + record.text_bytes() > LOADED_BYTES { return false; }
-            text += record.text_bytes();
-            true
-        });
+        let records = records.into_iter().map(|(_, record)| record).collect();
         Loaded { records, tombstones, high }
     }
 
@@ -361,6 +376,17 @@ impl Store {
     fn write_tombstones(&self, tombstones: &BTreeMap<Key, u64>) {
         let stored = StoredTombstones { v: VERSION, keys: tombstones.iter().map(|(key, seq)| StoredTombstone { key: key.clone(), seq: *seq }).collect() };
         if let Ok(bytes) = serde_json::to_vec(&stored) { write_private(&self.dir.join("tombstones.json"), &bytes); }
+    }
+}
+
+/// Read-directory order is arbitrary. Retain only the newest bounded tail while scanning, with the
+/// previous filename order as the deterministic tie-breaker for equal timestamps and write orders.
+fn keep_newest(records: &mut Vec<(PathBuf, Record)>, text_bytes: &mut u64, file: PathBuf, record: Record) {
+    let at = records.partition_point(|(old_file, old)| (old.recorded, old.seq, old_file) <= (record.recorded, record.seq, &file));
+    *text_bytes += record.text_bytes();
+    records.insert(at, (file, record));
+    while records.len() > MAX_RECORDS || *text_bytes > LOADED_BYTES {
+        *text_bytes -= records.remove(0).1.text_bytes();
     }
 }
 
@@ -416,6 +442,9 @@ fn valid_key(key: &Key) -> bool {
         Key::File { path } => path.is_absolute()
             && path.to_str().is_some_and(|p| !p.contains("://"))
             && path.components().all(|c| matches!(c, std::path::Component::RootDir | std::path::Component::Normal(_) | std::path::Component::Prefix(_))),
+        Key::Archive { location } => !location.members.is_empty()
+            && location.to_uri().as_os_str().len() <= 64 << 10
+            && crate::archive::Location::new(location.container.clone(), location.members.clone()).is_ok(),
         Key::Untitled { token } => !token.is_empty() && token.len() <= 200 && token.chars().all(|c| c.is_ascii_graphic()),
     }
 }
@@ -733,6 +762,89 @@ mod tests {
     }
 
     fn flush(saver: &Saver) { saver.flush().recv_timeout(Duration::from_secs(5)).expect("the saver answered"); }
+
+    #[test]
+    fn loading_many_recovery_records_keeps_the_newest_eligible_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_owned());
+        let owner = Owner::claim(dir.path());
+        let mut tombstones = BTreeMap::new();
+        for index in 0..MAX_RECORDS + 10 {
+            let key = Key::Archive { location: crate::archive::Location::new(
+                PathBuf::from("/p/work.zip"), vec![format!("member-{index}.txt")]).unwrap() };
+            let mut record = version("draft", "saved").record(index as u64 + 1, None).unwrap();
+            record.key = key.clone();
+            record.recorded = index as u64;
+            if index == MAX_RECORDS + 9 { record.owner = Some(owner.token.clone()); }
+            store.write(&record);
+            if index == MAX_RECORDS + 8 { tombstones.insert(key, record.seq); }
+        }
+        store.write_tombstones(&tombstones);
+        let loaded = store.load();
+        let expected: Vec<_> = (8..MAX_RECORDS + 8).map(|index| index as u64 + 1).collect();
+        assert_eq!(loaded.records.iter().map(|record| record.seq).collect::<Vec<_>>(), expected);
+        assert_eq!(loaded.high, (MAX_RECORDS + 10) as u64, "even an excluded live owner's write order is observed");
+        assert_eq!(loaded.tombstones, tombstones);
+    }
+
+    #[test]
+    fn recovery_record_collection_stays_bounded_during_scan_and_orders_ties_by_filename() {
+        let mut records = Vec::new();
+        let mut bytes = 0;
+        let draft: Arc<str> = "x".repeat(RECORD_BYTES as usize - 1).into();
+        // A shared payload avoids a large test fixture while counting every retained record's bytes.
+        for index in (0..100).rev() {
+            let mut record = version("draft", "s").record(index + 1, None).unwrap();
+            record.recorded = index;
+            record.draft = draft.clone();
+            keep_newest(&mut records, &mut bytes, PathBuf::from(format!("{index:03}.json")), record);
+            assert!(records.len() <= MAX_RECORDS);
+            assert!(bytes <= LOADED_BYTES);
+            assert_eq!(bytes, records.iter().map(|(_, record)| record.text_bytes()).sum::<u64>());
+        }
+        assert_eq!(bytes, LOADED_BYTES);
+        assert_eq!(records.iter().map(|(_, record)| record.seq).collect::<Vec<_>>(), [97, 98, 99, 100]);
+
+        records.clear();
+        bytes = 0;
+        for index in (0..MAX_RECORDS + 10).rev() {
+            let mut record = version("draft", "saved").record(1, None).unwrap();
+            record.recorded = 1;
+            keep_newest(&mut records, &mut bytes, PathBuf::from(format!("{index:03}.json")), record);
+        }
+        let expected: Vec<_> = (10..MAX_RECORDS + 10).map(|index| PathBuf::from(format!("{index:03}.json"))).collect();
+        assert_eq!(records.iter().map(|(path, _)| path.clone()).collect::<Vec<_>>(), expected);
+    }
+
+    #[test]
+    fn control_character_filename_titles_round_trip_without_changing_keys_or_draft_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().to_owned());
+        let keys = [
+            Key::File { path: PathBuf::from("/p/line\nname\t.txt") },
+            Key::Archive { location: crate::archive::Location::new(PathBuf::from("/p/outer\t.zip"), vec!["line\nname\t.txt".into()]).unwrap() },
+        ];
+        for (index, key) in keys.iter().enumerate() {
+            let mut version = version("draft λ\r\n", "baseline\n");
+            version.key = key.clone();
+            version.title = if index == 0 { "line\nname\t.txt".into() } else { format!("line\nname\t.txt{}", "界".repeat(TITLE_CHARS)) };
+            let mut record = version.record(index as u64 + 1, None).unwrap();
+            record.recorded = 1;
+            assert!(record.title.starts_with("line name .txt"));
+            assert!(!record.title.chars().any(char::is_control));
+            assert!(record.title.chars().count() <= TITLE_CHARS);
+            if index == 1 { assert_eq!(record.title.chars().count(), TITLE_CHARS); }
+            store.write(&record);
+        }
+        let loaded = store.load();
+        assert_eq!(loaded.records.len(), keys.len(), "supported filenames must not make their drafts unreadable");
+        for (record, key) in loaded.records.iter().zip(keys) {
+            assert_eq!(record.key(), &key);
+            assert_eq!(record.draft(), "draft λ\r\n");
+            assert_eq!(record.baseline(), "baseline\n");
+            assert_eq!(record.encoding(), "UTF-8");
+        }
+    }
 
     #[test]
     fn a_version_is_kept_privately_and_read_back_as_written() {

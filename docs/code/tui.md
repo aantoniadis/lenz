@@ -25,6 +25,26 @@ work without a terminal; ordinary reading needs an interactive terminal on stdin
 path beginning with a dash. Opening a file alone does not enumerate its parent; Open Folder starts project
 browsing and project search.
 
+Opening a ZIP, TAR, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`/`.tbz`, `.tar.xz`/`.txz`, or
+`.tar.zst`/`.tzst` shows its contents in the explorer. This works from the command line,
+**Open File…**, and an archive in a project. Enter or Right expands folders and nested archives;
+Enter opens a member in an ordinary editor tab. Typing, paste, Undo/Redo and Ctrl+S work there:
+Save replaces that member inside the outer archive, preserving the other members. No files are
+extracted into the project. Tabs, breadcrumbs and Status details show readable paths such as
+`sources.zip!/src/main.rs`.
+
+Left selects a member's parent or collapses an expanded folder. **↑ Up / close archive** returns
+from a nested archive or closes its browser while keeping open member tabs. Escape returns to an
+open editor; with no editor it goes up and closes the root browser. Type to search archive names,
+then Enter to open the selected member. Ctrl+Shift+E returns to the explorer. In a narrow terminal,
+the focused archive browser uses the available width, and opening a member returns it to the editor.
+The status bar names the selected row's action. An unreadable archive has an Enter-to-retry row;
+empty archives keep the Up / close row available.
+
+Links and archive records whose metadata cannot be preserved are read-only, with their reason in
+Status details. Archives with ambiguous duplicate member names are read-only. Filesystem actions such as
+Rename, Move and Delete do not act on archive members; Save As can write a member to a regular file.
+
 A window with nothing open starts on **Open File…**, **Open Folder…**, the recent folders and the files recently
 opened without a folder (each newest first, at most ten, kept in `recent-roots.json` and `recent-files.json` in the
 state folder), in the terminal as in the GUI. A click runs the command or opens the folder or file; closing the last

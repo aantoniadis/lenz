@@ -184,7 +184,8 @@ impl ReaderView {
         let at = *at;
         let first = self.modal_first(at, at..at + 1, search.rows.len(), visible);
         self.navigation_drawn = Some((search.revision, first, visible));
-        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: search.query.clone(), cursor: self.popup_field().map(|(_,cursor,_)|cursor).unwrap_or_default(), status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect() })
+        let snapshot = self.popup_field_snapshot(self.columns((f32::from(bounds.size.width) - 36.0 - 2.0 * self.char_w).max(0.0)))?;
+        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: snapshot.text, cursor: snapshot.cursor, status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect() })
     }
 
     pub(super) fn navigation_rows(&self) -> Vec<(String, Option<&'static str>)> {

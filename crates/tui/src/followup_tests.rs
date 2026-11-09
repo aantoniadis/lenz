@@ -286,3 +286,48 @@ fn tui_popup_fields_edit_unicode_ranges_without_editing_comparison(){
     }
     assert_eq!(std::fs::read(dir.path().join("b")).unwrap(),b"new\n");
 }
+
+#[test]
+fn tui_entry_show_selects_the_displayed_commit_when_overview_opens() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    for n in 0..3 {
+        std::fs::write(dir.path().join("f.txt"), format!("commit {n}\n")).unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", &format!("Commit {n}")]);
+    }
+    let requested = git(dir.path(), &["rev-parse", "HEAD~1"]).trim().to_owned();
+    let mut app = open(dir.path(), &["show", "HEAD~1"]);
+    key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+    ready(&mut app);
+    let core = &app.repository.as_ref().unwrap().core;
+    assert_eq!(core.picker.clipboard_text(&lenz::repository_session::RepositoryCommand::CopyHash, core.picker.anchor), Some(requested));
+    assert!(screen(&draw(&mut app, 100, 30)).contains("commit 1"));
+}
+
+#[test]
+fn tui_entry_relative_show_filter_and_follow_keep_the_nested_file_on_refresh() {
+    let dir = tempfile::tempdir().unwrap();
+    git(dir.path(), &["init", "-q"]);
+    std::fs::create_dir(dir.path().join("nested")).unwrap();
+    for name in ["f.txt", "nested/f.txt"] { std::fs::write(dir.path().join(name), "before\n").unwrap(); }
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "Base"]);
+    std::fs::write(dir.path().join("f.txt"), "wrong root file\n").unwrap();
+    std::fs::write(dir.path().join("nested/f.txt"), "expected nested file\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "Both changed"]);
+    let cwd = dir.path().join("nested");
+    for args in [vec!["show", "HEAD", "--", "f.txt"], vec!["log", "--follow", "f.txt"]] {
+        let mut app = open(&cwd, &args);
+        assert_eq!(app.session.comparisons()[0].path, "nested/f.txt");
+        if args[0] == "show" { key(&mut app, KeyCode::Esc, KeyModifiers::NONE); ready(&mut app); }
+        key(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+        ready(&mut app);
+        assert_eq!(app.session.comparisons()[0].path, "nested/f.txt");
+        let shown = screen(&draw(&mut app, 120, 36));
+        assert!(shown.contains("expected nested file"), "{shown}");
+        assert!(!shown.contains("wrong root file"), "{shown}");
+    }
+    assert_eq!(std::fs::read(dir.path().join("nested/f.txt")).unwrap(), b"expected nested file\n");
+    assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(), b"wrong root file\n");
+}

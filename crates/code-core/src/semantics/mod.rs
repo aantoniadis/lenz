@@ -737,6 +737,7 @@ impl Semantics {
 
     /// [`Self::wants_text`] for a source: a template's when any of its embedded languages has a provider.
     pub(crate) fn wants_source(&self, source: &crate::document::SourceMeta, large: bool, browse: Option<&Path>) -> bool {
+        if source.archive().is_some() { return false; }
         match crate::template::languages(source.source()) {
             [] => self.wants_text(source.language(), large, browse),
             languages => languages.iter().any(|l| self.wants_text(Some(*l), large, browse)),
@@ -746,6 +747,7 @@ impl Semantics {
     /// The provider for `doc`'s language (a template view's embedded one) and, once resolved, its workspace root and
     /// the provider serving it.
     pub(crate) fn resolved(&self, doc: &Document) -> Option<(usize, Option<Option<PathBuf>>)> {
+        if doc.source_meta().archive().is_some() { return None; }
         match doc.served_language() {
             Some(language) => self.resolved_language(language, doc.source()),
             None => self.resolved_source(doc.source_meta()),
@@ -775,6 +777,7 @@ impl Semantics {
         self.view_source(doc.source_meta(), doc.is_large())
     }
     pub(crate) fn view_source(&self, source: &crate::document::SourceMeta, large: bool) -> Option<ProviderView> {
+        if source.archive().is_some() { return None; }
         let (p, root) = self.resolved_source(source)?;
         let provider = &PROVIDERS[p];
         let view = |root: Option<PathBuf>, status| ProviderView { name: provider.name, root, status, version: None, untested: false, limits: provider.limits, memory: None, supports: Vec::new(), error: None, environment: None };
@@ -828,7 +831,7 @@ impl Semantics {
         self.unmapped.clear();
         self.templates.clear();
         let mut served = Vec::with_capacity(docs.len());
-        for doc in docs.iter().filter(|d| !d.is_large()) {
+        for doc in docs.iter().filter(|d| !d.is_large() && d.source_meta().archive().is_none()) {
             match doc.templates() {
                 Some(views) => {
                     if let Some(why) = views.unmapped() { self.unmapped.insert(doc.source().to_owned(), why); }
@@ -1057,6 +1060,7 @@ impl Semantics {
     /// A template is asked through the view the caret is in (its Ruby, else an HTML template's markup), and
     /// whole-document questions through its Ruby; a caret no view maps says why instead.
     pub fn ask_with(&mut self, doc: &Arc<Document>, offset: usize, request: u64, question: Question, extra: Value) -> Result<(), String> {
+        if doc.source_meta().archive().is_some() { return Err("Language-server actions require a standalone file; archive entries can be exported with Save As".into()); }
         self.cancel_lane(question.lane());
         let routed;
         let doc = match doc.templates() {

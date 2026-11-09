@@ -699,7 +699,7 @@ impl Viewer {
             }
         }
         let focused = p.focus == Pane::Log;
-        Some(LogFrame { filter_input:p.filter_editing.then(||self.field_inputs.cursor(u64::MAX,0).unwrap_or_default().snapshot(&p.filter,(self.panes.viewport[0]/self.char_w.max(1.0)) as usize)),height:self.log_h(), rows, edges, status, focused, scroll: p.scroll, char_w: self.char_w, query:p.pane_search.query().to_owned(),
+        Some(LogFrame { filter_input:p.filter_editing.then(||self.projected_field(u64::MAX,&p.filter,self.field_inputs.cursor(u64::MAX,0).unwrap_or_default(),(self.panes.viewport[0]/self.char_w.max(1.0)) as usize)),height:self.log_h(), rows, edges, status, focused, scroll: p.scroll, char_w: self.char_w, query:p.pane_search.query().to_owned(),
         })
     }
 }

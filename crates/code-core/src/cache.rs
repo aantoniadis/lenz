@@ -20,6 +20,9 @@ pub struct Stamp {
 
 impl Stamp {
     pub fn of(path: &Path) -> Option<Stamp> {
+        if let Some(location) = crate::archive::Location::from_uri(path) {
+            return std::fs::metadata(location.outer_path()).ok().map(|m| Stamp::from(&m));
+        }
         std::fs::metadata(path).ok().map(|m| Stamp::from(&m))
     }
 }

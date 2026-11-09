@@ -156,6 +156,9 @@ impl ReaderView {
     pub(super) fn input_key(&mut self, event: &KeyDownEvent, window: &Window, cx: &mut Context<Self>) -> bool {
         self.synchronize_input(window, cx);
         let key = &event.keystroke;
+        if key.key_char.as_deref().is_some_and(|text| !text.chars().any(char::is_control)) && !key.modifiers.control && !key.modifiers.platform {
+            self.field_native_stale = false;
+        }
         if key.key == "escape" && self.input_state.capture.is_some() { self.cancel_marked_input(cx); cx.stop_propagation(); return true; }
         let printable = key.key_char.as_deref().is_some_and(|text| !text.chars().any(char::is_control))
             && !key.modifiers.control && !key.modifiers.platform && !key.modifiers.alt;
@@ -175,6 +178,11 @@ impl ReaderView {
 }
 impl EntityInputHandler for ReaderView {
     fn text_for_range(&mut self, range: Range<usize>, adjusted: &mut Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) -> Option<String> {
+        self.synchronize_field_native();
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return None; }
+            return self.with_field_native(|native, text, cursor| native.text_for_range(text, cursor, range, adjusted)).flatten();
+        }
         if self.session.state().terminal().focused() {
             if !self.terminal_active() || !self.focus.is_focused(window) { return None; }
             let text = self.terminal_marked().unwrap_or("");
@@ -201,6 +209,11 @@ impl EntityInputHandler for ReaderView {
         source.copy_range(start..end)
     }
     fn selected_text_range(&mut self, _: bool, window: &mut Window, cx: &mut Context<Self>) -> Option<UTF16Selection> {
+        self.synchronize_field_native();
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return None; }
+            return self.with_field_native(|native, text, cursor| native.selected(text, cursor)).flatten().map(|(range, reversed)| UTF16Selection { range, reversed });
+        }
         if self.session.state().terminal().focused() {
             if !self.terminal_active() || !self.focus.is_focused(window) { return None; }
             let range = if self.terminal_marked().is_some() { self.terminal_ui.mark_selection.clone() } else { 0..0 };
@@ -220,6 +233,12 @@ impl EntityInputHandler for ReaderView {
         Some(UTF16Selection { range: source.byte_to_utf16(selected.range().start)?..source.byte_to_utf16(selected.range().end)?, reversed: selected.head < selected.anchor })
     }
     fn marked_text_range(&self, window: &mut Window, _: &mut Context<Self>) -> Option<Range<usize>> {
+        if self.field_native_target.is_some() && self.field_native_target != self.field_target() { return None; }
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { return None; }
+            let (_, text, cursor) = self.field_source()?;
+            return self.field_native.marked_range(text, cursor);
+        }
         if self.session.state().terminal().focused() {
             if !self.focus.is_focused(window) { return None; }
             return self.terminal_marked().map(|text| 0..text.encode_utf16().count());
@@ -232,6 +251,12 @@ impl EntityInputHandler for ReaderView {
         Some(source.byte_to_utf16(range.start)?..source.byte_to_utf16(range.end)?)
     }
     fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_field_native();
+        if self.field_target().is_some() || self.field_native_stale {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return; }
+            self.finish_field_mark(cx);
+            return;
+        }
         if self.session.state().terminal().focused() {
             if self.terminal_active() && self.focus.is_focused(window) && let Some((id,text)) = self.terminal_ui.marked.take() {
                 self.terminal_ui.suppress_commit = Some((id,text.clone()));
@@ -243,6 +268,14 @@ impl EntityInputHandler for ReaderView {
         self.synchronize_input(window, cx); self.commit_input(cx);
     }
     fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_field_native();
+        if self.field_target().is_some() || self.field_native_stale {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return; }
+            #[cfg(not(target_os = "macos"))]
+            if text.is_empty() && range.is_some() && range == self.marked_text_range(window, cx) { self.cancel_field_native(); cx.notify(); return; }
+            self.replace_field_native(range, text, cx);
+            return;
+        }
         if self.session.state().terminal().focused() {
             if !self.terminal_active() || !self.focus.is_focused(window) { return; }
             let id = self.session.state().terminal().active().map(|t| t.id());
@@ -281,6 +314,18 @@ impl EntityInputHandler for ReaderView {
         }
     }
     fn replace_and_mark_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, selected: Option<Range<usize>>, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_field_native();
+        if self.field_target().is_some() || self.field_native_stale {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return; }
+            let text = text.split(['\r', '\n']).next().unwrap_or_default();
+            let new_phase = range.is_none();
+            let marked = self.with_field_native(|native, current, cursor| native.mark(current, cursor, range, text, selected, cfg!(target_os = "macos"))).unwrap_or(false);
+            if marked {
+                self.field_native_notify |= 3;
+                if new_phase { self.field_native_suppress = None; }
+            }
+            cx.notify(); return;
+        }
         if self.session.state().terminal().focused() {
             if !self.terminal_active() || !self.focus.is_focused(window) || text.len() > SURROUNDING_BYTES { return; }
             let Some(id) = self.session.state().terminal().active().map(|t| t.id()) else { return };
@@ -312,6 +357,14 @@ impl EntityInputHandler for ReaderView {
         self.show_input(capture, cx);
     }
     fn bounds_for_range(&mut self, range: Range<usize>, _: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+        self.synchronize_field_native();
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return None; }
+            let bounds = self.field_bounds()?;
+            let columns = (f32::from(bounds.size.width) / self.char_w.max(1.0)) as usize;
+            let (snapshot, range) = self.with_field_native(|native, text, cursor| native.snapshot_range(text, cursor, range, columns)).flatten()?;
+            return lenz_gpui::field::bounds_for_range(lenz_gpui::field::View { text: &snapshot.text, cursor: snapshot.cursor, bounds, char_w: self.char_w, active: true }, range, window, self.metrics());
+        }
         if self.session.state().terminal().focused() {
             if !self.terminal_active() || !self.focus.is_focused(window) { return None; }
             let _ = utf16_bytes(self.terminal_marked().unwrap_or(""),range)?;
@@ -337,6 +390,18 @@ impl EntityInputHandler for ReaderView {
         Some(Bounds { origin: gpui::point(px(x), px(y)), size: gpui::size(px((end - start).max(2.0)), px(line_h())) })
     }
     fn character_index_for_point(&mut self, point: gpui::Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
+        self.synchronize_field_native();
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return None; }
+            let bounds = self.field_bounds().filter(|b| b.contains(&point))?;
+            let columns = (f32::from(bounds.size.width) / self.char_w.max(1.0)) as usize;
+            let (snapshot, caret_units) = self.with_field_native(|native, text, cursor| Some((native.snapshot(text, cursor, columns), native.selected(text, cursor)?))).flatten()?;
+            let at = lenz_gpui::field::hit_test(lenz_gpui::field::View { text: &snapshot.text, cursor: snapshot.cursor, bounds, char_w: self.char_w, active: true }, point, window, self.metrics());
+            let caret = snapshot.cursor.caret(&snapshot.text);
+            let global_caret = if caret_units.1 { caret_units.0.start } else { caret_units.0.end };
+            let offset = global_caret.checked_sub(snapshot.text.get(..caret)?.encode_utf16().count())?;
+            return Some(offset + snapshot.text.get(..at)?.encode_utf16().count());
+        }
         if self.session.state().terminal().focused() {
             return (self.terminal_active() && self.focus.is_focused(window) && self.terminal_layout().is_some_and(|l| l.grid.contains(&point))).then_some(0);
         }
@@ -348,19 +413,46 @@ impl EntityInputHandler for ReaderView {
         source.byte_to_utf16(self.byte_at(window, f32::from(point.x), f32::from(point.y))?)
     }
     fn text_length_utf16(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {
+        self.synchronize_field_native();
+        if self.field_target().is_some() {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return None; } return self.with_field_native(|native, text, cursor| native.len_utf16(text, cursor)); }
         self.synchronize_input(window, cx); Some(self.input_snapshot(window)?.len_utf16())
     }
     fn accepts_text_input(&self, window: &mut Window, _: &mut Context<Self>) -> bool {
+        if self.field_native_target.is_some() && self.field_native_target != self.field_target() { return false; }
+        if self.field_target().is_some() {
+            // AppKit consults this before dispatching printable keys to the application. Option goes through
+            // the field's shortcut/symbol routing first; an already active composition remains IME-owned.
+            return self.focus.is_focused(window)
+                && lenz_gpui::field::prefers_native_input(self.field_native_stale, cfg!(target_os = "macos"), window.modifiers().alt);
+        }
+        if self.field_native_stale { return false; }
         self.focus.is_focused(window) && self.draft_target().is_some()
             && self.input_state.capture.as_ref().is_none_or(|capture| self.capture_current(capture, window))
     }
     fn set_selected_text_range(&mut self, range: Range<usize>, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_field_native();
+        if self.field_target().is_some() || self.field_native_stale {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return; }
+            if let Some(command) = self.with_field_native(|native, text, cursor| native.set_selection(text, cursor, range)).flatten() { self.apply_field_command(command, cx); }
+            self.field_native_notify |= 2;
+            cx.notify(); return;
+        }
         self.synchronize_input(window, cx); let Some(source) = self.input_snapshot(window) else { return };
         let Some(range) = source_range(&source, range) else { return }; let selected = Selection { anchor: range.start, head: range.end };
         if let Some(mut capture) = self.input_state.capture.clone() { capture.selected = selected; self.show_input(capture, cx); }
         else { self.dispatch(Command::Select(selected), cx); }
     }
     fn paste(&mut self, item: ClipboardItem, window: &mut Window, cx: &mut Context<Self>) {
+        self.synchronize_field_native();
+        if self.field_target().is_some() || self.field_native_stale {
+            if !self.focus.is_focused(window) { self.cancel_field_native(); return; }
+            self.synchronize_field_native();
+            if !self.field_native_stale && let Some(text) = item.text().filter(|text| !text.is_empty()) {
+                self.apply_field_command(lenz_content::field_edit::Command::Insert(text), cx);
+            }
+            return;
+        }
         self.synchronize_input(window, cx); if !self.draft_context() { return; }
         self.cancel_input(true, cx); if let Some(text) = item.text() { self.dispatch(Command::Paste(text), cx); }
     }

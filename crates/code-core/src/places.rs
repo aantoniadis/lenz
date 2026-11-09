@@ -511,10 +511,14 @@ pub fn read(file: &Path, root: &Path) -> Result<Places, ReadError> {
     if !same {
         return Err(broken("written for another folder".into()));
     }
-    let abs = |p: PathBuf| if p.is_absolute() { p } else { root.join(p) };
+    let abs = |p: PathBuf| if p.is_absolute() || crate::archive::Location::from_uri(&p).is_some() { p } else { root.join(p) };
     // Positions past any document are clamped; keys other than 0–9 and A–Z are dropped (the bookmark stays).
     // An environment file's mark keeps no line text (an older file may hold some): it stays on its line number.
-    let private = |p: &Path| lenz_content::highlight::detect(p, "") == Some(lenz_content::highlight::Language::Env);
+    let private = |p: &Path| {
+        let location = crate::archive::Location::from_uri(p);
+        let name = location.as_ref().and_then(|location| location.member_name()).map_or(p, Path::new);
+        lenz_content::highlight::detect(name, "") == Some(lenz_content::highlight::Language::Env)
+    };
     let mark = |m: SavedMark| Mark { anchor: if private(&abs(m.path.clone())) { "".into() } else { m.anchor.into() }, source: abs(m.path).into(), line: m.line.min(MAX_POSITION), offset: m.offset.min(MAX_POSITION), mnemonic: m.mnemonic.map(|k| k.to_ascii_uppercase()).filter(char::is_ascii_alphanumeric), moved: false };
     let mut p = Places { workspace: s.workspace.map(|mut w| { w.resolve(root); w }), ..Default::default() };
     // Through the same rules as typing them: sorted, one per line and key.

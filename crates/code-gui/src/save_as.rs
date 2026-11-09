@@ -22,11 +22,9 @@ impl ReaderView {
         if key == "enter" {
             let command = match &mut self.modal {
                 Some(Modal::SaveAs { tab, dir, input, error, .. }) => {
-                    if input.trim().is_empty() { *error = Some("Enter the new file's path".into()); None }
+                    if input.is_empty() { *error = Some("Enter the new file's path".into()); None }
                     else {
-                        let input = input.trim();
-                        let path = input.strip_prefix("~/").and_then(|rest| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(rest))).unwrap_or_else(|| PathBuf::from(input));
-                        Some(Command::SaveAs { tab: *tab, path: if path.is_absolute() { path } else { dir.join(path) } })
+                        Some(Command::SaveAs { tab: *tab, path: code_core::open_path::expand(input, dir) })
                     }
                 }
                 Some(Modal::RenameTerminal { id, input, error, .. }) => {

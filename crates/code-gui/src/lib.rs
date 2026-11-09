@@ -34,6 +34,7 @@ mod navigation;
 mod search;
 mod dialog;
 mod open_path;
+mod archive;
 mod fields;
 mod activity;
 mod terminal;
@@ -243,6 +244,11 @@ pub struct ReaderView {
     open_path_request: usize,
     popup_fields: lenz_content::field_edit::Fields,
     find_fields: lenz_content::field_edit::Fields,
+    field_native: lenz_content::field_edit::Native,
+    field_native_target: Option<fields::Target>,
+    field_native_stale: bool,
+    field_native_suppress: Option<fields::Target>,
+    field_native_notify: u8,
     focus: FocusHandle,
     font: Font,
     /// Rows that fit in the focused pane, and in the explorer, from the last paint.
@@ -789,7 +795,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -899,7 +905,8 @@ impl ReaderView {
         self.tree_sel = Some(row.path.clone());
         self.remember_explorer();
         self.tree_reveal = true;
-        self.dispatch(Command::ActivateTree { path: row.path, retain }, cx);
+        self.dispatch(Command::ActivateTree { path: row.path.clone(), retain }, cx);
+        if retain { self.focus_archive_member(&row.path); }
         cx.notify();
     }
 
@@ -938,6 +945,7 @@ impl ReaderView {
 
     /// Close the open modal and its core search or runtime dialog.
     fn close_modal(&mut self, cx: &mut Context<Self>) {
+        self.cancel_field_native();
         self.popup_fields.clear();
         self.modal_seen.set(None);
         self.terminal_ui.path_context = None;
@@ -1068,6 +1076,9 @@ impl ReaderView {
         if matches!(&input, code_core::session::Input::Command(Command::OpenRoot(_))) { self.remember_explorer(); }
         let workspace = self.session.state().workspace_revision();
         let tree_revision = self.session.state().tree_revision();
+        let archive_parent = if matches!(&input, code_core::session::Input::Completion(Completion::ArchiveListed(_))) {
+            self.tree_sel.as_ref().and_then(|path| self.session.state().archive_tree().parent(path).map(|parent| (path.clone(), parent)))
+        } else { None };
         let library_read = matches!(&input, code_core::session::Input::Completion(Completion::LibraryRead { .. }));
         let mut effect = self.session.dispatch(input);
         if terminal_before != (self.session.state().terminal().focused(), self.session.state().terminal().active().map(|t| t.id())) {
@@ -1101,14 +1112,24 @@ impl ReaderView {
             self.tree_shown = true;
             self.tree_sel = self.session.state().active_in_tree();
             self.tree_reveal = true;
+            if !self.session.state().has_tree() { self.tree_focus = false; }
         } else if library_read && self.tree_sel == self.session.state().active_in_tree() {
+            self.tree_reveal = true;
+        }
+        // A completed listing removes its Loading/retry row; keep selection in that archive.
+        if let Some((selected, parent)) = archive_parent
+            && !self.session.state().tree_rows().any(|row| row.path == selected)
+            && self.session.state().tree_rows().any(|row| row.path == parent) {
+            self.tree_sel = Some(parent);
             self.tree_reveal = true;
         }
         // The session says which explorer row to show and select.
         if let Some((path, ticket)) = self.session.state().tree_reveal()
             && ticket > self.reveal_seen {
             self.reveal_seen = ticket;
-            if let Some(i) = self.session.state().tree_rows().position(|r| r.path == path) {
+            let index = self.session.state().tree_rows().position(|r| r.path == path);
+            if let Some(i) = index {
+                self.reveal_archive_browser(&path);
                 self.tree_sel = Some(path);
                 self.tree_shown = true;
                 self.tree_reveal = true;
@@ -1580,18 +1601,24 @@ impl ReaderView {
         if state.csv(tab.id()).is_some() { return None; }
         let f = tab.find()?;
         let o = self.session.find_options();
+        let query_cursor = self.find_fields.cursor(tab.id().0, 0).unwrap_or_default();
+        let replace_cursor = self.find_fields.cursor(tab.id().0, 1).unwrap_or_default();
+        let columns = (f32::from(g.text.size.width) / self.char_w.max(1.0)) as usize;
+        let query = if self.field_native_target == Some(fields::Target::Find(tab.id(), 0)) { self.field_native.snapshot(f.query(), query_cursor, columns) } else { query_cursor.snapshot(f.query(), columns) };
+        let replacement = self.session.replace_text();
+        let replace = if self.field_native_target == Some(fields::Target::Find(tab.id(), 1)) { self.field_native.snapshot(replacement, replace_cursor, columns) } else { replace_cursor.snapshot(replacement, columns) };
         Some(FindBox {
             bounds: Bounds::default(),
             toggles: [(FindOption::Case, Bounds::default()); 3],
             on: [o.case, o.word, o.regex],
-            query: f.query().to_owned(),
-            query_cursor:self.find_fields.cursor(0,0).unwrap_or_default(), replace_cursor:self.find_fields.cursor(0,1).unwrap_or_default(),
+            query: query.text,
+            query_cursor: query.cursor, replace_cursor: replace.cursor,
             counter: f.counter(),
             error: f.error().is_some(),
             focused: self.find_focus == Some(g.pane),
             show_replace: true,
             replace_label: CommandId::ReplaceMatch.label().to_owned(),
-            replace: self.session.replace_text().to_owned(),
+            replace: replace.text,
             replace_focused: self.find_replace,
             replace_row: Bounds::default(),
         }.layout(g.text, line_h(), self.char_w))
@@ -1738,12 +1765,14 @@ impl ReaderView {
         let k = &ev.keystroke;
         if !matches!(k.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
         let (key, ctrl, shift) = (k.key.as_str(), k.modifiers.control || k.modifiers.platform, k.modifiers.shift);
+        if self.field_native_key(ev, window, cx) { return; }
         // The modal takes every key first.
         if self.modal.is_some() {
             if !matches!(key, "enter" | "escape") { self.modal_seen.set(None); }
             self.modal_key(ev, window, cx);
             if self.modal.is_none() { self.modal_seen.set(None); }
             cx.notify();
+            cx.stop_propagation();
             return;
         }
         if self.terminal_key(ev, window, cx) { return; }
@@ -1751,6 +1780,7 @@ impl ReaderView {
         // A focused find box takes its own keys before the keymap (Alt+Enter lists every match there, not Quick Fix);
         // keys it does not use go on.
         if self.find_focus.is_some() && self.crumb_focus.is_none() && !(key == "escape" && self.session.state().documentation().is_some()) && self.find_key(ev, cx) {
+            cx.stop_propagation();
             return;
         }
         if self.tree_focus && ctrl && !k.modifiers.alt && !shift {
@@ -1815,6 +1845,7 @@ impl ReaderView {
             return self.dispatch(Command::CloseDocumentation, cx);
         }
         if self.find_focus.is_some() && self.find_key(ev, cx) {
+            cx.stop_propagation();
             return;
         }
         if key == "f3" && !ctrl {
@@ -3083,9 +3114,14 @@ impl ReaderView {
             ("down", false) => self.tree_move(at + 1),
             ("home", false) => self.tree_move(0),
             ("end", false) => self.tree_move(len.saturating_sub(1)),
-            ("enter", false) => self.activate_row(at, false, cx),
+            ("enter", false) => {
+                let path = self.session.state().tree_rows().nth(at).map(|row| row.path.clone());
+                self.activate_row(at, false, cx);
+                if let Some(path) = path { self.focus_archive_member(&path); }
+            }
             ("right", false) if expanded == Some(false) => self.activate_row(at, false, cx),
             ("left", false) if expanded == Some(true) => self.activate_row(at, false, cx),
+            ("left", false) if self.archive_parent_key(cx) => {},
             ("escape", false) if !self.session.state().tree_marks().is_empty() => self.dispatch(Command::ClearTreeMarks, cx),
             // Space marks the highlighted entry for Compare Selected (Ctrl+D), as in the terminal.
             ("space", false) => {
@@ -3680,6 +3716,7 @@ impl ReaderView {
         if self.modal.is_none() && self.input_state.capture.is_some() { self.cancel_input(true, cx); cx.stop_propagation(); return; }
         self.double_shift.interrupt();
         window.focus(&self.focus, cx);
+        if self.field_click(ev, window, cx) { return; }
         if matches!(self.modal, Some(Modal::Navigation { .. })) {
             return self.navigation_click(ev.position, window, cx);
         }
@@ -4431,7 +4468,7 @@ impl ReaderView {
         self.session.state().tree_rows().enumerate().skip(self.tree_scroll).take(self.tree_rows).map(|(i, r)| TreeLine {
                 depth: r.depth,
                 expanded: r.dir,
-                icon: match r.dir { Some(open) => icons::folder(open), None => icons::file(&r.name) },
+                icon: self.tree_icon(r),
                 name: r.name.to_string(),
                 highlight: self.session.state().explorer_search().ranges(&r.name).collect(),
                 error: self.session.state().row_problem_count(r) > 0,
@@ -4882,7 +4919,9 @@ impl ReaderView {
             code_core::session::SiblingTarget::Line(line) => self.go_to(line, cx),
             code_core::session::SiblingTarget::Folder(rel) => self.show_in_tree(rel, cx),
             code_core::session::SiblingTarget::File(rel) => {
-                if let Some(path) = self.session.state().project().map(|p| p.root().join(&*rel)) {
+                if let Some(location) = code_core::archive::Location::from_uri(std::path::Path::new(rel.as_ref())) {
+                    self.dispatch(Command::OpenArchiveEntry(location), cx);
+                } else if let Some(path) = self.session.state().project().map(|p| p.root().join(&*rel)) {
                     self.open(path, cx);
                 }
             }
@@ -5436,7 +5475,7 @@ impl ReaderView {
                 else { rows.extend(files.iter().map(|p| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(), None))); }
                 rows
             },
-            Some(Modal::Recent { .. }) => self.session.state().recent().iter().map(|r| (r.display().to_string(), None)).collect(),
+            Some(Modal::Recent { .. }) => self.session.state().recent().iter().map(|r| (archive::source_path_label(r), None)).collect(),
             Some(Modal::Keymap { capture, .. }) => {
                 let hint = if *capture {
                     "Press the new shortcut (Esc cancels); its command keeps its menu entry either way".to_string()
@@ -5571,6 +5610,11 @@ impl ReaderView {
 
 impl Render for ReaderView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.focus.is_focused(window) && self.field_native.is_marked() { self.cancel_field_native(); }
+        self.synchronize_field_native();
+        let native_notify = std::mem::take(&mut self.field_native_notify);
+        if native_notify & 1 != 0 { window.notify_text_input_changed(&self.focus); }
+        if native_notify & 2 != 0 { window.notify_text_selection_changed(&self.focus); }
         self.synchronize_input(window, cx);
         #[cfg(feature = "perf-probe")]
         let render_started = std::time::Instant::now();
@@ -5620,7 +5664,7 @@ impl Render for ReaderView {
         let tabs_h = line_h();
         let nav = self.nav_buttons();
         let explorer_buttons = self.explorer_buttons();
-        let explorer_title = self.session.state().explorer_search().label().unwrap_or_else(|| self.session.state().project().map(|p| p.root().file_name().map_or_else(|| p.root().display().to_string(), |n| n.to_string_lossy().into_owned())).unwrap_or_else(|| "Files".into()));
+        let explorer_title = self.explorer_title();
         let nav_end = self.sidebar_w;
         let body_top = toolbar_h() + tabs_h;
         // The results panel: a status line, the list and a preview, below the panes and above the status bar: 45% of
@@ -5882,12 +5926,12 @@ impl Render for ReaderView {
                 Some((row.y, shown))
             });
             // Nothing open: the start screen's commands and recent folders, each a click target.
-            let items = if tab.is_none() && g.pane == 0 { state.start_items() } else { Vec::new() };
+            let items = if tab.is_none() && g.pane == 0 && state.archive_tree().title().is_none() { state.start_items() } else { Vec::new() };
             let (mut start, mut row, mut heading) = (Vec::new(), 0.0, None);
             for (i, item) in items.iter().enumerate() {
                 let label = match item {
                     StartItem::Command(id) => self.key_hint(*id).map_or_else(|| id.label().to_string(), |key| format!("{}  {key}", id.label())),
-                    StartItem::RecentFolder(path) | StartItem::RecentFile(path) => path.display().to_string(),
+                    StartItem::RecentFolder(path) | StartItem::RecentFile(path) => archive::source_path_label(path),
                 };
                 // Each group of recents under a blank row and its heading.
                 if item.heading() != heading {
@@ -5910,7 +5954,8 @@ impl Render for ReaderView {
                 Some(t) if state.presentation_view(t.id()).is_some() || state.loading().is_some() => None,
                 None if !start.is_empty() => None,
                 None if split.is_some() => Some("Open a file here, or drag a tab to this pane"),
-                _ if state.project().is_some() => Some("Pick a file in the tree, or find one with Ctrl+P"),
+                _ if state.archive_tree().title().is_some() => Some("Choose an entry in the tree. Enter opens it; the Up row leaves the archive."),
+                _ if state.has_tree() => Some("Pick a file in the tree, or find one with Ctrl+P"),
                 _ => Some("Open a file to read it (Ctrl+O)"),
             };
             let hscroll = tab.map_or(0.0, |t| t.column() as f32 * self.char_w);
@@ -6010,7 +6055,7 @@ impl Render for ReaderView {
         let form = self.form_layout();
         let search = self.search_layout();
         let modal = self.modal_layout();
-        let modal_field = self.popup_field().map(|(text,cursor,_)| cursor.snapshot(text, (self.width / self.char_w.max(1.0)) as usize));
+        let modal_field = self.popup_field_snapshot((self.width / self.char_w.max(1.0)) as usize);
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         let menu_modal = matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
@@ -6130,7 +6175,7 @@ impl Render for ReaderView {
         let terminal_drop = cx.weak_entity();
         let text_input = {
             self.input_state.registered.set(false);
-            (!self.log_focus && (self.terminal_active() || self.draft_target().is_some() || self.csv_field().is_some()) && self.focus.is_focused(window)).then(|| (self.focus.clone(), cx.entity().clone(), self.input_state.registered.clone()))
+            ((self.field_target().is_some() || !self.log_focus && (self.terminal_active() || self.draft_target().is_some() || self.csv_field().is_some())) && self.focus.is_focused(window)).then(|| (self.focus.clone(), cx.entity().clone(), self.input_state.registered.clone()))
         };
         #[cfg(feature = "test-support")]
         let painted_problem_bounds = { self.painted_problem_bounds.borrow_mut().clear(); self.painted_problem_bounds.clone() };

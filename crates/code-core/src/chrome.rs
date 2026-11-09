@@ -111,7 +111,7 @@ impl Session {
             return format!("{asking} (Escape cancels)");
         }
         if let Some(path) = state.loading() {
-            return format!("Loading {}…", path.display());
+            return format!("Loading {}…", crate::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path()));
         }
         if let Some(notice) = state.notices().last() {
             return notice.clone();
@@ -215,7 +215,7 @@ impl Session {
     pub fn status_details(&self) -> String {
         let state = self.state();
         let name = match (state.loading(), state.current_source()) {
-            (Some(path), _) => format!("Loading {}…", path.display()),
+            (Some(path), _) => format!("Loading {}…", crate::archive::Location::from_uri(path).map_or_else(|| path.display().to_string(), |location| location.display_path())),
             (None, Some(document)) => shown_name(state, document),
             (None, None) => "No file open — Ctrl+O file, F10 commands".into(),
         };
@@ -301,7 +301,7 @@ pub fn ellipsize(text: &str, cols: usize) -> String {
 fn shown_name(state: &crate::session::State, document: &crate::text::TextSnapshot) -> String {
     match state.active().filter(|t| t.untitled()) {
         Some(tab) => tab.title(),
-        None => document.source().display().to_string(),
+        None => document.source_meta().archive().map_or_else(|| document.source().display().to_string(), crate::archive::Location::display_path),
     }
 }
 

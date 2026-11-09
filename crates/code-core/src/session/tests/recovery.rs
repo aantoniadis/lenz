@@ -3,6 +3,9 @@ use super::*;
 use crate::close::Choice as CloseChoice;
 use crate::recovery::{Choice, Disk};
 use super::super::recovery_work::RESTORE_DIRTY;
+mod archive;
+mod archive_readonly;
+mod archive_save_busy;
 
 fn edit(s: &mut Session, text: &str) {
     let tab = s.state().active().unwrap().id();
@@ -12,6 +15,67 @@ fn edit(s: &mut Session, text: &str) {
 }
 
 fn text(s: &Session) -> String { source_text(s.state().current_source().unwrap()) }
+
+#[test]
+fn save_and_save_as_keep_newer_edits_recoverable_against_the_written_baseline() {
+    for (save_as, untitled) in [(false, false), (true, false), (true, true)] {
+        let d = tempfile::tempdir().unwrap();
+        let original = write(d.path(), "original.txt", b"original\n");
+        let target = if save_as { d.path().join("saved-as.txt") } else { original.clone() };
+        let mut s = session(d.path());
+        if untitled {
+            s.dispatch(Command::NewDocument);
+        } else {
+            open(&mut s, Command::OpenRetained(original.clone()), "original.txt");
+        }
+        let tab = s.state().active().unwrap().id();
+        edit(&mut s, "captured by Save\n");
+        s.flush_recovery_for_test();
+        // Hold every worker so Save captures this version before a genuine later edit.
+        let (started, entered) = std::sync::mpsc::channel();
+        let gates: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+            let (release, wait) = std::sync::mpsc::channel();
+            let started = started.clone();
+            s.jobs.submit(Priority::Visible, move || {
+                started.send(()).unwrap();
+                let _ = wait.recv_timeout(Duration::from_secs(5));
+            });
+            release
+        }).collect();
+        for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+        s.dispatch(if save_as { Command::SaveAs { tab, path: target.clone() } } else { Command::Save { tab } });
+        assert!(s.state().view(tab).unwrap().save_status().busy());
+        edit(&mut s, "newer unsaved edit λ\n");
+        for gate in gates { gate.send(()).unwrap(); }
+        settle(&mut s, |s| !s.state().view(tab).unwrap().save_status().busy());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "captured by Save\n");
+        if save_as { assert_eq!(std::fs::read(&original).unwrap(), b"original\n"); }
+        assert_eq!(text(&s), "newer unsaved edit λ\n");
+        assert!(s.state().tab_dirty(tab));
+        s.flush_recovery_for_test();
+        drop(s);
+
+        let mut restarted = session(d.path());
+        let offers = restarted.recovered_drafts();
+        assert_eq!(offers.len(), 1, "save_as={save_as}, untitled={untitled}: newer edits must survive Save completion");
+        let offer = &offers[0];
+        assert_eq!(offer.record().key().path(), Some(target.as_path()));
+        assert_eq!(offer.record().draft(), "newer unsaved edit λ\n");
+        assert_eq!(offer.record().baseline(), "captured by Save\n");
+        assert_eq!(offer.disk(), Disk::Matches, "recovery uses the bytes that Save actually wrote");
+        let ticket = restarted.recovery_prompt().unwrap().ticket;
+        restarted.dispatch(Command::ChooseRecoveredDraft { ticket, choice: Choice::Restore });
+        assert_eq!(text(&restarted), "newer unsaved edit λ\n");
+        assert_eq!(restarted.disabled(CommandId::Save), None);
+        let tab = restarted.state().active().unwrap().id();
+        restarted.dispatch(Command::Save { tab });
+        settle(&mut restarted, |s| !s.state().tab_dirty(tab));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "newer unsaved edit λ\n");
+        restarted.flush_recovery_for_test();
+        drop(restarted);
+        assert!(session(d.path()).recovered_drafts().is_empty(), "a fully saved draft leaves no recovery offer");
+    }
+}
 
 #[test]
 fn an_interrupted_draft_is_offered_at_the_next_start_and_restored_against_its_baseline() {

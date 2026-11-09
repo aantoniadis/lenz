@@ -36,7 +36,7 @@ impl Session {
 
     pub(super) fn save_as_disabled(&self, tab: TabId) -> Option<&'static str> {
         let Some(view) = self.state.view(tab) else { return Some("No loaded file is open") };
-        if let Some(why) = view.intrinsic_edit_disabled() { return Some(why); }
+        if let Some(why) = view.intrinsic_export_disabled() { return Some(why); }
         if view.save.status.busy() { return Some("A save operation is running"); }
         if self.save_as_prompt().is_some() { return Some("Choose whether to replace the existing file first"); }
         None
@@ -61,10 +61,10 @@ impl Session {
     fn save_as_target(&self, tab: TabId, path: &Path) -> Result<(PathBuf, Option<FileIdentity>), String> {
         if !path.is_absolute() || is_virtual(path) { return Err("choose an absolute file path".into()); }
         let path = normalized(path);
+        if self.save_as_destination_reserved(&path) { return Err("this destination is already reserved by Save As; wait for that operation to finish".into()); }
         let Some(t) = self.state.tabs.iter().find(|t| t.id == tab) else { return Err("the document is closed".into()) };
-        let canonical = std::fs::canonicalize(&path).ok();
-        let names = |o: &Tab| o.source == path || o.canonical.as_ref() == Some(&path)
-            || canonical.as_ref().is_some_and(|c| o.source == *c || o.canonical.as_ref() == Some(c));
+        let identity = destination_identity(&path);
+        let names = |o: &Tab| names_destination(o, &path, &identity);
         if names(t) { return Err("this is the document's current file; use Save".into()); }
         if let Some(other) = self.state.tabs.iter().find(|o| o.buffer != t.buffer && o.read_only_side().is_none() && names(o)) {
             return Err(format!("{} is open in another tab; close it first", other.display.display()));
@@ -80,6 +80,19 @@ impl Session {
                 Err(_) => Err("it is a broken symbolic link".into()),
             },
         }
+    }
+
+    /// Reserve the destination throughout the decision and asynchronous write, including alternate
+    /// spellings through symlinks. Navigation must not admit a second independent buffer there.
+    pub(super) fn save_as_destination_reserved(&self, path: &Path) -> bool {
+        let mut pending = self.replacing.as_ref()
+            .filter(|pending| self.state.source(pending.tab).is_some_and(|source| pending.source.matches(source)))
+            .map(|pending| pending.path.as_path()).into_iter().chain(
+            self.state.sources.buffers.values().filter_map(|entry| entry.save.captured.as_ref()
+                .and_then(|captured| captured.save_as.as_ref()).map(|save_as| save_as.path.as_path()))).peekable();
+        if pending.peek().is_none() { return false; }
+        let identity = destination_identity(path);
+        pending.any(|candidate| candidate == path || destination_identity(candidate) == identity)
     }
 
     /// The pending Replace decision, while its document is unchanged.
@@ -98,7 +111,10 @@ impl Session {
             ReplaceChoice::Replace if !current => self.state.messages.push("Save As cancelled: the document changed. Nothing was written.".into()),
             ReplaceChoice::Replace => match self.save_as_disabled(pending.tab) {
                 Some(why) => self.state.messages.push(why.into()),
-                None => { self.close_saved_comparison(); self.submit_save_as(pending.tab, pending.path, Some(pending.file)) }
+                None => match self.save_as_target(pending.tab, &pending.path) {
+                    Ok(_) => { self.close_saved_comparison(); self.submit_save_as(pending.tab, pending.path, Some(pending.file)) }
+                    Err(why) => self.state.messages.push(format!("Save As: {why}. Nothing was written.")),
+                }
             },
         }
         Effect { repaint: true, copy: None, ..Effect::default() }
@@ -113,7 +129,7 @@ impl Session {
         let Some(snapshot) = entry.snapshot.clone() else { return };
         // The document's own encoding choice; an untitled document is UTF-8 without a BOM.
         let (encoding, bom) = entry.save.read.as_ref().map_or_else(
-            || (snapshot.source_meta().original_encoding(), snapshot.source_meta().had_bom()),
+            || entry.save.archive.as_ref().map_or((snapshot.source_meta().original_encoding(), snapshot.source_meta().had_bom()), |read| (read.encoding, read.bom)),
             |read| (read.snapshot.encoding.name(), read.snapshot.bom));
         let path = target.clone();
         let document = entry.document.clone();
@@ -136,6 +152,12 @@ impl Session {
 
     /// A Save As outcome. Only a confirmed write moves the document; otherwise it keeps its original identity and state.
     pub(super) fn saved_as(&mut self, buffer: crate::text::BufferId, request: u64, captured: Arc<crate::text::TextSnapshot>, save_as: save::SaveAs, outcome: Outcome) {
+        let occupied = match &outcome {
+            Outcome::Written(WriteOutcome::Saved { snapshot, target }) => self.state.tabs.iter().any(|tab|
+                tab.buffer != Some(buffer) && tab.read_only_side().is_none()
+                    && names_destination(tab, &snapshot.path, &target.canonical)),
+            _ => false,
+        };
         let Some(entry) = self.state.sources.buffers.get_mut(&buffer) else { return };
         let path = save_as.path.display().to_string();
         let message = match outcome {
@@ -143,6 +165,11 @@ impl Session {
                 if !entry.snapshot.as_ref().is_some_and(|current| Arc::ptr_eq(current.source_meta(), captured.source_meta())) {
                     entry.save.status = save_as.prior;
                     self.state.messages.push(format!("Saved a copy as {path}, but the document changed identity meanwhile; it stays at its original location."));
+                    return;
+                }
+                if occupied {
+                    entry.save.status = save_as.prior;
+                    self.state.messages.push(format!("Saved a copy as {path}, but another document now holds that destination; both documents stay at their original locations with their drafts."));
                     return;
                 }
                 let canonical = target.canonical.clone();
@@ -202,6 +229,18 @@ impl Session {
     }
 }
 
+fn destination_identity(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).ok().or_else(|| Some(std::fs::canonicalize(path.parent()?).ok()?.join(path.file_name()?)))
+        .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn names_destination(tab: &Tab, path: &Path, identity: &Path) -> bool {
+    tab.source == path || tab.canonical.as_deref() == Some(path)
+        || tab.source == identity || tab.canonical.as_deref() == Some(identity)
+        || std::iter::once(tab.source.as_path()).chain(tab.canonical.as_deref()).any(|source|
+            crate::archive::Location::from_uri(source).is_some_and(|location| location.container == path || location.container == identity))
+}
+
 /// Replace only the file that was offered for replacement, through the exact identity-checked writer.
 fn replace_existing(path: &Path, file: FileIdentity, encoding: &'static str, bom: bool, text: &str) -> WriteOutcome {
     let raw = match lenz_content::write::read_exact_bytes(path) { Ok(raw) => raw, Err(e) => return WriteOutcome::Rejected(e) };
@@ -216,6 +255,11 @@ impl Session {
     /// else the working directory.
     pub fn save_as_start(&self) -> (PathBuf, Option<String>) {
         let file = self.state.active().filter(|t| t.is_file());
+        if let Some(location) = file.and_then(|tab| crate::archive::Location::from_uri(&tab.source)) {
+            let dir = location.container.parent().unwrap_or(Path::new("/")).to_path_buf();
+            let name = location.member_name().and_then(|name| Path::new(name).file_name()).map(|name| name.to_string_lossy().into_owned());
+            return (dir, name);
+        }
         let dir = file.and_then(|t| t.source.parent().map(Path::to_path_buf))
             .or_else(|| self.state.project.as_ref().map(|p| p.root().to_owned()))
             .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());

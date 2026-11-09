@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
-members = ["crates/engine", "crates/content", "crates/gpui", "crates/app", "crates/tui", "crates/code-core", "crates/code-gui", "crates/code-tui", "crates/launcher", "crates/terminal-ui"]
+members = ["crates/engine", "crates/content", "crates/archive", "crates/gpui", "crates/app", "crates/tui", "crates/code-core", "crates/code-gui", "crates/code-tui", "crates/launcher", "crates/terminal-ui"]
+exclude = ["vendor/gpui_linux"]
 
 [workspace.package]
 edition = "2024"
@@ -16,6 +17,7 @@ unimplemented = "deny"
 undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
+lenz-archive = { path = "crates/archive" }
 lenz-content = { path = "crates/content" }
 lenz-gpui = { path = "crates/gpui" }
 gix-imara-diff = "0.3"
@@ -30,6 +32,11 @@ async-task = { git = "https://github.com/zed-industries/async-task.git", rev = "
 calloop = { git = "https://github.com/zed-industries/calloop", rev = "3759371fee14c40066d64777e2a36b6ffcc22590" }
 # Zed patches khronos-egl (wgpu's EGL loader) from v1.26.
 khronos-egl = { git = "https://github.com/zed-industries/khronos-egl", rev = "42214b36347b108fd9630ca6254b96dde59e04fe" }
+
+# Keep XKB Escape cancellation from committing preedit before the application sees the key.
+# This is the Linux crate from the same GPUI tag, with the small transport fix documented beside it.
+[patch."https://github.com/zed-industries/zed"]
+gpui_linux = { path = "vendor/gpui_linux" }
 
 # Dev and test builds keep line tables (backtraces still show file:line) and drop dependency debug info.
 # Full debug info made each test binary up to 813 MB, and the parallel relink after an edit to a core crate needed

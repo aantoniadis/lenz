@@ -1019,6 +1019,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "image",
+ "lenz-archive",
  "lenz-content",
  "lenz-engine",
  "libc",
@@ -1044,6 +1045,7 @@ dependencies = [
  "gpui",
  "gpui_platform",
  "image",
+ "lenz-archive",
  "lenz-content",
  "lenz-gpui",
  "resvg 0.49.0",
@@ -1064,6 +1066,7 @@ dependencies = [
  "futures-lite",
  "gpui",
  "image",
+ "lenz-archive",
  "lenz-content",
  "lenz-terminal-ui",
  "ratatui",
@@ -2437,7 +2440,6 @@ dependencies = [
 [[package]]
 name = "gpui_linux"
 version = "0.1.0"
-source = "git+https://github.com/zed-industries/zed?tag=v1.26.2#c4273271092b0287f7d181f616bd5171e0a2f70c"
 dependencies = [
  "accesskit",
  "accesskit_unix",
@@ -3349,6 +3351,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lenz-archive"
+version = "0.0.13"
+dependencies = [
+ "bzip2",
+ "crc32fast",
+ "flate2",
+ "lzma-rust2 0.24.0",
+ "ruzstd",
+ "tar",
+ "zip",
+]
+
+[[package]]
 name = "lenz-content"
 version = "0.0.13"
 dependencies = [
@@ -3409,6 +3424,7 @@ version = "0.0.13"
 dependencies = [
  "gpui",
  "lenz-content",
+ "xkbcommon",
 ]
 
 [[package]]

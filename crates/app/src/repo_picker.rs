@@ -236,7 +236,7 @@ impl RepoPicker {
             }
             PickerCommand::Complete => self.complete(),
             PickerCommand::Submit if self.mode == Mode::Repository => {
-                let text = self.input.text().trim();
+                let text = self.input.text();
                 let typed = (!text.is_empty())
                     .then(|| self.resolve(text))
                     .filter(|p| p.is_dir());
@@ -286,7 +286,8 @@ impl RepoPicker {
     }
     fn pair(&self) -> Result<Choice, String> {
         let path = |input: &Input, side: &str| {
-            let text = input.text().trim();
+            // A path's whitespace belongs to its name, including paths chosen by the native dialog.
+            let text = input.text();
             if text.is_empty() {
                 return Err(format!(
                     "Enter the {side} {} path",
@@ -373,6 +374,58 @@ impl RepoPicker {
 mod tests {
     use super::*;
     use crate::git::testing::repo;
+
+    #[test]
+    fn comparison_paths_preserve_whitespace_for_typed_pasted_and_native_choices() {
+        let dir = tempfile::tempdir().unwrap();
+        for mode in [Mode::Files, Mode::Folders] {
+            let base = dir.path().join(mode.label());
+            std::fs::create_dir(&base).unwrap();
+            for name in ["left", "left ", " left", " ", "right "] {
+                let path = base.join(name);
+                if mode == Mode::Files {
+                    std::fs::write(path, name).unwrap();
+                } else {
+                    std::fs::create_dir(path).unwrap();
+                }
+            }
+            for name in ["left ", " left", " "] {
+                for native in [false, true] {
+                    let mut picker = RepoPicker::with_recent(base.clone(), vec![])
+                        .with_comparisons(true);
+                    picker.execute(PickerCommand::Mode(mode));
+                    if native {
+                        picker.execute(PickerCommand::Choose(base.join(name)));
+                        picker.execute(PickerCommand::Choose(base.join("right ")));
+                    } else {
+                        for c in name.chars() {
+                            picker.execute(PickerCommand::Insert(c));
+                        }
+                        picker.execute(PickerCommand::NextField);
+                        picker.execute(PickerCommand::InsertText("right ".into()));
+                    }
+                    assert_eq!(picker.execute(PickerCommand::Submit), Some(Choice::Comparison {
+                        left: base.join(name), right: base.join("right "),
+                    }), "{mode:?}, native={native}, name={name:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn typed_repository_path_keeps_its_trailing_space() {
+        let base = tempfile::tempdir().unwrap();
+        for name in ["project", "project "] {
+            let path = base.path().join(name);
+            std::fs::create_dir(&path).unwrap();
+            crate::git::testing::git(&path, &["init", "-q"]);
+        }
+        let mut picker = RepoPicker::with_recent(base.path().into(), vec![]);
+        picker.execute(PickerCommand::InsertText("project ".into()));
+        assert_eq!(picker.execute(PickerCommand::Submit), Some(Choice::Repository(
+            changeset::toplevel(&base.path().join("project ")).unwrap(),
+        )));
+    }
 
     #[test]
     fn correction_selection_and_comparison_validation_preserve_inputs_and_bytes() {

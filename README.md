@@ -60,6 +60,8 @@ directions. This is core computation, not popup latency; see the [SQL completion
 
 - **Explore code** with a project tree, file finder, tabs, independent split panes,
   breadcrumbs, outline, folding and sticky declarations.
+- **Edit archive members** by opening a ZIP or tarball, including nested archives. Open a member,
+  edit it normally and Save to update the archive while preserving its other members.
 - **Navigate** with bookmarks, recent files and locations, and back/forward history.
   Installed language servers add definitions, usages, documentation, call/type
   hierarchies, semantic colours and inlay hints; availability depends on the provider.
@@ -97,8 +99,8 @@ directions. This is core computation, not popup latency; see the [SQL completion
   preferences. Each app keeps its own documents and navigation state.
 
 Lenz Code edits stay in shared drafts until Save or Save As writes the file. Checkouts and branch operations
-change repository state explicitly. Archive browsing is currently a
-Diff feature. See the [Lenz Code guide](docs/code/README.md) for controls and limits,
+change repository state explicitly. Both apps browse archives; Code also saves member edits back into them.
+See the [Lenz Code guide](docs/code/README.md#editing-archives) for controls and limits,
 and [language-server compatibility](docs/code/providers.md) for setup and provider side effects.
 
 The internal snapshot migration measured core text availability at **0.888 → 0.912–0.976 ms**
@@ -389,6 +391,14 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+Archive editing checks on Linux listed a 5,000-file ZIP in **3.32 ms** and gzip/Zstd TARs in
+**17.10 / 16.55 ms**; replacing two small members alongside 8 MiB of untouched payload took
+**22.35 / 125.21 / 140.50 ms**. These are completed codec operations, excluding disk writes and
+frontend painting. A 21-second rewrite/cache stress checked 170 cycles. Ordinary startup and input
+repeats found no consistent latency regression; terminal search used about 0.6 MiB more RSS, mostly
+file-backed pages. See the [archive and recovery checks](docs/optimization-notebook.md#archive-editing-and-recovery-checks-2026-11-09)
+for fixtures, memory, repeat results and limits.
+
 The [integrated-editor Linux validation](docs/research/code-integrated-editor-linux-validation.md)
 records a fresh complete CI pass, 62 available-provider checks, native SQL/X11/PTY safety and the
 completed Linux measurement campaign. Final 180-second Lenz Code PTY settled RSS was **45.70→40.00 MiB**;
@@ -492,6 +502,8 @@ Linux desktop, release builds, medians of three warm launches; the GUI on a soft
 | Move through the repository log | 8.6 ms | 0.3 ms |
 
 Opening times run to the GUI's first paint and the TUI's first comparison text; memory is RSS three seconds later (on macOS, the physical footprint). Interaction times are first feedback after the key, not a completed frame on a physical display. Syntax highlighting finishes after first content (0.5–0.9 s on 100k-line inputs in the TUI). On an Apple M2 Mac, GUI first paint is 231–401 ms; see the [macOS results](docs/performance.md#macos).
+
+Folder comparison now streams file contents for equality and rename detection, retaining at most 1 MiB of tiny-file bodies. In a paired Linux release probe with 128 MiB of renamed files, core listing time fell from 232 to 75 ms and peak process RSS from 138.5 to 7.0 MiB. A 31-pair small-folder repeat found overlapping timings. These numbers exclude frontend painting and archive expansion; see the [folder comparison measurements](docs/optimization-notebook.md#review-fixes-after-0013--2026-11-09).
 
 In a shared-core release fixture with 5,001 branches and 25 worktrees, incremental loading reduced first-comparison readiness from 114 to 10 ms and first-branch readiness from 105 to 35 ms (six samples). The sidebar initially retains 20 branches and offers **Load more**; worktree details finish in the background. These timings exclude frontend painting and GitHub access; see the [repository loading measurements](docs/optimization-notebook.md#2026-10-17-incremental-repository-loading-and-pr-reading).
 

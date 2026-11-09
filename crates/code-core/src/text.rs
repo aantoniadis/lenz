@@ -159,6 +159,13 @@ impl TextSnapshot {
         let entry = self.entry(byte)?;
         entry.chunk.text().get(byte - entry.byte..)?.chars().next()
     }
+    /// Word motion shares the field editor's grapheme policy while borrowing the rope's existing chunks.
+    pub(crate) fn word_stop(&self, head: usize, backward: bool, spaces: bool) -> usize {
+        let bounds = self.reader_line_range(self.line_of(head));
+        lenz_content::line_edit::word_stop_chunks(self.bytes, bounds, head, backward, spaces, |at| {
+            self.entry(at).map(|entry| (entry.byte, entry.chunk.text()))
+        })
+    }
     /// Word, whitespace or punctuation run at a source caret, without assembling its line.
     pub(crate) fn word_at(&self, byte: usize) -> Range<usize> {
         let range = self.reader_line_range(self.line_of(byte));

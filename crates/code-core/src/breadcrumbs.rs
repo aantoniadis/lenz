@@ -86,7 +86,9 @@ pub struct Sibling {
 /// its caret (the top line's start without one). Previews and images show the path only.
 pub(crate) fn build(tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>) -> Breadcrumbs {
     let mut crumbs = Vec::new();
-    match project.and_then(|p| p.relative(&tab.source).filter(|rel| p.has_file(rel))) {
+    if let Some(location) = crate::archive::Location::from_uri(&tab.source) {
+        crumbs = archive_crumbs(&location);
+    } else { match project.and_then(|p| p.relative(&tab.source).filter(|rel| p.has_file(rel))) {
         Some(rel) => {
             let mut at = 0;
             for part in rel.split('/') {
@@ -113,7 +115,7 @@ pub(crate) fn build(tab: &Tab, view: Option<&crate::session::View<'_>>, project:
                 }
             }
         }
-    }
+    } }
     let doc = view.map(|v| v.snapshot());
     let large = doc.is_some_and(|d| d.is_large());
     let text = doc.is_some_and(|d| d.image().is_none() || tab.image_source) && !matches!(view.and_then(|v| v.rendering()), Some(Rendering::Preview(_) | Rendering::Pending));
@@ -128,6 +130,30 @@ pub(crate) fn build(tab: &Tab, view: Option<&crate::session::View<'_>>, project:
     Breadcrumbs { crumbs, large }
 }
 
+/// Archive identities stay in targets; the bar contains the same names the explorer shows.
+fn archive_crumbs(location: &crate::archive::Location) -> Vec<Crumb> {
+    let mut container = crate::archive::Location { container: location.container.clone(), members: Vec::new() };
+    let name = location.container.file_name().map_or_else(|| location.container.display().to_string(), |name| name.to_string_lossy().into_owned());
+    let mut crumbs = vec![Crumb::Folder { name: name.into(), rel: container.to_uri().to_string_lossy().as_ref().into() }];
+    for (index, member) in location.members.iter().enumerate() {
+        let mut path = String::new();
+        let mut parts = member.split('/').peekable();
+        while let Some(name) = parts.next() {
+            if !path.is_empty() { path.push('/'); }
+            path.push_str(name);
+            if parts.peek().is_some() {
+                crumbs.push(Crumb::Folder { name: name.into(), rel: crate::archive_tree::directory_key(&container, &path) });
+            } else if index + 1 == location.members.len() {
+                crumbs.push(Crumb::File { name: name.into() });
+            } else {
+                container.members.push(member.clone());
+                crumbs.push(Crumb::Folder { name: name.into(), rel: container.to_uri().to_string_lossy().as_ref().into() });
+            }
+        }
+    }
+    crumbs
+}
+
 /// `decl`'s index in `d` (it borrows from `d.items`): by its start, then identity.
 fn index_of(d: &Declarations, decl: &lenz_content::highlight::Declaration) -> u32 {
     let start = d.items.partition_point(|x| x.range.start < decl.range.start);
@@ -137,8 +163,15 @@ fn index_of(d: &Declarations, decl: &lenz_content::highlight::Declaration) -> u3
 
 /// The list after crumb `i` of `bar`: a folder's entries (project folders only), the entries of a file's folder,
 /// the declarations at a declaration's depth under the same parent.
-pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>) -> Vec<Sibling> {
+pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, view: Option<&crate::session::View<'_>>, project: Option<&Project>, archives: &crate::archive_tree::Tree) -> Vec<Sibling> {
     let entries = |rel: &str| -> Vec<Sibling> {
+        let rows = archives.children(rel);
+        if !rows.is_empty() {
+            return rows.into_iter().map(|row| {
+                let dir = row.dir.is_some();
+                Sibling { label: row.name.to_string(), dir, target: if dir { SiblingTarget::Folder(row.path) } else { SiblingTarget::File(row.path) } }
+            }).collect();
+        }
         project.map_or_else(Vec::new, |p| {
             p.children(rel)
                 .into_iter()
@@ -172,6 +205,19 @@ pub(crate) fn inside(bar: &Breadcrumbs, i: usize, tab: &Tab, view: Option<&crate
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archive_breadcrumb_names_and_targets_keep_nested_context_without_exposing_uri() {
+        let location = crate::archive::Location::new("/tmp/outer.zip".into(), vec!["lib/inner.zip".into(), "src/δ/main.rs".into()]).unwrap();
+        let crumbs = archive_crumbs(&location);
+        assert_eq!(crumbs.iter().map(Crumb::name).collect::<Vec<_>>(), ["outer.zip", "lib", "inner.zip", "src", "δ", "main.rs"]);
+        assert!(crumbs.iter().all(|crumb| !crumb.name().contains("lenz-archive")));
+        let Crumb::Folder { rel, .. } = &crumbs[2] else { panic!("nested archive must navigate as a container") };
+        assert_eq!(crate::archive::Location::from_uri(std::path::Path::new(rel.as_ref())).unwrap().members, ["lib/inner.zip"]);
+        let bar = Breadcrumbs { crumbs, large: false };
+        let kept = bar.fit(|name| name.chars().count() as f32, 3.0, 8.0, None);
+        assert!(kept.last().copied().unwrap(), "the file remains visible in narrow bars");
+    }
 
     #[test]
     fn fit_drops_folders_then_outer_declarations_and_keeps_the_file_innermost_and_focus() {

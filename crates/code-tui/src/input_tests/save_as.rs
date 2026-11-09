@@ -11,6 +11,31 @@ fn save_as_to(app: &mut App, path: &Path) {
 }
 
 #[test]
+fn save_as_keeps_exact_path_whitespace_and_first_pasted_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let sibling = dir.path().join("result");
+    std::fs::write(&sibling, b"keep sibling").unwrap();
+    let mut a = App::new(config(dir.path()), Some(dir.path().to_owned()));
+    a.enable_draft_input_for_test();
+    a.dispatch(Command::NewDocument);
+    a.handle(Event::Paste("draft contents".into()));
+    for name in ["result ", " result", " "] {
+        let target = dir.path().join(name);
+        key(&mut a, KeyCode::Char('S'), KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.modal.as_ref().is_some_and(|m| m.error.is_some()), "empty input must stay in the path prompt");
+        a.handle(Event::Paste(format!("{name}\nignored")));
+        assert_eq!(a.modal.as_ref().unwrap().input, name);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.session.save_as_prompt().is_none(), "the trimmed sibling must not request replacement");
+        settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.source() == target));
+        assert_eq!(std::fs::read(&target).unwrap(), b"draft contents");
+        assert_eq!(std::fs::read(&sibling).unwrap(), b"keep sibling");
+    }
+}
+
+#[test]
 fn new_file_and_save_as_use_terminal_keys_prompts_and_the_core_replace_decision() {
     let dir = tempfile::tempdir().unwrap();
     let existing = dir.path().join("existing.txt");

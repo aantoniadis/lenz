@@ -54,6 +54,10 @@ mod close_work;
 mod external_work;
 #[path = "session/save_as.rs"]
 mod save_as_work;
+#[path = "session/archive_save.rs"]
+pub(crate) mod archive_save_work;
+#[path = "session/archive.rs"]
+mod archive_work;
 #[path = "session/scratch.rs"]
 mod scratch_work;
 #[path = "session/create.rs"]
@@ -157,6 +161,8 @@ pub use crate::native::{NativeReveal, NativeViewport};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
+    OpenArchiveEntry(crate::archive::Location),
+    ArchiveTreeParent { path: Arc<str> },
     Terminal(crate::terminal::Command),
     Csv(crate::csv::Command),
     /// A transient input-method display, validated against the captured authoritative source.
@@ -1524,6 +1530,11 @@ pub struct Action {
 
 /// Results of background work, applied through [`Session::dispatch`].
 pub enum Completion {
+    ArchiveListed(crate::archive_tree::Listed),
+    ArchiveLoaded(Box<archive_save_work::Loaded>),
+    ArchiveSaved(Box<archive_save_work::Saved>),
+    ArchiveRechecked(Box<archive_save_work::Rechecked>),
+    ArchiveRecovered { ticket: u64, result: Result<Document, String> },
     TerminalStarted { id: crate::terminal::Id, generation: u64, result: Result<crate::terminal::Process, String> },
     TerminalWake { id: crate::terminal::Id, generation: u64 },
     ExplorerCopied { request: u64, result: Result<(), String> },
@@ -1678,6 +1689,11 @@ impl Input {
         match self {
             Input::Command(_) => "command",
             Input::Completion(c) => match c {
+                Completion::ArchiveListed(..) => "archive-listed",
+                Completion::ArchiveLoaded(..) => "archive-loaded",
+                Completion::ArchiveSaved(..) => "archive-saved",
+                Completion::ArchiveRechecked(..) => "archive-rechecked",
+                Completion::ArchiveRecovered { .. } => "archive-recovered",
                 Completion::TerminalStarted { .. } | Completion::TerminalWake { .. } => "terminal",
                 Completion::ExplorerCopied { .. } => "explorer copy",
                 Completion::FileClipboard { .. } => "file clipboard",
@@ -1789,6 +1805,7 @@ pub struct State {
     palette: Arc<Palette>,
     project: Option<Project>,
     libraries: crate::libraries::Libraries,
+    pub(crate) archive_tree: crate::archive_tree::Tree,
     tree_revision: u64,
     /// The explorer row the session asked the adapters to show and select, with its ticket.
     tree_reveal: Option<(Arc<str>, u64)>,
@@ -2026,6 +2043,7 @@ impl Sources {
         entry.saved = entry.snapshot.as_ref().map(|snapshot| SemanticSource::new(snapshot));
         entry.stamp = stamp;
         entry.save.read = doc.write_baseline.as_deref().cloned();
+        entry.save.archive = doc.archive_baseline.clone();
         entry.save.status = crate::save::Status::Ready;
         id
     }
@@ -2049,9 +2067,17 @@ impl<'a> View<'a> {
     pub fn dirty(&self) -> bool { self.draft.is_some_and(crate::draft::Draft::dirty) }
     pub fn can_undo(&self) -> bool { self.tab.read_only_side().is_none() && self.draft.is_some_and(crate::draft::Draft::can_undo) }
     pub fn can_redo(&self) -> bool { self.tab.read_only_side().is_none() && self.draft.is_some_and(crate::draft::Draft::can_redo) }
+    pub(super) fn intrinsic_export_disabled(&self) -> Option<&'static str> {
+        if let Some(side) = self.tab.read_only_side() { side.read_only() }
+        else if self.snapshot.image().is_some() { Some("Images are read-only") }
+        else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
+        else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
+        else if self.snapshot.source_meta().is_lossy() { Some("Lossy text is read-only") }
+        else { None }
+    }
     /// Existing confirmed ending preference; typing never normalizes the remaining source.
     pub fn input_newline(&self) -> &'static str {
-        if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) { "\r\n" } else { "\n" }
+        if self.save.read.as_ref().is_some_and(|read| read.snapshot.crlf) || self.save.archive.as_ref().is_some_and(|read| read.crlf) { "\r\n" } else { "\n" }
     }
     pub fn read_only(&self) -> bool { self.read_only }
     pub fn edit_disabled(&self) -> Option<&'static str> {
@@ -2061,6 +2087,7 @@ impl<'a> View<'a> {
         if let Some(side) = self.tab.read_only_side() { side.read_only() }
         else if self.snapshot.image().is_some() { Some("Images are read-only") }
         else if self.tab.retrieved.is_some() { Some("Retrieved sources are read-only") }
+        else if self.snapshot.source_meta().archive_read_only_reason().is_some() && !self.tab.recovered { Some("This archive entry cannot be rewritten without losing information") }
         else if self.snapshot.source_meta().is_binary() { Some("Binary files are read-only") }
         else if self.snapshot.source_meta().is_lossy() { Some("Lossy text is read-only") }
         else { None }
@@ -2297,8 +2324,16 @@ impl State {
     }
     /// Whether an explorer row's file has unsaved changes in a tab.
     pub fn row_dirty(&self, row: &project::TreeRow) -> bool {
+        if self.archive_tree.is_virtual(&row.path) {
+            return self.tabs.iter().filter(|tab| tab.read_only_side().is_none() && self.tab_dirty(tab.id)).any(|tab|
+                std::iter::once(tab.source.as_path()).chain(tab.canonical.as_deref()).any(|path|
+                    crate::archive::Location::from_uri(path).is_some_and(|location| crate::archive_tree::row_contains_source(row, &location))));
+        }
         let Some(path) = self.project.as_ref().filter(|_| row.dir.is_none()).map(|p| p.root().join(&*row.path)) else { return false };
-        self.tabs.iter().any(|t| (t.source == path || t.canonical.as_deref() == Some(&path)) && t.read_only_side().is_none() && self.tab_dirty(t.id))
+        self.tabs.iter().filter(|tab| tab.read_only_side().is_none() && self.tab_dirty(tab.id)).any(|tab|
+            tab.source == path || tab.canonical.as_deref() == Some(&path)
+                || std::iter::once(tab.source.as_path()).chain(tab.canonical.as_deref()).any(|source|
+                    crate::archive::Location::from_uri(source).is_some_and(|location| location.container == path)))
     }
     /// Unsaved content is independent of repository status and remains visible for inactive tabs.
     pub fn tab_dirty(&self, id: TabId) -> bool {
@@ -2366,7 +2401,7 @@ impl State {
     /// List `list`'s places matching `query` (fuzzy on the path, or a plain match in the line's text), in the list's
     /// order. Recent files lead with the file left last, the open one second.
     pub fn place_rows(&self, list: PlaceList, query: &str) -> Vec<PlaceRow> {
-        let rel = |p: &Path| self.project.as_ref().and_then(|pr| pr.relative(p)).map_or_else(|| p.display().to_string(), |r| r.to_string());
+        let rel = |p: &Path| crate::archive::Location::from_uri(p).map_or_else(|| self.project.as_ref().and_then(|pr| pr.relative(p)).map_or_else(|| p.display().to_string(), |r| r.to_string()), |location| location.display_path());
         let mark = |m: &crate::places::Mark, place: Place| {
             let key = m.mnemonic.map_or_else(|| "·".to_string(), String::from);
             let label = match list {
@@ -2409,7 +2444,7 @@ impl State {
     /// folder; empty once a file or folder is open
     /// (or opening); split panes show it in the first. Adapters resolve a chosen row by its index here at use time.
     pub fn start_items(&self) -> Vec<StartItem> {
-        if self.project.is_some() || !self.tabs.is_empty() || self.loading.is_some() {
+        if self.has_tree() || !self.tabs.is_empty() || self.loading.is_some() {
             return Vec::new();
         }
         [CommandId::Open, CommandId::OpenFolder].into_iter().map(StartItem::Command).chain(self.recent.iter().cloned().map(StartItem::RecentFolder))
@@ -2421,9 +2456,10 @@ impl State {
     }
     /// Cached project and library rows, with stable identities shared by both explorers.
     pub fn tree_rows(&self) -> impl DoubleEndedIterator<Item = &project::TreeRow> + Clone {
-        self.project.as_ref().map_or(&[][..], |p| p.rows()).iter().chain(self.libraries.rows())
+        self.project.as_ref().map_or(&[][..], |p| p.rows()).iter().chain(self.libraries.rows()).chain(self.archive_tree.rows().iter())
     }
-    pub fn has_tree(&self) -> bool { self.project.is_some() || !self.libraries.rows().is_empty() }
+    pub fn has_tree(&self) -> bool { self.project.is_some() || !self.libraries.rows().is_empty() || !self.archive_tree.rows().is_empty() }
+    pub fn archive_tree(&self) -> &crate::archive_tree::Tree { &self.archive_tree }
     /// Changes when navigation asks the adapters to reveal the active library file.
     pub fn tree_revision(&self) -> u64 { self.tree_revision }
     /// The explorer row the session asked the adapters to show and select, and its ticket:
@@ -2431,6 +2467,7 @@ impl State {
     pub fn tree_reveal(&self) -> Option<(Arc<str>, u64)> { self.tree_reveal.clone() }
     pub fn active_in_tree(&self) -> Option<Arc<str>> {
         let t = self.active()?;
+        if self.archive_tree.contains_source(&t.source) { return Some(t.source.to_string_lossy().as_ref().into()); }
         if self.libraries.contains(&t.source) { return Some(t.source.to_string_lossy().as_ref().into()); }
         let p = self.project.as_ref()?;
         p.relative(&t.source).filter(|rel| p.has_file(rel))
@@ -2526,7 +2563,7 @@ impl State {
             false => format!("Read-only source retrieved from {}; its server session has ended ({})", v.provider, v.uri),
         });
         // Outside the browsing root, or a dependency inside it (node_modules, a project's virtualenv): its origin.
-        let origin = tab.filter(|t| t.is_file()).zip(self.project.as_ref()).and_then(|(t, p)| {
+        let origin = tab.filter(|t| t.is_file() && crate::archive::Location::from_uri(&t.source).is_none()).zip(self.project.as_ref()).and_then(|(t, p)| {
             let language = self.source(t.id).map_or(t.language.flatten(), |d| d.language());
             let origin = semantics::provider::origin(&t.source, language);
             let inside = t.source.starts_with(p.root());
@@ -2704,7 +2741,7 @@ impl State {
     /// What is inside crumb `crumb` of pane `pane`'s bar.
     pub fn siblings(&self, pane: u8, crumb: usize) -> Vec<Sibling> {
         let (Some(bar), Some(tab)) = (self.breadcrumbs_for(pane), self.shown(pane)) else { return Vec::new() };
-        crate::breadcrumbs::inside(&bar, crumb, tab, self.view(tab.id).as_ref(), self.project.as_ref())
+        crate::breadcrumbs::inside(&bar, crumb, tab, self.view(tab.id).as_ref(), self.project.as_ref(), &self.archive_tree)
     }
     /// Whether parses should find declarations (sticky scroll or breadcrumbs is on).
     fn wants_declarations(&self) -> bool {
@@ -2902,6 +2939,8 @@ pub struct Session {
     file_clipboard: explorer_work::ClipboardWork,
     navigation_query: Option<navigation_query::NavigationQuery>,
     save_seq: u64,
+    archive_saves: archive_save_work::Saves,
+    pub(crate) archive_browser: crate::archive_tree::Browser,
     /// Recoverable versions of unsaved work, offered at start and kept current off the UI thread.
     recovery: crate::recovery::Recovery,
     /// Names this session's New File identities, so another window's Untitled-1 is another document.
@@ -3154,6 +3193,7 @@ impl Session {
                 palette: themes.snapshot().palette,
                 project: None,
             libraries: Default::default(),
+            archive_tree: Default::default(),
             tree_revision: 0,
             tree_reveal: None,
                 explorer: Default::default(), explorer_search: Default::default(), workspace_revision: 0,
@@ -3213,6 +3253,8 @@ impl Session {
             file_clipboard: Default::default(),
             navigation_query: None,
             save_seq: 0,
+            archive_saves: Default::default(),
+            archive_browser: Default::default(),
             recovery,
             recovery_token: format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis())),
             untitled_seq: 0, replacing: None,
@@ -3409,6 +3451,15 @@ impl Session {
 
     pub fn disabled(&self, id: CommandId) -> Option<&'static str> {
         if self.closed {return Some("This reader view is closed");}
+        if self.state.explorer.selected.as_deref().is_some_and(|path| self.state.archive_tree.is_virtual(path)) && matches!(id,
+            CommandId::NewExplorerFile | CommandId::NewExplorerFolder | CommandId::RenameExplorerEntry | CommandId::MoveExplorerEntry
+            | CommandId::DeleteExplorerEntry | CommandId::DeleteExplorerPermanently | CommandId::CopyExplorerEntry | CommandId::PasteExplorerEntry) {
+            return Some("Archive entries support content editing; filesystem entry operations are unavailable inside an archive");
+        }
+        if self.state.current_source().is_some_and(|source| source.source_meta().archive().is_some()) && matches!(id,
+            CommandId::OpenInEditor | CommandId::OpenWithDefaultApp | CommandId::AnnotateBlame | CommandId::FormatDocument | CommandId::OrganizeImports | CommandId::QuickFix) {
+            return Some("This action requires a file on disk; the current document is an archive entry");
+        }
         if self.state.active().is_some_and(|tab| tab.csv.is_some()) && matches!(id,
             CommandId::Cut | CommandId::Paste | CommandId::Delete | CommandId::SelectAll | CommandId::ExtendSelection | CommandId::ShrinkSelection | CommandId::AddCursorBelow | CommandId::AddCursorAbove | CommandId::SelectNextOccurrence | CommandId::CollapseSelections | CommandId::IndentSelection | CommandId::OutdentSelection | CommandId::ToggleComment | CommandId::MoveLinesUp | CommandId::MoveLinesDown | CommandId::DuplicateLinesUp | CommandId::DuplicateLinesDown | CommandId::Completion | CommandId::FormatDocument | CommandId::OrganizeImports | CommandId::QuickFix | CommandId::ReplaceMatch | CommandId::ReplaceAll) { return Some("Use CSV cell editing or switch to Source"); }
         if self.csv_pending() && !matches!(id, CommandId::ChooseTheme | CommandId::About | CommandId::StatusDetails | CommandId::NewWindow | CommandId::LanguageServer | CommandId::ServerDetails | CommandId::CopyServerDetails | CommandId::Copy) { return Some(csv_work::PENDING_FIELD); }
@@ -3608,7 +3659,7 @@ impl Session {
                     None => Some("No file is open"),
                     Some(view) if view.save_status().busy() => Some("A save operation is running"),
                     Some(view) if id == CommandId::ConfirmRecheckedSave => (!matches!(view.save_status(), crate::save::Status::Checked(crate::save::DiskMatch::Baseline | crate::save::DiskMatch::Attempted))).then_some("Recheck must match the baseline or attempted save first"),
-                    Some(view) => (!view.write_path_changed() && !matches!(view.save_status(), crate::save::Status::Uncertain(_) | crate::save::Status::Rejected(_) | crate::save::Status::Checked(_))).then_some("No save outcome needs rechecking"),
+                    Some(view) => (!view.write_path_changed() && !self.archive_requires_recheck(view.snapshot().key().buffer) && !matches!(view.save_status(), crate::save::Status::Uncertain(_) | crate::save::Status::Rejected(_) | crate::save::Status::Checked(_))).then_some("No save outcome needs rechecking"),
                 },
             },
             CommandId::Undo | CommandId::Redo => match self.state.active().and_then(|tab| self.state.view(tab.id)) {
@@ -4308,6 +4359,7 @@ impl Session {
             None => Err("No file is open"),
             Some(t) if t.read_only_side().is_some() => Err("A comparison's read-only side is an immutable snapshot; open the current side externally"),
             Some(t) if t.retrieved.is_some() => Err("Source from a language server has no file to open"),
+            Some(t) if crate::archive::Location::from_uri(&t.source).is_some() => Err("An archive entry has no standalone file to open; use Save As to export it"),
             Some(t) if t.untitled() => Err(UNTITLED_NO_FILE),
             Some(t) if t.unavailable.is_some() => Err("The file is unavailable"),
             Some(t) => Ok(t),
@@ -4407,7 +4459,7 @@ impl Session {
             }
         }
         let laid_out = matches!(&input, Input::Completion(Completion::LaidOut(_)));
-        if matches!(&input, Input::Command(Command::CompareSaved | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. } | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::AddCursorBelow | Command::AddCursorAbove | Command::CollapseSelections | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::ResizeAnnotations { .. } | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
+        if matches!(&input, Input::Command(Command::CompareSaved | Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. } | Command::Pin(_) | Command::Back | Command::Forward | Command::Select(_) | Command::MoveCaret(_) | Command::SelectAll | Command::AddCursorBelow | Command::AddCursorAbove | Command::CollapseSelections | Command::Scroll(_) | Command::ScrollRows(_) | Command::ScrollColumn(_) | Command::GoToLine(_) | Command::GoToPlace(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_) | Command::ActivateTree { .. } | Command::SetLayout(_) | Command::ResizeAnnotations { .. } | Command::SetSoftWrap(_))) { self.restore_workspace = false; }
         let expansion_completion = match &input {
             Input::Completion(Completion::SelectionSteps { request, .. }) => Some(*request),
             Input::Completion(Completion::Analyzed { result, .. }) => match result.as_ref() { Completion::SelectionSteps { request, .. } => Some(*request), _ => None },
@@ -4422,7 +4474,7 @@ impl Session {
         let retire_messages = matches!(&input, Input::Command(_)) && (edit_reveal || reveal_selection) && !self.state.messages.is_empty();
         if retire_messages { self.state.messages.clear(); }
         // Tabs and layout, not each caret move: what an interrupted session reopens.
-        let arranged = matches!(&input, Input::Command(Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. }
+        let arranged = matches!(&input, Input::Command(Command::OpenArchiveEntry(_) | Command::ArchiveTreeParent { .. } | Command::ActivateTree { .. } | Command::Open(_) | Command::OpenRetained(_) | Command::NewScratch(_) | Command::OpenScratch(_) | Command::OpenAt { .. } | Command::ActivateTab(_) | Command::Close | Command::CloseTab(_) | Command::CloseTabs { .. }
             | Command::Pin(_) | Command::Split(_) | Command::Unsplit | Command::FocusPane(_) | Command::MoveTab { .. } | Command::SetExplorer(_) | Command::ToggleDir(_)
             | Command::SetLayout(_) | Command::ResizeAnnotations { commit: true, .. } | Command::SetSoftWrap(_) | Command::ChooseRecoveredDraft { .. }));
         let input = match input {
@@ -4779,6 +4831,8 @@ impl Session {
                 if self.state.project.is_none() && !is_virtual(&path) { self.remember_alone(normalized(&path)); }
                 self.navigate(path, false, None, true)
             }
+            Command::OpenArchiveEntry(location) => if location.members.is_empty() { self.browse_archive(location) } else { self.navigate(location.to_uri(), true, None, true) },
+            Command::ArchiveTreeParent { path } => self.archive_tree_parent(&path).unwrap_or_default(),
             Command::OpenRetained(path) => self.navigate(path, true, None, true),
             Command::ActivateTab(id) => {
                 let Some(pane) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.pane) else { return Effect::default() };
@@ -4855,7 +4909,7 @@ impl Session {
                 let files: std::collections::BTreeSet<PathBuf> = p.bookmarks().iter().map(|m| m.source.to_path_buf()).chain(p.recent_files().iter().cloned()).chain(p.recent_locations().iter().map(|m| m.source.to_path_buf())).collect();
                 let (tx, generation) = (self.tx.clone(), self.project_generation.load(Ordering::Relaxed));
                 self.jobs.submit(Priority::Background, move || {
-                    let missing = files.into_iter().filter(|f| !f.exists()).collect();
+                    let missing = files.into_iter().filter(|f| !crate::archive::physical_path(f).exists()).collect();
                     let _ = tx.send_blocking(Completion::PlacesChecked { generation, missing });
                 });
                 Effect::default()
@@ -5022,6 +5076,7 @@ impl Session {
                 Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::RevealInTree(rel) => {
+                if let Some(effect) = self.archive_reveal(&rel) { return effect; }
                 let changed = self.state.project.as_mut().is_some_and(|p| p.reveal(&rel) || p.reveal_folder(&rel));
                 Effect { repaint: changed, copy: None, ..Effect::default() }
             }
@@ -5203,6 +5258,7 @@ impl Session {
             Command::ActivateTree { path, retain } => self.activate_tree(path, retain),
             Command::ExplorerSearch(input) => self.explorer_search(input),
             Command::ToggleDir(dir) => {
+                if let Some(effect) = self.activate_archive_tree(&dir, false) { return effect; }
                 self.state.explorer_search = Default::default();
                 if self.state.libraries.rows().iter().any(|r| r.path.as_ref() == dir) {
                     let requests = self.state.libraries.toggle(&dir, self.state.settings.folders_first);
@@ -5213,6 +5269,8 @@ impl Session {
                 Effect { repaint: changed, copy: None, ..Effect::default() }
             }
             Command::Locate => {
+                if let Some(path) = self.state.active().map(|tab| tab.source.to_string_lossy().into_owned())
+                    && let Some(effect) = self.archive_reveal(&path) { return effect; }
                 if let Some(path) = self.state.active().map(|t| t.source.clone()) && self.state.libraries.contains(&path) {
                     let requests = self.state.libraries.reveal(&path, self.state.settings.folders_first);
                     self.read_libraries(requests);
@@ -6420,13 +6478,13 @@ impl Session {
             true => {
                 let mut seen = std::collections::HashSet::new();
                 // A template keeps the servers of each of its embedded languages warm.
-                self.state.tabs.iter().filter(|t| t.is_file() && seen.insert(&t.source)).flat_map(|t| match crate::template::languages(&t.source) {
+                self.state.tabs.iter().filter(|t| t.is_file() && !is_virtual(&t.source) && seen.insert(&t.source)).flat_map(|t| match crate::template::languages(&t.source) {
                     [] => vec![(t.source.as_path(), t.language.unwrap_or_else(|| highlight::detect(&t.source, "")))],
                     languages => languages.iter().map(|l| (t.source.as_path(), Some(*l))).collect(),
                 }).collect()
             }
         };
-        let files: Vec<&Path> = self.state.tabs.iter().filter(|t| t.is_file()).map(|t| t.source.as_path()).collect();
+        let files: Vec<&Path> = self.state.tabs.iter().filter(|t| t.is_file() && !is_virtual(&t.source)).map(|t| t.source.as_path()).collect();
         self.state.semantics.sync(&docs, &held, &files, browse.as_deref(), &mut resolve, &self.tx);
     }
 
@@ -6725,6 +6783,11 @@ impl Session {
 
     fn complete_source(&mut self, completion: Completion, buffer: Option<crate::text::BufferId>) -> Effect {
         match completion {
+            Completion::ArchiveListed(listed) => self.archive_listed(listed),
+            Completion::ArchiveLoaded(loaded) => self.archive_loaded(*loaded),
+            Completion::ArchiveSaved(saved) => self.archive_saved(*saved),
+            Completion::ArchiveRechecked(reply) => self.archive_rechecked(*reply),
+            Completion::ArchiveRecovered { ticket, result } => self.restore_archive_loaded(ticket, result),
             Completion::TerminalStarted { id, generation, result } => self.terminal_started(id, generation, result),
             Completion::TerminalWake { id, generation } => self.terminal_wake(id, generation),
             Completion::ExplorerCopied { request, result } => self.explorer_copied(request, result),
@@ -8117,6 +8180,7 @@ impl Session {
     /// Keep tree activation out of the dispatcher used by scrolling and startup.
     #[cold]
     fn activate_tree(&mut self, path: Arc<str>, retain: bool) -> Effect {
+        if let Some(effect) = self.activate_archive_tree(&path, retain) { return effect; }
         let Some(row) = self.state.tree_rows().find(|r| r.path == path).cloned() else { return Effect::default() };
         if row.dir.is_some() {
             return if retain { Effect::default() } else { self.command(Command::ToggleDir(path.to_string())) };
@@ -8464,6 +8528,7 @@ impl Session {
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
+        if let Some(location) = self.state.tabs.iter().find(|tab| tab.id == id).and_then(|tab| crate::archive::Location::from_uri(&tab.source)) { self.check_archive(id, location); return; }
         let replacement = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer).is_some_and(|buffer| self.replacement_current(buffer));
         let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
             .and_then(|buffer| self.state.sources.buffers.get(&buffer))
@@ -8627,13 +8692,13 @@ impl Session {
     /// navigation must not pay for them.
     fn rewatch(&mut self) {
         // An opened file cannot wait for inventory discovery or delivery, even in an already-known folder.
-        let mut immediate: std::collections::BTreeSet<_> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| t.source.parent()).map(Path::to_path_buf).collect();
+        let mut immediate: std::collections::BTreeSet<_> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| crate::archive::physical_path(&t.source).parent().map(Path::to_path_buf)).collect();
         if let Some(p) = &self.state.project { immediate.insert(p.root().to_owned()); }
         let _ = self.watcher.include(immediate);
         let project = self.state.project.as_ref().map(|p| (p.root().to_owned(), p.walk, p.files(), !p.refreshing() && !matches!(p.coverage(), project::Coverage::Scanning(_))));
         // Tabs inside the inventory's folders add nothing: opening one of the project's files costs no rebuild.
         let inside = |d: &Path| self.state.project.as_ref().is_some_and(|p| d == p.root() || d.strip_prefix(p.root()).is_ok_and(|r| p.has_dir(&r.to_string_lossy())));
-        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| t.source.parent()).filter(|d| !inside(d)).map(Path::to_path_buf).collect();
+        let extra: std::collections::BTreeSet<PathBuf> = self.state.tabs.iter().filter(|t| t.is_file()).filter_map(|t| crate::archive::physical_path(&t.source).parent().map(Path::to_path_buf)).filter(|d| !inside(d)).collect();
         let key: WatchKey = (project, extra);
         if self.watching.as_ref() == Some(&key) {
             return;
@@ -8716,6 +8781,9 @@ impl Session {
         self.restore_workspace = self.state.tabs.is_empty();
         self.state.explorer = Default::default(); self.state.explorer_search = Default::default(); self.state.workspace_revision += 1;
         self.state.libraries = Default::default();
+        self.archive_browser = Default::default();
+        self.state.archive_tree = Default::default();
+        self.state.tree_reveal = None;
         let root = normalized(&root);
         self.pending_goto = None;
         let generation = self.root_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -9207,6 +9275,12 @@ impl Session {
     /// [`Session::navigate`], optionally to source a language server returned (`retrieved`): its tab holds that
     /// snapshot and never reads the disk.
     fn navigate_to(&mut self, requested: PathBuf, retain: bool, restore: Option<Location>, record: bool, retrieved: Option<(RetrievedContent, semantics::VirtualSource)>) -> Effect {
+        if !is_virtual(&requested) && self.save_as_destination_reserved(&normalized(&requested)) {
+            self.state.messages.push("This destination is reserved by Save As; finish that operation before opening it.".into());
+            return Effect { repaint: true, copy: None, ..Effect::default() };
+        }
+        if !is_virtual(&requested) && lenz_archive::Kind::of(&requested.to_string_lossy()).is_some()
+            && let Ok(location) = crate::archive::Location::new(normalized(&requested), Vec::new()) { return self.browse_archive(location); }
         self.close_saved_comparison();
         self.open_seq += 1; // a result still being checked must not move the view after this
         // A jump to another file that has not landed is given up: it must not fire on that file's next open.
@@ -9218,7 +9292,7 @@ impl Session {
         }
         // Retrieved source is identified by its opaque URI, never a path; once its tab is gone it is not held.
         let virtual_source = is_virtual(&requested);
-        if virtual_source && retrieved.is_none() && !self.state.tabs.iter().any(|t| t.source == requested) {
+        if virtual_source && crate::archive::Location::from_uri(&requested).is_none() && retrieved.is_none() && !self.state.tabs.iter().any(|t| t.source == requested) {
             if requested.to_str().is_some_and(|p| p.starts_with(crate::tabs::UNTITLED)) {
                 self.state.messages.push("That untitled document was closed without a file".into());
                 return Effect { repaint: true, copy: None, ..Effect::default() };
@@ -9494,6 +9568,7 @@ impl Session {
             active: index(self.state.active), other: index(self.state.other), focused: self.state.focused,
             split: self.state.settings.split, layout: self.state.settings.layout, soft_wrap: self.state.settings.soft_wrap,
             expanded: project.expanded(), explorer: self.state.explorer.clone(),
+            archives: self.state.archive_tree.roots().to_vec(),
             tabs: tabs.into_iter().map(|t| crate::workspace::SavedTab { path: t.source.clone(), selection: t.selection(), top_line: t.top_line, top_row: t.top_row(), column: t.column, pane: t.pane, retained: t.retained, markdown_source: t.markdown_source, image_source: t.image_source }).collect(),
             missing: Vec::new(),
         };
@@ -9503,6 +9578,9 @@ impl Session {
 
     fn apply_workspace(&mut self, mut saved: crate::workspace::Workspace) {
         let missing = std::mem::take(&mut saved.missing);
+        let archives = std::mem::take(&mut saved.archives);
+        self.archive_browser = Default::default();
+        self.state.archive_tree = Default::default();
         self.state.settings.split = saved.split; self.state.settings.layout = saved.layout; self.state.settings.soft_wrap = saved.soft_wrap;
         self.state.explorer = saved.explorer; self.state.workspace_revision += 1;
         if let Some(project) = &mut self.state.project { project.restore_expanded(saved.expanded); }
@@ -9521,6 +9599,11 @@ impl Session {
         self.state.active = None;
         if let Some(active) = active { self.activate(active); }
         self.load_other();
+        let explorer = self.state.explorer.clone();
+        for location in archives { self.browse_archive(location); }
+        self.state.explorer = explorer;
+        self.state.tree_reveal = None;
+        self.state.archive_tree.clear_reveal();
         self.rewatch();
         // After activation, which clears messages.
         if !missing.is_empty() {
@@ -10015,6 +10098,7 @@ impl Session {
     /// Read and decode tab `id`'s source off the UI thread; a load superseded before it starts reads nothing.
     fn load(&mut self, id: TabId, reload: bool) {
         let Some(path) = self.state.tabs.iter().find(|t| t.id == id).map(|t| t.source.clone()) else { return };
+        if let Some(location) = crate::archive::Location::from_uri(&path) { self.load_archive_entry(id, reload, location); return; }
         let request = self.next_request();
         self.pending = Some((id, reload));
         self.reload_source = reload.then(|| self.state.source(id).map(|source| SemanticSource::new(source))).flatten();
@@ -10542,6 +10626,7 @@ pub fn launch_target(arg: Option<PathBuf>, cwd: Option<PathBuf>, home: Option<Pa
 }
 
 fn normalized(path: &Path) -> PathBuf {
+    if is_virtual(path) { return path.to_path_buf(); }
     let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
     let mut out = PathBuf::new();
     for c in absolute.components() {
@@ -10621,25 +10706,7 @@ fn moved(doc: &crate::text::TextSnapshot, v: &crate::folds::Visible, head: usize
 /// too, as macOS's Option+arrows go: from the end of `width: 80` the stops are `80`, `:` and `width`. At the line's
 /// edge the head stays; spaces running to it end there.
 pub(crate) fn word_stop(doc: &crate::text::TextSnapshot, head: usize, backward: bool, spaces: bool) -> usize {
-    let range = doc.reader_line_range(doc.line_of(head));
-    if backward {
-        if head <= range.start { return head; }
-        let head = if spaces { skip_back(doc, head, range.start, char::is_whitespace) } else { head };
-        if head <= range.start { return head; }
-        let kind = doc.range(doc.previous_char_boundary(head)..head).and_then(|t| t.chars().next()).map_or(0, word_class);
-        skip_back(doc, head, range.start, |c| word_class(c) == kind)
-    } else {
-        if head >= range.end { return head; }
-        let head = if spaces { skip_on(doc, head, range.end, char::is_whitespace) } else { head };
-        if head >= range.end { return head; }
-        let kind = doc.range(head..doc.next_char_boundary(head)).and_then(|t| t.chars().next()).map_or(0, word_class);
-        skip_on(doc, head, range.end, |c| word_class(c) == kind)
-    }
-}
-
-/// Spaces, word characters (as [`crate::document`]'s word at a position) and other symbols: a word motion crosses one run.
-fn word_class(c: char) -> u8 {
-    if c.is_whitespace() { 0 } else if c.is_alphanumeric() || c == '_' { 1 } else { 2 }
+    doc.word_stop(head, backward, spaces)
 }
 
 /// The first byte at or after `at` (before `end`) whose character fails `keep`, scanning a bounded window at a time.
@@ -10650,16 +10717,6 @@ fn skip_on(doc: &crate::text::TextSnapshot, mut at: usize, end: usize, keep: imp
         match text.char_indices().find(|&(_, c)| !keep(c)) { Some((i, _)) => return at + i, None => at = to }
     }
     end
-}
-
-/// The byte after the last character before `at` (from `start`) that fails `keep`: [`skip_on`] backwards.
-fn skip_back(doc: &crate::text::TextSnapshot, mut at: usize, start: usize, keep: impl Fn(char) -> bool) -> usize {
-    while at > start {
-        let from = doc.floor_char_boundary(at.saturating_sub(4096).max(start));
-        let Some(text) = doc.range(from..at) else { return at };
-        match text.char_indices().rev().find(|&(_, c)| !keep(c)) { Some((i, c)) => return from + i + c.len_utf8(), None => at = from }
-    }
-    start
 }
 
 /// The head moved one visual row up or down, keeping its display column (collapsed lines skipped).

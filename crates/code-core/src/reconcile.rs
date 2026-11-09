@@ -41,7 +41,8 @@ pub enum DiskChange {
 #[derive(Clone)]
 pub struct Disk {
     /// The exact write target the read confirmed: its bytes, identity and stamp.
-    pub baseline: crate::save::Baseline,
+    pub baseline: Option<crate::save::Baseline>,
+    pub(crate) archive: Option<Arc<crate::archive::Baseline>>,
     /// The same content as a session snapshot.
     pub text: Arc<TextSnapshot>,
 }
@@ -115,7 +116,7 @@ impl Prompt {
     }
     /// The dialog's text: the three sides, what each decision does, and never the source itself.
     pub fn text(&self) -> String {
-        let mut text = format!("{}\nchanged on disk while you were editing it.\n\nThe three sides:\n", self.path.display());
+        let mut text = format!("{}\nchanged on disk while you were editing it.\n\nThe three sides:\n", crate::archive::Location::from_uri(&self.path).map_or_else(|| self.path.display().to_string(), |location| location.display_path()));
         match (&self.disk, &self.read_failure) {
             (_, Some(why)) => text.push_str(&format!("  Disk: cannot be read ({why})\n")),
             (Some(disk), None) => {

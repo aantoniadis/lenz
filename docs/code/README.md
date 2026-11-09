@@ -22,6 +22,40 @@ remain unverified.
 Lenz Code is the editor in the Lenz command family; [the launcher guide](../launcher-trial.md)
 explains how to launch it as `lenz [file-or-folder]`.
 
+## Editing archives
+
+Open an archive with `lenz sources.zip`, Open File…, or the explorer. The explorer shows its
+folders and members; Enter or double-click opens a member in an ordinary editor tab. Typing,
+clipboard commands, Find/Replace, editor motions and Undo/Redo work on that member's draft.
+Save (Ctrl+S) writes its captured version back into the outer archive. Save As exports it to
+a regular file. Saving one member keeps other unsaved member drafts untouched.
+
+Supported formats match Diff: ZIP, TAR, gzip TAR (`.tar.gz`, `.tgz`), bzip2 TAR
+(`.tar.bz2`, `.tbz2`, `.tbz`), XZ TAR (`.tar.xz`, `.txz`) and Zstandard TAR
+(`.tar.zst`, `.tzst`). Nested archives work through four layers. Use the Up / close row
+to return from a nested archive or close its browser; open tabs remain available. Empty
+and damaged archives keep an exit, and a failed listing offers Retry. See the
+[terminal controls](tui.md) for keyboard navigation in a narrow terminal.
+
+Member names are virtual paths: nothing is extracted into the project. Tabs, breadcrumbs
+and status show paths such as `sources.zip!/nested.tgz!/src/main.rs`. Links are readable
+but cannot be edited. Encrypted, ambiguous or unsupported archive layouts stay read-only
+when their metadata cannot be preserved; Status details explains the reason. Rename,
+Move, Delete, external tools and language servers require physical files; export a member
+with Save As when one of those operations is needed.
+
+Save preserves untouched members, order, comments and supported metadata, and replaces the
+container atomically after checking its exact identity and bytes. Concurrent member saves
+are serialized per container. External changes are checked through the same recovery and
+comparison controls as ordinary files; failed or unconfirmed saves retain the draft.
+Unsaved member drafts also participate in restart recovery.
+
+Stored archives are limited to 512 MiB, unpacked streams to 2 GiB, members to 1 GiB and indexes
+to 100,000 records. Browsing keeps a bounded cache and loads member text on demand. Large
+members still inherit the editor's normal limits. Unsupported RAR and 7z files remain binary files.
+
+## Architecture
+
 - `crates/code-core` (`code-core`): documents, commands and the session. No GPUI.
 - `crates/code-gui` (`code-gui`, binary `lenz-code`): the window.
 - `crates/code-tui` (`code-tui`, binary `lenz-code-tui`): the [terminal editor](tui.md).

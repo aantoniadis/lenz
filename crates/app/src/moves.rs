@@ -85,9 +85,9 @@ impl Edit {
 }
 
 impl Edits {
-    pub(crate) fn record_detail(&mut self, side: Side, before: &str, after: &str) -> (Range<usize>, String) {
+    pub(crate) fn record_detail(&mut self, side: Side, before: &str, after: &str) -> (Range<usize>, String, u64) {
         let edit = Edit::between(side, before, after);
-        let detail = (edit.replace.clone(), edit.text.clone());
+        let detail = (edit.replace.clone(), edit.text.clone(), edit.expected);
         self.undo.push(edit); self.redo.clear(); detail
     }
 

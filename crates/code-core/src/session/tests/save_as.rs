@@ -154,6 +154,7 @@ fn save_as_replaces_an_existing_file_only_after_an_explicit_current_decision() {
     let stale = s.save_as_prompt().unwrap();
     type_text(&mut s, tab, "more\n");
     assert!(s.save_as_prompt().is_none());
+    assert!(!s.save_as_destination_reserved(&existing), "an invalidated Replace decision no longer owns its destination");
     s.dispatch(Command::ChooseReplace { ticket: stale.ticket, choice: ReplaceChoice::Replace });
     assert_eq!(std::fs::read(&existing).unwrap(), b"keep me\n");
     // A different file appearing at the path after the decision is refused.
@@ -229,6 +230,7 @@ fn save_as_failures_keep_the_original_document_and_never_clobber_a_new_entry() {
         assert!(s.state().tab_dirty(tab) && s.state().view(tab).unwrap().can_undo());
         assert_eq!(std::fs::read(&original).unwrap(), b"original\n");
         assert!(s.disabled(CommandId::Save).is_none(), "the original file's Save state is unaffected");
+        assert!(!s.save_as_destination_reserved(&target), "a completed failed write releases its destination");
     }
     // A file created between validation and the write is never replaced.
     let raced = d.path().join("raced.txt");
@@ -245,6 +247,72 @@ fn save_as_failures_keep_the_original_document_and_never_clobber_a_new_entry() {
     assert_eq!(std::fs::read(&raced).unwrap(), b"theirs\n");
     assert_eq!(s.state().active().unwrap().source(), original);
     assert!(s.state().tab_dirty(tab));
+}
+
+#[test]
+fn save_as_reserves_its_destination_and_alias_until_the_write_is_accounted() {
+    use crate::save::ReplaceChoice;
+    for exists in [true, false] {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("destination.txt");
+        let alias = d.path().join("alias.txt");
+        if exists {
+            std::fs::write(&target, b"old destination\n").unwrap();
+            std::os::unix::fs::symlink(&target, &alias).unwrap();
+        }
+        let mut s = session(d.path());
+        let tab = new_document(&mut s);
+        type_text(&mut s, tab, "source draft\n");
+        let buffer = s.state().current_source().unwrap().key().buffer;
+        let (started, entered) = std::sync::mpsc::channel();
+        let gates: Vec<_> = (0..crate::jobs::MAX_JOBS).map(|_| {
+            let (release, wait) = std::sync::mpsc::channel();
+            let started = started.clone();
+            s.jobs.submit(Priority::Visible, move || {
+                started.send(()).unwrap();
+                let _ = wait.recv_timeout(Duration::from_secs(5));
+            });
+            release
+        }).collect();
+        for _ in &gates { entered.recv_timeout(Duration::from_secs(5)).unwrap(); }
+        s.dispatch(Command::SaveAs { tab, path: target.clone() });
+        if exists {
+            let prompt = s.save_as_prompt().unwrap();
+            s.dispatch(Command::OpenRetained(alias.clone()));
+            assert_eq!(s.state().active().unwrap().id(), tab);
+            assert_eq!(s.state().tabs().len(), 1);
+            assert_eq!(s.save_as_prompt().unwrap().ticket, prompt.ticket);
+            s.dispatch(Command::ChooseReplace { ticket: prompt.ticket, choice: ReplaceChoice::Replace });
+        }
+        assert!(s.state().view(tab).unwrap().save_status().busy());
+        for spelling in std::iter::once(&target).chain(exists.then_some(&alias)) {
+            s.dispatch(Command::OpenRetained(spelling.clone()));
+            assert_eq!(s.state().active().unwrap().id(), tab);
+            assert_eq!(s.state().tabs().len(), 1, "the pending write must not admit another independent destination buffer");
+            assert!(messages(&s).contains("reserved by Save As"));
+        }
+        let other = new_document(&mut s);
+        type_text(&mut s, other, "another draft\n");
+        s.dispatch(Command::SaveAs { tab: other, path: if exists { alias.clone() } else { target.clone() } });
+        assert!(s.save_as_prompt().is_none());
+        assert!(messages(&s).contains("already reserved by Save As"));
+        assert!(s.state().tab_dirty(other));
+        s.dispatch(Command::ActivateTab(tab));
+        for gate in gates { gate.send(()).unwrap(); }
+        settle(&mut s, |s| !s.state().view(tab).unwrap().save_status().busy());
+        assert_eq!(std::fs::read(&target).unwrap(), b"source draft\n");
+        assert_eq!(s.state().active().unwrap().source(), target);
+        assert!(!s.state().tab_dirty(tab));
+        let spelling = if exists { alias } else { target };
+        s.dispatch(Command::OpenRetained(spelling.clone()));
+        settle(&mut s, opened);
+        assert_eq!(s.state().active().unwrap().id(), tab, "the canonical destination reuses its saved tab");
+        assert_eq!(s.state().tabs().len(), 2, "only the saved tab and unrelated untitled draft remain");
+        assert_eq!(s.state().tabs().iter().filter(|tab| tab.buffer == Some(buffer)).count(), 1);
+        assert_eq!(s.state().current_source().unwrap().key().buffer, buffer, "opening the destination after completion shares the confirmed document");
+        assert_eq!(source_text(s.state().current_source().unwrap()), "source draft\n");
+        assert!(s.state().tab_dirty(other), "unrelated drafts survive destination reservation and completion");
+    }
 }
 
 #[test]

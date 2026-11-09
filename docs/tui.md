@@ -118,7 +118,9 @@ Reader and Diff search fields, command filters, path/name prompts and comparison
 
 In a GUI, Ctrl-V (Cmd-V on macOS) pastes from the system clipboard. In a terminal, use the emulator's Paste command, usually Ctrl-Shift-V, which delivers a bracketed paste event. Copy/cut use OSC 52 and require the emulator to allow clipboard writes. Modified motions require a terminal that reports those keys. Popup fields do not implement document undo, Vim operators or multiple cursors.
 
-Up/Down and PageUp/PageDown still navigate picker results; Tab switches fields or search scope. Alt-Home/End select the first/last result where the picker supports those jumps. In Reader's branch picker, Alt-Enter opens the selected row's actions; Ctrl-Enter retains its open-in-new-view behavior. F6 forgets a highlighted recent item/bookmark or resets a highlighted keybinding, while Delete edits a nonempty filter. Escape cancels and Enter confirms the active dialog.
+GUI search and popup fields also accept native text input and input-method composition. Preedit text stays separate from the query until committed. Escape cancels composition; a subsequent Escape dismisses the field or popup. Clicking text places the caret, and Shift-click extends the selection. Printable Option-key characters are accepted where the key is not already a documented field shortcut; for example, Find keeps Alt+C/W/R for its options and Alt+A for Replace All. A terminal receives the text committed by its emulator's input method.
+
+Up/Down and PageUp/PageDown still navigate picker results; Tab switches fields or search scope. Alt-Home/End select the first/last result where the picker supports those jumps. In Reader's branch picker, Alt-Enter opens the selected row's actions, including Open in New Window. F6 forgets a highlighted recent item/bookmark or resets a highlighted keybinding, while Delete edits a nonempty filter. Escape cancels and Enter confirms the active dialog.
 
 ## Comparison controls
 

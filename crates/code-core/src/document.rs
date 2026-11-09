@@ -31,6 +31,8 @@ pub struct SourceMeta {
     source: PathBuf,
     /// Naming provenance captured by the exact read; never a live filesystem lookup.
     canonical: Option<PathBuf>,
+    archive: Option<crate::archive::Location>,
+    archive_read_only: Option<String>,
     encoding: String,
     original_encoding: &'static str,
     had_bom: bool,
@@ -49,16 +51,23 @@ impl SourceMeta {
     pub(crate) fn fingerprint(&self) -> u64 { self.fingerprint }
     pub(crate) fn is_large(&self) -> bool { self.large }
     pub(crate) fn loaded_version(&self) -> Option<u64> { self.loaded_version }
-    pub(crate) fn renamed(&self, source: PathBuf) -> Self { Self { source, canonical: None, ..self.clone() } }
+    pub(crate) fn renamed(&self, source: PathBuf) -> Self {
+        let archive = crate::archive::Location::from_uri(&source);
+        let archive_read_only = archive.as_ref().and(self.archive_read_only.clone());
+        Self { archive, archive_read_only, source, canonical: None, ..self.clone() }
+    }
     pub(crate) fn with_canonical(mut self, canonical: Option<PathBuf>) -> Self { self.canonical = canonical; self }
     pub(crate) fn with_language(mut self, language: Option<Language>) -> Self { self.language = language; self }
     pub(crate) fn canonical(&self) -> Option<&std::path::Path> { self.canonical.as_deref() }
     pub(crate) fn bytes(&self) -> usize {
         size_of::<Self>() + 2 * size_of::<usize>() + self.source.capacity() + self.encoding.capacity() + self.canonical.as_ref().map_or(0, |path| path.capacity())
+            + self.archive.as_ref().map_or(0, crate::archive::Location::estimated_bytes) + self.archive_read_only.as_ref().map_or(0, String::capacity)
             + self.image.as_ref().map_or(0, |i| size_of::<Image>() + 2 * size_of::<usize>()
                 + i.pixels.as_ref().map_or_else(|why| why.capacity(), |p| size_of::<img::Pixels>() + 2 * size_of::<usize>() + p.as_raw().capacity()))
     }
     pub fn source(&self) -> &std::path::Path { &self.source }
+    pub fn archive(&self) -> Option<&crate::archive::Location> { self.archive.as_ref() }
+    pub fn archive_read_only_reason(&self) -> Option<&str> { self.archive_read_only.as_deref() }
     pub fn encoding(&self) -> &str { &self.encoding }
     pub fn original_encoding(&self) -> &'static str { self.original_encoding }
     pub fn had_bom(&self) -> bool { self.had_bom }
@@ -68,6 +77,8 @@ impl SourceMeta {
     pub fn image(&self) -> Option<&Arc<Image>> { self.image.as_ref() }
     pub(crate) fn notices(&self, large: bool) -> Vec<String> {
         let mut notices = Vec::new();
+        if let Some(location) = &self.archive { notices.push(format!("Archive: {} — Save updates its container", location.display_path())); }
+        if let Some(reason) = &self.archive_read_only { notices.push(format!("Archive entry is read-only: {reason}")); }
         if self.shown_encoding {
             notices.push(format!("Encoding: {}", self.encoding));
         }
@@ -102,6 +113,7 @@ pub struct Document {
     /// for them, not for the reader. Found when a language server first needs it, not at every open.
     protocol_lines: std::sync::OnceLock<Option<Arc<[usize]>>>,
     pub(crate) write_baseline: Option<Arc<crate::save::Baseline>>,
+    pub(crate) archive_baseline: Option<Arc<crate::archive::Baseline>>,
     /// An ERB or Haml template's embedded-language views, built once for this version (by the worker that
     /// materializes it).
     templates: std::sync::OnceLock<Option<Arc<crate::template::Views>>>,
@@ -149,6 +161,7 @@ impl Document {
                 language,
                 source,
                 canonical: None,
+                archive: None, archive_read_only: None,
                 image,
                 fingerprint,
                 large,
@@ -159,7 +172,7 @@ impl Document {
             large,
             version,
             protocol_lines: std::sync::OnceLock::new(),
-            write_baseline: None,
+            write_baseline: None, archive_baseline: None,
             templates: std::sync::OnceLock::new(),
             embedded: None,
         };
@@ -181,6 +194,7 @@ impl Document {
             language: None,
             source,
             canonical: None,
+            archive: None, archive_read_only: None,
             image: None,
             fingerprint: 0,
             large: false,
@@ -207,14 +221,14 @@ impl Document {
         let lines = line_starts.len() - usize::from(text.ends_with('\n'));
         let large = if source.loaded_version == Some(version) { source.large }
             else { source.large || text.len() > LARGE_BYTES || lines > LARGE_LINES };
-        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None, templates: std::sync::OnceLock::new(), embedded: None }
+        Self { source, version, text, line_starts, large, protocol_lines: std::sync::OnceLock::new(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), embedded: None }
     }
 
     /// This version of a template as `projection` presents it: the same identity, version and text (shared), sent to
     /// its server as the projection.
     pub(crate) fn embedded_view(&self, projection: Arc<crate::template::Projection>) -> Self {
         Self { source: self.source.clone(), version: self.version, text: self.text.clone(), line_starts: self.line_starts.clone(), large: self.large,
-            protocol_lines: self.protocol_lines.clone(), write_baseline: None, templates: std::sync::OnceLock::new(), embedded: Some(projection) }
+            protocol_lines: self.protocol_lines.clone(), write_baseline: None, archive_baseline: None, templates: std::sync::OnceLock::new(), embedded: Some(projection) }
     }
 
     /// An ERB or Haml template's embedded-language views (`None`: not a template, a large file, or itself a view).
@@ -242,6 +256,19 @@ impl Document {
             None if self.is_template() => None,
             None => self.language(),
         }
+    }
+
+    pub(crate) fn with_archive(mut self, location: crate::archive::Location, reason: Option<String>, baseline: Option<Arc<crate::archive::Baseline>>) -> Self {
+        let language = location.member_name().and_then(|name| highlight::detect(std::path::Path::new(name), self.line(0)));
+        let metadata = Arc::make_mut(&mut self.source);
+        metadata.language = language;
+        metadata.source = location.to_uri();
+        metadata.canonical = baseline.as_ref().map(|baseline| baseline.location.to_uri());
+        metadata.archive = Some(location);
+        metadata.archive_read_only = reason;
+        self.archive_baseline = baseline;
+        self.write_baseline = None;
+        self
     }
 
     pub(crate) fn set_canonical(&mut self, canonical: PathBuf) { Arc::make_mut(&mut self.source).canonical = Some(canonical); }
@@ -287,6 +314,7 @@ impl Document {
             large: self.large,
             protocol_lines: self.protocol_lines.clone(),
             write_baseline: self.write_baseline.clone(),
+            archive_baseline: self.archive_baseline.clone(),
             // Another name may be another template language (or none): its views are built for it.
             templates: std::sync::OnceLock::new(),
             embedded: None,

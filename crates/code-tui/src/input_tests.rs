@@ -34,6 +34,8 @@ mod scrollbar;
 mod problems;
 #[path = "input_tests/project_syntax.rs"]
 mod project_syntax;
+#[path = "input_tests/archive.rs"]
+mod archive;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{
@@ -66,6 +68,60 @@ fn app(dir: &Path) -> App {
 
 fn key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     app.handle(Event::Key(KeyEvent::new(code, modifiers)));
+}
+
+#[test]
+fn open_prompt_keeps_exact_path_whitespace_and_first_pasted_line() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["file", "file ", " file", " "] {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+    let mut a = app(dir.path());
+    for name in ["file ", " file", " "] {
+        a.run(CommandId::Open);
+        key(&mut a, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(a.modal.as_ref().is_some_and(|m| m.error.is_some()));
+        a.handle(Event::Paste(format!("{name}\nignored")));
+        assert_eq!(a.modal.as_ref().unwrap().input, name);
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        let target = dir.path().join(name);
+        settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.loaded() && t.source() == target));
+        let source = a.session.state().current_source().unwrap();
+        assert_eq!(source.copy_range(0..source.len_bytes()).unwrap(), name);
+    }
+    assert_eq!(std::fs::read(dir.path().join("file")).unwrap(), b"file");
+}
+
+#[test]
+fn alt_home_and_end_jump_picker_rows_without_editing_query() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["a_item.txt", "b_item.txt"] {
+        std::fs::write(dir.path().join(name), name).unwrap();
+    }
+    let mut a = app(dir.path());
+    settle(&mut a, |a| a.session.state().project().is_some_and(|p| matches!(p.coverage(), code_core::project::Coverage::Complete(_))));
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("item".into()));
+    navigation_ready(&mut a);
+    assert_eq!(a.session.state().navigation().unwrap().rows.len(), 2);
+    draw(&mut a, 32, 8);
+    key(&mut a, KeyCode::End, KeyModifiers::ALT);
+    assert_eq!(a.modal.as_ref().unwrap().at, 1);
+    assert_eq!(a.modal.as_ref().unwrap().input, "item");
+    draw(&mut a, 32, 8);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.loaded() && t.source() == dir.path().join("b_item.txt")));
+    key(&mut a, KeyCode::Char('p'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("item".into()));
+    navigation_ready(&mut a);
+    key(&mut a, KeyCode::Down, KeyModifiers::NONE);
+    key(&mut a, KeyCode::Home, KeyModifiers::ALT);
+    assert_eq!(a.modal.as_ref().unwrap().at, 0);
+    assert_eq!(a.modal.as_ref().unwrap().input, "item");
+    draw(&mut a, 32, 8);
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    settle(&mut a, |a| a.session.state().active().is_some_and(|t| t.loaded() && t.source() == dir.path().join("a_item.txt")));
 }
 pub(crate) fn settle(app: &mut App, done: impl Fn(&App) -> bool) {
     let deadline = Instant::now() + Duration::from_secs(10);

@@ -72,6 +72,8 @@ pub(crate) struct Revalidated { pub request: u64, pub source: crate::session::Se
 #[derive(Default)]
 pub(crate) struct State {
     pub read: Option<Baseline>,
+    pub(crate) archive: Option<Arc<crate::archive::Baseline>>,
+    pub(crate) archive_checked: Option<crate::session::archive_save_work::Checked>,
     pub status: Status,
     pub captured: Option<Captured>,
     /// Actual accounted successful write; compaction and recheck never create this receipt.

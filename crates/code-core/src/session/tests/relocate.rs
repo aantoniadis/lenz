@@ -149,3 +149,28 @@ fn nothing_to_move_explains_why() {
     s.dispatch(Command::SetExplorer(Explorer { visible: true, selected: None, top: None }));
     assert_eq!(s.disabled(CommandId::MoveExplorerEntry), Some("Highlight a file or folder in the explorer"));
 }
+
+#[test]
+fn renaming_a_real_file_carries_the_dirty_document_opened_through_its_alias() {
+    let d = tempfile::tempdir().unwrap();
+    let root = d.path().join("proj");
+    std::fs::create_dir(&root).unwrap();
+    let real = write(&root, "real.txt", b"saved\n");
+    let alias = root.join("alias.txt");
+    std::os::unix::fs::symlink(&real, &alias).unwrap();
+    let mut s = session(d.path());
+    open_project(&mut s, &root, "alias.txt");
+    let tab = s.state().active().unwrap().id();
+    let expected = s.state().current_source().unwrap().key();
+    s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..0, text: "draft ".into() }], kind: crate::text::EditKind::Paste });
+    relocate(&mut s, Kind::Rename, "real.txt", "renamed.txt");
+    let target = root.join("renamed.txt");
+    assert_eq!(s.state().active().unwrap().source(), target);
+    assert!(s.state().tab_dirty(tab));
+    assert_eq!(text(&s), "draft saved\n");
+    assert_eq!(s.disabled(CommandId::Save), None);
+    s.dispatch(Command::Save { tab });
+    settle(&mut s, |s| !s.state().tab_dirty(tab));
+    assert_eq!(std::fs::read(&target).unwrap(), b"draft saved\n");
+    assert!(!real.exists() && !alias.exists());
+}

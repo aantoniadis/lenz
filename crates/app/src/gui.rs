@@ -27,6 +27,7 @@ pub fn run() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    let launch_cwd = std::env::current_dir().unwrap_or_default();
     // the Change Set Picker, when a repository stands behind the Change Set: (root, shown)
     let mut picker: Option<(std::path::PathBuf, bool)> = None;
     let log_branches=matches!(request.launch,cli::Launch::Log{..}).then(||crate::repository_session::initial_log_branches(&request.spec));
@@ -117,7 +118,7 @@ pub fn run() -> ExitCode {
             }
         }
         (cli::Launch::Log { .. }, Some(root)) => {
-            if let Ok((initial,spec,_))=crate::repository_session::initial_log_comparison(&root,&request.spec){
+            if let Ok((initial,spec,_))=crate::repository_session::initial_log_comparison(&launch_cwd,&request.spec){
                 set=initial;request.spec=spec;
             }
             picker=Some((root,true));
@@ -218,7 +219,7 @@ pub fn run() -> ExitCode {
             // the shared repository session, opened on the comparison loaded above; a followed file is
             // opened by the session once the sidebar inventory has resolved the repository
             let follow = match &request.launch { cli::Launch::Log { follow } => follow.clone(), _ => None };
-            let session = picker.map(|(root, shown)| crate::repository_session::RepositorySession::open_loaded_with_paths(root, shown, log_branches, follow, log_paths, set.clone(), request.spec.clone()));
+            let session = picker.map(|(_root, shown)| crate::repository_session::RepositorySession::open_loaded_with_paths(launch_cwd.clone(), shown, log_branches, follow, log_paths, set.clone(), request.spec.clone()));
             let viewer = cx.new(|cx| {
                 let mut v = ui::Viewer::new(set, request.spec, request.blame, request.name, doc, view, blocks.is_none(), request.options, font, started, timings, cx);
                 if let Some(session) = session {
