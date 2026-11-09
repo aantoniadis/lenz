@@ -101,9 +101,18 @@ fn project_replace_preview_input_selection_cancel_apply_and_undo_match_in_both_a
         visual.simulate_keystrokes("ctrl-tab");
         tui.handle(Event::Key(KeyEvent::new(KeyCode::Tab,KeyModifiers::CONTROL)));
         settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().current_source().is_some_and(|d|d.source().ends_with("scratch_1.rb")));
-        gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project},cx));
-        tui.dispatch(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project});
-        settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().results().is_some_and(|r|r.done()));
+        // The preceding Save's OS notification can arrive after a new search. Honor its stale
+        // refusal and rerun, as a user must; never bypass the current-source safety check.
+        for _ in 0..3 {
+            gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project},cx));
+            tui.dispatch(Command::Search {query:"foo".into(),scope:code_core::session::SearchIn::Project});
+            settle(&mut visual,&mut tui,&mut terminal,&|s|s.state().results().is_some_and(|r|r.done()));
+            let reasons = [gui.read_with(&visual,|v,_|v.session().disabled(CommandId::ProjectReplace)),tui.session.disabled(CommandId::ProjectReplace)];
+            assert!(reasons.iter().all(|r| r.is_none() || *r == Some("Rerun a complete project search before replacing")), "{reasons:?}");
+            if reasons.iter().all(Option::is_none) { break; }
+        }
+        assert!(gui.read_with(&visual,|v,_|v.session().disabled(CommandId::ProjectReplace).is_none()));
+        assert!(tui.session.disabled(CommandId::ProjectReplace).is_none());
         gui.update(&mut visual, |v,cx| v.dispatch_for_test(Command::PreviewProjectReplace("again".into()),cx));
         tui.dispatch(Command::PreviewProjectReplace("again".into()));
         settle(&mut visual,&mut tui,&mut terminal,&|s|s.workspace_preview().is_some());
