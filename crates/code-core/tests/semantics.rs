@@ -1791,7 +1791,7 @@ fn the_context_menu_lists_navigation_then_copy_and_copies_paths() {
     assert_eq!(f.s.context_menu(), vec![
         C(CommandId::Definition), C(CommandId::PeekDefinition), C(CommandId::TypeDefinition),
         C(CommandId::Implementation), C(CommandId::Usages), C(CommandId::CallHierarchy),
-        C(CommandId::TypeHierarchy), C(CommandId::Documentation), Separator,
+        C(CommandId::TypeHierarchy), C(CommandId::Documentation), C(CommandId::RenameSymbol), Separator,
         C(CommandId::Collapse), C(CommandId::Expand), C(CommandId::CollapseAll), C(CommandId::ExpandAll), Separator,
         C(CommandId::Copy), C(CommandId::SendSelectionToTerminal), C(CommandId::Cut), C(CommandId::Paste), C(CommandId::Delete), C(CommandId::ReadOnlyMode),
         C(CommandId::CopyPath), C(CommandId::CopyPathLine), C(CommandId::LocateFile), Separator,
@@ -2054,7 +2054,13 @@ fn a_new_version_cancels_the_older_request_and_asks_again() {
     f.settle_until(|| !sent(&log, "textDocument/inlayHint").is_empty());
     write(&f.root, "src/main.rs", &HINTED.replace("add(1)", "add(2)"));
     f.s.dispatch(Command::Reload);
-    f.settle_until(|| sent(&log, "textDocument/inlayHint").len() >= 2);
+    // Earlier background requests can already make the count reach two. Wait for the
+    // actual post-change request before asserting protocol order.
+    f.settle_until(|| {
+        let all = messages(&log);
+        all.iter().position(|m| m["method"] == "textDocument/didChange")
+            .is_some_and(|change| all.iter().skip(change + 1).any(|m| m["method"] == "textDocument/inlayHint"))
+    });
     // The fake answers one request at a time (300 ms each), so the older one is still pending when the text changes.
     f.settle_until(|| !sent(&log, "$/cancelRequest").is_empty());
     let hint_ids: Vec<Value> = sent(&f.log, "textDocument/inlayHint").iter().map(|m| m["id"].clone()).collect();

@@ -4,6 +4,7 @@ use crate::{create, relocate, session::{PasteEntry, Session}, trash};
 pub enum Form<'a> {
     OpenPath(crate::open_path::Kind),
     RenameTerminal,
+    WorkspaceInput(bool),
     Create(create::Kind, &'a str),
     SaveAs,
     Scratch,
@@ -30,6 +31,7 @@ impl Session {
         let folder = |dir: &str| if dir.is_empty() { "the project root" } else { dir }.to_string();
         let (title, field, description, submit, destructive) = match form {
             Form::OpenPath(kind) => (kind.title(), Some("Path"), "Enter an existing path. Relative paths start in the current project; ~/ starts in your home folder.".into(), "Open", false),
+            Form::WorkspaceInput(rename) => (if rename { "Rename Symbol" } else { "Replace in Project" }, Some(if rename { "New name" } else { "Replacement" }), if rename { "The language server proposes edits; review them before applying." } else { "Replace matches from the completed project search. Replacement is literal; an empty value deletes matches." }.into(), "Preview", false),
             Form::RenameTerminal => ("Rename Terminal Tab", Some("Name"), "Change this tab's label. Its shell and history stay running.".into(), "Rename", false),
             Form::Create(kind, dir) => (kind.label(), Some("Name"), format!("Create in {}", folder(dir)), "Create", false),
             Form::SaveAs => ("Save As", Some("File path"), "Save the current draft to a new location.".into(), "Save", false),

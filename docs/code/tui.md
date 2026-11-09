@@ -656,3 +656,11 @@ its retained text, **Clear** removes it, and **Hide** or Escape collapses the pa
 input to the editor. The latest 256 entries are kept in memory, up to 8 KiB each, with UTC timestamps;
 they survive file switches but are not saved between sessions. New entries follow the bottom when
 scrolled there. This is application activity, not an unrestricted capture of every child process's output.
+
+Project-wide replacement and symbol rename use Commands → **Replace in Project…** /
+**Rename Symbol…**. Replace starts from a completed project search, retaining its file
+filter and match options. Enter previews the replacement/new name; `N`/`P` selects a
+preview file, Space includes/excludes it, `A` applies to drafts, and Escape cancels.
+The same controls have clickable buttons, including in narrow terminals. Normal Save
+writes a changed file; Undo reverts its replacement as one step. See the
+[replacement and rename guide](README.md#project-replacement-and-symbol-rename) for limits.

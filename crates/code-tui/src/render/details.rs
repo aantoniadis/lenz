@@ -20,6 +20,7 @@ impl App {
         let close = || b("Close", "Esc", false, false);
         match kind {
             Details::Terminal(_) => vec![b(self.session.state().terminal().prompt().map_or("Confirm", |p| p.accept), "Enter", false, true), b("Cancel", "Esc", false, false)],
+            Details::Workspace => vec![b("Previous file", "p", false, false), b("Next file", "n", false, false), b("Include/exclude", "Space", self.session.workspace_busy(), false), b("Apply", "a", self.session.disabled(CommandId::ApplyWorkspaceEdit).is_some(), false), b("Cancel", "Esc", false, false)],
             Details::Install => self.session.server_install_actions().iter().map(|id| b(id.label(), "", self.session.disabled(*id).is_some(), false)).chain([close()]).collect(),
             Details::External => code_core::external::Choice::ALL.into_iter().zip(["s", "o", "Esc"]).map(|(c, k)| b(c.label(), k, self.session.external_prompt().is_some_and(|p| p.disabled(c).is_some()), false)).collect(),
             Details::Reconcile => code_core::reconcile::Choice::ALL.into_iter().map(|c| b(c.label(), c.key(), self.session.reconcile_prompt().is_some_and(|p| p.disabled(c).is_some()), matches!(c, code_core::reconcile::Choice::TakeDisk | code_core::reconcile::Choice::SaveDraft))).collect(),
@@ -70,6 +71,6 @@ pub(super) fn paint_footer(frame: &mut ratatui::Frame, geometry: &mut Geometry, 
     match kind {
         Details::Text => { geometry.details_copy = rects.first().copied().unwrap_or_default(); geometry.details_close = rects.get(1).copied().unwrap_or_default(); }
         Details::Change | Details::Sql | Details::Commit => { geometry.details_diff = rects.first().copied().unwrap_or_default(); geometry.details_copy = rects.get(1).copied().unwrap_or_default(); geometry.details_close = rects.get(2).copied().unwrap_or_default(); }
-        Details::Terminal(_) | Details::Install | Details::External | Details::Reconcile | Details::Replace | Details::Recovered | Details::Close | Details::Checkout => geometry.details_choices = rects,
+        Details::Workspace | Details::Terminal(_) | Details::Install | Details::External | Details::Reconcile | Details::Replace | Details::Recovered | Details::Close | Details::Checkout => geometry.details_choices = rects,
     }
 }

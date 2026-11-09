@@ -155,6 +155,56 @@ be attributed to completion of the requested action. Correctness checks separate
 verify saved/undone merge bytes; completed model-work timings have separate metric
 names. Preserve this boundary when interpreting sub-frame input numbers.
 
+## Validation process cleanup
+
+On Linux, `scripts/ci-local.sh` automatically uses `scripts/reap-children.py`.
+Run individual test or benchmark commands under it too when a container's PID 1
+does not reap orphaned children:
+
+```sh
+python3 scripts/reap-children.py -- cargo test -p lenz-content --locked
+```
+
+The supervisor adopts and collects only its command's orphaned descendants,
+including children that start separate sessions. It forwards interruption to the
+command's process group. After the command exits, descendants have two seconds
+to finish; remaining children receive TERM and then KILL. Forced cleanup changes
+an otherwise successful result to failure. The `VALIDATION_CHILDREN` stderr
+record reports the command status, collected orphan count, cleanup and elapsed
+time. Other platforms execute the command directly without Linux adoption.
+An outer supervisor's elapsed time includes cleanup and is not a latency metric;
+the benchmark's own samples and endpoint definitions remain authoritative.
+The optional `--old-git` container uses `--init` as well: its processes belong to
+the container runtime and cannot be collected by the host command's supervisor.
+
+Fixture Git commands set `maintenance.autoDetach=false` and `gc.autoDetach=false`
+per invocation. This keeps automatic maintenance owned by the command rather than
+creating an orphan after commits; production Git commands and user configuration
+are unchanged. First run a small batch, compare process counts before and after,
+then repeat before starting long workloads. Unexpected growth or forced cleanup
+needs investigation. The supervisor cannot collect zombies already adopted by
+PID 1, so a polluted environment still needs recreation or a full restart.
+A supervisor also cannot clean up after its own uncatchable SIGKILL; a proper
+reaping container init remains the preferred outer boundary.
+
+The project replacement acceptance probe runs alone after a normal release test
+build (build the standalone terminal binaries separately from GUI features):
+
+```sh
+python3 scripts/reap-children.py -- cargo test --locked --release -p code-core \
+  workspace_edit_release_probe --no-run
+LENZ_WORKSPACE_PROBE_SECONDS=120 python3 scripts/reap-children.py -- \
+  cargo test --locked --release -p code-core workspace_edit_release_probe -- --ignored --nocapture
+```
+
+`WORKSPACE_PROBE` workload version 2 retains every cycle's completed preview/apply
+wall time, elapsed timestamp and process memory sample. Each cycle replaces 4,000
+matches across 40 files, verifies every draft and its independent Undo, and checks
+all 40 disk files remain byte-identical. Timing includes completion polling;
+it excludes frontend rendering, language-server requests and Save. RSS includes
+the probe's retained samples and allocator residency, and does not prove leak
+freedom. Keep the actual duration, raw samples and test executable/source identity.
+
 ## Linux and macOS
 
 | Capability | Linux | macOS |

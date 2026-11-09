@@ -4813,3 +4813,6 @@ fn popup_fields_edit_ranges_and_preserve_document_and_both_carets() {
     key(&mut a,KeyCode::Home,KeyModifiers::NONE);key(&mut a,KeyCode::Right,KeyModifiers::SHIFT);key(&mut a,KeyCode::BackTab,KeyModifiers::SHIFT);
     assert_eq!(App::field_cursor(a.modal.as_ref().unwrap()).selected(&a.modal.as_ref().unwrap().input),Some("f"));
 }
+
+#[path = "input_tests/workspace_edit.rs"]
+mod workspace_edit;

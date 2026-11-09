@@ -88,6 +88,8 @@ pub enum Question {
     Formatting,
     /// The `source.organizeImports` actions for a document.
     OrganizeImports,
+    /// A workspace edit renaming the symbol at the caret.
+    Rename,
     /// What the server inserts at a position after a typed character (its provider's `auto_insert` request). Not in
     /// [`Question::ALL`]: no protocol capability declares it, so only a server that has it lists it as offered.
     AutoInsert,
@@ -111,6 +113,8 @@ pub enum Lane {
     CodeAction,
     /// Formatting or organizing a document's imports, explicitly or before a save.
     Format,
+    /// An explicit rename request, independent of other semantic work.
+    Rename,
     /// Text inserted after a typed character (a closing tag): never cancelled by completion or documentation.
     AutoInsert,
 }
@@ -138,6 +142,7 @@ impl Question {
             Question::SignatureHelp => "textDocument/signatureHelp",
             Question::CodeAction | Question::OrganizeImports => "textDocument/codeAction",
             Question::Formatting => "textDocument/formatting",
+            Question::Rename => "textDocument/rename",
             // Its provider's own request (see `ask_with`).
             Question::AutoInsert => "",
         }
@@ -160,6 +165,7 @@ impl Question {
             Question::SignatureHelp => "signatureHelpProvider",
             Question::CodeAction | Question::OrganizeImports => "codeActionProvider",
             Question::Formatting => "documentFormattingProvider",
+            Question::Rename => "renameProvider",
             // No protocol capability: its provider declares it (see `supports`).
             Question::AutoInsert => "",
         }
@@ -186,6 +192,7 @@ impl Question {
             Question::CodeAction => "quick fixes",
             Question::Formatting => "formatting",
             Question::OrganizeImports => "organize imports",
+            Question::Rename => "symbol rename",
             Question::AutoInsert => "automatic closing tags",
         }
     }
@@ -200,6 +207,7 @@ impl Question {
             Question::SignatureHelp => Lane::Signature,
             Question::CodeAction => Lane::CodeAction,
             Question::Formatting | Question::OrganizeImports => Lane::Format,
+            Question::Rename => Lane::Rename,
             Question::AutoInsert => Lane::AutoInsert,
             // A hierarchy's root is the user's own request; its levels load in the background.
             Question::IncomingCalls | Question::OutgoingCalls | Question::Supertypes | Question::Subtypes | Question::TypeUsages => Lane::Hierarchy,
@@ -208,7 +216,7 @@ impl Question {
     }
 
     /// Every question, for capability views.
-    pub const ALL: [Question; 20] = [
+    pub const ALL: [Question; 21] = [
         Question::Definition,
         Question::Usages,
         Question::Symbols,
@@ -229,6 +237,7 @@ impl Question {
         Question::CodeAction,
         Question::Formatting,
         Question::OrganizeImports,
+        Question::Rename,
     ];
 }
 
@@ -1145,7 +1154,7 @@ impl Semantics {
                 params = json!({ "textDocument": { "uri": lsp::file_uri(doc.source()) }, "range": { "start": { "line": 0, "character": 0 }, "end": end },
                     "context": { "diagnostics": [], "only": ["source.organizeImports"], "triggerKind": 1 } });
             }
-            Question::Definition | Question::Symbols | Question::Implementation | Question::TypeDefinition | Question::PrepareCallHierarchy | Question::PrepareTypeHierarchy | Question::Hover | Question::Highlight | Question::AutoInsert => {}
+            Question::Definition | Question::Symbols | Question::Implementation | Question::TypeDefinition | Question::PrepareCallHierarchy | Question::PrepareTypeHierarchy | Question::Hover | Question::Highlight | Question::Rename | Question::AutoInsert => {}
         }
         if let (Value::Object(params), Value::Object(extra)) = (&mut params, extra) { params.extend(extra); }
         if !background {
@@ -1859,7 +1868,7 @@ impl Server {
         self.next_id += 1;
         let id = self.next_id;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))?;
-        let sources = if matches!(lane, Lane::Foreground | Lane::Hierarchy) {
+        let sources = if matches!(lane, Lane::Foreground | Lane::Hierarchy | Lane::Rename) {
             source_context(&self.open)
         } else { Default::default() };
         self.pending.insert(lane, PendingRequest { request, id, sources });

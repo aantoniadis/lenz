@@ -5,6 +5,10 @@
 # Skip once with `git push --no-verify`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Keep detached fixture/tool children owned even in containers whose PID 1 does not reap.
+if [[ $(uname) == Linux && ${LENZ_VALIDATION_SUPERVISOR_PID:-} != "$PPID" ]]; then
+    exec python3 scripts/reap-children.py -- "$PWD/scripts/ci-local.sh" "$@"
+fi
 step() { printf '\n== %s\n' "$*"; }
 # gpui compiles Metal shaders; the Command Line Tools have no `metal`, so fall back to an installed Xcode.
 if [[ $(uname) == Darwin && -z ${DEVELOPER_DIR:-} ]] && ! xcrun -find metal > /dev/null 2>&1 \
@@ -50,7 +54,7 @@ if [[ ${1:-} == --old-git ]]; then
     step "core tests on git 2.30 (Debian bullseye)"
     engine=$(command -v podman || command -v docker)
     # bullseye is past end of life: use the image's pinned snapshot of the archive. Build output stays in a volume.
-    "$engine" run --rm -v "$PWD:/src:ro" -v lenz-old-git-target:/target -e CARGO_TARGET_DIR=/target debian:bullseye bash -euc '
+    "$engine" run --init --rm -v "$PWD:/src:ro" -v lenz-old-git-target:/target -e CARGO_TARGET_DIR=/target debian:bullseye bash -euc '
         sed -i -e "s|^deb |# deb |" -e "s|^# deb http://snapshot|deb http://snapshot|" /etc/apt/sources.list
         apt-get -qq -o Acquire::Check-Valid-Until=false update
         apt-get -qq install -y git curl build-essential pkg-config libxkbcommon-x11-dev libwayland-dev \

@@ -50,6 +50,7 @@ pub enum InterfaceAction {
     OpenRecent,
     FindFile,
     SearchProject,
+    WorkspaceInput { rename: bool },
     FindInFile,
     GoToLine,
     FindDeclarations,
@@ -209,6 +210,10 @@ impl Session {
             CommandId::OpenFolder => return CatalogAction::Interface(InterfaceAction::OpenFolder),
             CommandId::OpenRecent => return CatalogAction::Interface(InterfaceAction::OpenRecent),
             CommandId::FindFile => return CatalogAction::Interface(InterfaceAction::FindFile),
+            CommandId::ProjectReplace => return CatalogAction::Interface(InterfaceAction::WorkspaceInput { rename: false }),
+            CommandId::RenameSymbol => return CatalogAction::Interface(InterfaceAction::WorkspaceInput { rename: true }),
+            CommandId::ApplyWorkspaceEdit => Command::ApplyWorkspaceEdit,
+            CommandId::CancelWorkspaceEdit => Command::CancelWorkspaceEdit,
             CommandId::SearchProject => return CatalogAction::Interface(InterfaceAction::SearchProject),
             CommandId::FindInFile if state.active().and_then(|tab| state.csv(tab.id())).is_some() => Command::Csv(crate::csv::Command::BeginFilter),
             CommandId::FindInFile => return CatalogAction::Interface(InterfaceAction::FindInFile),
@@ -605,7 +610,7 @@ impl CommandId {
             | Self::CallHierarchy | Self::CallHierarchyCallers | Self::CallHierarchyCallees
             | Self::TypeHierarchy | Self::TypeHierarchySupertypes | Self::TypeHierarchySubtypes
             | Self::Documentation | Self::NextProblem | Self::PreviousProblem | Self::ShowProblems | Self::CheckProjectSyntax | Self::CancelProjectSyntax | Self::ShowInSource | Self::FollowLink => G::Navigate,
-            Self::SearchEverywhere | Self::NameLetterSearch | Self::RankNearbyFiles | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
+            Self::SearchEverywhere | Self::NameLetterSearch | Self::RankNearbyFiles | Self::FindSymbol | Self::FindAction | Self::FindFile | Self::SearchProject | Self::ProjectReplace | Self::RenameSymbol | Self::ApplyWorkspaceEdit | Self::CancelWorkspaceEdit | Self::FindInFile | Self::NextMatch | Self::PreviousMatch
             | Self::CloseFind | Self::MatchCase | Self::WholeWord | Self::RegularExpression | Self::ReplaceMatch | Self::ReplaceAll | Self::ListMatches
             | Self::FindDeclarations | Self::RerunSearch | Self::CloseResults | Self::ToggleResults | Self::StopSearch | Self::FoldAllResults | Self::NextResult | Self::PreviousResult | Self::PreviousResults | Self::NextResults | Self::Usages | Self::Symbols
             | Self::FileSymbols => G::Find,

@@ -2476,3 +2476,32 @@ timing because `/usr/bin/time` was absent; the scratch collector fallback and un
 profile/features, source/rlib/probe hashes, every raw sample and actual durations are retained. Evidence
 is under `perf-results/archive-editor/` and `perf-results/fix-rigorous-2026-11-09/`, including source
 archives, binary identities, final gate records, native screenshots, frontend repeats and word probes.
+
+## Project replacement and symbol rename — 2026-11-09
+
+Fresh-environment validation now covers the rebased PR #50 tree. The
+[validation report](research/project-replace-rename-validation.md) records exact
+sources, binaries, commands, normal Cargo profiles and raw evidence under
+`perf-results/pr51/`. The complete local gate, 17 focused core checks, three actual
+GUI/TUI input/render replays and normal production GUI light/dark replays pass.
+An integration bug treated inactive retained dirty/undoable tabs as loading;
+shared preflight now validates their actual buffers before publishing any edits,
+then restores views without losing prior text, buffer identity or per-file Undo.
+Scratch-picker, navigation and Save When Leaving a File integration are covered.
+
+| Experiment | Result / decision |
+| --- | --- |
+| Process cleanup on a fresh environment | Eight lifecycle cases, the Rust Trace2 fixture regression and 100 synchronous commits pass. The full gate collects 817 orphans without forced cleanup; global zombies remain at one from an initial unsupervised checkout. No EAGAIN. Old 32,000-zombie runs do not validate this tree. |
+| Same-machine normal release GUI comparison against main after PR #50 | Seven alternating measured launches: mapped-window median 107.256 → 104.197 ms, p95 118.858 → 144.431 ms. Three editing processes / 60 actions: first edit damage 13.047 → 13.096 ms; settled RSS 210.004 → 206.375 MiB and peak 210.004 → 210.883 MiB. Exact-byte Save/Undo/Redo pass. No speedup claimed from repaint timings. |
+| Standalone TUI, eight alternating pairs | First feedback 7.559 → 7.426 ms, content 20.949 → 19.385 ms, pooled key feedback 0.805 → 0.806 ms. Each process scrolls at least 20 seconds, checks bytes, idle and termios. Settled RSS medians 46.146 → 51.062 MiB; peak 56.520 → 61.109 MiB. Both executables reproduce roughly 42/51 MiB settled modes; do not average them into a preservation claim. |
+| Investigate higher initial TUI RSS | Six further short reload trials per build reproduce five high-mode/one low-mode processes in each, with medians 50.076 → 50.461 MiB. Separate glibc diagnostics estimate about 6.42 MiB allocated in both and about 32 MiB free arena space; trim changes residency. Diagnostic instrumentation/short stress are excluded from normal performance samples. Identical default RSS distributions and indefinite leak freedom remain unproved. |
+| Create the workspace cancellation token lazily | Six shorter trials remain in the high residency mode, 50.359–52.012 MiB; no RSS reduction. Reverted. Patch, normal-profile build and binary retained separately. No production allocator tuning or profile exception. |
+| Sustained 40-file / 4,000-edit replacement and per-file Undo | 4,220 cycles in 120.003 seconds. Prepare median/p95 2.332/3.551 ms, Apply 10.454/14.396 ms. Every draft, Undo and all disk bytes pass each cycle. Sampled RSS peak 26.910 MiB; quarter medians 22.748/23.965/25.176/26.176 MiB include retained probe samples and allocator residency. Candidate-only core work, not frontend/provider/Save latency. |
+| Initial tool/header, adapter-fixture and native OCR failures | Retained and corrected: cached tools were outside PATH, matching Clang headers were missing, menu/overlap fixtures made incorrect geometry assumptions, and dark OCR needed contrast preprocessing. One obsolete gate and an initially mis-scoped preload diagnostic were interrupted explicitly. No failed application assertion was suppressed. |
+
+Standalone terminal binaries exclude GPUI and use the normal release profile;
+rebuilding the candidate with the exact baseline command yields the same measured
+hash. Production GUI uses private Xvfb/Mesa lavapipe, so mapped-window, XDamage and
+PTY feedback are distinct from physical presentation. RSS is not GPU accounting
+or leak proof. Native macOS/Windows/Wayland, physical GPU/display checks, old-Git
+container coverage and prolonged external-provider workloads remain unverified.

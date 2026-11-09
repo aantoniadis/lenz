@@ -15,7 +15,7 @@ impl ReaderView {
 
     /// File prompts own all input; the core still validates and writes, including the captured Save As tab.
     pub(super) fn file_prompt_key(&mut self, ev: &KeyDownEvent, cx: &mut Context<Self>) -> bool {
-        let Some(Modal::SaveAs { input, selected, error, .. } | Modal::RenameTerminal { input, selected, error, .. }) = &mut self.modal else { return false };
+        let Some(Modal::SaveAs { input, selected, error, .. } | Modal::RenameTerminal { input, selected, error, .. } | Modal::WorkspaceInput { input, selected, error, .. }) = &mut self.modal else { return false };
         let key = ev.keystroke.key.as_str();
         let ctrl = ev.keystroke.modifiers.control || ev.keystroke.modifiers.platform;
         if key == "escape" { self.modal = None; cx.notify(); return true; }
@@ -26,6 +26,10 @@ impl ReaderView {
                     else {
                         Some(Command::SaveAs { tab: *tab, path: code_core::open_path::expand(input, dir) })
                     }
+                }
+                Some(Modal::WorkspaceInput { rename, input, error, .. }) => {
+                    if *rename && input.is_empty() { *error = Some("Enter the new symbol name".into()); None }
+                    else { Some(if *rename { Command::RenameSymbol(input.clone()) } else { Command::PreviewProjectReplace(input.clone()) }) }
                 }
                 Some(Modal::RenameTerminal { id, input, error, .. }) => {
                     match self.session.terminal_rename_refusal(*id, input) {

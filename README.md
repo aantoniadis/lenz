@@ -58,6 +58,10 @@ A bounded SQL completion check (512 tables × 16 columns, Linux release, ten alt
 measured **1.84→1.86 ms per completion** after the default-schema fix; paired differences varied in both
 directions. This is core computation, not popup latency; see the [SQL completion notes](docs/optimization-notebook.md#sql-metadata-completion--2026-10-29).
 
+A Linux release project-edit check completed **4,220 cycles in 120 seconds**, each replacing
+4,000 matches across 40 files and checking exact per-file Undo and disk bytes. Core preview/Apply
+medians were **2.33/10.45 ms**; see [validation results and frontend measurement limits](docs/research/project-replace-rename-validation.md).
+
 - **Explore code** with a project tree, file finder, tabs, independent split panes,
   breadcrumbs, outline, folding and sticky declarations.
 - **Edit archive members** by opening a ZIP or tarball, including nested archives. Open a member,
@@ -68,6 +72,10 @@ directions. This is core computation, not popup latency; see the [SQL completion
   Dependency definitions reveal a lazy **Libraries** section for browsing their source files.
   F2 offers [project-scoped LSP settings](docs/code/providers.md#project-language-server-settings),
   including a reversible Ruby tooling-gem exclusion toggle and a reset to inherited settings.
+- **Replace across a project** with a preview of each affected file, inclusion controls and undoable draft edits.
+  **Rename Symbol…** uses the language server and the same preview before applying changes. See the
+  [replacement and rename guide](docs/code/README.md#project-replacement-and-symbol-rename) and
+  [Linux validation results](docs/research/project-replace-rename-validation.md).
 - **Find and replace** within a file — the replace row takes the next match or every match, each replace one undo
   step on the draft — or search across the project, with case, whole-word and regular-expression
   options. Go straight to a file and line with `Ctrl+P`, or a line with `Ctrl+G`.
@@ -621,6 +629,13 @@ See the [performance overview](docs/performance.md) for method and accepted cost
 ## Contributing
 
 Checks run locally: `scripts/ci-local.sh` runs clippy with warnings as errors, the panic-site ratchet, every test suite and the release size check (`--old-git` adds the git 2.30 tests in podman or docker). Enable it before every push with `git config core.hooksPath .githooks`. `python3 scripts/capture-screenshots.py --xvfb /path/to/Xvfb` regenerates the Diff screenshots (Catppuccin Mocha) on a private display. Add `--reader target/release/lenz-code --only reader-code reader-markdown` to capture Lenz Code using disposable demo files.
+
+On Linux, local CI runs under a child-reaping supervisor so detached tools cannot
+accumulate exited processes when the container's PID 1 does not reap them. Fixture
+Git commands keep maintenance synchronous. For an individual validation command,
+use `python3 scripts/reap-children.py -- <command>`. It reports collected orphaned
+children and fails if lingering processes require forced cleanup; see the
+[process cleanup guide](docs/benchmarking.md#validation-process-cleanup).
 
 ## Licence
 
