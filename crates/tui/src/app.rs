@@ -17,6 +17,8 @@ pub(crate) type BarKey=(Side,bool,usize,u64);
 pub(crate) enum ToolbarAction { Run(lenz::catalog::Action), Palette, Icons }
 
 pub struct App {
+    pub(crate) field_inputs:lenz::field_edit::Fields,
+    pub(crate) open_comparison: Option<crate::repo_picker::View>,
     /// The restored position, applied once the repository settles; then the place being recorded.
     pub(crate) pending_place:Option<lenz::place::Restore>,
     place_recorder:Option<lenz::place::Recorder>,
@@ -98,7 +100,7 @@ pub struct App {
 
 impl App {
     pub fn new(session: Session) -> Self {
-        Self { command_palette:None,views:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,scrollbar_drag:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
+        Self { field_inputs:Default::default(), open_comparison:None,command_palette:None,views:None,layout:Default::default(),header_switch:Vec::new(),panel_switch:Vec::new(),palette_hint:Default::default(),held_diff:None,swap_at:None,pending_place:None,place_recorder:None,place_root:None,start_rendered:false,icons:crate::icons::Icons::from_env(),reset_sizes_requested:false,pane_ratio:0.5,applied_height:None,resizer:Default::default(),palette:std::sync::Arc::new(*crate::chrome::initial_palette()),theme_revision:1,theme_request:false,session, context:Default::default(),popup_hits:Vec::new(),popup_rect:Default::default(), about:None,message:None, report_request:Default::default(), toolbar:Default::default(), navigator:Default::default(), summary:Default::default(), quit: false, repository:None, visual:crate::visual::Visual::with_sticky(lenz::settings::get().view.sticky_scroll),markdown:Default::default(), visual_revision:None, visual_document:None, blame:[false;2], selection:None, diff_area:ratatui::layout::Rect::new(0,0,80,24),popup_area:ratatui::layout::Rect::new(0,0,80,24), conflicts:None,new_view:None,comparison_name:None,initial_line:None,mouse_click:None,scrollbar_drag:None,grouping:None,files_click:None,commit_panel:Default::default(), auto_repository:false,set_search:None,pending_hit:None,open_token:std::sync::Arc::new(()),opening_editor:None, #[cfg(test)] inspected_position:None, focus: Side::Right, horizontal: [0;2], columns:[None;2], prompt: None,
             input: String::new(), selected: 0, size: (80, 24) }
     }
 
@@ -131,9 +133,11 @@ impl App {
         },cwd.clone()));
         let auto_repository=matches!(request.launch,lenz::cli::Launch::Diff)&&matches!(&request.spec,lenz::changeset::Spec::Git{cached:false,revs,paths,..}
         if revs.is_empty()&&paths.is_empty());
+        let show=request.launch==lenz::cli::Launch::Show;
         let about=request.launch==lenz::cli::Launch::About;
         let blame=request.blame;let initial_settings=(request.name.clone(),request.line);let start_rendered=request.markdown==lenz::markdown::PresentationMode::Rendered;
-        let mut app=Self::new(Session::open(request,cwd));app.repository=repository;app.auto_repository=auto_repository;app.blame=[blame;2];app.comparison_name=initial_settings.0;app.initial_line=initial_settings.1;app.start_rendered=start_rendered;if about{app.about=Some(Default::default());}app
+        let mut app=Self::new(Session::open(request,cwd));app.repository=repository;app.auto_repository=auto_repository;app.blame=[blame;2];app.comparison_name=initial_settings.0;app.initial_line=initial_settings.1;app.start_rendered=start_rendered;if about{app.about=Some(Default::default());}
+        if show{app.layout=lenz::layout::Layout::focused_selection(app.layout.files());}app
     }
     /// Opens the restored file at its line once the repository has settled, then records where the user is.
     fn restore_and_record_place(&mut self)->bool {
@@ -474,12 +478,13 @@ impl App {
         navigator::rank(query, &paths)
     }
     pub(crate) fn begin(&mut self, prompt: Prompt) {
+        self.field_inputs.clear();
         self.input = if prompt == Prompt::Search && self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered {self.session.markdown_selection().filter(|s|s.anchor.abs_diff(s.head)<=4096).and_then(|_|self.session.copy_text(commands::Interaction::Copy,self.selection,self.focus).ok()).filter(|s|!s.contains('\n')).unwrap_or_else(||self.session.find().map_or(String::new(),|f|f.query().into()))} else if prompt == Prompt::Search { self.selection.filter(|s|!s.is_empty()&&s.anchor.line==s.head.line).and_then(|s|self.session.document().map(|d|s.text(d.lines_on(s.side)))).unwrap_or_else(||self.session.find().map_or(String::new(),|f|f.query().into())) } else { String::new() };
         self.prompt = Some(prompt);
         self.selected = 0;
         if prompt==Prompt::Search { self.search_input(); }
     }
-    fn search_input(&mut self){let selected=if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered {self.session.markdown_selection().and_then(|s|self.session.markdown_projection()?.source_selection(s))}else{self.selection};let from=selected.filter(|s|s.side==self.focus).map_or_else(||lenz::selection::Pos::new(self.session.view().anchor_line_on(self.focus)as u32,0),|s|s.ordered().0);self.session.search_at(self.input.clone(),self.focus,from);if self.session.markdown_edit_disabled().is_none() && let Some(selection)=self.session.find_selection(){self.selection=Some(selection);}}
+    pub(crate) fn search_input(&mut self){let selected=if self.session.markdown_mode()==lenz::markdown::PresentationMode::Rendered {self.session.markdown_selection().and_then(|s|self.session.markdown_projection()?.source_selection(s))}else{self.selection};let from=selected.filter(|s|s.side==self.focus).map_or_else(||lenz::selection::Pos::new(self.session.view().anchor_line_on(self.focus)as u32,0),|s|s.ordered().0);self.session.search_at(self.input.clone(),self.focus,from);if self.session.markdown_edit_disabled().is_none() && let Some(selection)=self.session.find_selection(){self.selection=Some(selection);}}
     fn type_text(&mut self, text: &str) {
         for ch in lenz::document::one_line(text).chars() {
             if self.input.len() >= 4096 { break; }
@@ -510,7 +515,7 @@ impl App {
         use lenz::catalog::{Action,HelpAction};use lenz::layout::LayoutCommand as L;
         let item=|label:std::borrow::Cow<'static,str>,action:Action|{let mut item=Item::new(label,Run(action));item.disabled=lenz::catalog::Availability::disabled(self,action);item};
         let entries=|entries:Vec<lenz::catalog::Entry>|entries.into_iter().map(|e|item(e.label,e.action).active(e.current)).collect::<Vec<_>>();
-        let mut app_menu=entries(lenz::catalog::app_menu());app_menu.push(Item::new("Nerd Font icons (Mono)",Icons).active(self.icons.nerd()));
+        let mut app_menu=entries(lenz::catalog::comparison_app_menu());app_menu.push(Item::new("Nerd Font icons (Mono)",Icons).active(self.icons.nerd()));
         let mut items=vec![Item::new("☰",Palette).choices(app_menu)];
         if self.repository.is_some(){
             items.push(item("Overview".into(),Action::Layout(L::LeaveFocus)));
@@ -536,7 +541,7 @@ impl App {
         let entries=|entries:Vec<lenz::catalog::Entry>|entries.into_iter().map(|e|item(e.label,e.action).active(e.current)).collect::<Vec<_>>();
         let scope=self.scope();
         if self.layout.shows_focus(self.repository.as_ref().map(|r|&r.core)) {return self.focus_toolbar_items(&scope);}
-        let mut app_menu=entries(lenz::catalog::app_menu());app_menu.push(Item::new("Nerd Font icons (Mono)",Icons).active(self.icons.nerd()));
+        let mut app_menu=entries(lenz::catalog::comparison_app_menu());app_menu.push(Item::new("Nerd Font icons (Mono)",Icons).active(self.icons.nerd()));
         // ☰, then Focus where Focus shows Overview
         let mut items=vec![Item::new("☰",Palette).choices(app_menu)];
         // as wide as "Overview", so the buttons after it stay put between the views
@@ -722,6 +727,26 @@ impl App {
         handled
     }
     fn handle_event(&mut self, event: Event) -> bool {
+        if self.open_comparison.is_some() && matches!(&event,Event::Key(k) if k.kind!=KeyEventKind::Release && k.modifiers==KeyModifiers::CONTROL && matches!(k.code,KeyCode::Char('q'))) {
+            self.open_comparison=None;
+            return self.handle_event(event);
+        }
+        if let Some(picker) = &mut self.open_comparison {
+            match picker.handle(&event) {
+                crate::repo_picker::Outcome::None => {}
+                crate::repo_picker::Outcome::Quit => self.open_comparison = None,
+                crate::repo_picker::Outcome::Chosen(choice) => {
+                    let (args, cwd) = choice.invocation(&["--new-comparison".into()], self.session.cwd());
+                    match lenz::cli::parse(&args, &cwd) {
+                        Ok(request) => { self.new_view = Some((request, cwd)); self.open_comparison = None; }
+                        Err(error) => self.session.set_notice(error.0),
+                    }
+                }
+            }
+            return true;
+        }
+        if matches!(&event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers.contains(KeyModifiers::CONTROL)&&k.code==KeyCode::Char('c'))&&self.command_palette.is_some()&&self.message.is_none()&&self.about.is_none()&&self.context_details().is_none(){return crate::palette::input(self,&event);}
+        if self.field_event(&event){return true;}
         let closing_details=matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::CONTROL&&matches!(k.code,KeyCode::Char('q'|'c')));
         if !closing_details && let Some(message)=&mut self.message {
             if let Event::Resize(w,h)=event {self.size=(w,h);}
@@ -749,6 +774,10 @@ impl App {
         if self.repository.as_ref().is_some_and(|r|r.core.picker.focus!=lenz::repository_session::Pane::Diff){self.navigator.focused=false;}
         if let Event::Key(key)=event && key.kind!=KeyEventKind::Release {
             let copying=key.modifiers==KeyModifiers::CONTROL&&key.code==KeyCode::Char('c');
+            if copying&&self.message.is_none()&&self.about.is_none(){
+                if self.repository.as_mut().is_some_and(|r|r.text_event(&event)){return true;}
+                if self.set_search.as_mut().is_some_and(|s|s.model.editing()&&s.handle(event.clone())){return true;}
+            }
             // a selection on a PR tab: Ctrl+C copies it rather than quitting
             if copying&&!self.modal_input()&&self.pr_details_shown()&&self.pr_tab_event(&event){return true;}
             if copying&&self.commit_panel.focused&&!self.navigator.focused&&!self.modal_input(){self.copy_message();return true;}

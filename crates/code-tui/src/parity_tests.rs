@@ -311,9 +311,9 @@ fn search_in_project_edits_its_fields_at_the_caret_in_both_adapters(cx: &mut Tes
         ("r", KeyCode::Char('r'), none, "f", "*.r", 3),
         ("left", KeyCode::Left, none, "f", "*.r", 2),
         ("x", KeyCode::Char('x'), none, "f", "*.xr", 3),
-        ("ctrl-a", KeyCode::Char('a'), ctrl, "f", "*.xr", 3),
+        ("ctrl-a", KeyCode::Char('a'), ctrl, "f", "*.xr", 4),
         ("left", KeyCode::Left, none, "f", "*.xr", 0),
-        ("ctrl-a", KeyCode::Char('a'), ctrl, "f", "*.xr", 0),
+        ("ctrl-a", KeyCode::Char('a'), ctrl, "f", "*.xr", 4),
         ("backspace", KeyCode::Backspace, none, "f", "", 0),
     ] {
         visual.simulate_keystrokes(gui_key);
@@ -329,6 +329,17 @@ fn search_in_project_edits_its_fields_at_the_caret_in_both_adapters(cx: &mut Tes
     let cursor = terminal.get_cursor_position().unwrap();
     let buffer = terminal.backend().buffer();
     assert_eq!((buffer[(cursor.x - 1, cursor.y)].symbol(), buffer[(cursor.x, cursor.y)].symbol()), ("a", "b"));
+    let query=format!("START_{}TAIL", "abcdefghijklmnopqrstuvwxyz_".repeat(5));
+    visual.simulate_keystrokes("ctrl-a");
+    visual.update(|_,cx|cx.write_to_clipboard(gpui::ClipboardItem::new_string(query.clone())));
+    visual.simulate_keystrokes("ctrl-v home");
+    tui.handle(Event::Key(KeyEvent::new(KeyCode::Char('a'),ctrl)));
+    tui.handle(Event::Paste(query));tui.handle(Event::Key(KeyEvent::new(KeyCode::Home,none)));
+    for c in "INSERTED_".chars(){visual.simulate_keystrokes(&c.to_string());tui.handle(Event::Key(KeyEvent::new(KeyCode::Char(c),none)));}
+    terminal.draw(|frame|tui.draw(frame)).unwrap();
+    let shown=terminal.backend().buffer().content.iter().map(|c|c.symbol()).collect::<String>();
+    assert!(shown.contains("INSERTED_START_"),"{shown}");
+    assert_eq!(tui_fields(&tui),gui.read_with(&visual,|view,_|view.search_fields_for_test()));
     assert_eq!(std::fs::read(path).unwrap(), b"fn main() {}\n");
 }
 
@@ -1746,8 +1757,8 @@ fn unified_name_search_replays_files_symbols_actions_caret_and_recents_in_both_a
         "other.txt"
     );
     terminal.draw(|f| tui.draw(f)).unwrap();
-    visual.simulate_keystrokes("delete");
-    key(&mut tui, KeyCode::Delete, KeyModifiers::NONE);
+    visual.simulate_keystrokes("f6");
+    key(&mut tui, KeyCode::F(6), KeyModifiers::NONE);
     settle(&mut visual, &mut tui);
     assert!(tui.session.state().navigation().unwrap().rows.is_empty());
     visual.simulate_keystrokes("escape ctrl-e");
@@ -2114,9 +2125,9 @@ fn gui_and_terminal_git_comparisons_start_the_same_lenz_diff(cx: &mut TestAppCon
     visual.simulate_keystrokes("ctrl-shift-`");
     tui.run(CommandId::GitBranches);
     settle(&mut visual, &mut tui, &|s| s.state().branches().is_some_and(|b| !b.loading));
-    visual.simulate_keystrokes("v 1 right down down enter");
+    visual.simulate_keystrokes("v 1 alt-enter down down enter");
     for c in "v1".chars() { key(&mut tui, KeyCode::Char(c), KeyModifiers::NONE); }
-    key(&mut tui, KeyCode::Right, KeyModifiers::NONE);
+    key(&mut tui, KeyCode::Enter, KeyModifiers::ALT);
     for _ in 0..2 { key(&mut tui, KeyCode::Down, KeyModifiers::NONE); }
     key(&mut tui, KeyCode::Enter, KeyModifiers::NONE);
     let tag = tui_args(&mut tui);

@@ -1065,6 +1065,7 @@ dependencies = [
  "gpui",
  "image",
  "lenz-content",
+ "lenz-terminal-ui",
  "ratatui",
  "serde_json",
  "signal-hook 0.3.18",
@@ -3389,6 +3390,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "tree-sitter-zig",
+ "unicode-segmentation",
  "unicode-width",
  "xml-rs 1.0.0",
 ]
@@ -3417,6 +3419,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lenz-terminal-ui"
+version = "0.0.12"
+dependencies = [
+ "crossterm",
+ "lenz-content",
+ "ratatui",
+ "unicode-width",
+]
+
+[[package]]
 name = "lenz-tui"
 version = "0.0.12"
 dependencies = [
@@ -3426,6 +3438,7 @@ dependencies = [
  "futures-lite",
  "lenz",
  "lenz-engine",
+ "lenz-terminal-ui",
  "ratatui",
  "signal-hook 0.3.18",
  "tempfile",

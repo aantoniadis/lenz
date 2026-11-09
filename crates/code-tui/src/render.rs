@@ -1274,21 +1274,11 @@ impl App {
                 field.width.saturating_sub(2),
                 field.height,
             );
-            let shown = tail_columns(value, text_area.width.saturating_sub(1) as usize);
-            if value.is_empty() {
-                line(frame.buffer_mut(), text_area, placeholder, style(p.dim, p.bg));
-            } else {
-                line(frame.buffer_mut(), text_area, shown, style(p.fg, if active && modal.selected { p.selected_bg } else { p.bg }));
-            }
-            if active && text_area.height > 0 && text_area.width > 0 {
-                // The caret sits before the text after it, counted from the end the field keeps visible.
-                let after = modal.caret.and_then(|c| value.get(code_core::line_edit::clamp(value, c)..)).map_or(0, |a| a.width());
-                frame.set_cursor_position((
-                    text_area.x
-                        + (shown.width().saturating_sub(after) as u16).min(text_area.width.saturating_sub(1)),
-                    text_area.y,
-                ));
-            }
+            let cursor = modal.editors[i].unwrap_or_else(|| if active { Self::field_cursor(modal) } else { Default::default() });
+            lenz_terminal_ui::paint(frame, lenz_terminal_ui::Field { text: value, cursor, area: text_area, active }, style(p.fg,p.bg), style(p.fg,p.selected_bg));
+            if value.is_empty() { line(frame.buffer_mut(), text_area, placeholder, style(p.dim,p.bg)); }
+
+
         }
         for (((id, label), (dy, dx, w)), on) in labels.iter().zip(placed).zip(on) {
             let r = row(content, toggles_y + dy);
@@ -1400,23 +1390,10 @@ impl App {
             x = x.saturating_add(width + 1);
         }
         if content.height > 1 {
-            let query = tail_columns(&modal.input, content.width.saturating_sub(3) as usize);
-            line(
-                frame.buffer_mut(),
-                row(content, 1),
-                &format!("› {query}"),
-                style(p.fg, p.status_bg),
-            );
-            if content.width > 2 {
-                // The caret sits before the text after it, counted from the end the row keeps visible.
-                let after = modal.caret.and_then(|c| modal.input.get(code_core::line_edit::clamp(&modal.input, c)..)).map_or(0, |a| a.width());
-                frame.set_cursor_position((
-                    content.x
-                        + 2
-                        + query.width().saturating_sub(after).min(content.width.saturating_sub(3) as usize) as u16,
-                    content.y + 1,
-                ));
-            }
+            let r=row(content,1);
+            line(frame.buffer_mut(),r,"› ",style(p.fg,p.status_bg));
+            let area=Rect::new(r.x+2.min(r.width),r.y,r.width.saturating_sub(2),r.height);
+            lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&modal.input,cursor:Self::field_cursor(modal),area,active:true},style(p.fg,p.status_bg),style(p.fg,p.selected_bg));
         }
         let list_y = 2.min(content.height);
         let reserve = u16::from(content.height > list_y);
@@ -1692,14 +1669,14 @@ impl App {
             )
         };
         for i in 0..input_rows.min(content.height as usize) {
-            let active = (i == 1) == modal.secondary_focus;
-            let prefix = if modal.kind == Prompt::Branches { "Filter: " } else if active { "› " } else { "  " };
-            let room = content.width.saturating_sub(prefix.len() as u16) as usize;
-            let text = field_text(modal, i == 1);
-            let tail = tail_columns(&text, room);
-            let bg = if modal.kind == Prompt::Branches { p.bg } else { p.status_bg };
-            fill(frame.buffer_mut(), row(content, i as u16), style(p.fg, bg));
-            line(frame.buffer_mut(), row(content, i as u16), &format!("{prefix}{tail}"), style(if active { p.fg } else { p.dim }, bg));
+            let active=(i==1)==modal.secondary_focus;
+            let prefix=if modal.kind==Prompt::Branches { "Filter: ".to_string() } else if i==1 && modal.kind==Prompt::Find { format!("  {}: ",CommandId::ReplaceMatch.label()) } else if active { "› ".into() } else { "  ".into() };
+            let r=row(content,i as u16);let bg=if modal.kind==Prompt::Branches {p.bg}else{p.status_bg};
+            fill(frame.buffer_mut(),r,style(p.fg,bg));line(frame.buffer_mut(),r,&prefix,style(p.dim,bg));
+            let offset=(prefix.width() as u16).min(r.width);
+            let text=if i==1{&modal.secondary}else{&modal.input};
+            let cursor=modal.editors[i].unwrap_or_else(||if active {Self::field_cursor(modal)}else{Default::default()});
+            lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text,cursor,area:Rect::new(r.x+offset,r.y,r.width.saturating_sub(offset),r.height),active},style(p.fg,bg),style(p.fg,p.selected_bg));
         }
         let list_y = input_rows.min(content.height as usize) as u16;
         let reserve = u16::from(!themes && content.height > list_y);
@@ -1853,38 +1830,13 @@ impl App {
                 ),
             );
         }
-        if !context
-            && !themes
-            && modal.kind != Prompt::LanguageServer
-            && content.height > 0
-            && content.width > 2
-        {
-            let text = field_text(modal, modal.secondary_focus);
-            frame.set_cursor_position((
-                content.x
-                    + 2
-                    + UnicodeWidthStr::width(tail_columns(
-                        &text,
-                        content.width.saturating_sub(3) as usize,
-                    ))
-                    .min(content.width.saturating_sub(3) as usize) as u16,
-                content.y + u16::from(modal.secondary_focus).min(content.height - 1),
-            ));
-        }
+
     }
 }
 
 /// What the find prompt's footer says under its fields.
 const FIND_HINT: &str = "Enter replaces · Alt+A all · Tab field · Esc closes";
 const FIND_QUERY_HINT: &str = "Enter next · F3 / Shift+F3 · Tab replace · Esc closes";
-
-/// A prompt field as drawn: the find prompt's second row is its replacement text, labelled so an empty one is
-/// clear; the caret column follows the same text.
-fn field_text(modal: &crate::app::Modal, second: bool) -> std::borrow::Cow<'_, str> {
-    use std::borrow::Cow;
-    let text = if second { modal.secondary.as_str() } else { modal.input.as_str() };
-    if second && modal.kind == Prompt::Find { Cow::Owned(format!("{}: {text}", CommandId::ReplaceMatch.label())) } else { Cow::Borrowed(text) }
-}
 
 fn centered(area: Rect, width: u16, height: u16) -> Rect {
     Rect::new(
@@ -3131,18 +3083,6 @@ fn draw_markdown(
     }
 }
 
-fn tail_columns(text: &str, columns: usize) -> &str {
-    let mut width = 0;
-    let mut start = text.len();
-    for (i, g) in text.grapheme_indices(true).rev() {
-        width += UnicodeWidthStr::width(g);
-        if width > columns {
-            break;
-        }
-        start = i;
-    }
-    &text[start..]
-}
 
 /// `text` wrapped to `columns`, at most `max` lines, the last ending in `…` when cut.
 fn wrap(text: &str, columns: usize, max: usize) -> Vec<String> {

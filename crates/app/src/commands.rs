@@ -57,6 +57,11 @@ pub fn unified_disabled(image: bool, rendered: bool) -> Option<&'static str> {
 /// Why commands that need a document are off in an empty window or a selection without changes.
 pub const NOTHING_OPEN: &str = "No comparison open";
 
+/// A loaded selection with zero changed files is a successful empty result, not an unopened window.
+pub fn empty_label(spec: &crate::changeset::Spec) -> &'static str {
+    if matches!(spec, crate::changeset::Spec::Empty) { NOTHING_OPEN } else { "No differences" }
+}
+
 pub fn disabled(command: Command, view: &View, loading: bool, current: usize, count: usize, large: bool) -> Option<&'static str> {
     match command {
         Command::SetDiffLayout(_) => None,

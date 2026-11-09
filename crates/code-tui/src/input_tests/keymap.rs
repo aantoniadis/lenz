@@ -131,8 +131,8 @@ fn the_keymap_dialog_filters_binds_refuses_taken_chords_and_restores() {
     key(&mut a, KeyCode::Char('k'), KeyModifiers::CONTROL);
     assert!(a.session.state().notices().iter().any(|m| m.starts_with("Ctrl+K already runs")), "{:?}", a.session.state().notices());
     assert_eq!(hint(&a, CommandId::Save).as_deref(), Some("Ctrl+Alt+S"));
-    // Delete restores the preset's chord.
-    key(&mut a, KeyCode::Delete, KeyModifiers::NONE);
+    // F6 restores the preset's chord.
+    key(&mut a, KeyCode::F(6), KeyModifiers::NONE);
     assert_eq!(hint(&a, CommandId::Save).as_deref(), Some("Ctrl+S"));
     key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
     assert!(a.modal.is_none());

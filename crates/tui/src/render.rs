@@ -87,6 +87,7 @@ fn label(palette:&lenz::theme::Palette,frame: &mut ratatui::Frame, area: Rect, t
 }
 
 pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
+    if let Some(picker) = &mut app.open_comparison { picker.draw(frame, &app.palette); return; }
     let palette=app.palette.clone();let palette=&*palette;
     let area = app.diff_area;
     app.size = (area.width, area.height);
@@ -217,6 +218,13 @@ pub fn draw(app: &mut App, frame: &mut ratatui::Frame) {
     // the separator only before a message
     let status=match status_text(app){text if text.is_empty()=>"F2 details".to_string(),text=>format!("F2 details · {text}")};
     label(palette,frame, Rect::new(area.x, area.y+area.height - 2, area.width, 1), &status, base(palette).fg(color(palette.accent)));
+    if let Some(kind @ (Prompt::Search | Prompt::Line)) = app.prompt {
+        let prefix=if kind==Prompt::Search {format!("Find {}: ",app.session.find().map_or_else(String::new,|f|f.counter()))} else {"Line: ".into()};let offset=(lenz::wrap::width(&prefix) as u16).min(area.width);
+        let row=Rect::new(area.x,area.y+area.height-2,area.width,1);
+        frame.render_widget(Clear,row);
+        label(palette,frame,row,&prefix,base(palette));
+        lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&app.input,cursor:app.field_inputs.cursor(kind as u64,0).unwrap_or_default(),area:Rect::new(row.x+offset,row.y,row.width.saturating_sub(offset),1),active:true},base(palette),base(palette).bg(color(palette.selected_bg)));
+    }
     let lists=app.navigator.focused||app.repository.as_ref().is_some_and(|r|r.core.picker.shown&&r.core.picker.focus==lenz::repository_session::Pane::Log);
     let footer=if lists{" Type to find  ↑/↓ or F3 matches  Enter open  Esc cancel  F10 commands  Ctrl-Q quit"}else{" n/p changes  [/] files  / find  f files  F10 commands  ? help  q quit"};
     // a full-width bar under the side panels: the panel switches, glued, at the left and the keys at the right
@@ -342,6 +350,9 @@ fn popup(app: &mut App, frame: &mut ratatui::Frame, prompt: Prompt) {
     let rows=popup_rows(app,prompt);
     let heading = format!(" {}{}", if prompt == Prompt::Files { "Files: " } else { "Applied history: " }, app.input);
     label(palette,frame, Rect::new(rect.x + 1, rect.y, rect.width - 2, 1), &heading, base(palette).fg(color(palette.accent)));
+    if prompt==Prompt::Files {
+        lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&app.input,cursor:app.field_inputs.cursor(prompt as u64,0).unwrap_or_default(),area:Rect::new(rect.x+8.min(rect.width),rect.y,rect.width.saturating_sub(9),1),active:true},base(palette),base(palette).bg(color(palette.selected_bg)));
+    }
     let count = h.saturating_sub(2) as usize;
     let start = app.selected.saturating_sub(count.saturating_sub(1));
     for (i, row) in rows.iter().enumerate().skip(start).take(count) {

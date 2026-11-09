@@ -134,6 +134,12 @@ impl ReaderView {
         if let Some(id) = self.key_command(ev).filter(|id| id.passes_terminal_focus()) {
             self.run(id, window, cx); cx.stop_propagation(); return true;
         }
+        if self.session.state().terminal().find().is_some() && command && !k.modifiers.alt && matches!(k.key.as_str(),"v"|"V") {
+            if let Some(text)=cx.read_from_clipboard().and_then(|c|c.text()).filter(|s|!s.is_empty()) {
+                self.dispatch(Command::Terminal(TerminalCommand::Paste(text)),cx);
+            }
+            cx.stop_propagation();return true;
+        }
         // Plain Ctrl+V stays the program's (quoted insert, visual block), as Ctrl+Shift+C copy implies.
         if ((ctrl && k.modifiers.shift) || k.modifiers.platform) && !k.modifiers.alt && matches!(k.key.as_str(), "v" | "V") {
             self.terminal_ui.marked = None;
@@ -324,6 +330,7 @@ pub(super) struct Paint {
     focused: bool,
     marked: Option<String>,
     find: Option<(String, String)>,
+    find_cursor:lenz_content::field_edit::Cursor,
     char_w: f32,
 }
 impl ReaderView {
@@ -339,6 +346,7 @@ impl ReaderView {
             disabled,
             focused: self.terminal_active(),
             marked: self.terminal_ui.marked.as_ref().filter(|(id,_)| tab.is_some_and(|t| t.id() == *id)).map(|(_,text)| text.clone()),
+            find_cursor:state.find_cursor(),
             find: state.find().map(|query| (query.to_owned(),state.find_label((self.width/self.char_w).floor().max(0.0) as usize,self.terminal_marked().unwrap_or("")).unwrap_or_default())),
             char_w: self.char_w,
         })
@@ -368,11 +376,16 @@ impl Paint {
                     lenz_gpui::text(window,cx,m,f32::from(b.left())+self.char_w,f32::from(b.top()),label,if self.disabled.contains(id) {palette.dim} else {palette.accent});
                 });
             }
-            if let Some((_,label)) = &self.find && let Some(find) = self.layout.find {
+            if let Some((query,label)) = &self.find && let Some(find) = self.layout.find {
                 let find = offset(find);
                 window.with_content_mask(Some(gpui::ContentMask { bounds:find }), |window| {
                     lenz_gpui::fill(window,f32::from(find.left()),f32::from(find.top()),f32::from(find.size.width),f32::from(find.size.height),palette.header_bg);
-                    lenz_gpui::text(window,cx,m,f32::from(find.left()),f32::from(find.top()),label,palette.accent);
+                    lenz_gpui::text(window,cx,m,f32::from(find.left()),f32::from(find.top()),"Find: ",palette.accent);
+                    let hint=label.rsplit_once('▏').map_or("",|(_,hint)|hint);
+                    let hint_w=(lenz_content::wrap::width(hint) as f32*self.char_w).min((f32::from(find.size.width)-14.0*self.char_w).max(0.0));
+                    let bounds=Bounds{origin:gpui::point(find.left()+px(6.0*self.char_w),find.top()),size:gpui::size(px((f32::from(find.size.width)-6.0*self.char_w-hint_w).max(0.0)),find.size.height)};
+                    if hint_w>0.0 {lenz_gpui::text(window,cx,m,f32::from(find.right())-hint_w,f32::from(find.top()),hint,palette.dim);}
+                    lenz_gpui::field::paint(lenz_gpui::field::View{text:query,cursor:self.find_cursor,bounds,char_w:self.char_w,active:self.focused},window,cx,m,palette);
                 });
             }
             let grid = offset(self.layout.grid);

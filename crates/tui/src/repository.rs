@@ -31,6 +31,7 @@ enum Prompt {
 }
 
 pub struct Repository {
+    input_cursor:lenz::field_edit::Cursor,
     pub(crate) icons:crate::icons::Icons,
     pub core: RepositorySession,
     pub quit: bool,
@@ -69,6 +70,7 @@ pub struct Repository {
 impl Repository {
     pub fn open(request: Request, cwd: PathBuf) -> Self {
         Self {
+            input_cursor:Default::default(),
             icons:Default::default(),
             core: RepositorySession::open(&request, cwd),
             quit: false,
@@ -173,6 +175,7 @@ impl Repository {
             Prompt::Sources => self.core.picker.sources.filter.clone(),
             _ => String::new(),
         };
+        self.input_cursor=Default::default();
         self.prompt = Some(prompt);
     }
     fn source(&self) -> Option<SourceAction> {
@@ -328,7 +331,17 @@ impl Repository {
         }
         true
     }
+    pub(crate) fn text_event(&mut self,event:&Event)->bool{
+        if self.prompt.is_none(){return false;}
+        let command=match event{Event::Key(k)if k.kind!=KeyEventKind::Release=>lenz_terminal_ui::command(*k),Event::Paste(text)=>Some(lenz::field_edit::Command::Insert(text.clone())),_=>None};
+        let Some(mut command)=command else{return false};
+        if matches!(self.prompt,Some(Prompt::NewBranch{..}|Prompt::Revision)) && let lenz::field_edit::Command::Insert(text)=&mut command{*text=text.lines().next().unwrap_or_default().to_owned();}
+        let out=self.input_cursor.execute_limited(&mut self.input,command,4096);
+        if out.changed{self.command_selected=0;self.prompt_error=None;if self.prompt==Some(Prompt::Filter){self.execute(Command::Filter(self.input.clone()));}}
+        if let Some(text)=out.copy{let _=crate::clipboard::copy(&text);}true
+    }
     pub fn handle(&mut self, event: Event) -> bool {
+        if self.text_event(&event){return true;}
         if self.resize_input(&event,false){return true;}
         if self.core.pr.as_ref().is_some_and(|p|p.details().is_some()){
             if event==Event::FocusGained {self.execute(Command::CheckPrHead);return true;}
@@ -1018,8 +1031,7 @@ impl Repository {
                 }
                 Prompt::Revision => "Checkout tag or revision".to_string(),
             };
-            // the popup's inner width: the caret end of a long input stays in view
-            let mut lines = vec![Line::from(crate::visual::input_line(&format!("{label}: "), &safe_label(&self.input), usize::from(area.width.saturating_sub(4))))];
+            let mut lines = vec![Line::from(label), Line::from("")];
             lines.extend(self.prompt_error.as_deref().map(|e| Line::from(safe_label(e))));
             let popup = Rect::new(
                 area.x + 1,
@@ -1037,6 +1049,9 @@ impl Repository {
                 ),
                 popup,
             );
+            let inner=Rect::new(popup.x+1,popup.y+2,popup.width.saturating_sub(2),popup.height.saturating_sub(3).min(1));
+            lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&self.input,cursor:self.input_cursor,area:inner,active:true},crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg)),crate::chrome::style_with(palette).bg(crate::chrome::color(palette.selected_bg)));
+
         }
         if let Some(text) = &self.core.overlay {
             if text==HELP{let mut scroll=self.overlay_scroll as usize;crate::help::draw(frame,area,crate::help::REPOSITORY,&mut scroll,palette);self.overlay_scroll=scroll as u16;return;}

@@ -9,7 +9,7 @@ pub(super) struct FormLayout {
     pub buttons: [Bounds<Pixels>; 2],
     pub text: FormText,
     value: String,
-    selected: bool,
+    cursor: lenz_content::field_edit::Cursor,
     checked: bool,
     lines: Vec<(String, bool)>,
     pub first: usize,
@@ -30,6 +30,7 @@ fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
 impl ReaderView {
     pub(super) fn form_layout(&self) -> Option<FormLayout> {
         let (form, value, selected, check, error) = match self.modal.as_ref()? {
+            Modal::OpenPath { kind, input, error } => (Form::OpenPath(*kind), input.text(), input.selected(), None, error.as_deref()),
             Modal::Create { kind, dir, name, error } => (Form::Create(*kind, dir), name.as_str(), false, None, error.as_deref()),
             Modal::SaveAs { input, selected, error, .. } => (Form::SaveAs, input.as_str(), *selected, None, error.as_deref()),
             Modal::RenameTerminal { input, selected, error, .. } => (Form::RenameTerminal, input.as_str(), *selected, None, error.as_deref()),
@@ -46,7 +47,7 @@ impl ReaderView {
         };
         let text = self.session.form_text(form);
         let w = (self.width - 16.0).clamp(0.0, 560.0);
-        let compact = self.height < 240.0;
+        let compact = self.height <= 240.0;
         let pad = (if compact { 4.0_f32 } else { 16.0 }).min(w / 4.0);
         let cols = self.columns(w - 2.0 * pad).max(1);
         let lines: Vec<_> = error.into_iter().map(|s| (s, true)).chain([(text.description.as_str(), false)])
@@ -80,7 +81,7 @@ impl ReaderView {
         let label_width = if compact { text.field.map_or(0.0, |label| ((lenz_content::wrap::width(label) as f32 + 1.0) * self.char_w).min((w - 2.0 * pad) / 3.0)) } else { 0.0 };
         Some(FormLayout { bounds, field: text.field.map(|_| { let fy = y + header_h + if compact { 0.0 } else { lh + 4.0 }; fit(x + pad + label_width, fy, w - 2.0 * pad - label_width, (lh + if compact { 4.0 } else { 8.0 }).min((footer_y - 4.0 - fy).max(0.0))) }),
             checkbox: check.map(|_| fit(x + pad, y + header_h + field_h, w - 2.0 * pad, lh + 4.0)),
-            buttons, text, value: value.into(), selected, checked: check.unwrap_or(false),
+            buttons, text, value: value.into(), cursor: self.popup_field().map_or_else(|| lenz_content::field_edit::Cursor::at(None, selected, value), |(_,cursor,_)| cursor), checked: check.unwrap_or(false),
             max_scroll: lines.len().saturating_sub(visible), lines, first, visible, body_y, char_w: self.char_w, pad, invalid: error.is_some(), inline_field: compact, label_width })
     }
 
@@ -116,13 +117,8 @@ impl FormLayout {
                 lenz_gpui::text(window, cx, m, if self.inline_field { x + pad } else { fx }, if self.inline_field { fy + 2.0 } else { fy - line_h() - 4.0 }, &label, p.fg);
                 lenz_gpui::fill(window, fx, fy, fw, fh, if self.invalid { p.error } else { p.accent });
                 lenz_gpui::fill(window, fx + 1.0, fy + 1.0, (fw - 2.0).max(0.0), (fh - 2.0).max(0.0), p.bg);
-                let shown = navigation::tail(&self.value, ((fw - 20.0) / self.char_w).max(0.0) as usize);
-                window.with_content_mask(Some(gpui::ContentMask { bounds: rect(fx + 1.0, fy + 1.0, (fw - 2.0).max(0.0), (fh - 2.0).max(0.0)) }), |window| {
-                    let sw = lenz_content::wrap::width(&shown) as f32 * self.char_w;
-                    if self.selected { lenz_gpui::fill(window, fx + 8.0, fy + 4.0, sw, line_h(), p.selected_bg); }
-                    lenz_gpui::text(window, cx, m, fx + 8.0, fy + 4.0, &shown, p.fg);
-                    lenz_gpui::fill(window, fx + 8.0 + sw, fy + 4.0, 2.0, line_h(), p.caret);
-                });
+                lenz_gpui::field::paint(lenz_gpui::field::View { text: &self.value, cursor: self.cursor,
+                    bounds: rect(fx + 8.0, fy + 4.0, (fw - 20.0).max(0.0), line_h()), char_w: self.char_w, active: true }, window, cx, m, p);
             }
             if let Some(b) = self.checkbox {
                 let (cx0, cy) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y));

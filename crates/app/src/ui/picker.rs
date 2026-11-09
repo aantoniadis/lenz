@@ -35,7 +35,7 @@ impl Viewer {
     /// The picker sidebar's width (0 in Focus Mode or when hidden).
     pub(super) fn picker_w(&self) -> f32 {
         match self.repo.as_ref().map(|r| &r.picker) {
-            Some(p) if p.shown && p.sidebar => crate::pane_layout::clamp_size(self.panes.viewport[0],self.panes.picker,100.0,120.0+if self.layout.files(){100.0}else{0.0}),
+            Some(p) if p.shown && p.sidebar => crate::pane_layout::clamp_size(self.panes.viewport[0],self.panes.picker,100.0,self.comparison_min_width()+if self.layout.files(){100.0}else{0.0}),
             _ => 0.0,
         }
     }
@@ -194,7 +194,10 @@ impl Viewer {
     }
 
     /// `lenz args` in `cwd`, as a window of its own.
-    fn spawn_lenz(&mut self, args: &[String], cwd: &std::path::Path, cx: &mut Context<Self>) {
+    pub(super) fn spawn_lenz(&mut self, args: &[String], cwd: &std::path::Path, cx: &mut Context<Self>) {
+        #[cfg(all(test,feature="gui-test"))]
+        { self.spawned_comparisons.push((args.to_vec(), cwd.into())); let _ = cx; }
+        #[cfg(not(all(test,feature="gui-test")))]
         if let Err(e) = std::env::current_exe().and_then(|exe| std::process::Command::new(exe).args(args).current_dir(cwd).spawn()) {
             self.toast(format!("Cannot start lenz: {e}"), cx);
         }
@@ -696,7 +699,7 @@ impl Viewer {
             }
         }
         let focused = p.focus == Pane::Log;
-        Some(LogFrame { height:self.log_h(), rows, edges, status, focused, scroll: p.scroll, char_w: self.char_w, query:p.pane_search.query().to_owned(),
+        Some(LogFrame { filter_input:p.filter_editing.then(||self.field_inputs.cursor(u64::MAX,0).unwrap_or_default().snapshot(&p.filter,(self.panes.viewport[0]/self.char_w.max(1.0)) as usize)),height:self.log_h(), rows, edges, status, focused, scroll: p.scroll, char_w: self.char_w, query:p.pane_search.query().to_owned(),
         })
     }
 }
@@ -718,6 +721,7 @@ pub(super) struct LogRow {
 
 #[derive(Clone)]
 pub(super) struct LogFrame {
+    filter_input:Option<crate::field_edit::Snapshot>,
     query: String,
     height: f32,
     pub(super) rows: Vec<LogRow>,
@@ -751,8 +755,13 @@ pub(super) fn paint_log(palette: &theme::Palette, window: &mut Window, cx: &mut 
     let p = palette;
     fill(window, x0, y0, w, h, p.bg);
     fill(window, x0, y0, w, line_h(), p.header_bg);
+    if let Some(field)=&frame.filter_input {
+        text(window,cx,font,x0+8.0,y0,"Filter: ",p.dim);
+        lenz_gpui::field::paint(lenz_gpui::field::View{text:&field.text,cursor:field.cursor,bounds:Bounds{origin:point(px(x0+8.0+8.0*frame.char_w),px(y0)),size:size(px((w-16.0-8.0*frame.char_w).max(0.0)),px(line_h()))},char_w:frame.char_w,active:frame.focused},window,cx,metrics(font),p);
+    }else{
     text(window, cx, font, x0 + 8.0, y0, &frame.status, if frame.focused { p.fg } else { p.dim },
     );
+    }
     let body = Bounds { origin: point(px(x0), px(y0 + line_h())), size: size(px(w), px(h - line_h())),
     };
     let top = y0 + line_h();
@@ -940,6 +949,34 @@ mod refresh_gui_tests {
         let viewer=cx.new(|cx|{let mut v=Viewer::new(set,spec,false,None,doc,view,false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx);v.repo = Some(crate::repository_session::RepositorySession::with_picker(picker));v});
         (dir,viewer)
     }
+    #[gpui::test]
+    fn gui_log_filter_field_owns_motions_clipboard_and_refilters(cx:&mut TestAppContext){
+        let (_dir,viewer)=fixture(cx);
+        let window=cx.update(|cx|cx.open_window(Default::default(),|_,_|viewer.clone())).unwrap();
+        viewer.update(cx,|v,_|{let p=&mut v.repo.as_mut().unwrap().picker;p.focus=Pane::Log;p.filter_editing=true;p.set_filter("Refresh".into());});
+        for (name,ctrl,shift) in [("home",false,false),("end",false,true),("c",true,false)]{
+            window.update(cx,|v,w,cx|v.on_key(&event(name,ctrl,shift,false),w,cx)).unwrap();
+        }
+        assert_eq!(cx.update(|cx|cx.read_from_clipboard().and_then(|c|c.text())).as_deref(),Some("Refresh"));
+        window.update(cx,|v,w,cx|v.on_key(&event("x",true,false,false),w,cx)).unwrap();
+        assert!(viewer.read_with(cx,|v,_|v.repo.as_ref().unwrap().picker.filter.is_empty()));
+        window.update(cx,|v,w,cx|v.on_key(&event("v",true,false,false),w,cx)).unwrap();
+        viewer.read_with(cx,|v,_|{assert_eq!(v.repo.as_ref().unwrap().picker.filter,"Refresh");let frame=v.log_frame().unwrap();assert!(frame.filter_input.is_some());assert!(!v.edits.has_dirty());});
+    }
+    #[gpui::test]
+    fn gui_narrow_overview_reserves_reading_space_without_losing_preferences(cx:&mut TestAppContext){
+        let (_dir,viewer)=fixture(cx);
+        viewer.update(cx,|v,_|{
+            let preferred=(v.panes.picker,v.panes.navigator);
+            for viewport in [[1536.,1000.],[640.,480.],[400.,240.],[1536.,1000.]]{
+                v.panes.viewport=viewport;
+                let reading=viewport[0]-v.diff_x();
+                assert!(reading>=if viewport[0]>=600. {400.} else {viewport[0]*0.6},"{viewport:?}: {reading}");
+                assert_eq!((v.panes.picker,v.panes.navigator),preferred);
+                assert!(v.picker_w()>0.&&v.sidebar_w()>0.);
+            }
+        });
+    }
     fn pump(cx:&mut TestAppContext,viewer:&Entity<Viewer>,done:impl Fn(&Viewer)->bool){
         let started=Instant::now();loop{cx.executor().run_until_parked();cx.executor().advance_clock(std::time::Duration::from_millis(35));
             if viewer.read_with(cx,|v,_|done(v)){break;}
@@ -962,6 +999,27 @@ mod refresh_gui_tests {
             let (date,time)=row.date.split_once(' ').expect("date and time");
             assert_eq!(date.len(),10);assert_eq!(time.len(),5);assert_eq!(&time[2..3],":");
         });
+    }
+
+    #[test]
+    fn gui_show_opens_the_requested_commit_and_message_and_can_return_to_overview(){
+        let mut cx=TestAppContext::single();let(dir,viewer)=fixture(&mut cx);let root=dir.path();
+        let request=crate::cli::parse(&["show".into(),"HEAD".into()],root).unwrap();
+        let spec=request.spec.clone();let set=Arc::new(ChangeSet::load(&spec,root).unwrap());
+        let bytes=std::fs::read(root.join("a.txt")).unwrap();
+        viewer.update(&mut cx,|v,cx|{
+            let session=crate::repository_session::RepositorySession::open_loaded(root.into(),false,None,None,set.clone(),spec.clone());
+            v.spec=spec;v.show_change_set(set,cx);v.with_session(session,cx);v.start_in_focus();
+        });
+        pump(&mut cx,&viewer,|v|v.repo.as_ref().is_some_and(|r|!r.busy())&&v.doc().is_some());
+        viewer.read_with(&cx,|v,_|{
+            assert!(v.layout.focused(v.repo.as_ref()));
+            assert!(!v.message_lines().is_empty());
+            assert_eq!(v.spec,request.spec);
+        });
+        viewer.update(&mut cx,|v,cx|v.layout_command(crate::layout::LayoutCommand::LeaveFocus,cx));
+        viewer.read_with(&cx,|v,_|assert_eq!(v.repo.as_ref().unwrap().panels(),(true,true)));
+        assert_eq!(std::fs::read(root.join("a.txt")).unwrap(),bytes);
     }
 
     #[test]

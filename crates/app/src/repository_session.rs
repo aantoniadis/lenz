@@ -1454,7 +1454,8 @@ impl RepositorySession {
         };
         let branches = matches!(request.launch, Launch::Log { .. }).then(|| initial_log_branches(&request.spec));
         let paths = if matches!(request.launch, Launch::Log { follow: None }) { log_paths(&request.spec) } else { Vec::new() };
-        let mut state = Self::start(cwd, !matches!(request.launch, Launch::Diff), branches, follow, paths);
+        let mut state = Self::start(cwd, !matches!(request.launch, Launch::Diff | Launch::Show), branches, follow, paths);
+        if request.launch == Launch::Show { state.set_spec(request.spec.clone()); }
         if let Launch::Pr(target) = &request.launch {
             state.execute(RepositoryCommand::OpenPr(target.clone()));
         } else if state.picker.shown {

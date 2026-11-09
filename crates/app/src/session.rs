@@ -145,7 +145,7 @@ impl Session {
     fn paths(&self,index:usize)->(PathBuf,PathBuf){let c=&self.comparisons()[index];let name=self.name.as_deref().filter(|n|!n.is_empty());
         (PathBuf::from(name.unwrap_or(&c.old_path)),PathBuf::from(name.unwrap_or(&c.path)))}
     fn load(&mut self,index:usize,place:Place,force:bool,reuse:bool){
-        let Some(set)=self.set.clone().filter(|s|index<s.comparisons.len())else{if self.comparisons().is_empty(){self.notice=Some(if matches!(self.spec,Spec::Empty){crate::commands::NOTHING_OPEN}else{"No differences"}.into());}return;};
+        let Some(set)=self.set.clone().filter(|s|index<s.comparisons.len())else{if self.comparisons().is_empty(){self.notice=Some(crate::commands::empty_label(&self.spec).into());}return;};
         if index!=self.state.current && let Some(doc)=&self.document{self.state.remember_position(doc);}
         // a file on screen has its row in Files; one behind a Folder Summary stays in its collapsed folder
         if self.state.folders.summary().is_none(){self.state.folders.reveal(&set.comparisons,index);}

@@ -24,6 +24,8 @@ pub mod highlight;
 pub mod image;
 pub mod icons;
 pub mod lines;
+pub mod line_edit;
+pub mod field_edit;
 pub mod markdown;
 pub mod open;
 pub mod scrollbar;

@@ -12,6 +12,7 @@ Usage: lenz [file-or-folder]
 Use lenz diff --help for comparison options.
 With no path, lenz opens the Lenz Code editor in the current directory.
 Use lenz diff log and lenz diff merge for repository and merge workflows.
+Use lenz diff show <commit> to compare a commit with its first parent.
 Existing difftool/mergetool commands must add the diff prefix, or use lenz-diff directly.
 To open a file or folder named diff, use lenz ./diff.
 After --, all arguments are passed unchanged (including a file named --tui).";

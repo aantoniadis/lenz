@@ -68,4 +68,5 @@ pub mod layout;
 mod layout_jobs;
 
 pub mod native;
+pub mod open_path;
 pub mod terminal;

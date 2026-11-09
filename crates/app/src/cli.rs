@@ -12,6 +12,10 @@ use crate::{
 /// What the invocation opens.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Launch {
+    /// Choose two files/folders or a repository, even when launched inside Git.
+    Choose,
+    /// One commit against its first parent (the empty tree for a root commit).
+    Show,
     /// Standalone information window, without a repository or files.
     About,
     /// A Change Set given as `git diff` arguments, files or directories: opens in Focus Mode.
@@ -68,6 +72,8 @@ pub fn wants_help(args: &[String]) -> bool { matches!(args, [a] if a == "--help"
 
 pub const USAGE: &str = "usage: lenz diff [options] [--staged] [<rev> [<rev>]] [-- <path>...]
        lenz diff [options] [--no-index] <left> <right>
+       lenz diff show <commit> [options] [-- <path>...]
+       lenz diff --new-comparison
        lenz diff log [<rev>...] [-- <path>...] | lenz diff log --follow <file>
        lenz diff --about | --version
        lenz diff report --last [--print]
@@ -89,6 +95,24 @@ pub fn parse_with(args: &[String], cwd: &Path, view: &crate::settings::View) -> 
     let defaults = Options { whitespace: view.whitespace, ignore_case: view.ignore_case, highlight: view.highlight };
     // subcommands: only as the first argument (a branch named `log` is `heads/log`)
     match args.first().map(String::as_str) {
+        Some("--new-comparison") if args.len() == 1 => return Ok(Request { launch: Launch::Choose, spec: Spec::Empty, options: defaults, name: None, scroll: view.scroll, blame: view.blame, line: None, markdown: view.markdown }),
+        Some("show") => {
+            let revision = args.get(1).filter(|s| !s.is_empty() && !s.starts_with('-')).ok_or_else(usage)?;
+            let mut request = parse_with(&args[2..], cwd, view)?;
+            if request.launch != Launch::Diff { return Err(usage()); }
+            let Spec::Git { cached: false, revs, paths, .. } = &request.spec else { return Err(usage()) };
+            if !revs.is_empty() { return Err(usage()); }
+            // Outside Git, defer resolution until the chooser reruns this request in the selected repository.
+            let (base, head) = if changeset::toplevel(cwd).is_ok() {
+                let bytes = git::run(cwd, &["rev-parse", "--verify", "--end-of-options", &format!("{revision}^{{commit}}")])
+                    .map_err(|e| UsageError(format!("lenz diff show: {e}")))?;
+                let head = String::from_utf8_lossy(&bytes).trim().to_string();
+                (crate::blame::parent_or_empty_tree(cwd, &head).map_err(UsageError)?, head)
+            } else { (format!("{revision}^1"), revision.clone()) };
+            request.spec = Spec::Git { cached: false, revs: vec![base, head], paths: paths.clone(), untracked: false };
+            request.launch = Launch::Show;
+            return Ok(request);
+        }
         Some("--about") if args.len()==1=>return Ok(Request{launch:Launch::About,spec:Spec::Empty,options:defaults,name:None,scroll:view.scroll,blame:view.blame,line:None,markdown:view.markdown}),
         Some("pr") => {
             let target = match &args[1..] {
@@ -225,6 +249,45 @@ fn is_plain_pair(cwd: &Path, left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn show_pins_committed_bytes_and_handles_root_merge_and_empty_commits() {
+        use crate::git::testing::git;
+        let dir = repo(); let root = dir.path();
+        write(root, "f", "root\n"); commit_all(root, "root");
+        let first = git(root, &["rev-parse", "HEAD"]).trim().to_string();
+        let parse_show = |revision: &str| parse_with(&["show".into(), revision.into()], root, &Default::default()).unwrap();
+        let root_request = parse_show(&first);
+        let set = changeset::ChangeSet::load(&root_request.spec, root).unwrap();
+        assert_eq!(set.comparisons.len(), 1);
+        assert_eq!(set.read(&set.comparisons[0].left).unwrap(), b"");
+        assert_eq!(set.read(&set.comparisons[0].right).unwrap(), b"root\n");
+        assert_eq!(crate::commit_message::query(&root_request.spec), Some(crate::commit_message::Query::One(first.clone())));
+
+        write(root, "f", "committed\n"); commit_all(root, "second");
+        write(root, "f", "dirty working tree\n"); write(root, "untracked", "not in the commit\n");
+        let request = parse_show("HEAD");
+        assert_eq!(request.launch, Launch::Show); assert!(!request.restores_place());
+        let set = changeset::ChangeSet::load(&request.spec, root).unwrap();
+        assert_eq!(set.comparisons.len(), 1);
+        assert_eq!(set.read(&set.comparisons[0].left).unwrap(), b"root\n");
+        assert_eq!(set.read(&set.comparisons[0].right).unwrap(), b"committed\n");
+        assert_eq!(std::fs::read(root.join("f")).unwrap(), b"dirty working tree\n");
+        let filtered = parse_with(&["show".into(), "HEAD".into(), "--".into(), "untracked".into()], root, &Default::default()).unwrap();
+        assert!(changeset::ChangeSet::load(&filtered.spec, root).unwrap().comparisons.is_empty());
+        assert!(parse_with(&["show".into(), "not-a-commit".into()], root, &Default::default()).is_err());
+        assert!(parse_with(&["show".into()], root, &Default::default()).is_err());
+        assert!(parse_with(&["show".into(), "HEAD".into(), "--staged".into()], root, &Default::default()).is_err());
+
+        std::fs::remove_file(root.join("untracked")).unwrap();
+        git(root, &["checkout", "--", "f"]);
+        let branch = git(root, &["branch", "--show-current"]).trim().to_string();
+        git(root, &["checkout", "-b", "side", &first]); write(root, "side", "side\n"); commit_all(root, "side");
+        git(root, &["checkout", &branch]); git(root, &["merge", "--no-ff", "side", "-m", "merge"]);
+        let merged = parse_show("HEAD"); let set = changeset::ChangeSet::load(&merged.spec, root).unwrap();
+        assert_eq!(set.comparisons.iter().map(|c|c.path.as_str()).collect::<Vec<_>>(), ["side"]);
+        git(root, &["commit", "--allow-empty", "-m", "empty"]);
+        assert!(changeset::ChangeSet::load(&parse_show("HEAD").spec, root).unwrap().comparisons.is_empty());
+    }
     #[test]
     fn help_is_asked_for_alone() {
         assert!(wants_help(&["--help".into()]) && wants_help(&["-h".into()]));

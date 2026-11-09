@@ -10,6 +10,7 @@ publish.workspace = true
 gui-test = ["lenz/gui-test"]
 
 [dependencies]
+lenz-terminal-ui = { path = "../terminal-ui" }
 lenz = { path = "../app", default-features = false }
 lenz-engine = { path = "../engine" }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }

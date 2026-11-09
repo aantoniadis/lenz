@@ -15,8 +15,7 @@ pub(super) struct Frame {
     char_w: f32,
     scope: Scope,
     query: String,
-    /// Where the query's caret is drawn: a byte offset into `query`.
-    caret: usize,
+    cursor: lenz_content::field_edit::Cursor,
     status: String,
     rows: Vec<code_core::navigation::Row>,
 }
@@ -56,7 +55,7 @@ impl ReaderView {
     }
 
     /// A new query or scope: the list starts over at its first row; the caret stays where it is (`None`: the end).
-    fn update_navigation(&mut self, scope: Scope, query: String, caret: Option<usize>, cx: &mut Context<Self>) {
+    pub(super) fn update_navigation(&mut self, scope: Scope, query: String, caret: Option<usize>, cx: &mut Context<Self>) {
         self.modal = Some(Modal::Navigation { at: 0, caret });
         self.modal_seen.set(None);
         self.navigation_drawn = None;
@@ -116,7 +115,7 @@ impl ReaderView {
             "pagedown" => *at = (*at + page).min(len.saturating_sub(1)),
             "home" => *at = 0,
             "end" => *at = len.saturating_sub(1),
-            "delete" if scope == Scope::Recent => {
+            "delete" | "f6" if scope == Scope::Recent => {
                 if let Some((revision, ..)) = self.navigation_drawn {
                     let index = *at;
                     self.dispatch(Command::ForgetNavigation { revision, index }, cx);
@@ -180,12 +179,12 @@ impl ReaderView {
         let bounds = self.navigation_bounds();
         let visible = self.navigation_visible(self.session.state().navigation()?.rows.len());
         let search = self.session.state().navigation()?;
-        let Some(Modal::Navigation { at, caret }) = &mut self.modal else { return None };
+        let Some(Modal::Navigation { at, .. }) = &mut self.modal else { return None };
         *at = (*at).min(search.rows.len().saturating_sub(1));
-        let (at, caret) = (*at, caret.map_or(search.query.len(), |c| code_core::line_edit::clamp(&search.query, c)));
+        let at = *at;
         let first = self.modal_first(at, at..at + 1, search.rows.len(), visible);
         self.navigation_drawn = Some((search.revision, first, visible));
-        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: search.query.clone(), caret, status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect() })
+        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: search.query.clone(), cursor: self.popup_field().map(|(_,cursor,_)|cursor).unwrap_or_default(), status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect() })
     }
 
     pub(super) fn navigation_rows(&self) -> Vec<(String, Option<&'static str>)> {
@@ -214,24 +213,10 @@ impl Frame {
             }
             let input_y = y + 4.0 + line_h();
             lenz_gpui::fill(window, x + 6.0, input_y, (w - 12.0).max(0.0), line_h(), p.bg);
-            let query = tail(&self.query, ((w - 36.0) / self.char_w).max(1.0) as usize);
-            let input = format!("› {query}");
-            let input = lenz_content::display::cap_marks(&input);
-            let input = lenz_content::display::show_bidi(&input).into_owned();
-            let run = gpui::TextRun { len: input.len(), font: m.font.clone(), color: lenz_gpui::color(p.fg), background_color: None, underline: None, strikethrough: None };
-            let line = window.text_system().shape_line(input.into(), px(m.font_size), &[run], None);
-            let tx = (x + 12.0).min(x + w - 14.0 - f32::from(line.width));
-            // The caret sits before the text after it, measured from the end the row keeps visible.
-            let after = self.query.get(self.caret..).filter(|after| !after.is_empty()).map_or(0.0, |after| {
-                let after = lenz_content::display::show_bidi(&lenz_content::display::cap_marks(after)).into_owned();
-                let run = gpui::TextRun { len: after.len(), font: m.font.clone(), color: lenz_gpui::color(p.fg), background_color: None, underline: None, strikethrough: None };
-                f32::from(window.text_system().shape_line(after.into(), px(m.font_size), &[run], None).width)
-            });
-            let caret_x = (tx + f32::from(line.width) - after).max(tx + 2.0 * self.char_w);
-            window.with_content_mask(Some(lenz_gpui::clip(bounds, x + 6.0, w - 12.0)), |window| {
-                let _ = line.paint(gpui::point(px(tx), px(input_y)), px(m.line_h), gpui::TextAlign::Left, None, window, cx);
-                lenz_gpui::fill(window, caret_x, input_y + 1.0, 2.0, line_h() - 2.0, p.caret);
-            });
+            lenz_gpui::text(window, cx, m, x + 12.0, input_y, "›", p.dim);
+            lenz_gpui::field::paint(lenz_gpui::field::View { text: &self.query, cursor: self.cursor,
+                bounds: Bounds { origin: gpui::point(px(x + 12.0 + 2.0 * self.char_w), px(input_y)), size: gpui::size(px((w - 36.0 - 2.0 * self.char_w).max(0.0)), px(line_h())) },
+                char_w: self.char_w, active: true }, window, cx, m, p);
             let hint = if self.scope == Scope::Recent { format!("{} · Enter open · Esc close", self.status) } else if self.query.is_empty() { format!("{} · Tab category · Enter open · Esc close", self.status) } else { self.status.clone() };
             lenz_gpui::text(window, cx, m, x + 12.0, input_y + line_h(), &hint, p.dim);
             for (i, row) in self.rows.iter().enumerate() {
@@ -273,6 +258,7 @@ fn highlights(query: &str, label: &str, color: u32) -> Vec<(std::ops::Range<usiz
 }
 
 /// Keep the end of a long query and its caret visible in the fixed input row.
+#[cfg(test)]
 pub(super) fn tail(query: &str, columns: usize) -> String {
     use lenz_content::wrap::width;
     if columns == 0 { return String::new(); }

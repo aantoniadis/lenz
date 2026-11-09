@@ -171,8 +171,10 @@ pub struct State {
     pub(crate) focused: bool,
     pub(crate) prompt: Option<Prompt>,
     pub(crate) find: Option<String>,
+    pub(crate) find_cursor: lenz_content::field_edit::Cursor,
 }
 impl State {
+    pub fn find_cursor(&self) -> lenz_content::field_edit::Cursor { self.find_cursor }
     pub fn shown(&self) -> bool {
         self.shown
     }

@@ -40,8 +40,13 @@ impl App {
         }
         let finding = terminal.find().is_some();
         let find_rows = u16::from(finding && area.height > 1);
-        if find_rows > 0 && let Some(label) = terminal.find_label(area.width as usize, "") {
-            line(frame.buffer_mut(),Rect::new(area.x,area.y+1,area.width,1),&label,style(p.accent,p.header_bg));
+        if find_rows > 0 && let Some(query) = terminal.find() {
+            line(frame.buffer_mut(),Rect::new(area.x,area.y+1,area.width,1),"Find: ",style(p.accent,p.header_bg));
+            let label=terminal.find_label(area.width as usize,"").unwrap_or_default();
+            let hint=label.rsplit_once('▏').map_or("",|(_,hint)|hint);
+            let hint_w=(lenz_content::wrap::width(hint) as u16).min(area.width.saturating_sub(14));
+            if hint_w>0 {line(frame.buffer_mut(),Rect::new(area.right()-hint_w,area.y+1,hint_w,1),hint,style(p.dim,p.header_bg));}
+            lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:query,cursor:terminal.find_cursor(),area:Rect::new(area.x+6.min(area.width),area.y+1,area.width.saturating_sub(6+hint_w),1),active:terminal.focused()},style(p.fg,p.header_bg),style(p.fg,p.selected_bg));
         }
         let cells = Rect::new(area.x,area.y.saturating_add(1+find_rows),area.width,area.height.saturating_sub(1+find_rows));
         geometry.terminal.cells = cells;

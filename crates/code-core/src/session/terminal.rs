@@ -194,30 +194,37 @@ impl Session {
             self.terminal_command(T::FindClose);
         }
         // Find owns input at the core boundary too: native commits and paste cannot reach the shell.
-        if let Some(query) = self.state.terminal.find.as_ref() {
-            match &command {
-                T::Text(text) | T::Paste(text) => {
-                    if text.len() > 1024usize.saturating_sub(query.len()) || text.chars().any(char::is_control) {
-                        return self.command(Command::Notice("Terminal find accepts a single line up to 1024 bytes".into()));
+        if self.state.terminal.find.is_some() {
+            use lenz_content::field_edit::{Command as F, Key};
+            let edit=match &command {
+                T::Text(text)|T::Paste(text)=>{
+                    let current=self.state.terminal.find.as_deref().unwrap_or_default();
+                    let retained=current.len().saturating_sub(self.state.terminal.find_cursor.selection(current).map_or(0,|r|r.len()));
+                    if retained.saturating_add(text.len())>1024||text.chars().any(char::is_control){return self.command(Command::Notice("Terminal find accepts a single line up to 1024 bytes".into()));}
+                    Some(F::Insert(text.clone()))
+                },
+                T::Copy=>Some(F::Copy),
+                T::Paths(_)=>return self.command(Command::Notice("Close terminal Find before pasting file paths".into())),
+                T::Key(key)=>{
+                    if key.key=="escape" {return self.terminal_command(T::FindClose);}
+                    if key.key=="enter" && !key.ctrl && !key.alt {
+                        return self.terminal_command(T::Search{query:self.state.terminal.find.clone().unwrap_or_default(),backwards:key.shift,advance:true});
                     }
-                    return self.terminal_command(T::Search { query: format!("{query}{text}"), backwards: false, advance: false });
+                    Key{name:&key.key,control:key.ctrl,alt:key.alt,shift:key.shift,..Default::default()}.command()
+                },
+                _=>None,
+            };
+            if let Some(edit)=edit {
+                let Some(query)=self.state.terminal.find.as_mut() else {return effect};
+                let out=self.state.terminal.find_cursor.execute_limited(query,edit,1024);
+                effect.copy=out.copy;
+                if out.changed {
+                    let query=query.clone();
+                    self.terminal_command(T::Search{query,backwards:false,advance:false});
                 }
-                T::Paths(_) => return self.command(Command::Notice("Close terminal Find before pasting file paths".into())),
-                T::Key(key) => {
-                    let mut query = query.clone();
-                    return match key.key.as_str() {
-                        "escape" => self.terminal_command(T::FindClose),
-                        "enter" if !key.ctrl && !key.alt => self.terminal_command(T::Search { query, backwards: key.shift, advance: true }),
-                        "backspace" if !key.ctrl && !key.alt => {
-                            query.pop();
-                            self.terminal_command(T::Search { query, backwards: false, advance: false })
-                        }
-                        "a" if key.ctrl && !key.alt => self.terminal_command(T::Search { query: String::new(), backwards: false, advance: false }),
-                        _ => effect,
-                    };
-                }
-                _ => {}
+                return effect;
             }
+            if matches!(command,T::Key(_)){return effect;}
         }
         match command {
             T::Find => {
@@ -227,6 +234,7 @@ impl Session {
                 if self.state.terminal.active().is_some() {
                     self.state.terminal.shown = true;
                     self.state.terminal.focused = true;
+                    if self.state.terminal.find.is_none() { self.state.terminal.find_cursor=Default::default(); }
                     self.state.terminal.find.get_or_insert_default();
                 }
             }
@@ -939,6 +947,9 @@ mod tests {
         s.dispatch(Command::Terminal(T::Text("x".repeat(1025))));
         assert_eq!(s.state.terminal.find(), Some("literal.*界"));
         s.dispatch(Command::Terminal(T::Key(crate::keymap::KeyPress::new("a",true,false,false).unwrap())));
+        assert_eq!(s.state.terminal.find(), Some("literal.*界"));
+        assert_eq!(s.state.terminal.find_cursor().selected(s.state.terminal.find().unwrap()),Some("literal.*界"));
+        s.dispatch(Command::Terminal(T::Key(crate::keymap::KeyPress::new("backspace",false,false,false).unwrap())));
         assert_eq!(s.state.terminal.find(), Some(""));
         s.dispatch(Command::Terminal(T::New));
         assert!(s.state.terminal.find().is_none());

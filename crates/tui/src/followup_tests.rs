@@ -1,5 +1,54 @@
 //! Seeded workflow and pending-result scenarios using the real TUI routes.
 use super::*;
+use crate::app::Prompt;
+
+#[test]
+fn tui_show_keeps_the_requested_commit_while_local_changes_exist(){
+    let dir=tempfile::tempdir().unwrap();
+    git(dir.path(),&["init","-q"]);
+    std::fs::write(dir.path().join("f.txt"),"old commit\n").unwrap();git(dir.path(),&["add","."]);git(dir.path(),&["commit","-qm","first"]);
+    std::fs::write(dir.path().join("f.txt"),"new commit\n").unwrap();git(dir.path(),&["commit","-qam","second"]);
+    std::fs::write(dir.path().join("f.txt"),"unsaved disk changes\n").unwrap();
+    let mut app=open(dir.path(),&["show","HEAD~1"]);
+    let pinned=cli::parse(&["show".into(),"HEAD~1".into()],dir.path()).unwrap();
+    assert_eq!(app.session.spec(),&pinned.spec);
+    let set=app.session.change_set().unwrap();assert_eq!(set.comparisons.len(),1);
+    assert_eq!(set.read(&set.comparisons[0].right).unwrap(),b"old commit\n");
+    assert!(!app.repository.as_ref().unwrap().core.picker.shown);
+    let shown=screen(&draw(&mut app,100,30));
+    assert!(shown.contains("old commit"));assert!(shown.contains("first"),"{shown}");
+    key(&mut app,KeyCode::Esc,KeyModifiers::NONE);
+    assert_eq!(app.repository.as_ref().unwrap().core.panels(),(true,true));
+    assert_eq!(std::fs::read(dir.path().join("f.txt")).unwrap(),b"unsaved disk changes\n");
+}
+
+#[test]
+fn tui_new_comparison_cancel_and_submit_keep_the_original_view_and_files() {
+    let dir=tempfile::tempdir().unwrap();
+    for(name,bytes)in[("left",b"left\n".as_slice()),("right",b"right\n".as_slice())]{std::fs::write(dir.path().join(name),bytes).unwrap();}
+    let mut app=open(dir.path(),&["--no-index","left","right"]);
+    let old=app.session.spec().clone();
+    app.run_action(lenz::catalog::Action::NewComparison);
+    key(&mut app,KeyCode::Char('s'),KeyModifiers::CONTROL);
+    assert!(app.open_comparison.is_some());
+    key(&mut app,KeyCode::Esc,KeyModifiers::NONE);
+    assert!(!app.quit);assert_eq!(app.session.spec(),&old);
+    app.run_action(lenz::catalog::Action::NewComparison);
+    app.handle(Event::Paste("/missing".into()));key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+    assert!(app.open_comparison.as_ref().unwrap().core.error.is_some());
+    key(&mut app,KeyCode::Char('a'),KeyModifiers::CONTROL);
+    app.handle(Event::Paste("left".into()));key(&mut app,KeyCode::Tab,KeyModifiers::NONE);
+    app.handle(Event::Paste("right".into()));
+    assert!(screen(&draw(&mut app,80,24)).contains("Compare Files"));
+    key(&mut app,KeyCode::Enter,KeyModifiers::NONE);
+    assert!(app.new_view.is_some());assert_eq!(app.session.spec(),&old);
+    for(name,bytes)in[("left",b"left\n".as_slice()),("right",b"right\n".as_slice())]{assert_eq!(std::fs::read(dir.path().join(name)).unwrap(),bytes);}
+    let mut quitting=open(dir.path(),&["--no-index","left","right"]);
+    quitting.run_action(lenz::catalog::Action::NewComparison);
+    key(&mut quitting,KeyCode::Char('q'),KeyModifiers::CONTROL);
+    assert!(quitting.quit,"Ctrl+Q remains a global quit while the chooser is open");
+
+}
 
 fn flow_fixture(case: &user_flows::Case) -> (tempfile::TempDir, App) {
     let dir = tempfile::tempdir_in(std::env::current_dir().unwrap()).unwrap();
@@ -219,4 +268,21 @@ fn tui_committed_find_preserves_navigation_and_editing_find_blocks_save() {
             assert!(app.session.has_dirty());
         }
     }
+}
+
+#[test]
+fn tui_popup_fields_edit_unicode_ranges_without_editing_comparison(){
+    let dir=tempfile::tempdir().unwrap();std::fs::write(dir.path().join("a"),"old\n").unwrap();std::fs::write(dir.path().join("b"),"new\n").unwrap();
+    let mut app=open(dir.path(),&["a","b"]);
+    for prompt in [Prompt::Search,Prompt::Line,Prompt::Files]{
+        app.begin(prompt);app.handle(Event::Paste("one é👩🏽‍💻 two".into()));
+        key(&mut app,KeyCode::Home,KeyModifiers::NONE);key(&mut app,KeyCode::Right,KeyModifiers::CONTROL);key(&mut app,KeyCode::Right,KeyModifiers::NONE);
+        for _ in 0..2{key(&mut app,KeyCode::Right,KeyModifiers::SHIFT);}
+        assert_eq!(app.field_inputs.cursor(prompt as u64,0).unwrap().selected(&app.input),Some("é👩🏽‍💻"));
+        key(&mut app,KeyCode::Char('x'),KeyModifiers::CONTROL);assert_eq!(app.input,"one  two");assert!(!app.quit);
+        app.handle(Event::Paste("é👩🏽‍💻".into()));assert_eq!(app.input,"one é👩🏽‍💻 two");
+        for(w,h)in[(80,24),(24,8),(5,3)]{draw(&mut app,w,h);}
+        key(&mut app,KeyCode::Esc,KeyModifiers::NONE);
+    }
+    assert_eq!(std::fs::read(dir.path().join("b")).unwrap(),b"new\n");
 }

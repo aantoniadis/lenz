@@ -28,6 +28,7 @@ mod repository;
 mod pr_details;
 mod visual;
 mod app;
+mod fields;
 mod context;
 mod palette;
 mod md_images;
@@ -210,10 +211,10 @@ fn restore_input_modes() {
 }
 
 /// Outside a repository: the repository picker, before any comparison opens. `None` when the user quits.
-fn choose_repository(terminal:&mut ratatui::DefaultTerminal,cwd:std::path::PathBuf)->io::Result<Option<std::path::PathBuf>>{
+fn choose_repository(terminal:&mut ratatui::DefaultTerminal,cwd:std::path::PathBuf,comparisons:bool,new:bool)->io::Result<Option<lenz::repo_picker::Choice>>{
     let themes=lenz::theme::ThemeService::new_deferred(lenz::theme::paths_from_env(),lenz::theme::overrides_from_env(),true);
     let palette=themes.snapshot().palette;
-    let mut view=repo_picker::View::new(lenz::repo_picker::RepoPicker::new(cwd));
+    let mut view=repo_picker::View::new(lenz::repo_picker::RepoPicker::new(cwd).with_optional_comparisons(comparisons,new));
     loop {
         terminal.draw(|frame|view.draw(frame,&palette))?;
         match view.handle(&event::read()?) {
@@ -244,9 +245,10 @@ fn run(args: &[String], mut request: Request, mut cwd: std::path::PathBuf) -> io
     let mut terminal = init_terminal()?;
     restore_on_signal();
     if lenz::repo_picker::needed(&request,&cwd) {
-        let Some(root)=choose_repository(&mut terminal,cwd)? else { return Ok(0) };
+        let Some(choice)=choose_repository(&mut terminal,cwd.clone(),args.is_empty()||request.launch==Launch::Choose,request.launch==Launch::Choose)? else { return Ok(0) };
+        let (args,root)=choice.invocation(args,&cwd);
         std::env::set_current_dir(&root)?;
-        request=self::request(args,&root).map_err(io::Error::other)?;
+        request=self::request(&args,&root).map_err(io::Error::other)?;
         cwd=root;
     }
     let mut app = Screens::open(request,cwd);

@@ -93,7 +93,7 @@ pub(crate) enum Prompt {
     NewBranch { from: Option<String>, checkout: bool },
     /// Checkout Tag or Revision (`input`).
     Revision,
-    /// Every command's chord: type to filter, Enter captures a new shortcut, Delete restores the preset.
+    /// Every command's chord: type to filter, Enter captures a new shortcut, F6 restores the preset.
     Keymap,
 }
 /// What a details prompt is.
@@ -128,6 +128,7 @@ pub(crate) struct Modal {
     pub selected: bool,
     /// Search Everywhere's caret in `input` (a byte offset; `None` at the end). Other prompts type at the end.
     pub caret: Option<usize>,
+    pub editors: [Option<lenz_content::field_edit::Cursor>; 2],
 }
 #[derive(Clone)]
 pub(crate) struct Choice {
@@ -999,6 +1000,7 @@ impl App {
             capture: None,
             selected,
             caret: None,
+            editors: [None; 2],
         });
         if self
             .modal
@@ -1332,7 +1334,7 @@ impl App {
                     let where_ = if dir.is_empty() { "the project root" } else { dir.as_str() };
                     return format!("{} in {where_} · Enter creates · Esc cancels", kind.label());
                 }
-                Prompt::PasteEntry(request) => return format!("Paste {} in {} · saved contents · edit name · Ctrl+A clears · Enter copies · Esc cancels", request.source().display(), if request.folder().is_empty() { "the project root" } else { request.folder() }),
+                Prompt::PasteEntry(request) => return format!("Paste {} in {} · saved contents · edit name · Ctrl+A selects all · Enter copies · Esc cancels", request.source().display(), if request.folder().is_empty() { "the project root" } else { request.folder() }),
                 Prompt::Relocate { kind, from } => {
                     return format!("{} {from} · type {} · Enter · Esc cancels · references are not changed", kind.label(), kind.asks());
                 }
@@ -1354,16 +1356,16 @@ impl App {
                 Prompt::Symbols => "Workspace symbols · Tab: declarations",
                 Prompt::GoTo => "Go to line · line:column",
                 Prompt::Themes => "Theme",
-                Prompt::Places(PlaceList::Bookmarks) => "Bookmarks · Delete forgets",
-                Prompt::Places(PlaceList::RecentFiles) => "Recent files · Delete forgets",
-                Prompt::Places(PlaceList::RecentLocations) => "Recent locations · Delete forgets",
+                Prompt::Places(PlaceList::Bookmarks) => "Bookmarks · F6 forgets",
+                Prompt::Places(PlaceList::RecentFiles) => "Recent files · F6 forgets",
+                Prompt::Places(PlaceList::RecentLocations) => "Recent locations · F6 forgets",
                 Prompt::Mnemonic => "Bookmark key · press 0–9 or A–Z",
                 Prompt::Keymap if self.modal.as_ref().is_some_and(|m| m.capture.is_some()) => {
                     "Keymap · press the new shortcut (Esc cancels)"
                 }
                 Prompt::Keymap => {
                     return format!(
-                        "Keymap: {} · type to filter · Enter rebinds · Delete restores the preset · Esc closes",
+                        "Keymap: {} · type to filter · Enter rebinds · F6 restores the preset · Esc closes",
                         self.session.keymap().preset().label()
                     );
                 }
@@ -1374,9 +1376,9 @@ impl App {
                     let Some(b) = self.session.state().branches() else { return String::new() };
                     return match b.state_text() {
                         Some(state) => format!("{} · {state}", b.heading()),
-                        None if b.worktrees_only => format!("{} · type to filter · Enter compares · → more", b.heading()),
+                        None if b.worktrees_only => format!("{} · type to filter · Enter compares · Alt+Enter actions", b.heading()),
                         None if b.revisions_only => format!("{} · type to filter or a revision · Enter compares", b.heading()),
-                        None => format!("{} · type to filter · Enter checks out · → more", b.heading()),
+                        None => format!("{} · type to filter · Enter checks out · Alt+Enter actions", b.heading()),
                     };
                 }
                 Prompt::BranchMenu { .. } => "Actions · ← back",
@@ -1490,67 +1492,10 @@ impl App {
         }
         true
     }
-    fn edit_prompt(&mut self, text: &str, backspace: bool) {
-        let Some(modal) = &mut self.modal else { return };
-        if matches!(
-            modal.kind,
-            Prompt::Help
-                | Prompt::Details { .. }
-                | Prompt::Mnemonic
-                | Prompt::Context { .. }
-                | Prompt::Menu(_)
-                | Prompt::LanguageServer
-                | Prompt::Themes
-                | Prompt::ConfirmDelete { .. }
-        ) {
-            return;
-        }
-        let target = if modal.secondary_focus {
-            &mut modal.secondary
-        } else {
-            &mut modal.input
-        };
-        // Search Everywhere and Search in Project type and delete at their caret; the other prompts at the end.
-        let caret_box = matches!(modal.kind, Prompt::Navigation | Prompt::Search);
-        let mut caret = modal.caret.unwrap_or(target.len());
-        if std::mem::take(&mut modal.selected) {
-            target.clear();
-        } else if backspace && caret_box {
-            code_core::line_edit::apply(target, &mut caret, code_core::line_edit::Edit::Backspace);
-        } else if backspace {
-            target.pop();
-        }
-        if !backspace && caret_box {
-            code_core::line_edit::insert(target, &mut caret, text);
-        } else if !backspace {
-            target.extend(text.chars().filter(|c| !c.is_control()));
-        }
-        modal.caret = caret_box.then_some(caret);
-        modal.at = 0;
-        modal.top = 0;
-        modal.reveal_selection = true;
-        modal.error = None;
-        let (kind, query, replacement, replacing) =
-            (modal.kind.clone(), modal.input.clone(), modal.secondary.clone(), modal.secondary_focus);
-        match kind {
-            Prompt::Navigation => {
-                if let Some(search) = self.session.state().navigation() {
-                    self.dispatch(Command::SearchEverywhere {
-                        scope: search.scope,
-                        query,
-                    });
-                }
-            }
-            // The replacement field only edits remembered text; Enter in it replaces (see `accept`).
-            Prompt::Find if replacing => self.dispatch(Command::SetReplaceText(replacement)),
-            Prompt::Find => self.dispatch(Command::Find(query)),
-            Prompt::Declarations => self.dispatch(Command::FindDeclarations(query)),
-            Prompt::Symbols => self.dispatch(Command::Symbols(query)),
-            _ => {}
-        }
-    }
+    fn edit_prompt(&mut self, text: &str, backspace: bool) { self.type_field(text, backspace); }
     // Callers require an open modal; branches that dismiss or replace it return before accessing it again.
     fn modal_key(&mut self, key: KeyEvent) {
+        if self.field_key(key) { return; }
         let kind = self.modal.as_ref().unwrap().kind.clone();
         if let Prompt::Details { kind: Details::Terminal(ticket), .. } = kind
             && matches!(key.code, KeyCode::Enter | KeyCode::Esc)
@@ -1609,7 +1554,7 @@ impl App {
             return;
         }
         // The Git Branches popup: Right opens the highlighted row's actions; in them Left or Esc goes back.
-        if kind == Prompt::Branches && key.code == KeyCode::Right {
+        if kind == Prompt::Branches && (key.code == KeyCode::Right || key.code == KeyCode::Enter && alt) {
             return self.open_branch_menu(self.modal.as_ref().map_or(0, |m| m.at));
         }
         if matches!(kind, Prompt::BranchMenu { .. }) && key.code == KeyCode::Right {
@@ -1859,7 +1804,7 @@ impl App {
                 };
                 self.edit_prompt("", false);
             }
-            KeyCode::Delete if kind == Prompt::Navigation => {
+            KeyCode::Delete | KeyCode::F(6) if kind == Prompt::Navigation => {
                 if self
                     .session
                     .state()
@@ -1871,7 +1816,7 @@ impl App {
                     self.dispatch(Command::ForgetNavigation { revision, index });
                 }
             }
-            KeyCode::Delete if matches!(kind, Prompt::Places(_)) => {
+            KeyCode::Delete | KeyCode::F(6) if matches!(kind, Prompt::Places(_)) => {
                 if let Some(choice) = self.choices().get(self.modal.as_ref().unwrap().at)
                     && let ChoiceTarget::Place(place) = &choice.target
                 {
@@ -1879,7 +1824,7 @@ impl App {
                 }
                 self.clamp();
             }
-            KeyCode::Delete if kind == Prompt::Keymap => {
+            KeyCode::Delete | KeyCode::F(6) if kind == Prompt::Keymap => {
                 let at = self.modal.as_ref().map(|m| m.at);
                 let choices = self.choices();
                 let command = at.and_then(|at| choices.get(at)).and_then(|c| match c.target {
@@ -2138,13 +2083,9 @@ impl App {
             }
             Prompt::Open | Prompt::OpenFolder => {
                 let path = self.resolve_path(&input);
-                if input.trim().is_empty()
-                    || !path.exists()
-                    || (kind == Prompt::OpenFolder && !path.is_dir())
-                    || (kind == Prompt::Open && !path.is_file())
-                {
-                    self.modal.as_mut().unwrap().error =
-                        Some("Enter an existing file or folder path".into());
+                let target = if kind == Prompt::OpenFolder { code_core::open_path::Kind::Folder } else { code_core::open_path::Kind::File };
+                if input.trim().is_empty() || target.validate(path.clone()).is_err() {
+                    self.modal.as_mut().unwrap().error = Some("Enter an existing file or folder path".into());
                 } else {
                     self.close_modal();
                     if kind == Prompt::OpenFolder {

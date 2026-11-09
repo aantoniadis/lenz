@@ -688,6 +688,7 @@ pub fn syntax_style(palette:&lenz::theme::Palette,capture: Capture) -> Style {
 }
 /// A one-line input, `label` then its text and the caret at its end, in `cols` cells: text too long to fit shows
 /// its tail after `…`, so the caret and what is being typed stay in view.
+#[cfg(test)]
 pub fn input_line(label: &str, text: &str, cols: usize) -> String {
     let full = format!("{label}{text}▏");
     if full.width() <= cols { return full; }

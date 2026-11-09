@@ -203,16 +203,19 @@ fn vim_insert_tab_and_enter_join_the_insert_undo_group() {
 }
 
 #[test]
-fn vim_typing_while_save_is_pending_keeps_each_save_boundary() {
+fn vim_typing_after_save_keeps_the_observed_save_boundaries() {
     let (_d,mut s,path)=vim_fixture("");keys(&mut s,"i");
     s.dispatch(Command::InsertText{text:"a".into(),kind:crate::text::EditKind::Typing});let tab=s.state().active().unwrap().id();
     s.dispatch(Command::Save{tab});
+    // A tiny write can finish during Save itself. Only a still-pending acknowledgement
+    // separates the subsequent b/c typing into two Insert transactions.
+    let pending=s.state().view(tab).unwrap().save_status().busy();
     s.dispatch(Command::InsertText{text:"b".into(),kind:crate::text::EditKind::Typing});
     settle(&mut s,|s|!s.state().view(tab).unwrap().save_status().busy());
     assert_eq!(std::fs::read(&path).unwrap(),b"a");assert_eq!(source_text(s.state().current_source().unwrap()),"ab");
     s.dispatch(Command::InsertText{text:"c".into(),kind:crate::text::EditKind::Typing});esc(&mut s);
-    keys(&mut s,"u");assert_eq!(source_text(s.state().current_source().unwrap()),"ab");
-    keys(&mut s,"u");assert_eq!(source_text(s.state().current_source().unwrap()),"a");
+    keys(&mut s,"u");assert_eq!(source_text(s.state().current_source().unwrap()),if pending{"ab"}else{"a"});
+    keys(&mut s,"u");assert_eq!(source_text(s.state().current_source().unwrap()),if pending{"a"}else{""});
     assert_eq!(std::fs::read(path).unwrap(),b"a");
 }
 

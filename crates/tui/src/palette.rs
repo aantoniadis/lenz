@@ -40,6 +40,7 @@ impl App {
     fn run_action_inner(&mut self, action: Action) {
         self.command_palette = None;
         match action {
+            Action::NewComparison => self.open_comparison = Some(crate::repo_picker::View::new(lenz::repo_picker::RepoPicker::new(self.session.cwd().into()).with_comparisons(true))),
             Action::Comparison(lenz::commands::Command::SetDiffLayout(lenz::commands::DiffLayout::Unified)) if let Some(why) = self.unified_disabled() => self.session.set_notice(why),
             Action::Comparison(command) => { if let Some(why) = self.session.disabled(command) { self.session.set_notice(why); } else { self.comparison_command(command); } }
             // as Ctrl-F: the focused Files, Branches or History pane's own search, else Find in the comparison
@@ -164,6 +165,7 @@ impl App {
 impl Availability for App {
     fn disabled(&self, action: Action) -> Option<Cow<'static, str>> {
         match action {
+            Action::NewComparison => None,
             Action::Comparison(lenz::commands::Command::SetDiffLayout(lenz::commands::DiffLayout::Unified)) => self.unified_disabled().map(Cow::Borrowed),
             Action::Comparison(command) => self.session.disabled(command).map(Cow::Borrowed),
             Action::Interaction(command) => self.interaction_disabled(command).map(Cow::Borrowed),
@@ -233,7 +235,7 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
     frame.render_widget(crate::chrome::pane("",palette,true).style(base), rect);
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
     let buf = frame.buffer_mut();
-    crate::visual::safe_text(buf, Rect { height: 1, ..inner }, &crate::visual::input_line("Commands: ", p.query(), usize::from(inner.width)), base.fg(color(palette.accent)));
+    crate::visual::safe_text(buf,Rect{height:1,..inner},"Commands: ",base.fg(color(palette.accent)));
     let range = p.window(usize::from(inner.height.saturating_sub(1)));
     let selected = p.selected();
     if p.is_empty() && inner.height > 1 { crate::visual::safe_text(buf, Rect::new(inner.x, inner.y + 1, inner.width, 1), "No matching commands", base.add_modifier(Modifier::DIM)); }
@@ -247,13 +249,19 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
         buf.set_style(line, style);
         crate::visual::safe_text(buf, line, &format!("{mark}{}{reason}  · {right}", entry.entry.label), style);
     }
+    let offset=10.min(inner.width);
+    lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:p.query(),cursor:p.input().cursor(),area:Rect::new(inner.x+offset,inner.y,inner.width.saturating_sub(offset),1),active:true},base,base.bg(color(palette.selected_bg)));
+
 }
 
 /// What an event did to an open palette.
-pub(crate) enum Input { Ignored, Handled, Close, Done(Outcome) }
+pub(crate) enum Input { Ignored, Handled, Close, Copy(String), Done(Outcome) }
 
 /// Keys, wheel, clicks and paste while the palette in `rect` is open; it takes every key and click (it is modal).
 pub(crate) fn handle(p: &mut Palette, event: &Event, rect: Rect) -> Input {
+    if let Event::Key(key)=event && key.kind!=KeyEventKind::Release && let Some(command)=lenz_terminal_ui::command(*key) {
+        return p.edit(command).copy.map_or(Input::Handled,Input::Copy);
+    }
     match event {
         Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
             KeyCode::Esc => return Input::Close,
@@ -301,6 +309,7 @@ pub(crate) fn input(app: &mut App, event: &Event) -> bool {
     match handle(p, event, rect(area, p)) {
         Input::Ignored => return false,
         Input::Handled => {}
+        Input::Copy(text) => app.copy(&text),
         Input::Close => app.command_palette = None,
         Input::Done(Outcome::Run(action)) => app.run_action(action),
         Input::Done(Outcome::Disabled(why)) => app.session.set_notice(why.into_owned()),

@@ -155,7 +155,7 @@ Builds for macOS (Apple Silicon) and Linux (x86_64, aarch64) are on the [GitHub 
 
 Every package installs all five executables; `lenz` finds the others beside it. Linux binaries need glibc 2.35 or later; the GUI also loads the system's libxkbcommon-x11, libxcb and Vulkan loader at runtime (Debian/Ubuntu: `libxkbcommon-x11-0 libxcb1 libvulkan1`), which desktop installations already have.
 
-Linux tarballs include the logo and two desktop entries, **Lenz Code** (`lenz.desktop`) and **Lenz Diff** (`lenz-diff.desktop`, which opens the repository chooser described below); the AUR and Linux Homebrew packages install them.
+Linux tarballs include the logo and two desktop entries, **Lenz Code** (`lenz.desktop`) and **Lenz Diff** (`lenz-diff.desktop`, which opens the comparison/repository chooser described below); the AUR and Linux Homebrew packages install them.
 
 ## Build
 
@@ -217,6 +217,8 @@ This is Diff's reference; Lenz Code usage is in the [Lenz Code guide](docs/code/
 | `lenz diff` | working tree vs index (unstaged changes), plus untracked files |
 | `lenz diff --staged` (or `--cached`) | index vs HEAD |
 | `lenz diff <rev>` | working tree vs `<rev>`, plus untracked files |
+| `lenz diff show <commit>` | that commit vs its first parent; root commits compare with the empty tree, merge commits use their first parent |
+| `lenz diff --new-comparison` | choose two files, two folders, or a repository |
 | `lenz diff A B`, `lenz diff A..B` | revision `A` vs revision `B` |
 | `lenz diff A...B` | merge base of `A` and `B` vs `B` |
 | `lenz diff ... -- <path>...` | only these paths (relative to the current directory) |
@@ -253,9 +255,11 @@ Options:
 - `--blame`: start with Blame Annotations on; `--line <n>`: open the first file at line `n` of the right Side.
 - `--about`: show version, platform and licence information without opening a comparison.
 
-**Outside a repository**, `lenz diff`, `lenz diff log`, `lenz diff merge` and `lenz diff pr` (and the same in `lenz diff --tui`) open a repository chooser instead of failing: recent repositories (those Lenz has saved a place for), a path field with Tab completion, and in the GUI **Browse…** (Ctrl+O) for the system folder dialog. Choosing one reruns the same command inside it; Esc quits with exit code `0`. Two files or folders still compare anywhere.
+**Outside a repository**, plain `lenz diff` offers **Compare Files**, **Compare Folders** and **Open Repository** (F1/F2/F3 or a click). The same chooser opens anywhere with `lenz diff --new-comparison`, or **☰ → New Comparison…** / Commands in an existing comparison. A new comparison opens in a separate window, or an independent terminal view; the current documents and drafts stay open. Enter compares the two paths; Tab switches fields and Ctrl+Space completes a path. The repository path uses Tab completion and can also select a recent repository. All path fields support Ctrl/Cmd+A, caret/word movement and deletion; the GUI supports clipboard paste and the terminal supports bracketed paste. GUI **Browse…** (Ctrl+O) selects the active path.
 
-Lenz stays in the foreground until its window closes. Exit codes: `0` on a normal close, or when there is nothing to show (it prints `no differences` and opens no window); `2` on bad arguments or startup errors (git missing or older than 2.30, `lenz diff --tui` outside a repository without an interactive terminal). `lenz diff merge <base> <local> <remote> <merged>` exits `0` only after **Done**, `1` when cancelled or closed, so `git mergetool` restores its backup.
+Repository workflows (`lenz diff log`, `lenz diff show <commit>`, `lenz diff merge`, `lenz diff pr`) started outside Git ask for a repository and retain the requested command. Choosing one reruns it there; Esc cancels with exit code `0`. Two files or folders still compare anywhere. `show` accepts a commit ID or revision, optional comparison options and `-- <path>…`; it shows committed bytes without including local edits or restoring a previous comparison.
+
+Lenz stays in the foreground until its window closes. Exit codes: `0` on a normal close, or when an ordinary Git comparison has nothing to show (it prints `no differences` and opens no window); identical file/folder comparisons and `show` of an empty commit retain a window with an empty result; `2` on bad arguments or startup errors (git missing or older than 2.30, `lenz diff --tui` outside a repository without an interactive terminal). `lenz diff merge <base> <local> <remote> <merged>` exits `0` only after **Done**, `1` when cancelled or closed, so `git mergetool` restores its backup.
 
 ### Settings and last position
 
@@ -293,7 +297,7 @@ Plain `lenz diff` and `lenz diff log` in a repository reopen where you left off:
 - Tab/Shift-Tab move focus between panes. Typing in the Files or Commits list searches it; Ctrl/Cmd+F searches the focused text side, Ctrl/Cmd+Shift+F the whole Change Set.
 - **Back / Forward** (◀ ▶, Alt+Left/Right, mouse back/forward buttons) return to the previous commit, branch, filter or file history and reopen its file and line; `[` / `]` move between files.
 - In **Focus**, commit details sit below the file tree and diff in a full-width panel. **Commit** in the bottom bar, or **Show / hide commit message** in Commands, hides and restores it. Files can be hidden independently.
-- Drag pane dividers to resize; **Reset pane sizes** restores the layout.
+- Drag pane dividers to resize; **Reset pane sizes** restores the layout. Narrow GUI Overviews shrink navigation panes to reserve reading space, keeping the preferred sizes for a wider window. Merge finish controls remain available in narrow windows, and recovery warnings wrap.
 - `o` opens the file in your editor at the line (`$VISUAL`/`$EDITOR`, or `LENZ_EDITOR` when those are wrappers), `shift-o` in the default app.
 - Long histories load in steps of about 50,000 commits beyond what you can see; scrolling, End, searches and filters load more.
 - In a pull request, **PR details** (`d`) shows the description, discussion, review summaries and inline review threads.
@@ -467,6 +471,11 @@ Lazy library browsing revealed a 1,000-file library in 0.811 ms in the shared co
 10,000-file subtree unread. Paired GUI RSS was 168.78→168.88 MiB; this is a Linux software-rendered sample,
 not a native macOS guarantee. See [library browsing validation](docs/code/performance.md#dependency-libraries-in-the-explorer--2026-10-21)
 for startup, interaction, cancellation, memory and test limits.
+
+Journey-input checks retained 20-second long-search runs: GUI feedback was 22.82→23.36 ms and terminal
+feedback 0.268→0.319 ms. Code TUI retained about 0.6–0.8 MiB more file-backed RSS, with anonymous RSS
+unchanged; GUI memory ranges overlapped on repeat. These are feedback and residency measurements,
+not completed-frame times or leak proof. See the [journey validation notes](docs/optimization-notebook.md#journey-input-and-comparison-entry-2026-11-08).
 
 ### Diff and merge
 

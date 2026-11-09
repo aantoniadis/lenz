@@ -19,6 +19,7 @@ write-testing = []
 tempfile = "3"
 # Zero-width detection for the combining-mark cap (src/display.rs).
 unicode-width = "0.2"
+unicode-segmentation = "1.13.3"
 # In-document find (src/find.rs); already linked through tree-sitter.
 regex = "1.13"
 # Decoding (src/encoding.rs).

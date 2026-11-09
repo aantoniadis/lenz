@@ -50,9 +50,10 @@ impl App {
                 let field = Rect::new(content.x, y, content.width, 1);
                 fill(frame.buffer_mut(), field, style(p.fg, p.bg));
                 let prefix = if compact { format!("{}: ", code_core::chrome::ellipsize(label, content.width as usize / 3)) } else { " ".into() };
-                let shown = tail_columns(&modal.input, (content.width as usize).saturating_sub(prefix.width() + 1));
-                line(frame.buffer_mut(), field, &format!("{prefix}{shown}"), style(p.fg, if modal.selected { p.selected_bg } else { p.bg }).add_modifier(Modifier::UNDERLINED));
-                frame.set_cursor_position((content.x + (shown.width() as u16 + prefix.width() as u16).min(content.width.saturating_sub(1)), y));
+                line(frame.buffer_mut(),field,&prefix,style(p.dim,p.bg));
+                let offset=(prefix.width() as u16).min(field.width);
+                let area=Rect::new(field.x+offset,field.y,field.width.saturating_sub(offset),field.height);
+                lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&modal.input,cursor:Self::field_cursor(modal),area,active:true},style(p.fg,p.bg).add_modifier(Modifier::UNDERLINED),style(p.fg,p.selected_bg));
             }
             y = y.saturating_add(if compact { 1 } else { 2 }).min(content.bottom());
         }

@@ -327,7 +327,7 @@ The complete local gate and production dark/light, narrow/tiny, clipboard and
 modal-isolation replays passed. Sixty-second status cycles showed bounded sampled
 RSS and unchanged source/configuration bytes. Two alternating release comparisons
 found timing differences within pair variation. GUI initial sampled RSS rose
-0.6–1.3 MiB, while both 15-second sustained comparisons settled below the saved
+0.6–1.4 MiB, while both 15-second sustained comparisons settled below the saved
 baseline; this distinction remains explicit in the report. The first native GUI
 OCR oracle missed a visible Actions tab and was narrowed to the relevant tab;
 the failed run was retained. No source changes were needed after visual review.
@@ -442,7 +442,7 @@ Linux release builds, same machine, shared-core fixture with 5,001 branches and 
 | Page local branches, remote refs and PRs in batches of about 20 | **Kept.** Local filtering can request the full inventory; PR filtering covers loaded requests. `gh pr list` has no offset, so another PR batch refetches a larger prefix. |
 | Shape a PR description synchronously during render | **Rejected.** Native formatting now runs on the background executor with source, width, theme, font and request identity checks; provisional content remains available. |
 | Reuse the Markdown parser, reading style and native glyph shaping for PR prose and code | **Kept.** The final release test's 35,255-byte description prepares its render in 1.49–1.69 ms; formatting completes in 39.1 ms cold and 4.99–5.11 ms warm in the background. Cached render preparation is 0.020–0.023 ms. These are native-text test measurements, excluding canvas paint and physical presentation; absolute process RSS was 78.1 MiB, not a leak or baseline-memory claim. |
-| Group the on-demand PR Markdown and cached page builders with `#[cold]` | **Kept.** Warmed, same-filesystem plain-TUI RSS overlaps at 10.6–10.8 MiB. Without the hints, the changed binary retained about 1.3 MiB more executable pages. Anonymous memory and thread counts were unchanged. Marking only the Markdown builder fixed plain comparisons; grouping the cached builders also removed a consistent extra 1 MiB in the conflict workflow and a 0.6 ms second-view slowdown. Final paired conflict RSS was 11.93 → 11.76 MiB; second-view timing moved in both directions. A temporary `MADV_RANDOM` diagnostic isolated executable fault-around; no preload, allocator or system configuration ships with the change. |
+| Group the on-demand PR Markdown and cached page builders with `#[cold]` | **Kept.** Warmed, same-filesystem plain-TUI RSS overlaps at 10.6–10.8 MiB. Without the hints, the changed binary retained about 1.4 MiB more executable pages. Anonymous memory and thread counts were unchanged. Marking only the Markdown builder fixed plain comparisons; grouping the cached builders also removed a consistent extra 1 MiB in the conflict workflow and a 0.6 ms second-view slowdown. Final paired conflict RSS was 11.93 → 11.76 MiB; second-view timing moved in both directions. A temporary `MADV_RANDOM` diagnostic isolated executable fault-around; no preload, allocator or system configuration ships with the change. |
 
 The full Linux suite collected 133 passing cases and 394 metrics, including a 10-second sustained mixed workload and three repetitions of the GUI interaction scenarios on a private software-rendered display. Its final comparison guard held the baseline's earlier "running" status; a separate post-collection comparison verified the completed baseline and matching configuration without changing either raw report. Evidence remains under `target/perf/2026-10-17-repository-{before-frozen,after,ux}`.
 
@@ -2320,3 +2320,50 @@ Paired release runs against `v0.0.7`; the table and commands are in the
 |---|---|
 | gpui v1.24.2 → v1.26.2 with the dependency updates (Code and Diff GUI, Code and Diff TUI, two alternating pairs) | **No regression of a millisecond or more.** Code GUI open 158.6–160.8 ms against 159.6–160.0; Diff GUI first paint 252–253 against 250–251.5 ms; Code TUI first feedback +0.7 ms and Diff TUI input +0.3 ms in both pairs, recorded and not pursued; Code GUI edit-run peak RSS +1–3 MiB. |
 | Diff terminal first-paint marker | **Collector fix.** Since 0.0.7 the header names the comparison, so `tui-bench.py`, `markdown-bench.py` and `crash-reporting-check.py` waited for a `Lenz` that never came; they now wait for the status line's `F2 details`. Both builds were measured with it. |
+
+## Journey input and comparison entry (2026-11-08)
+
+The reader and Diff journey fixes share a borrowed, caret-aware input viewport. It walks backward only
+through the visible prefix, then forward to the viewport edge; the initial full-prefix scan was replaced
+before final measurements. A million-character input and combining/emoji boundaries are covered by
+correctness tests. GUI and terminal adapters keep their own shaping and cell placement.
+
+Release baseline `0baf705d8405a33543dfc73616f6551a98502b54`, repository profiles unchanged, four jobs;
+terminal binaries built separately from GUI features. Three private-X11 trials per GUI workload and
+three owned-PTY long-query trials include a 20-second input/resize loop. Long-query first feedback was
+22.82→23.36 ms in the GUI (XDamage), 0.268→0.319 ms in the TUI (PTY bytes). Every fixed trial exposed
+edits at Home; every baseline trial reproduced the hidden prefix. Original file bytes and terminal
+restoration remained exact. Ordinary GUI paging changed 8.19→8.68 ms (Code), 8.97→9.26 ms (Diff).
+
+Alternating warm Diff first-paint samples were 182/156/127→125/127/125 ms, with settled RSS
+145.5–146.3→146.2–146.4 MiB. This is not a speedup claim. An initial Diff TUI startup outlier did not
+repeat: baseline repeats 13.25/6.31/6.70 ms, fixed 6.45/5.17/5.99 ms. GUI mapping is a different,
+noisy endpoint; Code first-readable content was not measured. Code GUI RSS initially rose about
+3 MiB, but baseline repeat 134.04–136.04 MiB overlapped fixed 135.21–135.88 MiB.
+
+Code TUI's small RSS increase remains: roughly 0.6–0.8 MiB of file-backed pages in repeated search
+runs, with anonymous RSS about 2.3 MiB in both. Ordinary 20-second paging measured total RSS
+16.01→16.68 MiB. This is an unresolved executable-residency difference; full memory preservation
+is not established. A bounded ASCII shortcut and a cross-crate inline hint gave no useful improvement
+and were removed. The ASCII trial used a Code-TUI-only feature graph, so its memory comparison is
+inconclusive; the inline trial used the matching two-terminal graph. The simpler bounded Unicode
+implementation remains.
+
+Ignored local evidence is under `perf-results/journey-fixes/`: source and executable identities,
+retained baseline and initial candidate binaries, raw timings and actual durations, native screenshots,
+full local gate, final constructor/input tests, failed attempts and the detailed validation report. The
+original GUI wrapper's elapsed field includes settlement/screenshot time; its timeline bounds the
+stress interval. The final Reader change after the measurements makes compact forms include exactly
+240 px so their error remains visible; final functional replay is separate. Native Wayland/macOS,
+hardware GPU memory, physical presentation, and longer soaks remain unverified. RSS is not leak proof.
+
+
+## Search and popup text editing — 2026-11-09
+
+Shared one-line selection and edit commands now cover Reader/Diff search and popup fields in both adapters. GUI clipboard transport and terminal cell presentation remain separate. Cursor-only movement/copy does not restart query workers; cursor banks are bounded to two active fields. Paint snapshots borrow or copy only the visible range, hidden characters are displayed safely, and GUI carets account for fallback-font advances. Compact Find gives its query priority over counters/options.
+
+The retained baseline includes the preceding journey fixes and `diff show`, with unchanged Cargo profiles. TUI payloads were captured from standalone builds; GUI builds use the same package feature union as that baseline. Full local CI passed, as did real X11 clipboard/keyboard checks and PTY Unicode/resize/cleanup checks.
+
+Evidence: `perf-results/popup-inputs/validation.md`, `metrics.json`, source/binary identities, native screenshots/events, PTY raw output, and initial/paired performance samples. Paired terminal search feedback was 0.314 → 0.315 ms. Repeated source-navigation stress was 0.696 → 0.726 ms (initially 0.673 → 0.760 ms), so a small feedback cost remains in that workload. Reader GUI mapped-window and damage timing samples varied by run. Fixed-viewport anonymous RSS overlapped; approximately 1.4 MiB more executable pages remain resident (smaps), with approximately 1.4 MiB higher total RSS in that diagnostic. This residual is reported, not called zero overhead. There is no new unbounded field history/cache. RSS does not measure GPU allocation or prove absence of leaks.
+
+Early native harness assertions relied on OCR and a simple terminal screen approximation; the final checks use exact clipboard bytes plus adapter cell/paint assertions and inspected screenshots. The 20-second sustained runs passed; longer leak runs, native macOS/Wayland and physical-display timing remain unverified.

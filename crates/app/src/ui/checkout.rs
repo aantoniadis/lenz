@@ -17,15 +17,15 @@ impl Viewer {
     /// The open Git prompt's line, drawn in the Go to line box.
     pub(super) fn git_prompt_text(&self) -> Option<String> {
         Some(match self.git_prompt.as_ref()? {
-            GitPrompt::NewBranch { from, name, checkout, error } => {
+            GitPrompt::NewBranch { from, name:_, checkout, error } => {
                 let start = from.as_deref().map_or("HEAD", |r| ["refs/heads/", "refs/remotes/", "refs/tags/"].iter().find_map(|p| r.strip_prefix(p)).unwrap_or(r));
                 let mark = if *checkout { "x" } else { " " };
                 let hint = error.clone().unwrap_or_else(|| "Enter".into());
-                format!("New branch from {start} [{mark}] check out (Tab): {name}▏   {hint}")
+                format!("New branch from {start} [{mark}] check out (Tab) · {hint}")
             }
-            GitPrompt::Revision { input, error } => {
+            GitPrompt::Revision { input:_, error } => {
                 let hint = error.clone().unwrap_or_else(|| "a tag, branch, commit id or HEAD~2 — Enter".into());
-                format!("Checkout tag or revision: {input}▏   {hint}")
+                format!("Checkout tag or revision · {hint}")
             }
         })
     }
@@ -324,7 +324,7 @@ mod gui_tests {
         assert!(viewer.read_with(&cx, |v, _| v.goto_prompt()).unwrap().ends_with("A branch named \"other\" already exists"));
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("-x\nmore".into()));
         window.update(&mut cx, |v, w, cx| v.on_key(&event("v", true, false, false), w, cx)).unwrap();
-        assert!(viewer.read_with(&cx, |v, _| v.goto_prompt()).unwrap().contains(": other-x▏"));
+        assert_eq!(viewer.read_with(&cx,|v,_|match v.git_prompt.as_ref().unwrap(){GitPrompt::NewBranch{name,..}=>name.clone(),_=>unreachable!()}),"other-x");
         keys(&mut cx, &window, &["tab", "enter"]);
         pump(&mut cx, &viewer, done);
         assert_eq!(branch(dir.path()), "main", "Check out was off");

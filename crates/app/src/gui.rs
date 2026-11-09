@@ -122,7 +122,7 @@ pub fn run() -> ExitCode {
             }
             picker=Some((root,true));
         }
-        (cli::Launch::Diff, Some(root)) => {
+        (cli::Launch::Diff | cli::Launch::Show, Some(root)) => {
             // `lenz` in a clean repository browses history instead of saying "no differences"
             let bare = matches!(&request.spec, changeset::Spec::Git { cached: false, revs, paths, .. } if revs.is_empty() && paths.is_empty());
             // during a merge, rebase, cherry-pick, revert or stash pop: its Conflict List
@@ -142,7 +142,7 @@ pub fn run() -> ExitCode {
         }
         _ => {}
     }
-    if set.comparisons.is_empty() && !matches!(request.launch,cli::Launch::About|cli::Launch::Log{..}) {
+    if set.comparisons.is_empty() && (merging.is_some() || picking.is_some() || (!matches!(request.launch,cli::Launch::About|cli::Launch::Log{..}|cli::Launch::Show) && !matches!(request.spec,changeset::Spec::Plain{..}))) {
         if merging.is_some() || picking.is_some() {
             eprintln!("lenz diff merge: nothing to merge, the versions are identical");
             return ExitCode::from(2);
@@ -223,6 +223,7 @@ pub fn run() -> ExitCode {
                 let mut v = ui::Viewer::new(set, request.spec, request.blame, request.name, doc, view, blocks.is_none(), request.options, font, started, timings, cx);
                 if let Some(session) = session {
                     v.with_session(session, cx);
+                    if request.launch == cli::Launch::Show { v.start_in_focus(); }
                     if let Some((found, fetched)) = opened_pr {
                         v.adopt_pr(found, fetched, cx);
                     }
@@ -312,12 +313,14 @@ fn choose_repository(args: &[String]) -> Option<ExitCode> {
     let request = cli::parse(args, &cwd).ok()?;
     if !crate::repo_picker::needed(&request, &cwd) { return None; }
     let owned_args = args.to_vec();
+    let comparisons = args.is_empty() || request.launch == cli::Launch::Choose;
+    let new = request.launch == cli::Launch::Choose;
     gpui_platform::application().run(move |cx: &mut App| {
         let (font, _) = ui::pick_mono(cx);
         let options = WindowOptions {
             app_id: Some("lenz".into()),
             focus: true,
-            titlebar: Some(TitlebarOptions { title: Some("Lenz — open a repository".into()), ..Default::default() }),
+            titlebar: Some(TitlebarOptions { title: Some("Lenz — open a comparison".into()), ..Default::default() }),
             ..Default::default()
         };
         cx.open_window(options, |window, cx| {
@@ -325,7 +328,7 @@ fn choose_repository(args: &[String]) -> Option<ExitCode> {
             ui::themes::install(cx);
             let dark = matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark);
             cx.update_global::<ui::themes::GuiThemes, _>(|g, _| { g.0.execute(crate::theme::ThemeCommand::NativeAppearance(dark)); });
-            let chooser = cx.new(|cx| ui::repo_chooser::RepoChooser::new(crate::repo_picker::RepoPicker::new(cwd), font, cx));
+            let chooser = cx.new(|cx| ui::repo_chooser::RepoChooser::new(crate::repo_picker::RepoPicker::new(cwd).with_optional_comparisons(comparisons, new), font, cx));
             // as the main window: the system's light/dark setting (on Linux it can arrive after the window opens)
             // and live theme changes repaint the chooser
             chooser.update(cx, |_, cx| {
@@ -351,19 +354,21 @@ fn choose_repository(args: &[String]) -> Option<ExitCode> {
 /// Start again inside the repository chosen in the chooser (`exec`, or a fresh process on macOS): 2 if that failed,
 /// 0 when nothing was chosen or the new process started.
 fn open_chosen(args: &[String]) -> u8 {
-    let Some(root) = ui::repo_chooser::chosen() else { return 0 };
+    let Some(choice) = ui::repo_chooser::chosen() else { return 0 };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (args, root) = choice.invocation(args, &cwd);
     let error = match std::env::current_exe() {
         // AppKit has already written this process off as quitting (the chooser closed through `terminate:`), so an
         // image exec'd into it starts but never shows a window: start the repository in a fresh process instead.
         #[cfg(target_os = "macos")]
-        Ok(exe) => match std::process::Command::new(exe).args(args).current_dir(&root).spawn() {
+        Ok(exe) => match std::process::Command::new(exe).args(&args).current_dir(&root).spawn() {
             Ok(_) => return 0,
             Err(error) => error,
         },
         #[cfg(not(target_os = "macos"))]
         Ok(exe) => {
             use std::os::unix::process::CommandExt;
-            std::process::Command::new(exe).args(args).current_dir(&root).exec()
+            std::process::Command::new(exe).args(&args).current_dir(&root).exec()
         }
         Err(error) => error,
     };

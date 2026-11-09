@@ -16,16 +16,18 @@ pub fn matches(label: &str, group: &str, query: &str) -> bool {
     query.split_whitespace().all(|word| { let word = word.to_lowercase(); label.contains(&word) || group.contains(&word) })
 }
 
-pub struct Palette { all: Vec<Row>, query: String, hits: Vec<usize>, selected: usize, first: usize }
+pub struct Palette { all: Vec<Row>, query: crate::line_edit::Input, hits: Vec<usize>, selected: usize, first: usize }
 
 impl Palette {
     /// Rows for `entries`, each with its disabled reason as of now.
     pub fn new(entries: Vec<Entry>, availability: &dyn Availability) -> Self {
         let all: Vec<Row> = entries.into_iter().map(|entry| Row { disabled: availability.disabled(entry.action), entry }).collect();
         let hits = (0..all.len()).collect();
-        Self { all, query: String::new(), hits, selected: 0, first: 0 }
+        Self { all, query: Default::default(), hits, selected: 0, first: 0 }
     }
-    pub fn query(&self) -> &str { &self.query }
+    pub fn query(&self) -> &str { self.query.text() }
+    pub fn input(&self) -> &crate::line_edit::Input { &self.query }
+    pub fn edit(&mut self, command: crate::field_edit::Command) -> crate::field_edit::Outcome { let out=self.query.command(command); if out.changed {self.refilter();} out }
     pub fn len(&self) -> usize { self.hits.len() }
     pub fn is_empty(&self) -> bool { self.hits.is_empty() }
     pub fn rows(&self) -> impl Iterator<Item = &Row> { self.hits.iter().map(|&i| &self.all[i]) }
@@ -34,8 +36,8 @@ impl Palette {
     pub fn command(&mut self, command: PaletteCommand) {
         let last = self.hits.len().saturating_sub(1);
         match command {
-            PaletteCommand::Type(text) => { self.query.push_str(&text); self.refilter(); }
-            PaletteCommand::Backspace => { self.query.pop(); self.refilter(); }
+            PaletteCommand::Type(text) => { self.edit(crate::field_edit::Command::Insert(text)); }
+            PaletteCommand::Backspace => { self.edit(crate::field_edit::Command::Edit {edit:crate::line_edit::Edit::Backspace,extend:false}); }
             PaletteCommand::Move(delta) => self.selected = self.selected.saturating_add_signed(delta).min(last),
             PaletteCommand::Home => self.selected = 0,
             PaletteCommand::End => self.selected = last,
@@ -59,7 +61,7 @@ impl Palette {
     }
 
     fn refilter(&mut self) {
-        let query = self.query.clone();
+        let query = self.query.text().to_string();
         self.hits = (0..self.all.len()).filter(|&i| matches(&self.all[i].entry.label, self.all[i].entry.group.label(), &query)).collect();
         (self.selected, self.first) = (0, 0);
     }

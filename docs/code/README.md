@@ -38,6 +38,8 @@ Started with nothing to open (from home or `/`, as a desktop launcher does), a w
 Folder…**, the recent folders and the files recently opened without a folder; a click runs the command or opens the
 folder or file ([terminal](tui.md)).
 
+If the desktop file dialog cannot open, **Open File…** and **Open Folder…** offer an in-window path prompt with the error and an Open button. Type or paste an existing path (relative to the project, or `~/` for home); Ctrl/Cmd+A replaces it, arrows move the caret, Enter opens and Escape cancels. A bad path keeps the prompt open without changing documents. Long search and path inputs scroll to keep the caret visible, including after Home and word movement.
+
 Keys (the default IntelliJ keymap; see [Keymaps](#keymaps)): Ctrl+O open, Ctrl+R/F5 reload, Ctrl+F4 close, Ctrl+A select
 all, Ctrl+C copy, Shift+arrows/Home/End select, Ctrl+Left/Right move by word (word ends and starts; Shift selects),
 Ctrl+Shift+Home/End select to the file's start/end, Home goes to the first non-blank character and then the line start
@@ -718,3 +720,6 @@ its retained text, **Clear** removes it, and **Hide** or Escape collapses the pa
 input to the editor. The latest 256 entries are kept in memory, up to 8 KiB each, with UTC timestamps;
 they survive file switches but are not saved between sessions. New entries follow the bottom when
 scrolled there. This is application activity, not an unrestricted capture of every child process's output.
+
+
+Search and popup fields support selection, copy/cut/paste, character/word movement, Home/End and Shift-selection in both interfaces. See [text input controls and terminal clipboard behavior](../tui.md#text-in-searches-and-dialogs). Reader branch-row actions use Alt+Enter while a filter is nonempty; F6 forgets a recent item/bookmark or resets a keybinding.

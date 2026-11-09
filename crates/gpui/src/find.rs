@@ -10,6 +10,8 @@ pub struct FindBox {
     pub toggles: [(FindOption, Bounds<Pixels>); 3],
     pub on: [bool; 3],
     pub query: String,
+    pub query_cursor: lenz_content::field_edit::Cursor,
+    pub replace_cursor: lenz_content::field_edit::Cursor,
     pub counter: String,
     pub error: bool,
     pub focused: bool,
@@ -35,8 +37,10 @@ impl FindBox {
             f32::from(pane.size.height).max(0.0),
         );
         let margin = 8.0_f32.min(w / 2.0);
+        let toggle_w = 3.0 * char_w + 4.0;
+        let minimum = (3.0*toggle_w + self.counter.chars().count().min(12) as f32*char_w + 6.0*char_w + 32.0).max(240.0);
         let bw = ((self.query.chars().count() + self.counter.chars().count() + 18) as f32 * char_w)
-            .max(240.0)
+            .max(minimum)
             .min((w - 2.0 * margin).max(0.0));
         let row_h = line_h + 4.0;
         // Both rows show only where the pane has room for them; the query row always does.
@@ -55,11 +59,10 @@ impl FindBox {
         } else {
             Bounds::default()
         };
-        let toggle_w = 3.0 * char_w + 4.0;
-        let counter_w = (self.counter.chars().count() as f32 * char_w).min(bw * 0.4);
+        let counter_w = self.counter_width(char_w);
         let right = x + w - margin - 8.0 - counter_w;
         self.toggles = std::array::from_fn(|i| {
-            let visible = bw >= (3.0 * toggle_w + counter_w + char_w + 32.0).max(240.0) && row_h > 4.0;
+            let visible = bw >= (3.0 * toggle_w + counter_w + 6.0*char_w + 32.0).max(240.0) && row_h > 4.0;
             (
                 [FindOption::Case, FindOption::Word, FindOption::Regex][i],
                 Bounds {
@@ -69,6 +72,21 @@ impl FindBox {
             )
         });
         self
+    }
+
+    fn counter_width(&self, char_w:f32)->f32 {
+        let w=f32::from(self.bounds.size.width);
+        if w<240.0 {0.0}else{(self.counter.chars().count() as f32*char_w).min(w*0.4)}
+    }
+
+    /// The query keeps priority over counters and option buttons in a compact pane.
+    pub fn query_bounds(&self, offset:gpui::Point<Pixels>, char_w:f32)->Bounds<Pixels>{
+        let x=f32::from(self.bounds.origin.x+offset.x);
+        let y=f32::from(self.bounds.origin.y+offset.y);
+        let w=f32::from(self.bounds.size.width);
+        let row_h=f32::from(self.bounds.size.height)/if self.replace_row.size.height>px(0.0){2.0}else{1.0};
+        let end=if self.toggles[0].1.size.width>px(0.0){f32::from(self.toggles[0].1.origin.x+offset.x)-4.0}else{x+w-12.0-self.counter_width(char_w)};
+        Bounds{origin:point(px(x+8.0),px(y+2.0)),size:size(px((end-x-12.0).max(0.0)),px((row_h-4.0).max(0.0)))}
     }
 
     pub fn option_at(&self, p: gpui::Point<Pixels>) -> Option<FindOption> {
@@ -106,28 +124,13 @@ impl FindBox {
             return;
         }
         let row_h = h / if self.replace_row.size.height > px(0.0) { 2.0 } else { 1.0 };
-        let counter_w = (self.counter.chars().count() as f32 * char_w).min(w * 0.4);
+        let counter_w = self.counter_width(char_w);
         let counter_x = x + w - 8.0 - counter_w;
-        let query_end = if self.toggles[0].1.size.width > px(0.0) {
-            f32::from(self.toggles[0].1.origin.x + offset.x) - 4.0
-        } else {
-            counter_x - 4.0
-        };
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             fill(window, x, y, w, h, if self.focused { palette.accent } else { palette.border });
             fill(window, x + 1.0, y + 1.0, w - 2.0, h - 2.0, palette.header_bg);
-            let field = Bounds {
-                origin: point(px(x + 6.0), px(y)),
-                size: size(px((query_end - x - 6.0).max(0.0)), px(row_h)),
-            };
-            window.with_content_mask(Some(ContentMask { bounds: field }), |window| {
-                let query_w = self.query.chars().count() as f32 * char_w;
-                let tx = (query_end - query_w - 4.0).min(x + 8.0);
-                text(window, cx, m, tx, y + 2.0, &self.query, palette.fg);
-                if self.focused && !self.replace_focused {
-                    fill(window, tx + query_w, y + 4.0, 2.0, row_h - 8.0, palette.caret);
-                }
-            });
+            crate::field::paint(crate::field::View { text: &self.query, cursor: self.query_cursor,
+                bounds: self.query_bounds(offset,char_w),char_w,active:self.focused&&!self.replace_focused },window,cx,m,palette);
             for ((option, b), on) in self.toggles.iter().zip(self.on) {
                 if b.size.width <= px(0.0) {
                     continue;
@@ -152,7 +155,7 @@ impl FindBox {
             if self.replace_row.size.height > px(0.0) {
                 let ry = y + row_h;
                 fill(window, x + 1.0, ry, w - 2.0, 1.0, palette.border);
-                let label = self.replace_label.as_str();
+                let label = if w<self.replace_label.chars().count() as f32*char_w + 6.0*char_w+20.0 {"↦"}else{self.replace_label.as_str()};
                 let left = x + 6.0;
                 let field_left = left + label.chars().count() as f32 * char_w + 6.0;
                 text(window, cx, m, left, ry + 2.0, label, palette.dim);
@@ -160,14 +163,7 @@ impl FindBox {
                     origin: point(px(field_left), px(ry)),
                     size: size(px((x + w - 8.0 - field_left).max(0.0)), px(row_h)),
                 };
-                window.with_content_mask(Some(ContentMask { bounds: row }), |window| {
-                    let text_w = self.replace.chars().count() as f32 * char_w;
-                    let tx = (x + w - 8.0 - text_w - 4.0).min(field_left);
-                    text(window, cx, m, tx, ry + 2.0, &self.replace, palette.fg);
-                    if self.focused && self.replace_focused {
-                        fill(window, tx + text_w, ry + 4.0, 2.0, row_h - 8.0, palette.caret);
-                    }
-                });
+                crate::field::paint(crate::field::View{text:&self.replace,cursor:self.replace_cursor,bounds:Bounds{origin:point(row.origin.x,px(ry+2.0)),size:row.size},char_w,active:self.focused&&self.replace_focused},window,cx,m,palette);
             }
         });
     }
@@ -182,6 +178,7 @@ mod tests {
             toggles: [(FindOption::Case, Bounds::default()); 3],
             on: [false; 3],
             query: query.into(),
+            query_cursor:Default::default(),replace_cursor:Default::default(),
             counter: "invalid expression ".repeat(50),
             error: true,
             focused: true,
@@ -225,4 +222,15 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn compact_find_preserves_a_visible_query_in_a_split_pane(){
+        for width in [48.0,76.0,100.0,224.0]{
+            let b=boxed("alpha beta ","replacement").layout(Bounds{origin:point(px(0.0),px(0.0)),size:size(px(width+16.0),px(100.0))},20.0,8.0);
+            let field=b.query_bounds(point(px(0.0),px(0.0)),8.0);
+            assert_eq!(f32::from(field.size.width),width-24.0);
+            assert!(b.toggles.iter().all(|(_,b)|b.size.width==px(0.0)));
+            assert_eq!(b.counter_width(8.0),0.0);
+        }
+    }
+
 }

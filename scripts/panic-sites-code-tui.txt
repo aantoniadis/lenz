@@ -2,4 +2,4 @@ unwrap_used 11
 expect_used 0
 panic 0
 unreachable 0
-string_slice 2
+string_slice 1

@@ -214,8 +214,9 @@ def main():
         finally:
             probe.close()
         # Error-path cleanup and Ctrl-C while the search prompt owns input.
+        # Find owns Ctrl+C for copying; Escape returns to the global Ctrl+C quit binding.
         for command, key, expected in [([app, '--no-index', 'absent', 'right'], b'q', 2),
-                                        ([app, '--no-index', 'left', 'right'], b'/hello\x03', 0)]:
+                                        ([app, '--no-index', 'left', 'right'], b'/hello\x03\x1b\x03', 0)]:
             probe = TerminalProbe(command, root)
             try:
                 probe.expect(b'details')

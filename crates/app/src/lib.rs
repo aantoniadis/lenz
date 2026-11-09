@@ -15,7 +15,7 @@ pub use lenz_content::{encoding, highlight, icons, file_icons, wrap};
 pub mod document;
 pub mod find;
 /// Go-to-line input, from the shared content crate.
-pub use lenz_content::goto;
+pub use lenz_content::{goto, line_edit, field_edit};
 pub use lenz_content::double_shift;
 pub use lenz_content::scrollbar;
 pub use lenz_content::branches;

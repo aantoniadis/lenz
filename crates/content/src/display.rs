@@ -22,6 +22,17 @@ pub fn one_line(text: &str) -> String {
         .collect()
 }
 
+/// Safe text for a single-line field, without allocating for ordinary input.
+pub fn field_text(text:&str)->std::borrow::Cow<'_,str>{
+    use std::borrow::Cow;
+    if text.is_ascii()&&!text.bytes().any(|b|b.is_ascii_control()){return Cow::Borrowed(text);}
+    let capped=cap_marks(text);
+    let shown=match show_bidi(&capped){Cow::Owned(shown)=>Cow::Owned(shown),Cow::Borrowed(_)=>capped};
+    if shown.chars().any(char::is_control){Cow::Owned(shown.chars().map(|c|if c.is_control(){'�'}else{c}).collect())}else{shown}
+}
+/// Cell width of the displayed field, including visible hidden characters.
+pub fn field_width(text:&str)->usize{use unicode_width::UnicodeWidthStr;field_text(text).width()}
+
 fn is_bidi_control(c: char) -> bool {
     matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }

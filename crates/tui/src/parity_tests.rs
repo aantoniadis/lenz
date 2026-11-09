@@ -1601,7 +1601,7 @@ fn new_branch_and_revision_prompts_refuse_in_place_in_the_terminal() {
     assert!(screen(&draw(&mut app, 160, 40)).contains("A branch named \"other\" already exists"));
     app.handle(Event::Paste("-x".into()));
     key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-    assert!(screen(&draw(&mut app, 160, 40)).contains("[ ] check out (Tab): other-x"));
+    let shown=screen(&draw(&mut app,160,40));assert!(shown.contains("[ ] check out (Tab)")&&shown.contains("other-x"));
     key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
     ready(&mut app);
     assert_eq!(current_branch(dir.path()), "main");

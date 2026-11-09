@@ -2391,6 +2391,7 @@ impl MergeSession {
 }
 
 struct MergeFind {
+    cursor: crate::field_edit::Cursor,
     search: crate::find::Find,
     editing: bool,
 }
@@ -2423,6 +2424,7 @@ impl MergeSession {
             f.editing = true;
         } else {
             self.find = Some(MergeFind {
+                cursor:Default::default(),
                 search: crate::find::Find::new(
                     String::new(),
                     options,
@@ -2435,29 +2437,16 @@ impl MergeSession {
         }
         self.refind();
     }
-    pub fn type_find(&mut self, text: &str) {
-        if let Some(f) = &mut self.find {
-            for c in crate::document::one_line(text).chars() {
-                if f.search.query.len() + c.len_utf8() > 4096 {
-                    break;
-                }
-                f.search.query.push(c);
-            }
-            self.refind();
-        }
+    pub fn find_query(&self) -> Option<&str> {self.find.as_ref().map(|f|f.search.query.as_str())}
+    pub fn find_cursor(&self) -> crate::field_edit::Cursor {self.find.as_ref().map_or(Default::default(),|f|f.cursor)}
+    pub fn edit_find(&mut self, command: crate::field_edit::Command) -> crate::field_edit::Outcome {
+        let Some(f)=self.find.as_mut() else{return Default::default()};
+        let out=f.cursor.execute_limited(&mut f.search.query,command,4096);
+        if out.changed {self.refind();}out
     }
-    pub fn backspace_find(&mut self) {
-        if let Some(f) = &mut self.find {
-            f.search.query.pop();
-            self.refind();
-        }
-    }
-    pub fn clear_find_query(&mut self) {
-        if let Some(f) = &mut self.find {
-            f.search.query.clear();
-            self.refind();
-        }
-    }
+    pub fn type_find(&mut self,text:&str){self.edit_find(crate::field_edit::Command::Insert(text.into()));}
+    pub fn backspace_find(&mut self){self.edit_find(crate::field_edit::Command::Edit{edit:crate::line_edit::Edit::Backspace,extend:false});}
+    pub fn clear_find_query(&mut self){self.edit_find(crate::field_edit::Command::Clear);}
     pub fn finish_find(&mut self) {
         if let Some(f) = &mut self.find {
             f.editing = false;

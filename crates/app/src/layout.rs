@@ -26,6 +26,10 @@ pub struct Layout { files: bool, saved: Option<Panels> }
 
 impl Layout {
     pub fn new(files: bool) -> Self { Self { files, saved: None } }
+    /// An explicit commit opens in Focus; Overview can still reveal the repository's panels.
+    pub fn focused_selection(files: bool) -> Self {
+        Self { files, saved: Some(Panels { branches: true, history: true, files }) }
+    }
     pub fn files(&self) -> bool { self.files }
     /// Show or hide Files for a view that owns the screen (merge, Version Picker, Conflict List); Focus is unchanged.
     pub fn set_files(&mut self, files: bool) { self.files = files; }

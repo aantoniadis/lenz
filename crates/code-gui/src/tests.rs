@@ -2,6 +2,8 @@
 //! commands, and the file on disk never changes.
 use super::*;
 mod create;
+mod fields;
+mod open_path;
 mod activity;
 #[cfg(target_os = "linux")]
 mod terminal;
@@ -4944,7 +4946,7 @@ fn a_click_in_a_scrolled_finder_opens_the_clicked_file(cx: &mut TestAppContext) 
     drop(v);
     settle(cx, &f, |v| v.session().state().navigation().is_some_and(|f| !f.pending && f.query == "f"));
     let mut v = visual(cx, &f);
-    v.simulate_keystrokes("end");
+    v.simulate_keystrokes("alt-end");
     draw(&mut v);
     // Scrolled: the clicked row is the one drawn there, not the one the unscrolled layout would put there.
     let first = f.view.read_with(&v, |r, _| r.navigation_drawn.unwrap().1);
@@ -5916,13 +5918,13 @@ fn unified_search_caret_starts_at_the_shaped_query_end(cx: &mut TestAppContext) 
                 v.simulate_keystrokes("ctrl-v");
                 draw(&mut v);
                 let (bounds, char_w, font, caret) = f.view.read_with(&v, |r, _| (r.navigation_bounds(), r.char_w, r.font.clone(), r.session.state().palette().caret));
-                let shown = format!("› {}", navigation::tail(&query, ((f32::from(bounds.size.width) - 36.0) / char_w).max(1.0) as usize));
+                let shown = code_core::line_edit::visible(&query, query.len(), ((f32::from(bounds.size.width) - 36.0 - 2.0*char_w) / char_w).max(0.0) as usize).prefix.to_owned();
                 let shown = lenz_content::display::show_bidi(&lenz_content::display::cap_marks(&shown)).into_owned();
                 v.update(|window, _| {
                     let run = gpui::TextRun { len: shown.len(), font, color: gpui::Hsla::default(), background_color: None, underline: None, strikethrough: None };
                     let end = window.text_system().shape_line(shown.into(), px(font_size()), &[run], None).width;
                     let scale = window.scale_factor();
-                    let x = (f32::from(bounds.origin.x + end) + 12.0).min(f32::from(bounds.right()) - 14.0) * scale;
+                    let x = (f32::from(bounds.origin.x + end) + 12.0 + 2.0*char_w).min(f32::from(bounds.right()) - 26.0) * scale;
                     let y = (f32::from(bounds.origin.y) + 4.0 + line_h() + 1.0) * scale;
                     assert!(window.painted_quads().iter().any(|q|
                         (q.bounds.origin.x.0 - x).abs() <= 0.5
@@ -5966,7 +5968,7 @@ fn unified_search_empty_constructor_paste_tabs_resize_and_appearances(cx: &mut T
     let b = f.view.read_with(&v, |r, _| r.navigation_bounds());
     v.simulate_click(point(b.origin.x + b.size.width / 8.0, b.origin.y + px(10.0)), Modifiers::default());
     assert_eq!(f.view.read_with(&v, |r, _| { let n = r.session.state().navigation().unwrap(); (n.scope, n.query.clone()) }), (Scope::All, "Soft Wrap".to_string()));
-    v.simulate_keystrokes("ctrl-a");
+    v.simulate_keystrokes("ctrl-a backspace");
     assert!(f.view.read_with(&v, |r, _| r.session.state().navigation().unwrap().query.is_empty()));
     let long_query = format!("{}終端", "Été/".repeat(40));
     v.update(|_, cx| cx.write_to_clipboard(ClipboardItem::new_string(long_query.clone())));
@@ -6140,7 +6142,7 @@ fn recent_files_use_search_presentation_filter_delete_and_keep_query_between_mod
     settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.query == "é"));
     let mut v = visual(cx, &f);
     draw(&mut v);
-    v.simulate_keystrokes("delete");
+    v.simulate_keystrokes("f6");
     drop(v);
     settle(cx, &f, |r| r.session.state().navigation().is_some_and(|n| !n.pending && n.rows.is_empty()));
     assert!(!f.view.read_with(cx, |r, _| r.session.state().places().recent_files().iter().any(|file| file.ends_with("Été.rs"))));
@@ -6693,12 +6695,12 @@ fn gui_a_rows_menu_makes_a_branch_from_it_and_the_revision_prompt_checks_out(cx:
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     draw(&mut v);
     type_text(&mut v, "v1");
-    v.simulate_keystrokes("right");
+    v.simulate_keystrokes("alt-enter");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
     assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree"]);
     v.simulate_keystrokes("escape");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "v1")), "back to the list");
-    v.simulate_keystrokes("right down enter");
+    v.simulate_keystrokes("alt-enter down enter");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::NewBranch { from: Some(f), .. }) if f == "refs/tags/v1")));
     type_text(&mut v, "other");
     v.simulate_keystrokes("enter");
@@ -6777,7 +6779,7 @@ fn gui_a_worktree_opens_here_or_in_a_new_window(cx: &mut TestAppContext) {
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     draw(&mut v);
     type_text(&mut v, "second");
-    v.simulate_keystrokes("right");
+    v.simulate_keystrokes("alt-enter");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
     assert_eq!(&menu[1..], ["Open", "Open in New Window", "Compare with Working Tree"]);
     v.simulate_keystrokes("down enter");
@@ -6862,7 +6864,7 @@ fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppCo
     v.simulate_keystrokes("ctrl-shift-`");
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     type_text(&mut v, "other");
-    v.simulate_keystrokes("right");
+    v.simulate_keystrokes("alt-enter");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
     assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
     v.simulate_keystrokes("down down enter");
@@ -6871,7 +6873,7 @@ fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppCo
     v.simulate_keystrokes("ctrl-shift-`");
     settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
     type_text(&mut v, "other");
-    v.simulate_keystrokes("right down down down enter");
+    v.simulate_keystrokes("alt-enter down down down enter");
     let split = lenz_content::git::testing::git(f.dir.path(), &["rev-parse", "main"]).trim().to_string();
     assert_eq!(launched_args(&mut v, &f)[1], [split]);
     // Compare with Worktree…: only the other worktree; Enter compares the folders.

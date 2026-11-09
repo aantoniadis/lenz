@@ -41,6 +41,7 @@ pub enum HelpAction { Shortcuts, DiffOptions, Settings }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Action {
+    NewComparison,
     Comparison(Command), Interaction(Interaction), Edit(EditMenuCommand), File(FileAction),
     /// Index into `image_session::image_commands()`.
     Image(usize),
@@ -147,6 +148,7 @@ pub fn entries(scope: &Scope) -> Vec<Entry> {
     let i = |command: Interaction, group, key| entry(Action::Interaction(command), command.label(), group, key);
     let l = |command: LayoutCommand, key| entry(Action::Layout(command), command.label(), G::View, key);
     let mut out = Vec::new();
+    if scope.surface == Surface::Comparison { out.push(entry(Action::NewComparison, "New Comparison…", G::File, None)); }
     match scope.surface {
         Surface::Merge => {
             let m = |act: Act, group| entry(Action::Merge(act), act.label(), group, None);
@@ -292,6 +294,12 @@ pub mod pointer {
 }
 
 /// The ☰ menu: settings, theme, keys, about, error report. The palette lists them too.
+pub fn comparison_app_menu() -> Vec<Entry> {
+    let mut entries = app_menu();
+    entries.insert(0, entry(Action::NewComparison, "New Comparison…", Group::File, None));
+    entries
+}
+
 pub fn app_menu() -> Vec<Entry> {
     let i = |command: Interaction| entry(Action::Interaction(command), command.label(), Group::Help, None);
     vec![

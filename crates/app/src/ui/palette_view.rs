@@ -40,6 +40,10 @@ impl Viewer {
         use crate::repository_session::RepositoryCommand as R;
         self.command_palette=None;
         match action {
+            Action::NewComparison => {
+                let cwd = self.set.git_root().map(std::path::Path::to_path_buf).unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                self.spawn_lenz(&["--new-comparison".into()], &cwd, cx);
+            }
             Action::Comparison(command@crate::commands::Command::SetDiffLayout(crate::commands::DiffLayout::Unified)) if let Some(why)=self.unified_disabled() => {let _=command;self.toast(why.into(),cx);}
             Action::Comparison(command)=>self.comparison_command(command,cx),
             Action::Interaction(command)=>self.interaction(command,cx),
@@ -105,7 +109,7 @@ impl Viewer {
     }
 
     /// The ☰ menu under its button.
-    pub(super) fn open_app_menu(&mut self,x:f32,cx:&mut Context<Self>){self.open_entry_menu(catalog::app_menu(),x,cx);}
+    pub(super) fn open_app_menu(&mut self,x:f32,cx:&mut Context<Self>){let entries = if self.merge.is_none() && self.picker_v.is_none() { catalog::comparison_app_menu() } else { catalog::app_menu() }; self.open_entry_menu(entries,x,cx);}
 
     /// A toolbar dropdown of catalog entries under its button; again closes it.
     pub(super) fn open_entry_menu(&mut self,entries:Vec<catalog::Entry>,x:f32,cx:&mut Context<Self>){
@@ -146,6 +150,10 @@ impl Viewer {
         let (_,_,_,rows)=self.palette_layout();
         let Some(p)=self.command_palette.as_mut() else {return false};
         let ks=&ev.keystroke;
+        if let Some(command)=lenz_gpui::field::command(ev,cx) {
+            if let Some(text)=p.edit(command).copy {cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));}
+            cx.notify();return true;
+        }
         let page=rows.max(1) as isize;
         match ks.key.as_str() {
             "escape"=>self.command_palette=None,
@@ -201,15 +209,16 @@ impl Viewer {
             (format!("{mark}{}{reason}",row.entry.label),right,row.disabled.is_some(),selected==Some(i))
         }).collect();
         let empty=p.is_empty();
-        Some(PalettePaint{x,y,width,query:format!("› {}▏",p.query()),lines,empty})
+        Some(PalettePaint{x,y,width,query:p.query().to_string(),cursor:p.input().cursor(),lines,empty})
     }
 }
 
-pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub lines:Vec<(String,String,bool,bool)>, pub empty:bool }
+pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<(String,String,bool,bool)>, pub empty:bool }
 
 impl Availability for Viewer {
     fn disabled(&self,action:Action)->Option<Cow<'static,str>>{
         match action {
+            Action::NewComparison => None,
             Action::Comparison(crate::commands::Command::SetPresentation(mode))=>self.comparison.presentation_disabled(mode,self.doc().map(|d|&d.text)).map(Cow::Borrowed),
             Action::Comparison(crate::commands::Command::Preview(_))=>self.comparison.presentation_disabled(crate::markdown::PresentationMode::Rendered,self.doc().map(|d|&d.text)).map(Cow::Borrowed),
             Action::Comparison(crate::commands::Command::SetDiffLayout(crate::commands::DiffLayout::Unified))=>self.unified_disabled().map(Cow::Borrowed),

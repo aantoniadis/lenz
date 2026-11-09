@@ -37,7 +37,7 @@ pub struct Merger {
     files_search:lenz::pane_search::PaneSearch,files_search_origin:Option<usize>,
     diff: Option<crate::app::App>,
     diff_path: Option<(String, bool, bool)>,
-    menu: Option<usize>,menu_query:String,
+    menu: Option<usize>,menu_query:String,menu_cursor:lenz::field_edit::Cursor,
     pub(crate) command_palette: Option<lenz::palette::Palette>,
     files_menu_target:Option<(usize,String)>,
     /// The change block a pointer menu is for: (file index, block, the current change before the menu).
@@ -73,7 +73,7 @@ impl Merger {
             new_view: None,
             files_search:Default::default(),files_search_origin:None,diff: None,
             diff_path: None,
-            menu: None,menu_query:String::new(),command_palette:None,files_menu_target:None,block_menu_target:None,pending_files_action:None,
+            menu: None,menu_query:String::new(),menu_cursor:Default::default(),command_palette:None,files_menu_target:None,block_menu_target:None,pending_files_action:None,
             menu_first:0,menu_area:Rect::default(),files_area:Rect::default(),text_area:Rect::default(),files_focused:false,file_scroll:0,last_file:None,
             toolbar:Default::default(),help:None,message:None,about:None,report_request:Default::default(),
             horizontal:[0;3],columns:[None;3],horizontal_version:None,
@@ -243,7 +243,7 @@ impl Merger {
             m.current=previous.filter(|&i|i<m.m.blocks().len());
         }
     }
-    fn open_menu(&mut self){self.menu_query.clear();self.menu=Some(0);}
+    fn open_menu(&mut self){self.menu_cursor=Default::default();self.menu_query.clear();self.menu=Some(0);}
     /// The file list's pointer menu: open, copy path, then the list actions.
     fn menu_labels(&self)->Vec<(String,Option<String>)>{
         if let Some((_,block,_))=self.block_menu_target {
@@ -417,8 +417,22 @@ impl Merger {
             return true;
         }
         if self.resize_input(&event){return true;}
+        // Text controls own copy and editing before Ctrl+C's global quit binding.
+        if self.help.is_none()&&self.about.is_none()&&self.message.is_none()&&self.command_palette.is_none()&&!self.toolbar.menu_open()&&!self.workspace.confirming() {
+            let command=match &event {Event::Key(k) if k.kind!=KeyEventKind::Release=>lenz_terminal_ui::command(*k),Event::Paste(s)=>Some(lenz::field_edit::Command::Insert(s.clone())),_=>None};
+            if let Some(command)=command {
+                let out=if self.menu.is_some(){
+                    let out=self.menu_cursor.execute_limited(&mut self.menu_query,command,4096);
+                    if out.changed {self.menu=Some(self.menu_matches().first().copied().unwrap_or(0));}Some(out)
+                }else if let Some(FileView::Merge(m))=&mut self.workspace.file {
+                    if m.ask.is_none()&&m.find_editing(){Some(m.edit_find(command))}else{None}
+                }else{None};
+                if let Some(out)=out {if let Some(text)=out.copy{let _=crate::clipboard::copy(&text);}return true;}
+            }
+        }
         let list_copy=matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::CONTROL&&k.code==KeyCode::Char('c'))&&self.files_focused&&self.about.is_none()&&self.help.is_none()&&self.message.is_none()&&self.menu.is_none()&&!self.workspace.confirming()&&!matches!(&self.workspace.file,Some(FileView::Merge(m))if m.ask.is_some()||m.find_editing())&&!matches!(&self.workspace.file,Some(FileView::Picker(p))if p.ask.is_some())&&self.diff.as_ref().is_none_or(|a|!a.modal_input());
-        let quit=!list_copy&&matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers.contains(KeyModifiers::CONTROL)&&matches!(k.code,KeyCode::Char('q'|'c')));
+        let palette_copy=self.command_palette.is_some()&&self.help.is_none()&&self.about.is_none()&&self.message.is_none()&&matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers==KeyModifiers::CONTROL&&k.code==KeyCode::Char('c'));
+        let quit=!list_copy&&!palette_copy&&matches!(event,Event::Key(k)if k.kind!=KeyEventKind::Release&&k.modifiers.contains(KeyModifiers::CONTROL)&&matches!(k.code,KeyCode::Char('q'|'c')));
         if quit && self.guard_preview_edits() { return true; }
         if !quit && let Some(about)=&mut self.about {
             if let Event::Resize(w,h)=event {self.width=w;self.height=h;}
@@ -451,6 +465,7 @@ impl Merger {
             match crate::palette::handle(p,&event,crate::palette::rect(Rect::new(0,0,self.width,self.height),p)) {
                 Input::Ignored=>{},
                 Input::Handled=>return true,
+                Input::Copy(text)=>{let _=crate::clipboard::copy(&text);return true;}
                 Input::Close=>{self.command_palette=None;return true;}
                 Input::Done(Outcome::Run(action))=>{self.run_action(action);self.quit=self.workspace.quit;return true;}
                 Input::Done(Outcome::Disabled(why))=>{self.workspace.notice=Some(why.into_owned());return true;}
@@ -1176,6 +1191,10 @@ impl Merger {
             ),
             bands[2],
         );
+        if let Some(FileView::Merge(m))=&self.workspace.file && m.ask.is_none()&&m.error.is_none()&&m.find_editing() {
+            let row=Rect::new(bands[2].x,bands[2].y+u16::from(bands[2].height>0),bands[2].width,bands[2].height.saturating_sub(1).min(1));
+            lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:m.find_query().unwrap_or_default(),cursor:m.find_cursor(),area:row,active:true},crate::chrome::style_with(palette),crate::chrome::style_with(palette).bg(crate::chrome::color(palette.selected_bg)));
+        }
         self.resizer.draw(frame.buffer_mut(),palette);
         if let Some(app)=&mut self.diff{app.popup_area=full;crate::render::draw_popup(app,frame);crate::palette::draw(app,frame);app.draw_context(frame);}
         self.toolbar.draw_menu_with_theme(frame,palette);
@@ -1194,8 +1213,13 @@ impl Merger {
         let rect=Rect::new(area.x+(area.width-width)/2,area.y+(area.height-height)/2,width,height);self.menu_area=rect;
         let mut lines:Vec<_>=matches.iter().skip(self.menu_first).take(visible).map(|&index|{let(label,reason)=&labels[index];Line::from(format!("{} {}{}",if index==at{">"}else{" "},label,reason.as_ref().map(|r|format!(" — {r}")).unwrap_or_default()))}).collect();
         if lines.is_empty(){lines.push(Line::from("No matching commands"));}
-        let title=if self.block_menu_target.is_some(){format!("Change · {}",self.menu_query)}else if let Some((_,path))=&self.files_menu_target{format!("Files: {} · {}",clean(path),self.menu_query)}else{format!("Merge commands: {}",if self.menu_query.is_empty(){"type to filter"}else{&self.menu_query})};
-        frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg))).block(Block::default().borders(Borders::ALL).title(format!("F2 details · {title}"))),rect);
+        let title=if rect.width<12{"› "}else if rect.width<32{"Filter: "}else if self.block_menu_target.is_some(){"Change filter: "}else if self.files_menu_target.is_some(){"File actions: "}else{"Merge commands: "};
+        frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg))).block(Block::default().borders(Borders::ALL).title(title)),rect);
+        let offset=(title.len() as u16+1).min(rect.width);
+        let field=Rect::new(rect.x+offset,rect.y,rect.width.saturating_sub(offset+1),1);
+        lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&self.menu_query,cursor:self.menu_cursor,area:field,active:true},crate::chrome::style_with(palette),crate::chrome::style_with(palette).bg(crate::chrome::color(palette.selected_bg)));
+        if self.menu_query.is_empty()&&field.width>0{frame.buffer_mut().set_stringn(field.x,field.y,"type to filter",usize::from(field.width),crate::chrome::style_with(palette).fg(crate::chrome::color(palette.dim)));}
+
     }
 
 }
@@ -1243,7 +1267,7 @@ impl Merger {
             },
             Action::Help(HelpAction::Shortcuts) => self.help = Some(0),
             Action::Help(HelpAction::Settings) => self.workspace.notice = Some(crate::palette::open_settings()),
-            Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
+            Action::NewComparison | Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
             | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) | Action::Folder(_) => match &mut self.diff {
                 Some(app) => app.run_action(action),
                 None => self.workspace.notice = Some("No comparison here".into()),
@@ -1262,7 +1286,7 @@ impl lenz::catalog::Availability for Merger {
             Action::Pick(act) => match &self.workspace.file { Some(FileView::Picker(p)) => p.disabled(act).map(Cow::Borrowed), _ => Some(Cow::Borrowed("Only in the Version Picker")) },
             Action::Interaction(I::ChangeTheme | I::About | I::ResetPaneSizes | I::ReportLastError) | Action::Help(HelpAction::Shortcuts | HelpAction::Settings) => None,
             Action::Interaction(I::FindCase | I::FindWord | I::FindRegex) if let Some(FileView::Merge(m)) = &self.workspace.file => (!m.find_editing()).then_some(Cow::Borrowed("No find is open")),
-            Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
+            Action::NewComparison | Action::Comparison(_) | Action::Interaction(_) | Action::Edit(_) | Action::File(_) | Action::Image(_) | Action::Layout(_)
             | Action::Help(HelpAction::DiffOptions) | Action::Repository(_) | Action::Pr(_) | Action::Folder(_) =>
                 self.diff.as_ref().map_or(Some(Cow::Borrowed("No comparison here")), |app| lenz::catalog::Availability::disabled(app, action)),
         }
@@ -1390,6 +1414,18 @@ mod tests {
     /// The window's merge fixture (crates/app/src/ui/scrollbar_tests.rs `merge`): 200 lines, Conflicts at lines 5 and
     /// 150; each pane's strip is its last text column, left of the border it keeps, and drags, pages and marks as the
     /// window's `gui_merge_scrollbars_mark_conflicts` and `gui_merge_scrollbar_drag_and_page_move_each_pane` assert.
+    #[test]
+    fn merge_palette_text_owns_paste_copy_and_cut_above_existing_find(){
+        let (_dir,mut app)=open_fixture([b"a\n",b"ours\n",b"theirs\n"]);
+        if let Some(FileView::Merge(m))=&mut app.workspace.file{m.begin_find(Default::default());m.type_find("protected");}
+        app.open_palette();app.handle(Event::Paste("commands".into()));
+        assert_eq!(app.command_palette.as_ref().unwrap().query(),"commands");
+        key(&mut app,KeyCode::Home,KeyModifiers::NONE);key(&mut app,KeyCode::Right,KeyModifiers::SHIFT);
+        key(&mut app,KeyCode::Char('c'),KeyModifiers::CONTROL);assert!(!app.quit);
+        key(&mut app,KeyCode::Char('x'),KeyModifiers::CONTROL);
+        assert_eq!(app.command_palette.as_ref().unwrap().query(),"ommands");
+        if let Some(FileView::Merge(m))=&app.workspace.file{assert_eq!(m.find_query(),Some("protected"));assert!(!m.dirty);}else{panic!("merge missing");}
+    }
     #[test]
     fn merge_border_columns_carry_scrollbars() {
         let text=|who:&str|(0..200).map(|i|if i==5||i==150{format!("{who} {i}\n")}else{format!("line {i}\n")}).collect::<String>();

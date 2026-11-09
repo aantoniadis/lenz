@@ -75,6 +75,7 @@ pub(super) struct MergeFrame {
     headers: [String; 3],
     /// The banner: a question, or (`true`) a failed save in red.
     ask: Option<(String, bool)>,
+    find_input:Option<crate::field_edit::Snapshot>,
     current: Option<(f32, f32)>,
     /// Middle-pane row spans of Conflicts the magic wand resolved and nobody has looked at yet.
     auto: Vec<(f32, f32)>,
@@ -286,6 +287,7 @@ impl Viewer {
             controls,
             headers,
             ask,
+            find_input:if s.ask.is_none()&&s.error.is_none()&&s.find_editing(){s.find_query().map(|q|s.find_cursor().snapshot(q,(self.panes.viewport[0]/self.char_w.max(1.0)).max(0.0) as usize))}else{None},
             current,
             auto,
             outside,
@@ -666,8 +668,16 @@ pub(super) fn paint(palette: &theme::Palette,
         }
     });
     for bar in &f.bars { super::scrollbars::paint(palette, window, bar); }
-    if let Some((ask, failed)) = &f.ask {
-        let bh = line_h() + 8.0;
+    if let Some(field)=&f.find_input {
+        let m=metrics(font);
+        let label=f.ask.as_ref().and_then(|(s,_)|s.split_once(": ")).map_or("Find",|(head,_)|head);
+        fill(window,x0,y0,w,2.0*line_h()+8.0,palette.banner_bg);
+        text(window,cx,font,x0+12.0,y0+4.0,&format!("{label} · Enter searches · Tab pane · F3 next · Esc closes"),palette.dim);
+        lenz_gpui::field::paint(lenz_gpui::field::View{text:&field.text,cursor:field.cursor,bounds:Bounds{origin:point(px(x0+12.0),px(y0+4.0+line_h())),size:size(px((w-24.0).max(0.0)),px(line_h()))},char_w:font_size()*0.62,active:true},window,cx,m,palette);
+    } else     if let Some((ask, failed)) = &f.ask {
+        let columns = ((w - 24.0) / (font_size() * 0.62)).floor().max(1.0) as usize;
+        let lines = banner_lines(ask, columns);
+        let bh = lines.len() as f32 * line_h() + 8.0;
         fill(
             window,
             x0,
@@ -683,8 +693,16 @@ pub(super) fn paint(palette: &theme::Palette,
         if *failed {
             fill(window, x0, y0, 4.0, bh, edge(palette, Kind::Conflict));
         }
-        text(window, cx, font, x0 + 12.0, y0 + 4.0, ask, palette.fg);
+        for (i, line) in lines.iter().enumerate() {
+            text(window, cx, font, x0 + 12.0, y0 + 4.0 + i as f32 * line_h(), line, palette.fg);
+        }
     }
+}
+
+fn banner_lines(text: &str, columns: usize) -> Vec<&str> {
+    let starts=crate::wrap::wrap_starts(text,columns);
+    let ends=starts.iter().copied().chain(std::iter::once(text.len()));
+    std::iter::once(0).chain(starts.iter().copied()).zip(ends).map(|(start,end)|text.get(start..end).unwrap_or_default().trim_end()).collect()
 }
 
 /// Bezier bands across a gutter between a version and the Result, and markers where a side is empty
@@ -827,6 +845,43 @@ pub(crate) mod gui_tests {
             viewer
         });
         (dir, viewer)
+    }
+    #[test]
+    fn gui_identical_files_construct_a_successful_empty_view_and_allow_a_new_comparison(){
+        let mut cx=TestAppContext::single();cx.skip_drawing();
+        let dir=tempfile::tempdir().unwrap();let left=dir.path().join("left");let right=dir.path().join("right");
+        std::fs::write(&left,b"same\n").unwrap();std::fs::write(&right,b"same\n").unwrap();
+        let spec=Spec::Plain{left:left.clone(),right:right.clone()};
+        let set=Arc::new(ChangeSet::load(&spec,dir.path()).unwrap());assert!(set.comparisons.is_empty());
+        let doc=Arc::new(Doc::new("","",&left,&right));
+        let viewer=cx.new(|cx|Viewer::new(set,spec,false,None,doc,View::new(0,0,&[],10.),false,Options::default(),gpui::font("monospace"),Instant::now(),false,cx));
+        viewer.update(&mut cx,|v,cx|{
+            assert_eq!(v.nothing.as_deref(),Some("No differences"));
+            assert!(v.title().contains("left")&&v.title().contains("right"));
+            v.edit_menu(crate::edit_session::EditMenuCommand::Undo,cx);
+            v.spawn_lenz(&["--new-comparison".into()],dir.path(),cx);
+            assert_eq!(v.spawned_comparisons.len(),1);
+            assert!(v.doc().is_none());
+        });
+        assert_eq!(std::fs::read(right).unwrap(),b"same\n");
+    }
+    #[test]
+    fn gui_narrow_merge_keeps_finish_controls_warning_and_back_instructions() {
+        let mut cx=TestAppContext::single();cx.skip_drawing();
+        let(dir,viewer)=fixture(&mut cx);
+        viewer.update(&mut cx,|v,cx|{
+            v.panes.viewport=[400.,240.];
+            assert!(v.toolbar_ids().contains(&"m-done"));assert!(v.toolbar_ids().contains(&"m-cancel"));
+            v.merge_key(&event("enter",true,false,false),cx);
+            let frame=v.merge_frame(6.,[120.;3]).unwrap();let message=&frame.ask.unwrap().0;
+            let lines=banner_lines(message,43);
+            assert!(lines.len()>1);assert!(lines.iter().all(|line|crate::wrap::width(line)<=43));
+            let compact=lines.join("").split_whitespace().collect::<String>();
+            assert!(compact.contains("conflictmarkers"));assert!(compact.contains("ctrl-enter"));assert!(compact.contains("Esc"));
+            v.merge_key(&event("escape",false,false,false),cx);
+            assert!(v.merge.as_ref().unwrap().ask.is_none());
+        });
+        assert_eq!(std::fs::read(dir.path().join("result")).unwrap(),b"needle ours\n");
     }
     #[test]
     fn gui_merge_real_keys_accept_all_four_choices_undo_and_save_exact_result() {

@@ -35,8 +35,8 @@ impl Viewer {
                 m("m-prev","↑","Previous change",Act::PrevChange);m("m-next","↓","Next change",Act::NextChange);
                 m("m-prev-c","⇡","Previous unresolved conflict",Act::PrevConflict);m("m-next-c","⇣","Next unresolved conflict",Act::NextConflict);
             }
+            m("m-done","Done","Save and finish / next unresolved file (Ctrl/Cmd+Enter)",Act::Done);m("m-cancel","Cancel","Close merge view (Esc)",Act::Cancel);
             m("m-undo","↶","Undo (Ctrl/Cmd+Z)",Act::Undo);m("m-redo","↷","Redo (Ctrl/Cmd+Shift+Z)",Act::Redo);m("m-save","⤓","Save result (Ctrl/Cmd+S)",Act::Save);
-            if width>=640. {m("m-done","Done","Save and finish / next unresolved file",Act::Done);m("m-cancel","Cancel","Close merge view (Esc)",Act::Cancel);}
         } else if let Some(s)=&self.picker_v {
             use version_picker::PickAct;
             let mut acts=vec![("p-undo","↶",PickAct::Undo),("p-redo","↷",PickAct::Redo),("p-save","⤓",PickAct::Save),("p-done","Done",PickAct::Done),("p-cancel","Cancel",PickAct::Cancel)];
@@ -83,7 +83,7 @@ impl Viewer {
                 out.insert(0,Slot{width:Some(self.mode_button_w()),..slot("focus","Focus","Focus on this selection: Files and the diff (f, Enter, double-click)",Tool::Layout(LayoutCommand::ToggleFocus))});
             }
         }
-        let app_menu_open=self.menu.as_ref().is_some_and(|m|matches!(m.items.first(),Some((_,MenuAction::Run(catalog::Action::Help(catalog::HelpAction::Settings))))));
+        let app_menu_open=self.menu.as_ref().is_some_and(|m|matches!(m.items.first(),Some((_,MenuAction::Run(catalog::Action::NewComparison | catalog::Action::Help(catalog::HelpAction::Settings))))));
         out.insert(0,Slot{active:app_menu_open,..slot("app-menu","☰","Settings, theme, keyboard shortcuts, about",Tool::AppMenu)});
         // a button that can do nothing now looks it, and says why
         for s in out.iter_mut().filter(|s|!s.dim) {

@@ -8818,7 +8818,7 @@ impl Session {
         }
         if n.scope == S::Symbols && n.query.is_empty() { parts.push("Type a symbol name".into()); }
         if let Some(message) = &n.message { parts.push(message.clone()); }
-        if n.scope == S::Recent { parts.push("Recent files · Delete forgets".into()); }
+        if n.scope == S::Recent { parts.push("Recent files · F6 forgets".into()); }
         parts.join(" · ")
     }
 
