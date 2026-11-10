@@ -107,7 +107,7 @@ pub enum Modal {
     Themes { ids: Vec<(String, String)>, at: usize },
     /// Recent folders, most recent first.
     Recent { at: usize },
-    ScratchFiles { files: Vec<PathBuf>, at: usize },
+    ScratchFiles { files: Vec<PathBuf>, query: String, at: usize },
     /// An in-window destination prompt; the originating tab stays captured until acceptance.
     SaveAs { tab: code_core::tabs::TabId, dir: PathBuf, input: String, selected: bool, error: Option<String> },
     /// New Scratch File's kinds ([`code_core::scratch::KINDS`]): typing filters, Enter creates `scratch_N.<ext>`.
@@ -321,6 +321,8 @@ pub struct ReaderView {
     /// The last Always Select Opened File ticket acted on.
     follow_seen: u64,
     navigation_drawn: Option<(u64, usize, usize)>,
+    /// A refreshed branch inventory cannot reuse row coordinates from the preceding frame.
+    branch_hits_valid: bool,
     /// Popup viewport and fractional wheel steps, independent of the highlighted option.
     modal_scroll: std::cell::Cell<usize>,
     modal_wheel: std::cell::Cell<f32>,
@@ -800,7 +802,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, branch_hits_valid: false, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -1086,7 +1088,24 @@ impl ReaderView {
             self.tree_sel.as_ref().and_then(|path| self.session.state().archive_tree().parent(path).map(|parent| (path.clone(), parent)))
         } else { None };
         let library_read = matches!(&input, code_core::session::Input::Completion(Completion::LibraryRead { .. }));
+        let branch_selection = if matches!(&input, code_core::session::Input::Completion(Completion::Branches { .. })) {
+            self.branch_hits_valid = false;
+            match &self.modal {
+                Some(Modal::Branches { query, at }) => self.session.state().branch_rows(query).into_iter().nth(*at).map(|row| row.target),
+                Some(Modal::BranchMenu { target, .. }) => Some(target.clone()),
+                _ => None,
+            }
+        } else { None };
         let mut effect = self.session.dispatch(input);
+        if let Some(target) = branch_selection {
+            let query = match &self.modal { Some(Modal::Branches { query, .. } | Modal::BranchMenu { query, .. }) => Some(query), _ => None };
+            let selected = query.and_then(|query| self.session.state().branch_rows(query).into_iter().position(|row| row.target == target));
+            match &mut self.modal {
+                Some(Modal::Branches { at, .. }) => *at = selected.unwrap_or(0),
+                Some(Modal::BranchMenu { row, .. }) => *row = selected.unwrap_or(0),
+                _ => {},
+            }
+        }
         if terminal_before != (self.session.state().terminal().focused(), self.session.state().terminal().active().map(|t| t.id())) {
             self.cancel_input(true, cx);
             self.terminal_ui.marked = None;
@@ -2054,8 +2073,12 @@ impl ReaderView {
                     self.dispatch(Command::Theme(ThemeCommand::Select(selection)), cx);
                 }
             }
-            Some(Modal::ScratchFiles { files, at }) => {
-                if let Some(path) = files.get(at) { self.dispatch(Command::OpenScratch(path.clone()), cx); }
+            Some(Modal::ScratchFiles { files, query, at }) => {
+                if let Some(path) = save_as::matching_scratch_files(&files, &query).nth(at).cloned() {
+                    self.tree_focus = false; self.results_focus = false; self.log_focus = false;
+                    self.find_focus = None; self.crumb_focus = None;
+                    self.dispatch(Command::OpenScratch(path), cx);
+                } else { self.modal = Some(Modal::ScratchFiles { files, query, at }); }
             }
             Some(Modal::Recent { at }) => {
                 if let Some(root) = self.session.state().recent().get(at).cloned() {
@@ -2088,7 +2111,11 @@ impl ReaderView {
             },
             m @ Some(Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. }) => self.modal = m,
             Some(Modal::NewScratch { query, at }) => match code_core::scratch::matching(&query).get(at) {
-                Some(&kind) => self.dispatch(Command::NewScratchFile(kind), cx),
+                Some(&kind) => {
+                    self.tree_focus = false; self.results_focus = false; self.log_focus = false;
+                    self.find_focus = None; self.crumb_focus = None;
+                    self.dispatch(Command::NewScratchFile(kind), cx);
+                },
                 None => self.modal = Some(Modal::NewScratch { query, at }),
             },
             Some(Modal::Places { list, query, at }) => {
@@ -2120,7 +2147,6 @@ impl ReaderView {
         match &mut self.modal {
             Some(Modal::Navigation { .. }) => return,
             Some(Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Recent { at }) => *at = row,
-            Some(Modal::ScratchFiles { at, .. }) => match row.checked_sub(1) { Some(i) => *at = i, None => return },
             Some(Modal::Themes { at, .. }) => match row.checked_sub(THEME_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
@@ -2129,7 +2155,7 @@ impl ReaderView {
                 Some(i) if i < self.session.keymap().rows().len() => *at = i,
                 _ => return,
             },
-            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. } | Modal::NewScratch { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
+            Some(Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::Branches { at, .. } | Modal::NewScratch { at, .. } | Modal::ScratchFiles { at, .. }) => match row.checked_sub(FINDER_HEADER_ROWS) {
                 Some(i) => *at = i,
                 None => return,
             },
@@ -2393,12 +2419,18 @@ impl ReaderView {
             let rows = self.session.state().branch_rows(&query);
             let last = rows.len().saturating_sub(1);
             let at = at.min(last);
+            let page = if matches!(key, "pageup" | "pagedown") {
+                self.modal_layout().map_or(8, |l| l.lines.iter().skip(l.first).take(l.visible)
+                    .filter_map(|(row, ..)| (*row != usize::MAX).then_some(*row)).collect::<std::collections::BTreeSet<_>>().len().saturating_sub(1).max(1))
+            } else { 1 };
             let typed = ev.keystroke.key_char.clone().filter(|_| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform);
             let set = |query: String, at: usize| Some(Modal::Branches { query, at });
             match key {
                 "escape" => self.close_modal(cx),
                 "up" => self.modal = set(query, at.saturating_sub(1)),
                 "down" => self.modal = set(query, (at + 1).min(last)),
+                "pageup" => self.modal = set(query, at.saturating_sub(page)),
+                "pagedown" => self.modal = set(query, (at + page).min(last)),
                 "home" => self.modal = set(query, 0),
                 "end" => self.modal = set(query, last),
                 "right" | "enter" if key == "right" || ev.keystroke.modifiers.alt => self.modal = match rows.get(at) {
@@ -2827,7 +2859,7 @@ impl ReaderView {
             Some(Modal::CommandGroup { group, .. }) => self.session.menu(Some(*group)).len(),
             Some(Modal::Themes { ids, .. }) => ids.len(),
             Some(Modal::Recent { .. }) => self.session.state().recent().len(),
-            Some(Modal::ScratchFiles { files, .. }) => files.len().max(1),
+            Some(Modal::ScratchFiles { files, query, .. }) => save_as::matching_scratch_files(files, query).count(),
             None => 0,
         };
         // A menu's separator line is passed over in the direction of the move.
@@ -3777,6 +3809,7 @@ impl ReaderView {
         self.double_shift.interrupt();
         window.focus(&self.focus, cx);
         if self.field_click(ev, window, cx) { return; }
+        if matches!(self.modal, Some(Modal::Branches { .. })) && !self.branch_hits_valid { return cx.notify(); }
         if matches!(self.modal, Some(Modal::Navigation { .. })) {
             return self.navigation_click(ev.position, window, cx);
         }
@@ -4137,6 +4170,7 @@ impl ReaderView {
         if self.modal.is_none() && self.input_state.capture.is_some() { self.cancel_input(true, cx); cx.stop_propagation(); return; }
         self.double_shift.interrupt();
         // A Git Branches row: its actions.
+        if matches!(self.modal, Some(Modal::Branches { .. })) && !self.branch_hits_valid { return cx.notify(); }
         if let Some(Modal::Branches { query, .. }) = self.modal.clone()
             && let Some(l) = self.modal_layout().filter(|l| l.bounds.contains(&ev.position))
         {
@@ -5372,6 +5406,23 @@ impl ReaderView {
 
     pub fn modal_lines(&self) -> Vec<(usize, String, bool)> {
         let cols = self.columns(self.modal_width() - 24.0);
+        if let Some(Modal::Branches { query, .. }) = &self.modal {
+            let mut lines = Vec::new();
+            for (row, text) in [(0, format!("› {query}")), (1, self.branch_hint())] {
+                lines.extend(wrap(&text, cols).into_iter().map(|line| (row, line, false)));
+            }
+            let mut section = "";
+            for (index, row) in self.session.state().branch_rows(query).into_iter().enumerate() {
+                if row.section != section {
+                    section = row.section;
+                    if !section.is_empty() {
+                        lines.extend(wrap(code_core::branches::branch_section_label(section), cols).into_iter().map(|line| (usize::MAX, line, true)));
+                    }
+                }
+                lines.extend(wrap(&code_core::branches::row_text(&row), cols).into_iter().map(|line| (index + FINDER_HEADER_ROWS, line, false)));
+            }
+            return lines;
+        }
         let shortcuts = self.modal_shortcuts();
         let actions = matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. } | Modal::LanguageServer { .. }));
         self.modal_rows()
@@ -5443,15 +5494,26 @@ impl ReaderView {
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
             return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading, query: None, body_top, shortcuts: Vec::new() });
         }
-        if let Some(Modal::Branches { query, .. }) = &self.modal {
-            let heading = self.session.state().branches().map(|b| b.heading().to_string()).unwrap_or_else(|| "Branches".into());
-            let hint = self.modal_rows().get(1).map(|r| r.0.clone()).unwrap_or_default();
-            let footer = wrap(&hint, self.columns(mw - 24.0));
+        if let Some(Modal::Branches { query, .. } | Modal::ScratchFiles { query, .. }) = &self.modal {
+            let scratch = matches!(self.modal, Some(Modal::ScratchFiles { .. }));
+            let heading = if scratch { "Scratch Files".into() } else { self.session.state().branches().map(|b| b.heading().to_string()).unwrap_or_else(|| "Branches".into()) };
             lines.retain(|(row, ..)| *row >= FINDER_HEADER_ROWS);
             if lines.is_empty() { lines.push((usize::MAX, "No matching branches".into(), true)); }
             let body_top = 2.0 * line_h() + 40.0;
             let cap = (self.height - 16.0).clamp(0.0, 540.0);
-            let visible = (((cap - body_top - (footer.len() as f32 * line_h() + 20.0)).max(0.0) / line_h()).floor() as usize).min(lines.len());
+            let hint = if scratch { "Enter: open · Esc: close" } else { match self.session.state().branches() {
+                Some(b) if b.state_text().is_some() => b.state_text().unwrap_or_default(),
+                Some(b) if b.worktrees_only || b.revisions_only => "Enter: compare · Alt+Enter: actions · Esc: close",
+                _ => "Enter: checkout/open · Alt+Enter: actions · Esc: close",
+            } };
+            let available = ((cap - body_top - 20.0).max(0.0) / line_h()).floor() as usize;
+            let footer_cap = available.saturating_sub(1).min(3);
+            let mut footer = wrap(hint, self.columns(mw - 24.0));
+            if footer.len() > footer_cap {
+                footer.truncate(footer_cap);
+                if let Some(last) = footer.last_mut() { last.pop(); last.push('…'); }
+            }
+            let visible = available.saturating_sub(footer.len()).min(lines.len());
             let start = lines.iter().position(|(i, _, _)| *i == at).unwrap_or(0);
             let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
             let first = self.modal_first(at, start..end, lines.len(), visible);
@@ -5496,6 +5558,18 @@ impl ReaderView {
         self.session.language_server_rows()
     }
 
+    fn branch_hint(&self) -> String {
+        match self.session.state().branches() {
+            None => String::new(),
+            Some(b) => match b.state_text() {
+                Some(state) => format!("{} — {state}", b.heading()),
+                None if b.worktrees_only => format!("{} — type to filter; Enter compares with the working tree, Alt+Enter more, Escape closes", b.heading()),
+                None if b.revisions_only => format!("{} — type to filter or a revision; Enter compares with the working tree, Escape closes", b.heading()),
+                None => format!("{} — type to filter; Enter checks out (or opens a worktree), Alt+Enter more, Escape closes", b.heading()),
+            },
+        }
+    }
+
     /// The modal's rows: label and disabled reason. Search headers precede their result rows.
     pub fn modal_rows(&self) -> Vec<(String, Option<&'static str>)> {
         match &self.modal {
@@ -5530,10 +5604,13 @@ impl ReaderView {
                 ("Theme · ↑/↓ choose · Enter select · Esc close".to_string(), None),
                 (format!("Current: {}", self.session.theme_source()), None),
             ].into_iter().chain(ids.iter().map(|(_, label)| (label.clone(), None))).collect(),
-            Some(Modal::ScratchFiles { files, .. }) => {
-                let mut rows = vec![("Personal scratch files — ↑/↓ choose · Enter open · Escape close".into(), None)];
+            Some(Modal::ScratchFiles { files, query, .. }) => {
+                let mut rows = vec![(format!("› {query}"), None), ("Personal scratch files — type to filter · Enter open · Escape close".into(), None)];
                 if files.is_empty() { rows.push(("No scratch files yet — New Scratch File… creates one".into(), Some("No files"))); }
-                else { rows.extend(files.iter().map(|p| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(), None))); }
+                else {
+                    rows.extend(save_as::matching_scratch_files(files, query).map(|p| (p.file_name().unwrap_or_default().to_string_lossy().into_owned(), None)));
+                    if rows.len() == FINDER_HEADER_ROWS { rows.push(("No matching scratch files".into(), Some("No matches"))); }
+                }
                 rows
             },
             Some(Modal::Recent { .. }) => self.session.state().recent().iter().map(|r| (archive::source_path_label(r), None)).collect(),
@@ -5589,16 +5666,7 @@ impl ReaderView {
                 rows
             }
             Some(Modal::Branches { query, .. }) => {
-                let hint = match self.session.state().branches() {
-                    None => String::new(),
-                    Some(b) => match b.state_text() {
-                        Some(state) => format!("{} — {state}", b.heading()),
-                        None if b.worktrees_only => format!("{} — type to filter; Enter compares with the working tree, Alt+Enter more, Escape closes", b.heading()),
-                        None if b.revisions_only => format!("{} — type to filter or a revision; Enter compares with the working tree, Escape closes", b.heading()),
-                        None => format!("{} — type to filter; Enter checks out (or opens a worktree), Alt+Enter more, Escape closes", b.heading()),
-                    },
-                };
-                let mut rows = vec![(format!("› {query}"), None), (hint, None)];
+                let mut rows = vec![(format!("› {query}"), None), (self.branch_hint(), None)];
                 rows.extend(self.session.state().branch_rows(query).into_iter().map(|r| (code_core::branches::row_text(&r), None)));
                 rows
             }
@@ -6125,8 +6193,10 @@ impl Render for ReaderView {
         let form = self.form_layout();
         let search = self.search_layout();
         let modal = self.modal_layout();
+        self.branch_hits_valid = matches!(self.modal, Some(Modal::Branches { .. })) && modal.is_some();
         let modal_field = self.popup_field_snapshot((self.width / self.char_w.max(1.0)) as usize);
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
+        let branch_chooser = matches!(self.modal, Some(Modal::Branches { .. }));
         let menu_modal = matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
@@ -6732,7 +6802,7 @@ impl Render for ReaderView {
                                         let kx = mx + mw - 12.0 - lenz_content::wrap::width(key) as f32 * char_w;
                                         if lenz_content::wrap::width(key) + 3 < ((mw - 24.0) / char_w).max(0.0) as usize / 2 { lenz_gpui::text(window, cx, m, kx, y, key, palette.dim); }
                                     }
-                                    let section = details_modal && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
+                                    let section = branch_chooser && *row == usize::MAX || details_modal && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
                                     let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
                                     lenz_gpui::text(window, cx, if section { Metrics { font: &heading, ..m } } else { m }, mx + 12.0, y, line, if *row == usize::MAX { palette.readable_on(palette.dim, bg) } else if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
                                 }
@@ -7171,9 +7241,8 @@ impl Modal {
         match self {
             Modal::Navigation { at, .. } => *at,
             Modal::Commands { at } | Modal::AppMenu { at } | Modal::CommandGroup { at, .. } | Modal::LanguageServer { at } | Modal::Recent { at } => *at,
-            Modal::ScratchFiles { at, .. } => *at + 1,
             Modal::Themes { at, .. } => *at + THEME_HEADER_ROWS,
-            Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::NewScratch { at, .. } => *at + FINDER_HEADER_ROWS,
+            Modal::ServerRuntime { at, .. } | Modal::Siblings { at, .. } | Modal::Places { at, .. } | Modal::NewScratch { at, .. } | Modal::ScratchFiles { at, .. } => *at + FINDER_HEADER_ROWS,
             Modal::Search { in_files, .. } => *in_files as usize,
             Modal::StatusDetails { .. } | Modal::Declarations { .. } | Modal::Root { .. } | Modal::SqlMetadata { .. } | Modal::OpenPath { .. } | Modal::GoTo { .. } | Modal::Mnemonic | Modal::NewBranch { .. } | Modal::Revision { .. } | Modal::Create { .. } | Modal::PasteEntry { .. } | Modal::SaveAs { .. } | Modal::RenameTerminal { .. } | Modal::WorkspaceInput { .. } | Modal::Relocate { .. } | Modal::ConfirmDelete { .. } => 0,
             Modal::Context { at, .. } => *at,

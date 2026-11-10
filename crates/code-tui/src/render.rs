@@ -504,6 +504,7 @@ impl App {
         fill(frame.buffer_mut(), area, style(p.fg, p.bg));
         if area.is_empty() {
             self.layout = geometry;
+            if let Some(modal) = &mut self.modal { modal.top = 0; }
             for command in self.source_cache.borrow_mut().finish() { self.source_redraw |= self.session.dispatch(command).repaint; }
             self.sync_prompts();
             return;
@@ -1233,6 +1234,7 @@ impl App {
         let area = centered(frame.area(), width, height);
         geometry.modal = area;
         if area.is_empty() {
+            modal.top = 0;
             return;
         }
         frame.render_widget(Clear, area);
@@ -1560,6 +1562,16 @@ impl App {
         } else {
             self.choices()
         };
+        let branch_notice = self.modal.as_ref().filter(|m| m.kind == Prompt::Branches)
+            .and_then(|_| self.session.state().branches())
+            .and_then(|b| b.state_text()).map(str::to_owned);
+        let branch_footer = self.session.state().branches().map(|b| {
+            if b.worktrees_only || b.revisions_only {
+                "Enter compares · Alt+Enter actions · Alt+Home/End jumps · Esc closes"
+            } else {
+                "Enter selects · → / Alt+Enter actions · Alt+Home/End jumps · Esc closes"
+            }
+        });
         let Some(modal) = &mut self.modal else {
             return;
         };
@@ -1676,7 +1688,7 @@ impl App {
             }
             return;
         }
-        let input_rows = if context || themes || modal.kind == Prompt::LanguageServer {
+        let input_rows = if context || themes || matches!(modal.kind, Prompt::LanguageServer | Prompt::BranchMenu { .. }) {
             0
         } else {
             1 + usize::from(
@@ -1708,6 +1720,14 @@ impl App {
         // Wrapped details participate in scrolling: selection remains a choice index, top is a visual row.
         let width = list.width.max(1) as usize;
         let mut rendered = Vec::new();
+        if modal.kind == Prompt::Branches {
+            let notice = branch_notice.as_deref().or_else(|| choices.is_empty().then_some("Nothing matches this filter"));
+            if let Some(notice) = notice {
+                for text in wrap_text(notice, width) {
+                    rendered.push((usize::MAX, text, true));
+                }
+            }
+        }
         if themes {
             for header in [
                 "↑/↓ choose · Enter select · Esc close".to_owned(),
@@ -1720,7 +1740,16 @@ impl App {
         }
         let mut selected = 0..0;
         modal.at = modal.at.min(choices.len().saturating_sub(1));
+        let mut previous_section = None;
         for (i, choice) in choices.iter().enumerate() {
+            if choice.section != previous_section {
+                if let Some(section) = choice.section {
+                    for text in wrap_text(code_core::branches::branch_section_label(section), width) {
+                        rendered.push((usize::MAX, text, true));
+                    }
+                }
+                previous_section = choice.section;
+            }
             if modal.kind == Prompt::LanguageServer && matches!(i, 4 | 8) {
                 rendered.push((usize::MAX, if i == 4 { "Setup" } else { "Indexing" }.to_string(), true));
             }
@@ -1791,7 +1820,7 @@ impl App {
                 r,
                 text,
                 style(
-                    if themes && *i == usize::MAX {
+                    if (themes || modal.kind == Prompt::Branches) && *i == usize::MAX {
                         p.accent
                     } else if *disabled {
                         p.dim
@@ -1825,12 +1854,15 @@ impl App {
                         .then_some(runtime_message.as_deref())
                         .flatten()
                 })
+                .or_else(|| (modal.kind == Prompt::Branches).then_some(branch_footer).flatten())
                 .unwrap_or(if modal.kind == Prompt::LanguageServer {
                     "Ctrl+C copies details · Enter runs action · Esc closes"
                 } else if modal.kind == Prompt::Menu(None) {
                     "Enter / → open · Esc closes"
                 } else if matches!(modal.kind, Prompt::Menu(Some(_))) {
                     "Enter runs · ← back · Esc closes"
+                } else if matches!(modal.kind, Prompt::BranchMenu { .. }) {
+                    "Enter runs · ← / Esc back"
                 } else {
                     "Enter accepts · Esc closes · ↑↓ selects · Tab field"
                 });

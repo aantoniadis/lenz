@@ -1,5 +1,49 @@
 use super::*;
 
+#[gpui::test]
+fn gui_scratch_files_filter_edit_clear_and_open_the_filtered_path(cx: &mut TestAppContext) {
+    let f = fixture(cx, Some(("keep.txt", b"keep\n")));
+    settle(cx, &f, active_is("keep.txt"));
+    f.view.update(cx, |r, _| r.enable_draft_input_for_test());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(500.0)));
+    draw(&mut v);
+    choose_menu_command(&mut v, &f, CommandId::NewScratch);
+    type_text(&mut v, "ruby");
+    v.simulate_keystrokes("enter");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source().extension().is_some_and(|e| e == "rb")));
+    let ruby = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().source().to_owned());
+    choose_menu_command(&mut v, &f, CommandId::NewScratch);
+    type_text(&mut v, "json");
+    v.simulate_keystrokes("enter");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source().extension().is_some_and(|e| e == "json")));
+    let json = f.view.read_with(&v, |r, _| r.session().state().active().unwrap().source().to_owned());
+    // Opening a scratch file must return from a previously focused results pane to the editor.
+    f.view.update(&mut v, |r, _| r.results_focus = true);
+    choose_menu_command(&mut v, &f, CommandId::ScratchFiles);
+    type_text(&mut v, "no-such-scratch");
+    assert!(f.view.read_with(&v, |r, _| r.modal_rows().iter().any(|row| row.0 == "No matching scratch files")));
+    v.simulate_keystrokes("enter");
+    assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::ScratchFiles { query, .. }) if query == "no-such-scratch")));
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().active().unwrap().source().to_owned()), json);
+    v.simulate_keystrokes("ctrl-a backspace");
+    let rows = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().skip(FINDER_HEADER_ROWS).map(|row| row.0).collect::<Vec<_>>());
+    assert!(rows.contains(&ruby.file_name().unwrap().to_string_lossy().into_owned()) && rows.contains(&json.file_name().unwrap().to_string_lossy().into_owned()));
+    type_text(&mut v, ".RB");
+    assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows().len()), FINDER_HEADER_ROWS + 1);
+    v.simulate_resize(size(px(220.0), px(180.0)));
+    draw(&mut v);
+    assert!(f.view.read_with(&v, |r, _| r.modal_layout().is_some_and(|layout| layout.visible > 0 && layout.query.as_deref() == Some(".RB"))));
+    v.simulate_keystrokes("enter");
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source() == ruby));
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && !r.results_focus && !r.tree_focus));
+    v.simulate_keystrokes("x");
+    assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..1)), Some("x".into()));
+    assert_eq!(std::fs::read(&ruby).unwrap(), b"");
+    assert_eq!(std::fs::read(&json).unwrap(), b"");
+    assert_eq!(std::fs::read(f.dir.path().join("keep.txt")).unwrap(), b"keep\n");
+}
+
 fn text(v: &VisualTestContext, f: &Fixture) -> String {
     f.view.read_with(v, |view, _| { let s = view.session().state().current_source().unwrap(); s.copy_range(0..s.len_bytes()).unwrap() })
 }

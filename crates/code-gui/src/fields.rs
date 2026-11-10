@@ -54,6 +54,7 @@ impl ReaderView {
             | Modal::SqlMetadata { path }
             | Modal::ServerRuntime { path, .. } => (path.as_str(), None, false, 0),
             Modal::Branches { query, .. }
+            | Modal::ScratchFiles { query, .. }
             | Modal::Places { query, .. }
             | Modal::NewScratch { query, .. }
             | Modal::Siblings { query, .. }
@@ -147,6 +148,7 @@ impl ReaderView {
                 | Modal::SqlMetadata { path }
                 | Modal::ServerRuntime { path, .. } => path,
                 Modal::Branches { query, .. }
+                | Modal::ScratchFiles { query, .. }
                 | Modal::Places { query, .. }
                 | Modal::NewScratch { query, .. }
                 | Modal::Siblings { query, .. }
@@ -170,6 +172,7 @@ impl ReaderView {
                 _ => {}
             }
             if outcome.changed {
+                if matches!(modal, Modal::Branches { .. }) { self.branch_hits_valid = false; }
                 match modal {
                     Modal::Search { .. } => {}
                     Modal::SaveAs { error, .. }
@@ -183,6 +186,7 @@ impl ReaderView {
                     | Modal::NewBranch { error, .. } => *error = None,
                     Modal::ServerRuntime { at, .. }
                     | Modal::Branches { at, .. }
+                    | Modal::ScratchFiles { at, .. }
                     | Modal::Places { at, .. }
                     | Modal::NewScratch { at, .. }
                     | Modal::Siblings { at, .. } => *at = 0,

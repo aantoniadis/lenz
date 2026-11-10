@@ -63,6 +63,8 @@ impl Statuses {
 #[derive(Debug, Clone, Default)]
 pub struct BranchesView {
     pub loading: bool,
+    /// Cached rows remain usable while a fresh inventory is read.
+    pub has_snapshot: bool,
     pub refs: Refs,
     pub worktrees: Vec<Worktree>,
     pub error: Option<String>,
@@ -83,7 +85,7 @@ impl BranchesView {
     }
     /// Why it shows no rows yet: loading, or what went wrong.
     pub fn state_text(&self) -> Option<&str> {
-        if self.loading { Some("loading…") } else { self.error.as_deref() }
+        if self.loading && !self.has_snapshot { Some("loading…") } else { self.error.as_deref() }
     }
 }
 
@@ -377,9 +379,19 @@ impl crate::session::Session {
     }
 }
 
-/// How both frontends show a popup row: its section, the current marker, its text.
+/// Section headings shared by both branch pickers; keys remain stable for filtering.
+pub fn branch_section_label(section: &str) -> &str {
+    match section {
+        "Local" => "Local branches",
+        "Remote" => "Remote branches",
+        "Recent" => "Recent branches",
+        other => other,
+    }
+}
+
+/// Row text under a separate section heading in both frontends.
 pub fn row_text(r: &BranchRow) -> String {
-    format!("{:<10}{}{}", r.section, if r.current { "● " } else { "  " }, r.label)
+    format!("{}{}", if r.current { "● " } else { "  " }, r.label)
 }
 
 /// A fully named ref as people say it (`refs/heads/main` → `main`, `refs/tags/v1` → `v1`).

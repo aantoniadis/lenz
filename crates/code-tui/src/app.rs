@@ -140,6 +140,8 @@ pub(crate) struct Modal {
 pub(crate) struct Choice {
     pub label: String,
     pub detail: Option<String>,
+    /// A nonselectable heading rendered before the first consecutive choice in this section.
+    pub section: Option<&'static str>,
     pub disabled: Option<&'static str>,
     pub target: ChoiceTarget,
 }
@@ -566,6 +568,17 @@ impl App {
     }
     pub fn apply(&mut self, completion: Completion) -> bool {
         let theme = self.highlighted_theme();
+        let branch_selection = matches!(&completion, Completion::Branches { .. }).then(|| {
+            self.modal.as_ref().and_then(|m| {
+                let (query, row) = match &m.kind {
+                    Prompt::Branches => (&m.input, m.at),
+                    Prompt::BranchMenu { query, row, .. } => (query, *row),
+                    _ => return None,
+                };
+                self.session.state().branch_rows(query).into_iter().nth(row)
+                    .map(|r| (query.clone(), r.section, r.target))
+            })
+        }).flatten();
         let tree_path = self.session.state().tree_rows().nth(self.tree_at).map(|r| r.path.clone());
         let tree_parent = tree_path.as_deref().and_then(|path| self.session.state().archive_tree().parent(path));
         let tree_revision = self.session.state().tree_revision();
@@ -574,6 +587,26 @@ impl App {
         let preview_positions = self.preview_positions();
         let workspace = self.session.state().workspace_revision();
         let mut effect = self.session.dispatch(completion);
+        // A cached list can refresh while the user is selecting a row. Follow the target, not the old
+        // numeric index; Recent and Local may contain the same branch. Hit rows belong to the old paint
+        // until the next draw and must not activate a different branch in the refreshed list.
+        if effect.repaint && let Some((query, section, target)) = branch_selection {
+            let rows = self.session.state().branch_rows(&query);
+            let at = rows.iter().position(|r| r.section == section && r.target == target)
+                .or_else(|| rows.iter().position(|r| r.target == target));
+            if let Some(m) = self.modal.as_mut() {
+                match &mut m.kind {
+                    Prompt::Branches => {
+                        m.at = at.unwrap_or(0);
+                        if at.is_none() { m.top = 0; }
+                        m.reveal_selection = true;
+                    }
+                    Prompt::BranchMenu { row, .. } => *row = at.unwrap_or(0),
+                    _ => {}
+                }
+            }
+            self.layout.modal_items.clear();
+        }
         if let Some(ticket) = self.session.external_ready() {
             let delivery = self.session.dispatch(Command::TakeExternal { ticket });
             effect.repaint |= delivery.repaint;
@@ -1193,6 +1226,7 @@ impl App {
         let simple = |label: String, target| Choice {
             label,
             detail: None,
+            section: None,
             disabled: None,
             target,
         };
@@ -1203,6 +1237,7 @@ impl App {
                     MenuEntry::Command(id) => Some(Choice {
                         label: id.label().into(),
                         detail: None,
+                        section: None,
                         disabled: self.session.disabled(*id),
                         target: ChoiceTarget::Action(*id),
                     }),
@@ -1220,6 +1255,7 @@ impl App {
                             .map(|(label, path)| Choice {
                                 label,
                                 detail: None,
+                                section: None,
                                 disabled: self.session.disabled(CommandId::ServerRuntime),
                                 target: ChoiceTarget::ServerRuntime(path),
                             })
@@ -1235,6 +1271,7 @@ impl App {
                 .filter_map(|(label, action)| action.map(|id| Choice {
                     label,
                     detail: None,
+                    section: None,
                     disabled: self.session.disabled(id),
                     target: ChoiceTarget::Action(id),
                 })).collect(),
@@ -1246,6 +1283,7 @@ impl App {
                     // A separator reads as a line; it is passed over and does nothing.
                     label: if r.target == MenuTarget::Separator { "─".repeat(24) } else { r.label },
                     detail: None,
+                    section: None,
                     disabled: r.disabled,
                     target: match r.target {
                         MenuTarget::Run(id) => ChoiceTarget::Action(id),
@@ -1265,6 +1303,7 @@ impl App {
                         a.label
                     ),
                     detail: a.disabled.map(str::to_owned),
+                    section: None,
                     disabled: a.disabled,
                     target: ChoiceTarget::Action(a.id),
                 })
@@ -1278,6 +1317,7 @@ impl App {
                 .map(|r| Choice {
                     label: format!("{} — {}{}", r.label, r.chords, r.note.map_or_else(String::new, |note| format!(" ({note})"))),
                     detail: None,
+                    section: None,
                     disabled: None,
                     target: ChoiceTarget::Keymap(r.command),
                 })
@@ -1308,7 +1348,7 @@ impl App {
                 .into_iter()
                 .map(|i| {
                     let kind = &code_core::scratch::KINDS[i];
-                    Choice { label: kind.label.to_string(), detail: Some(format!(".{}", kind.extension)), disabled: None, target: ChoiceTarget::ScratchKind(i) }
+                    Choice { label: kind.label.to_string(), detail: Some(format!(".{}", kind.extension)), section: None, disabled: None, target: ChoiceTarget::ScratchKind(i) }
                 })
                 .collect(),
             Prompt::Places(list) => self
@@ -1319,6 +1359,7 @@ impl App {
                 .map(|r| Choice {
                     label: r.label,
                     detail: Some(r.detail),
+                    section: None,
                     disabled: r.missing.then_some("File is missing"),
                     target: ChoiceTarget::Place(r.place),
                 })
@@ -1328,7 +1369,13 @@ impl App {
                 .state()
                 .branch_rows(&modal.input)
                 .into_iter()
-                .map(|r| simple(code_core::branches::row_text(&r), ChoiceTarget::Branch(r.target)))
+                .map(|r| Choice {
+                    label: code_core::branches::row_text(&r),
+                    detail: None,
+                    section: (!r.section.is_empty()).then_some(r.section),
+                    disabled: None,
+                    target: ChoiceTarget::Branch(r.target),
+                })
                 .collect(),
             Prompt::BranchMenu { ref target, .. } => self
                 .session
@@ -2084,6 +2131,7 @@ impl App {
             Prompt::NewScratch => {
                 if let Some(Choice { target: ChoiceTarget::ScratchKind(kind), .. }) = self.choices().get(at).cloned() {
                     self.close_modal();
+                    self.focus = Focus::Text;
                     self.dispatch(Command::NewScratchFile(kind));
                 }
             }
@@ -2273,7 +2321,10 @@ impl App {
                     ChoiceTarget::Information | ChoiceTarget::ServerRuntime(_) | ChoiceTarget::Keymap(_) => {}
                     ChoiceTarget::Action(id) => self.run(id),
                     ChoiceTarget::Path(path) if kind == Prompt::RecentRoots => self.open_root(path),
-                    ChoiceTarget::Path(path) if matches!(kind, Prompt::ScratchFiles(_)) => self.dispatch(Command::OpenScratch(path)),
+                    ChoiceTarget::Path(path) if matches!(kind, Prompt::ScratchFiles(_)) => {
+                        self.focus = Focus::Text;
+                        self.dispatch(Command::OpenScratch(path));
+                    }
                     ChoiceTarget::Path(path) => self.dispatch(Command::Open(path)),
                     ChoiceTarget::Theme(id) => {
                         if let Some(theme) = ThemeSelection::from_id(&id) {
@@ -2281,7 +2332,10 @@ impl App {
                         }
                     }
                     ChoiceTarget::Place(place) => self.dispatch(Command::GoToPlace(place)),
-                    ChoiceTarget::ScratchKind(kind) => self.dispatch(Command::NewScratchFile(kind)),
+                    ChoiceTarget::ScratchKind(kind) => {
+                        self.focus = Focus::Text;
+                        self.dispatch(Command::NewScratchFile(kind));
+                    }
                     ChoiceTarget::Branch(target) => match target {
                         code_core::branches::BranchTarget::Action(id) => self.run(id),
                         t => {

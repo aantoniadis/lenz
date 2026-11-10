@@ -53,7 +53,7 @@ impl Session {
             self.prepare_scratch_directory()?;
             let names: Vec<String> = std::fs::read_dir(&self.scratch_dir).map_err(|e| e.to_string())?
                 .filter_map(|entry| entry.ok()?.file_name().into_string().ok()).collect();
-            let path = self.scratch_dir.join(crate::scratch::next_name(names.iter().map(String::as_str), kind.extension));
+            let path = self.scratch_dir.join(crate::scratch::next_name(names.iter().map(String::as_str), kind.extension)?);
             std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path).map_err(|e| e.to_string())?;
             Ok(path)
         })();

@@ -68,11 +68,13 @@ pub fn matching(query: &str) -> Vec<usize> {
 }
 
 /// The next free scratch name for `extension`: `scratch_N.<extension>`, N one more than any `scratch_N.*` in `names`.
-pub fn next_name<'a>(names: impl IntoIterator<Item = &'a str>, extension: &str) -> String {
+/// Refuses exhausted numbering rather than wrapping around to an existing name.
+pub fn next_name<'a>(names: impl IntoIterator<Item = &'a str>, extension: &str) -> Result<String, String> {
     let taken = names.into_iter().filter_map(|name| {
         name.strip_prefix("scratch_")?.split('.').next()?.parse::<u64>().ok()
     }).max().unwrap_or(0);
-    format!("scratch_{}.{extension}", taken + 1)
+    let next = taken.checked_add(1).ok_or("Scratch file numbering is exhausted")?;
+    Ok(format!("scratch_{next}.{extension}"))
 }
 
 #[cfg(test)]
@@ -106,8 +108,16 @@ mod tests {
 
     #[test]
     fn names_count_on_from_the_highest_scratch_number() {
-        assert_eq!(next_name([], "rb"), "scratch_1.rb");
-        assert_eq!(next_name(["scratch_1.rb", "scratch_7.json", "notes.txt", "scratch_x.txt"], "rb"), "scratch_8.rb");
-        assert_eq!(next_name(["scratch_2.html.erb"], "html.erb"), "scratch_3.html.erb");
+        assert_eq!(next_name([], "rb").unwrap(), "scratch_1.rb");
+        assert_eq!(next_name(["scratch_1.rb", "scratch_7.json", "notes.txt", "scratch_x.txt"], "rb").unwrap(), "scratch_8.rb");
+        assert_eq!(next_name(["scratch_2.html.erb"], "html.erb").unwrap(), "scratch_3.html.erb");
+    }
+
+    #[test]
+    fn scratch_numbering_stops_at_the_largest_representable_number() {
+        let before_maximum = format!("scratch_{}.rb", u64::MAX - 1);
+        let maximum = format!("scratch_{}.rb", u64::MAX);
+        assert_eq!(next_name([before_maximum.as_str()], "rb"), Ok(maximum.clone()));
+        assert_eq!(next_name([maximum.as_str()], "rb"), Err("Scratch file numbering is exhausted".into()));
     }
 }

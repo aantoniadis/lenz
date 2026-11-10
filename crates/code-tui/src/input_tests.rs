@@ -36,6 +36,8 @@ mod problems;
 mod project_syntax;
 #[path = "input_tests/archive.rs"]
 mod archive;
+#[path = "input_tests/branch_picker.rs"]
+mod branch_picker;
 use crossterm::event::{KeyEvent, KeyModifiers};
 use lenz_content::theme::{ThemeOverrides, ThemePaths};
 use std::{

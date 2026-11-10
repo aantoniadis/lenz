@@ -86,8 +86,13 @@ impl ReaderView {
 
     pub(super) fn prompt_scratch_files(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         match self.session.scratch_files() {
-            Ok(files) => { self.modal_scroll.set(0); self.modal = Some(Modal::ScratchFiles { files, at: 0 }); cx.notify(); }
+            Ok(files) => { self.modal_scroll.set(0); self.modal = Some(Modal::ScratchFiles { files, query: String::new(), at: 0 }); cx.notify(); }
             Err(why) => self.dispatch(Command::Notice(format!("Scratch files: {why}")), cx),
         }
     }
+}
+
+pub(super) fn matching_scratch_files<'a>(files: &'a [std::path::PathBuf], query: &str) -> impl Iterator<Item = &'a std::path::PathBuf> + 'a {
+    let query = query.to_lowercase();
+    files.iter().filter(move |path| path.file_name().is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&query)))
 }

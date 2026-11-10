@@ -33,6 +33,8 @@ mod csv;
 mod scrollbar;
 mod problems;
 mod project_syntax;
+mod branch_inventory;
+mod scratch_numbering;
 use crate::tabs::TabId;
 use crate::text::TextSnapshot;
 use std::time::Duration;

@@ -603,6 +603,45 @@ fn a_scratch_of_a_kind_is_the_next_numbered_scratch_file_in_its_language() {
     assert!(s.state().tabs().iter().all(|t| t.retained()), "kept open, as a file the user made");
 }
 
+#[test]
+fn editable_scratch_and_external_sources_do_not_claim_to_be_read_only() {
+    let d = tempfile::tempdir().unwrap();
+    let project = d.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let external = write(d.path(), "outside.txt", b"outside\n");
+    let dependency_dir = d.path().join(".cargo/registry/src/fixture");
+    std::fs::create_dir_all(&dependency_dir).unwrap();
+    let dependency = write(&dependency_dir, "lib.rs", b"fn dependency() {}\n");
+    let mut s = session(&d.path().join("personal-state"));
+    s.dispatch(Command::OpenRoot(project));
+    s.enable_text_input_for_test();
+    let plain = crate::scratch::KINDS.iter().position(|k| k.label == "Plain text").unwrap();
+    s.dispatch(Command::NewScratchFile(plain));
+    settle(&mut s, |s| s.state().current_source().is_some());
+    let scratch = s.state().active().unwrap().source().to_owned();
+    for path in [scratch, external, dependency] {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        open(&mut s, Command::OpenRetained(path.clone()), &name);
+        let tab = s.state().active().unwrap().id();
+        assert_eq!(active_view(&s).edit_disabled(), None);
+        assert!(s.state().notices().iter().any(|n| n.starts_with("Source from ")), "{}", s.state().notices().join("; "));
+        assert!(!s.state().notices().iter().any(|n| n.starts_with("Read-only source from ")));
+        type_text(&mut s, tab, "editable λ\r\n");
+        let expected = source_text(s.state().current_source().unwrap());
+        s.dispatch(Command::Save { tab });
+        settle(&mut s, |s| !s.state().tab_dirty(tab));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+
+        s.dispatch(Command::SetReadOnly(true));
+        assert_eq!(active_view(&s).edit_disabled(), Some("Read-only mode is on"));
+        assert!(s.state().notices().iter().any(|n| n == "Read-only mode is on"));
+        type_text(&mut s, tab, "blocked");
+        assert_eq!(source_text(s.state().current_source().unwrap()), expected, "read-only still refuses edits");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        s.dispatch(Command::SetReadOnly(false));
+    }
+}
+
 /// Leaving an edited file (with a syntax error, or not) and coming back: it is highlighted again, and so is another file
 /// of its language opened meanwhile. Each file is parsed on its own.
 #[test]
