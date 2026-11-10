@@ -34,7 +34,7 @@ One `lenz` command opens both, each a separate executable:
 (or `lenz-diff-tui`), and git difftool and mergetool configurations change as shown in
 [git difftool](#git-difftool) and [git mergetool](#git-mergetool).
 
-**Status:** beta ([0.0.14](docs/releases/0.0.14.md)). Diff is tested on Linux and macOS (Apple Silicon), with automated
+**Status:** beta ([0.0.15](docs/releases/0.0.15.md)). Diff is tested on Linux and macOS (Apple Silicon), with automated
 GUI interaction coverage on Linux. Lenz Code and the launcher are verified on Linux;
 native macOS validation is pending. Lenz Code edits existing files in its window on Linux (X11 and Wayland) and macOS, and in the terminal on both. It has desktop and terminal adapters. See the [Diff macOS figures and known costs](docs/performance.md#macos).
 
