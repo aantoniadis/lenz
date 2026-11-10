@@ -76,6 +76,27 @@ python3 -m unittest discover -s scripts -p 'test_*.py'
 cargo test -p lenz --features gui-test gui_
 ```
 
+The focused Find scanner probe uses the normal release profile and retains the
+exact `6f7a186` matcher as a test-only reference:
+
+```sh
+cargo test --locked --release -p lenz-content --lib find::perf::find_release_probe -- --exact --ignored --nocapture
+```
+
+Its `FIND_PROBE` workload version 2 reports hot scans, exact results and at least
+20 seconds of sustained work. These timings exclude document materialization and
+frontends. For a change comparison, build the same probe in a separate baseline
+checkout/target and compare public root-path samples across executables. The
+private reference can have different compiler output even for identical code;
+it is a correctness oracle, not sufficient evidence of baseline preservation.
+
+`scripts/code-editor-gui-bench.py` schema 2 drains preceding XDamage events before
+rearming the NonEmpty damage region. Older versions could discard a late paint
+notification after rearming, leaving the region nonempty and suppressing the
+next input's notification. Repeat both executables with schema 2 when comparing
+GUI feedback. First XDamage is feedback, not completion or physical presentation;
+the separate exact-byte Save/Undo/Redo oracles remain required.
+
 Output directories must be new or empty; a timestamped directory under `perf-results/` is used when `--output` is omitted. Keep the directory to retain fixtures, per-case stdout and stderr, exact commands, executable hashes, a source manifest, machine and build metadata, raw samples (`results.json`) and a readable report (`summary.md`). `fixtures.json` identifies generated inputs by SHA-256. Results are written after each case and on interruption.
 
 Build time is recorded separately. Tests run as prebuilt executables, sequentially, so compilation and competing benchmark processes do not enter component measurements. Quick runs usually take tens of seconds after building; full runs take several minutes; stress adds its configured sustained duration and longer browsing runs. Large fixtures require a few hundred MiB of disk space, and pathological workloads can use several GiB of RAM. Use `--profile quick` first on smaller machines.

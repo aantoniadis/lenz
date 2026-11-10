@@ -467,7 +467,12 @@ fn main() -> ExitCode {
         let first=match &mut screens.views[0]{Screen::Diff(app)=>{app.new_view=Some((request(),dir.path().into()));app.session.markdown_projection().unwrap().clone()},_=>panic!()};screens.poll();settle(&mut screens);
         assert_eq!(screens.active,1);assert!(matches!(&screens.views[1],Screen::Diff(app)if app.session.markdown_mode()==PresentationMode::Source));
         rendered(&mut screens);settle(&mut screens);let second=match &screens.views[1]{Screen::Diff(app)=>app.session.markdown_projection().unwrap().clone(),_=>panic!()};assert!(!std::sync::Arc::ptr_eq(&first.pair,&second.pair));let weak=std::sync::Arc::downgrade(&second.pair);drop(second);
-        screens.handle(key(event::KeyCode::Char('h')));assert!(screens.busy());screens.handle(key(event::KeyCode::Char('q')));screens.poll();assert_eq!(screens.views.len(),1);settle(&mut screens);assert!(weak.upgrade().is_none());
+        screens.handle(key(event::KeyCode::Char('h')));assert!(screens.busy());screens.handle(key(event::KeyCode::Char('q')));screens.poll();assert_eq!(screens.views.len(),1);settle(&mut screens);
+        // The remaining view can be idle before the closed view's cancelled worker
+        // unwinds. Require release after that asynchronous cleanup, not in this turn.
+        let until=std::time::Instant::now()+std::time::Duration::from_secs(10);
+        while weak.upgrade().is_some() && std::time::Instant::now()<until {std::thread::sleep(std::time::Duration::from_millis(1));}
+        assert!(weak.upgrade().is_none());
         assert!(matches!(&screens.views[0],Screen::Diff(app)if app.session.markdown_mode()==PresentationMode::Rendered));assert_eq!(std::fs::read(dir.path().join("right.md")).unwrap(),b"# New\n");
     }
 

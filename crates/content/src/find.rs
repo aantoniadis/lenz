@@ -4,6 +4,10 @@ use std::{fmt, ops::Range, sync::OnceLock};
 
 use regex::{Regex, RegexBuilder};
 
+mod literal;
+#[cfg(test)]
+mod perf;
+
 /// Longer queries are refused (merge find already capped its input here).
 pub const MAX_QUERY: usize = 4096;
 
@@ -46,6 +50,34 @@ pub type Matches<L> = (Vec<(L, Range<usize>)>, bool);
 /// Collect in document order without copying lines. `None` discards obsolete work.
 /// Check cancellation on sparse documents and within a line containing many matches.
 pub fn collect_matches<'a, L: Copy>(matcher: &Matcher, lines: impl IntoIterator<Item = (L, &'a str)>, mut current: impl FnMut() -> bool) -> Option<Matches<L>> {
+    let Some((needle, case)) = &matcher.literal else { return collect_original(matcher, lines, current); };
+    let scanner = literal::Scanner::new(needle, *case);
+    let mut hits = Vec::new();
+    for (index, (line, text)) in lines.into_iter().enumerate() {
+        if index % 1024 == 0 && !current() { return None; }
+        // Unicode case folding and dense lines retain the original small iterator.
+        let complete = if (*case || text.is_ascii()) && !scanner.dense_prefix(text) {
+            collect_line(&mut hits, line, scanner.ranges(text, matcher.word), &mut current)?
+        } else {
+            collect_line(&mut hits, line, matcher.ranges(text), &mut current)?
+        };
+        if !complete { return Some((hits, true)); }
+    }
+    if !current() { return None; }
+    Some((hits, false))
+}
+
+#[inline]
+fn collect_line<L: Copy>(hits: &mut Vec<(L, Range<usize>)>, line: L, ranges: impl Iterator<Item = Range<usize>>, current: &mut impl FnMut() -> bool) -> Option<bool> {
+    for range in ranges {
+        if hits.len().is_multiple_of(1024) && !current() { return None; }
+        if hits.len() == MATCH_LIMIT { return Some(false); }
+        hits.push((line, range));
+    }
+    Some(true)
+}
+
+fn collect_original<'a, L: Copy>(matcher: &Matcher, lines: impl IntoIterator<Item = (L, &'a str)>, mut current: impl FnMut() -> bool) -> Option<Matches<L>> {
     let mut hits = Vec::new();
     for (index, (line, text)) in lines.into_iter().enumerate() {
         if index % 1024 == 0 && !current() { return None; }
@@ -369,6 +401,36 @@ mod tests {
         }
         let unicode = Matcher::new(&Query { text: "k".into(), options: FindOptions::default() }).unwrap();
         assert_eq!(unicode.ranges("\u{212A} k").collect::<Vec<_>>(), vec![0..3, 4..5], "a non-ASCII line keeps Unicode folding");
+    }
+
+    #[test]
+    fn literal_scanning_agrees_with_regex_on_mixed_text_and_repeated_prefixes() {
+        let lines = ["aaaaaaaaab aaaaaaaaB", "foo_foo foo Foo", "éFOO λfoo fooλ", "K k K ſ S s", "😀éé 😀 é", "a\r\na", "", "ab", "abababab"];
+        for text in ["aaaaaaaaab", "foo", "k", "s", "é", "😀", "a", "ab", "not found"] {
+            for case in [false, true] { for word in [false, true] {
+                let matcher = Matcher::new(&Query { text: text.into(), options: FindOptions { case, word, regex: false } }).unwrap();
+                for line in lines {
+                    let expected: Vec<_> = matcher.regex_ranges(line).filter(|range| !word || whole_word(line, range)).collect();
+                    assert_eq!(collect_matches(&matcher, [(0, line)], || true).unwrap().0.into_iter().map(|(_, r)| r).collect::<Vec<_>>(), expected, "{text:?}, {line:?}, case={case}, word={word}");
+                }
+            } }
+        }
+    }
+
+    #[test]
+    fn literal_scanning_checks_suffixes_and_utf8_boundaries_in_generated_text() {
+        let mut seed = 17u64;
+        let alphabet = ["a", "B", "b", "_", " ", "é", "K", "😀"];
+        for _ in 0..100 {
+            let line: String = (0..80).map(|_| { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); alphabet[(seed >> 32) as usize % alphabet.len()] }).collect();
+            for text in ["ab", "B_", "b", "k", "😀a", "é", " "] {
+                for case in [false, true] {
+                    let matcher = Matcher::new(&Query { text: text.into(), options: FindOptions { case, word: true, regex: false } }).unwrap();
+                    let expected: Vec<_> = matcher.regex_ranges(&line).filter(|range| whole_word(&line, range)).collect();
+                    assert_eq!(collect_matches(&matcher, [(0, line.as_str())], || true).unwrap().0.into_iter().map(|(_, r)| r).collect::<Vec<_>>(), expected, "{text:?}, case={case}, {line:?}");
+                }
+            }
+        }
     }
 
     #[test]

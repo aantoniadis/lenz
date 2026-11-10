@@ -1035,10 +1035,15 @@ fn server_status_reports_missing_setup_and_offers_restart_or_enable_without_touc
         .layout
         .controls
         .iter()
-        .find(|(id, _)| *id == CommandId::LanguageServer)
+        .find(|(id, _)| *id == CommandId::InstallServer)
         .unwrap()
         .1;
     click(&mut a, control.x, control.y);
+    assert!(matches!(a.modal.as_ref().unwrap().kind, Prompt::Details { kind: Details::Install, .. }));
+    assert!(!a.session.state().server_install().unwrap().running);
+    key(&mut a, KeyCode::Esc, KeyModifiers::NONE);
+    key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     assert_eq!(a.modal.as_ref().unwrap().kind, Prompt::LanguageServer);
     draw(&mut a, 100, 26);
     assert_eq!(a.choices().len(), 10);
@@ -2421,6 +2426,7 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document() {
     key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
     let selected = a.session.state().selection();
     key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+    key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     let at = a
         .choices()
         .iter()

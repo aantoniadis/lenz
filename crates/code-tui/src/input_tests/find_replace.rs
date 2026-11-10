@@ -1,6 +1,33 @@
 //! Find and replace in the terminal: the prompt's two fields, the keys that replace, and what is drawn.
 use super::*;
 
+#[test]
+fn pasted_find_completes_in_a_large_standalone_text_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("reader.txt");
+    let source: String = (0..100_000).map(|i| format!("READER_LINE_{i:06} plain reader fixture {i}\n")).collect();
+    std::fs::write(&path, &source).unwrap();
+    let mut a = App::new(config(dir.path()), Some(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    draw(&mut a, 120, 36);
+    key(&mut a, KeyCode::Home, KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::Char('f'), KeyModifiers::CONTROL);
+    key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+    a.handle(Event::Paste("not_present".into()));
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut repaint = false;
+    while !settled(&a) {
+        assert!(Instant::now() < until);
+        if let Ok(done) = a.session.completions().try_recv() { repaint = a.apply(done); }
+        else { std::thread::yield_now(); }
+    }
+    assert!(repaint, "completed searches must repaint even when there is no match to reveal");
+    assert_eq!(a.session.state().active().unwrap().find().unwrap().counter(), "No matches");
+    let screen = draw_screen(&mut a, 120, 36);
+    assert!(screen.contains("No matches"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
 fn open(dir: &Path, text: &str) -> (App, std::path::PathBuf) {
     let path = dir.join("a.txt");
     std::fs::write(&path, text).unwrap();

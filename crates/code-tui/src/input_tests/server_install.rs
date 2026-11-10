@@ -10,7 +10,7 @@ fn server_install_menu_opens_preview_and_keeps_document_input_modal() {
     std::fs::write(&cfg.providers, r#"{"providers":{"bash-language-server":{"env":{"PATH":"/nonexistent"}}}}"#).unwrap();
     let mut a = App::new(cfg, Some(path.clone()));
     settle(&mut a, |a| a.session.state().current_source().is_some());
-    key(&mut a, KeyCode::F(2), KeyModifiers::NONE);
+    key(&mut a, KeyCode::F(2), KeyModifiers::NONE); key(&mut a, KeyCode::Home, KeyModifiers::NONE);
     let at = a.choices().iter().position(|c| matches!(c.target, ChoiceTarget::Action(CommandId::InstallServer))).unwrap();
     for _ in 0..at { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
@@ -44,7 +44,7 @@ fn server_install_start_progress_and_cancel_use_real_owned_processes() {
     let settings=serde_json::json!({"providers":{"bash-language-server":{"env":{"PATH":format!("{}:/usr/bin:/bin",bin.display())}}}});
     std::fs::write(&providers,settings.to_string()).unwrap();
     let mut a=App::new(cfg,Some(path.clone()));settle(&mut a,|a|a.session.state().current_source().is_some());
-    key(&mut a,KeyCode::F(2),KeyModifiers::NONE);
+    key(&mut a,KeyCode::F(2),KeyModifiers::NONE); key(&mut a,KeyCode::Home,KeyModifiers::NONE);
     let at=a.choices().iter().position(|c|matches!(c.target,ChoiceTarget::Action(CommandId::InstallServer))).unwrap();
     for _ in 0..at {key(&mut a,KeyCode::Down,KeyModifiers::NONE);}
     key(&mut a,KeyCode::Enter,KeyModifiers::NONE);

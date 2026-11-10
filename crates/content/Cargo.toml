@@ -22,6 +22,8 @@ unicode-width = "0.2"
 unicode-segmentation = "1.13.3"
 # In-document find (src/find.rs); already linked through tree-sitter.
 regex = "1.13"
+# Reused by regex/tree-sitter; SIMD literal Find scanning.
+memchr = "2.8"
 # Decoding (src/encoding.rs).
 encoding_rs = "0.8.42"
 chardetng = "1.0.0"

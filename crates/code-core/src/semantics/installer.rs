@@ -2,6 +2,9 @@
 use std::{io::Read, path::{Path, PathBuf}, process::{Command, Stdio}, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
 use super::provider::{Provider, Settings, find_executable};
 
+mod toolchains;
+use toolchains::Toolchain;
+
 pub const OUTPUT_LIMIT: usize = 32 * 1024;
 
 /// Held from before the first subprocess through provider persistence, including across independent windows.
@@ -20,6 +23,7 @@ pub struct Plan {
     pub executable: PathBuf,
     runtime: PathBuf,
     package: &'static str,
+    toolchain: Toolchain,
 }
 
 pub struct Preview {
@@ -55,14 +59,8 @@ impl Install {
 
 /// Build argv from this allowlist alone. No global install, project manifests or shell evaluation.
 pub fn preview(provider: &'static Provider, settings: &Settings, home: &Path) -> Preview {
-    let package = match provider.id {
-        "bash-language-server" => "bash-language-server@5.8.1",
-        "pyright" => "pyright@1.1.414",
-        "yaml-language-server" => "yaml-language-server@2.0.0",
-        "typescript-language-server" => "typescript-language-server@6.0.1",
-        "vscode-html" | "vscode-css" => "vscode-langservers-extracted@4.10.0",
-        _ => return Preview { command: provider.setup.into(), disabled: Some("No managed installer is available for this server. Follow the setup instructions above, then Restart Language Server.".into()), plan: None },
-    };
+    if let Some(preview) = toolchains::preview(provider, settings, home) { return preview; }
+    let Some(package) = node_package(provider.id) else { return Preview { command: provider.setup.into(), disabled: Some("No managed installer is available for this server. Follow the setup instructions above, then Restart Language Server.".into()), plan: None }; };
     let directory = home.join(provider.id);
     let mut args = vec!["install".into(), "--prefix".into(), directory.display().to_string(), "--no-audit".into(), "--no-fund".into(), "--package-lock=false".into(), "--ignore-scripts".into(), package.into()];
     if provider.id == "typescript-language-server" { args.push("typescript@6".into()); }
@@ -91,9 +89,20 @@ pub fn preview(provider: &'static Provider, settings: &Settings, home: &Path) ->
         // Keep npm's cache and any package metadata in Lenz's own directory as well.
         env.push(("npm_config_cache".into(), directory.join("cache").display().to_string()));
         env.push(("npm_config_engine_strict".into(), "true".into()));
-        Plan { provider: provider.id, manager, args, executable: directory.join("node_modules/.bin").join(provider.executable), directory, env, runtime, package }
+        Plan { provider: provider.id, manager, args, executable: directory.join("node_modules/.bin").join(provider.executable), directory, env, runtime, package, toolchain: Toolchain::Node }
     });
     Preview { command, disabled, plan }
+}
+
+pub fn node_package(provider: &str) -> Option<&'static str> {
+    Some(match provider {
+        "bash-language-server" => "bash-language-server@5.8.1",
+        "pyright" => "pyright@1.1.414",
+        "yaml-language-server" => "yaml-language-server@2.0.0",
+        "typescript-language-server" => "typescript-language-server@6.0.1",
+        "vscode-html" | "vscode-css" => "vscode-langservers-extracted@4.10.0",
+        _ => return None,
+    })
 }
 
 fn quote(value: &str) -> String { format!("'{}'", value.replace('\'', "'\\''")) }
@@ -154,6 +163,10 @@ pub fn run(plan: &Plan, cancel: &AtomicBool, output: &mut dyn FnMut(&str)) -> Re
         std::fs::TryLockError::Error(e) => format!("Cannot lock managed server directory: {e}"),
     })?;
     let lock = InstallLock { _file: file };
+    if plan.toolchain != Toolchain::Node {
+        toolchains::run(plan, cancel, output)?;
+        return Ok(lock);
+    }
     output("Checking Node.js runtime…\n");
     let mut version = String::new();
     process(&plan.runtime, &["--version".into()], &plan.env, &plan.directory, cancel, Duration::from_secs(10), &mut |chunk| { version.push_str(chunk); output(chunk); })?;
@@ -193,6 +206,11 @@ pub fn persist(plan: &Plan, file: &Path, expected: &Settings, cancel: &AtomicBoo
         provider.insert("executable".into(), serde_json::json!(plan.executable));
         let env = provider.entry("env").or_insert_with(|| serde_json::json!({})).as_object_mut().ok_or("Provider env must be an object")?;
         if let Some((_, path)) = plan.env.iter().find(|(key,_)| key == "PATH") { env.insert("PATH".into(), serde_json::json!(path)); }
+        if plan.toolchain == Toolchain::Ruby {
+            for key in ["GEM_HOME", "GEM_PATH"] {
+                if let Some((_, value)) = plan.env.iter().find(|(k,_)| k == key) { env.insert(key.into(), serde_json::json!(value)); }
+            }
+        }
         if plan.provider == "pyright" && !provider.contains_key("node") { provider.insert("node".into(), serde_json::json!(plan.runtime)); }
         Ok(())
     })

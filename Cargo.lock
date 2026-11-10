@@ -3373,6 +3373,7 @@ dependencies = [
  "image",
  "lenz-engine",
  "libc",
+ "memchr",
  "notify",
  "pulldown-cmark",
  "regex",

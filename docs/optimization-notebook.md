@@ -2505,3 +2505,59 @@ hash. Production GUI uses private Xvfb/Mesa lavapipe, so mapped-window, XDamage 
 PTY feedback are distinct from physical presentation. RSS is not GPU accounting
 or leak proof. Native macOS/Windows/Wayland, physical GPU/display checks, old-Git
 container coverage and prolonged external-provider workloads remain unverified.
+
+## Editor feedback, server setup and Find — 2026-11-10
+
+The [validation report](research/editor-feedback-setup-search-validation.md)
+records changes against merged PR #51 (`6f7a186`) and raw evidence under
+`perf-results/editor-diagnostics-install-search/`.
+
+| Experiment | Result / decision |
+| --- | --- |
+| Dirty syntax-error tab switching | Ordinary Java/Rust/Ruby round trips already pass on the base. A split retaining the same source reproduces missing colors on return: delivered analysis was deduplicated after the restored view cleared it. Share only exactly current peer syntax/semantic payloads; keep document text and view positions independent. Core and light/dark GUI/TUI input/render replays pass. |
+| Easier language-server setup | Missing-server footer opens Install; F2 initially selects it. Existing Node can be selected before server installation. Both adapters expose the same preview, progress, cancel, details and retry. Real npm installation passes; fresh offline Ruby installation builds six official cached gems and passes validation/persistence. Live Ruby index and a Go module download are blocked by this environment; do not count them as successful live installs. |
+| Prepare a borrowed literal scanner once per collection | Three independent normal-release process pairs / 21 samples per case: absent ASCII 7.174 → 1.974 ms, sparse sensitive 16.189 → 1.475 ms, common capped 0.742 → 0.460 ms, repeated-prefix absent 4 MiB line 11.961 → 0.151 ms. Keep the original iterator for dense lines and Unicode folding/regex. Exact ranges/caps/cancellation remain checked. |
+| Enlarge the iterator / prepare work per line | Early probes showed dense and Unicode/regex costs; discarded. Final scanner stays local to bounded collection and leaves the public matcher/iterator representation unchanged. Earlier logs/hashes remain; not every transient experimental source snapshot was retained. |
+| Compare against a private copy of old code in one executable | Inconclusive preservation evidence: even unchanged Unicode/regex paths differed because compiler context changed. Build the baseline root implementation separately in its own checkout/target. Independent root comparisons give dense 0.134 → 0.135 ms, Unicode sensitive 0.373 → 0.371 ms, folding 1.376 → 1.349 ms, regex 9.663 → 9.666 ms. |
+| Six sustained scan processes | Each runs 20.001–20.014 seconds with exact old/new results. Sampled RSS 39.26–39.84 MiB; first-to-last growth at most 0.063 MiB. This is bounded stress evidence, not a leak proof. |
+| Production TUI zero-hit query | The core completed the query but returned no repaint when there was no match to reveal. The native counter stayed pending until another input. A permanent test fails before the fix and passes afterward; rebuilt production TUI now paints completion without an extra key. Native paired timings must use the same bounded endpoint on both builds. |
+
+All builds use repository Cargo profiles. Standalone terminal dependencies exclude
+GPUI. Initial process health had one existing Git zombie; an unsupervised Go SDK
+inspection added a detached telemetry orphan. Subsequent supervised checks retain
+the same two PID-1 zombies without fork/thread failures. Preserve that distinction
+in the raw process snapshots. Final frontend and full-gate results are in the report.
+
+The complete local gate passes (2,958 workspace/serial-memory and 925 dedicated
+adapter passes across overlapping invocations; 85 Python tests, one skip).
+Three native TUI pairs measure completed Find/reveal **9.875 → 3.450 ms**, with
+20.156–20.293 seconds of checked queries per process. A separate absent/present
+candidate run lasts 20.399 seconds. Both binaries reproduce roughly 30/39 MiB
+RSS modes, with at most 0.102 MiB settled-quarter growth; identical frequencies
+and indefinite leak freedom remain unproved.
+
+Original GUI attempts on both builds exposed an XDamage collector race: draining
+after rearming could discard a late NonEmpty notification and suppress the next
+paint signal. A deterministic private-Xvfb control reproduces it. Collector
+schema 2 now drains before rearming; the final three pairs use that logic and
+one controlled outside-Git fixture. Exact Save/Undo/Redo pass; pooled first edit
+damage is 12.213 → 9.134 ms and settled RSS 165.359 → 161.812 MiB. Seven startup
+pairs give first received client image 650.508 → 661.158 ms, with overlapping
+ranges and pair differences in both directions. No GUI timing speedup is claimed.
+
+After these measurements, an environment transition killed the eleventh gate's
+outer supervisor with SIGKILL. Its surviving test session orphaned descendants
+at PID 1; the new stopped baseline is 767 zombies. Eight lifecycle tests and 20
+synchronous commits pass with no further growth. The final gate isolates its
+supervisor session; report the interruption and subsequent counts explicitly.
+A later semantic-test fix scopes cancellation to the pending definition request
+ID while retaining successful navigation; leaving the file may cancel background
+highlights. These are test/validation changes; measured production sources stay
+unchanged.
+
+The final isolated gate (ci-local-13.log) passes in 228.554 seconds, collects 821
+orphans without forced cleanup and retains the same 767 PID-1 zombies. Its
+Python suite includes the corrected collector definition. The Diff TUI closed
+Markdown-view test now waits for its cancelled worker to unwind within the
+existing bound and still requires weak ownership to disappear. Final reports
+distinguish all failed/interrupted attempts from this passing gate.
