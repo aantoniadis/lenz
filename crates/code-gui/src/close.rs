@@ -13,16 +13,16 @@ struct ReaderClose {
     coordinator: CloseCoordinator,
     entries: Vec<Entry>,
     scheduled: bool,
-    #[cfg(any(target_os = "macos", test))]
+    #[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
     native_commands_installed: bool,
 }
 impl gpui::Global for ReaderClose {}
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
 gpui::actions!(lenz_code, [Quit]);
 
 /// AppKit's Quit menu and keyboard equivalent must request consent before GPUI shutdown.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
 pub(super) fn install_native_commands(cx: &mut App) {
     if !cx.has_global::<ReaderClose>() { return; }
     let state = cx.global_mut::<ReaderClose>();
