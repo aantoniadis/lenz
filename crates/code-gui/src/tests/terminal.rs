@@ -48,6 +48,14 @@ fn source_text(r: &ReaderView) -> String {
     s.copy_range(0..s.len_bytes()).unwrap()
 }
 
+fn terminal_frame_fits_layout(r: &ReaderView) -> bool {
+    let Some(layout) = r.terminal_layout() else { return false };
+    r.session.state().terminal().active().and_then(|tab| tab.frame()).is_some_and(|frame| {
+        frame.columns == r.columns(f32::from(layout.grid.size.width)).clamp(2, 512)
+            && frame.rows == ((f32::from(layout.grid.size.height) / line_h()).floor() as usize).clamp(1, 256)
+    })
+}
+
 #[gpui::test]
 fn gui_terminal_keys_native_input_and_modals_preserve_source(cx: &mut TestAppContext) {
     let f = fixture(cx, Some(("keep.txt", b"keep\n")));
@@ -265,7 +273,12 @@ fn gui_terminal_cell_selection_copy_and_rejection_are_visible(cx: &mut TestAppCo
     drop(v);
     settle(cx,&f,|r| r.session.state().terminal().active().is_some_and(|t| t.running() && t.frame().is_some()));
     let mut v = visual(cx,&f); draw(&mut v);
-    v.update(|_,cx| cx.write_to_clipboard(ClipboardItem::new_string("printf 'SELECT_ME\\n'".into())));
+    drop(v);
+    settle(cx, &f, terminal_frame_fits_layout);
+    let mut v = visual(cx, &f); draw(&mut v);
+    // Typeahead can be echoed before the first shell prompt. Make the output's column
+    // explicit rather than assuming that a running/blank terminal frame implies a prompt.
+    v.update(|_,cx| cx.write_to_clipboard(ClipboardItem::new_string("printf '\\rSELECT_ME\\n'".into())));
     v.simulate_keystrokes("ctrl-shift-v enter");
     drop(v);
     let row = |r: &ReaderView| {
@@ -369,10 +382,7 @@ fn gui_terminal_sgr_mouse_tracks_hover_and_all_buttons_and_releases_outside(cx: 
     v.simulate_keystrokes("ctrl-alt-t"); drop(v);
     settle(cx,&f,|r| r.session.state().terminal().active().is_some_and(|t| t.running() && t.frame().is_some()));
     let mut v = visual(cx,&f); draw(&mut v); drop(v);
-    settle(cx,&f,|r| {
-        let Some(layout) = r.terminal_layout() else {return false};
-        r.session.state().terminal().active().and_then(|tab| tab.frame()).is_some_and(|frame| frame.columns == r.columns(f32::from(layout.grid.size.width)).clamp(2,512) && frame.rows == ((f32::from(layout.grid.size.height)/line_h()).floor() as usize).clamp(1,256))
-    });
+    settle(cx, &f, terminal_frame_fits_layout);
     let mut v = visual(cx,&f); draw(&mut v);
     let (a,b,outside,rows,columns) = f.view.read_with(&v,|r,_| {
         let grid = r.terminal_layout().unwrap().grid;
