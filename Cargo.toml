@@ -5,7 +5,7 @@ exclude = ["vendor/gpui_linux"]
 
 [workspace.package]
 edition = "2024"
-version = "0.0.13"
+version = "0.0.14"
 publish = false
 
 # Lints that have no hits today stay at zero. Panic-prone patterns that do have hits are held to a baseline

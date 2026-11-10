@@ -72,6 +72,16 @@ jobs:
 
       - run: packaging/package.sh "${TAG#v}"
 
+      - name: Verify the unpacked package and launcher routing
+        shell: bash
+        run: |
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          archive="target/package/lenz-${TAG#v}-$target.tar.gz"
+          temporary=$(mktemp -d)
+          trap 'rm -rf "$temporary"' EXIT
+          tar -xzf "$archive" -C "$temporary"
+          python3 packaging/check-package.py "$temporary/lenz-${TAG#v}-$target" "${TAG#v}"
+
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: package-${{ matrix.os }}
