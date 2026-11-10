@@ -1,8 +1,12 @@
 # Lenz 0.0.14 beta validation — 2026-11-10
 
-The release source is `cc4411322c58756d5486e127ba9ef45af1772c16`.
-Local validation passed. Native packages and publication are in progress in
-[release run 42784617241](https://github.com/aantoniadis/lenz/actions/runs/42784617241).
+Published [Lenz 0.0.14 beta](https://github.com/aantoniadis/lenz/releases/tag/v0.0.14)
+on 2026-11-10 at 09:04:51 UTC. The annotated tag identifies
+`cc4411322c58756d5486e127ba9ef45af1772c16`. Local gates, all three native
+packages and final packaged-app verification passed. Native build:
+[42784617241](https://github.com/aantoniadis/lenz/actions/runs/42784617241);
+verification/publication:
+[42787561128](https://github.com/aantoniadis/lenz/actions/runs/42787561128).
 Raw logs, samples, identities, failed attempts and process snapshots are retained
 locally in `perf-results/release-0.0.14/`, outside disposable Cargo output.
 
@@ -155,8 +159,49 @@ omitted from the evidence.
 The final native build is
 [run 42784617241](https://github.com/aantoniadis/lenz/actions/runs/42784617241),
 for the exact release source, using the normal shipping `dist` profile and
-independent frontend builds. Publication remains pending native package checks
-and verification of the six archive/checksum assets against that run.
+independent frontend builds. Ubuntu 22.04 x86_64 and ARM64 and macOS 26 Apple
+Silicon all pass. Each unpacked package passes all five version checks, launcher
+GUI/TUI help, and Diff GUI/TUI error routing (nine command checks per platform).
+The macOS bundle also passes `codesign -v --strict`. The native jobs take
+16.38, 16.17 and 20.78 minutes respectively.
+
+| Archive | SHA-256 |
+| --- | --- |
+| `lenz-0.0.14-aarch64-apple-darwin.tar.gz` | `43bf893f9840d89b6004a7f0a4a6c2590725a428c1037caaea54b15c29573b65` |
+| `lenz-0.0.14-aarch64-unknown-linux-gnu.tar.gz` | `78e6b1f24ad2f6f31eb06dd0b7bc4fda81522d554b6b8e6cd5b46c9aaff18236` |
+| `lenz-0.0.14-x86_64-unknown-linux-gnu.tar.gz` | `5b944a981cd187a6985937538cb91723e5c33e74447186e712a42107aa34e047` |
+
+Final verification/publication is
+[run 42787561128](https://github.com/aantoniadis/lenz/actions/runs/42787561128).
+It passes all checks before publishing: the six downloaded release assets match
+both the manifest and the final build's three artifacts, checksum sidecars match
+the archives, and the annotated tag and all five Linux embedded source identities
+match the validated commit. The exact packaged Linux executables pass:
+
+- Diff GUI startup on an owned private display and a disposable 2,000-line pair.
+- Code GUI editing on 100,000 Unicode/CRLF lines, with exact-byte Save, Undo and
+  Redo assertions and restoration of the original file.
+- Diff TUI input and terminal cleanup on a 1,000-line disposable fixture.
+- Code TUI editing, popup/input checks, stress and terminal restoration on a
+  1,000-line disposable fixture.
+
+The publication supervisor returns 0 after 23.685 seconds, with no forced
+cleanup. Its logs/results are retained in the run's
+`published-package-verification` artifact (ID 13749469156). Local evidence includes
+`publisher-job.log`, `final-manifest.json`, `final-native-run.json`,
+`final-native-jobs.json`, native platform logs and final publication metadata.
+
+After publication, all six public URLs were downloaded again locally: all
+**152,642,583 bytes** match the recorded asset sizes and SHA-256 digests.
+`downloads/` retains the actual archives and sidecars;
+`public-download-verification.json` records this separate check.
+
+The repository Homebrew formula and Arch recipe now point to 0.0.14 with these
+actual archive checksums. Ruby and shell syntax checks pass, and all pins match
+the verified sidecars. The existing Homebrew tap was updated in
+[`b91490f`](https://github.com/aantoniadis/homebrew-lenz/commit/b91490fd73ce3a3d2a9291ac0fa7e1e4b8b8f3c1)
+and its served formula was read back and matched. This is a metadata/syntax and
+package verification, not a fresh Homebrew installation on each platform.
 
 Superseded runs 42769225197, 42773313394 and 42775328614 built earlier unpublished
 candidates. They are retained as history and must not be used as evidence for
@@ -174,5 +219,5 @@ remain unverified. Native macOS CLI/signature checks do not establish interactiv
 acceptance. Real npm and a fresh offline Ruby installation passed in the feature
 campaign; live Ruby registry discovery and a complete Go dependency download
 were blocked. This release does not add a new prolonged live-provider campaign.
-AUR registration/submission remains unavailable; only its repository recipe can
-be updated. macOS packages are ad-hoc signed, not notarized.
+AUR registration/submission remains unavailable; its repository recipe is updated
+without claiming an AUR publication. macOS packages are ad-hoc signed, not notarized.

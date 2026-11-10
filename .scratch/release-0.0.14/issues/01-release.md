@@ -1,5 +1,5 @@
 # Prepare, validate, package and publish 0.0.14
-Status: claimed
+Status: resolved
 Type: task
 
 Bump workspace/lock metadata to0.0.14, write release notes covering PR49–52,
@@ -71,4 +71,20 @@ Evidence and failed attempts are indexed in the
 [release validation report](../../../docs/research/release-0.0.14-validation.md).
 
 Final native run: [42784617241](https://github.com/aantoniadis/lenz/actions/runs/42784617241).
-Publication and real distribution checksum updates remain pending that run.
+That run passed all three native builds and package checks.
+
+## Verified outcome
+
+Published [0.0.14 beta](https://github.com/aantoniadis/lenz/releases/tag/v0.0.14)
+at 2026-11-10 09:04:51 UTC through
+[verification/publication run 42787561128](https://github.com/aantoniadis/lenz/actions/runs/42787561128).
+The exact assets match final native-run artifacts and sidecars. All five commands
+pass native version/routing checks, macOS strict bundle signing passes, and the
+packaged Linux GUI/TUI replay passes before publication. All six public downloads
+were independently fetched and hashed locally afterward.
+
+Updated real checksums in the repository Homebrew formula, Arch recipe and
+existing Homebrew tap (`b91490fd73ce3a3d2a9291ac0fa7e1e4b8b8f3c1`); syntax and
+served formula checks pass. AUR registration/submission remains unavailable.
+The report retains failures, corrected collectors, process-transition evidence,
+inconclusive timings and explicit native/physical coverage limits.
