@@ -35,3 +35,11 @@ pins in the repository and Homebrew tap. Preserve failed attempts and limitation
   additional PID1 zombie. No live validation descendants remained. All8 supervisor
   lifecycle checks passed afterward with the count stable at768. The fixture
   probe must use lenz-content (the initial lenz probe selected zero tests).
+
+- First full suite stopped at the obsolete `Log filter:` PTY marker after26
+  cases; retain full-1. The app's editable prompt uses a separate heading/field.
+  Updated the collector to require heading plus visible editing controls and
+  to wait for actual prompt/panel dismissal. Use workload version7 and keep
+  version6 results separate. The corrected 2,000-line/11-round native repository
+  and conflict workflow passes in12.33s; Python86 passes (one macOS skip).
+  No additional product Rust change was needed. Revalidate the combined tree.

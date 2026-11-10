@@ -17,12 +17,23 @@ class ScreenTests(unittest.TestCase):
         workflow.history_filter('first', 'Workflow first commit', absent=('Workflow second commit',), metric='history-filter')
         self.assertEqual(calls[0][:2], (b'\x1b[21~', ('Commands:',)))
         self.assertEqual(calls[1][0], b'filter history')
-        self.assertEqual(calls[2][:2], (b'\r', ('Log filter:',)))
+        self.assertEqual(calls[2][:2], (b'\r', ('Log filter', _workflow.PROMPT_EXECUTE_MARKER)))
         self.assertEqual(calls[3], (b'first\r', ('Workflow first commit',),
             {'absent': ('Workflow second commit',), 'metric': 'history-filter'}))
         calls.clear()
-        workflow.menu('Find in Change Set', 'Find in Change Set:')
+        workflow.menu('Find in Change Set', 'Find in Change Set', _workflow.SET_SEARCH_PROMPT_MARKER)
         self.assertEqual(calls[0][:2], (b'\x1b[21~', ('Commands:',)))
+
+    def test_prompt_ready_requires_editing_controls_beside_its_label(self):
+        probe = SimpleNamespace(output=bytearray(b'\x1b[1;1HLog filter'), proc=SimpleNamespace(poll=lambda: None), sample=lambda: {}, reads=0)
+        def read(_timeout):
+            probe.reads += 1
+            probe.output.extend(b'\x1b[2;1H' + _workflow.PROMPT_EXECUTE_MARKER.encode())
+        probe.read = read
+        workflow = _workflow.Workflow.__new__(_workflow.Workflow)
+        workflow.probe, workflow.screen = probe, _workflow.Screen()
+        workflow.wait('Log filter', _workflow.PROMPT_EXECUTE_MARKER)
+        self.assertEqual(probe.reads, 1)
 
     def test_blame_expected_date_uses_author_utc_across_local_midnight(self):
         timestamp = _workflow.datetime.datetime.fromisoformat('2026-10-04T01:00:00+03:00').timestamp()
@@ -74,8 +85,6 @@ class ScreenTests(unittest.TestCase):
         self.assertNotIn('hidden', screen.text())
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 class FixtureGitTests(unittest.TestCase):
     def test_setup_retries_only_a_transient_index_lock(self):
@@ -90,3 +99,7 @@ class FixtureGitTests(unittest.TestCase):
         with patch.object(_workflow.subprocess,'run',return_value=failed) as run:
             with self.assertRaises(RuntimeError):_workflow.git(Path('/fixture'),'merge','side',expected=1)
             self.assertEqual(run.call_count,1)
+
+
+if __name__ == '__main__':
+    unittest.main()

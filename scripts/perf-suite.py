@@ -19,7 +19,7 @@ from perf_support import compare, metrics, run, tail_growth, cargo_executable, i
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS = ROOT / 'scripts'
 SCHEMA = 1
-WORKLOAD_VERSION = 6
+WORKLOAD_VERSION = 7
 
 
 def command_text(args, env):

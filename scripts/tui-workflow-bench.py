@@ -20,6 +20,8 @@ _spec.loader.exec_module(_bench)
 TerminalProbe = _bench.TerminalProbe
 # This line exists only after commit details load, never in the background log.
 COMMIT_DETAILS_MARKER = 'Workflow Author <workflow@example.invalid>'
+PROMPT_EXECUTE_MARKER = 'Enter executes · Esc closes'
+SET_SEARCH_PROMPT_MARKER = 'Alt-O changed lines only:'
 
 
 class Screen:
@@ -170,7 +172,7 @@ class Workflow:
         self.key(b'\r', *expected, metric=metric)
 
     def history_filter(self, text, *expected, absent=(), metric=None):
-        self.menu('filter history', 'Log filter:', repository=True)
+        self.menu('filter history', 'Log filter', PROMPT_EXECUTE_MARKER, repository=True)
         self.key(text.encode() + b'\r', *expected, absent=absent, metric=metric)
 
     def close_overlay(self):
@@ -244,7 +246,7 @@ def repository_workflow(app, root, lines, rounds):
         workflow.key(b'Workflow second commit\r', 'WORKFLOW_2')
         workflow.close_overlay()  # leave committed pane search before cycling focus
         workflow.key(b'\t\t', 'WORKFLOW_2')
-        workflow.menu('Find in Change Set', 'Find in Change Set:')
+        workflow.menu('Find in Change Set', 'Find in Change Set', SET_SEARCH_PROMPT_MARKER)
         workflow.key(b'needle\r', 'Find in Change Set ·', matches, 'needle', metric='change-set-search')
         workflow.key(b'\r', 'needle')
         workflow.close_overlay()
@@ -259,17 +261,17 @@ def repository_workflow(app, root, lines, rounds):
         workflow.close_overlay()
         # Repeated real search/query cancellation checks absence of stale panel.
         for _ in range(rounds):
-            workflow.menu('Find in Change Set', 'Find in Change Set:')
+            workflow.menu('Find in Change Set', 'Find in Change Set', SET_SEARCH_PROMPT_MARKER)
             workflow.key(b'needle\r', matches, metric='search-stress')
             workflow.close_overlay()
-            workflow.wait(absent=('Find in Change Set:', 'Find in Change Set ·'))
-            workflow.menu('Find in Change Set', 'Find in Change Set:')
+            workflow.wait(absent=('Find in Change Set', SET_SEARCH_PROMPT_MARKER))
+            workflow.menu('Find in Change Set', 'Find in Change Set', SET_SEARCH_PROMPT_MARKER)
             workflow.key(b'needle\r')
-            workflow.key(b'\x1b', absent=('Find in Change Set:', 'Find in Change Set ·'), metric='search-cancel')
+            workflow.key(b'\x1b', absent=('Find in Change Set', SET_SEARCH_PROMPT_MARKER), metric='search-cancel')
             sample = workflow.probe.sample()
             if sample['rss_mib'] is not None:
                 workflow.metrics.setdefault('search-stress-rss', []).append(sample['rss_mib'])
-        workflow.menu('Find in Change Set', 'Find in Change Set:')
+        workflow.menu('Find in Change Set', 'Find in Change Set', SET_SEARCH_PROMPT_MARKER)
         workflow.key(b'\x1bo', 'changed lines only: on')
         workflow.key(b'needle\r', '4 matches', 'changed lines only', metric='changed-only-search')
         workflow.close_overlay()

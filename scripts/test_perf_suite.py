@@ -307,8 +307,6 @@ class PerformanceTools(unittest.TestCase):
             self.assertEqual(s.prepare_gui_launch(ordinary,scratch),(ordinary,None))
 
 
-if __name__ == '__main__':
-    unittest.main()
 
 class CargoArtifactSelection(unittest.TestCase):
     def test_examples_and_cli_cannot_replace_library_test_harness(self):
@@ -319,3 +317,7 @@ class CargoArtifactSelection(unittest.TestCase):
         self.assertEqual(module.cargo_executable(lines,'lib','lenz',True),'/tmp/tests')
         with self.assertRaises(ValueError):module.cargo_executable(lines,'bench','engine',False)
         with self.assertRaises(ValueError):module.cargo_executable(lines+'\n'+artifact('lib','lenz','/tmp/other'),'lib','lenz',True)
+
+
+if __name__ == '__main__':
+    unittest.main()
