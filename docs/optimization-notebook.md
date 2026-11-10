@@ -4,6 +4,39 @@
 
 Evidence and decisions from the 2026-10-03 Linux performance work. Keep unsuccessful and superseded approaches here so a later platform, renderer or workload can justify another trial. Results are specific to the machine and measurement method; they are not universal performance claims.
 
+## Release 0.0.14 comparison layout — 2026-11-10
+
+The combined candidate `efe382d` failed the existing normal-release 100k-line
+view-build gate at 3.93 ms against 2.4 ms; isolated repetitions reproduced
+3.67–5.25 ms. Allocating inline-range vectors only when changes need them reduced
+work but still measured about 2.83–3.10 ms. Appending row iterators directly
+improved isolated timings, but the second complete gate still measured 2.51 ms.
+Reserving known uncollapsed row counts completed the fix (`86c6106`); collapsed
+layouts retain their smaller capacity. Refinement tests verify inline ranges
+appearing and being cleared. Budgets were not raised.
+
+Three alternating normal-release process pairs measured median view construction
+at **3.962 → 2.157 ms**. Scroll/layout **14.01 → 13.32 µs** had overlapping ranges.
+Five warm GUI startup pairs measured first paint **215 → 202 ms**, settled RSS
+**210.1 → 208.5 MiB** and peak RSS **423.0 → 420.2 MiB**. Six interaction pairs,
+including three reversed-order confirmations, leave Find-scroll **49.71 → 52.42
+ms** inconclusive: ranges overlap and paired differences vary in sign. Native
+TUI sub-millisecond resize variation is also inconclusive; no universal input
+speedup is claimed. TUIs were built independently without GUI features.
+
+The clean final source `cc44113` passes full local CI, the normal-release gate
+and workload version 7's **133 cases/394 metrics with no skipped workloads**.
+Candidate mixed stress runs **60.027 seconds**, with 312.70 MiB settled RSS and
+zero last-quarter growth, versus **60.005 seconds** and 315.18 MiB median RSS for
+the retained baseline. These are combined-tree candidates, not a pristine
+0.0.13 package comparison. Software-renderer RSS is not GPU allocation, and
+XDamage/PTY feedback is not physical display latency or indefinite leak proof.
+
+The [release validation report](research/release-0.0.14-validation.md) records
+all frontend endpoints, collector/test-fixture repairs and coverage limits.
+Raw samples, configuration, source/executable hashes, failed attempts and
+process identities remain in `perf-results/release-0.0.14/`.
+
 ## Scrollbars with track marks — 2026-10-31
 
 Every text pane in both apps gained an IntelliJ-style scrollbar: a thumb, a track that pages, and priority-merged

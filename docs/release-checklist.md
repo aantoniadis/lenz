@@ -2,9 +2,10 @@
 
 Run on **Linux and macOS** before each release, on the release commit, with a release build. Tick each box on both and note the machine (CPU, display refresh rate) and the numbers next to the timed items. The automated checks run locally through `scripts/ci-local.sh`; this list covers what they cannot: physical-display behavior, mouse input and packaging.
 
-Latest automated record: [Linux validation, 2026-10-21](release-validation.md).
-It covers the pending working tree, not a packaged release; manual boxes below
-remain for the final release commit.
+Latest automated record: [0.0.14 validation, 2026-11-10](research/release-0.0.14-validation.md).
+It identifies the release source and separates local gates, native package checks
+and publication. Physical-display and native interactive boxes below remain
+unverified unless explicitly recorded in that report.
 
 ## Setup
 
@@ -78,7 +79,7 @@ In a throwaway repository with a merge conflict in a text file, a binary (PNG) f
 
 ## Package and publish
 
-Pushing a `v<version>` tag runs `.github/workflows/release.yml`: native runners (Ubuntu 22.04 x86_64 and arm64, macOS 15 Apple Silicon) run `packaging/package.sh` and attach the tarballs and `.sha256` files to a draft release. The tag must match the workspace version. Rerun it for an existing tag from the Actions tab. The steps below also work locally and need Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own.
+Pushing a `v<version>` tag runs `.github/workflows/release.yml`: native runners (Ubuntu 22.04 x86_64 and arm64, macOS 26 Apple Silicon) run `packaging/package.sh` and attach the tarballs and `.sha256` files to a draft release. The tag must match the workspace version. Rerun it for an existing tag from the Actions tab. The steps below also work locally and need Python 3. Each tarball holds the launcher `lenz` and its four apps, `lenz-code`, `lenz-code-tui`, `lenz-diff` and `lenz-diff-tui`, each built on its own. Before upload, `packaging/check-package.py` verifies the unpacked commands and launcher routing; on macOS it also verifies the bundle signature. These automated checks do not tick the physical-display items below.
 
 - [ ] From the unpacked tarball (and, on macOS, through the Homebrew-style symlinks into `Lenz.app`): `lenz --help` lists the commands; `lenz <folder>` opens Lenz Code; `lenz --tui <file>` opens the terminal editor; `lenz diff <left> <right>` and `lenz diff --tui <left> <right>` open the comparisons; `lenz diff --bogus` prints `usage: lenz diff`.
 - [ ] macOS: the Dock shows the Lenz logo from launch to quit for both a Code and a Diff window, launched from Finder (`Lenz.app` opens Lenz Code) and from a terminal through the symlinks; `codesign -v --strict Lenz.app` passes.

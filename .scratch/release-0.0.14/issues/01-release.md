@@ -52,3 +52,23 @@ pins in the repository and Homebrew tap. Preserve failed attempts and limitation
   running/zombie/reaped regression fails against the old helper and passes now.
   All160 available semantics tests and100 repeated writer-cleanup runs pass.
   Keep diagnostic builds/logs; this changes test fixtures, not production cleanup.
+
+## Final local validation
+
+The clean final source is `cc4411322c58756d5486e127ba9ef45af1772c16`.
+Full local CI passes: 2,959 workspace/serial plus 925 dedicated frontend passing
+results across invocations, zero failures; Python 86 tests with one macOS-only
+skip. The complete normal-release gate and workload version 7 full suite pass:
+133 cases, 394 metrics, no skipped workloads. Mixed stress actually lasts
+60.027 seconds with zero last-quarter RSS growth. Final Code TUI stress lasts
+10.042 seconds / 123 cycles on the 100k-line fixture.
+
+Five startup pairs and six GUI/native-TUI interaction pairs pass. The extra
+three reversed-order pairs leave Find-scroll and sub-millisecond resize
+variation inconclusive; retain the measurements without claiming improvement.
+All later process snapshots stay at 768 existing zombies, without fork failures.
+Evidence and failed attempts are indexed in the
+[release validation report](../../../docs/research/release-0.0.14-validation.md).
+
+Final native run: [42784617241](https://github.com/aantoniadis/lenz/actions/runs/42784617241).
+Publication and real distribution checksum updates remain pending that run.

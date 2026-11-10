@@ -204,14 +204,14 @@ On Linux, gpui needs: `libxkbcommon-x11-dev libwayland-dev libfontconfig-dev lib
 `cargo build` makes bare executables. They work, but the Dock shows a generic icon while they start and quit, and the Lenz logo only once the window is up. For the logo throughout, build the release package, which puts all five executables in `Lenz.app`:
 
 ```sh
-packaging/package.sh 0.0.13
+packaging/package.sh 0.0.14
 ```
 
-The bundle is at `target/package/lenz-0.0.13-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.13-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version. It builds in `/tmp/lenz-dist` (set `CARGO_TARGET_DIR` to choose another folder outside your home): the shaders record their build folder, and no home folder may ship.
+The bundle is at `target/package/lenz-0.0.14-aarch64-apple-darwin/Lenz.app`, next to a symlink into it for each executable; the same folder is packed as `target/package/lenz-0.0.14-aarch64-apple-darwin.tar.gz`. `cargo build` does not update it: run the script again after changes. The argument is the bundle's version (Finder's Get Info) and goes into the file names; About shows the workspace version. It builds in `/tmp/lenz-dist` (set `CARGO_TARGET_DIR` to choose another folder outside your home): the shaders record their build folder, and no home folder may ship.
 
 ```sh
-open target/package/lenz-0.0.13-aarch64-apple-darwin/Lenz.app                          # Lenz Code, as from Finder
-target/package/lenz-0.0.13-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
+open target/package/lenz-0.0.14-aarch64-apple-darwin/Lenz.app                          # Lenz Code, as from Finder
+target/package/lenz-0.0.14-aarch64-apple-darwin/lenz diff path/to/left path/to/right  # a comparison
 ```
 
 To install it, copy `Lenz.app` to `/Applications` and put symlinks to the five executables in `/Applications/Lenz.app/Contents/MacOS/` on your `PATH` (as the Homebrew formula does); launched through them, from a terminal or as a git difftool, it still shows the logo.
@@ -399,6 +399,15 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+The [0.0.14 validation](docs/research/release-0.0.14-validation.md) passes the fresh
+combined-tree gate and full suite: **133 cases, 394 metrics, no skipped workloads**.
+Three alternating normal-release pairs measured large-comparison view construction
+at **3.96 → 2.16 ms** after reducing allocations. Five startup and six frontend
+interaction pairs found overlapping Find-scroll and resize ranges; those endpoints
+remain inconclusive. The baseline already includes PRs 49–52, rather than pristine
+0.0.13. The report records actual stress duration, memory, retained failures and
+native-platform limits.
+
 Archive editing checks on Linux listed a 5,000-file ZIP in **3.32 ms** and gzip/Zstd TARs in
 **17.10 / 16.55 ms**; replacing two small members alongside 8 MiB of untouched payload took
 **22.35 / 125.21 / 140.50 ms**. These are completed codec operations, excluding disk writes and
@@ -414,7 +423,7 @@ ordinary GUI editing repeats measured **162.69→207.71 MiB** settled RSS. Cache
 other memory/throughput costs are detailed in the report. **The single cost decision remains pending**;
 this is not complete native release acceptance. Editing on macOS (window and terminal) is enabled from 0.0.8.
 
-The [final Linux validation on 2026-10-21](docs/release-validation.md) passed the
+The [earlier Linux validation on 2026-10-21](docs/release-validation.md) passed the
 full suite: **133 cases, 394 metrics**, plus ten live language-server lifecycle
 checks. Fresh paired runs measured Lenz Code wheel feedback at **26.00→26.01 ms**
 and Rails recovery after lost watcher events at **6.79→0.95 seconds**. The report
