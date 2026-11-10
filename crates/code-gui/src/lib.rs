@@ -1089,8 +1089,8 @@ impl ReaderView {
             self.tree_sel.as_ref().and_then(|path| self.session.state().archive_tree().parent(path).map(|parent| (path.clone(), parent)))
         } else { None };
         let library_read = matches!(&input, code_core::session::Input::Completion(Completion::LibraryRead { .. }));
-        let branch_selection = if matches!(&input, code_core::session::Input::Completion(Completion::Branches { .. })) {
-            self.branch_hits_valid = false;
+        let branch_completion = matches!(&input, code_core::session::Input::Completion(Completion::Branches { .. }));
+        let branch_selection = if branch_completion {
             match &self.modal {
                 Some(Modal::Branches { query, at }) => self.session.state().branch_rows(query).into_iter().nth(*at).map(|row| (Some(row.section), row.target)),
                 Some(Modal::BranchMenu { target, query, row, .. }) => {
@@ -1101,7 +1101,8 @@ impl ReaderView {
             }
         } else { None };
         let mut effect = self.session.dispatch(input);
-        if let Some((section, target)) = branch_selection {
+        if branch_completion && effect.repaint { self.branch_hits_valid = false; }
+        if let Some((section, target)) = branch_selection.filter(|_| effect.repaint) {
             let query = match &self.modal { Some(Modal::Branches { query, .. } | Modal::BranchMenu { query, .. }) => Some(query), _ => None };
             let selected = query.and_then(|query| {
                 let rows = self.session.state().branch_rows(query);

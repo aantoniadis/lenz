@@ -151,3 +151,31 @@ fn gui_branch_filter_edits_reject_pointer_rows_until_repaint(cx: &mut TestAppCon
         assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"other\n");
     }
 }
+
+#[gpui::test]
+fn gui_ignored_stale_branch_completion_keeps_painted_choices_clickable(cx: &mut TestAppContext) {
+    use code_core::branches::BranchTarget;
+    let (f, _wt) = branches_fixture(cx);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(650.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    let result = f.view.read_with(&v, |r, _| {
+        assert!(r.branch_hits_valid);
+        let selected = r.session().state().branch_rows("").iter().position(|row| row.target == BranchTarget::Branch("other".into())).unwrap();
+        let layout = r.modal_layout().unwrap();
+        let line = layout.lines.iter().position(|(row, _, _)| *row == selected + FINDER_HEADER_ROWS).unwrap();
+        assert!((layout.first..layout.first + layout.visible).contains(&line));
+        point(layout.bounds.center().x, layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
+    });
+    // Opening the popup allocated a positive request. This obsolete reply is ignored by the core
+    // and must not disable a current frame's hit map without requesting a replacement frame.
+    f.view.update(&mut v, |r, cx| r.dispatch(Completion::Branches { request: 0, root: f.dir.path().to_path_buf(), result: Err("obsolete inventory".into()) }, cx));
+    assert!(f.view.read_with(&v, |r, _| r.branch_hits_valid && r.session().state().branches().unwrap().error.is_none()));
+    // No draw between the ignored completion and the first click.
+    f.view.update_in(&mut v, |r, window, cx| r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: result, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx));
+    settle_for(cx, &f, 10, &|r| branch_of(r).as_deref() == Some("⎇ other"));
+    assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"other\n");
+}

@@ -3909,8 +3909,8 @@ fn a_worktree_opens_here_or_in_a_new_view_and_a_tiny_terminal_copes() {
 fn enter_on_the_current_branch_or_worktree_does_nothing_and_keeps_the_popup() {
     let (_r, _wt, mut a) = branches_app();
     open_popup(&mut a);
-    for current in ["● main", "Worktrees"] {
-        let at = a.choices().iter().position(|c| c.label.contains(current) && c.label.contains("●")).unwrap();
+    for current in ["Local", "Worktrees"] {
+        let at = a.choices().iter().position(|c| c.section == Some(current) && c.label.contains("●")).unwrap();
         a.modal.as_mut().unwrap().at = at;
         key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!a.session.state().checking_out(), "{current}: no checkout");

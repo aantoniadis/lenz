@@ -123,8 +123,10 @@ fn cached_branch_refresh_keeps_target_identity_and_invalidates_stale_mouse_rows(
     git(r.path(), &["branch", "aaa"]);
     a.run(CommandId::GitBranches);
     assert!(a.session.state().branches().unwrap().loading);
+    draw(&mut a, 100, 32);
     let remote = code_core::branches::BranchTarget::Remote("origin/topic".into());
-    let old_at = a.choices().iter().position(|c| matches!(&c.target, ChoiceTarget::Branch(t) if *t == remote)).unwrap();
+    let old_at = a.choices().iter().position(|c| matches!(&c.target, ChoiceTarget::Branch(t) if *t == remote))
+        .unwrap_or_else(|| panic!("cached remote missing: prompt {:?}, view {:?}, choices {:?}", prompt_kind(&a), a.session.state().branches(), a.choices().iter().map(|c| &c.label).collect::<Vec<_>>()));
     for _ in 0..old_at { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
     draw(&mut a, 100, 32);
     assert!(!a.layout.modal_items.is_empty());
@@ -143,6 +145,7 @@ fn cached_branch_refresh_keeps_target_identity_and_invalidates_stale_mouse_rows(
 
     git(r.path(), &["update-ref", "-d", "refs/remotes/origin/topic"]);
     a.run(CommandId::GitBranches);
+    draw(&mut a, 100, 32);
     typed(&mut a, "topic");
     assert_eq!(a.choices().len(), 1, "the cached target remains usable during refresh");
     settle(&mut a, |a| !a.session.state().branches().unwrap().loading);
