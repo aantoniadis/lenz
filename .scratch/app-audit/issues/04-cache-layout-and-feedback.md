@@ -1,5 +1,5 @@
 # Investigate ordinary editor feedback after adding the branch cache
-Status: needs-info
+Status: resolved
 Type: task
 
 Six normal-release pairs on the same frozen binaries show a small upward TUI
@@ -33,6 +33,8 @@ GUI edit tendency; this supports a confound hypothesis without proving it.
 The final picker improves usable choices 20.635 → 1.407 ms while first bytes
 increase 0.727 → 1.354 ms to include cached content. TUI key feedback retains a
 small roughly 0.04 ms upward tendency. AGENTS.md requires explicit agreement for
-a deliberate performance tradeoff. Await user acceptance before marking PR #53
-ready. Full data, failed/inconclusive attempts and limits are in the
+a deliberate performance tradeoff. The user explicitly accepted the approximately
+0.6 ms first-frame increase and roughly 0.04 ms TUI key-feedback tendency on
+2026-11-10 and asked to finish PR #53. Performance acceptance is complete.
+Full data, failed/inconclusive attempts and limits are in the
 [audit report](../../../docs/research/code-branch-picker-audit.md).

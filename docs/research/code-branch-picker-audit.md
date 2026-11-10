@@ -1,7 +1,7 @@
 # Code branch picker and workflow audit — 2026-11-10
 
-CI and native validation pass on `fix/code-branch-picker-and-audit`; the measured
-performance tradeoff awaits user acceptance. Baseline source:
+CI and native validation pass on `fix/code-branch-picker-and-audit`; the user
+accepted the measured performance tradeoff on 2026-11-10. Baseline source:
 `13af4f5` (0.0.14 plus release documentation/checksum metadata). Raw native input,
 screens, identities, failed attempts, samples and process snapshots are retained
 in `perf-results/app-audit/`, outside disposable Cargo output.
@@ -172,8 +172,8 @@ The full log, source, exit status and summary are `ci-local-11.*`.
 The final production Code GUI build and separate standalone Code TUI build also
 pass using normal repository `release` profiles, without test or benchmark
 features (`final-code-{gui,tui}-build.*`). Candidate native replays and the paired
-correctness workloads pass as recorded below; performance acceptance is still
-pending. Baseline source is
+correctness workloads pass as recorded below; the user accepted the measured
+performance tradeoff. Baseline source is
 `13af4f5ea732fe2fbb5ef245fe66b04ad7446144`; its GUI and TUI were built separately
 in an isolated checkout with its own target. Executable copies and SHA-256
 identities remain in `baseline-bin/` and `baseline-executables.json` after cleaning
@@ -195,7 +195,7 @@ source/executable identities and exact commands are `editor-pairs-final-1/` and
 | --- | --- | --- |
 | GUI ordinary edit, median of process medians | 8.070 → 9.685 ms | Five of six paired medians are higher; paired median +0.646 ms, range −0.146 to +3.177 ms. Pooled p95 18.413 → 17.650 ms. First XDamage can include preceding Save/refresh feedback; it does not identify the edit's own paint. |
 | GUI sustained edit | Mixed paired signs | Three of six higher; paired median −0.102 ms, range −5.427 to +2.163 ms. No sustained editing speedup claim. |
-| TUI ordinary key feedback | 0.7384 → 0.7689 ms | Five of six higher; paired median +0.0377 ms, range −0.0881 to +0.0981 ms; pooled p95 0.9434 → 0.9671 ms. A small upward tendency remains under investigation. |
+| TUI ordinary key feedback | 0.7384 → 0.7689 ms | Five of six higher; paired median +0.0377 ms, range −0.0881 to +0.0981 ms; pooled p95 0.9434 → 0.9671 ms. The measured tendency remains explicit after the investigations below. |
 | TUI sustained key feedback | 0.8544 → 0.8881 ms | Five of six higher; paired median +0.0499 ms, range −0.0254 to +0.1040 ms; pooled p95 1.3047 → 1.3388 ms. |
 
 The ordinary editor comparison does not establish a consistent memory reduction.
@@ -268,8 +268,10 @@ tendency. Exact latency preservation is not established. The final candidate
 therefore keeps the faster usable picker while reporting its larger first-frame
 cost and roughly 0.04 ms TUI key-feedback tendency. The
 [repository performance rule](../../AGENTS.md#preserve-performance) requires
-explicit agreement for a deliberate tradeoff. PR #53 remains draft pending that
-decision; no merge or release is part of this audit.
+explicit agreement for a deliberate tradeoff. On 2026-11-10 the user explicitly
+accepted the approximately 0.6 ms first-frame increase and roughly 0.04 ms TUI
+key-feedback tendency for 20.6 → 1.4 ms usable choices, and asked to finish PR #53.
+Performance acceptance is complete; merging and releasing remain separate tasks.
 
 The first audit snapshot has 788 processes, including 768 pre-existing PID1
 zombies. At the end of the first performance campaigns there are 776 processes
