@@ -350,7 +350,7 @@ impl View {
     /// Lay out display rows and segments from the Change Blocks, collapsing long unchanged runs.
     fn rebuild(&mut self) {
         // raw segments: (left start, left len, right start, right len, change)
-        let mut raw = Vec::new();
+        let mut raw = Vec::with_capacity(self.blocks.len().saturating_mul(2).saturating_add(1));
         let (mut l, mut r) = (0u32, 0u32);
         for b in &self.blocks {
             raw.push((l, b.left.start - l, r, b.left.start - l, None));
@@ -360,9 +360,20 @@ impl View {
         }
         raw.push((l, self.raw_left - l, r, self.raw_right - r, None));
 
-        let (mut segs, mut rows_l, mut rows_r) = (Vec::new(), Vec::new(), Vec::new());
+        let mut segs = Vec::with_capacity(raw.len());
+        // Without folds, display rows have exactly the raw line counts. Reserve
+        // them once; collapsed layouts still grow to their smaller actual size.
+        let mut rows = if !self.collapse && self.folded.is_empty() {
+            [Vec::with_capacity(self.raw_left as usize), Vec::with_capacity(self.raw_right as usize)]
+        } else {
+            [Vec::new(), Vec::new()]
+        };
         let mut c = 0u32;
-        let mut push = |rows_l: &mut Vec<DRow>, rows_r: &mut Vec<DRow>, left: Vec<DRow>, right: Vec<DRow>, change: Option<(Kind, bool)>| {
+        // Append each run directly to the owned buffers instead of allocating
+        // and copying a temporary vector for every side of every segment.
+        fn push(rows: &mut [Vec<DRow>; 2], segs: &mut Vec<Seg>, c: &mut u32,
+                left: impl ExactSizeIterator<Item = DRow>, right: impl ExactSizeIterator<Item = DRow>, change: Option<(Kind, bool)>) {
+            let [rows_l, rows_r] = rows;
             let (ln, rn) = (left.len() as u32, right.len() as u32);
             let cn = ln.max(rn);
             if cn == 0 && change.is_none() {
@@ -374,7 +385,7 @@ impl View {
                     ln: ln as f32,
                     r0: rows_r.len() as f32,
                     rn: rn as f32,
-                    c0: c as f32,
+                    c0: *c as f32,
                     cn: cn as f32,
                     change,
                     u0: 0.0,
@@ -383,9 +394,9 @@ impl View {
             }
             rows_l.extend(left);
             rows_r.extend(right);
-            c += cn;
-        };
-        let lines = |a: u32, n: u32| (a..a + n).map(DRow::Line).collect::<Vec<_>>();
+            *c += cn;
+        }
+        let lines = |a: u32, n: u32| (a..a + n).map(DRow::Line);
         let last = raw.len() - 1;
         for (id, &(l0, ln, r0, rn, change)) in raw.iter().enumerate() {
             let head = if id == 0 { 0 } else { CONTEXT };
@@ -395,21 +406,23 @@ impl View {
             // raw segments alternate unchanged run, Change Block, …
             let block = id / 2;
             if change.is_some() && self.folded.contains(&block) {
-                push(&mut rows_l, &mut rows_r, vec![DRow::Folded { block, start: l0 }], vec![DRow::Folded { block, start: r0 }], change);
+                push(&mut rows, &mut segs, &mut c, std::iter::once(DRow::Folded { block, start: l0 }), std::iter::once(DRow::Folded { block, start: r0 }), change);
             } else if change.is_none() && ln == rn && self.collapse && hidden > 1 && !self.expanded.contains(&id) {
-                push(&mut rows_l, &mut rows_r, lines(l0, head), lines(r0, head), None);
+                push(&mut rows, &mut segs, &mut c, lines(l0, head), lines(r0, head), None);
                 push(
-                    &mut rows_l,
-                    &mut rows_r,
-                    vec![DRow::Fold { hidden, id, start: l0 + head }],
-                    vec![DRow::Fold { hidden, id, start: r0 + head }],
+                    &mut rows,
+                    &mut segs,
+                    &mut c,
+                    std::iter::once(DRow::Fold { hidden, id, start: l0 + head }),
+                    std::iter::once(DRow::Fold { hidden, id, start: r0 + head }),
                     None,
                 );
-                push(&mut rows_l, &mut rows_r, lines(l0 + head + hidden, tail), lines(r0 + head + hidden, tail), None);
+                push(&mut rows, &mut segs, &mut c, lines(l0 + head + hidden, tail), lines(r0 + head + hidden, tail), None);
             } else {
-                push(&mut rows_l, &mut rows_r, lines(l0, ln), lines(r0, rn), change);
+                push(&mut rows, &mut segs, &mut c, lines(l0, ln), lines(r0, rn), change);
             }
         }
+        let [rows_l, rows_r] = rows;
         let mut u = 0.0;
         for s in &mut segs {
             s.u0 = u;
@@ -522,6 +535,13 @@ impl View {
         }
         self.lens_left = left.to_vec();
         self.lens_right = right.to_vec();
+        // Line-only and unrefined comparisons have no inline ranges to store.
+        // Refinement calls this again when inline changes become available.
+        if self.blocks.iter().all(|block| block.inline.as_ref().is_none_or(Vec::is_empty)) {
+            self.inline_left = Vec::new();
+            self.inline_right = Vec::new();
+            return;
+        }
         self.inline_left = vec![Vec::new(); left.len()];
         self.inline_right = vec![Vec::new(); right.len()];
         for b in &self.blocks {
@@ -1921,6 +1941,10 @@ pub(crate) mod tests {
         assert_eq!(tint_of(&f.left, 3), None);
         assert_eq!(f.connectors.len(), 1);
         assert_eq!(view.change_count(), 1);
+        view.apply_refinements(vec![(0, Refinement::Refined(block(1..2, 1..2)))]);
+        let f = view.frame();
+        assert!(f.left[1].inline.is_empty());
+        assert!(f.right[1].inline.is_empty());
     }
 
     /// View-model half of the performance guard (the engine's is `cargo bench -p lenz-engine`): building the
