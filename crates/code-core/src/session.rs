@@ -3166,7 +3166,7 @@ pub struct Session {
     pending_checkout: Option<crate::branches::Retry>,
     branches_requests: Arc<AtomicU64>,
     /// One repository's metadata, retained across popup dismissal; refreshed on every open.
-    branches_cache: Option<(PathBuf, lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>)>,
+    branches_cache: Option<Box<(PathBuf, lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>)>>,
     /// The last file-status read asked for; a running read stops when it is no longer this one.
     git_status_requests: Arc<AtomicU64>,
     git_status_running: bool,
@@ -5461,7 +5461,7 @@ impl Session {
                 }
                 let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
                 let mut view = crate::branches::BranchesView { loading: true, worktrees_only, revisions_only, ..Default::default() };
-                if let Some((_, refs, worktrees)) = self.branches_cache.as_ref().filter(|(cached, _, _)| *cached == root) {
+                if let Some((_, refs, worktrees)) = self.branches_cache.as_deref().filter(|(cached, _, _)| *cached == root) {
                     view.refs = refs.clone();
                     view.refs.current = self.state.repo.as_ref().and_then(|r| r.head.branch.clone());
                     view.worktrees = worktrees.clone();
@@ -7200,7 +7200,7 @@ impl Session {
                     match result {
                         Ok((refs, worktrees)) => {
                             if !v.worktrees_only && !v.revisions_only {
-                                self.branches_cache = Some((root, refs.clone(), worktrees.clone()));
+                                self.branches_cache = Some(Box::new((root, refs.clone(), worktrees.clone())));
                             }
                             (v.refs, v.worktrees) = (refs, worktrees);
                             v.has_snapshot = true;
