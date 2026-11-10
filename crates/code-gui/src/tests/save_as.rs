@@ -35,7 +35,8 @@ fn gui_scratch_files_filter_edit_clear_and_open_the_filtered_path(cx: &mut TestA
     draw(&mut v);
     assert!(f.view.read_with(&v, |r, _| r.modal_layout().is_some_and(|layout| layout.visible > 0 && layout.query.as_deref() == Some(".RB"))));
     v.simulate_keystrokes("enter");
-    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source() == ruby));
+    settle(cx, &f, |r| r.session().state().active().is_some_and(|t| t.source() == ruby)
+        && r.session().state().current_source().is_some());
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && !r.results_focus && !r.tree_focus));
     v.simulate_keystrokes("x");
     assert_eq!(f.view.read_with(&v, |r, _| r.session().state().current_source().unwrap().copy_range(0..1)), Some("x".into()));
