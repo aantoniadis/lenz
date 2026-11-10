@@ -43,3 +43,12 @@ pins in the repository and Homebrew tap. Preserve failed attempts and limitation
   version6 results separate. The corrected 2,000-line/11-round native repository
   and conflict workflow passes in12.33s; Python86 passes (one macOS skip).
   No additional product Rust change was needed. Revalidate the combined tree.
+
+- CI3 stopped in the LSP writer-cleanup test. The old liveness probe called
+  kill-0, then treated a missing /proc entry after reaping as alive. Diagnostics
+  captured successful kill-0 followed by ENOENT. It reproduced in isolation;
+  process counts stayed stable. Use one Linux /proc observation, account for
+  disappearing entries and parse command names with spaces. A real-process
+  running/zombie/reaped regression fails against the old helper and passes now.
+  All160 available semantics tests and100 repeated writer-cleanup runs pass.
+  Keep diagnostic builds/logs; this changes test fixtures, not production cleanup.

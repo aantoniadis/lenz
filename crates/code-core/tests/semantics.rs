@@ -411,8 +411,50 @@ fn messages(log: &Path) -> Vec<Value> {
 }
 
 fn alive(pid: u64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        // Use one observation: a zombie can be reaped between kill -0 and a
+        // second /proc read. Missing after that successful kill was reported alive.
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => {
+                let fields = stat.rsplit_once(')').expect("proc stat has a command").1;
+                let state = fields.split_whitespace().next().expect("proc stat has a state");
+                !matches!(state, "Z" | "X")
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                || error.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()) => false,
+            Err(error) => panic!("cannot inspect owned helper {pid}: {error}"),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
     std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success())
-        && !std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|s| s.split(' ').nth(2) == Some("Z"))
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn liveness_probe_handles_running_zombie_and_reaped_helpers() {
+    let mut child = std::process::Command::new("sh")
+        .args(["-c", "printf 'owned helper' > /proc/self/comm && printf ready && read hold"])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+    let pid = u64::from(child.id());
+    let mut ready = [0; 5];
+    std::io::Read::read_exact(&mut child.stdout.take().unwrap(), &mut ready).unwrap();
+    assert_eq!(&ready, b"ready");
+    let running = alive(pid);
+    child.kill().unwrap();
+    let until = Instant::now() + Duration::from_secs(5);
+    let mut zombie = false;
+    while Instant::now() < until {
+        zombie = std::fs::read_to_string(format!("/proc/{pid}/status")).is_ok_and(|s| s.lines().any(|line| line.starts_with("State:\tZ")));
+        if zombie { break; }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let zombie_running = alive(pid);
+    child.wait().unwrap();
+    assert!(running, "the owned helper must start running");
+    assert!(zombie, "the killed direct child remains reserved until wait");
+    assert!(!zombie_running, "zombies must not count as running, including names with spaces");
+    assert!(!alive(pid), "a reaped helper must stay gone");
 }
 
 const LIB: &str = "pub fn helper() {}\npub struct Thing;\n";
