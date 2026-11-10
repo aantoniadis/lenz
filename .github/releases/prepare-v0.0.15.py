@@ -24,7 +24,7 @@ for attempt in range(120):
    break
  time.sleep(30)
 else: raise RuntimeError('Native release builds did not finish in one hour')
-r=api('releases/tags/v0.0.15')
+r=next(release for release in api('releases?per_page=50') if release['tag_name']=='v0.0.15')
 names={f'lenz-0.0.15-{t}.tar.gz{s}' for t in ['x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','aarch64-apple-darwin'] for s in ['', '.sha256']}
 assert len(r['assets'])==6 and {a['name'] for a in r['assets']}==names
 assets={a['name']:a['digest'] for a in r['assets']}
