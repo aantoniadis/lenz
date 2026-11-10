@@ -178,9 +178,20 @@ fn pump(cx: &mut App) {
     } else {
         for entry in &live {
             let _ = entry.view.update(cx, |v, cx| {
+                let before = match &v.modal {
+                    Some(Modal::StatusDetails { title, kind, text, .. }) => Some((*kind, *title, text.clone())),
+                    _ => None,
+                };
                 // Preparation can create a terminal question even with no dirty buffers.
                 v.sync_prompts();
-                cx.notify();
+                let after = match &v.modal {
+                    Some(Modal::StatusDetails { title, kind, text, .. }) => Some((*kind, *title, text.as_str())),
+                    _ => None,
+                };
+                // A resize can schedule progress while its frame acknowledgement is still
+                // queued. Repainting an unchanged question here would request that resize
+                // again and keep deferred progress/render work running without yielding.
+                if before.as_ref().map(|(kind, title, text)| (*kind, *title, text.as_str())) != after { cx.notify(); }
             });
         }
         if let Some(Progress::Pending(id)) = result
