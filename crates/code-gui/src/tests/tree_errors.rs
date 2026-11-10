@@ -11,7 +11,9 @@ fn gui_tree_errors_preserve_names_dirty_git_marks_and_folder_arrow_hits(cx: &mut
         r.dispatch(Command::RevealInTree("sub/bad.rs".into()), cx);
         r.dispatch(Command::OpenRetained(project.path().join("sub/bad.rs")), cx);
     });
-    settle(cx, &f, |r| r.session.state().active().is_some_and(|t| r.session.state().diagnostics(t.id()).is_some()) && r.tree_lines(usize::MAX).iter().any(|row| row.name == "bad.rs"));
+    // Syntax diagnostics and Git status finish independently. Wait for the badge being asserted,
+    // rather than assuming that syntax readiness also completed the repository's status read.
+    settle(cx, &f, |r| r.session.state().active().is_some_and(|t| r.session.state().diagnostics(t.id()).is_some()) && r.tree_lines(usize::MAX).iter().any(|row| row.name == "bad.rs" && row.status == Some(FileStatus::Modified)));
     let mut v = visual(cx, &f); v.simulate_resize(size(px(900.0),px(500.0))); draw(&mut v);
     f.view.update(&mut v, |r, _| r.enable_draft_input_for_test());
     v.simulate_keystrokes("end space");
@@ -23,7 +25,7 @@ fn gui_tree_errors_preserve_names_dirty_git_marks_and_folder_arrow_hits(cx: &mut
             let folder = rows.iter().find(|row| row.name == "sub").unwrap();
             let file = rows.iter().find(|row| row.name == "bad.rs").unwrap();
             assert!(folder.error && file.error);
-            assert!(file.dirty && file.status == Some(FileStatus::Modified), "error, unsaved mark and Git status remain independent");
+            assert!(file.dirty && file.status == Some(FileStatus::Modified), "error, unsaved mark and Git status remain independent: dirty={}, status={:?}", file.dirty, file.status);
             assert!(rows.iter().all(|row| !row.name.starts_with('!')), "error labels never alter filesystem names");
         });
     }
