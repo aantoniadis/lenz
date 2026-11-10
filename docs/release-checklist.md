@@ -2,7 +2,7 @@
 
 Run on **Linux and macOS** before each release, on the release commit, with a release build. Tick each box on both and note the machine (CPU, display refresh rate) and the numbers next to the timed items. The automated checks run locally through `scripts/ci-local.sh`; this list covers what they cannot: physical-display behavior, mouse input and packaging.
 
-Latest automated record: [0.0.14 validation, 2026-11-10](research/release-0.0.14-validation.md).
+Latest automated record: [0.0.15 validation, 2026-11-10](research/release-0.0.15-validation.md).
 It identifies the release source and separates local gates, native package checks
 and publication. Physical-display and native interactive boxes below remain
 unverified unless explicitly recorded in that report.
