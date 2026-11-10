@@ -1,10 +1,18 @@
 import hashlib,json,subprocess,time
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
-COMMIT='1ddeb8ed94cb415e0c27b00f696578bdf995e6f7'
+COMMIT='2e998fa2d0e24bc69e1a84177f1f23580340f9b8'
 REPO='aantoniadis/lenz'
 def api(path):
  return json.loads(subprocess.check_output(['gh','api',f'repos/{REPO}/{path}'],text=True))
+for gate_attempt in range(120):
+ try:
+  gate=api('git/ref/heads/automation/validated-v0.0.15')
+ except subprocess.CalledProcessError:
+  print('Waiting for complete local CI',flush=True);time.sleep(30);continue
+ assert gate['object']['sha']==COMMIT, gate
+ break
+else: raise RuntimeError('Local validation approval ref missing')
 for attempt in range(120):
  runs=api(f'actions/workflows/release.yml/runs?head_sha={COMMIT}&event=push&per_page=20')['workflow_runs']
  if runs:
