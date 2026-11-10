@@ -92,7 +92,7 @@ impl ReaderView {
     }
 }
 
-pub(super) fn matching_scratch_files<'a>(files: &'a [std::path::PathBuf], query: &str) -> impl Iterator<Item = &'a std::path::PathBuf> + 'a {
+pub(super) fn matching_scratch_files<'a>(files: &'a [std::path::PathBuf], query: &str) -> impl Iterator<Item = &'a std::path::PathBuf> + 'a + use<'a> {
     let query = query.to_lowercase();
     files.iter().filter(move |path| path.file_name().is_some_and(|name| name.to_string_lossy().to_lowercase().contains(&query)))
 }

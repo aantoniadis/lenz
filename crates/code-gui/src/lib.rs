@@ -1078,6 +1078,7 @@ impl ReaderView {
         #[cfg(any(target_os = "linux", target_os = "freebsd"))]
         let selected = (self.session.state().active().map(|t| t.id()), self.session.state().selection());
         let input: code_core::session::Input = input.into();
+        if matches!(&input, code_core::session::Input::Command(Command::OpenBranches | Command::OpenWorktrees | Command::OpenRevisions)) { self.branch_hits_valid = false; }
         #[cfg(feature = "perf-probe")]
         let (started, kind) = (std::time::Instant::now(), input.kind());
         let theme_update = matches!(&input, code_core::session::Input::Command(Command::Theme(_)) | code_core::session::Input::Completion(Completion::Theme(_)));
@@ -2074,7 +2075,8 @@ impl ReaderView {
                 }
             }
             Some(Modal::ScratchFiles { files, query, at }) => {
-                if let Some(path) = save_as::matching_scratch_files(&files, &query).nth(at).cloned() {
+                let path = save_as::matching_scratch_files(&files, &query).nth(at).cloned();
+                if let Some(path) = path {
                     self.tree_focus = false; self.results_focus = false; self.log_focus = false;
                     self.find_focus = None; self.crumb_focus = None;
                     self.dispatch(Command::OpenScratch(path), cx);
@@ -2425,6 +2427,7 @@ impl ReaderView {
             } else { 1 };
             let typed = ev.keystroke.key_char.clone().filter(|_| !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform);
             let set = |query: String, at: usize| Some(Modal::Branches { query, at });
+            if matches!(key, "up" | "down" | "home" | "end" | "pageup" | "pagedown") { self.branch_hits_valid = false; }
             match key {
                 "escape" => self.close_modal(cx),
                 "up" => self.modal = set(query, at.saturating_sub(1)),
@@ -5465,11 +5468,13 @@ impl ReaderView {
         first
     }
 
-    fn scroll_modal(&self, delta: f32, max: usize) {
+    fn scroll_modal(&mut self, delta: f32, max: usize) {
+        let before = self.modal_scroll.get();
         let accumulated = self.modal_wheel.get() + delta;
         let steps = accumulated.trunc() as isize;
         self.modal_wheel.set(accumulated - steps as f32);
         self.modal_scroll.set(self.modal_scroll.get().saturating_add_signed(steps).min(max));
+        if before != self.modal_scroll.get() && matches!(self.modal, Some(Modal::Branches { .. })) { self.branch_hits_valid = false; }
     }
 
     /// The open modal's box and wrapped lines. Paint and hit testing share the independent viewport.

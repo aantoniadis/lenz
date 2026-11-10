@@ -1721,7 +1721,7 @@ impl App {
         let width = list.width.max(1) as usize;
         let mut rendered = Vec::new();
         if modal.kind == Prompt::Branches {
-            let notice = branch_notice.as_deref().or_else(|| choices.is_empty().then_some("Nothing matches this filter"));
+            let notice = branch_notice.as_deref().or(choices.is_empty().then_some("Nothing matches this filter"));
             if let Some(notice) = notice {
                 for text in wrap_text(notice, width) {
                     rendered.push((usize::MAX, text, true));
@@ -1854,7 +1854,7 @@ impl App {
                         .then_some(runtime_message.as_deref())
                         .flatten()
                 })
-                .or_else(|| (modal.kind == Prompt::Branches).then_some(branch_footer).flatten())
+                .or(branch_footer.filter(|_| modal.kind == Prompt::Branches))
                 .unwrap_or(if modal.kind == Prompt::LanguageServer {
                     "Ctrl+C copies details · Enter runs action · Esc closes"
                 } else if modal.kind == Prompt::Menu(None) {
