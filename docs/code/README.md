@@ -541,8 +541,10 @@ the second one, or press Space on each; marked entries show a ✓. Escape in the
 them.
 
 **Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the top bar) lists **New Branch…**,
-**Checkout Tag or Revision…**, then the **Recent**, **Local**, **Remote** and **Tags** branches and, with more than one,
-the **Worktrees**; typing filters. Enter checks out the highlighted branch (a remote one as a local branch tracking it,
+**Checkout Tag or Revision…**, then separate **Recent branches**, **Local branches**, **Remote branches**, **Tags**
+and (with more than one) **Worktrees** sections; typing filters. The last inventory appears immediately on reopening
+while metadata refreshes in the background. Choosing a branch does not scan every worktree's changed files.
+Enter checks out the highlighted branch (a remote one as a local branch tracking it,
 a tag or revision on a detached HEAD) or opens the highlighted worktree as the folder; → or a right-click lists a row's
 other actions (New Branch from Here…, Open in New Window). Your uncommitted changes go along when git allows. When they
 would be overwritten, a dialog lists the files: **Smart Checkout** stashes them, checks out and puts them back (a
@@ -552,6 +554,11 @@ moved or deleted first. After a checkout the open files reload (removed ones sho
 index refresh and annotations blame again. The top bar shows the branch (or the detached commit) and follows a
 switch made elsewhere within a few seconds. Checkouts run git as your terminal would, with the repository's hooks and
 filters; everything else Lenz Code asks git keeps them off.
+
+On macOS, Command-Q and the application menu's Quit request closure of all Code
+windows through the shared Save/Discard/Cancel protocol. The red window button
+closes its own window, dismissing transient pickers and presenting any file or
+running-terminal question immediately; an active decision remains available.
 
 The Git menu also compares the working tree as it is (uncommitted and untracked files included) in Lenz Diff:
 **Show Local Changes** against the last commit (what the next commit would hold); **Compare with Branch, Tag or

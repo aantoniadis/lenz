@@ -33,6 +33,10 @@ mod csv;
 mod scrollbar;
 mod problems;
 mod project_syntax;
+mod branch_inventory;
+mod scratch_numbering;
+mod own_save_refresh;
+mod shutdown;
 use crate::tabs::TabId;
 use crate::text::TextSnapshot;
 use std::time::Duration;
@@ -4707,7 +4711,7 @@ fn rapid_changes_end_on_the_last_content_and_recheck_works_without_events() {
     settle(&mut s, |s| s.state().current_source().is_some_and(|d| source_line(d, 0) == "50"));
     // A late result for an older check does nothing.
     let id = s.state().active().unwrap().id();
-    let stale = Completion::Refreshed { tab: id, token: 0, result: Refresh::Gone("old".into()) };
+    let stale = Completion::Refreshed { tab: id, token: 0, baseline: s.refresh_baseline(id), result: Refresh::Gone("old".into()) };
     assert_eq!(s.dispatch(stale), Effect::default());
     // Recheck (focus regained) finds what notifications would have.
     s.watcher.set(Default::default());

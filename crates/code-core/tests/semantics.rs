@@ -885,7 +885,7 @@ fn large_files_are_never_sent_and_dependencies_show_their_origin() {
     f.definition("from_dep", false);
     f.settle(|s| s.state().current_source().is_some_and(|d| d.source().starts_with(&dep)));
     assert_eq!(f.selected_text(), "from_dep");
-    assert!(f.notice("Read-only source from a Cargo dependency"), "{:?}", f.s.state().notices());
+    assert!(f.notice("Source from a Cargo dependency"), "{:?}", f.s.state().notices());
     f.settle(|s| s.state().tree_rows().any(|r| r.name.as_ref() == "sibling.rs"));
     assert!(f.s.state().tree_rows().any(|r| r.name.as_ref() == "Libraries"));
     assert_eq!(f.s.state().project().unwrap().root(), f.root);

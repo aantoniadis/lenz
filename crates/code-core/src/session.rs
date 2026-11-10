@@ -1636,7 +1636,7 @@ pub enum Completion {
     /// Filesystem changes, coalesced.
     Changed(Change),
     /// A tab's source was checked against the disk.
-    Refreshed { tab: TabId, token: u64, result: Refresh },
+    Refreshed { tab: TabId, token: u64, baseline: RefreshBaseline, result: Refresh },
     /// Results for search `id`.
     Found { id: u64, found: search::Found },
     ProjectSyntax(project_syntax::Reply),
@@ -1715,6 +1715,10 @@ pub enum Refresh {
     /// The file kept changing while it was read: try again shortly.
     Unstable,
 }
+
+/// Opaque identity of the confirmed content a disk check compared against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshBaseline(Option<SemanticSource>);
 
 pub enum Input {
     Command(Command),
@@ -2617,7 +2621,7 @@ impl State {
             let language = self.source(t.id).map_or(t.language.flatten(), |d| d.language());
             let origin = semantics::provider::origin(&t.source, language);
             let inside = t.source.starts_with(p.root());
-            (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Read-only source from {origin}"))
+            (!inside || origin != semantics::provider::OUTSIDE).then(|| format!("Source from {origin}"))
         });
         let read_only = tab.and_then(|t| self.view(t.id)).and_then(|view| view.edit_disabled().map(str::to_owned));
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
@@ -3160,7 +3164,9 @@ pub struct Session {
     repo_requests: u64,
     /// What the running checkout does, to run again from its dialog when git refuses.
     pending_checkout: Option<crate::branches::Retry>,
-    branches_requests: u64,
+    branches_requests: Arc<AtomicU64>,
+    /// One repository's metadata, retained across popup dismissal; refreshed on every open.
+    branches_cache: Option<(PathBuf, lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>)>,
     /// The last file-status read asked for; a running read stops when it is no longer this one.
     git_status_requests: Arc<AtomicU64>,
     git_status_running: bool,
@@ -3417,7 +3423,8 @@ impl Session {
             repo_git_seen: None,
             repo_requests: 0,
             pending_checkout: None,
-            branches_requests: 0,
+            branches_requests: Arc::new(AtomicU64::new(0)),
+            branches_cache: None,
             git_status_requests: Arc::new(AtomicU64::new(0)),
             git_status_running: false,
             git_status_again: false,
@@ -4336,6 +4343,8 @@ impl Session {
         self.markers_epoch += 1;
         self.state.marker_sets.clear();
         self.state.branches = None;
+        self.branches_requests.fetch_add(1, Ordering::Relaxed);
+        self.branches_cache = None;
         self.state.checkout_problem = None;
         self.state.stash_conflicts = None;
         let Some(anchor) = anchor else { return };
@@ -5451,27 +5460,36 @@ impl Session {
                     return Effect::default();
                 }
                 let Some(root) = self.state.repo.as_ref().map(|r| r.root.clone()) else { return Effect::default() };
-                self.state.branches = Some(crate::branches::BranchesView { loading: true, worktrees_only, revisions_only, ..Default::default() });
-                self.branches_requests += 1;
-                let (request, tx) = (self.branches_requests, self.tx.clone());
+                let mut view = crate::branches::BranchesView { loading: true, worktrees_only, revisions_only, ..Default::default() };
+                if let Some((_, refs, worktrees)) = self.branches_cache.as_ref().filter(|(cached, _, _)| *cached == root) {
+                    view.refs = refs.clone();
+                    view.refs.current = self.state.repo.as_ref().and_then(|r| r.head.branch.clone());
+                    view.worktrees = worktrees.clone();
+                    view.has_snapshot = true;
+                }
+                self.state.branches = Some(view);
+                let request = self.branches_requests.fetch_add(1, Ordering::Relaxed) + 1;
+                let (latest, tx) = (self.branches_requests.clone(), self.tx.clone());
                 self.jobs.submit(Priority::Visible, move || {
-                    // Changed paths are counted only when the Worktrees section shows (more than one).
-                    // Compare with Worktree… shows neither the refs nor the current worktree.
+                    if latest.load(Ordering::Relaxed) != request { return; }
                     let refs = if worktrees_only { Ok(Default::default()) } else { lenz_content::branches::refs(&root) };
                     let result = refs.and_then(|r| {
-                        // Compare with Branch, Tag or Revision… lists no worktrees.
-                        let mut worktrees = if revisions_only { Vec::new() } else { lenz_content::branches::worktree_list(&root)? };
-                        match worktrees.len() > 1 {
-                            true => worktrees.iter_mut().filter(|w| !(worktrees_only && w.current)).for_each(|w| lenz_content::branches::count_changes(std::slice::from_mut(w))),
-                            false => worktrees.iter_mut().for_each(|w| w.dirty = None),
-                        }
+                        if latest.load(Ordering::Relaxed) != request { return Err("superseded".into()); }
+                        // This is a navigation inventory: do not enumerate changed/untracked files
+                        // in every worktree just to let the user choose a branch.
+                        let worktrees = if revisions_only { Vec::new() } else { lenz_content::branches::worktree_list(&root)? };
                         Ok((r, worktrees))
                     });
-                    let _ = tx.send_blocking(Completion::Branches { request, root, result });
+                    if latest.load(Ordering::Relaxed) == request {
+                        let _ = tx.send_blocking(Completion::Branches { request, root, result });
+                    }
                 });
                 repaint
             }
-            Command::CloseBranches => Effect { repaint: self.state.branches.take().is_some(), copy: None, ..Effect::default() },
+            Command::CloseBranches => {
+                self.branches_requests.fetch_add(1, Ordering::Relaxed);
+                Effect { repaint: self.state.branches.take().is_some(), copy: None, ..Effect::default() }
+            }
             Command::MarkTreeRow { path, selected } => {
                 if path.contains("://") {
                     self.state.messages.push("Compare Selected: this entry has no file on disk".into());
@@ -7176,11 +7194,17 @@ impl Session {
             }
             Completion::ReconcileRead { ticket, result } => self.reconcile_read(ticket, result),
             Completion::ReconcileChecked { ticket, choice, result } => self.reconcile_checked(ticket, choice, result),
-            Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
+            Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests.load(Ordering::Relaxed) && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
                 Some(v) => {
                     v.loading = false;
                     match result {
-                        Ok((refs, worktrees)) => (v.refs, v.worktrees) = (refs, worktrees),
+                        Ok((refs, worktrees)) => {
+                            if !v.worktrees_only && !v.revisions_only {
+                                self.branches_cache = Some((root, refs.clone(), worktrees.clone()));
+                            }
+                            (v.refs, v.worktrees) = (refs, worktrees);
+                            v.has_snapshot = true;
+                        }
                         Err(e) => v.error = Some(e),
                     }
                     let none = v.worktrees_only && v.error.is_none() && self.state.branch_rows("").is_empty();
@@ -7715,7 +7739,7 @@ impl Session {
                 }
                 self.changed(change)
             }
-            Completion::Refreshed { tab, token, result } => self.refreshed(tab, token, result),
+            Completion::Refreshed { tab, token, baseline, result } => self.refreshed(tab, token, baseline, result),
             Completion::Watch { key, folders } => {
                 if self.watching.as_ref() == Some(&key) {
                     self.inventory_folders = Some((key.0.clone(), folders.clone()));
@@ -8616,6 +8640,13 @@ impl Session {
         self.check(id, None);
     }
 
+    fn refresh_baseline(&self, id: TabId) -> RefreshBaseline {
+        RefreshBaseline(self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer))
+            .and_then(|entry| entry.draft.as_ref().map(|draft| &draft.baseline).or(entry.snapshot.as_ref()))
+            .map(|source| SemanticSource::new(source)))
+    }
+
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
@@ -8624,6 +8655,7 @@ impl Session {
         let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
             .and_then(|buffer| self.state.sources.buffers.get(&buffer))
             .and_then(|entry| entry.draft.as_ref().map(|draft| draft.baseline.clone()).or_else(|| entry.snapshot.clone()));
+        let baseline = RefreshBaseline(snapshot.as_deref().map(SemanticSource::new));
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token;
@@ -8651,7 +8683,7 @@ impl Session {
                     Err(ReadError::Failed(why)) => Refresh::Gone(why),
                 }
             } else { check(&path, stamp, shown.as_ref(), &versions) };
-            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, result });
+            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, baseline, result });
         });
     }
 
@@ -8660,8 +8692,15 @@ impl Session {
         self.refresh_seq
     }
 
-    fn refreshed(&mut self, id: TabId, token: u64, result: Refresh) -> Effect {
+    fn refreshed(&mut self, id: TabId, token: u64, baseline: RefreshBaseline, result: Refresh) -> Effect {
         let Some(tab) = self.state.tabs.iter().find(|t| t.id == id && t.refresh == token) else { return Effect::default(); };
+        if baseline != self.refresh_baseline(id) {
+            // Save (or another confirmed baseline change) overtook this read. Its result may
+            // describe our own write as external. Check the current disk against the new
+            // baseline instead, so a genuine later external write is still detected.
+            self.check(id, None);
+            return Effect::default();
+        }
         let buffer = tab.buffer;
         let replacement = buffer.is_some_and(|buffer| self.replacement_current(buffer));
         if let Some(buffer) = buffer {
@@ -10536,7 +10575,9 @@ impl Drop for Session {
         self.projections.cancel_all();
         self.rx.close();
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
+        self.branches_requests.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
+        self.git_status_requests.fetch_add(1, Ordering::Relaxed);
         self.query_latest.fetch_add(1, Ordering::Relaxed);
         self.latest.fetch_add(1, Ordering::Relaxed);
         self.search_latest.fetch_add(1, Ordering::Relaxed);

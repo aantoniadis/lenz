@@ -2,6 +2,8 @@
 //! commands, and the file on disk never changes.
 use super::*;
 mod create;
+mod branches;
+mod native_close;
 mod archive;
 mod fields;
 mod native_fields;
@@ -141,7 +143,17 @@ fn settle(cx: &mut TestAppContext, f: &Fixture, done: impl Fn(&ReaderView) -> bo
     }
     panic!("timed out: {}", f.view.read_with(cx, |v, _| {
         let results = v.session().state().results().map(|r| (r.query().to_owned(), r.done(), r.selected(), r.preview().map(|p| p.index)));
-        format!("modal {} · focus results {} tree {} find {} · results {results:?}\n{}", v.modal.is_some(), v.results_focus, v.tree_focus, v.find_focus.is_some(), v.status())
+        let terminal = v.session().state().terminal();
+        let terminal_debug = if terminal.shown() {
+            let grid = v.terminal_layout().map(|layout| layout.grid);
+            let active = terminal.active().map(|tab| (tab.id(), tab.running(), tab.starting(), tab.status(), tab.error(), tab.cwd()));
+            let frame = terminal.active().and_then(|tab| tab.frame()).map(|frame| {
+                let text = frame.cells.chunks(frame.columns.max(1)).take(12).map(|row| row.iter().map(|cell| cell.text.as_str()).collect::<String>()).collect::<Vec<_>>();
+                (frame.columns, frame.rows, frame.cursor, frame.scrollback, text)
+            });
+            format!("\nTerminal shown={} focused={} shell=/bin/sh -i grid={grid:?} active(id,running,starting,status,error,cwd)={active:?} frame(columns,rows,cursor,scrollback,cells)={frame:?}", terminal.shown(), terminal.focused())
+        } else { String::new() };
+        format!("modal {} · focus results {} tree {} find {} · results {results:?}\n{}{terminal_debug}", v.modal.is_some(), v.results_focus, v.tree_focus, v.find_focus.is_some(), v.status())
     }));
 }
 
@@ -5690,7 +5702,7 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document(cx: &mut Tes
     let original = std::fs::read(&settings).unwrap();
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
-    v.simulate_keystrokes("ctrl-a f2");
+    v.simulate_keystrokes("ctrl-a f2 home");
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
     let at = f.view.read_with(&v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(CommandId::ServerRuntime)).unwrap());
     for _ in 0..at { v.simulate_keystrokes("down"); }

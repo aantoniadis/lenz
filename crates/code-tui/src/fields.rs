@@ -49,10 +49,15 @@ impl App {
                 .state()
                 .navigation()
                 .is_some_and(|n| n.scope == code_core::navigation::Scope::Recent);
+        // At the end of the branch filter, Right opens the row's actions. Inside the filter it still
+        // moves the caret, and a selected range still collapses normally before opening a submenu.
+        let branch_actions = modal.kind == Prompt::Branches && key.code == KeyCode::Right && {
+            let cursor = Self::field_cursor(modal);
+            cursor.caret(&modal.input) == modal.input.len() && cursor.selection(&modal.input).is_none()
+        };
         if plain
-            && modal.input.is_empty()
-            && (key.code == KeyCode::Right && modal.kind == Prompt::Branches
-                || key.code == KeyCode::Delete
+            && (branch_actions
+                || modal.input.is_empty() && key.code == KeyCode::Delete
                     && (recent || matches!(modal.kind, Prompt::Places(_) | Prompt::Keymap)))
         {
             return false;

@@ -13,8 +13,47 @@ struct ReaderClose {
     coordinator: CloseCoordinator,
     entries: Vec<Entry>,
     scheduled: bool,
+    #[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
+    native_commands_installed: bool,
 }
 impl gpui::Global for ReaderClose {}
+
+#[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
+gpui::actions!(lenz_code, [Quit]);
+
+/// AppKit's Quit menu and keyboard equivalent must request consent before GPUI shutdown.
+#[cfg(any(target_os = "macos", all(test, feature = "test-support")))]
+pub(super) fn install_native_commands(cx: &mut App) {
+    if !cx.has_global::<ReaderClose>() { return; }
+    let state = cx.global_mut::<ReaderClose>();
+    if state.native_commands_installed { return; }
+    state.native_commands_installed = true;
+    cx.bind_keys([gpui::KeyBinding::new("cmd-q", Quit, None)]);
+    cx.on_action(|_: &Quit, cx| request_native(None, true, cx));
+    cx.set_menus(vec![gpui::Menu {
+        name: code_core::chrome::APP_NAME.into(),
+        items: vec![gpui::MenuItem::action("Quit Lenz Code", Quit)],
+        disabled: false,
+    }]);
+}
+
+/// Native close/quit may arrive while a transient picker owns input. Settle that
+/// picker in its adapter, then let the shared coordinator decide whether files can close.
+pub(super) fn request_native(id: Option<SessionId>, all: bool, cx: &mut App) {
+    if !cx.has_global::<ReaderClose>() { return; }
+    cx.defer(move |cx| {
+        let entries = cx.global::<ReaderClose>().entries.iter()
+            .filter(|entry| (all || Some(entry.id) == id) && entry.view.upgrade().is_some())
+            .cloned().collect::<Vec<_>>();
+        for entry in &entries {
+            if !entry.view.update(cx, |view, cx| view.prepare_native_close(cx)).unwrap_or(true) {
+                let _ = entry.window.update(cx, |_, window, _| window.activate_window());
+                return;
+            }
+        }
+        if let Some(entry) = entries.first() { request(entry.id, all, cx); }
+    });
+}
 
 pub(super) fn register(view: &gpui::Entity<ReaderView>, window: &Window, cx: &mut App) {
     if !cx.has_global::<ReaderClose>() {
@@ -36,6 +75,8 @@ pub(super) fn register(view: &gpui::Entity<ReaderView>, window: &Window, cx: &mu
         })
         .detach();
     }
+    #[cfg(target_os = "macos")]
+    install_native_commands(cx);
     let id = view.read(cx).session.id();
     let entry = Entry {
         id,
@@ -137,8 +178,20 @@ fn pump(cx: &mut App) {
     } else {
         for entry in &live {
             let _ = entry.view.update(cx, |v, cx| {
-                v.sync_close_prompt();
-                cx.notify();
+                let before = match &v.modal {
+                    Some(Modal::StatusDetails { title, kind, text, .. }) => Some((*kind, *title, text.clone())),
+                    _ => None,
+                };
+                // Preparation can create a terminal question even with no dirty buffers.
+                v.sync_prompts();
+                let after = match &v.modal {
+                    Some(Modal::StatusDetails { title, kind, text, .. }) => Some((*kind, *title, text.as_str())),
+                    _ => None,
+                };
+                // A resize can schedule progress while its frame acknowledgement is still
+                // queued. Repainting an unchanged question here would request that resize
+                // again and keep deferred progress/render work running without yielding.
+                if before.as_ref().map(|(kind, title, text)| (*kind, *title, text.as_str())) != after { cx.notify(); }
             });
         }
         if let Some(Progress::Pending(id)) = result
@@ -155,10 +208,24 @@ impl ReaderView {
         if self.session.closed() {
             return true;
         }
-        if self.modal.is_none() {
-            request(self.session.id(), false, cx);
-        }
+        request_native(Some(self.session.id()), false, cx);
         false
+    }
+
+    fn prepare_native_close(&mut self, cx: &mut Context<Self>) -> bool {
+        self.sync_close_prompt();
+        self.sync_terminal_prompt();
+        if matches!(self.modal, Some(Modal::StatusDetails {
+            kind: Details::Close | Details::Terminal { .. } | Details::Recovered
+                | Details::External | Details::Reconcile | Details::Replace | Details::Checkout,
+            ..
+        })) {
+            cx.notify();
+            return false;
+        }
+        self.close_modal(cx);
+        self.cancel_input(true, cx);
+        true
     }
     pub(super) fn sync_close_prompt(&mut self) {
         match (

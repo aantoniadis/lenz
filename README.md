@@ -399,6 +399,15 @@ git config --global mergetool.keepBackup false   # optional: Lenz writes atomica
 
 ## Performance
 
+The [Code branch-picker audit](docs/research/code-branch-picker-audit.md) measures
+usable cached choices at **20.635 → 1.407 ms** on 1,000 generated branches and
+three worktrees. Its first PTY frame takes **0.727 → 1.354 ms**, now containing
+choices instead of a loading placeholder. Six editor pairs retain a small TUI
+key-feedback tendency of about **0.04 ms**; the user accepted this measured
+tradeoff on 2026-11-10.
+The report includes the passing full gate/native replays, normal release builds,
+repeated samples, a reverted cache-layout experiment and native-platform limits.
+
 The [0.0.14 validation](docs/research/release-0.0.14-validation.md) passes the fresh
 combined-tree gate and full suite: **133 cases, 394 metrics, no skipped workloads**.
 Three alternating normal-release pairs measured large-comparison view construction

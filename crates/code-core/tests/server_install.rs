@@ -166,7 +166,9 @@ fn server_install_uses_the_selected_node_for_npm_and_validates_before_persisting
     assert!(why.contains("executable"),"{why}");
     let script=std::fs::read_to_string(&npm).unwrap().replace("chmod 600","chmod 700").replace("1.1.414","0.0.0");
     std::fs::write(&npm,script).unwrap();
-    assert!(installer::run(&plan,&AtomicBool::new(false),&mut |_|{}).unwrap_err().contains("version"));
+    let mut validation_output = String::new();
+    let why = installer::run(&plan,&AtomicBool::new(false),&mut |chunk| validation_output.push_str(chunk)).unwrap_err();
+    assert!(why.contains("version"), "expected the wrong package version to be rejected, got: {why}\nInstaller output:\n{validation_output}");
 }
 
 #[cfg(unix)]

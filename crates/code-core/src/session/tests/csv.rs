@@ -121,7 +121,7 @@ fn csv_external_source_replacement_preserves_pending_field_until_explicit_cancel
     let replacement=Arc::new(Document::decode(path.clone(),s.versions.fetch_add(1,Ordering::Relaxed)+1,b"h,v\nb,external\n"));
     std::fs::write(&path,b"h,v\nb,external\n").unwrap();
     let token=s.state.active().unwrap().refresh;
-    s.dispatch(Completion::Refreshed{tab,token,result:Refresh::Changed(Stamp::of(&path).unwrap(),replacement)});
+    s.dispatch(Completion::Refreshed{tab,token,baseline:s.refresh_baseline(tab),result:Refresh::Changed(Stamp::of(&path).unwrap(),replacement)});
     assert_eq!(csv(&s).input.as_ref().unwrap().value,"keep this λ");assert!(csv(&s).error.as_deref().unwrap().contains("source changed"));
     command(&mut s,C::Commit);assert_eq!(csv(&s).input.as_ref().unwrap().value,"keep this λ");assert_eq!(s.dispatch(Command::Copy).copy,Some("keep this λ".into()));
     assert_eq!(source_text(s.state.current_source().unwrap()),"h,v\nb,external\n");
@@ -129,7 +129,7 @@ fn csv_external_source_replacement_preserves_pending_field_until_explicit_cancel
     command(&mut s,C::BeginEdit);command(&mut s,C::SetInput("keep after delete".into()));
     let token=s.state.active().unwrap().refresh;
     std::fs::remove_file(&path).unwrap();
-    s.dispatch(Completion::Refreshed{tab,token,result:Refresh::Gone("deleted externally".into())});
+    s.dispatch(Completion::Refreshed{tab,token,baseline:s.refresh_baseline(tab),result:Refresh::Gone("deleted externally".into())});
     command(&mut s,C::Commit);assert_eq!(csv(&s).input.as_ref().unwrap().value,"keep after delete");assert!(!path.exists());
     let buffer=s.state.current_source().unwrap().key().buffer;
     s.state.sources.buffers.get_mut(&buffer).unwrap().snapshot=None;

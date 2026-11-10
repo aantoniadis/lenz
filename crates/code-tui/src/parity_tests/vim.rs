@@ -47,6 +47,7 @@ impl Pair {
             while let Ok(done) = self.tui.session.completions().try_recv() { self.tui.apply(done); }
             self.draw();
             if done(self.tui.session.state()) && self.gui.read_with(&self.visual, |view, _| done(view.session().state())) { break; }
+            if Instant::now() >= deadline { self.trace("TIMEOUT"); }
             assert!(Instant::now() < deadline, "GUI {}; TUI {}", self.gui.read_with(&self.visual, |view, _| view.status()), self.tui.session.status_details());
             std::thread::sleep(Duration::from_millis(2));
         }
@@ -54,6 +55,22 @@ impl Pair {
     fn key(&mut self, gui: &str, code: KeyCode, modifiers: KeyModifiers) {
         self.visual.simulate_keystrokes(gui);
         self.tui.handle(Event::Key(KeyEvent::new(code, modifiers)));
+    }
+    fn trace(&self, label: &str) {
+        let describe = |session: &Session| {
+            let s = session.state();
+            format!("mode={:?} vim={:?} active={:?} dirty={:?} stale={:?} save={:?} key={:?} selection={:?} close={:?}",
+                s.vim_mode(), s.vim_status(), s.active().map(|t| t.source()),
+                s.active().map(|t| s.tab_dirty(t.id())),
+                s.active().map(|t| t.stale_on_disk()),
+                s.active().and_then(|t| s.view(t.id())).map(|v| format!("{:?}", v.save_status())),
+                s.active().and_then(|t| s.view(t.id())).map(|v| v.snapshot().key()),
+                s.selection(), session.close_prompt())
+        };
+        eprintln!("VIM_TRACE {label}: GUI {}; TUI {}; disk={:?}",
+            self.gui.read_with(&self.visual, |view, _| describe(view.session())),
+            describe(&self.tui.session),
+            self.paths.iter().map(std::fs::read_to_string).collect::<Vec<_>>());
     }
     fn chars(&mut self, keys: &str) {
         for c in keys.chars() {

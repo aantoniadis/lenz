@@ -132,6 +132,59 @@ fn scratch_commands_and_tab_context_menu_use_real_terminal_input() {
 }
 
 #[test]
+fn creating_and_reopening_scratch_files_focuses_text_from_explorer_and_results() {
+    let focus = |a: &mut App, wanted| {
+        if wanted == Focus::Results {
+            a.run(CommandId::SearchProject);
+            a.handle(Event::Paste("needle".into()));
+            key(a, KeyCode::Enter, KeyModifiers::NONE);
+            settle(a, |a| a.session.state().results().is_some());
+        } else {
+            a.focus = wanted;
+        }
+        assert_eq!(a.focus, wanted);
+    };
+    for initial_focus in [Focus::Tree, Focus::Results] {
+        let d = tempfile::tempdir().unwrap();
+        let project = d.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("find.txt"), b"needle\n").unwrap();
+        let mut a = App::new(config(d.path()), Some(project));
+        a.enable_draft_input_for_test();
+        settle(&mut a, |a| a.session.state().has_tree());
+        focus(&mut a, initial_focus);
+        draw(&mut a, 80, 18);
+        key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+        a.handle(Event::Paste("New Scratch File".into()));
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(prompt_kind(&a), Some(Prompt::NewScratch));
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        settle(&mut a, |a| a.session.state().current_source().is_some());
+        assert_eq!(a.focus, Focus::Text);
+        let scratch = a.session.state().active().unwrap().source().to_owned();
+        a.handle(Event::Paste("scratch λ".into()));
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        settle(&mut a, |a| !a.session.state().tab_dirty(a.session.state().active().unwrap().id()));
+        assert_eq!(std::fs::read(&scratch).unwrap(), "scratch λ".as_bytes());
+        a.run(CommandId::Close);
+
+        focus(&mut a, initial_focus);
+        key(&mut a, KeyCode::F(10), KeyModifiers::NONE);
+        a.handle(Event::Paste("Scratch Files".into()));
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(prompt_kind(&a), Some(Prompt::ScratchFiles(_))));
+        key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+        settle(&mut a, |a| a.session.state().current_source().is_some());
+        assert_eq!(a.focus, Focus::Text);
+        key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
+        a.handle(Event::Paste("reopened β".into()));
+        key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
+        settle(&mut a, |a| !a.session.state().tab_dirty(a.session.state().active().unwrap().id()));
+        assert_eq!(std::fs::read(&scratch).unwrap(), "reopened β".as_bytes());
+    }
+}
+
+#[test]
 fn new_file_key_names_a_file_in_the_highlighted_project_folder() {
     let d = tempfile::tempdir().unwrap();
     std::fs::create_dir(d.path().join("src")).unwrap();

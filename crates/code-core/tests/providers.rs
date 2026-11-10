@@ -289,7 +289,7 @@ fn real_pyright() {
     }
     println!("join: {:?} {:?}", f.s.state().current_source().unwrap().source(), f.notices());
     assert!(f.s.state().current_source().unwrap().source().to_string_lossy().contains("typeshed"), "{:?}", f.s.state().current_source().unwrap().source());
-    assert!(f.notices().iter().any(|n| n == "Read-only source from Pyright's bundled type stubs"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from Pyright's bundled type stubs"), "{:?}", f.notices());
     f.back("app.py");
     // Usages of `make`, asked at its declaration: both calls and the import, not the definition itself.
     f.show("pkg/geometry.py");
@@ -496,7 +496,7 @@ fn real_pyright_configured_environment_editing() {
     f.definition_into("area(2.0)", 1, "site-packages/shapes_dep");
     let shown = f.s.state().current_source().unwrap().source().to_owned();
     assert_eq!(shown, site_packages(&env).join("shapes_dep/__init__.py"));
-    assert!(f.notices().iter().any(|n| n == "Read-only source from an installed Python package"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from an installed Python package"), "{:?}", f.notices());
     f.back("app.py");
     // Quick fixes: Pyright offers none.
     f.caret("other_dep\n", 2);
@@ -709,7 +709,7 @@ fn real_typescript() {
         f.s.dispatch(Command::CloseResults);
     }
     println!("Math.max: {:?} {:?}", f.s.state().current_source().unwrap().source(), f.notices());
-    assert!(f.notices().iter().any(|n| n == "Read-only source from TypeScript's library declarations"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from TypeScript's library declarations"), "{:?}", f.notices());
     f.back("src/app.ts");
     // TSX and JavaScript files: the same server.
     f.show("src/view.tsx");
@@ -723,7 +723,7 @@ fn real_typescript() {
     f.show("src/extra.ts");
     f.definition_until("areaOf(2)", 0, "index.d.ts");
     assert_eq!((file_of(&f.s), f.selected()), ("index.d.ts".into(), "areaOf".into()), "{:?}", f.notices());
-    assert!(f.notices().iter().any(|n| n == "Read-only source from a type declaration package"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from a type declaration package"), "{:?}", f.notices());
     assert_eq!(f.s.state().servers().len(), 1, "a dependency does not start a server of its own");
     f.show("packages/ui/button.ts");
     f.definition("make(3)", 0);
@@ -857,7 +857,7 @@ fn real_typescript_go() {
         f.s.dispatch(Command::CloseResults);
     }
     println!("Math.max: {:?} {:?}", f.s.state().current_source().map(|d| d.source().to_owned()), f.notices());
-    assert!(f.notices().iter().any(|n| n == "Read-only source from TypeScript's library declarations"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from TypeScript's library declarations"), "{:?}", f.notices());
     f.show("src/view.tsx");
     f.definition("make(1)", 0);
     assert_eq!((file_of(&f.s), f.selected()), ("geometry.ts".into(), "make".into()), "{:?}", f.notices());
@@ -866,7 +866,7 @@ fn real_typescript_go() {
     assert_eq!((file_of(&f.s), f.selected()), ("util.js".into(), "twice".into()), "{:?}", f.notices());
     f.show("src/extra.ts");
     f.definition_until("areaOf(2)", 0, "index.d.ts");
-    assert!(f.notices().iter().any(|n| n == "Read-only source from a type declaration package"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from a type declaration package"), "{:?}", f.notices());
     f.show("packages/ui/button.ts");
     f.definition("make(3)", 0);
     assert_eq!(file_of(&f.s), "geometry.ts", "{:?}", f.notices());
@@ -1594,7 +1594,7 @@ fn real_ruby() {
     f.back("lib/app.rb");
     // Into RBS core signatures, shown with its origin.
     f.definition_into("File.join", 1, ".rbs");
-    assert!(f.notices().iter().any(|n| n == "Read-only source from RBS core signatures"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from RBS core signatures"), "{:?}", f.notices());
     f.back("lib/app.rb");
     // Constant usages, then method usages: separately.
     // (Lines from 0; the declaration comes too: it ignores `includeDeclaration: false`.)
@@ -1629,7 +1629,7 @@ fn real_ruby() {
         f.settle("cli", Duration::from_secs(60), |s| s.state().provider().is_some_and(|v| v.status == Status::Ready && v.root.as_deref().is_some_and(|r| r.ends_with("cli"))));
         // Thor is reopened in many of its files: candidates, each opening the gem's source.
         f.definition_into("Thor\n", 1, "/gems/thor-");
-        assert!(f.notices().iter().any(|n| n == "Read-only source from an installed gem"), "{:?}", f.notices());
+        assert!(f.notices().iter().any(|n| n == "Source from an installed gem"), "{:?}", f.notices());
     } else {
         println!("SKIPPED: the thor gem is not installed for an offline lock");
     }
@@ -2749,7 +2749,7 @@ fn real_rust() {
     f.show("app/src/main.rs");
     f.definition("Vec::new", 6);
     assert!(f.s.state().current_source().unwrap().source().to_string_lossy().contains("/rustlib/src/"), "{:?}", f.s.state().current_source().map(|d| d.source().to_owned()));
-    assert!(f.notices().iter().any(|n| n == "Read-only source from the Rust standard library"), "{:?}", f.notices());
+    assert!(f.notices().iter().any(|n| n == "Source from the Rust standard library"), "{:?}", f.notices());
     // The project's server answers there: no server of its own for the standard library's workspace.
     f.s.dispatch(Command::FileSymbols);
     f.settle("std file symbols", Duration::from_secs(60), |s| s.state().asking().is_none());
