@@ -1820,6 +1820,12 @@ impl ReaderView {
         let k = &ev.keystroke;
         if !matches!(k.key.as_str(), "shift" | "control" | "alt" | "super" | "meta" | "fn") { self.double_shift.interrupt(); }
         let (key, ctrl, shift) = (k.key.as_str(), k.modifiers.control || k.modifiers.platform, k.modifiers.shift);
+        // Native Quit is application-wide, including while a transient field owns input.
+        if self.mac_keys && k.modifiers.platform && !k.modifiers.control && !k.modifiers.alt && !shift && key == "q" {
+            close::request_native(None, true, cx);
+            cx.stop_propagation();
+            return;
+        }
         if self.field_native_key(ev, window, cx) { return; }
         // The modal takes every key first.
         if self.modal.is_some() {

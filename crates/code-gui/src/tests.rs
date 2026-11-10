@@ -3,6 +3,7 @@
 use super::*;
 mod create;
 mod branches;
+mod native_close;
 mod archive;
 mod fields;
 mod native_fields;

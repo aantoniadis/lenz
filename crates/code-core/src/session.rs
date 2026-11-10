@@ -10577,6 +10577,7 @@ impl Drop for Session {
         self.navigation_latest.fetch_add(1, Ordering::Relaxed);
         self.branches_requests.fetch_add(1, Ordering::Relaxed);
         self.root_generation.fetch_add(1, Ordering::Relaxed);
+        self.git_status_requests.fetch_add(1, Ordering::Relaxed);
         self.query_latest.fetch_add(1, Ordering::Relaxed);
         self.latest.fetch_add(1, Ordering::Relaxed);
         self.search_latest.fetch_add(1, Ordering::Relaxed);

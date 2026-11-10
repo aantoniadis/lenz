@@ -555,6 +555,11 @@ index refresh and annotations blame again. The top bar shows the branch (or the 
 switch made elsewhere within a few seconds. Checkouts run git as your terminal would, with the repository's hooks and
 filters; everything else Lenz Code asks git keeps them off.
 
+On macOS, Command-Q and the application menu's Quit request closure of all Code
+windows through the shared Save/Discard/Cancel protocol. The red window button
+closes its own window, dismissing transient pickers and presenting any file or
+running-terminal question immediately; an active decision remains available.
+
 The Git menu also compares the working tree as it is (uncommitted and untracked files included) in Lenz Diff:
 **Show Local Changes** against the last commit (what the next commit would hold); **Compare with Branch, Tag or
 Revision…** against one picked from a list of branches and tags, or any revision typed; **Compare with Base Branch**

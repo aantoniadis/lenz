@@ -36,6 +36,7 @@ mod project_syntax;
 mod branch_inventory;
 mod scratch_numbering;
 mod own_save_refresh;
+mod shutdown;
 use crate::tabs::TabId;
 use crate::text::TextSnapshot;
 use std::time::Duration;
