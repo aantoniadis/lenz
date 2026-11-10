@@ -3,7 +3,21 @@ use super::*;
 use semantics::installer;
 
 impl Session {
-    fn install_provider(&self) -> Option<&'static semantics::provider::Provider> {
+    /// Missing executables/runtimes open setup directly; missing workspaces still open status.
+    pub fn language_server_control(&self) -> (String, CommandId) {
+        let Some(view) = self.state.provider() else { return (self.state.language_server_label(), CommandId::LanguageServer) };
+        if view.root.is_some() && matches!(view.status, semantics::Status::Missing(_)) {
+            return (format!("Install {}…", view.name), CommandId::InstallServer);
+        }
+        (view.status_label(), CommandId::LanguageServer)
+    }
+
+    pub fn language_server_initial_action(&self) -> usize {
+        let action = self.language_server_control().1;
+        let action = if action == CommandId::LanguageServer { CommandId::ServerDetails } else { action };
+        self.language_server_rows().iter().position(|(_, id)| *id == Some(action)).unwrap_or(0)
+    }
+    pub(super) fn install_provider(&self) -> Option<&'static semantics::provider::Provider> {
         self.state.provider().and_then(|view| semantics::provider::PROVIDERS.iter().find(|p| p.name == view.name))
             .or_else(|| self.state.current_source()?.language().and_then(semantics::provider::for_language).map(|(_,p)|p))
     }
@@ -18,7 +32,7 @@ impl Session {
             request: self.install_request, provider: provider.id, source: doc.source().to_owned(), expected: self.state.semantics.settings().clone(),
             preview: installer::preview(provider, self.state.semantics.settings(), &home),
             running: false, finished: false,
-            message: "Review the command, then choose Start Installation (S or Enter). Cancel Installation is C; D opens Server Details, and Escape closes and cancels. Downloads packages into Lenz's managed directory; npm package scripts are disabled. No project files or system packages are changed. ShellCheck and shfmt are separate optional tools. Server Details retains full diagnostics.".into(),
+            message: "Choose Start Installation (S or Enter) to download and set up this server for Lenz. Project files stay unchanged. Progress appears here; C cancels, D opens Server Details, and Escape closes and cancels. The exact command and destination are below. ShellCheck and shfmt are separate optional tools.".into(),
             output: String::new(), cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         });
         Effect { repaint: true, ..Effect::default() }
@@ -90,7 +104,7 @@ impl Session {
             model.running = false; model.finished = true;
             model.message = match result {
                 Ok(()) => format!("{provider} installed and validated. Its launch was saved; enabled workspaces will restart."),
-                Err(why) => format!("Installation did not finish: {why}. Close and reopen Install to retry. Partial downloads may remain in Lenz's managed directory."),
+                Err(why) => format!("Installation did not finish: {why}. Choose Install Language Server (S or Enter) to retry. Partial downloads may remain in Lenz's managed directory."),
             };
         }
         Effect { repaint: true, ..Effect::default() }
@@ -98,12 +112,25 @@ impl Session {
 }
 
 impl Session {
+    pub fn server_install_start_action(&self) -> CommandId {
+        if self.state.server_install.as_ref().is_some_and(|m| m.finished) { CommandId::InstallServer } else { CommandId::StartServerInstall }
+    }
+
     /// Ordered dialog actions and their labels/availability come from the shared command catalog.
     pub fn server_install_actions(&self) -> Vec<CommandId> {
         let Some(model) = self.state.server_install.as_ref() else { return Vec::new() };
         let mut actions = Vec::new();
         if !model.finished { actions.push(if model.running { CommandId::CancelServerInstall } else { CommandId::StartServerInstall }); }
+        else { actions.push(CommandId::InstallServer); }
+        if !model.running && model.preview.disabled.is_some() && self.runtime_kind().is_some() { actions.push(CommandId::ServerRuntime); }
         actions.push(CommandId::ServerDetails);
         actions
+    }
+
+    pub(super) fn refresh_install_runtime(&mut self, provider: &str) {
+        if self.state.server_install.as_ref().is_some_and(|m| !m.running && m.provider == provider
+            && self.state.current_source().is_some_and(|source| source.source() == m.source)) {
+            self.open_server_install();
+        }
     }
 }

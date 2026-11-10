@@ -7,12 +7,14 @@ pub enum Kind {
     #[default]
     Java,
     PyrightNode,
+    /// An existing Node runtime, including before its managed server has been installed.
+    Node(&'static str),
 }
 
 impl Kind {
-    pub fn label(self) -> &'static str { match self { Self::Java => "Java", Self::PyrightNode => "Node.js" } }
-    pub fn input_label(self) -> &'static str { match self { Self::Java => "Java executable / JDK folder", Self::PyrightNode => "Node.js executable / install folder" } }
-    pub fn provider(self) -> &'static str { match self { Self::Java => "jdtls", Self::PyrightNode => "pyright" } }
+    pub fn label(self) -> &'static str { match self { Self::Java => "Java", Self::PyrightNode | Self::Node(_) => "Node.js" } }
+    pub fn input_label(self) -> &'static str { match self { Self::Java => "Java executable / JDK folder", Self::PyrightNode | Self::Node(_) => "Node.js executable / install folder" } }
+    pub fn provider(self) -> &'static str { match self { Self::Java => "jdtls", Self::PyrightNode => "pyright", Self::Node(provider) => provider } }
 }
 
 #[derive(Default)]
@@ -39,14 +41,14 @@ pub fn configured(kind: Kind, settings: &provider::Settings) -> Option<PathBuf> 
     let settings = settings.providers.get(kind.provider())?;
     match kind {
         Kind::Java => settings.args.as_deref().and_then(java::configured),
-        Kind::PyrightNode => settings.node.clone(),
+        Kind::PyrightNode | Kind::Node(_) => settings.node.clone(),
     }
 }
 
 pub fn discover(kind: Kind, current: Option<PathBuf>) -> Vec<PathBuf> {
     match kind {
         Kind::Java => java::discover(current),
-        Kind::PyrightNode => {
+        Kind::PyrightNode | Kind::Node(_) => {
             let mut homes = Vec::new();
             if let Some(home) = std::env::var_os("MISE_DATA_DIR") {
                 homes.push(PathBuf::from(home).join("installs/node"));
@@ -61,7 +63,7 @@ pub fn discover(kind: Kind, current: Option<PathBuf>) -> Vec<PathBuf> {
             if let Some(home) = std::env::var_os("NVM_DIR") {
                 homes.push(PathBuf::from(home).join("versions/node"));
             }
-            discover_node(current, std::env::var_os("PATH").as_deref(), &homes)
+            discover_node(current, std::env::var_os("PATH").as_deref(), &homes, kind == Kind::PyrightNode)
         },
     }
 }
@@ -69,7 +71,8 @@ pub fn discover(kind: Kind, current: Option<PathBuf>) -> Vec<PathBuf> {
 pub fn save(kind: Kind, file: &Path, path: Option<PathBuf>) -> Result<Option<PathBuf>, String> {
     match kind {
         Kind::Java => java::save(file, path),
-        Kind::PyrightNode => {
+        Kind::PyrightNode | Kind::Node(_) => {
+            if kind != Kind::PyrightNode && super::installer::node_package(kind.provider()).is_none() { return Err("This provider does not use Node.js".into()); }
             let path = path.as_deref().map(node_path).transpose()?;
             if let Some(path) = &path {
                 let version = version(path, "--version")?;
@@ -78,11 +81,11 @@ pub fn save(kind: Kind, file: &Path, path: Option<PathBuf>) -> Result<Option<Pat
                     return Err(format!("{} did not report a Node.js version (expected vMAJOR.MINOR.PATCH): {version}", path.display()));
                 }
             }
-            provider::update_settings(file, "pyright", "Node.js", |provider| {
+            provider::update_settings(file, kind.provider(), "Node.js", |provider| {
                 if let Some(path) = &path {
                     let custom = provider.get("executable").and_then(serde_json::Value::as_str)
                         .is_some_and(|name| name != "pyright-langserver");
-                    if !custom && !path.parent().is_some_and(|bin| bin.join(server_name()).is_file()) {
+                    if kind == Kind::PyrightNode && !custom && !path.parent().is_some_and(|bin| bin.join(server_name()).is_file()) {
                         return Err(format!("Pyright is not installed beside this Node.js executable ({}). Choose an existing Node.js installation containing Pyright, or use Install Language Server to install a managed Pyright, then choose its Node.js runtime.", path.display()));
                     }
                     provider.insert("node".into(), serde_json::json!(path));
@@ -114,13 +117,13 @@ fn node_path(path: &Path) -> Result<PathBuf, String> {
     Ok(parent.join(node_name()))
 }
 
-fn discover_node(current: Option<PathBuf>, path: Option<&std::ffi::OsStr>, homes: &[PathBuf]) -> Vec<PathBuf> {
+fn discover_node(current: Option<PathBuf>, path: Option<&std::ffi::OsStr>, homes: &[PathBuf], require_server: bool) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     let mut identities = Vec::new();
     let mut add = |path: PathBuf| {
         if paths.len() < 64
             && let Ok(path) = node_path(&path)
-            && path.parent().is_some_and(|bin| bin.join(server_name()).is_file())
+            && (!require_server || path.parent().is_some_and(|bin| bin.join(server_name()).is_file()))
             && let Ok(identity) = path.canonicalize()
             && !identities.contains(&identity)
         {
@@ -367,8 +370,30 @@ mod tests {
             std::os::unix::fs::symlink(home.join("bin"), install.join("bin")).unwrap();
         }
         let path = std::env::join_paths([first.parent().unwrap(), first.parent().unwrap(), missing.parent().unwrap()]).unwrap();
-        let discovered = discover_node(Some(first.clone()), Some(&path), &homes);
-        assert_eq!(discovered, [first, second]);
+        let discovered = discover_node(Some(first.clone()), Some(&path), &homes, true);
+        assert_eq!(discovered, [first.clone(), second.clone()]);
+        let candidates = discover_node(Some(first.clone()), Some(&path), &homes, false);
+        assert_eq!(candidates.len(), 3, "setup can discover Node before a language server is installed");
+        assert!(candidates.contains(&first) && candidates.contains(&second) && candidates.contains(&missing));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_setup_can_choose_node_before_installing_its_server() {
+        let dir = tempfile::tempdir().unwrap(); let runtime = node(dir.path(), "echo v24.0.0");
+        std::fs::remove_file(runtime.parent().unwrap().join("pyright-langserver")).unwrap();
+        let file = dir.path().join("providers.json");
+        std::fs::write(&file, r#"{"providers":{"yaml-language-server":{"env":{"KEEP":"yes"}}}}"#).unwrap();
+        let kind = Kind::Node("yaml-language-server");
+        assert_eq!(save(kind, &file, Some(runtime.clone())).unwrap(), Some(runtime.clone()));
+        let settings = provider::Settings::read(&file);
+        assert_eq!(configured(kind, &settings), Some(runtime.clone()));
+        let yaml = provider::PROVIDERS.iter().find(|p| p.id == kind.provider()).unwrap();
+        let launch = settings.launch(yaml);
+        assert_eq!(std::env::split_paths(launch.path().unwrap()).next().as_deref(), runtime.parent());
+        assert!(launch.env.contains(&("KEEP".into(), "yes".into())));
+        save(kind, &file, None).unwrap();
+        assert!(configured(kind, &provider::Settings::read(&file)).is_none());
     }
 
     #[test]

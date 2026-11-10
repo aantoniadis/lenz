@@ -3,6 +3,7 @@ mod blank_line_completion;
 mod enter_indent;
 mod json;
 mod vim;
+mod setup_and_feedback;
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use gpui::{AppContext, TestAppContext, VisualTestContext};
@@ -904,8 +905,8 @@ fn gui_and_terminal_project_lsp_actions_save_and_reset_the_same_scope(cx: &mut T
         };
         settle(&mut visual, &mut tui, false, true);
         // Both adapters open the same frozen report from the first F2 action, then copy it after scrolling.
-        visual.simulate_keystrokes("f2 enter");
-        key(&mut tui, KeyCode::F(2)); key(&mut tui, KeyCode::Enter);
+        visual.simulate_keystrokes("f2 home enter");
+        key(&mut tui, KeyCode::F(2)); key(&mut tui, KeyCode::Home); key(&mut tui, KeyCode::Enter);
         for (width, height) in [(26, 8), (1, 1), (80, 24)] {
             let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
             terminal.draw(|f| tui.draw(f)).unwrap();
@@ -1355,8 +1356,9 @@ fn gui_and_tui_server_runtime_repairs_produce_the_same_settings(cx: &mut TestApp
             );
         };
         settle(&mut visual, &mut tui, false);
-        visual.simulate_keystrokes("f2");
+        visual.simulate_keystrokes("f2 home");
         key(&mut tui, KeyCode::F(2));
+        key(&mut tui, KeyCode::Home);
         let at = tui
             .session
             .language_server_rows()

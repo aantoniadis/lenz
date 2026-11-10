@@ -1353,7 +1353,7 @@ impl ReaderView {
                 InterfaceAction::OpenFolder => self.prompt_open_path(code_core::open_path::Kind::Folder, window, cx),
                 InterfaceAction::LanguageServer => {
                     self.dispatch(Command::CloseDocumentation, cx);
-                    self.modal = Some(Modal::LanguageServer { at: 0 });
+                    self.modal = Some(Modal::LanguageServer { at: self.session.language_server_initial_action() });
                     cx.notify();
                 }
                 InterfaceAction::Keymap => {
@@ -2278,7 +2278,8 @@ impl ReaderView {
         }
         if matches!(self.modal, Some(Modal::StatusDetails { kind: Details::Install, .. })) && !ev.keystroke.modifiers.control && !ev.keystroke.modifiers.platform && !ev.keystroke.modifiers.alt {
             match key {
-                "s" | "enter" => { self.run(CommandId::StartServerInstall,window,cx); return; }
+                "s" | "enter" => { self.run(self.session.server_install_start_action(),window,cx); return; }
+                "r" if self.session.server_install_actions().contains(&CommandId::ServerRuntime) => { self.run(CommandId::ServerRuntime,window,cx); return; }
                 "c" => { self.run(CommandId::CancelServerInstall,window,cx); return; }
                 "d" => { self.run(CommandId::ServerDetails,window,cx); return; }
                 _ => {}
@@ -3907,8 +3908,8 @@ impl ReaderView {
                 self.open_navigation(code_core::navigation::Scope::Actions, cx);
                 return;
             }
-            let (server, _, _, sql, _) = self.status_segments();
-            let id = if server.0.contains(&ev.position) { CommandId::LanguageServer } else if sql.0.contains(&ev.position) { CommandId::SqlDialect } else { CommandId::StatusDetails };
+            let (server, _, _, sql, _, server_action) = self.status_segments();
+            let id = if server.0.contains(&ev.position) { server_action } else if sql.0.contains(&ev.position) { CommandId::SqlDialect } else { CommandId::StatusDetails };
             self.run(id, window, cx);
             return;
         }
@@ -4339,8 +4340,8 @@ impl ReaderView {
         let hover = self.modal.is_none().then(|| self.nav_buttons().into_iter().filter(|_| (0.0..toolbar_h()).contains(&y))
             .chain(self.explorer_buttons().into_iter().filter(|_| (toolbar_h()..toolbar_h() + line_h()).contains(&y))).find(|b| (b.0..b.1).contains(&x)).map(|b| b.2)).flatten().or_else(|| {
                 if self.modal.is_none() && y >= self.height - self.status_h() && self.status_h() > 0.0 {
-                    let (server, message, _, sql, markers) = self.status_segments();
-                    if server.0.contains(&ev.position) { Some(CommandId::LanguageServer) }
+                    let (server, message, _, sql, markers, server_action) = self.status_segments();
+                    if server.0.contains(&ev.position) { Some(server_action) }
                     else if sql.0.contains(&ev.position) { Some(CommandId::SqlDialect) }
                     else if markers.0.contains(&ev.position) || message.0.contains(&ev.position) { Some(CommandId::StatusDetails) } else { None }
                 } else { None }
@@ -4552,13 +4553,13 @@ impl ReaderView {
     }
 
     /// Independent footer cells; narrow windows keep recovery and message targets accessible.
-    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, StatusCell) {
+    fn status_segments(&self) -> (StatusCell, StatusCell, StatusCell, StatusCell, StatusCell, CommandId) {
         let left = STATUS_PAD.min(self.width / 2.0);
         let right = self.results_button().or_else(|| self.activity_button()).map_or(self.width - left, |(b, _)| f32::from(b.origin.x) - STATUS_PAD).max(left);
         let room = right - left;
         let position = self.session.status_position();
         let position_w = if self.width >= 480.0 { (12.0 * self.char_w).min(room * 0.3) } else { 0.0 };
-        let label = self.session.state().language_server_label();
+        let (label, server_action) = self.session.language_server_control();
         // The SQL dialect (or "not set") beside the server status, never assumed.
         let sql = self.session.sql_dialect_label().unwrap_or_default();
         let server_w = ((lenz_content::wrap::width(&label) as f32 + 2.0) * self.char_w).min(room * if sql.is_empty() { 0.5 } else { 0.4 }).min(room - position_w);
@@ -4571,7 +4572,7 @@ impl ReaderView {
             (Bounds { origin: gpui::point(px(x), px(self.height - self.status_h())), size: gpui::size(px(w.max(0.0)), px(self.status_h())) }, code_core::chrome::ellipsize(text, cols))
         };
         let message_w = (room - server_w - sql_w - markers_w - position_w).max(0.0);
-        (cell(left + position_w, server_w, &label), cell(left + position_w + server_w + sql_w + markers_w, message_w, &self.session.status_message()), cell(left, position_w, &position), cell(left + position_w + server_w, sql_w, &sql), cell(left + position_w + server_w + sql_w, markers_w, &markers))
+        (cell(left + position_w, server_w, &label), cell(left + position_w + server_w + sql_w + markers_w, message_w, &self.session.status_message()), cell(left, position_w, &position), cell(left + position_w + server_w, sql_w, &sql), cell(left + position_w + server_w + sql_w, markers_w, &markers), server_action)
     }
 
     /// Toolbar buttons share the core's command order; omitted buttons remain in Commands.
@@ -5725,7 +5726,7 @@ impl Render for ReaderView {
         let narrow = self.width < 320.0;
         let explorer_w = self.layout.explorer_width.map_or((self.width * 0.35).clamp(120.0, 280.0), |w| (w as f32).clamp(120.0, (self.width - 160.0).max(120.0)));
         self.sidebar_w = if self.session.state().has_tree() && self.tree_shown && (!narrow || self.tree_focus) { if narrow { self.width } else { explorer_w } } else { 0.0 };
-        let (server_cell, message_cell, position_cell, sql_cell, markers_cell) = self.status_segments();
+        let (server_cell, message_cell, position_cell, sql_cell, markers_cell, server_action) = self.status_segments();
         let attention = self.session.state().provider().is_some_and(|v| matches!(v.status, code_core::semantics::Status::Missing(_) | code_core::semantics::Status::Failed(_) | code_core::semantics::Status::Disabled));
         let server_color = if attention { palette.error } else { palette.accent };
         // The toolbar row on top: the explorer's title over the tree; over the text the buttons, then the first
@@ -6383,7 +6384,7 @@ impl Render for ReaderView {
                             let status_y = y0 + h - status_h;
                             lenz_gpui::fill(window, x0, status_y, w, status_h, palette.header_bg);
                             lenz_gpui::fill(window, x0, status_y, w, 1.0, palette.border);
-                            for ((b, label), color, action) in [(&server_cell, server_color, Some(CommandId::LanguageServer)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&markers_cell, palette.fg, Some(CommandId::StatusDetails)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&position_cell, palette.dim, None)] {
+                            for ((b, label), color, action) in [(&server_cell, server_color, Some(server_action)), (&sql_cell, palette.accent, Some(CommandId::SqlDialect)), (&markers_cell, palette.fg, Some(CommandId::StatusDetails)), (&message_cell, palette.fg, Some(CommandId::StatusDetails)), (&position_cell, palette.dim, None)] {
                                 let clip = Bounds { origin: gpui::point(px(x0 + f32::from(b.origin.x)), px(status_y)), size: b.size };
                                 window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                     if action.is_some() && nav_hover == action { lenz_gpui::fill(window, f32::from(clip.origin.x), status_y + 2.0, f32::from(clip.size.width), status_h - 4.0, palette.selected_bg); }

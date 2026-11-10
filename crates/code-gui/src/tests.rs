@@ -918,11 +918,14 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
     draw(&mut v);
-    assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("LSP unavailable"));
+    assert!(f.view.read_with(&v, |r, _| r.status_segments().0.1).starts_with("Install rust-analyzer"));
     v.simulate_keystrokes("ctrl-a");
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
     let server = f.view.read_with(&v, |r, _| r.status_segments().0.0.center());
     v.simulate_click(server, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::StatusDetails { kind: Details::Install, .. }))));
+    assert!(f.view.read_with(&v, |r, _| !r.session().state().server_install().unwrap().running));
+    v.simulate_keystrokes("escape f2 home");
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::LanguageServer { .. }))));
     assert!(f.view.read_with(&v, |r, _| r.server_rows().len() == 10 && r.server_rows().iter().all(|(_, id)| id.is_some())));
     let button = f.view.read_with(&v, |r, _| { let l = r.modal_layout().unwrap(); l.bounds.origin + point(px(20.0), px(l.body_top + line_h() / 2.0)) });
@@ -958,7 +961,7 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
         let at = f.view.read_with(v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(id)).unwrap());
         for _ in 0..at { v.simulate_keystrokes("down"); }
         v.simulate_keystrokes("enter");
-        assert!(f.view.read_with(v, |r, _| r.modal.is_none()));
+        assert!(f.view.read_with(v, |r, _| r.modal.is_none()), "{id:?}: {:?}", f.view.read_with(v, |r, _| (r.modal.as_ref().map(std::mem::discriminant), r.session().disabled(id))));
     };
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::DisableServer);
@@ -969,7 +972,8 @@ fn server_status_click_shows_setup_and_shared_recovery_actions(cx: &mut TestAppC
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::EnableServer);
     drop(v);
-    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_))));
+    settle(cx, &f, |r| r.session().state().provider().is_some_and(|p| matches!(p.status, code_core::semantics::Status::Missing(_)))
+        && r.session().disabled(CommandId::RestartServer).is_none());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f2");
     activate(&mut v, CommandId::RestartServer);
@@ -6372,7 +6376,7 @@ fn chrome_segments_fit_and_details_scroll_copy_and_dismiss_in_both_appearances(c
             v.simulate_resize(size(px(w), px(h)));
             draw(&mut v);
             f.view.read_with(&v, |r, _| {
-                let (a, b, c, sql, markers) = r.status_segments();
+                let (a, b, c, sql, markers, _) = r.status_segments();
                 assert_eq!(c.0.left(), px(STATUS_PAD.min(w / 2.0)));
                 assert!(c.0.right() <= a.0.left() && a.0.right() <= sql.0.left() && sql.0.right() <= markers.0.left() && markers.0.right() <= b.0.left());
                 assert!(b.0.right() <= px(w));

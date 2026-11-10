@@ -605,6 +605,13 @@ with ordinary directory updates **0.58→0.50 seconds**. The existing saved-inde
 and explicit rebuild remains available in both frontends. Cold server indexing remains around **11–12 seconds**;
 the report includes repeat measurements, the small retained-digest memory cost and unverified native macOS behavior.
 
+The [editor Find update](docs/research/editor-feedback-setup-search-validation.md) measures completed hot
+scans over 100,000 ASCII lines at **7.17→1.97 ms** for an absent literal and **16.19→1.48 ms** for a sparse
+case-sensitive literal. Dense, Unicode and regex cases remain comparable in three normal-release process
+pairs. These are matcher/collection timings, excluding document loading and frontend presentation.
+Three standalone TUI release pairs measure completed Find and reveal at **9.88→3.45 ms** on the
+100,000-line fixture, with exact selection, resize, terminal-restoration and sustained-work checks.
+
 See the [performance overview](docs/performance.md) for method and accepted costs, and the [benchmark guide](docs/benchmarking.md) to run the suite yourself.
 
 ## Documentation

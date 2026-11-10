@@ -238,7 +238,7 @@ Provider {
     // It names itself and its version when initialized (`typescript-go 7.0.2`).
     version: Version::Initialize,
     tested: Some("7.0.2"),
-    setup: "Install TypeScript 7 in the project (`npm install --save-dev typescript@7`) or globally (`npm install -g typescript@7`, which needs Node.js) so that its `tsc` is in the project's node_modules/.bin or on PATH, or set its `executable` and `env.PATH` in providers.json; the reader never installs or upgrades it",
+    setup: "Install TypeScript 7 in the project (`npm install --save-dev typescript@7`) or globally (`npm install -g typescript@7`, which needs Node.js) so that its `tsc` is in the project's node_modules/.bin or on PATH, or set its `executable` and `env.PATH` in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: typescript_root,
     no_root: "no TypeScript or JavaScript project encloses this file; set a workspace root",
     config_section: "typescript",
@@ -261,7 +261,7 @@ Provider {
     // Its launcher has no version flag (it would start the server); it names its version when initialized.
     version: Version::Initialize,
     tested: Some("1.61.0"),
-    setup: "Install Eclipse JDT LS (a `jdtls` launcher; it needs Python 3 and Java 21 or newer, from JAVA_HOME or PATH) so that `jdtls` is on PATH, or set its `executable` and `env` (PATH, JAVA_HOME) in providers.json; the reader never installs or upgrades it",
+    setup: "Install Eclipse JDT LS (a `jdtls` launcher; it needs Python 3 and Java 21 or newer, from JAVA_HOME or PATH) so that `jdtls` is on PATH, or set its `executable` and `env` (PATH, JAVA_HOME) in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: java_root,
     no_root: "no Java project encloses this file; set a workspace root",
     origins: &[("/.m2/repository/", "a Maven dependency"), ("/.gradle/caches/", "a Gradle dependency")],
@@ -334,7 +334,7 @@ Provider {
     // `--version` prints it and exits before any bundle is composed.
     version: Version::Flag(&["--version"]),
     tested: Some("0.26.11"),
-    setup: "Install it with `gem install ruby-lsp` (for your user: `--user-install`, with that gem bin folder on PATH) so that `ruby-lsp` is on PATH, or set its `executable` and `env` (PATH, GEM_HOME, a version manager's shims) in providers.json; the reader never installs or upgrades it",
+    setup: "Install it with `gem install ruby-lsp` (for your user: `--user-install`, with that gem bin folder on PATH) so that `ruby-lsp` is on PATH, or set its `executable` and `env` (PATH, GEM_HOME, a version manager's shims) in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: ruby_root,
     no_root: "no Gemfile encloses this file; set a workspace root",
     // Installed gems by their installation folders (user, system, version managers, vendored bundles), never a
@@ -388,7 +388,7 @@ Provider {
     // `golang.org/x/tools/gopls v0.24.0` and its build line.
     version: Version::Flag(&["version"]),
     tested: Some("v0.24.0"),
-    setup: "Install it with `go install golang.org/x/tools/gopls@latest` (it needs the Go toolchain) and put its folder (usually ~/go/bin) on PATH, or set its `executable` in providers.json; the reader never installs or upgrades it",
+    setup: "Install it with `go install golang.org/x/tools/gopls@latest` (it needs the Go toolchain) and put its folder (usually ~/go/bin) on PATH, or set its `executable` in providers.json; Install Language Server offers explicit managed installation where supported; upgrades are never automatic",
     root: |file, _| go_root(file),
     no_root: "no go.mod or go.work encloses this file; set a workspace root",
     origins: &[("/pkg/mod/", "a Go module dependency"), ("/go/src/", "the Go standard library")],
@@ -1018,10 +1018,10 @@ impl Settings {
             args: s.and_then(|s| s.args.clone()).unwrap_or_else(|| provider.args.iter().map(|a| a.to_string()).collect()),
             env: s.map(|s| s.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect()).unwrap_or_default(),
         };
-        if provider.id == "pyright"
+        if super::installer::node_package(provider.id).is_some()
             && let Some(bin) = s.and_then(|s| s.node.as_deref()).and_then(Path::parent)
         {
-            if launch.executable == Path::new(provider.executable) {
+            if provider.id == "pyright" && launch.executable == Path::new(provider.executable) {
                 launch.executable = bin.join(if cfg!(windows) { "pyright-langserver.cmd" } else { "pyright-langserver" });
             }
             let inherited = std::env::var_os("PATH");

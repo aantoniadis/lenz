@@ -1025,12 +1025,13 @@ impl App {
             _ => {}
         }
         let selected = matches!(kind, Prompt::WorkspaceInput { .. } | Prompt::RenameTerminal { .. } | Prompt::Search) && !input.is_empty();
+        let at = if kind == Prompt::LanguageServer { self.session.language_server_initial_action() } else { 0 };
         self.modal = Some(Modal {
             kind,
             input,
             secondary,
             secondary_focus: false,
-            at: 0,
+            at,
             top: 0,
             reveal_selection: true,
             error,
@@ -1670,7 +1671,8 @@ impl App {
         }
         if matches!(kind, Prompt::Details {kind:Details::Install,..}) && !control && !alt {
             match key.code {
-                KeyCode::Char('s'|'S') | KeyCode::Enter => return self.run(CommandId::StartServerInstall),
+                KeyCode::Char('s'|'S') | KeyCode::Enter => return self.run(self.session.server_install_start_action()),
+                KeyCode::Char('r'|'R') if self.session.server_install_actions().contains(&CommandId::ServerRuntime) => return self.run(CommandId::ServerRuntime),
                 KeyCode::Char('c'|'C') => return self.run(CommandId::CancelServerInstall),
                 KeyCode::Char('d'|'D') => return self.run(CommandId::ServerDetails),
                 _ => {}

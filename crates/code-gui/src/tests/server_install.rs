@@ -6,7 +6,7 @@ fn server_install_menu_opens_preview_and_keeps_document_input_modal(cx: &mut Tes
     settle(cx, &f, |r| r.session().state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(700.0), px(350.0)));
-    v.simulate_keystrokes("f2");
+    v.simulate_keystrokes("f2 home");
     let at = f.view.read_with(&v, |r, _| r.server_rows().iter().position(|(_, id)| *id == Some(CommandId::InstallServer)).unwrap());
     for _ in 0..at { v.simulate_keystrokes("down"); }
     v.simulate_keystrokes("enter");
@@ -33,7 +33,7 @@ fn server_install_start_progress_and_cancel_use_real_owned_processes(cx: &mut Te
     let f=fixture_providers(cx,Some(("script.sh",b"echo unchanged\n")),&[("bash-language-server",Path::new(""),Some(&search),None)]);
     settle(cx,&f,|r|r.session().state().current_source().is_some());
     let providers=f.dir.path().join("config/lenz-code/providers.json");let before=std::fs::read(&providers).unwrap();
-    let mut v=visual(cx,&f);v.simulate_resize(size(px(900.0),px(500.0)));v.simulate_keystrokes("f2");
+    let mut v=visual(cx,&f);v.simulate_resize(size(px(900.0),px(500.0)));v.simulate_keystrokes("f2 home");
     let at=f.view.read_with(&v,|r,_|r.server_rows().iter().position(|(_,id)|*id==Some(CommandId::InstallServer)).unwrap());
     for _ in 0..at {v.simulate_keystrokes("down");}v.simulate_keystrokes("enter");
     assert!(f.view.read_with(&v,|r,_|!r.session().state().server_install().unwrap().running));

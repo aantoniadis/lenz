@@ -3780,7 +3780,7 @@ impl Session {
                 _ => None,
             },
             CommandId::ServerRuntime => if self.state.provider_saves > 0 { Some("Waiting for provider settings to finish saving") }
-                else if self.runtime_kind().is_none() { Some("Open a Java or Python source file to choose its server runtime") } else { None },
+                else if self.runtime_kind().is_none() { Some("Open a Java or Node-based language source file to choose its server runtime") } else { None },
             CommandId::RestartServer => match self.state.provider() {
                 None => Some("No language server for this file"),
                 Some(v) if v.status == semantics::Status::Disabled => Some("Disabled for this folder"),
@@ -3875,8 +3875,7 @@ impl Session {
     fn runtime_kind(&self) -> Option<semantics::runtime::Kind> {
         match self.state.current()?.language()? {
             highlight::Language::Java => Some(semantics::runtime::Kind::Java),
-            highlight::Language::Python => Some(semantics::runtime::Kind::PyrightNode),
-            _ => None,
+            _ => self.install_provider().filter(|p| semantics::installer::node_package(p.id).is_some()).map(|p| semantics::runtime::Kind::Node(p.id)),
         }
     }
 
@@ -6979,6 +6978,7 @@ impl Session {
                         self.state.semantics.reload_runtime(kind.provider());
                         self.synced = 0;
                         if let Some(model) = &mut self.state.server_runtime { model.configured = path; }
+                        self.refresh_install_runtime(kind.provider());
                         format!("{} runtime saved. Enabled {} language servers are restarting.", kind.label(), kind.provider())
                     }
                     Err(why) => format!("{} runtime was not changed: {why}", kind.label()),
@@ -7240,11 +7240,10 @@ impl Session {
                         });
                         let f = t.find.as_mut().expect("checked above");
                         f.current = f.at_or_after(at.0, at.1);
-                        if f.reveal {
-                            self.show_match(tab)
-                        } else {
-                            Effect { repaint: true, ..Effect::default() }
-                        }
+                        let mut effect = if f.reveal { self.show_match(tab) } else { Effect::default() };
+                        // Completion changes the counter even when there is no match to reveal.
+                        effect.repaint = true;
+                        effect
                     }
                 }
             }
@@ -10281,6 +10280,13 @@ impl Session {
     fn show_snapshot(&mut self, id: TabId, snapshot: Arc<crate::text::TextSnapshot>, stamp: Option<Stamp>, reload: bool) {
         let buffer = snapshot.key().buffer;
         let retained = !reload && self.state.sources.buffers.get(&buffer).is_some_and(CurrentSource::pinned);
+        // Another split may still own this version's delivered analysis. The scheduler
+        // deduplicates those requests, so restoring a view must reuse the current result.
+        let peer = self.state.tabs.iter().find(|tab| tab.id != id && tab.loaded && tab.buffer == Some(buffer));
+        let syntax = peer.filter(|tab| tab.parsed_source.as_ref().is_some_and(|source| source.matches(&snapshot)))
+            .map(|tab| (tab.highlights.clone(), tab.parsed_source.clone(), tab.folds.clone(), tab.declarations.clone()));
+        let semantic = peer.filter(|tab| tab.decor_source.as_ref().is_some_and(|source| source.matches(&snapshot)))
+            .map(|tab| (tab.hints.clone(), tab.decor_source.clone(), tab.tokens.clone()));
         if let Some(entry) = self.state.sources.buffers.get_mut(&buffer) { entry.snapshot = Some(snapshot.clone()); }
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
@@ -10295,6 +10301,12 @@ impl Session {
         }
         t.language = Some(snapshot.language());
         t.new_content();
+        if let Some((highlights, source, folds, declarations)) = syntax {
+            t.highlights = highlights; t.parsed_source = source; t.folds = folds; t.declarations = declarations;
+        }
+        if let Some((hints, source, tokens)) = semantic {
+            t.hints = hints; t.decor_source = source; t.tokens = tokens;
+        }
         let clamped = t.selection().map(|s| Selection { anchor: snapshot.floor_char_boundary(s.anchor), head: snapshot.floor_char_boundary(s.head) });
         t.place_selection(clamped);
         t.top_line = t.top_line.min(snapshot.line_count() - 1);

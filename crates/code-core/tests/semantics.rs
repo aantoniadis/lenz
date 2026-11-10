@@ -1778,7 +1778,11 @@ fn background_lanes_never_cancel_a_pending_definition() {
     f.s.dispatch(Command::HighlightAt);
     f.settle(|s| s.state().current_source().is_some_and(|d| d.source().ends_with("lib.rs"))); // the definition still arrived
     let log = messages(&f.log);
-    assert!(!log.iter().any(|m| m["method"] == "$/cancelRequest"), "nothing was cancelled");
+    let definition = log.iter().find(|m| m["method"] == "textDocument/definition").expect("the foreground request reached the server");
+    // Following the definition can cancel highlights of the file we just left.
+    // Protect the foreground request itself, regardless of that background timing.
+    let cancelled: Vec<_> = log.iter().filter(|m| m["method"] == "$/cancelRequest").collect();
+    assert!(!cancelled.iter().any(|m| m["params"]["id"] == definition["id"]), "the pending definition was cancelled: {cancelled:?}");
 }
 
 #[test]

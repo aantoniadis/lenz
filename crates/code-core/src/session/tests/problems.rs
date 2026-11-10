@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn edited_syntax_feedback_returns_to_one_split_while_the_other_keeps_the_source() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = write(dir.path(), "a.rs", b"fn main() {}\n");
+    let other = write(dir.path(), "other.txt", b"other\n");
+    let mut s = session(dir.path());
+    open(&mut s, Command::OpenRetained(path.clone()), "a.rs");
+    let first = s.state().active().unwrap().id();
+    let snapshot = s.state().current_source().unwrap();
+    let (expected, len) = (snapshot.key(), snapshot.len_bytes());
+    s.dispatch(Command::Edit { tab: first, expected, edits: vec![crate::text::TextEdit { range: 0..len, text: "fn main( {\n".into() }], kind: crate::text::EditKind::Replace });
+    settle(&mut s, |s| s.state().highlights().is_some() && s.state().diagnostics(first).is_some());
+    s.dispatch(Command::Split(Split::Columns));
+    let second = s.state().active().unwrap().id();
+    settle(&mut s, |s| s.state().view(second).is_some_and(|v| v.highlights().is_some()));
+    open(&mut s, Command::OpenRetained(other), "other.txt");
+    assert!(s.state().view(first).unwrap().highlights().is_some());
+    s.dispatch(Command::ActivateTab(second));
+    settle(&mut s, |s| s.state().view(second).is_some_and(|v| v.highlights().is_some()));
+    assert!(!s.state().diagnostics(second).unwrap().items.is_empty());
+    assert!(s.state().inline_problem(second, 0).is_some());
+    assert_eq!(std::fs::read(path).unwrap(), b"fn main() {}\n");
+}
+
+#[test]
+fn edited_syntax_feedback_returns_after_switching_tabs() {
+    for (name, clean, broken) in [
+        ("a.java", "class A {}\n", "class A { void f( { }\n"),
+        ("a.rs", "fn main() {}\n", "fn main( {\n"),
+        ("a.rb", "def foo\n  1\nend\n", "def foo(\n  1\nend\n"),
+    ] {
+        for pending in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = write(dir.path(), name, clean.as_bytes());
+            let other = write(dir.path(), "other.txt", b"other\n");
+            let mut s = session(dir.path());
+            open(&mut s, Command::OpenRetained(path.clone()), name);
+            let tab = s.state().active().unwrap().id();
+            settle(&mut s, |s| s.state().highlights().is_some() && s.state().diagnostics(tab).is_some());
+            let snapshot = s.state().current_source().unwrap();
+            let (expected, len) = (snapshot.key(), snapshot.len_bytes());
+            s.dispatch(Command::Edit { tab, expected, edits: vec![crate::text::TextEdit { range: 0..len, text: broken.into() }], kind: crate::text::EditKind::Replace });
+            if !pending {
+                settle(&mut s, |s| s.state().highlights().is_some() && s.state().diagnostics(tab).is_some());
+                assert!(!s.state().diagnostics(tab).unwrap().items.is_empty(), "{name}");
+            }
+            let edited = s.state().current_source().unwrap().key();
+            for _ in 0..3 {
+                open(&mut s, Command::OpenRetained(other.clone()), "other.txt");
+                s.dispatch(Command::ActivateTab(tab));
+                settle(&mut s, |s| s.state().highlights().is_some() && s.state().diagnostics(tab).is_some());
+                assert_eq!(s.state().current_source().unwrap().key(), edited);
+                assert_eq!(source_text(s.state().current_source().unwrap()), broken);
+                assert!(!s.state().diagnostics(tab).unwrap().items.is_empty(), "{name}, pending={pending}");
+                assert!(s.state().problem_badge(tab).starts_with('!'));
+                assert!(s.state().inline_problem(tab, 0).is_some(), "{name}");
+            }
+            assert_eq!(std::fs::read(&path).unwrap(), clean.as_bytes());
+            s.dispatch(Command::Undo { tab });
+            settle(&mut s, |s| s.state().highlights().is_some() && s.state().diagnostics(tab).is_some());
+            assert!(s.state().diagnostics(tab).unwrap().items.is_empty());
+        }
+    }
+}
+
+#[test]
 fn syntax_problems_survive_switching_and_list_all_known_files_without_a_server() {
     let dir = tempfile::tempdir().unwrap();
     let a = write(dir.path(), "a.java", b"class A { void f( { }\n");

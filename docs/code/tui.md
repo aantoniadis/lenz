@@ -517,7 +517,7 @@ for a server that is missing, failing or indexing. Its clickable **Copy** and **
 Ctrl-C copies the full, unwrapped snapshot through OSC 52, and Esc closes it. Reopen the popup to refresh its
 contents. **Copy Language Server Details** remains in F10. The menu offers Restart, Enable/Disable for This
 Folder and Set Workspace Root with shared disabled reasons. Recovery actions stay in fixed positions while
-background status changes. **Install Language Server…** previews curated npm installs and requires explicit Start (`S`/Enter); progress/output, Cancel (`C`), Server Details (`D`) and Close/Escape are in its focused dialog. Missing managers and unsupported servers show a manual setup action; see [managed installation](providers.md#explicit-managed-installation). Other missing servers need user installation or an executable/PATH correction; restarting
+background status changes. **Install Language Server…** previews curated npm, Ruby LSP and gopls installs and requires explicit Start (`S`/Enter). A missing server has a direct Install control in the footer; F2 selects Install as its first action. Setup can choose an existing Node runtime (`R`) before installing the server. Progress/output, retry, Cancel (`C`), Server Details (`D`) and Close/Escape stay in its focused dialog. Missing managers and unsupported servers show a manual setup action; see [managed installation](providers.md#explicit-managed-installation). Other missing servers need user installation or an executable/PATH correction; restarting
 rechecks setup. Disabled servers stay off until explicitly enabled. Unsupported documents explain that no server
 is available; text search and syntax highlighting remain usable. See [provider setup](providers.md#status-and-recovery).
 

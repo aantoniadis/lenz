@@ -803,7 +803,8 @@ impl App {
         }
         let available = area.width.saturating_sub(commands_width + log_width + results_width);
         let state = self.session.state();
-        let lsp = format!(" {} [F2] ", state.language_server_label());
+        let (server_label, server_action) = self.session.language_server_control();
+        let lsp = format!(" {server_label} [F2] ");
         let sql = self.session.sql_dialect_label().map(|label| format!(" {label} ")).unwrap_or_default();
         let save_notice = area.width < 60 && state.active().and_then(|tab| state.view(tab.id()))
             .is_some_and(|view| view.save_status().message().is_some());
@@ -842,7 +843,7 @@ impl App {
         );
         geometry
             .controls
-            .push((CommandId::LanguageServer, lsp_rect));
+            .push((server_action, lsp_rect));
         // The SQL dialect the file is written for, including "not set": never assumed, always visible.
         let sql_width = if save_notice { 0 } else { (sql.width() as u16).min(available.saturating_sub(lsp_width) / 2) };
         let sql_rect = Rect::new(lsp_rect.right(), area.y, sql_width, 1);

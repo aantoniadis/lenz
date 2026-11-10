@@ -74,7 +74,7 @@ def main():
     env.update(XDG_RUNTIME_DIR=str(root / 'runtime'), MESA_SHADER_CACHE_DIR=str(root / 'shaders'))
     Path(env['XDG_RUNTIME_DIR']).mkdir(mode=0o700)
     server = proc = display = None
-    result = dict(schema=1, source=args.source, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+    result = dict(schema=2, source=args.source, binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
                   collector_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   original_sha256=hashlib.sha256(original).hexdigest(), fixture_bytes=len(original), rounds=args.rounds,
                   latency='first XDamage after synthetic input; no physical-display or completed-analysis claim',
@@ -133,10 +133,13 @@ def main():
                 for code in reversed(codes): xtest.XTestFakeKeyEvent(display,code,0,0)
                 x.XFlush(display)
             def drain():
-                while x.XPending(display): x.XNextEvent(display,C.byref(event))
-                damage.XDamageSubtract(display,handle,0,0); x.XSync(display,0)
+                x.XSync(display,0)
                 while x.XPending(display): x.XNextEvent(display,C.byref(event))
                 if errors: raise RuntimeError(f'private X server error: {errors}')
+                # NonEmpty reports only the empty-to-nonempty transition. Never discard
+                # notifications after rearming: a late paint would leave the region
+                # nonempty and suppress the next input's notification indefinitely.
+                damage.XDamageSubtract(display,handle,0,0); x.XFlush(display)
             def feedback(name, modifiers=()):
                 time.sleep(.08)
                 drain()
