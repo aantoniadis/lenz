@@ -1,0 +1,19 @@
+{
+  "commit": "cc4411322c58756d5486e127ba9ef45af1772c16",
+  "build_run": 42784617241,
+  "release_id": 440032005,
+  "assets": {
+    "lenz-0.0.14-aarch64-apple-darwin.tar.gz": "sha256:43bf893f9840d89b6004a7f0a4a6c2590725a428c1037caaea54b15c29573b65",
+    "lenz-0.0.14-aarch64-apple-darwin.tar.gz.sha256": "sha256:5762aecde22439bca167ba135f75605659be3d5a86c74bc581fde20a27bfde06",
+    "lenz-0.0.14-aarch64-unknown-linux-gnu.tar.gz": "sha256:78e6b1f24ad2f6f31eb06dd0b7bc4fda81522d554b6b8e6cd5b46c9aaff18236",
+    "lenz-0.0.14-aarch64-unknown-linux-gnu.tar.gz.sha256": "sha256:ad117939fe66e6fa9a8e40b2b197270e30e5b78a05edc5db9580d0b8aef0169b",
+    "lenz-0.0.14-x86_64-unknown-linux-gnu.tar.gz": "sha256:5b944a981cd187a6985937538cb91723e5c33e74447186e712a42107aa34e047",
+    "lenz-0.0.14-x86_64-unknown-linux-gnu.tar.gz.sha256": "sha256:773d4828d8aa598b76dd50b67accaf92ec0b5de3a63b09c5eee5a4af071e2457"
+  },
+  "notes_digest": "sha256:2c1046775518d56eb9ca8025af80e7608e91b0e04db5a91e5876ab9285b04415",
+  "superseded_runs": [
+    42769225197,
+    42773313394,
+    42775328614
+  ]
+}
