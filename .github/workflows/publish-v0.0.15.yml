@@ -1,0 +1,41 @@
+name: Publish Lenz 0.0.15
+
+on:
+  push:
+    branches: [automation/publish-v0.0.15]
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: publish-lenz-v0.0.15
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 85
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the private display and software renderer
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb mesa-vulkan-drivers libvulkan1 libxkbcommon-x11-0 libxcb1 libfontconfig1 libxtst6 libxdamage1 fonts-dejavu-core
+          for lenz_vulkan_driver in /usr/share/vulkan/icd.d/lvp_icd*.json; do
+            test -f "$lenz_vulkan_driver"
+            echo "VK_ICD_FILENAMES=$lenz_vulkan_driver" >> "$GITHUB_ENV"
+            break
+          done
+      - name: Verify packaged GUI and TUI apps and publish the beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          setsid --wait /usr/bin/python3 scripts/reap-children.py -- /usr/bin/python3 .github/releases/prepare-v0.0.15.py
+          setsid --wait /usr/bin/python3 scripts/reap-children.py -- /usr/bin/python3 .github/releases/publish-v0.0.15.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: published-package-verification
+          path: ${{ runner.temp }}/lenz-package-validation
+          if-no-files-found: warn
