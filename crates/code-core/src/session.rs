@@ -1636,7 +1636,7 @@ pub enum Completion {
     /// Filesystem changes, coalesced.
     Changed(Change),
     /// A tab's source was checked against the disk.
-    Refreshed { tab: TabId, token: u64, result: Refresh },
+    Refreshed { tab: TabId, token: u64, baseline: RefreshBaseline, result: Refresh },
     /// Results for search `id`.
     Found { id: u64, found: search::Found },
     ProjectSyntax(project_syntax::Reply),
@@ -1715,6 +1715,10 @@ pub enum Refresh {
     /// The file kept changing while it was read: try again shortly.
     Unstable,
 }
+
+/// Opaque identity of the confirmed content a disk check compared against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshBaseline(Option<SemanticSource>);
 
 pub enum Input {
     Command(Command),
@@ -7735,7 +7739,7 @@ impl Session {
                 }
                 self.changed(change)
             }
-            Completion::Refreshed { tab, token, result } => self.refreshed(tab, token, result),
+            Completion::Refreshed { tab, token, baseline, result } => self.refreshed(tab, token, baseline, result),
             Completion::Watch { key, folders } => {
                 if self.watching.as_ref() == Some(&key) {
                     self.inventory_folders = Some((key.0.clone(), folders.clone()));
@@ -8636,6 +8640,13 @@ impl Session {
         self.check(id, None);
     }
 
+    fn refresh_baseline(&self, id: TabId) -> RefreshBaseline {
+        RefreshBaseline(self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
+            .and_then(|buffer| self.state.sources.buffers.get(&buffer))
+            .and_then(|entry| entry.draft.as_ref().map(|draft| &draft.baseline).or(entry.snapshot.as_ref()))
+            .map(|source| SemanticSource::new(source)))
+    }
+
     /// Check tab `id` off the UI thread. With `moved_to`, follow the rename when the file there is the same file
     /// (identity) and nothing new took its old place; otherwise check the old path like any refresh.
     fn check(&mut self, id: TabId, moved_to: Option<PathBuf>) {
@@ -8644,6 +8655,7 @@ impl Session {
         let snapshot = self.state.tabs.iter().find(|t| t.id == id).and_then(|t| t.buffer)
             .and_then(|buffer| self.state.sources.buffers.get(&buffer))
             .and_then(|entry| entry.draft.as_ref().map(|draft| draft.baseline.clone()).or_else(|| entry.snapshot.clone()));
+        let baseline = RefreshBaseline(snapshot.as_deref().map(SemanticSource::new));
         let token = self.next_refresh();
         let Some(t) = self.tab_mut(id) else { return };
         t.refresh = token;
@@ -8671,7 +8683,7 @@ impl Session {
                     Err(ReadError::Failed(why)) => Refresh::Gone(why),
                 }
             } else { check(&path, stamp, shown.as_ref(), &versions) };
-            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, result });
+            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token, baseline, result });
         });
     }
 
@@ -8680,8 +8692,15 @@ impl Session {
         self.refresh_seq
     }
 
-    fn refreshed(&mut self, id: TabId, token: u64, result: Refresh) -> Effect {
+    fn refreshed(&mut self, id: TabId, token: u64, baseline: RefreshBaseline, result: Refresh) -> Effect {
         let Some(tab) = self.state.tabs.iter().find(|t| t.id == id && t.refresh == token) else { return Effect::default(); };
+        if baseline != self.refresh_baseline(id) {
+            // Save (or another confirmed baseline change) overtook this read. Its result may
+            // describe our own write as external. Check the current disk against the new
+            // baseline instead, so a genuine later external write is still detected.
+            self.check(id, None);
+            return Effect::default();
+        }
         let buffer = tab.buffer;
         let replacement = buffer.is_some_and(|buffer| self.replacement_current(buffer));
         if let Some(buffer) = buffer {

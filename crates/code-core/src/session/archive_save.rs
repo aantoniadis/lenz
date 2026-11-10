@@ -217,6 +217,7 @@ impl Session {
     }
 
     pub(super) fn check_archive(&mut self, id: TabId, location: Location) {
+        let baseline = self.refresh_baseline(id);
         let refresh = self.next_refresh();
         let Some(tab) = self.tab_mut(id) else { return };
         tab.refresh = refresh; tab.moving = false;
@@ -231,7 +232,7 @@ impl Session {
                 },
                 None => Refresh::Gone("archive deleted or moved".into()),
             };
-            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token: refresh, result });
+            let _ = tx.send_blocking(Completion::Refreshed { tab: id, token: refresh, baseline, result });
         });
     }
 

@@ -189,7 +189,7 @@ fn inline_problem_rejects_old_draft_and_refresh_findings_until_current_result_ar
     let version=s.versions.fetch_add(1,Ordering::Relaxed)+1;let replacement=Arc::new(Document::decode(path.clone(),version,b"disk\n"));let token=s.state.active().unwrap().refresh;
     // A refreshed clean source replaces this test's draft through the same admission boundary.
     s.state.sources.buffers.get_mut(&expected.buffer).unwrap().draft=None;
-    std::fs::write(&path,b"disk\n").unwrap();s.dispatch(Completion::Refreshed{tab,token,result:Refresh::Changed(Stamp::of(&path).unwrap(),replacement)});assert!(s.state.inline_problem(tab,0).is_none());
+    std::fs::write(&path,b"disk\n").unwrap();s.dispatch(Completion::Refreshed{tab,token,baseline:s.refresh_baseline(tab),result:Refresh::Changed(Stamp::of(&path).unwrap(),replacement)});assert!(s.state.inline_problem(tab,0).is_none());
     inline_findings(&mut s,vec![(4..4,S::Error,"current disk")]);assert_eq!(s.state.inline_problem(tab,0).unwrap().message,"current disk");
     inline_findings(&mut s,vec![]);assert!(s.state.inline_problem(tab,0).is_none());
 }
