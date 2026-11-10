@@ -1092,15 +1092,22 @@ impl ReaderView {
         let branch_selection = if matches!(&input, code_core::session::Input::Completion(Completion::Branches { .. })) {
             self.branch_hits_valid = false;
             match &self.modal {
-                Some(Modal::Branches { query, at }) => self.session.state().branch_rows(query).into_iter().nth(*at).map(|row| row.target),
-                Some(Modal::BranchMenu { target, .. }) => Some(target.clone()),
+                Some(Modal::Branches { query, at }) => self.session.state().branch_rows(query).into_iter().nth(*at).map(|row| (Some(row.section), row.target)),
+                Some(Modal::BranchMenu { target, query, row, .. }) => {
+                    let section = self.session.state().branch_rows(query).into_iter().nth(*row).filter(|row| &row.target == target).map(|row| row.section);
+                    Some((section, target.clone()))
+                },
                 _ => None,
             }
         } else { None };
         let mut effect = self.session.dispatch(input);
-        if let Some(target) = branch_selection {
+        if let Some((section, target)) = branch_selection {
             let query = match &self.modal { Some(Modal::Branches { query, .. } | Modal::BranchMenu { query, .. }) => Some(query), _ => None };
-            let selected = query.and_then(|query| self.session.state().branch_rows(query).into_iter().position(|row| row.target == target));
+            let selected = query.and_then(|query| {
+                let rows = self.session.state().branch_rows(query);
+                rows.iter().position(|row| Some(row.section) == section && row.target == target)
+                    .or_else(|| rows.iter().position(|row| row.target == target))
+            });
             match &mut self.modal {
                 Some(Modal::Branches { at, .. }) => *at = selected.unwrap_or(0),
                 Some(Modal::BranchMenu { row, .. }) => *row = selected.unwrap_or(0),
@@ -2413,6 +2420,7 @@ impl ReaderView {
             .map(|t| t.lines().next().unwrap_or_default().trim().to_string());
         // So does the Git Branches popup's filter (a commit id to compare with).
         if let (Some(text), Some(Modal::Branches { query, at })) = (&paste, &mut self.modal) {
+            if !text.is_empty() { self.branch_hits_valid = false; }
             query.push_str(text);
             *at = 0;
             return cx.notify();
@@ -2444,9 +2452,13 @@ impl ReaderView {
                     self.modal = set(query, at);
                     self.modal_accept(window, cx);
                 },
-                "backspace" => self.modal = set(query.chars().take(query.chars().count().saturating_sub(1)).collect(), 0),
+                "backspace" => {
+                    if !query.is_empty() { self.branch_hits_valid = false; }
+                    self.modal = set(query.chars().take(query.chars().count().saturating_sub(1)).collect(), 0);
+                },
                 _ => {
                     if let Some(text) = typed.filter(|t| !t.chars().any(char::is_control)) {
+                        if !text.is_empty() { self.branch_hits_valid = false; }
                         self.modal = set(query + &text, 0);
                     }
                 }
@@ -5422,7 +5434,8 @@ impl ReaderView {
                         lines.extend(wrap(code_core::branches::branch_section_label(section), cols).into_iter().map(|line| (usize::MAX, line, true)));
                     }
                 }
-                lines.extend(wrap(&code_core::branches::row_text(&row), cols).into_iter().map(|line| (index + FINDER_HEADER_ROWS, line, false)));
+                let text = code_core::branches::row_text(&row);
+                lines.extend(text.split('\n').flat_map(|line| wrap(line, cols)).map(|line| (index + FINDER_HEADER_ROWS, line, false)));
             }
             return lines;
         }

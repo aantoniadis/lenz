@@ -100,9 +100,10 @@ fn gui_cached_branch_refresh_keeps_the_target_and_rejects_old_pointer_rows(cx: &
     let target = f.view.read_with(&v, |r, _| {
         assert!(r.session().state().branches().unwrap().refs.local.iter().any(|name| name == "aaa"));
         let Some(Modal::Branches { query, at }) = &r.modal else { panic!("picker remains open") };
-        r.session().state().branch_rows(query).get(*at).unwrap().target.clone()
+        let selected = &r.session().state().branch_rows(query)[*at];
+        (selected.section, selected.target.clone())
     });
-    assert_eq!(target, BranchTarget::Branch("other".into()));
+    assert_eq!(target, ("Local", BranchTarget::Branch("other".into())));
     // Deliver a pointer event before the next frame: old coordinates must not pick a newly inserted row.
     f.view.update_in(&mut v, |r, window, cx| r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx));
     assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { .. })) && !r.session().state().checking_out()));
@@ -111,4 +112,42 @@ fn gui_cached_branch_refresh_keeps_the_target_and_rejects_old_pointer_rows(cx: &
     v.simulate_keystrokes("enter");
     settle_for(cx, &f, 10, &|r| branch_of(r).as_deref() == Some("⎇ other"));
     assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"other\n");
+}
+
+#[gpui::test]
+fn gui_branch_filter_edits_reject_pointer_rows_until_repaint(cx: &mut TestAppContext) {
+    for native in [false, true] {
+        let (f, _wt) = branches_fixture(cx);
+        let mut v = visual(cx, &f);
+        v.simulate_resize(size(px(900.0), px(650.0)));
+        draw(&mut v);
+        v.simulate_keystrokes("ctrl-shift-`");
+        settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+        draw(&mut v);
+        // This old command row will overlap a branch after filtering, so reusing its coordinates is unsafe.
+        let old_point = f.view.read_with(&v, |r, _| {
+            let layout = r.modal_layout().unwrap();
+            let line = layout.lines.iter().position(|(row, _, _)| *row == FINDER_HEADER_ROWS + 1).unwrap();
+            point(layout.bounds.center().x, layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
+        });
+        if native {
+            let mut input = ime_handler(&f, &mut v);
+            input.replace_text_in_range(None, "oth");
+        } else {
+            type_text(&mut v, "oth");
+        }
+        assert!(f.view.read_with(&v, |r, _| !r.branch_hits_valid), "native={native}: edited filters invalidate old coordinates");
+        f.view.update_in(&mut v, |r, window, cx| r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx));
+        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "oth") && !r.session().state().checking_out()));
+        assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n");
+        draw(&mut v);
+        let fresh_point = f.view.read_with(&v, |r, _| {
+            let layout = r.modal_layout().unwrap();
+            let line = layout.lines.iter().enumerate().skip(layout.first).take(layout.visible).find(|(_, (row, _, _))| *row == layout.at).map(|(line, _)| line).unwrap();
+            point(layout.bounds.center().x, layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
+        });
+        v.simulate_click(fresh_point, Modifiers::default());
+        settle_for(cx, &f, 10, &|r| branch_of(r).as_deref() == Some("⎇ other"));
+        assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"other\n");
+    }
 }
