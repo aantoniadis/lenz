@@ -95,18 +95,17 @@ fn gui_cached_branch_refresh_keeps_the_target_and_rejects_old_pointer_rows(cx: &
             Err(_) => { assert!(std::time::Instant::now() < deadline, "branch refresh arrives"); std::thread::sleep(std::time::Duration::from_millis(2)); }
         }
     };
-    f.view.update(&mut v, |r, cx| r.dispatch(refresh, cx));
-    assert!(f.view.read_with(&v, |r, _| !r.branch_hits_valid));
-    let target = f.view.read_with(&v, |r, _| {
+    f.view.update_in(&mut v, |r, window, cx| {
+        r.dispatch(refresh, cx);
+        assert!(!r.branch_hits_valid);
         assert!(r.session().state().branches().unwrap().refs.local.iter().any(|name| name == "aaa"));
         let Some(Modal::Branches { query, at }) = &r.modal else { panic!("picker remains open") };
         let selected = &r.session().state().branch_rows(query)[*at];
-        (selected.section, selected.target.clone())
+        assert_eq!((selected.section, selected.target.clone()), ("Local", BranchTarget::Branch("other".into())));
+        // Deliver the pointer event in this transaction, before GPUI can repaint the changed list.
+        r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx);
+        assert!(matches!(r.modal, Some(Modal::Branches { .. })) && !r.session().state().checking_out());
     });
-    assert_eq!(target, ("Local", BranchTarget::Branch("other".into())));
-    // Deliver a pointer event before the next frame: old coordinates must not pick a newly inserted row.
-    f.view.update_in(&mut v, |r, window, cx| r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx));
-    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { .. })) && !r.session().state().checking_out()));
     assert_eq!(f.view.read_with(&v, |r, _| branch_of(r)), Some("⎇ main".into()));
     draw(&mut v);
     v.simulate_keystrokes("enter");
@@ -130,15 +129,26 @@ fn gui_branch_filter_edits_reject_pointer_rows_until_repaint(cx: &mut TestAppCon
             let line = layout.lines.iter().position(|(row, _, _)| *row == FINDER_HEADER_ROWS + 1).unwrap();
             point(layout.bounds.center().x, layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
         });
-        if native {
-            let mut input = ime_handler(&f, &mut v);
-            input.replace_text_in_range(None, "oth");
-        } else {
-            type_text(&mut v, "oth");
-        }
-        assert!(f.view.read_with(&v, |r, _| !r.branch_hits_valid), "native={native}: edited filters invalidate old coordinates");
-        f.view.update_in(&mut v, |r, window, cx| r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx));
-        assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "oth") && !r.session().state().checking_out()));
+        f.view.update_in(&mut v, |r, window, cx| {
+            if native {
+                // Use the actual native callback in the same transaction as the click: the
+                // PlatformInputHandler wrapper otherwise lets TestWindow repaint on return.
+                <ReaderView as gpui::EntityInputHandler>::replace_text_in_range(r, None, "oth", window, cx);
+            } else {
+                for text in ["o", "t", "h"] {
+                    let mut key = gpui::Keystroke::parse(text).unwrap();
+                    key.key_char = Some(text.into());
+                    r.on_key(&KeyDownEvent { keystroke: key, is_held: false, prefer_character_input: false }, window, cx);
+                    // Registered printable keys are committed by the platform callback after
+                    // the raw event; on_key deliberately defers their insertion to this callback.
+                    <ReaderView as gpui::EntityInputHandler>::replace_text_in_range(r, None, text, window, cx);
+                }
+            }
+            assert!(matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "oth"));
+            assert!(!r.branch_hits_valid, "native={native}: edited filters invalidate old coordinates");
+            r.on_mouse_down(&MouseDownEvent { button: MouseButton::Left, position: old_point, modifiers: Modifiers::default(), click_count: 1, first_mouse: false }, window, cx);
+            assert!(matches!(&r.modal, Some(Modal::Branches { query, .. }) if query == "oth") && !r.session().state().checking_out());
+        });
         assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n");
         draw(&mut v);
         let fresh_point = f.view.read_with(&v, |r, _| {

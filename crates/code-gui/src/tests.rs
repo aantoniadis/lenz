@@ -5691,7 +5691,7 @@ fn server_runtime_dialog_validates_saves_and_preserves_the_document(cx: &mut Tes
     let original = std::fs::read(&settings).unwrap();
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(800.0), px(400.0)));
-    v.simulate_keystrokes("ctrl-a f2");
+    v.simulate_keystrokes("ctrl-a f2 home");
     let selected = f.view.read_with(&v, |r, _| r.session().state().selection());
     let at = f.view.read_with(&v, |r, _| r.server_rows().iter().position(|(_, action)| *action == Some(CommandId::ServerRuntime)).unwrap());
     for _ in 0..at { v.simulate_keystrokes("down"); }

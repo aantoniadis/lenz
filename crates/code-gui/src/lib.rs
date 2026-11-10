@@ -1101,7 +1101,7 @@ impl ReaderView {
             }
         } else { None };
         let mut effect = self.session.dispatch(input);
-        if branch_completion && effect.repaint { self.branch_hits_valid = false; }
+        if branch_completion && effect.repaint { self.branch_hits_valid = false; self.modal_seen.set(None); }
         if let Some((section, target)) = branch_selection.filter(|_| effect.repaint) {
             let query = match &self.modal { Some(Modal::Branches { query, .. } | Modal::BranchMenu { query, .. }) => Some(query), _ => None };
             let selected = query.and_then(|query| {

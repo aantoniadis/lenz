@@ -173,6 +173,7 @@ impl ReaderView {
             }
             if outcome.changed {
                 if matches!(modal, Modal::Branches { .. }) { self.branch_hits_valid = false; }
+                if matches!(modal, Modal::Branches { .. } | Modal::ScratchFiles { .. }) { self.modal_seen.set(None); }
                 match modal {
                     Modal::Search { .. } => {}
                     Modal::SaveAs { error, .. }
