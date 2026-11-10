@@ -1234,7 +1234,6 @@ impl App {
         let area = centered(frame.area(), width, height);
         geometry.modal = area;
         if area.is_empty() {
-            modal.top = 0;
             return;
         }
         frame.render_widget(Clear, area);
@@ -1631,6 +1630,7 @@ impl App {
         };
         geometry.modal = area;
         if area.is_empty() {
+            modal.top = 0;
             return;
         }
         frame.render_widget(Clear, area);

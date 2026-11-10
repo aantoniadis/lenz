@@ -164,7 +164,7 @@ fn creating_and_reopening_scratch_files_focuses_text_from_explorer_and_results()
         let scratch = a.session.state().active().unwrap().source().to_owned();
         a.handle(Event::Paste("scratch λ".into()));
         key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
-        settle(&mut a, |a| !a.session.state().active().unwrap().dirty());
+        settle(&mut a, |a| !a.session.state().tab_dirty(a.session.state().active().unwrap().id()));
         assert_eq!(std::fs::read(&scratch).unwrap(), "scratch λ".as_bytes());
         a.run(CommandId::Close);
 
@@ -179,7 +179,7 @@ fn creating_and_reopening_scratch_files_focuses_text_from_explorer_and_results()
         key(&mut a, KeyCode::Char('a'), KeyModifiers::CONTROL);
         a.handle(Event::Paste("reopened β".into()));
         key(&mut a, KeyCode::Char('s'), KeyModifiers::CONTROL);
-        settle(&mut a, |a| !a.session.state().active().unwrap().dirty());
+        settle(&mut a, |a| !a.session.state().tab_dirty(a.session.state().active().unwrap().id()));
         assert_eq!(std::fs::read(&scratch).unwrap(), "reopened β".as_bytes());
     }
 }
