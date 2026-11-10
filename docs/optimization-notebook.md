@@ -2594,3 +2594,30 @@ Python suite includes the corrected collector definition. The Diff TUI closed
 Markdown-view test now waits for its cancelled worker to unwind within the
 existing bound and still requires weak ownership to disappear. Final reports
 distinguish all failed/interrupted attempts from this passing gate.
+
+## Code branch picker and workflow audit — 2026-11-10
+
+The [audit report](research/code-branch-picker-audit.md) records the complete local
+gate, native GUI/TUI replays, source/executable hashes and raw evidence under
+`perf-results/app-audit/`. Final runtime files and both rebuilt Code binaries
+match the validated `d7b5566` source/binaries exactly after reverting an experiment.
+All builds use normal Cargo profiles; the TUI is built separately from GUI features.
+
+| Experiment | Result / decision |
+| --- | --- |
+| Reuse branch metadata and remove per-worktree status scans from navigation inventory | Three alternating pairs, 1,000 generated local refs, three worktrees and 2,000 untracked files: usable choices 20.635 → 1.407 ms, pooled p95 27.019 → 2.025 ms. Six checked 20.002–20.073 second runs preserve files/refs/HEADs and restore the terminal. First bytes 0.727 → 1.354 ms now include actual cached choices rather than the loading placeholder. |
+| Ordinary editor preservation, six pairs including reversed starting order | GUI ordinary first-XDamage feedback has a +0.646 ms paired median with mixed signs and lower pooled p95; sustained GUI editing has mixed signs. TUI ordinary/sustained paired medians rise about 0.038/0.050 ms with overlapping repeated ranges. No ordinary editing speedup or exact preservation claim; measured tradeoff awaits user acceptance. |
+| Box the optional cold cache | Measured Session 16,312 → 16,152 bytes; State/Input/BranchesView unchanged. Nine balanced baseline/inline/boxed TUI trials pass. Box versus inline ordinary feedback is mixed/nearly equal; sustained feedback is higher in all three pairs. Reverted. Lower RSS mode does not establish an 8 MiB saving from a 160-byte layout change. Initial baseline ordinary timings overlap metadata hashing; direct inline/Box comparisons and stress do not. |
+| Remove interleaved Saves in a separate GUI diagnostic | Six processes pass outside-timing exact Save/Undo-Save checks. Ordinary 22.666 → 22.213 ms and sustained 21.853 → 21.849 ms have mixed paired signs; the original upward tendency is not reproduced. Supports a Save/repaint confound hypothesis, not a proven cause. Weaker per-cycle buffer oracle and separate metric version are explicit; do not pool with full-Save samples. |
+| Filtering and offscreen-row proposals | Empty-query folding and viewport-formatting drafts remain unapplied. No optimization benefit is claimed from uncompiled proposals. |
+
+The audit fixes scratch focus/origin/filtering/number exhaustion, a deterministic
+own-Save versus late-refresh race, missing Code native Quit wiring, native close
+vetoes/hidden terminal questions and a pending-close repaint/resize feedback loop.
+Final CI passes 2,980 workspace/serial and 941 adapter results across overlapping
+invocations, plus 86 Python tests with one skip. Owned Linux light/dark/narrow
+replays and four X11 close-consent scenarios pass. Actual AppKit/macOS delivery,
+physical presentation, live provider campaigns and indefinite leak freedom remain
+unverified. Existing Vim/installer gate failures whose exact cause could not be
+reproduced retain stronger diagnostics; the report distinguishes them from
+confirmed runtime defects and passing final validation.
