@@ -206,21 +206,43 @@ fn terminal_reported_keypad_key_uses_child_application_mode() {
 
 #[test]
 fn terminal_find_key_paste_render_and_dismiss_keep_shell_and_source_safe() {
+    fn terminal_settle(a: &mut App, stage: &str, done: impl Fn(&App) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !done(a) {
+            if Instant::now() >= deadline {
+                let terminal = a.session.state().terminal();
+                let frame = terminal.active().and_then(|tab| tab.frame());
+                panic!("terminal stage {stage}: shown={} focused={} find={:?} find_status={} tab={:?} frame={:?} cells={:?} modal={:?}; source={:?}",
+                    terminal.shown(), terminal.focused(), terminal.find(), terminal.find_status(),
+                    terminal.active().map(|tab| (tab.id(), tab.running(), tab.status())),
+                    frame.map(|f| (f.columns, f.rows, f.cursor, f.scrollback, &f.search)),
+                    frame.map(|f| f.cells.iter().flat_map(|c| c.text.chars()).take(4096).collect::<String>()),
+                    prompt_kind(a), a.session.state().current_source().map(|s| s.copy_range(0..s.len_bytes())));
+            }
+            if let Ok(completion) = a.session.completions().try_recv() { a.apply(completion); }
+            else { std::thread::yield_now(); }
+        }
+    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("keep.txt"); std::fs::write(&path,b"keep\n").unwrap();
     let mut a = App::new(config(dir.path()),Some(path.clone()));
-    settle(&mut a,|a|a.session.state().current_source().is_some());
+    terminal_settle(&mut a,"source loaded",|a|a.session.state().current_source().is_some());
     a.terminal_command(terminal::Command::New);
-    settle(&mut a,|a|a.session.state().terminal().active().is_some_and(|t|t.running() && t.frame().is_some()));
+    terminal_settle(&mut a,"terminal frame published",|a|a.session.state().terminal().active().is_some_and(|t|t.running() && t.frame().is_some()));
     draw(&mut a,100,30);
-    a.handle(Event::Paste("stty -echo; printf 'needle.*é界\\r\\n'; printf 'last\\r\\n'".into()));
+    // Search a completed fixture screen. Escaped first characters keep command echo from satisfying the
+    // output oracle; the empty prompt and final marker avoid later shell output invalidating a found match.
+    a.handle(Event::Paste("PS1=''; stty -echo; printf '\\156eedle.*é界\\r\\n'; printf '\\154ast\\r\\n'; printf '\\106IND_FIXTURE_READY'".into()));
     key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
-    settle(&mut a,|a|screen_text(a).contains("needle.*é界"));
+    terminal_settle(&mut a,"fixture output complete",|a| {
+        let text = screen_text(a);
+        text.contains("needle.*é界") && text.contains("FIND_FIXTURE_READY")
+    });
     key(&mut a,KeyCode::Char('f'),KeyModifiers::CONTROL); draw(&mut a,100,30);
     assert_eq!(a.session.state().terminal().find(),Some(""));
     a.handle(Event::Paste("needle.*é界".into()));
     key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
-    settle(&mut a,|a|a.session.state().terminal().find_status() == "Match");
+    terminal_settle(&mut a,"find match",|a|a.session.state().terminal().find_status() == "Match");
     assert!(draw_screen(&mut a,100,30).contains("Find:"));
     assert!(a.session.state().terminal().active().unwrap().frame().unwrap().cells.iter().any(|c|c.search_match));
     key(&mut a,KeyCode::F(10),KeyModifiers::NONE);
@@ -231,14 +253,14 @@ fn terminal_find_key_paste_render_and_dismiss_keep_shell_and_source_safe() {
     key(&mut a,KeyCode::Char('a'),KeyModifiers::CONTROL);
     a.handle(Event::Paste("printf bad > find-must-not-execute".into()));
     key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
-    settle(&mut a,|a|a.session.state().terminal().find_status() == "No matches");
+    terminal_settle(&mut a,"find no matches",|a|a.session.state().terminal().find_status() == "No matches");
     for (w,h) in [(18,6),(1,1),(0,0),(100,30)] { draw(&mut a,w,h); }
     assert!(!dir.path().join("find-must-not-execute").exists());
     key(&mut a,KeyCode::Esc,KeyModifiers::NONE);
     assert!(a.session.state().terminal().find().is_none() && a.session.state().terminal().focused());
     a.handle(Event::Paste("printf restored > find-shell-restored".into()));
     key(&mut a,KeyCode::Enter,KeyModifiers::NONE);
-    settle(&mut a,|_|std::fs::read(dir.path().join("find-shell-restored")).is_ok_and(|b|b == b"restored"));
+    terminal_settle(&mut a,"shell input restored",|_|std::fs::read(dir.path().join("find-shell-restored")).is_ok_and(|b|b == b"restored"));
     key(&mut a,KeyCode::Char('f'),KeyModifiers::CONTROL);
     key(&mut a,KeyCode::Char('x'),KeyModifiers::NONE);
     key(&mut a,KeyCode::Char('n'),KeyModifiers::CONTROL | KeyModifiers::ALT);
