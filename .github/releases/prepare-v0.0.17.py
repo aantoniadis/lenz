@@ -1,0 +1,34 @@
+import hashlib,json,subprocess,time
+from pathlib import Path
+ROOT=Path(__file__).resolve().parent
+COMMIT='3b00d88bc12af90947c356c28d70d8ecba3d49f2'
+REPO='aantoniadis/lenz'
+def api(path):
+ return json.loads(subprocess.check_output(['gh','api',f'repos/{REPO}/{path}'],text=True))
+for gate_attempt in range(120):
+ try:
+  gate=api('git/ref/heads/automation/validated-v0.0.17')
+ except subprocess.CalledProcessError:
+  print('Waiting for complete local CI',flush=True);time.sleep(30);continue
+ assert gate['object']['sha']==COMMIT, gate
+ break
+else: raise RuntimeError('Local validation approval ref missing')
+for attempt in range(120):
+ runs=api(f'actions/workflows/release.yml/runs?head_sha={COMMIT}&event=push&per_page=20')['workflow_runs']
+ if runs:
+  run=max(runs,key=lambda x:x['id'])
+  assert run['head_sha']==COMMIT
+  print('BUILD_STATUS',run['id'],run['status'],run['conclusion'],flush=True)
+  if run['status']=='completed':
+   assert run['conclusion']=='success',run['conclusion']
+   break
+ time.sleep(30)
+else: raise RuntimeError('Native release builds did not finish in one hour')
+r=next(release for release in api('releases?per_page=50') if release['tag_name']=='v0.0.17')
+names={f'lenz-0.0.17-{t}.tar.gz{s}' for t in ['x86_64-unknown-linux-gnu','aarch64-unknown-linux-gnu','aarch64-apple-darwin'] for s in ['', '.sha256']}
+assert len(r['assets'])==6 and {a['name'] for a in r['assets']}==names
+assets={a['name']:a['digest'] for a in r['assets']}
+assert all(isinstance(v,str) and v.startswith('sha256:') and len(v)==71 for v in assets.values())
+expected=dict(commit=COMMIT,build_run=run['id'],release_id=r['id'],assets=assets,superseded_runs=[],notes_digest='sha256:'+hashlib.sha256((ROOT/'0.0.17.md').read_bytes()).hexdigest())
+(ROOT/'0.0.17-manifest.json').write_text(json.dumps(expected,indent=2))
+print('VERIFIED_MANIFEST',json.dumps(expected),flush=True)
