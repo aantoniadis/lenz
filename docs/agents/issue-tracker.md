@@ -1,6 +1,6 @@
 # Issue tracker: Local Markdown
 
-Issues and specs for Lenz live as Markdown files in `.scratch/` in this repository.
+Issues and specs for Lenz live as Markdown files in `.scratch/` in the working tree. The directory is gitignored: its files stay on the machine that wrote them and are never committed.
 
 ## Conventions
 

@@ -1,10 +1,10 @@
 # Integrated editor readiness evidence
 
-Date: 2026-10-23. Execution of the [reviewed readiness plan](../superpowers/plans/2026-10-23-editor-readiness.md), governed by the [accepted design](../superpowers/specs/2026-10-23-integrated-editor-design.md).
+Date: 2026-10-23. Execution of the reviewed readiness plan, governed by the accepted design.
 
 ## Status
 
-Baseline and buffer/save experiments completed. Template and SQL probes completed with release blockers. The [foundation implementation plan](../superpowers/plans/2026-10-23-editor-foundation.md) is complete for review. No production editor behavior has been implemented or validated.
+Baseline and buffer/save experiments completed. Template and SQL probes completed with release blockers. The foundation implementation plan is complete for review. No production editor behavior has been implemented or validated.
 
 ## Baseline
 
@@ -124,7 +124,7 @@ Evidence: [source/tool identity](../../target/perf/editor-readiness/sql-final-v2
 
 ## Foundation handoff and final gate
 
-The proposed [foundation plan](../superpowers/plans/2026-10-23-editor-foundation.md) defines session-owned buffers, worker-only contiguous Documents, exact save outcomes, transition guards, draft-aware navigation, blame, shared saved comparisons and both input adapters. A read-only advisor checked the document boundary. Source inspection confirmed that the existing long-line display scans the hidden tail and that GPUI's app-quit callback cannot veto shutdown; the plan uses pre-close/pre-quit commands and actual window-close hooks instead of treating cleanup as protection.
+The proposed foundation plan defines session-owned buffers, worker-only contiguous Documents, exact save outcomes, transition guards, draft-aware navigation, blame, shared saved comparisons and both input adapters. A read-only advisor checked the document boundary. Source inspection confirmed that the existing long-line display scans the hidden tail and that GPUI's app-quit callback cannot veto shutdown; the plan uses pre-close/pre-quit commands and actual window-close hooks instead of treating cleanup as protection.
 
 The full local `scripts/ci-local.sh` gate passed after all readiness code changes, including workspace/core, actual GUI/TUI/parity suites, strict Clippy, collector tests and separate release builds. The stripped Diff executable remains 68,501,304 bytes, matching baseline. This is evidence that test-only probes did not regress the checked build/tests; production editing and its performance remain unimplemented. [Final local gate log](../../target/perf/editor-readiness/after-ci-local.log).
 

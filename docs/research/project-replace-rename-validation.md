@@ -217,6 +217,6 @@ hardware GPU/frame pacing, the optional old-Git container, prolonged external
 provider workloads and an indefinitely long session are unverified. Rename uses a
 real offline fixture LSP process; no latency claim is made for external providers.
 
-The [acceptance ticket](../../.scratch/project-replace/issues/01-final-validation.md)
+The acceptance ticket (`.scratch/project-replace/issues/01-final-validation.md`, a local planning record)
 records the completed Linux checks and these limits. Merging and releasing remain
 separate actions.

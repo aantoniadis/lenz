@@ -5,3 +5,6 @@ perf-results/
 # Shared with cloud sessions: commit and PR attribution.
 !.claude/settings.json
 __pycache__/
+
+# Local specs and tickets (docs/agents/issue-tracker.md): kept on this machine, never committed.
+.scratch/
