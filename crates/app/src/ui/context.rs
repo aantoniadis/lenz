@@ -169,6 +169,7 @@ impl Viewer {
             div()
                 .absolute()
                 .size_full()
+                .bg(lenz_gpui::popup::scrim())
                 .flex()
                 .items_center()
                 .justify_center()
@@ -177,6 +178,8 @@ impl Viewer {
                 .child(
                     lenz_gpui::popup::dialog(div(), p)
                         .id("discard-confirmation")
+                        // the window's own font, as every other popup
+                        .text_size(px(font_size())).font_family(self.font.family.clone())
                         .w(px(560.))
                         .max_w_full()
                         .max_h_full()

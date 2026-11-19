@@ -1293,13 +1293,13 @@ impl App {
                 .collect(),
             Prompt::Commands => self
                 .session
-                .actions()
+                .command_menu()
                 .into_iter()
                 .map(|a| Choice {
                     label: format!(
                         "{}: {}{}",
                         a.id.group().label(),
-                        a.on.map_or("", |on| if on { "✓ " } else { "○ " }),
+                        code_core::chrome::toggle_mark(a.on),
                         a.label
                     ),
                     detail: a.disabled.map(str::to_owned),

@@ -1561,7 +1561,7 @@ fn themes_change_through_the_chooser_and_persist_for_the_reader_only(cx: &mut Te
     for entry in &themes {
         let (id, bg) = (entry.id.as_str(), entry.palette.bg);
         // Theme… from the command menu (Ctrl+T finds declarations, as the spec's table says).
-        let theme = CommandId::ALL.iter().position(|&c| c == CommandId::ChooseTheme).unwrap();
+        let theme = CommandId::grouped().iter().position(|&c| c == CommandId::ChooseTheme).unwrap();
         v.simulate_keystrokes("f10");
         for _ in 0..theme {
             v.simulate_keystrokes("down");
@@ -1630,7 +1630,7 @@ fn narrow_windows_cut_the_status_bar_and_wrap_menu_reasons_and_shift_keys_select
     v.simulate_keystrokes("ctrl-f4 f10");
     draw(&mut v);
     let menu = f.view.read_with(&v, |v, _| v.modal_lines());
-    let index = CommandId::ALL.iter().position(|&c| c == CommandId::Reload).unwrap();
+    let index = CommandId::grouped().iter().position(|&c| c == CommandId::Reload).unwrap();
     let reload: String = menu.iter().filter(|(i, _, _)| *i == index).map(|(_, l, _)| l.as_str()).collect();
     assert_eq!(reload, "Reload", "action rows stay concise");
     for _ in 0..index { v.simulate_keystrokes("down"); }
@@ -1959,7 +1959,7 @@ fn a_new_window_has_its_own_session(cx: &mut TestAppContext) {
     let before = cx.update(|cx| cx.windows().len());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f10");
-    for _ in 0..CommandId::ALL.iter().position(|id| *id == CommandId::NewWindow).unwrap() { v.simulate_keystrokes("down"); }
+    for _ in 0..CommandId::grouped().iter().position(|id| *id == CommandId::NewWindow).unwrap() { v.simulate_keystrokes("down"); }
     v.simulate_keystrokes("enter");
     drop(v);
     cx.run_until_parked();
@@ -4871,7 +4871,7 @@ fn the_toggles_run_from_the_command_menu_and_show_their_state(cx: &mut TestAppCo
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(500.0)));
     let menu = |v: &mut VisualTestContext, id: CommandId| {
-        let at = CommandId::ALL.iter().position(|c| *c == id).unwrap();
+        let at = CommandId::grouped().iter().position(|c| *c == id).unwrap();
         v.simulate_keystrokes(&format!("f10{}", " down".repeat(at)));
         draw(v);
         let label = f.view.read_with(v, |r, _| r.modal_rows()[at].0.clone());
@@ -4888,7 +4888,7 @@ fn the_toggles_run_from_the_command_menu_and_show_their_state(cx: &mut TestAppCo
     assert_eq!(menu(&mut v, CommandId::SemanticHighlighting), "Semantic Highlighting (on)");
     v.simulate_keystrokes("f10");
     draw(&mut v);
-    let at = CommandId::ALL.iter().position(|c| *c == CommandId::SemanticHighlighting).unwrap();
+    let at = CommandId::grouped().iter().position(|c| *c == CommandId::SemanticHighlighting).unwrap();
     assert_eq!(f.view.read_with(&v, |r, _| r.modal_rows()[at].0.clone()), "Semantic Highlighting (off)");
 }
 
@@ -5020,7 +5020,7 @@ fn clicks_pick_rows_in_the_command_menu_recent_folders_and_theme_chooser(cx: &mu
     v.simulate_resize(size(px(900.0), px(600.0)));
     // The command menu: a click on Open Recent Folder… runs it.
     v.simulate_keystrokes("f10");
-    let recent = CommandId::ALL.iter().position(|&c| c == CommandId::OpenRecent).unwrap();
+    let recent = CommandId::grouped().iter().position(|&c| c == CommandId::OpenRecent).unwrap();
     click_modal_row(&f, &mut v, recent);
     assert!(matches!(f.view.read_with(&v, |v, _| v.modal.clone()), Some(Modal::Recent { at: 0 })));
     // Recent folders, newest first: a click on the older one opens it.
@@ -5032,7 +5032,7 @@ fn clicks_pick_rows_in_the_command_menu_recent_folders_and_theme_chooser(cx: &mu
     // The theme chooser from the menu (highlighted by keys so its row is drawn), then a click on Light.
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("f10");
-    let theme = CommandId::ALL.iter().position(|&c| c == CommandId::ChooseTheme).unwrap();
+    let theme = CommandId::grouped().iter().position(|&c| c == CommandId::ChooseTheme).unwrap();
     for _ in 0..theme {
         v.simulate_keystrokes("down");
     }
@@ -5349,7 +5349,7 @@ fn every_toggle_shows_on_or_off_in_the_command_menu(cx: &mut TestAppContext) {
     let mut v = visual(cx, &f);
     v.simulate_resize(size(px(900.0), px(600.0)));
     draw(&mut v);
-    let label = |v: &VisualTestContext, id: CommandId| f.view.read_with(v, |r, _| r.modal_rows()[CommandId::ALL.iter().position(|c| *c == id).unwrap()].0.clone());
+    let label = |v: &VisualTestContext, id: CommandId| f.view.read_with(v, |r, _| r.modal_rows()[CommandId::grouped().iter().position(|c| *c == id).unwrap()].0.clone());
     v.simulate_keystrokes("f10");
     assert_eq!(label(&v, CommandId::SoftWrap), "Soft Wrap (off)");
     assert_eq!(label(&v, CommandId::StickyScroll), "Sticky Scroll (on)");

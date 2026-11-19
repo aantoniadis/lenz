@@ -31,6 +31,7 @@ struct Item {
     reason: Option<String>,
     action: Action,
 }
+const MENU_HINT: &str = "F2 details · Enter selects · Esc closes";
 #[derive(Default)]
 pub(crate) struct Menu {
     items: Vec<Item>,
@@ -39,6 +40,8 @@ pub(crate) struct Menu {
     area: Rect,
     question_scroll: u16,
     commit: Option<String>,
+    /// The cell a right click opened the menu at; `None` (Shift-F10) centres it.
+    anchor: Option<(u16, u16)>,
 }
 impl App {
     pub(crate) fn clear_context(&mut self){self.context.items.clear();self.session.cancel_discard();}
@@ -312,6 +315,7 @@ impl App {
         self.context.selected = 0;
         self.context.first = 0;
         self.context.commit = None;
+        self.context.anchor = point;
         let commit = point.zip(self.repository.as_ref()).and_then(|((x, y), r)| self.commit_panel.commit_at(x, y, &r.core));
         // over a PR tab: only its card's copy menu; the diff under it is hidden
         let pane = self.pr_pane();
@@ -433,18 +437,21 @@ impl App {
         if question.is_none() && self.context.items.is_empty() {
             return;
         }
-        let width = bounds.width.min(70);
+        use unicode_width::UnicodeWidthStr;
+        // A menu is as wide as its rows, their reasons and its key hint, and opens at the pointer; a question and a
+        // menu opened from the keyboard sit in the middle.
+        let content = self.context.items.iter().flat_map(|i| [i.label.width(), i.reason.as_deref().map_or(0, str::width)]).max().unwrap_or(0).max(MENU_HINT.width());
+        let width = if question.is_some() { bounds.width.min(70) } else { bounds.width.min(content.min(68) as u16 + 2) };
         let height = if question.is_some() {
             bounds.height.min(14)
         } else {
             bounds.height.min(self.context.items.len() as u16 + 3)
         };
-        let area = Rect::new(
-            bounds.x + (bounds.width - width) / 2,
-            bounds.y + (bounds.height - height) / 2,
-            width,
-            height,
-        );
+        let (x, y) = match self.context.anchor.filter(|_| question.is_none()) {
+            Some((x, y)) => (x.min(bounds.right() - width), y.min(bounds.bottom() - height)),
+            None => (bounds.x + (bounds.width - width) / 2, bounds.y + (bounds.height - height) / 2),
+        };
+        let area = Rect::new(x, y, width, height);
         self.context.area = area;
         frame.render_widget(Clear, area);
         frame.render_widget(
@@ -515,7 +522,7 @@ impl App {
                 .items
                 .get(self.context.selected)
                 .and_then(|i| i.reason.as_deref())
-                .unwrap_or("F2 details · Enter selects · Esc closes");
+                .unwrap_or(MENU_HINT);
             crate::visual::safe_text(
                 frame.buffer_mut(),
                 Rect::new(area.x + 1, area.bottom() - 2, width - 2, 1),

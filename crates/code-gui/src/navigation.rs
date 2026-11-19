@@ -192,7 +192,7 @@ impl ReaderView {
         let Some(search) = self.session.state().navigation() else { return Vec::new() };
         let heading = if search.scope == Scope::Recent { search.scope.label().to_string() } else { Scope::ALL.iter().map(|s| if *s == search.scope { format!("[{}]", s.label()) } else { s.label().to_string() }).collect::<Vec<_>>().join("  ") };
         let mut rows = vec![(heading, None), (format!("Search › {}", search.query), None), (self.session.navigation_status(), None)];
-        rows.extend(search.rows.iter().map(|r| (format!("{}{} — {}{}", r.label, match r.on { Some(true) => " (on)", Some(false) => " (off)", None => "" }, r.detail, navigation_shortcut(r).map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
+        rows.extend(search.rows.iter().map(|r| (format!("{} — {}{}", code_core::chrome::toggle_text(&r.label, r.on), r.detail, navigation_shortcut(r).map_or(String::new(), |k| format!(" · {k}"))), r.disabled)));
         rows
     }
 }
@@ -226,13 +226,16 @@ impl Frame {
                 match row.kind {
                     Kind::File => paint_icon(window, cx, nerd, logos, bounds, p, icons::file(&row.label), x + 10.0, top),
                     Kind::Symbol => lenz_gpui::text(window, cx, m, x + 10.0, top, "◇", p.accent),
-                    Kind::Action => lenz_gpui::text(window, cx, m, x + 10.0, top, "›", p.accent),
+                    // a setting shows its state where a command shows its chevron
+                    Kind::Action => match row.on {
+                        Some(on) => lenz_gpui::text(window, cx, m, x + 10.0, top, code_core::chrome::toggle_mark(Some(on)).trim_end(), if on { p.accent } else { p.dim }),
+                        None => lenz_gpui::text(window, cx, m, x + 10.0, top, "›", p.dim),
+                    },
                 }
-                let state = match row.on { Some(true) => "  on", Some(false) => "  off", None => "" };
-                let label = format!("{}{state}", row.label);
+                let label = &row.label;
                 let color = if row.disabled.is_some() { p.dim } else { p.fg };
                 let matched = highlights(&self.query, &row.label, p.accent);
-                lenz_gpui::colored_text(window, cx, m, color, x + 34.0, top, &label, &matched, &[]);
+                lenz_gpui::colored_text(window, cx, m, color, x + 34.0, top, label, &matched, &[]);
                 let detail = match row.disabled { Some(why) => format!("{} · {why}", row.detail), None => row.detail.clone() };
                 lenz_gpui::text(window, cx, m, x + 34.0, top + line_h(), &detail, p.dim);
                 if let Some(shortcut) = navigation_shortcut(row) {

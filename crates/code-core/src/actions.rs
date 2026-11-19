@@ -474,6 +474,24 @@ pub enum CommandGroup {
 impl CommandGroup {
     pub const ALL: [Self; 36] = [Self::File, Self::View, Self::Navigate, Self::Find, Self::Selection, Self::Git, Self::LanguageServers, Self::Sql, Self::Application, Self::Recovery, Self::FileLocation, Self::New, Self::Tabs, Self::Compare, Self::Layout, Self::Appearance, Self::Folding, Self::Hints, Self::Explorer, Self::Csv, Self::Annotations, Self::Branches, Self::GitCompare, Self::Changes, Self::Bookmarks, Self::CodeNavigation, Self::Problems, Self::FindOptions, Self::Selections, Self::Lines, Self::EditingSettings, Self::ServerSetup, Self::Metadata, Self::Dialect, Self::Keybindings, Self::Terminal];
 
+    /// Every group, each menu followed by its submenus: the order the full command menu lists them in.
+    pub fn nested() -> Vec<Self> {
+        let mut out = Vec::with_capacity(Self::ALL.len());
+        for &root in Self::ALL.iter().filter(|g| g.parent().is_none()) {
+            out.push(root);
+            out.extend(Self::ALL.iter().copied().filter(|g| g.parent() == Some(root)));
+        }
+        out
+    }
+
+    /// The group's place in the menus: "View › Terminal", or "File" for a menu of the root.
+    pub fn path(self) -> String {
+        match self.parent() {
+            Some(parent) => format!("{} › {}", parent.label(), self.label()),
+            None => self.label().to_string(),
+        }
+    }
+
     /// The menu a group's Back row returns to: the application's commands sit in the root menu, so its submenus
     /// return there.
     pub fn menu_parent(self) -> Option<Self> {
@@ -556,6 +574,15 @@ impl CommandGroup {
 }
 
 impl CommandId {
+    /// Every command in the full command menu's order: grouped as the menus group them ([`CommandGroup::nested`]),
+    /// in catalog order within a group.
+    pub fn grouped() -> Vec<Self> {
+        let order = CommandGroup::nested();
+        let mut all = Self::ALL.to_vec();
+        all.sort_by_key(|id| order.iter().position(|g| *g == id.group()));
+        all
+    }
+
     pub fn group(self) -> CommandGroup {
         use CommandGroup as G;
         match self {
@@ -687,5 +714,21 @@ mod tests {
         }).collect();
         assert_eq!(grouped.len(), CommandId::ALL.len());
         assert!(CommandId::ALL.iter().all(|id| grouped.contains(id)));
+    }
+
+    #[test]
+    fn the_full_command_menu_lists_each_group_once_under_its_menu() {
+        let grouped = CommandId::grouped();
+        assert_eq!(grouped.len(), CommandId::ALL.len());
+        assert!(CommandId::ALL.iter().all(|id| grouped.contains(id)));
+        // one run of rows per group, a submenu's after its menu's
+        let mut runs: Vec<CommandGroup> = Vec::new();
+        for id in &grouped { if runs.last() != Some(&id.group()) { runs.push(id.group()); } }
+        for (i, group) in runs.iter().enumerate() {
+            assert!(!runs[..i].contains(group), "{} is listed twice", group.label());
+            if let Some(parent) = group.parent() && runs.contains(&parent) { assert!(runs[..i].contains(&parent), "{} comes before {}", group.label(), parent.label()); }
+        }
+        assert_eq!(CommandGroup::Terminal.path(), "View › Terminal");
+        assert_eq!(CommandGroup::File.path(), "File");
     }
 }

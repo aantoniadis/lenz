@@ -95,7 +95,7 @@ The **☰** button (GUI and terminal) opens File, Edit, View, Navigate, Find, Gi
 existing commands and setting values. The selected action's disabled reason appears separately below the list;
 unavailable actions keep the menu open. Scroll long menus with the wheel or arrow keys. Click **‹ All menus**, or press Left/Escape, to go
 back to the groups. **All commands…** and the bottom-right **Commands** button open searchable Actions.
-F10 retains the plain full command menu. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10
+F10 keeps the full command menu: every command under its menu's heading (File, File › New, View › Terminal…), settings with a check mark when on. Narrow windows shorten the button label; below 240 px it gives way to the LSP status, with ☰ and F10
 still available. Menus consume input before the document beneath them.
 
 With the explorer focused (Ctrl+Shift+E), typing searches visible file and folder names without opening them.

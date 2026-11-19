@@ -241,6 +241,7 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
     let range = p.window(usize::from(inner.height.saturating_sub(1)));
     let selected = p.selected();
     if p.is_empty() && inner.height > 1 { crate::visual::safe_text(buf, Rect::new(inner.x, inner.y + 1, inner.width, 1), "No matching commands", base.fg(color(palette.dim))); }
+    let query = p.query().to_string();
     let rows: Vec<_> = p.rows().enumerate().skip(range.start).take(range.len()).collect();
     let key_w = rows.iter().filter_map(|(_, e)| e.entry.shortcut).map(UnicodeWidthStr::width).max().unwrap_or(0) as u16;
     for (row, (i, entry)) in rows.into_iter().enumerate() {
@@ -259,8 +260,20 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
         let columns = group_x > line.x + 1 && (entry.disabled.is_none() || (text.width() as u16) < group_x - line.x);
         let label_w = if columns { group_x - line.x - 1 } else { line.width };
         crate::visual::safe_text(buf, Rect { width: label_w, ..line }, &text, fg(if entry.disabled.is_some() { palette.dim } else { palette.fg }));
+        // the typed words, marked where the filter found them
+        let (in_label, in_group) = lenz::palette::match_ranges(&entry.entry.label, group, &query);
+        let fill = if selected == Some(i) { palette.menu_selected(palette.status_bg) } else { palette.status_bg };
+        let matched = ratatui::style::Style::default().fg(color(palette.readable_on(palette.accent, fill))).add_modifier(ratatui::style::Modifier::BOLD);
+        let mark_at = |buf: &mut ratatui::buffer::Buffer, from: u16, limit: u16, text: &str, range: std::ops::Range<usize>| {
+            let (Some(before), Some(hit)) = (text.get(..range.start), text.get(range)) else { return };
+            let x = from + before.width() as u16;
+            let w = (hit.width() as u16).min(limit.saturating_sub(x));
+            if x < limit { buf.set_style(Rect::new(x, line.y, w, 1), matched); }
+        };
+        for r in in_label { mark_at(buf, line.x + mark.width() as u16, line.x + label_w, &entry.entry.label, r); }
         if columns {
             crate::visual::safe_text(buf, Rect::new(group_x, line.y, line.right() - group_x, 1), group, fg(palette.dim));
+            for r in in_group { mark_at(buf, group_x, line.right(), group, r); }
             if let Some(key) = entry.entry.shortcut { crate::visual::safe_text(buf, Rect::new(line.right().saturating_sub(1 + key.width() as u16), line.y, key.width() as u16, 1), key, fg(palette.dim)); }
         }
     }

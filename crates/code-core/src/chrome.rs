@@ -54,6 +54,27 @@ pub fn about() -> String {
         .join("\n")
 }
 
+/// A setting's row where only text carries its state: "Soft Wrap (on)"; a command's label as it is.
+pub fn toggle_text(label: &str, on: Option<bool>) -> String {
+    match on {
+        Some(true) => format!("{label} (on)"),
+        Some(false) => format!("{label} (off)"),
+        None => label.to_string(),
+    }
+}
+
+/// [`toggle_text`] undone, for an adapter that draws the state as a mark: the label and the state it carried.
+pub fn toggle_split(text: &str) -> (&str, Option<bool>) {
+    if let Some(label) = text.strip_suffix(" (on)") { (label, Some(true)) }
+    else if let Some(label) = text.strip_suffix(" (off)") { (label, Some(false)) }
+    else { (text, None) }
+}
+
+/// A setting's state as a mark before its label: on, off, and nothing for a command.
+pub fn toggle_mark(on: Option<bool>) -> &'static str {
+    match on { Some(true) => "✓ ", Some(false) => "○ ", None => "" }
+}
+
 impl Session {
     /// Frequent actions in both toolbars. Overflow remains available in the command menu.
     pub fn toolbar(&self) -> Vec<(CommandId, &'static str)> {
@@ -71,14 +92,7 @@ impl Session {
     /// a parent link, direct commands and task submenus.
     pub fn menu(&self, group: Option<CommandGroup>) -> Vec<MenuRow> {
         let row = |label, disabled, target| MenuRow { label, disabled, target };
-        let commands = |g: CommandGroup| self.actions().into_iter().filter(move |a| a.id.group() == g).map(|a| {
-            let label = match a.on {
-                Some(true) => format!("{} (on)", a.label),
-                Some(false) => format!("{} (off)", a.label),
-                None => a.label.to_string(),
-            };
-            row(label, a.disabled, MenuTarget::Run(a.id))
-        });
+        let commands = |g: CommandGroup| self.actions().into_iter().filter(move |a| a.id.group() == g).map(|a| row(toggle_text(a.label, a.on), a.disabled, MenuTarget::Run(a.id)));
         let children = |g: CommandGroup| CommandGroup::ALL.iter().filter(move |child| child.parent() == Some(g)).map(|&child| row(format!("{} ›", child.label()), None, MenuTarget::Group(child)));
         match group {
             None => {
@@ -341,5 +355,14 @@ mod tests {
         let missing = provider_message(provider);
         assert!(missing.contains("Install Language Server") && !missing.contains("RAW_STARTUP_DIAGNOSTICS"), "{missing}");
         assert!(before.contains("1.2"));
+    }
+
+    #[test]
+    fn a_settings_state_reads_back_from_its_row_text() {
+        for on in [Some(true), Some(false), None] {
+            assert_eq!(toggle_split(&toggle_text("Soft Wrap", on)), ("Soft Wrap", on));
+        }
+        // a label that only looks like one keeps its text
+        assert_eq!(toggle_split("Turn (on) Later"), ("Turn (on) Later", None));
     }
 }

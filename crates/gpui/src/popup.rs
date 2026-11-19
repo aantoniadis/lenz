@@ -60,3 +60,12 @@ pub fn dialog<E: gpui::Styled>(element: E, palette: &Palette) -> E {
     let (bg, border) = colors(palette);
     element.bg(color(bg)).border_1().border_color(color(border)).rounded(px(RADIUS)).shadow(shadows(palette).to_vec())
 }
+
+/// The shade a dialog that must be answered lays over the window behind it. Menus, palettes and pickers leave the
+/// window as it is: they are glanced at, and a theme chooser previews on it.
+pub fn scrim() -> gpui::Hsla { gpui::hsla(0., 0., 0., 0.32) }
+
+/// Paint [`scrim`] over `bounds` (the window's content), before the dialog's own [`surface`].
+pub fn shade(window: &mut Window, bounds: Bounds<Pixels>) {
+    window.paint_quad(quad(bounds, px(0.), scrim(), px(0.), gpui::transparent_black(), Default::default()));
+}

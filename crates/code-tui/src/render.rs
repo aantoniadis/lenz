@@ -1453,7 +1453,7 @@ impl App {
                 Kind::Symbol => Icon::Book.label(nerd, &result.label),
                 Kind::Action => Icon::Commands.label(nerd, &result.label),
             };
-            let setting = result.on.map_or("", |on| if on { "✓ " } else { "○ " });
+            let setting = code_core::chrome::toggle_mark(result.on);
             let label = format!(
                 "{}{}{}  {}{}",
                 if selected { "› " } else { "  " },
@@ -1746,6 +1746,7 @@ impl App {
             }
         }
         let mut selected = 0..0;
+        let menu_marks = matches!(modal.kind, Prompt::Menu(_)) && choices.iter().any(|c| code_core::chrome::toggle_split(&c.label).1.is_some());
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         let mut previous_section = None;
         for (i, choice) in choices.iter().enumerate() {
@@ -1776,8 +1777,13 @@ impl App {
             let shortcut = if action_list { match choice.target { crate::app::ChoiceTarget::Action(id) => self.session.key_hint(id), _ => None } } else { None };
             let shortcut = shortcut.filter(|key| key.width() + 3 < width / 2 && choice.label.width() + suffix.width() + 2 + key.width() + 3 <= width);
             let label_width = shortcut.as_ref().map_or(width, |key| width.saturating_sub(key.width() + 3).max(1));
+            // A menu draws a setting's state as a mark in a column of its own, as the command list does.
+            let label = if !menu_marks || choice.label.starts_with('─') { choice.label.clone() } else {
+                let (label, on) = code_core::chrome::toggle_split(&choice.label);
+                format!("{}{label}", if on.is_some() { code_core::chrome::toggle_mark(on) } else { "  " })
+            };
             // A wrapped label's continuation keeps the label's indent, clear of the selection marker.
-            for (part, text) in wrap_text(&format!("{}{}", choice.label, suffix), label_width.saturating_sub(2).max(1))
+            for (part, text) in wrap_text(&format!("{label}{suffix}"), label_width.saturating_sub(2).max(1))
                 .into_iter()
                 .enumerate()
                 .map(|(part, text)| (part, format!("{}{text}", if part == 0 && i == modal.at { "› " } else { "  " }))) {

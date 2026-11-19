@@ -3740,7 +3740,9 @@ impl Render for Viewer {
         }
         let menu=self.menu.as_ref().map(|m| {
             let (x,y,width,rows)=m.layout(self.panes.viewport,char_w);let start=m.start(rows);
-            (x,y,width,m.items.iter().skip(start).take(rows).map(|i|i.0.clone()).collect::<Vec<_>>(),m.hover.map(|i|i-start),start, m.items.len())
+            // a catalog action that cannot run now is dim; its label already carries the reason
+            let disabled=|action:&MenuAction|matches!(action,MenuAction::Run(a) if crate::catalog::Availability::disabled(self,*a).is_some());
+            (x,y,width,m.items.iter().skip(start).take(rows).map(|i|(i.0.clone(),disabled(&i.1))).collect::<Vec<_>>(),m.hover.map(|i|i-start),start, m.items.len())
         });
         let goto = self.goto_prompt();
         let field_snapshot = self.field_snapshot((self.panes.viewport[0]/char_w.max(1.0)).max(0.0) as usize);
@@ -4036,13 +4038,13 @@ impl Render for Viewer {
                         if let Some((mx, my, mw, items, hover, start, total)) = &menu {
                             let mh = items.len() as f32 * line_h() + 8.0;
                             paint_raised(window, *mx, *my, *mw, mh, &palette);
-                            for (i, label) in items.iter().enumerate() {
+                            for (i, (label, disabled)) in items.iter().enumerate() {
                                 let iy = my + 4.0 + i as f32 * line_h();
                                 if *hover == Some(i) {
                                     lenz_gpui::popup::row(window, *mx, iy, *mw, line_h(), lenz_gpui::popup::selected(&palette));
                                 }
                                 let bounds=Bounds{origin:point(px(*mx),px(iy)),size:size(px(*mw),px(line_h()))};
-                                window.with_content_mask(Some(ContentMask{bounds}),|window|text(window,cx,&font,mx+12.,iy,label,palette.fg));
+                                window.with_content_mask(Some(ContentMask{bounds}),|window|text(window,cx,&font,mx+12.,iy,label,if *disabled {palette.dim} else {palette.fg}));
                             }
                             if *start>0 {text(window,cx,&font,mx+2.,my+4.,"↑",palette.dim);}
                             if start+items.len()<*total {text(window,cx,&font,mx+2.,my+4.+items.len().saturating_sub(1) as f32*line_h(),"↓",palette.dim);}
@@ -4073,18 +4075,21 @@ impl Render for Viewer {
                                 fill(window, cp.x, cp.y + 4.0 + line_h() - 1.0, cp.width, 1.0, lenz_gpui::popup::colors(&palette).1);
                                 if cp.empty {text(window, cx, &font, cp.x + 12.0, cp.y + 4.0 + line_h(), "No matching commands", palette.dim);}
                                 // shortcuts share one right-aligned column; the group sits left of it
-                                let key_w = cp.lines.iter().map(|l| l.2.chars().count()).max().unwrap_or(0) as f32 * char_w;
-                                for (i, (label, group, key, disabled, selected)) in cp.lines.iter().enumerate() {
+                                let key_w = cp.lines.iter().map(|l| l.key.chars().count()).max().unwrap_or(0) as f32 * char_w;
+                                for (i, palette_view::PaletteLine { label, group, key, disabled, selected, in_label, in_group }) in cp.lines.iter().enumerate() {
                                     let iy = cp.y + 4.0 + (i + 1) as f32 * line_h();
-                                    if *selected { lenz_gpui::popup::row(window, cp.x, iy, cp.width, line_h(), lenz_gpui::popup::selected(&palette)); }
+                                    let fill = if *selected { lenz_gpui::popup::selected(&palette) } else { lenz_gpui::popup::colors(&palette).0 };
+                                    if *selected { lenz_gpui::popup::row(window, cp.x, iy, cp.width, line_h(), fill); }
+                                    let matched = palette.readable_on(palette.accent, fill);
+                                    let marks = |ranges: &[Range<usize>]| ranges.iter().cloned().map(|r| (r, matched)).collect::<Vec<_>>();
                                     let kw = key.chars().count() as f32 * char_w;
                                     text(window, cx, &font, cp.x + cp.width - kw - 12.0, iy, key, palette.dim);
                                     let gap = if key_w > 0.0 { key_w + 2.0 * char_w } else { 0.0 };
                                     let gw = group.chars().count() as f32 * char_w;
                                     let gx = cp.x + cp.width - 12.0 - gap - gw;
-                                    text(window, cx, &font, gx, iy, group, palette.dim);
+                                    lenz_gpui::colored_text(window, cx, metrics(&font), palette.dim, gx, iy, group, &marks(in_group), &[]);
                                     let lb=Bounds{origin:point(px(cp.x),px(iy)),size:size(px((gx-cp.x-char_w).max(0.0)),px(line_h()))};
-                                    window.with_content_mask(Some(ContentMask{bounds:lb}),|window|text(window, cx, &font, cp.x + 12.0, iy, label, if *disabled {palette.dim} else {palette.fg}));
+                                    window.with_content_mask(Some(ContentMask{bounds:lb}),|window|lenz_gpui::colored_text(window, cx, metrics(&font), if *disabled {palette.dim} else {palette.fg}, cp.x + 12.0, iy, label, &marks(in_label), &[]));
                                 }
                             });
                         }

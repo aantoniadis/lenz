@@ -206,6 +206,8 @@ struct ModalLayout {
     query: Option<String>,
     body_top: f32,
     shortcuts: Vec<(usize, String)>,
+    /// Settings among a command menu's rows, and whether each is on: drawn as a check mark in a column of its own.
+    marks: Vec<(usize, bool)>,
 }
 
 impl ModalLayout {
@@ -2078,7 +2080,7 @@ impl ReaderView {
                 }
             }
             Some(Modal::Commands { at }) => {
-                if let Some(&id) = CommandId::ALL.get(at) { self.run(id, window, cx); }
+                if let Some(&id) = CommandId::grouped().get(at) { self.run(id, window, cx); }
             }
             Some(m @ (Modal::AppMenu { at } | Modal::CommandGroup { at, .. })) => {
                 let group = match m { Modal::CommandGroup { group, .. } => Some(group), _ => None };
@@ -5423,7 +5425,7 @@ impl ReaderView {
     /// The modal's rows, each wrapped to the menu's width, with the index of the row each line belongs to.
     fn modal_shortcuts(&self) -> Vec<(usize, String)> {
         let ids: Vec<_> = match self.modal.as_ref() {
-            Some(Modal::Commands { .. }) => CommandId::ALL.iter().copied().enumerate().collect(),
+            Some(Modal::Commands { .. }) => CommandId::grouped().into_iter().enumerate().collect(),
             Some(Modal::LanguageServer { .. }) => self.server_rows().into_iter().enumerate().filter_map(|(row, r)| r.1.map(|id| (row, id))).collect(),
             Some(m @ (Modal::AppMenu { .. } | Modal::CommandGroup { .. })) => {
                 let group = match m { Modal::CommandGroup { group, .. } => Some(*group), _ => None };
@@ -5456,15 +5458,23 @@ impl ReaderView {
         }
         let shortcuts = self.modal_shortcuts();
         let actions = matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. } | Modal::LanguageServer { .. }));
+        // A command menu draws a setting's state as a check mark in its own two-cell column.
+        let cols = if self.modal_marks().is_empty() { cols } else { cols.saturating_sub(2).max(1) };
         self.modal_rows()
             .into_iter()
             .enumerate()
             .flat_map(|(i, (label, why))| {
-                let text = match why { Some(why) if !actions => format!("{label} — {why}"), _ => label };
+                let text = match why { Some(why) if !actions => format!("{label} — {why}"), _ if actions => code_core::chrome::toggle_split(&label).0.to_string(), _ => label };
                 let cols = shortcuts.iter().find(|(row, key)| *row == i && lenz_content::wrap::width(key) + 3 < cols / 2).map_or(cols, |(_, key)| cols.saturating_sub(lenz_content::wrap::width(key) + 3).max(1));
                 text.split('\n').flat_map(|line| wrap(line, cols)).collect::<Vec<_>>().into_iter().map(move |l| (i, l, why.is_some()))
             })
             .collect()
+    }
+
+    /// A command menu's settings: each one's row and whether it is on.
+    fn modal_marks(&self) -> Vec<(usize, bool)> {
+        if !matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { return Vec::new(); }
+        self.modal_rows().iter().enumerate().filter_map(|(row, (label, _))| code_core::chrome::toggle_split(label).1.map(|on| (row, on))).collect()
     }
 
     fn action_menu_help(&self) -> Option<&'static str> {
@@ -5525,7 +5535,7 @@ impl ReaderView {
             let first = self.modal_scroll.get().min(lines.len().saturating_sub(visible));
             self.modal_scroll.set(first);
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
-            return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading, query: None, body_top, shortcuts: Vec::new() });
+            return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading, query: None, body_top, shortcuts: Vec::new(), marks: Vec::new() });
         }
         if let Some(Modal::Branches { query, .. } | Modal::ScratchFiles { query, .. }) = &self.modal {
             let scratch = matches!(self.modal, Some(Modal::ScratchFiles { .. }));
@@ -5552,7 +5562,7 @@ impl ReaderView {
             let first = self.modal_first(at, start..end, lines.len(), visible);
             let h = (body_top + (visible + footer.len()) as f32 * line_h() + 20.0).min(cap);
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
-            return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(query.clone()), body_top, shortcuts: Vec::new() });
+            return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(query.clone()), body_top, shortcuts: Vec::new(), marks: Vec::new() });
         }
         if matches!(self.modal, Some(Modal::Themes { .. })) {
             let h = (self.height - 16.0).clamp(0.0, 400.0);
@@ -5561,14 +5571,26 @@ impl ReaderView {
             let end = lines.iter().rposition(|(i, _, _)| *i == at).map_or(0, |i| i + 1);
             let first = self.modal_first(at, start..end, lines.len(), visible);
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
-            return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading: None, query: None, body_top: 4.0, shortcuts: Vec::new() });
+            return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading: None, query: None, body_top: 4.0, shortcuts: Vec::new(), marks: Vec::new() });
         }
         let heading = if matches!(self.modal, Some(Modal::LanguageServer { .. })) {
             for (row, title) in [(8, "Indexing"), (4, "Setup")] {
                 if let Some(at) = lines.iter().position(|r| r.0 == row) { lines.insert(at, (usize::MAX, title.into(), true)); }
             }
             Some("Language Server".to_string())
-        } else { None };
+        } else {
+            if matches!(self.modal, Some(Modal::Commands { .. })) {
+                // Each group under its menu path, a rule above every group but the first.
+                let mut group = None;
+                for (row, id) in CommandId::grouped().into_iter().enumerate() {
+                    if group.replace(id.group()) == Some(id.group()) { continue; }
+                    let Some(at) = lines.iter().position(|r| r.0 == row) else { continue };
+                    lines.insert(at, (usize::MAX, id.group().path(), true));
+                    if row > 0 { lines.insert(at, (usize::MAX, String::new(), true)); }
+                }
+            }
+            None
+        };
         let body_top = if heading.is_some() { line_h() + 28.0 } else { 4.0 };
         let top = if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { toolbar_h().min((self.height - 16.0).max(0.0)) } else { 8.0 };
         let capacity = ((self.height - top - body_top - 4.0) / line_h()).floor().max(0.0) as usize;
@@ -5579,7 +5601,7 @@ impl ReaderView {
         let first = self.modal_first(at, start..end, lines.len(), visible);
         let bounds = Bounds { origin: gpui::point(px(if matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { 4.0_f32.min((self.width - mw).max(0.0)) } else { (self.width - mw) / 2.0 }), px(top)), size: gpui::size(px(mw), px(((visible + footer.len()) as f32 * line_h() + body_top + 4.0).min((self.height - top).max(0.0)))) };
         let shortcuts = self.modal_shortcuts();
-        Some(ModalLayout { bounds, lines, first, visible, at, footer, heading, query: None, body_top, shortcuts })
+        Some(ModalLayout { bounds, lines, first, visible, at, footer, heading, query: None, body_top, shortcuts, marks: self.modal_marks() })
     }
 
     /// The key chooser's rows after its prompt: the bookmarks that have a key (each label starts with it).
@@ -5621,11 +5643,7 @@ impl ReaderView {
             Some(Modal::LanguageServer { .. }) => self.server_rows().into_iter().map(|(text, action)| (text, action.and_then(|id| self.session.disabled(id)))).collect(),
             Some(Modal::AppMenu { .. }) => self.session.menu(None).into_iter().map(|r| (r.label, r.disabled)).collect(),
             Some(Modal::CommandGroup { group, .. }) => self.session.menu(Some(*group)).into_iter().map(|r| (r.label, r.disabled)).collect(),
-            Some(Modal::Commands { .. }) => self.session.actions().into_iter().map(|a| (match a.on {
-                Some(true) => format!("{} (on)", a.label),
-                Some(false) => format!("{} (off)", a.label),
-                None => a.label.to_string(),
-            }, a.disabled)).collect(),
+            Some(Modal::Commands { .. }) => self.session.command_menu().into_iter().map(|a| (code_core::chrome::toggle_text(a.label, a.on), a.disabled)).collect(),
             Some(Modal::Context { entries, .. }) => entries
                 .iter()
                 .map(|e| match e {
@@ -6239,6 +6257,7 @@ impl Render for ReaderView {
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         let branch_chooser = matches!(self.modal, Some(Modal::Branches { .. }));
         let menu_modal = matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
+        let commands_modal = matches!(self.modal, Some(Modal::Commands { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
         let completion_frame = self.completion_frame(window, cx);
@@ -6777,6 +6796,8 @@ impl Render for ReaderView {
                         if let Some(dialog) = &search {
                             dialog.paint(window, cx, m, &palette, x0, y0);
                         }
+                        // A dialog that must be answered shades the window behind it.
+                        if form.is_some() || (modal.is_some() && details_modal) { lenz_gpui::popup::shade(window, bounds); }
                         if let Some(form) = &form { form.paint(window, cx, m, &palette, x0, y0); }
                         if let Some(l) = &modal {
                             let (mx, my) = (x0 + f32::from(l.bounds.origin.x), y0 + f32::from(l.bounds.origin.y));
@@ -6828,7 +6849,7 @@ impl Render for ReaderView {
                                         continue;
                                     }
                                     // A menu's separator: a line across, never highlighted.
-                                    if menu_modal && line.is_empty() {
+                                    if (menu_modal || commands_modal) && line.is_empty() {
                                         lenz_gpui::fill(window, mx + 8.0, y + line_h() / 2.0, (mw - 16.0).max(0.0), 1.0, border);
                                         continue;
                                     }
@@ -6839,7 +6860,7 @@ impl Render for ReaderView {
                                         let kx = mx + mw - 12.0 - lenz_content::wrap::width(key) as f32 * char_w;
                                         if lenz_content::wrap::width(key) + 3 < ((mw - 24.0) / char_w).max(0.0) as usize / 2 { lenz_gpui::text(window, cx, m, kx, y, key, palette.dim); }
                                     }
-                                    let section = branch_chooser && *row == usize::MAX || details_modal && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
+                                    let section = (branch_chooser || commands_modal) && *row == usize::MAX || details_modal && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
                                     let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
                                     // A row with a file-type icon (New Scratch File's kinds): the icon, then its text.
                                     let icon = scratch_icons.as_ref().zip(row.checked_sub(FINDER_HEADER_ROWS)).and_then(|(icons, i)| icons.get(i).copied());
@@ -6848,6 +6869,9 @@ impl Render for ReaderView {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, Bounds { origin: gpui::point(px(mx), px(my)), size: gpui::size(px(mw), px(mh)) }, &palette, icon, mx + 12.0, y);
                                     }
                                     let mx = if icon.is_some() { mx + icons::SIZE + ICON_GAP } else { mx };
+                                    // Settings show their state as a check mark; every command sits right of that column.
+                                    if first_line && l.marks.contains(&(*row, true)) { lenz_gpui::text(window, cx, m, mx + 12.0, y, "✓", palette.readable_on(palette.accent, bg)); }
+                                    let mx = if l.marks.is_empty() || *row == usize::MAX { mx } else { mx + 2.0 * char_w };
                                     lenz_gpui::text(window, cx, if section { Metrics { font: &heading, ..m } } else { m }, mx + 12.0, y, line, if *row == usize::MAX { palette.readable_on(palette.dim, bg) } else if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
                                 }
                                 if !l.footer.is_empty() {

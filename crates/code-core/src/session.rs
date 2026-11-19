@@ -3555,7 +3555,16 @@ impl Session {
     }
 
     pub fn actions(&self) -> Vec<Action> {
-        CommandId::ALL.iter().map(|&id| Action { id, label: id.label(), disabled: self.disabled(id), on: self.on(id), shortcut: self.key_hint(id) }).collect()
+        CommandId::ALL.iter().map(|&id| self.menu_action(id)).collect()
+    }
+
+    /// The full command menu's rows in both adapters: every command, grouped ([`CommandId::grouped`]).
+    pub fn command_menu(&self) -> Vec<Action> {
+        CommandId::grouped().into_iter().map(|id| self.menu_action(id)).collect()
+    }
+
+    fn menu_action(&self, id: CommandId) -> Action {
+        Action { id, label: id.label(), disabled: self.disabled(id), on: self.on(id), shortcut: self.key_hint(id) }
     }
 
     /// Toggle `id`'s state for the menus (`None`: not a toggle): a setting, or a find option (the session's, which the

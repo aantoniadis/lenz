@@ -16,6 +16,23 @@ pub fn matches(label: &str, group: &str, query: &str) -> bool {
     query.split_whitespace().all(|word| { let word = word.to_lowercase(); label.contains(&word) || group.contains(&word) })
 }
 
+/// Where [`matches`] found `query`'s words, for a frontend to highlight: byte ranges in `label`, and in `group` for
+/// a word only the group has. Empty for text whose lowercase form has other offsets.
+pub fn match_ranges(label: &str, group: &str, query: &str) -> (Vec<std::ops::Range<usize>>, Vec<std::ops::Range<usize>>) {
+    let find = |text: &str, word: &str| {
+        let lower = text.to_lowercase();
+        if lower.len() != text.len() { return None; }
+        let at = lower.find(word)?;
+        (text.is_char_boundary(at) && text.is_char_boundary(at + word.len())).then_some(at..at + word.len())
+    };
+    let (mut in_label, mut in_group) = (Vec::new(), Vec::new());
+    for word in query.split_whitespace() {
+        let word = word.to_lowercase();
+        if let Some(range) = find(label, &word) { in_label.push(range) } else if let Some(range) = find(group, &word) { in_group.push(range) }
+    }
+    (in_label, in_group)
+}
+
 pub struct Palette { all: Vec<Row>, query: crate::line_edit::Input, hits: Vec<usize>, selected: usize, first: usize }
 
 impl Palette {
@@ -79,6 +96,15 @@ mod tests {
         fn disabled(&self, a: Action) -> Option<Cow<'static, str>> { (a == Action::Interaction(Interaction::Copy)).then(|| "No selected text".into()) }
     }
     fn palette(a: &dyn Availability) -> Palette { Palette::new(catalog::entries(&Scope::comparison()), a) }
+
+    #[test]
+    fn match_ranges_follow_the_filter_into_the_label_or_the_group() {
+        let at = |start, end| vec![std::ops::Range { start, end }];
+        assert_eq!(match_ranges("Find: Match Case", "Search", "CASE sea"), (at(12, 16), at(0, 3)));
+        // a word the label has is marked there, not in the group
+        assert_eq!(match_ranges("Search results", "Search", "search"), (at(0, 6), vec![]));
+        assert_eq!(match_ranges("New Comparison…", "File", "comparison… zzz"), (at(4, 17), vec![]));
+    }
 
     #[test]
     fn words_match_label_or_group_in_any_case() {

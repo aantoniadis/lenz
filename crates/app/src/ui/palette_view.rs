@@ -206,7 +206,10 @@ impl Viewer {
             let reason=row.disabled.as_deref().filter(|_|selected==Some(i)).map_or(String::new(),|why|format!(" — {why}"));
             // macOS: the palette names the Command key the bindings accept
             let key=row.entry.shortcut.map(|k|if cfg!(target_os="macos") {k.replace("ctrl-","cmd-")} else {k.to_string()});
-            (format!("{mark}{}{reason}",row.entry.label),row.entry.group.label().to_string(),key.unwrap_or_default(),row.disabled.is_some(),selected==Some(i))
+            // the typed words, marked where the filter found them
+            let (mut in_label,in_group)=crate::palette::match_ranges(&row.entry.label,row.entry.group.label(),p.query());
+            for r in &mut in_label {*r=r.start+mark.len()..r.end+mark.len();}
+            PaletteLine{label:format!("{mark}{}{reason}",row.entry.label),group:row.entry.group.label().to_string(),key:key.unwrap_or_default(),disabled:row.disabled.is_some(),selected:selected==Some(i),in_label,in_group}
         }).collect();
         let empty=p.is_empty();
         let columns=(width/self.char_w.max(1.0)).max(0.0) as usize;
@@ -215,7 +218,10 @@ impl Viewer {
     }
 }
 
-pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<(String,String,String,bool,bool)>, pub empty:bool }
+pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<PaletteLine>, pub empty:bool }
+/// One palette row: its label (with the selected row's disabled reason), group and shortcut, and where the typed
+/// words sit in the label and the group.
+pub(super) struct PaletteLine { pub label:String, pub group:String, pub key:String, pub disabled:bool, pub selected:bool, pub in_label:Vec<std::ops::Range<usize>>, pub in_group:Vec<std::ops::Range<usize>> }
 
 impl Availability for Viewer {
     fn disabled(&self,action:Action)->Option<Cow<'static,str>>{
