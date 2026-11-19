@@ -55,8 +55,12 @@ impl App {
             let cursor = Self::field_cursor(modal);
             cursor.caret(&modal.input) == modal.input.len() && cursor.selection(&modal.input).is_none()
         };
+        // On a branch folder the arrows open and close it, as a tree's do, whatever the filter holds.
+        let folder = modal.kind == Prompt::Branches && matches!(key.code, KeyCode::Left | KeyCode::Right)
+            && self.session.state().branch_rows(&modal.input).get(modal.at).is_some_and(|r| matches!(r.target, code_core::branches::BranchTarget::Folder(..)));
         if plain
             && (branch_actions
+                || folder
                 || modal.input.is_empty() && key.code == KeyCode::Delete
                     && (recent || matches!(modal.kind, Prompt::Places(_) | Prompt::Keymap)))
         {

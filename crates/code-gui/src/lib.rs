@@ -2135,6 +2135,15 @@ impl ReaderView {
                         self.dispatch(Command::CloseBranches, cx);
                         self.run(*id, window, cx);
                     }
+                    // the highlight stays put: on the first of the rows it brings in
+                    BranchTarget::More(section) => {
+                        self.dispatch(Command::ExpandBranches(section), cx);
+                        self.modal = Some(Modal::Branches { query, at });
+                    }
+                    BranchTarget::Folder(section, name) => {
+                        self.dispatch(Command::ToggleBranchFolder(section, name.clone()), cx);
+                        self.modal = Some(Modal::Branches { query, at });
+                    }
                     t => match self.session.branch_enter(t) {
                         Some(action) => self.branch_action(t, action, window, cx),
                         None => self.modal = Some(Modal::Branches { query, at }),
@@ -2142,6 +2151,12 @@ impl ReaderView {
                 }
             }
             Some(Modal::BranchMenu { target, label, at, query, row }) => match self.session.branch_actions(&target).get(at) {
+                // a star changes the list, not the repository: back to the list, on the same branch where it moved
+                Some(&(_, code_core::branches::BranchAction::ToggleFavorite)) => {
+                    if let Some(rev) = target.rev() { self.dispatch(Command::ToggleFavoriteBranch(rev), cx); }
+                    let at = self.session.state().branch_rows(&query).iter().position(|r| r.target == target).unwrap_or(row);
+                    self.modal = Some(Modal::Branches { query, at });
+                }
                 Some(&(_, action)) => self.branch_action(&target, action, window, cx),
                 None => self.modal = Some(Modal::BranchMenu { target, label, at, query, row }),
             },
@@ -2493,6 +2508,11 @@ impl ReaderView {
                 "pagedown" => self.modal = set(query, (at + page).min(last)),
                 "home" => self.modal = set(query, 0),
                 "end" => self.modal = set(query, last),
+                // a folder opens on → and closes on ←, as a tree's do
+                "right" | "left" if rows.get(at).is_some_and(|r| matches!(r.target, code_core::branches::BranchTarget::Folder(..)) && r.open == (key == "left")) => {
+                    if let Some(code_core::branches::BranchTarget::Folder(section, name)) = rows.get(at).map(|r| r.target.clone()) { self.dispatch(Command::ToggleBranchFolder(section, name), cx); }
+                    self.modal = set(query, at);
+                }
                 "right" | "enter" if key == "right" || ev.keystroke.modifiers.alt => self.modal = match rows.get(at) {
                     Some(r) if !self.session.branch_actions(&r.target).is_empty() => Some(Modal::BranchMenu { target: r.target.clone(), label: r.label.clone(), at: 0, query, row: at }),
                     _ => set(query, at),
@@ -3490,6 +3510,7 @@ impl ReaderView {
                 }
             }
             (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
+            (BranchAction::ToggleFavorite, t) => if let Some(rev) = t.rev() { self.dispatch(Command::ToggleFavoriteBranch(rev), cx) },
         }
         cx.notify();
     }
@@ -5548,16 +5569,22 @@ impl ReaderView {
             for (row, text) in [(0, format!("› {query}")), (1, self.branch_hint())] {
                 lines.extend(wrap(&text, cols).into_iter().map(|line| (row, line, false)));
             }
+            // One line per row, never wrapped: the mark and name on the left (cut in the middle when long), the detail
+            // drawn on the right as a shortcut is.
+            let state = self.session.state();
             let mut section = "";
-            for (index, row) in self.session.state().branch_rows(query).into_iter().enumerate() {
+            for (index, row) in state.branch_rows(query).into_iter().enumerate() {
                 if row.section != section {
                     section = row.section;
                     if !section.is_empty() {
-                        lines.extend(wrap(code_core::branches::branch_section_label(section), cols).into_iter().map(|line| (usize::MAX, line, true)));
+                        // a rule above every section but the first row's
+                        if index > 0 { lines.push((usize::MAX, String::new(), true)); }
+                        let heading = code_core::branches::section_heading(section, state.branch_section_len(section, query));
+                        lines.push((usize::MAX, code_core::branches::middle_ellipsis(&heading, cols), true));
                     }
                 }
-                let text = code_core::branches::row_text(&row);
-                lines.extend(text.split('\n').flat_map(|line| wrap(line, cols)).map(|line| (index + FINDER_HEADER_ROWS, line, false)));
+                // one cell to spare: a branch mark draws wider than a cell in some fonts
+                lines.push((index + FINDER_HEADER_ROWS, code_core::branches::fit_row(&row, cols.saturating_sub(1)).0, false));
             }
             return lines;
         }
@@ -5593,6 +5620,9 @@ impl ReaderView {
             menu_width(self.width).min(24.0 + 24.0 * self.char_w)
         } else if matches!(self.modal, Some(Modal::Themes { .. } | Modal::StatusDetails { .. } | Modal::LanguageServer { .. })) {
             (self.width - 16.0).clamp(0.0, 600.0)
+        } else if matches!(self.modal, Some(Modal::Branches { .. })) {
+            // room for a branch's name and its upstream or folder side by side
+            (self.width - 32.0).clamp(0.0, 680.0)
         } else { menu_width(self.width) }
     }
 
@@ -5648,8 +5678,14 @@ impl ReaderView {
             lines.retain(|(row, ..)| *row >= FINDER_HEADER_ROWS);
             if lines.is_empty() { lines.push((usize::MAX, "No matching branches".into(), true)); }
             let body_top = 2.0 * line_h() + 40.0;
-            let cap = (self.height - 16.0).clamp(0.0, 540.0);
+            let cap = (self.height - 16.0).clamp(0.0, if scratch { 540.0 } else { 720.0 });
+            let cols = self.columns(mw - 24.0);
+            let branch_rows = if scratch { Vec::new() } else { self.session.state().branch_rows(query) };
+            // A name cut short on its row reads in full here while it is highlighted.
+            let full = branch_rows.get(at.saturating_sub(FINDER_HEADER_ROWS)).filter(|r| code_core::branches::fit_row(r, cols.saturating_sub(1)).0 != code_core::branches::row_text(r))
+                .map(|r| if r.detail.is_empty() { r.label.clone() } else { format!("{}  ·  {}", r.label, r.detail) });
             let hint = if scratch { "Enter: open · Esc: close" } else { match self.session.state().branches() {
+                _ if full.is_some() => full.as_deref().unwrap_or_default(),
                 Some(b) if b.state_text().is_some() => b.state_text().unwrap_or_default(),
                 Some(b) if b.worktrees_only || b.revisions_only => "Enter: compare · Alt+Enter: actions · Esc: close",
                 _ => "Enter: checkout/open · Alt+Enter: actions · Esc: close",
@@ -5667,7 +5703,9 @@ impl ReaderView {
             let first = self.modal_first(at, start..end, lines.len(), visible);
             let h = (body_top + (visible + footer.len()) as f32 * line_h() + 20.0).min(cap);
             let bounds = Bounds { origin: gpui::point(px((self.width - mw) / 2.0), px((self.height - h) / 2.0)), size: gpui::size(px(mw), px(h)) };
-            return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(query.clone()), body_top, shortcuts: Vec::new(), marks: Vec::new() });
+            // Each branch row's detail, right-aligned and dim on its line as a menu's shortcut is.
+            let shortcuts = branch_rows.iter().enumerate().filter_map(|(i, r)| { let detail = code_core::branches::fit_row(r, cols.saturating_sub(1)).1; (!detail.is_empty()).then_some((i + FINDER_HEADER_ROWS, detail)) }).collect();
+            return Some(ModalLayout { bounds, lines, first, visible, at, footer, heading: Some(heading), query: Some(query.clone()), body_top, shortcuts, marks: Vec::new() });
         }
         if matches!(self.modal, Some(Modal::Themes { .. })) {
             let h = (self.height - 16.0).clamp(0.0, 400.0);
@@ -6969,7 +7007,7 @@ impl Render for ReaderView {
                                         continue;
                                     }
                                     // A menu's separator: a line across, never highlighted.
-                                    if (menu_modal || commands_modal) && line.is_empty() {
+                                    if (menu_modal || commands_modal || branch_chooser) && line.is_empty() {
                                         lenz_gpui::fill(window, mx + 8.0, y + line_h() / 2.0, (mw - 16.0).max(0.0), 1.0, border);
                                         continue;
                                     }
@@ -6994,6 +7032,28 @@ impl Render for ReaderView {
                                     // Settings show their state as a check mark; every command sits right of that column.
                                     if first_line && l.marks.contains(&(*row, true)) { lenz_gpui::text(window, cx, m, mx + 12.0, y, "✓", palette.readable_on(palette.accent, bg)); }
                                     let mx = if l.marks.is_empty() || *row == usize::MAX { mx } else { mx + 2.0 * char_w };
+                                    // A branch row: its mark in its own colour (the current one and a star in the accent) after its
+                                    // folder's indent, its name in a column of its own; a Show more row a link.
+                                    let (line, mx) = match (branch_chooser && *row != usize::MAX && *row >= FINDER_HEADER_ROWS && first_line).then_some(line) {
+                                        Some(text) => {
+                                            let trimmed = text.trim_start_matches(' ');
+                                            let lead = text.len() - trimmed.len();
+                                            let found = code_core::branches::MARKS.iter().find_map(|m| trimmed.strip_prefix(m).map(|rest| (*m, rest.strip_prefix(' ').unwrap_or(rest))));
+                                            // a blank mark is two spaces of its own: the text after it lines up with the names
+                                            let (mark, rest, indent) = match found { Some((m, rest)) => (m, rest, lead), None => ("", trimmed, lead.saturating_sub(2)) };
+                                            let at = mx + 12.0 + indent as f32 * char_w;
+                                            if !mark.is_empty() {
+                                                let tone = if matches!(mark, "●" | "★") { palette.readable_on(palette.accent, bg) } else { palette.readable_on(palette.dim, bg) };
+                                                lenz_gpui::text(window, cx, m, at, y, mark, tone);
+                                            }
+                                            if mark.is_empty() && rest.starts_with("Show ") && rest.ends_with(" more…") {
+                                                lenz_gpui::text(window, cx, m, at + 3.0 * char_w, y, rest, palette.readable_on(palette.accent, bg));
+                                                continue;
+                                            }
+                                            (rest, at + 3.0 * char_w - 12.0)
+                                        }
+                                        None => (line, mx),
+                                    };
                                     // A details line's label is bold up to its colon; its value reads as text.
                                     let (label, line) = match line.split_once(':').filter(|_| section && details_modal) { Some((label, value)) => (line.get(..label.len() + 1).unwrap_or_default(), value), None => ("", line) };
                                     if !label.is_empty() { lenz_gpui::text(window, cx, Metrics { font: &heading, ..m }, mx + 12.0, y, label, palette.fg); }

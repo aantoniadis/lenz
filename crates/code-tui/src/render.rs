@@ -1761,17 +1761,31 @@ impl App {
             }
         }
         let mut selected = 0..0;
+        let branch_list = modal.kind == Prompt::Branches;
         let menu_marks = matches!(modal.kind, Prompt::Menu(_) | Prompt::LanguageServer) && choices.iter().any(|c| code_core::chrome::toggle_split(&c.label).1.is_some());
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         let mut previous_section = None;
         for (i, choice) in choices.iter().enumerate() {
             if choice.section != previous_section {
                 if let Some(section) = choice.section {
-                    for text in wrap_text(code_core::branches::branch_section_label(section), width) {
+                    // The branch picker: a rule above every section, its heading with its size.
+                    if branch_list && !rendered.is_empty() { rendered.push((usize::MAX, "─".repeat(width), true)); }
+                    let heading = if branch_list { code_core::branches::section_heading(section, self.session.state().branch_section_len(section, &modal.input)) } else { code_core::branches::branch_section_label(section).to_string() };
+                    for text in wrap_text(&heading, width) {
                         rendered.push((usize::MAX, text, true));
                     }
                 }
                 previous_section = choice.section;
+            }
+            // A branch row: one line, its name cut in the middle when long, its detail on the right.
+            if branch_list {
+                let path = matches!(choice.target, crate::app::ChoiceTarget::Branch(code_core::branches::BranchTarget::Worktree(_)));
+                let (name, detail) = code_core::branches::fit_text(&choice.label, choice.detail.as_deref().unwrap_or_default(), path, width.saturating_sub(2));
+                let marker = if i == modal.at { "› " } else { "  " };
+                let pad = width.saturating_sub(marker.width() + name.width() + detail.width());
+                if i == modal.at { selected = rendered.len()..rendered.len() + 1; }
+                rendered.push((i, format!("{marker}{name}{}{detail}", " ".repeat(pad)), false));
+                continue;
             }
             if modal.kind == Prompt::LanguageServer && matches!(i, 4 | 8) {
                 rendered.push((usize::MAX, if i == 4 { "Setup" } else { "Indexing" }.to_string(), true));
@@ -1856,6 +1870,26 @@ impl App {
                     bg,
                 ),
             );
+            // A branch row's parts: its mark (the current one in the accent), its dim detail, a Show more row a link.
+            if branch_list && let Some(choice) = choices.get(*i) {
+                let target = match &choice.target { crate::app::ChoiceTarget::Branch(t) => Some(t), _ => None };
+                let buf = frame.buffer_mut();
+                if matches!(target, Some(code_core::branches::BranchTarget::More(_))) {
+                    let link = (choice.label.trim().width() as u16).min(r.width.saturating_sub(4));
+                    buf.set_style(Rect { x: r.x + 4, width: link, ..r }, style(p.accent, bg).add_modifier(Modifier::UNDERLINED));
+                } else if r.width > 3 {
+                    // the mark after its folder's indent: the current one and a star in the accent
+                    let trimmed = choice.label.trim_start_matches(' ');
+                    let indent = (choice.label.len() - trimmed.len()) as u16;
+                    if let Some(mark) = code_core::branches::MARKS.iter().find(|m| trimmed.starts_with(**m)) {
+                        let tone = if matches!(*mark, "●" | "★") { p.accent } else { p.dim };
+                        buf.set_style(Rect { x: (r.x + 2 + indent).min(r.right().saturating_sub(1)), width: 1, ..r }, style(tone, bg));
+                    }
+                    let path = matches!(target, Some(code_core::branches::BranchTarget::Worktree(_)));
+                    let detail = code_core::branches::fit_text(&choice.label, choice.detail.as_deref().unwrap_or_default(), path, width.saturating_sub(2)).1.width() as u16;
+                    if detail > 0 { buf.set_style(Rect { x: r.right().saturating_sub(detail), width: detail.min(r.width), ..r }, style(p.dim, bg)); }
+                }
+            }
         }
         if reserve > 0 {
             // The find prompt says which match is current, or why the expression cannot be matched.
@@ -1866,9 +1900,17 @@ impl App {
                 let counter = find.counter();
                 if counter.is_empty() { hint.to_owned() } else { format!("{counter} · {hint}") }
             });
+            // A branch name cut short on its row reads in full here while it is highlighted.
+            let full_name = choices.get(modal.at).filter(|_| branch_list).and_then(|c| {
+                let path = matches!(c.target, crate::app::ChoiceTarget::Branch(code_core::branches::BranchTarget::Worktree(_)));
+                let detail = c.detail.as_deref().unwrap_or_default();
+                (code_core::branches::fit_text(&c.label, detail, path, width.saturating_sub(2)).0 != c.label)
+                    .then(|| if detail.is_empty() { c.label.trim_start().to_string() } else { format!("{}  ·  {detail}", c.label.trim_start()) })
+            });
             let footer = modal
                 .error
                 .as_deref()
+                .or(full_name.as_deref())
                 .or(find_footer.as_deref())
                 .or_else(|| {
                     action_list

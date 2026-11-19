@@ -7110,7 +7110,7 @@ fn gui_rows_compare_with_the_working_tree_and_since_branching(cx: &mut TestAppCo
     type_text(&mut v, "other");
     v.simulate_keystrokes("alt-enter");
     let menu = f.view.read_with(&v, |r, _| r.modal_rows().into_iter().map(|r| r.0).collect::<Vec<_>>());
-    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
+    assert_eq!(&menu[1..], ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here", "Add to Favorites"]);
     v.simulate_keystrokes("down down enter");
     assert!(f.view.read_with(&v, |r, _| r.modal.is_none() && r.session().state().branches().is_none()));
     assert_eq!(launched_args(&mut v, &f), [vec!["refs/heads/other".to_string()]]);

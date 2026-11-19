@@ -598,7 +598,17 @@ them.
 
 **Git Branches…** (Git menu, Ctrl+Shift+\`, or a click on the branch in the top bar) lists **New Branch…**,
 **Checkout Tag or Revision…**, then separate **Recent branches**, **Local branches**, **Remote branches**, **Tags**
-and (with more than one) **Worktrees** sections; typing filters. The last inventory appears immediately on reopening
+and (with more than one) **Worktrees** sections, each heading with its size; typing filters, and shows every match.
+Each row is one line: a mark (`●` the current branch or worktree, `★` a favorite, `⎇` a branch, `◆` a tag, `⧉` a
+worktree), the name — cut in the middle when it is too long, and shown in full at the foot while highlighted — and, on
+the right, a local branch's distance from its upstream and the upstream (`↑2 ↓1  origin/main`, or `gone`), a remote
+branch's remote, or a worktree's folder and changes. The distances are read after the lists, so they appear a moment
+later, and they compare with the remote branches as of your last `git fetch`: Lenz Code never fetches by itself.
+The current branch comes first in Local branches, then your favorites (**Add to Favorites** in a row's actions; they
+are kept per repository, so every worktree shows them, and starred remote branches lead Remote branches). Branches
+sharing a folder (`feature/login`, `feature/search`) gather under a **▸ feature/** row: Enter or → opens it, ← closes
+it, and it stays open for the rest of the session; typing lists every match by its whole name. A long section shows
+its first rows and **Show N more…**, which lists the rest. The last inventory appears immediately on reopening
 while metadata refreshes in the background. Choosing a branch does not scan every worktree's changed files.
 Enter checks out the highlighted branch (a remote one as a local branch tracking it,
 a tag or revision on a detached HEAD) or opens the highlighted worktree as the folder; → or a right-click lists a row's

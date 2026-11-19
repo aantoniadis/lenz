@@ -3864,6 +3864,65 @@ fn open_popup(a: &mut App) {
 }
 
 #[test]
+fn branch_rows_stay_one_line_and_enter_on_show_more_opens_the_section() {
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut a) = branches_app();
+    for i in 0..14 { git(r.path(), &["branch", &format!("topic-a-very-long-branch-name-number-{i:02}-for-the-settings-dialog")]); }
+    open_popup(&mut a);
+    let more = a.choices().iter().position(|c| matches!(&c.target, ChoiceTarget::Branch(code_core::branches::BranchTarget::More("Local")))).expect("a Show more row");
+    // At 60 columns every row is one line: the long names keep both ends around a …
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 40)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..40).map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+    let cut: Vec<_> = rows.iter().filter(|row| row.contains("topic-a-very") ).collect();
+    assert!(!cut.is_empty() && cut.iter().all(|row| row.contains('…') && row.contains("dialog")), "{}", rows.join("\n"));
+    assert!(!rows.iter().any(|row| row.trim_start().starts_with("for-the-settings")), "no name wraps onto a second line");
+    // Enter on Show more lists the rest and keeps the highlight on the first row it brings in.
+    a.modal.as_mut().unwrap().at = more;
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Branches), "the popup stays");
+    assert_eq!(a.modal.as_ref().unwrap().at, more);
+    assert!(!a.choices().iter().any(|c| matches!(&c.target, ChoiceTarget::Branch(code_core::branches::BranchTarget::More("Local")))));
+    assert!(matches!(&a.choices()[more].target, ChoiceTarget::Branch(code_core::branches::BranchTarget::Branch(_))));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n", "nothing was checked out");
+}
+
+#[test]
+fn branch_folders_open_by_key_and_a_star_from_the_menu_keeps_the_picker() {
+    use code_core::branches::BranchTarget;
+    use lenz_content::git::testing::git;
+    let (r, _wt, mut a) = branches_app();
+    for b in ["team/a", "team/b"] { git(r.path(), &["branch", b]); }
+    open_popup(&mut a);
+    let rows = |a: &App| a.session.state().branch_rows("");
+    let folder = rows(&a).iter().position(|r| matches!(&r.target, BranchTarget::Folder("Local", n) if n == "team")).expect("a team folder");
+    a.modal.as_mut().unwrap().at = folder;
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert!(rows(&a)[folder].open && rows(&a)[folder + 1].depth == 1);
+    key(&mut a, KeyCode::Left, KeyModifiers::NONE);
+    assert!(!rows(&a)[folder].open);
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    assert!(rows(&a)[folder].open);
+    assert_eq!((prompt_kind(&a), a.modal.as_ref().unwrap().at), (Some(Prompt::Branches), folder));
+    // the folder's branches render one level in, under their short names
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let screen: String = terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect();
+    assert!(screen.contains("▾ team/") && screen.contains("  ⎇ a"), "{screen}");
+    // → on a branch lists its actions; Add to Favorites stars it and returns to the list, on that branch.
+    a.modal.as_mut().unwrap().at = folder + 2;
+    key(&mut a, KeyCode::Right, KeyModifiers::NONE);
+    let star = a.choices().iter().position(|c| c.label == "Add to Favorites").expect("the menu offers a star");
+    a.modal.as_mut().unwrap().at = star;
+    key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
+    assert_eq!(prompt_kind(&a), Some(Prompt::Branches), "back to the list");
+    let at = a.modal.as_ref().unwrap().at;
+    assert!(rows(&a)[at].favorite && matches!(&rows(&a)[at].target, BranchTarget::Branch(b) if b == "team/b"));
+    assert_eq!(std::fs::read_to_string(r.path().join("a.txt")).unwrap(), "main\n", "nothing was checked out");
+}
+
+#[test]
 fn the_toolbar_branch_opens_the_popup_and_enter_checks_out() {
     let (r, _wt, mut a) = branches_app();
     let (_, rect) = *a.layout.controls.iter().find(|(id, _)| *id == CommandId::GitBranches).expect("a branch cell");
@@ -4091,7 +4150,7 @@ fn rows_compare_and_compare_with_worktree_lists_the_other_worktree() {
     open_popup(&mut a);
     typed(&mut a, "other");
     key(&mut a, KeyCode::Enter, KeyModifiers::ALT);
-    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
+    assert_eq!(a.choices().into_iter().map(|c| c.label).collect::<Vec<_>>(), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here", "Add to Favorites"]);
     for _ in 0..3 { key(&mut a, KeyCode::Down, KeyModifiers::NONE); }
     key(&mut a, KeyCode::Enter, KeyModifiers::NONE);
     let split = lenz_content::git::testing::git(r.path(), &["rev-parse", "main"]).trim().to_string();

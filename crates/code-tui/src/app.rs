@@ -1379,7 +1379,8 @@ impl App {
                 .into_iter()
                 .map(|r| Choice {
                     label: code_core::branches::row_text(&r),
-                    detail: None,
+                    // drawn right-aligned on the row's line, never appended and wrapped
+                    detail: (!r.detail.is_empty()).then_some(r.detail.clone()),
                     section: (!r.section.is_empty()).then_some(r.section),
                     disabled: None,
                     target: ChoiceTarget::Branch(r.target),
@@ -1661,6 +1662,16 @@ impl App {
             return;
         }
         // The Git Branches popup: Right opens the highlighted row's actions; in them Left or Esc goes back.
+        // a folder opens on → and closes on ←, as a tree's do
+        if kind == Prompt::Branches && matches!(key.code, KeyCode::Right | KeyCode::Left) {
+            let at = self.modal.as_ref().map_or(0, |m| m.at);
+            if let Some(row) = self.session.state().branch_rows(&self.modal.as_ref().map_or(String::new(), |m| m.input.clone())).get(at).cloned()
+                && let code_core::branches::BranchTarget::Folder(section, name) = row.target
+            {
+                if row.open == (key.code == KeyCode::Left) { self.dispatch(Command::ToggleBranchFolder(section, name)); }
+                return;
+            }
+        }
         if kind == Prompt::Branches && (key.code == KeyCode::Right || key.code == KeyCode::Enter && alt) {
             return self.open_branch_menu(self.modal.as_ref().map_or(0, |m| m.at));
         }
@@ -2080,6 +2091,7 @@ impl App {
                 }
             }
             (BranchAction::Open | BranchAction::OpenInNewWindow, _) => {}
+            (BranchAction::ToggleFavorite, t) => if let Some(rev) = t.rev() { self.dispatch(Command::ToggleFavoriteBranch(rev)) },
         }
     }
     /// Runs Lenz Diff on a Git comparison in this terminal, or shows why not.
@@ -2334,6 +2346,22 @@ impl App {
                     modal.capture = command;
                     modal.error = None;
                 }
+            }
+            // A section's Show more row lists the rest of it; the highlight stays on the first row it brings in.
+            Prompt::Branches if let Some(ChoiceTarget::Branch(code_core::branches::BranchTarget::More(section))) = self.choices().get(at).map(|c| c.target.clone()) => {
+                self.dispatch(Command::ExpandBranches(section));
+            }
+            // A folder row opens or closes; the highlight stays on it.
+            Prompt::Branches if let Some(ChoiceTarget::Branch(code_core::branches::BranchTarget::Folder(section, name))) = self.choices().get(at).map(|c| c.target.clone()) => {
+                self.dispatch(Command::ToggleBranchFolder(section, name));
+            }
+            // A star changes the list, not the repository: back to the list, on the same branch where it moved.
+            Prompt::BranchMenu { ref query, row, .. } if let Some(ChoiceTarget::BranchAction(target, code_core::branches::BranchAction::ToggleFavorite)) = self.choices().get(at).map(|c| c.target.clone()) => {
+                let query = query.clone();
+                if let Some(rev) = target.rev() { self.dispatch(Command::ToggleFavoriteBranch(rev)); }
+                let at = self.session.state().branch_rows(&query).iter().position(|r| r.target == target).unwrap_or(row);
+                self.prompt(Prompt::Branches);
+                if let Some(m) = self.modal.as_mut() { (m.input, m.at) = (query, at); }
             }
             // Enter on the current branch or worktree does nothing (its other actions are in its menu), as in the GUI.
             Prompt::Branches if self.choices().get(at).is_some_and(|c| matches!(&c.target, ChoiceTarget::Branch(t) if !matches!(t, code_core::branches::BranchTarget::Action(_)) && self.session.branch_enter(t).is_none())) => {}

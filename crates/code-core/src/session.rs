@@ -429,6 +429,12 @@ pub enum Command {
     /// The popup with only the other worktrees, for Compare with Worktree….
     OpenWorktrees,
     CloseBranches,
+    /// The Git Branches popup's Show more row: list the rest of `section`.
+    ExpandBranches(&'static str),
+    /// Open or close one of the popup's branch folders (`feature` in Local branches).
+    ToggleBranchFolder(&'static str, String),
+    /// Star or unstar a branch (by full name) for this repository: it stays at the top of its section.
+    ToggleFavoriteBranch(String),
     /// Check out a branch, remote branch, tag or revision (local changes go along when git allows).
     Checkout(lenz_content::branches::Target),
     /// The checkout-problem dialog's answer.
@@ -1732,6 +1738,8 @@ pub enum Completion {
     GitStatus { request: u64, root: PathBuf, anchor: (PathBuf, PathBuf), result: Result<lenz_content::branches::Statuses, String> },
     /// The Git Branches popup's lists for the repository at `root`.
     Branches { request: u64, root: PathBuf, result: Result<(lenz_content::branches::Refs, Vec<lenz_content::branches::Worktree>), String> },
+    /// How far the local branches are from their upstreams, read after [`Completion::Branches`] for `request`.
+    BranchTracking { request: u64, root: PathBuf, result: Result<std::collections::BTreeMap<String, lenz_content::branches::Track>, String> },
     /// The details of the commit popup's commit, for request `request`.
     CommitLoaded { request: u64, result: Result<lenz_content::blame::CommitDetails, String> },
     /// The file on disk read for external-change dialog `ticket` (or why it cannot be read).
@@ -1840,6 +1848,7 @@ impl Input {
                 Completion::CheckedOut { .. } => "checked out",
                 Completion::Head { .. } => "head",
                 Completion::Branches { .. } => "branches",
+                Completion::BranchTracking { .. } => "branch-tracking",
                 Completion::ReconcileRead { .. } | Completion::ReconcileChecked { .. } => "reconcile",
                 Completion::DocumentationReady { .. } => "documentation",
                 Completion::CompletionDocumentationReady { .. } => "completion documentation",
@@ -1954,6 +1963,8 @@ pub struct State {
     pub(crate) marker_sets: std::collections::HashMap<crate::text::BufferId, crate::markers::Markers>,
     /// The Git Branches popup's lists, while it is open.
     pub(crate) branches: Option<crate::branches::BranchesView>,
+    /// The popup's branch folders opened this run, by section and name (`feature`); kept while it is closed.
+    pub(crate) branch_folders: Vec<(&'static str, String)>,
     /// Explorer entries marked for Compare Selected (Ctrl+click), oldest first; at most two.
     pub(crate) tree_marks: Vec<Arc<str>>,
     /// The running checkout's request, the refused one's dialog, and the files a Smart Checkout left in conflict.
@@ -2733,6 +2744,11 @@ impl State {
         }
         self.semantics.view_source(self.current_source()?.source_meta(), self.current_source()?.is_large())
     }
+    /// The branches starred in this repository's Git Branches popup, by full name.
+    pub fn favorite_branches(&self) -> std::collections::BTreeSet<String> {
+        let key = self.repo.as_ref().map(crate::branches::Repo::common_dir);
+        key.and_then(|k| self.settings.favorite_branches.get(&k).cloned()).unwrap_or_default()
+    }
     /// The open project's own editing preferences (`None`: no folder is open).
     pub fn project_preferences(&self) -> Option<ProjectPreferences> {
         let root = self.project.as_ref()?.root();
@@ -3381,6 +3397,7 @@ impl Session {
             git_status: None,
                 marker_sets: Default::default(),
                 branches: None,
+                branch_folders: Vec::new(),
                 tree_marks: Vec::new(),
                 checkout_running: None,
                 checkout_problem: None,
@@ -5598,8 +5615,16 @@ impl Session {
                         let worktrees = if revisions_only { Vec::new() } else { lenz_content::branches::worktree_list(&root)? };
                         Ok((r, worktrees))
                     });
+                    let listed = result.is_ok();
                     if latest.load(Ordering::Relaxed) == request {
-                        let _ = tx.send_blocking(Completion::Branches { request, root, result });
+                        let _ = tx.send_blocking(Completion::Branches { request, root: root.clone(), result });
+                    }
+                    // The lists show first; how far each branch is from its upstream follows (git walks history).
+                    if listed && !worktrees_only && latest.load(Ordering::Relaxed) == request {
+                        let result = lenz_content::branches::tracking(&root);
+                        if latest.load(Ordering::Relaxed) == request {
+                            let _ = tx.send_blocking(Completion::BranchTracking { request, root, result });
+                        }
                     }
                 });
                 repaint
@@ -5607,6 +5632,28 @@ impl Session {
             Command::CloseBranches => {
                 self.branches_requests.fetch_add(1, Ordering::Relaxed);
                 Effect { repaint: self.state.branches.take().is_some(), copy: None, ..Effect::default() }
+            }
+            Command::ToggleBranchFolder(section, name) => {
+                let folders = &mut self.state.branch_folders;
+                match folders.iter().position(|(s, n)| *s == section && *n == name) {
+                    Some(at) => { folders.remove(at); }
+                    None => folders.push((section, name)),
+                }
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
+            Command::ToggleFavoriteBranch(name) => {
+                let Some(key) = self.state.repo.as_ref().map(crate::branches::Repo::common_dir) else { return Effect::default() };
+                let favorites = &mut self.state.settings.favorite_branches;
+                let set = favorites.entry(key.clone()).or_default();
+                if !set.remove(&name) { set.insert(name); }
+                if set.is_empty() { favorites.remove(&key); }
+                self.save_settings();
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
+            Command::ExpandBranches(section) => {
+                let Some(v) = self.state.branches.as_mut().filter(|v| !v.expanded.contains(&section)) else { return Effect::default() };
+                v.expanded.push(section);
+                Effect { repaint: true, copy: None, ..Effect::default() }
             }
             Command::MarkTreeRow { path, selected } => {
                 if path.contains("://") {
@@ -7402,11 +7449,20 @@ impl Session {
             }
             Completion::ReconcileRead { ticket, result } => self.reconcile_read(ticket, result),
             Completion::ReconcileChecked { ticket, choice, result } => self.reconcile_checked(ticket, choice, result),
+            Completion::BranchTracking { request, root, result } => {
+                let current = request == self.branches_requests.load(Ordering::Relaxed) && self.state.repo.as_ref().is_some_and(|r| r.root == root);
+                let (Some(v), Ok(track)) = (self.state.branches.as_mut().filter(|_| current), result) else { return Effect::default() };
+                if let Some((cached, refs, _)) = self.branches_cache.as_mut().filter(|(cached, ..)| *cached == root) { let _ = cached; refs.track = track.clone(); }
+                v.refs.track = track;
+                Effect { repaint: true, copy: None, ..Effect::default() }
+            }
             Completion::Branches { request, root, result } => match self.state.branches.as_mut().filter(|_| request == self.branches_requests.load(Ordering::Relaxed) && self.state.repo.as_ref().is_some_and(|r| r.root == root)) {
                 Some(v) => {
                     v.loading = false;
                     match result {
-                        Ok((refs, worktrees)) => {
+                        Ok((mut refs, worktrees)) => {
+                            // The last counts stay until the fresh ones are read, for the branches still there.
+                            refs.track = std::mem::take(&mut v.refs.track).into_iter().filter(|(b, _)| refs.upstream.contains_key(b)).collect();
                             if !v.worktrees_only && !v.revisions_only {
                                 self.branches_cache = Some((root, refs.clone(), worktrees.clone()));
                             }
@@ -10914,6 +10970,10 @@ struct Settings {
     /// File → the SQL dialect chosen for that file, above its project's default (never in the file).
     #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     sql_dialects: std::collections::BTreeMap<PathBuf, crate::sql_dialect::Dialect>,
+    /// Repository (its shared git folder) → the branches starred in its Git Branches popup, by full name
+    /// (`refs/heads/main`, `refs/remotes/origin/main`); kept outside the checkout.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub(crate) favorite_branches: std::collections::BTreeMap<PathBuf, std::collections::BTreeSet<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     duckdb_executable: Option<PathBuf>,
     /// The keyboard language menus and bare keys follow.
@@ -10925,7 +10985,7 @@ struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, relative_line_numbers: false, always_select_opened_file: false, inline_blame: false, mac_word_motion: false, save_on_leave: false, name_letter_search: false, rank_nearby_files: false, vim_enabled: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), sql_dialects: Default::default(), duckdb_executable: None, keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
+        Self { favorite_branches: Default::default(), persistent_index: true, folders_first: true, documentation_on_hover: true, auto_completion: true, file_icons: true, soft_wrap: false, relative_line_numbers: false, always_select_opened_file: false, inline_blame: false, mac_word_motion: false, save_on_leave: false, name_letter_search: false, rank_nearby_files: false, vim_enabled: false, sticky_scroll: true, breadcrumbs: true, inlay_types: true, inlay_parameters: true, semantic_highlighting: true, split: None, layout: Layout::default(), projects: Default::default(), sql_dialects: Default::default(), duckdb_executable: None, keymap: KeymapPreset::IntelliJ, keybindings: Default::default() }
     }
 }
 

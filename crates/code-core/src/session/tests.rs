@@ -9526,7 +9526,7 @@ mod git_branches {
         std::fs::remove_dir_all(wt.path().join("second")).unwrap();
         open_branches(&mut s);
         let row = s.state().branch_rows("second").into_iter().next().unwrap();
-        assert!(row.label.ends_with(" · missing"), "{}", row.label);
+        assert!(row.detail.ends_with(" · missing"), "{}", row.detail);
         assert!(s.branch_actions(&row.target).is_empty());
     }
 
@@ -9540,21 +9540,161 @@ mod git_branches {
         let shown: Vec<(&str, &str, bool)> = rows.iter().map(|r| (r.section, r.label.as_str(), r.current)).collect();
         assert_eq!(&shown[..2], [("", "New Branch…", false), ("", "Checkout Tag or Revision…", false)]);
         assert!(shown.contains(&("Recent", "feature/x", false)));
-        for (section, label) in [("Local", "feature/x"), ("Local", "other"), ("Remote", "origin/topic"), ("Tags", "v1")] {
+        for (section, label) in [("Local", "feature/x"), ("Local", "other"), ("Remote", "topic"), ("Tags", "v1")] {
             assert!(shown.contains(&(section, label, false)), "{section} {label}: {shown:?}");
         }
         assert!(shown.contains(&("Local", "main", true)), "the current branch is marked");
         let worktrees: Vec<_> = rows.iter().filter(|r| r.section == "Worktrees").collect();
         assert_eq!(worktrees.len(), 2);
-        assert!(worktrees.iter().any(|w| w.current && w.label.starts_with("main ")));
-        assert!(worktrees.iter().any(|w| matches!(&w.target, BranchTarget::Worktree(p) if p.ends_with("second")) && w.label.starts_with("other ")));
+        assert!(worktrees.iter().any(|w| w.current && w.label == "main"));
+        assert!(worktrees.iter().any(|w| matches!(&w.target, BranchTarget::Worktree(p) if p.ends_with("second")) && w.label == "other" && w.detail.ends_with("second")));
+        // a remote branch reads by its name, its remote on the right
+        assert!(rows.iter().any(|r| r.label == "topic" && r.detail == "origin" && r.target == BranchTarget::Remote("origin/topic".into())));
         let _ = wt;
         // Filtering keeps only matching rows (any case), sections and all.
         let found: Vec<_> = s.state().branch_rows("TOP").into_iter().map(|r| r.label).collect();
-        assert_eq!(found, ["origin/topic"]);
+        assert_eq!(found, ["topic"]);
+        assert_eq!(s.state().branch_rows("origin/top").into_iter().map(|r| r.label).collect::<Vec<_>>(), ["topic"], "the remote's full name still finds it");
         assert!(s.state().branch_rows("nothing like it").is_empty());
         s.dispatch(Command::CloseBranches);
         assert!(s.state().branches().is_none());
+    }
+
+    #[test]
+    fn long_sections_show_their_first_rows_then_show_more_and_the_current_branch_first() {
+        let (r, _wt, mut s) = repo_session();
+        for i in 0..20 { git(r.path(), &["branch", &format!("a{i:02}")]); }
+        git(r.path(), &["switch", "-q", "-c", "zeta"]);
+        open_branches(&mut s);
+        let local = |s: &Session| s.state().branch_rows("").into_iter().filter(|r| r.section == "Local").collect::<Vec<_>>();
+        let rows = local(&s);
+        let all = s.state().branch_section_len("Local", "").unwrap();
+        assert!(all > crate::branches::section_cap("Local") + 1, "{all}");
+        assert_eq!(rows.len(), crate::branches::section_cap("Local") + 1, "first rows, then Show more");
+        assert!(rows[0].current && rows[0].label == "zeta", "the current branch comes first, though last by name: {:?}", rows[0]);
+        let more = rows.last().unwrap();
+        assert_eq!(more.target, BranchTarget::More("Local"));
+        assert_eq!(more.label, format!("Show {} more…", all - crate::branches::section_cap("Local")));
+        assert!(s.branch_actions(&more.target).is_empty() && s.branch_enter(&more.target).is_none(), "Show more has no actions");
+        // Typing shows every match, no section cut short.
+        assert_eq!(s.state().branch_rows("a1").iter().filter(|r| r.section == "Local").count(), 10);
+        assert_eq!(s.state().branch_section_len("Local", "a1"), None, "a filter shows what matched, not the section's size");
+        // Show more lists the rest; the index of its row is the first row it brings in.
+        let at = s.state().branch_rows("").iter().position(|r| r.target == BranchTarget::More("Local")).unwrap();
+        s.dispatch(Command::ExpandBranches("Local"));
+        let rows = s.state().branch_rows("");
+        assert_eq!(rows.iter().filter(|r| r.section == "Local").count(), all);
+        assert!(!rows.iter().any(|r| r.target == BranchTarget::More("Local")));
+        assert_eq!(rows[at].section, "Local");
+        // Closing the popup forgets it; opened again while the inventory refreshes, it stays open when it lands.
+        s.dispatch(Command::CloseBranches);
+        git(r.path(), &["branch", "zz-late"]);
+        s.dispatch(Command::OpenBranches);
+        assert!(s.state().branches().is_some_and(|v| v.loading && v.expanded.is_empty()));
+        assert_eq!(local(&s).len(), crate::branches::section_cap("Local") + 1);
+        s.dispatch(Command::ExpandBranches("Local"));
+        settle(&mut s, |s| s.state().branches().is_some_and(|v| !v.loading));
+        assert!(local(&s).iter().any(|r| r.label == "zz-late"), "the refresh landed");
+        assert_eq!(local(&s).len(), all + 1, "and the section is still open");
+    }
+
+    #[test]
+    fn a_row_fits_one_line_keeping_both_ends_of_a_long_name_and_a_folders_last_names() {
+        use crate::branches::{fit_row, BranchRow};
+        let row = |label: &str, detail: &str, target| BranchRow { section: "Local", label: label.into(), detail: detail.into(), current: false, target, favorite: false, depth: 0, open: false };
+        let long = row("feature/very-long-branch-name-that-describes-the-settings-dialog", "origin/feature/very-long-branch-name", BranchTarget::Branch("x".into()));
+        let (name, detail) = fit_row(&long, 48);
+        let width = |t: &str| lenz_content::wrap::width(t);
+        assert!(width(&name) + 2 + width(&detail) <= 48, "{name} | {detail}");
+        assert!(name.starts_with("⎇ feature/") && name.ends_with("dialog") && name.contains('…'), "{name}");
+        let worktree = row("wt/hotfix", "/home/someone/projects/checkouts/app-hotfix-42 · 3 changed", BranchTarget::Worktree("/x".into()));
+        let (name, detail) = fit_row(&worktree, 70);
+        assert_eq!(name, "⧉ wt/hotfix");
+        assert!(detail.starts_with('…') && detail.ends_with("/app-hotfix-42 · 3 changed"), "the folder gives up its start, the changes stay: {detail}");
+        // too narrow for a detail: the name alone, still one line
+        let (name, detail) = fit_row(&long, 12);
+        assert!(detail.is_empty() && width(&name) <= 12, "{name}");
+    }
+
+    #[test]
+    fn branches_under_a_shared_folder_gather_into_a_row_that_opens_and_closes() {
+        let (r, _wt, mut s) = repo_session();
+        for b in ["feature/y", "feature/z", "fix/only-one"] { git(r.path(), &["branch", b]); }
+        open_branches(&mut s);
+        let local = |s: &Session| s.state().branch_rows("").into_iter().filter(|r| r.section == "Local").collect::<Vec<_>>();
+        let rows = local(&s);
+        let folder = rows.iter().find(|r| matches!(&r.target, BranchTarget::Folder("Local", n) if n == "feature")).expect("a feature folder");
+        assert_eq!((folder.label.as_str(), folder.detail.as_str(), folder.open), ("feature/", "3", false));
+        assert!(!rows.iter().any(|r| r.label.contains("feature/x") || r.depth > 0), "its branches wait inside: {rows:?}");
+        assert!(rows.iter().any(|r| r.label == "fix/only-one" && r.depth == 0), "a folder of one is just its branch");
+        assert!(s.branch_actions(&folder.target).is_empty() && s.branch_enter(&folder.target).is_none());
+        assert_eq!(crate::branches::row_text(folder), "▸ feature/");
+        // Opened, its branches follow it one level in, named after the folder; the state outlives the popup.
+        s.dispatch(Command::ToggleBranchFolder("Local", "feature".into()));
+        let rows = local(&s);
+        let at = rows.iter().position(|r| matches!(&r.target, BranchTarget::Folder(_, n) if n == "feature")).unwrap();
+        assert!(rows[at].open && crate::branches::row_text(&rows[at]) == "▾ feature/");
+        assert_eq!(rows[at + 1..at + 4].iter().map(|r| (r.label.as_str(), r.depth)).collect::<Vec<_>>(), [("x", 1), ("y", 1), ("z", 1)]);
+        assert!(matches!(&rows[at + 1].target, BranchTarget::Branch(b) if b == "feature/x"), "the row still checks out the whole name");
+        assert_eq!(crate::branches::row_text(&rows[at + 1]), "  ⎇ x");
+        s.dispatch(Command::CloseBranches);
+        open_branches(&mut s);
+        assert!(local(&s).iter().any(|r| r.depth == 1), "still open when the popup comes back");
+        // Typing lists every match by its whole name, no folders.
+        let found = s.state().branch_rows("feature").into_iter().filter(|r| r.section == "Local").map(|r| (r.label, r.depth)).collect::<Vec<_>>();
+        assert_eq!(found, [("feature/x".to_string(), 0), ("feature/y".into(), 0), ("feature/z".into(), 0)]);
+        s.dispatch(Command::ToggleBranchFolder("Local", "feature".into()));
+        assert!(!local(&s).iter().any(|r| r.depth == 1));
+    }
+
+    #[test]
+    fn starred_branches_stay_on_top_outside_folders_and_are_kept_for_the_repository() {
+        let (r, wt, mut s) = repo_session();
+        for b in ["feature/y", "zzz"] { git(r.path(), &["branch", b]); }
+        open_branches(&mut s);
+        let zzz = s.state().branch_rows("").into_iter().find(|r| r.label == "zzz").unwrap();
+        let actions = |s: &Session, t: &BranchTarget| s.branch_actions(t).into_iter().map(|(l, _)| l).collect::<Vec<_>>();
+        assert_eq!(actions(&s, &zzz.target).last(), Some(&"Add to Favorites"));
+        s.dispatch(Command::ToggleFavoriteBranch("refs/heads/zzz".into()));
+        s.dispatch(Command::ToggleFavoriteBranch("refs/heads/feature/x".into()));
+        s.dispatch(Command::ToggleFavoriteBranch("refs/remotes/origin/topic".into()));
+        let local: Vec<_> = s.state().branch_rows("").into_iter().filter(|r| r.section == "Local").collect();
+        assert!(local[0].current, "the current branch first");
+        assert_eq!(local[1..3].iter().map(|r| (r.label.as_str(), r.favorite, r.mark())).collect::<Vec<_>>(), [("feature/x", true, "★"), ("zzz", true, "★")], "then the starred ones, by name");
+        assert!(local.iter().any(|r| r.label == "feature/y" && r.depth == 0), "a folder of one: feature/x is starred, outside it");
+        let remote: Vec<_> = s.state().branch_rows("").into_iter().filter(|r| r.section == "Remote").collect();
+        assert!(remote[0].favorite && remote[0].label == "topic");
+        assert_eq!(actions(&s, &zzz.target).last(), Some(&"Remove from Favorites"));
+        // Saved in the settings file: another window, and another worktree of the repository, see the same stars.
+        let file = r.path().join(".lenz-test/state/lenz-code/settings.json");
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !std::fs::read_to_string(&file).is_ok_and(|t| t.contains("refs/heads/zzz")) {
+            assert!(std::time::Instant::now() < until, "the star is saved");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let mut other = session(&r.path().join(".lenz-test"));
+        other.dispatch(Command::OpenRoot(wt.path().join("second")));
+        settle(&mut other, |s| s.branch_label().is_some());
+        open_branches(&mut other);
+        assert!(other.state().branch_rows("").iter().any(|r| r.label == "zzz" && r.favorite), "the worktree's popup shows the repository's stars");
+        s.dispatch(Command::ToggleFavoriteBranch("refs/heads/zzz".into()));
+        assert!(!s.state().branch_rows("").iter().any(|r| r.label == "zzz" && r.favorite));
+    }
+
+    #[test]
+    fn how_far_each_branch_is_from_its_upstream_follows_the_lists() {
+        let (r, _wt, mut s) = repo_session();
+        git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]);
+        git(r.path(), &["branch", "--set-upstream-to=origin/main", "main"]);
+        put(r.path(), "a.txt", "ahead\n");
+        commit_all(r.path(), "ahead");
+        open_branches(&mut s);
+        settle(&mut s, |s| s.state().branches().is_some_and(|v| !v.refs.track.is_empty()));
+        let main = s.state().branch_rows("").into_iter().find(|r| r.section == "Local" && r.label == "main").unwrap();
+        assert_eq!(main.detail, "↑1  origin/main");
+        assert_eq!(lenz_content::branches::Track { ahead: 2, behind: 3, gone: false }.label(), "↑2 ↓3");
+        assert_eq!(lenz_content::branches::Track { gone: true, ..Default::default() }.label(), "gone");
+        assert_eq!(lenz_content::branches::Track::default().label(), "");
     }
 
     #[test]
@@ -9566,11 +9706,11 @@ mod git_branches {
             let row = rows.iter().find(|r| r.label == label || r.label.starts_with(&format!("{label} "))).unwrap();
             s.branch_actions(&row.target).into_iter().map(|(l, _)| l).collect::<Vec<_>>()
         };
-        assert_eq!(actions("other"), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
-        assert_eq!(actions("main"), ["New Branch from Here…", "Compare with Working Tree"], "the current branch is not checked out again");
+        assert_eq!(actions("other"), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here", "Add to Favorites"]);
+        assert_eq!(actions("main"), ["New Branch from Here…", "Compare with Working Tree", "Add to Favorites"], "the current branch is not checked out again");
         let enter = |label: &str| s.branch_enter(&rows.iter().find(|r| r.label == label || r.label.starts_with(&format!("{label} "))).unwrap().target);
         assert_eq!((enter("main"), enter("other"), enter("v1")), (None, Some(BranchAction::Checkout), Some(BranchAction::Checkout)), "Enter never opens a prompt");
-        assert_eq!(actions("origin/topic"), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here"]);
+        assert_eq!(actions("topic"), ["Checkout", "New Branch from Here…", "Compare with Working Tree", "Show Changes Since Branching from Here", "Add to Favorites"]);
         assert_eq!(actions("v1"), ["Checkout", "New Branch from Here…", "Compare with Working Tree"]);
         let second = rows.iter().find(|r| matches!(&r.target, BranchTarget::Worktree(p) if p.ends_with("second"))).unwrap();
         assert_eq!(
@@ -9664,7 +9804,7 @@ mod git_branches {
         let diff = |t: &BranchTarget, a| GitDiff::of(t, a);
         assert_eq!(diff(&target("v1"), BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("refs/tags/v1".into())));
         assert_eq!(diff(&target("other"), BranchAction::ChangesSinceBranching), Some(GitDiff::BranchChanges(Some("refs/heads/other".into()))));
-        assert_eq!(diff(&target("origin/topic"), BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("refs/remotes/origin/topic".into())));
+        assert_eq!(diff(&target("topic"), BranchAction::CompareWithWorkingTree), Some(GitDiff::Revision("refs/remotes/origin/topic".into())));
         assert_eq!(diff(&target("other"), BranchAction::Checkout), None);
         let second = wt.path().join("second");
         let launch = s.git_diff_launch(&GitDiff::Worktree(second.clone()), &exe, false).unwrap();

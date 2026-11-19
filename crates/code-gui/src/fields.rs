@@ -86,7 +86,12 @@ impl ReaderView {
                         self.modal,
                         Some(Modal::Places { .. } | Modal::Navigation { .. })
                     ));
-        if row_action {
+        // On a branch folder the arrows open and close it, as a tree's do, whatever the filter holds.
+        let folder = matches!(k.key.as_str(), "left" | "right") && k.modifiers == Default::default() && match &self.modal {
+            Some(Modal::Branches { query, at }) => self.session.state().branch_rows(query).get(*at).is_some_and(|r| matches!(r.target, code_core::branches::BranchTarget::Folder(..))),
+            _ => false,
+        };
+        if row_action || folder {
             return false;
         }
         let Some(command) = lenz_gpui::field::command(ev, cx) else {

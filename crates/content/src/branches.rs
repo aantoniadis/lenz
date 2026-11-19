@@ -129,22 +129,60 @@ pub struct Refs {
     pub remote: Vec<String>,
     pub tags: Vec<String>,
     pub current: Option<String>,
+    /// Each local branch's upstream, as git names it (`origin/main`), for the branches that track one.
+    pub upstream: std::collections::BTreeMap<String, String>,
+    /// How far each local branch is from its upstream; read after the lists ([`tracking`]), so empty until then.
+    pub track: std::collections::BTreeMap<String, Track>,
+}
+
+/// A local branch against its upstream: commits only it has, commits only the upstream has, or an upstream that is
+/// gone (deleted on the remote and pruned).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Track { pub ahead: u32, pub behind: u32, pub gone: bool }
+
+impl Track {
+    /// As the picker shows it: `↑2 ↓1`, `gone`, or nothing when even.
+    pub fn label(self) -> String {
+        if self.gone { return "gone".into(); }
+        [(self.ahead, '↑'), (self.behind, '↓')].into_iter().filter(|(n, _)| *n > 0).map(|(n, a)| format!("{a}{n}")).collect::<Vec<_>>().join(" ")
+    }
+}
+
+/// How far each local branch with an upstream is from it. git walks history for each one, so this is read apart
+/// from [`refs`] (it can take a while across thousands of commits) and never holds up the lists.
+pub fn tracking(root: &Path) -> Result<std::collections::BTreeMap<String, Track>, String> {
+    let out = git::run(root, &["for-each-ref", "--format=%(refname)%00%(upstream:track,nobracket)", "refs/heads"])?;
+    Ok(String::from_utf8_lossy(&out).lines().filter_map(|line| {
+        let (name, track) = line.split_once('\0')?;
+        let name = name.strip_prefix("refs/heads/")?;
+        if track.is_empty() { return None; }
+        let mut t = Track { gone: track == "gone", ..Track::default() };
+        for part in track.split(", ") {
+            if let Some(n) = part.strip_prefix("ahead ") { t.ahead = n.parse().ok()?; }
+            if let Some(n) = part.strip_prefix("behind ") { t.behind = n.parse().ok()?; }
+        }
+        Some((name.to_string(), t))
+    }).collect())
 }
 
 /// How many recently checked-out branches [`refs`] lists.
 pub const RECENT: usize = 5;
 
 pub fn refs(root: &Path) -> Result<Refs, String> {
-    let out = git::run(root, &["for-each-ref", "--sort=refname", "--format=%(refname)%00%(HEAD)", "refs/heads", "refs/remotes", "refs/tags"])?;
+    let out = git::run(root, &["for-each-ref", "--sort=refname", "--format=%(refname)%00%(HEAD)%00%(upstream:short)", "refs/heads", "refs/remotes", "refs/tags"])?;
     let mut refs = Refs::default();
     for line in String::from_utf8_lossy(&out).lines() {
-        let (name, head) = line.split_once('\0').unwrap_or((line, ""));
+        let (name, rest) = line.split_once('\0').unwrap_or((line, ""));
+        let (head, upstream) = rest.split_once('\0').unwrap_or((rest, ""));
         if name.rsplit('/').next().is_some_and(|n| n.starts_with('-')) || name.contains("/-") {
             continue; // named like an option: only `update-ref` makes those, and git is never handed them
         }
         if let Some(b) = name.strip_prefix("refs/heads/") {
             if head == "*" {
                 refs.current = Some(b.to_string());
+            }
+            if !upstream.is_empty() {
+                refs.upstream.insert(b.to_string(), upstream.to_string());
             }
             refs.local.push(b.to_string());
         } else if let Some(r) = name.strip_prefix("refs/remotes/").filter(|r| !r.ends_with("/HEAD")) {

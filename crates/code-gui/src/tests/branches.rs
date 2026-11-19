@@ -15,11 +15,12 @@ fn gui_branch_sections_are_visible_inert_and_keep_action_navigation(cx: &mut Tes
         draw(&mut v);
         let headings = f.view.read_with(&v, |r, _| r.modal_lines().into_iter().filter(|r| r.0 == usize::MAX).map(|r| r.1).collect::<Vec<_>>());
         for label in ["Recent branches", "Local branches", "Remote branches", "Tags", "Worktrees"] {
-            assert!(headings.iter().any(|heading| heading == label), "{theme}: {headings:?}");
+            // each heading with its section's size
+            assert!(headings.iter().any(|heading| heading.strip_prefix(label).is_some_and(|n| n.trim().parse::<usize>().is_ok())), "{theme}: {headings:?}");
         }
         let header = f.view.read_with(&v, |r, _| {
             let layout = r.modal_layout().unwrap();
-            let line = layout.lines.iter().position(|(row, text, _)| *row == usize::MAX && text == "Local branches").unwrap();
+            let line = layout.lines.iter().position(|(row, text, _)| *row == usize::MAX && text.starts_with("Local branches")).unwrap();
             assert!((layout.first..layout.first + layout.visible).contains(&line));
             point(layout.bounds.origin.x + px(24.0), layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
         });
@@ -36,6 +37,82 @@ fn gui_branch_sections_are_visible_inert_and_keep_action_navigation(cx: &mut Tes
         assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { at, .. }) if at == last - 1)));
         v.simulate_keystrokes("escape");
     }
+}
+
+#[gpui::test]
+fn gui_branch_picker_rows_stay_one_line_and_show_more_opens_a_section_by_key_and_click(cx: &mut TestAppContext) {
+    use lenz_content::git::testing::git;
+    let (f, _wt) = branches_fixture(cx);
+    for i in 0..14 { git(f.dir.path(), &["branch", &format!("topic-a-very-long-branch-name-number-{i:02}-for-the-settings-dialog")]); }
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(520.0), px(700.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading && b.refs.local.len() > 10));
+    draw(&mut v);
+    // Every row is one line: no row's text spills onto a second line, long names keep both ends. (The test window
+    // shapes no text: give it a character width to count columns with.)
+    f.view.update(&mut v, |r, _| r.char_w = 8.0);
+    let (lines, rows) = f.view.read_with(&v, |r, _| (r.modal_lines(), r.session().state().branch_rows("")));
+    let branch_lines: Vec<_> = lines.iter().filter(|l| l.0 != usize::MAX && l.0 >= FINDER_HEADER_ROWS).collect();
+    assert_eq!(branch_lines.len(), rows.len(), "one line per row");
+    assert!(branch_lines.iter().any(|l| l.1.contains('…') && l.1.ends_with("dialog")), "{branch_lines:?}");
+    // Enter on Show more lists the rest of the section and keeps the highlight on the first row it brings in.
+    let more = rows.iter().position(|r| r.target == code_core::branches::BranchTarget::More("Local")).expect("a Show more row");
+    f.view.update(&mut v, |r, _| r.modal = Some(Modal::Branches { query: String::new(), at: more }));
+    v.simulate_keystrokes("enter");
+    let (at, rows) = f.view.read_with(&v, |r, _| (match r.modal { Some(Modal::Branches { at, .. }) => at, _ => panic!("the picker stays open") }, r.session().state().branch_rows("")));
+    assert_eq!(at, more);
+    assert!(!rows.iter().any(|r| r.target == code_core::branches::BranchTarget::More("Local")));
+    assert_eq!(rows[at].section, "Local");
+    // Reopened, it is short again; a click on Show more opens it as Enter does.
+    v.simulate_keystrokes("escape ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading));
+    draw(&mut v);
+    let click = f.view.read_with(&v, |r, _| {
+        let layout = r.modal_layout().unwrap();
+        let more = r.session().state().branch_rows("").iter().position(|r| r.target == code_core::branches::BranchTarget::More("Local")).unwrap();
+        let line = layout.lines.iter().position(|(row, ..)| *row == more + FINDER_HEADER_ROWS).unwrap();
+        assert!((layout.first..layout.first + layout.visible).contains(&line));
+        point(layout.bounds.origin.x + px(40.0), layout.bounds.origin.y + px(layout.body_top + (line - layout.first) as f32 * line_h() + line_h() / 2.0))
+    });
+    v.simulate_click(click, Modifiers::default());
+    assert!(f.view.read_with(&v, |r, _| r.modal.is_some() && !r.session().state().branch_rows("").iter().any(|r| r.target == code_core::branches::BranchTarget::More("Local"))));
+    assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n", "nothing was checked out");
+}
+
+#[gpui::test]
+fn gui_branch_folders_open_by_key_and_a_star_from_the_menu_keeps_the_picker(cx: &mut TestAppContext) {
+    use code_core::branches::BranchTarget;
+    use lenz_content::git::testing::git;
+    let (f, _wt) = branches_fixture(cx);
+    for b in ["team/a", "team/b"] { git(f.dir.path(), &["branch", b]); }
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(900.0), px(700.0)));
+    draw(&mut v);
+    v.simulate_keystrokes("ctrl-shift-`");
+    settle_for(cx, &f, 10, &|r| r.session().state().branches().is_some_and(|b| !b.loading && b.refs.local.iter().any(|l| l == "team/a")));
+    let rows = |v: &VisualTestContext| f.view.read_with(v, |r, _| r.session().state().branch_rows(""));
+    let folder = rows(&v).iter().position(|r| matches!(&r.target, BranchTarget::Folder("Local", n) if n == "team")).expect("a team folder");
+    f.view.update(&mut v, |r, _| r.modal = Some(Modal::Branches { query: String::new(), at: folder }));
+    // Enter opens it, ← closes it, → opens it again; the highlight stays on the folder.
+    v.simulate_keystrokes("enter");
+    assert!(rows(&v)[folder].open && rows(&v)[folder + 1].label == "a" && rows(&v)[folder + 1].depth == 1);
+    v.simulate_keystrokes("left");
+    assert!(!rows(&v)[folder].open);
+    v.simulate_keystrokes("right");
+    assert!(rows(&v)[folder].open);
+    assert!(f.view.read_with(&v, |r, _| matches!(r.modal, Some(Modal::Branches { at, .. }) if at == folder)));
+    // → on a branch lists its actions; Add to Favorites stars it and returns to the list, on that branch.
+    let team_b = folder + 2;
+    f.view.update(&mut v, |r, _| r.modal = Some(Modal::Branches { query: String::new(), at: team_b }));
+    v.simulate_keystrokes("right");
+    let star = f.view.read_with(&v, |r, _| match &r.modal { Some(Modal::BranchMenu { target, .. }) => r.session().branch_actions(target).iter().position(|(l, _)| *l == "Add to Favorites"), _ => None }).expect("the menu offers a star");
+    for _ in 0..star { v.simulate_keystrokes("down"); }
+    v.simulate_keystrokes("enter");
+    let (at, rows) = f.view.read_with(&v, |r, _| (match r.modal { Some(Modal::Branches { at, .. }) => at, _ => panic!("back to the list") }, r.session().state().branch_rows("")));
+    assert!(rows[at].favorite && matches!(&rows[at].target, BranchTarget::Branch(b) if b == "team/b"), "{:?}", rows[at]);
+    assert_eq!(std::fs::read(f.dir.path().join("a.txt")).unwrap(), b"main\n", "nothing was checked out");
 }
 
 #[gpui::test]

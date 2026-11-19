@@ -17,6 +17,16 @@ pub struct Repo {
     pub signal: Option<std::time::SystemTime>,
 }
 
+impl Repo {
+    /// The git folder every worktree of the repository shares: what Lenz keeps per repository (starred branches)
+    /// is the same in each of them.
+    pub fn common_dir(&self) -> PathBuf {
+        let shared = std::fs::read_to_string(self.git_dir.join("commondir")).ok().map(|d| self.git_dir.join(d.trim()));
+        let dir = shared.unwrap_or_else(|| self.git_dir.clone());
+        std::fs::canonicalize(&dir).unwrap_or(dir)
+    }
+}
+
 /// File statuses read at most: beyond it the explorer and tabs show the first ones and the rest have no badge.
 pub const STATUS_LIMIT: usize = 20_000;
 
@@ -72,6 +82,8 @@ pub struct BranchesView {
     pub worktrees_only: bool,
     /// Compare with Branch, Tag or Revision…: branches and tags (and what is typed), and Enter compares.
     pub revisions_only: bool,
+    /// The sections opened past their first rows by their Show more row; kept while the lists refresh.
+    pub expanded: Vec<&'static str>,
 }
 
 impl BranchesView {
@@ -100,6 +112,10 @@ pub enum BranchTarget {
     Worktree(PathBuf),
     /// What was typed in the pick list: any revision, checked when used.
     Revision(String),
+    /// A section's Show more row: Enter lists the rest of it.
+    More(&'static str),
+    /// A folder of branches in a section (`feature` for `feature/login`…): Enter opens or closes it.
+    Folder(&'static str, String),
 }
 
 impl BranchTarget {
@@ -111,7 +127,7 @@ impl BranchTarget {
             // Fully named: a branch, remote, `$GIT_DIR` file or object id sharing a tag's short name must not win.
             Self::Tag(t) => Some(git_branches::Target::Detached(format!("refs/tags/{t}"))),
             Self::Revision(t) => Some(git_branches::Target::Detached(t.clone())),
-            Self::Action(_) | Self::Worktree(_) => None,
+            Self::Action(_) | Self::Worktree(_) | Self::More(_) | Self::Folder(..) => None,
         }
     }
     /// The revision a new branch from here starts at, fully named (a tag and a branch may share a name).
@@ -121,7 +137,7 @@ impl BranchTarget {
             Self::Remote(r) => Some(format!("refs/remotes/{r}")),
             Self::Tag(t) => Some(format!("refs/tags/{t}")),
             Self::Revision(r) => Some(r.clone()),
-            Self::Action(_) | Self::Worktree(_) => None,
+            Self::Action(_) | Self::Worktree(_) | Self::More(_) | Self::Folder(..) => None,
         }
     }
 }
@@ -139,6 +155,8 @@ pub enum BranchAction {
     CompareWithWorkingTree,
     /// Lenz Diff: everything since HEAD split from the row's branch.
     ChangesSinceBranching,
+    /// Star or unstar the branch for this repository; the popup stays open.
+    ToggleFavorite,
 }
 
 /// A comparison Lenz Code opens Lenz Diff on, the working tree as it is on the right.
@@ -168,14 +186,60 @@ impl GitDiff {
     }
 }
 
-/// A row of the popup: its section ("" for the popup's own commands), text, whether it is the current branch or
-/// worktree, and what it stands for.
+/// A row of the popup: its section ("" for the popup's own commands), name, the dim detail on its right (a
+/// branch's upstream, a remote branch's remote, a worktree's folder and changes), whether it is the current branch
+/// or worktree, and what it stands for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchRow {
     pub section: &'static str,
     pub label: String,
+    pub detail: String,
     pub current: bool,
     pub target: BranchTarget,
+    /// Starred for this repository: listed first in its section.
+    pub favorite: bool,
+    /// Nesting under a folder row (0 or 1).
+    pub depth: u8,
+    /// A folder row that is open (its branches follow it).
+    pub open: bool,
+}
+
+impl BranchRow {
+    /// What tells the row's kind without colour: the current branch or worktree `●`, a branch `⎇`, a tag `◆`, a
+    /// worktree `⧉` (as Lenz Diff's sidebar marks them); blank for the popup's commands and Show more rows.
+    pub fn mark(&self) -> &'static str {
+        match &self.target {
+            _ if self.current => "●",
+            _ if self.favorite => "★",
+            BranchTarget::Folder(..) => "▸",
+            BranchTarget::Branch(_) | BranchTarget::Remote(_) => "⎇",
+            BranchTarget::Tag(_) => "◆",
+            BranchTarget::Worktree(_) => "⧉",
+            BranchTarget::Action(_) | BranchTarget::Revision(_) | BranchTarget::More(_) => " ",
+        }
+    }
+    /// The text a filter looks in: the name, the detail, and the full name of what it stands for.
+    fn haystack(&self) -> String {
+        let full = match &self.target {
+            BranchTarget::Remote(r) => r.clone(),
+            BranchTarget::Worktree(p) => p.display().to_string(),
+            _ => String::new(),
+        };
+        format!("{} {} {full}", self.label, self.detail).to_lowercase()
+    }
+}
+
+/// Every mark a row can start with ([`BranchRow::mark`], an open folder's `▾`): what an adapter colours apart.
+pub const MARKS: [&str; 7] = ["●", "★", "▸", "▾", "⎇", "◆", "⧉"];
+
+/// How many rows each section shows before its Show more row, while nothing is typed.
+pub fn section_cap(section: &str) -> usize {
+    match section {
+        "Local" => 8,
+        "Remote" | "Worktrees" => 6,
+        "Tags" => 5,
+        _ => usize::MAX,
+    }
 }
 
 impl State {
@@ -196,51 +260,124 @@ impl State {
         self.branches.as_ref()
     }
     /// The popup's rows whose text holds `query` (any case): its commands, then Recent, Local, Remote, Tags and (with
-    /// more than one) Worktrees.
+    /// more than one) Worktrees. While nothing is typed a long section shows its first rows ([`section_cap`]; the
+    /// current branch first) and then a Show more row, until that row opens it.
     pub fn branch_rows(&self, query: &str) -> Vec<BranchRow> {
         let Some(v) = &self.branches else { return Vec::new() };
-        let row = |section, label: &str, current, target| BranchRow { section, label: label.to_string(), current, target };
+        let rows = self.matching_branch_rows(query);
+        if !query.trim().is_empty() { return rows; }
+        let rows = self.folded(rows);
+        // Each long section: its first rows, then one row that lists the rest.
+        let mut shown: Vec<BranchRow> = Vec::with_capacity(rows.len());
+        let mut at = 0;
+        while at < rows.len() {
+            let section = rows[at].section;
+            let end = rows[at..].iter().position(|r| r.section != section).map_or(rows.len(), |n| at + n);
+            let cap = section_cap(section);
+            if v.expanded.contains(&section) || end - at <= cap.saturating_add(1) {
+                shown.extend(rows[at..end].iter().cloned());
+            } else {
+                shown.extend(rows[at..at + cap].iter().cloned());
+                let more = end - at - cap;
+                shown.push(BranchRow { section, label: format!("Show {more} more…"), detail: String::new(), current: false, target: BranchTarget::More(section), favorite: false, depth: 0, open: false });
+            }
+            at = end;
+        }
+        shown
+    }
+    /// Local and remote branches named under a folder (`feature/login`, `feature/search`) gathered into one folder row
+    /// each where two or more share it, closed until opened ([`State::branch_folders`]); the current and starred
+    /// branches stay on top, outside folders, so they never hide.
+    fn folded(&self, rows: Vec<BranchRow>) -> Vec<BranchRow> {
+        let folder = |r: &BranchRow| (matches!(r.section, "Local" | "Remote") && !r.current && !r.favorite && r.depth == 0).then(|| r.label.split_once('/').map(|(f, _)| f.to_string())).flatten();
+        let mut out: Vec<BranchRow> = Vec::with_capacity(rows.len());
+        let mut at = 0;
+        while at < rows.len() {
+            let Some(name) = folder(&rows[at]) else { out.push(rows[at].clone()); at += 1; continue };
+            let section = rows[at].section;
+            let end = rows[at..].iter().position(|r| r.section != section || folder(r).as_deref() != Some(name.as_str())).map_or(rows.len(), |n| at + n);
+            if end - at < 2 { out.push(rows[at].clone()); at += 1; continue; }
+            let open = self.branch_folders.iter().any(|(s, n)| *s == section && *n == name);
+            out.push(BranchRow { section, label: format!("{name}/"), detail: (end - at).to_string(), current: false, target: BranchTarget::Folder(section, name.clone()), favorite: false, depth: 0, open });
+            if open {
+                let prefix = format!("{name}/");
+                out.extend(rows[at..end].iter().map(|r| BranchRow { label: r.label.strip_prefix(&prefix).unwrap_or(&r.label).to_string(), depth: 1, ..r.clone() }));
+            }
+            at = end;
+        }
+        out
+    }
+    /// Every row whose text holds `query`, no section cut short.
+    fn matching_branch_rows(&self, query: &str) -> Vec<BranchRow> {
+        let Some(v) = &self.branches else { return Vec::new() };
         let mut rows = Vec::new();
         if v.revisions_only {
-            let mut rows: Vec<_> = self.ref_rows(v).into_iter().filter(|r| matches!(r.section, "Local" | "Remote" | "Tags")).collect();
-            let typed = query.trim();
-            rows.retain(|r| r.label.to_lowercase().contains(&typed.to_lowercase()));
-            // A name already listed is picked from the list (a branch is not mistaken for a tag of that name).
-            if !typed.is_empty() && !rows.iter().any(|r| r.label == typed) {
-                rows.insert(0, row("", &format!("Compare with “{typed}”"), false, BranchTarget::Revision(typed.to_string())));
+            rows.extend(self.ref_rows(v).into_iter().filter(|r| matches!(r.section, "Local" | "Remote" | "Tags")));
+        } else {
+            if !v.worktrees_only {
+                rows.extend(self.ref_rows(v));
             }
-            return rows;
+            if v.worktrees.len() > 1 {
+                // Compare with Worktree… lists the others that have a folder of files (a bare repository has none).
+                let comparable = |w: &Worktree| !w.current && w.head.is_some() && w.path.is_dir();
+                rows.extend(v.worktrees.iter().filter(|w| !v.worktrees_only || comparable(w)).map(|w| {
+                    let name = w.branch.clone().or_else(|| w.head.as_ref().map(|h| h.get(..7).unwrap_or(h).to_string())).unwrap_or_else(|| "(bare)".into());
+                    let changed = w.dirty.filter(|&n| n > 0).map_or(String::new(), |n| format!(" · {n} changed"));
+                    let missing = if w.path.is_dir() { "" } else { " · missing" };
+                    let detail = format!("{}{changed}{missing}", home_relative(&w.path));
+                    BranchRow { section: "Worktrees", label: name, detail, current: w.current, target: BranchTarget::Worktree(w.path.clone()), favorite: false, depth: 0, open: false }
+                }));
+            }
         }
-        if !v.worktrees_only {
-            rows.extend(self.ref_rows(v));
+        let typed = query.trim();
+        let query = typed.to_lowercase();
+        rows.retain(|r| r.haystack().contains(&query));
+        if v.revisions_only {
+            // A name already listed is picked from the list (a branch is not mistaken for a tag of that name).
+            if !typed.is_empty() && !rows.iter().any(|r| r.label == typed || matches!(&r.target, BranchTarget::Remote(full) if full == typed)) {
+                rows.insert(0, BranchRow { section: "", label: format!("Compare with “{typed}”"), detail: String::new(), current: false, target: BranchTarget::Revision(typed.to_string()), favorite: false, depth: 0, open: false });
+            }
         }
-        if v.worktrees.len() > 1 {
-            // Compare with Worktree… lists the others that have a folder of files (a bare repository has none).
-            let comparable = |w: &Worktree| !w.current && w.head.is_some() && w.path.is_dir();
-            rows.extend(v.worktrees.iter().filter(|w| !v.worktrees_only || comparable(w)).map(|w| {
-                let name = w.branch.clone().or_else(|| w.head.as_ref().map(|h| h.get(..7).unwrap_or(h).to_string())).unwrap_or_else(|| "(bare)".into());
-                let changed = w.dirty.filter(|&n| n > 0).map_or(String::new(), |n| format!(" · {n} changed"));
-                let missing = if w.path.is_dir() { "" } else { " · missing" };
-                let label = format!("{name}  {}{changed}{missing}", w.path.display());
-                row("Worktrees", &label, w.current, BranchTarget::Worktree(w.path.clone()))
-            }));
-        }
-        let query = query.to_lowercase();
-        rows.retain(|r| r.label.to_lowercase().contains(&query));
         rows
     }
-    /// The popup's own commands, then Recent, Local, Remote and Tags.
+    /// How many entries a section has in all (its heading's count): `None` for the popup's own commands, and while a
+    /// filter is typed (the rows show what matched).
+    pub fn branch_section_len(&self, section: &str, query: &str) -> Option<usize> {
+        if section.is_empty() || !query.trim().is_empty() { return None; }
+        Some(self.matching_branch_rows("").iter().filter(|r| r.section == section).count())
+    }
+    /// The popup's own commands, then Recent, Local (the current branch, then the starred ones, first), Remote (the
+    /// starred ones first) and Tags.
     fn ref_rows(&self, v: &BranchesView) -> Vec<BranchRow> {
-        let row = |section, label: &str, current, target| BranchRow { section, label: label.to_string(), current, target };
+        let favorites = self.favorite_branches();
+        let row = |section, label: &str, detail: String, current, target: BranchTarget| {
+            let favorite = target.rev().is_some_and(|r| favorites.contains(&r)) && section != "Recent";
+            BranchRow { section, label: label.to_string(), detail, current, target, favorite, depth: 0, open: false }
+        };
         let mut rows = vec![
-            row("", CommandId::NewBranch.label(), false, BranchTarget::Action(CommandId::NewBranch)),
-            row("", CommandId::CheckoutRevision.label(), false, BranchTarget::Action(CommandId::CheckoutRevision)),
+            row("", CommandId::NewBranch.label(), String::new(), false, BranchTarget::Action(CommandId::NewBranch)),
+            row("", CommandId::CheckoutRevision.label(), String::new(), false, BranchTarget::Action(CommandId::CheckoutRevision)),
         ];
         let current = v.refs.current.as_deref();
-        rows.extend(v.refs.recent.iter().map(|b| row("Recent", b, false, BranchTarget::Branch(b.clone()))));
-        rows.extend(v.refs.local.iter().map(|b| row("Local", b, Some(b.as_str()) == current, BranchTarget::Branch(b.clone()))));
-        rows.extend(v.refs.remote.iter().map(|b| row("Remote", b, false, BranchTarget::Remote(b.clone()))));
-        rows.extend(v.refs.tags.iter().map(|t| row("Tags", t, false, BranchTarget::Tag(t.clone()))));
+        // `↑2 ↓1 origin/main`: how far it is from its upstream (once read), then the upstream
+        let upstream = |b: &str| {
+            let track = v.refs.track.get(b).map(|t| t.label()).unwrap_or_default();
+            [track, v.refs.upstream.get(b).cloned().unwrap_or_default()].into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join("  ")
+        };
+        rows.extend(v.refs.recent.iter().map(|b| row("Recent", b, upstream(b), false, BranchTarget::Branch(b.clone()))));
+        let starred = |full: String| favorites.contains(&full);
+        let rank = |b: &&String| (Some(b.as_str()) != current, !starred(format!("refs/heads/{b}")));
+        let mut local: Vec<_> = v.refs.local.iter().collect();
+        local.sort_by_key(rank); // stable: by name within each rank
+        rows.extend(local.into_iter().map(|b| row("Local", b, upstream(b), Some(b.as_str()) == current, BranchTarget::Branch(b.clone()))));
+        // A remote branch reads by its name; its remote stands on the right.
+        let mut remote: Vec<_> = v.refs.remote.iter().collect();
+        remote.sort_by_key(|b| !starred(format!("refs/remotes/{b}")));
+        rows.extend(remote.into_iter().map(|b| {
+            let (remote, name) = b.split_once('/').unwrap_or(("", b));
+            row("Remote", name, remote.to_string(), false, BranchTarget::Remote(b.clone()))
+        }));
+        rows.extend(v.refs.tags.iter().map(|t| row("Tags", t, String::new(), false, BranchTarget::Tag(t.clone()))));
         rows
     }
 }
@@ -268,14 +405,19 @@ impl crate::session::Session {
         }
         actions
     }
+    /// A branch row's star: added, or taken away when it has one.
+    fn favorite_action(&self, target: &BranchTarget) -> (&'static str, BranchAction) {
+        let starred = target.rev().is_some_and(|r| self.state().favorite_branches().contains(&r));
+        (if starred { "Remove from Favorites" } else { "Add to Favorites" }, BranchAction::ToggleFavorite)
+    }
     fn row_actions(&self, target: &BranchTarget) -> Vec<(&'static str, BranchAction)> {
         // What is current comes from the repository itself, not the popup's lists (which close before an action runs).
         let repo = self.state().repo();
         let current = repo.and_then(|r| r.head.branch.as_deref());
         match target {
-            BranchTarget::Action(_) => Vec::new(),
-            BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
-            BranchTarget::Branch(_) | BranchTarget::Remote(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE, ("Show Changes Since Branching from Here", BranchAction::ChangesSinceBranching)],
+            BranchTarget::Action(_) | BranchTarget::More(_) | BranchTarget::Folder(..) => Vec::new(),
+            BranchTarget::Branch(b) if Some(b.as_str()) == current => vec![("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE, self.favorite_action(target)],
+            BranchTarget::Branch(_) | BranchTarget::Remote(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE, ("Show Changes Since Branching from Here", BranchAction::ChangesSinceBranching), self.favorite_action(target)],
             BranchTarget::Tag(_) => vec![("Checkout", BranchAction::Checkout), ("New Branch from Here…", BranchAction::NewBranchFrom), COMPARE],
             BranchTarget::Revision(_) => vec![COMPARE],
             // A worktree whose folder is gone (`git worktree prune` tidies it), or a bare repository (no `.git` in
@@ -393,9 +535,91 @@ pub fn branch_section_label(section: &str) -> &str {
     }
 }
 
-/// Row text under a separate section heading in both frontends.
+/// A worktree's folder as people read it: under the home folder as `~/…`.
+fn home_relative(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| !h.as_os_str().is_empty());
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+/// Section headings shared by both branch pickers, with the section's size when it is known.
+pub fn section_heading(section: &str, count: Option<usize>) -> String {
+    match count {
+        Some(n) => format!("{}  {n}", branch_section_label(section)),
+        None => branch_section_label(section).to_string(),
+    }
+}
+
+/// A row in `cols` cells on one line, never wrapped, in both frontends: its mark and name on the left, its detail on
+/// the right. A detail takes at most about two fifths of the line; a name that does not fit keeps its start and its
+/// end around a `…` (the end of `feature/…-settings-dialog` tells branches apart).
+pub fn fit_row(r: &BranchRow, cols: usize) -> (String, String) {
+    fit_text(&row_text(r), &r.detail, matches!(r.target, BranchTarget::Worktree(_)), cols)
+}
+
+/// [`fit_row`] for a row's text (its mark and name) and detail; `path`: the detail is a folder, which gives up its
+/// start rather than its middle (its last folders tell worktrees apart).
+pub fn fit_text(name: &str, detail: &str, path: bool, cols: usize) -> (String, String) {
+    let room = (cols * 2 / 5).max(8);
+    let detail = match () {
+        _ if detail.is_empty() || cols < 24 => String::new(),
+        // the folder gives up its start; what follows it (" · 3 changed") stays whole
+        _ if path => {
+            let (folder, rest) = detail.find(" · ").map_or((detail, ""), |at| detail.split_at(at));
+            let keep = room.saturating_sub(lenz_content::wrap::width(rest)).max(8);
+            format!("{}{rest}", start_ellipsis(folder, keep))
+        }
+        _ => middle_ellipsis(detail, room),
+    };
+    let room = cols.saturating_sub(if detail.is_empty() { 0 } else { lenz_content::wrap::width(&detail) + 2 });
+    (middle_ellipsis(name, room.max(1)), detail)
+}
+
+/// `text` in at most `cols` cells: whole, or its start and end around a `…`.
+pub fn middle_ellipsis(text: &str, cols: usize) -> String {
+    use lenz_content::wrap::width;
+    if width(text) <= cols { return text.to_string(); }
+    if cols <= 1 { return "…".chars().take(cols).collect(); }
+    let keep = cols - 1;
+    let (head_cols, tail_cols) = (keep - keep * 2 / 5, keep * 2 / 5);
+    let (mut head, mut used) = (String::new(), 0);
+    for c in text.chars() {
+        let w = width(c.encode_utf8(&mut [0; 4]));
+        if used + w > head_cols { break; }
+        head.push(c);
+        used += w;
+    }
+    let (mut tail, mut used) = (Vec::new(), 0);
+    for c in text.chars().rev() {
+        let w = width(c.encode_utf8(&mut [0; 4]));
+        if used + w > tail_cols { break; }
+        tail.push(c);
+        used += w;
+    }
+    format!("{head}…{}", tail.into_iter().rev().collect::<String>())
+}
+
+/// `text` in at most `cols` cells: whole, or `…` and as much of its end as fits.
+pub fn start_ellipsis(text: &str, cols: usize) -> String {
+    use lenz_content::wrap::width;
+    if width(text) <= cols { return text.to_string(); }
+    let (mut tail, mut used) = (Vec::new(), 0);
+    for c in text.chars().rev() {
+        let w = width(c.encode_utf8(&mut [0; 4]));
+        if used + w + 1 > cols { break; }
+        tail.push(c);
+        used += w;
+    }
+    format!("…{}", tail.into_iter().rev().collect::<String>())
+}
+
+/// Row text under a separate section heading in both frontends: the row's mark, then its name.
 pub fn row_text(r: &BranchRow) -> String {
-    format!("{}{}", if r.current { "● " } else { "  " }, r.label)
+    let mark = match &r.target { BranchTarget::Folder(..) if r.open => "▾", _ => r.mark() };
+    format!("{}{mark} {}", "  ".repeat(usize::from(r.depth)), r.label)
 }
 
 /// A fully named ref as people say it (`refs/heads/main` → `main`, `refs/tags/v1` → `v1`).
