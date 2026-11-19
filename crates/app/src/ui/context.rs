@@ -175,7 +175,7 @@ impl Viewer {
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .child(
-                    div()
+                    lenz_gpui::popup::dialog(div(), p)
                         .id("discard-confirmation")
                         .w(px(560.))
                         .max_w_full()
@@ -185,9 +185,6 @@ impl Viewer {
                         .flex()
                         .flex_col()
                         .gap_3()
-                        .bg(rgb(p.status_bg))
-                        .border_1()
-                        .border_color(rgb(p.border))
                         .text_color(rgb(p.fg))
                         .child(question)
                         .child(
@@ -213,7 +210,7 @@ impl Viewer {
                                     div()
                                         .id("discard-confirm")
                                         .p_2()
-                                        .bg(rgb(p.selected_bg))
+                                        .bg(rgb(lenz_gpui::popup::selected(p)))
                                         .child("Discard (Enter)")
                                         .on_mouse_down(
                                             MouseButton::Left,

@@ -260,7 +260,7 @@ impl Viewer {
                     canvas(
                         |_, _, _| {},
                         move |_, _, window, cx| {
-                            fill(window, x, y, w, h, palette.status_bg);
+                            lenz_gpui::popup::surface(window, x, y, w, h, &palette);
                             let mask = ContentMask {
                                 bounds: Bounds {
                                     origin: point(px(x), px(y)),
@@ -271,13 +271,14 @@ impl Viewer {
                                 for (label, r, selected, heading) in &rows {
                                     let yy = f32::from(r.origin.y);
                                     if *selected {
-                                        fill(
+                                        // the row's hit box is x + 8 wide of each side; the row inset makes up 4
+                                        lenz_gpui::popup::row(
                                             window,
-                                            x + 8.0,
+                                            x + 4.0,
                                             yy,
-                                            (w - 16.0).max(0.0),
+                                            (w - 8.0).max(0.0),
                                             line_h(),
-                                            palette.selected_bg,
+                                            lenz_gpui::popup::selected(&palette),
                                         );
                                     }
                                     text(

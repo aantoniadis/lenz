@@ -197,6 +197,19 @@ pub fn raised(&self) -> (u32, u32) {
     (bg, mix(self.fg, bg, 0.45))
 }
 
+/// The highlighted row of a menu or list drawn on `fill`: `selected_bg` where it shows there, else `fill` tinted
+/// toward the accent until it does (several dark themes pick a `selected_bg` within 4% of their popup background).
+pub fn menu_selected(&self, fill: u32) -> u32 {
+    if contrast(self.selected_bg, fill) >= 1.3 { return self.selected_bg; }
+    // the strongest tint up to 1.3:1 that keeps the text on it at 4.5:1, or near the theme's own lower ratio
+    let own = contrast(self.fg, self.selected_bg);
+    let floor = if own >= 4.5 { 4.5 } else { own * 0.92 };
+    let tint = |t: f32| mix(fill, self.accent, t);
+    let mut t = 0.0;
+    while t < 0.4 && contrast(tint(t), fill) < 1.3 && contrast(self.fg, tint(t + 0.02)) >= floor { t += 0.02; }
+    if contrast(tint(t), fill) > contrast(self.selected_bg, fill) { tint(t) } else { self.selected_bg }
+}
+
 }
 
 /// `a` moved `t` of the way to `b`, per channel.

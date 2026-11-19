@@ -199,7 +199,7 @@ impl<A:Copy> Bar<A> {
     }
     pub fn draw_menu_with_theme(&mut self,frame:&mut Frame,palette:&lenz::theme::Palette) {
         let Some(index)=self.dropdown else{
-            if let Some(reason)=&self.notice {let area=self.bounds;if area.width>2&&area.height>2{let height=area.height.min(3);let rect=Rect::new(area.x,area.y+area.height-height,area.width,height);frame.render_widget(Clear,rect);frame.render_widget(Block::default().borders(Borders::ALL).style(style_with(palette).bg(color(palette.status_bg))),rect);crate::visual::safe_text(frame.buffer_mut(),Rect::new(rect.x+1,rect.y+1,rect.width-2,1),reason,style_with(palette));}}
+            if let Some(reason)=&self.notice {let area=self.bounds;if area.width>2&&area.height>2{let height=area.height.min(3);let rect=Rect::new(area.x,area.y+area.height-height,area.width,height);frame.render_widget(Clear,rect);frame.render_widget(pane("",palette,false).style(style_with(palette).bg(color(palette.status_bg))),rect);crate::visual::safe_text(frame.buffer_mut(),Rect::new(rect.x+1,rect.y+1,rect.width-2,1),reason,style_with(palette).bg(color(palette.status_bg)));}}
             return;
         };
         if self.items.get(index).is_none(){self.close();return;}
@@ -218,12 +218,12 @@ impl<A:Copy> Bar<A> {
         self.menu_first=self.menu_first.min(rows.len().saturating_sub(visible));
         for (i,row) in rows.iter().enumerate().skip(self.menu_first).take(visible) {
             let rect=Rect::new(self.popup.x+1,self.popup.y+1+(i-self.menu_first) as u16,width-2,1);
-            let bg=if self.row==i{palette.selected_bg}else{palette.status_bg};
+            let bg=if self.row==i{palette.menu_selected(palette.status_bg)}else{palette.status_bg};
             let s=style_with(palette).bg(color(bg)).fg(color(if row.disabled.is_some(){palette.dim}else{palette.fg}));
             frame.buffer_mut().set_style(rect,s);
             crate::visual::safe_text(frame.buffer_mut(),rect,&format!("{} {}",if row.active{"✓"}else{" "},row.label),s);
         }
-        if height>=4 {let reason=rows.get(self.row).and_then(|r|r.disabled.as_deref()).unwrap_or("Enter selects · Esc closes");crate::visual::safe_text(frame.buffer_mut(),Rect::new(self.popup.x+1,self.popup.bottom()-2,width-2,1),reason,style_with(palette).fg(color(palette.dim)));}
+        if height>=4 {let reason=rows.get(self.row).and_then(|r|r.disabled.as_deref()).unwrap_or("Enter selects · Esc closes");crate::visual::safe_text(frame.buffer_mut(),Rect::new(self.popup.x+1,self.popup.bottom()-2,width-2,1),reason,style_with(palette).bg(color(palette.status_bg)).fg(color(palette.dim)));}
     }
 }
 

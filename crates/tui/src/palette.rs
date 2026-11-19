@@ -1,11 +1,12 @@
 //! The command palette over the shared catalog (`:` and F10): scope, availability, dispatch, drawing and input.
+use unicode_width::UnicodeWidthStr;
 use crate::app::{App, Prompt};
 use crate::chrome::color;
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind};
 use lenz::catalog::{self, Action, Availability, HelpAction, PrAction, RepoAction, Scope, Surface};
 use lenz::palette::{Outcome, Palette, PaletteCommand};
 use lenz::repository_session::RepositoryCommand as R;
-use ratatui::{layout::Rect, style::Modifier, widgets::Clear};
+use ratatui::{layout::Rect, widgets::Clear};
 use std::borrow::Cow;
 
 impl App {
@@ -227,10 +228,11 @@ pub(crate) fn rect(area: Rect, p: &Palette) -> Rect {
     Rect::new(area.x + (area.width - w) / 2, area.y + 1.min(area.height), w, h)
 }
 
-/// Query line, then one row per matching entry; disabled rows dim with their reason.
+/// Query line, then one row per matching entry; disabled rows dim with their reason. Each row's group and shortcut
+/// sit in two right-aligned columns.
 pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, palette: &lenz::theme::Palette) {
     if rect.width < 4 || rect.height < 3 { return; }
-    let base = crate::chrome::style_with(palette);
+    let base = crate::chrome::style_with(palette).bg(color(palette.status_bg));
     frame.render_widget(Clear, rect);
     frame.render_widget(crate::chrome::pane("",palette,true).style(base), rect);
     let inner = Rect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2);
@@ -238,20 +240,32 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
     crate::visual::safe_text(buf,Rect{height:1,..inner},"Commands: ",base.fg(color(palette.accent)));
     let range = p.window(usize::from(inner.height.saturating_sub(1)));
     let selected = p.selected();
-    if p.is_empty() && inner.height > 1 { crate::visual::safe_text(buf, Rect::new(inner.x, inner.y + 1, inner.width, 1), "No matching commands", base.add_modifier(Modifier::DIM)); }
-    for (row, (i, entry)) in p.rows().enumerate().skip(range.start).take(range.len()).enumerate() {
+    if p.is_empty() && inner.height > 1 { crate::visual::safe_text(buf, Rect::new(inner.x, inner.y + 1, inner.width, 1), "No matching commands", base.fg(color(palette.dim))); }
+    let rows: Vec<_> = p.rows().enumerate().skip(range.start).take(range.len()).collect();
+    let key_w = rows.iter().filter_map(|(_, e)| e.entry.shortcut).map(UnicodeWidthStr::width).max().unwrap_or(0) as u16;
+    for (row, (i, entry)) in rows.into_iter().enumerate() {
         let line = Rect::new(inner.x, inner.y + 1 + row as u16, inner.width, 1);
-        let mut style = if selected == Some(i) { base.bg(color(palette.selected_bg)) } else { base };
-        if entry.disabled.is_some() { style = style.add_modifier(Modifier::DIM); }
+        let style = if selected == Some(i) { base.bg(color(palette.menu_selected(palette.status_bg))) } else { base };
+        let fg = |c: u32| style.fg(color(c));
         let mark = if entry.entry.current { "✓ " } else { "  " };
         let reason = entry.disabled.as_deref().map_or(String::new(), |why| format!(" ({why})"));
-        let right = [Some(entry.entry.group.label()), entry.entry.shortcut].into_iter().flatten().collect::<Vec<_>>().join("  ");
         buf.set_style(line, style);
-        crate::visual::safe_text(buf, line, &format!("{mark}{}{reason}  · {right}", entry.entry.label), style);
+        // right to left: a one-cell margin, the shortcut column, two cells, the group
+        let group = entry.entry.group.label();
+        let text = format!("{mark}{}{reason}", entry.entry.label);
+        let key_x = line.right().saturating_sub(1 + key_w);
+        let group_x = key_x.saturating_sub(group.width() as u16 + if key_w > 0 { 2 } else { 0 });
+        // a disabled row's reason outranks its group and shortcut: it takes the whole row when they would cut it
+        let columns = group_x > line.x + 1 && (entry.disabled.is_none() || (text.width() as u16) < group_x - line.x);
+        let label_w = if columns { group_x - line.x - 1 } else { line.width };
+        crate::visual::safe_text(buf, Rect { width: label_w, ..line }, &text, fg(if entry.disabled.is_some() { palette.dim } else { palette.fg }));
+        if columns {
+            crate::visual::safe_text(buf, Rect::new(group_x, line.y, line.right() - group_x, 1), group, fg(palette.dim));
+            if let Some(key) = entry.entry.shortcut { crate::visual::safe_text(buf, Rect::new(line.right().saturating_sub(1 + key.width() as u16), line.y, key.width() as u16, 1), key, fg(palette.dim)); }
+        }
     }
     let offset=10.min(inner.width);
     lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:p.query(),cursor:p.input().cursor(),area:Rect::new(inner.x+offset,inner.y,inner.width.saturating_sub(offset),1),active:true},base,base.bg(color(palette.selected_bg)));
-
 }
 
 /// What an event did to an open palette.

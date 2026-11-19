@@ -13,6 +13,7 @@ pub mod find;
 pub mod field;
 pub mod image;
 pub mod markdown;
+pub mod popup;
 pub mod scroll;
 
 use std::ops::Range;

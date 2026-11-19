@@ -8,7 +8,7 @@ use lenz::{
 };
 use ratatui::{
     layout::Rect,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 use std::sync::Arc;
 enum Action {
@@ -448,13 +448,8 @@ impl App {
         self.context.area = area;
         frame.render_widget(Clear, area);
         frame.render_widget(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(if question.is_some() {
-                    "F2 details · Discard"
-                } else {
-                    "F2 details · Actions"
-                })
+            // the footer names F2 details; the title names the box
+            crate::chrome::pane(if question.is_some() { " Discard " } else { " Actions " }, palette, true)
                 .style(
                     crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg)),
                 ),
@@ -472,8 +467,8 @@ impl App {
             crate::visual::safe_text(
                 frame.buffer_mut(),
                 Rect::new(area.x + 1, area.bottom() - 2, width - 2, 1),
-                "Cancel (Esc)          Discard (Enter)",
-                crate::chrome::style_with(palette),
+                "Cancel (Esc)          Discard (Enter) · F2 details",
+                crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg)),
             );
         } else {
             let visible = usize::from(inner.height);
@@ -508,7 +503,7 @@ impl App {
                         palette.fg
                     }))
                     .bg(crate::chrome::color(if i == self.context.selected {
-                        palette.selected_bg
+                        palette.menu_selected(palette.status_bg)
                     } else {
                         palette.status_bg
                     }));
@@ -525,7 +520,9 @@ impl App {
                 frame.buffer_mut(),
                 Rect::new(area.x + 1, area.bottom() - 2, width - 2, 1),
                 reason,
-                crate::chrome::style_with(palette),
+                crate::chrome::style_with(palette)
+                    .bg(crate::chrome::color(palette.status_bg))
+                    .fg(crate::chrome::color(palette.dim)),
             );
         }
     }

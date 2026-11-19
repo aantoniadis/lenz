@@ -26,7 +26,7 @@ impl About {
     pub fn paint(&self, palette: &theme::Palette,bounds:Bounds<Pixels>,font:&Font,char_w:f32,window:&mut Window,cx:&mut App) {
         let (x,y,w,h)=layout(bounds.size);
 
-        fill(window,x,y,w,h,palette.border);fill(window,x+1.0,y+1.0,(w-2.0).max(0.0),(h-2.0).max(0.0),palette.status_bg);
+        lenz_gpui::popup::surface(window,x+1.0,y+1.0,(w-2.0).max(0.0),(h-2.0).max(0.0),palette);
         let clip=Bounds{origin:point(px(x),px(y)),size:size(px(w),px(h))};
         window.with_content_mask(Some(ContentMask{bounds:clip}),|window|{
             text(window,cx,font,x+16.0,y+10.0,crate::about::TITLE,palette.accent);
@@ -40,7 +40,7 @@ impl About {
                 for (i,line) in lines.iter().skip(start).take(visible).enumerate(){text(window,cx,font,tx,top+i as f32*line_h(),line,palette.fg);}
             });
             let close=Self::close_bounds(bounds.size);let cy=f32::from(close.origin.y);
-            fill(window,x+8.0,cy,(w-16.0).max(0.0),f32::from(close.size.height),palette.selected_bg);
+            fill(window,x+8.0,cy,(w-16.0).max(0.0),f32::from(close.size.height),lenz_gpui::popup::selected(palette));
             text(window,cx,font,x+16.0,cy,"Close · Esc / Enter     ↑/↓ scroll",palette.accent);
         });
     }

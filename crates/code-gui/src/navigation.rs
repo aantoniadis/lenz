@@ -202,9 +202,9 @@ impl Frame {
     pub(super) fn paint(&self, window: &mut Window, cx: &mut App, m: Metrics, p: &lenz_content::theme::Palette, x0: f32, y0: f32, nerd: Option<&gpui::Font>, logos: &std::collections::HashMap<&'static str, Arc<gpui::RenderImage>>) {
         let (x, y, w, h) = (x0 + f32::from(self.bounds.origin.x), y0 + f32::from(self.bounds.origin.y), f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
         let bounds = Bounds { origin: gpui::point(px(x), px(y)), size: self.bounds.size };
-        let (bg, border) = p.raised();
-        lenz_gpui::fill(window, x - 1.0, y - 1.0, w + 2.0, h + 2.0, border);
-        lenz_gpui::fill(window, x, y, w, h, bg);
+        let bg = p.raised().0;
+        let selected = p.menu_selected(bg);
+        lenz_gpui::popup::surface(window, x, y, w, h, p);
         window.with_content_mask(Some(gpui::ContentMask { bounds }), |window| {
             let scopes = if self.scope == Scope::Recent { &[Scope::Recent][..] } else { &Scope::ALL[..] };
             for (i, scope) in scopes.iter().enumerate() {
@@ -213,7 +213,7 @@ impl Frame {
                 lenz_gpui::text(window, cx, m, tx + 12.0, y + 4.0, scope.label(), if *scope == self.scope { p.accent } else { p.dim });
             }
             let input_y = y + 4.0 + line_h();
-            lenz_gpui::fill(window, x + 6.0, input_y, (w - 12.0).max(0.0), line_h(), p.bg);
+            lenz_gpui::popup::field(window, x + 6.0, input_y, (w - 12.0).max(0.0), line_h(), p.bg, p.bg);
             lenz_gpui::text(window, cx, m, x + 12.0, input_y, "›", p.dim);
             lenz_gpui::field::paint(lenz_gpui::field::View { text: &self.query, cursor: self.cursor,
                 bounds: Bounds { origin: gpui::point(px(x + 12.0 + 2.0 * self.char_w), px(input_y)), size: gpui::size(px((w - 36.0 - 2.0 * self.char_w).max(0.0)), px(line_h())) },
@@ -222,7 +222,7 @@ impl Frame {
             lenz_gpui::text(window, cx, m, x + 12.0, input_y + line_h(), &hint, p.dim);
             for (i, row) in self.rows.iter().enumerate() {
                 let top = y + 4.0 + (HEADER + i as f32 * 2.0) * line_h();
-                if self.first + i == self.at { lenz_gpui::fill(window, x, top, w, 2.0 * line_h(), p.selected_bg); }
+                if self.first + i == self.at { lenz_gpui::popup::row(window, x, top, w, 2.0 * line_h(), selected); }
                 match row.kind {
                     Kind::File => paint_icon(window, cx, nerd, logos, bounds, p, icons::file(&row.label), x + 10.0, top),
                     Kind::Symbol => lenz_gpui::text(window, cx, m, x + 10.0, top, "◇", p.accent),
@@ -238,7 +238,9 @@ impl Frame {
                 if let Some(shortcut) = navigation_shortcut(row) {
                     let width = shortcut.chars().count() as f32 * self.char_w + 16.0;
                     if w > 320.0 {
-                        lenz_gpui::fill(window, x + w - width - 8.0, top, width + 8.0, line_h(), if self.first + i == self.at { p.selected_bg } else { bg });
+                        // covers a long label, stopping where the highlighted row's rounded end begins
+                        let end = lenz_gpui::popup::ROW_INSET + lenz_gpui::popup::ROW_RADIUS;
+                        lenz_gpui::fill(window, x + w - width - 8.0, top, width + 8.0 - end, line_h(), if self.first + i == self.at { selected } else { bg });
                         lenz_gpui::text(window, cx, m, x + w - width, top, &shortcut, p.dim);
                     }
                 }

@@ -105,8 +105,7 @@ impl FormLayout {
         let (x, y, w, h) = (x0 + f32::from(self.bounds.origin.x), y0 + f32::from(self.bounds.origin.y), f32::from(self.bounds.size.width), f32::from(self.bounds.size.height));
         let pad = self.pad;
         let (bg, border) = p.raised();
-        lenz_gpui::fill(window, x - 1.0, y - 1.0, w + 2.0, h + 2.0, border);
-        lenz_gpui::fill(window, x, y, w, h, bg);
+        lenz_gpui::popup::surface(window, x, y, w, h, p);
         let mask = rect(x, y, w, h);
         window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
             let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
@@ -116,8 +115,7 @@ impl FormLayout {
                 let (fx, fy, fw, fh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let label = code_core::chrome::ellipsize(self.text.field.unwrap_or_default(), if self.inline_field { (self.label_width / self.char_w).floor().max(0.0) as usize } else { ((w - 2.0 * pad) / self.char_w).floor().max(0.0) as usize });
                 lenz_gpui::text(window, cx, m, if self.inline_field { x + pad } else { fx }, if self.inline_field { fy + 2.0 } else { fy - line_h() - 4.0 }, &label, p.fg);
-                lenz_gpui::fill(window, fx, fy, fw, fh, if self.invalid { p.error } else { p.accent });
-                lenz_gpui::fill(window, fx + 1.0, fy + 1.0, (fw - 2.0).max(0.0), (fh - 2.0).max(0.0), p.bg);
+                lenz_gpui::popup::field(window, fx, fy, fw, fh, if self.invalid { p.error } else { p.accent }, p.bg);
                 lenz_gpui::field::paint(lenz_gpui::field::View { text: &self.value, cursor: self.cursor,
                     bounds: rect(fx + 8.0, fy + 4.0, (fw - 20.0).max(0.0), line_h()), char_w: self.char_w, active: true }, window, cx, m, p);
             }

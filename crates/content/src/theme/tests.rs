@@ -641,6 +641,16 @@ fn raised_surfaces_stand_out_in_every_builtin_theme() {
         }
         assert!(contrast(border, bg) >= 2.0, "{id}: border {border:06x} on {bg:06x}");
         assert!(contrast(p.fg, bg) >= 4.5, "{id}: text {:06x} on {bg:06x}", p.fg);
+        for fill in [bg, p.status_bg] {
+            let selected = p.menu_selected(fill);
+            // One Dark's text leaves no room above its own 1.19:1 selection; Solarized Light's bar is its selection
+            let visible = if fill == bg { 1.18 } else { contrast(p.selected_bg, fill).min(1.18) + 0.05 };
+            assert!(contrast(selected, fill) >= visible, "{id}: menu selection {selected:06x} vanishes on {fill:06x}");
+            // 4.5:1, or close to the theme's own selection where that is lower (Solarized Light's is 4.39:1)
+            let own = contrast(p.fg, p.selected_bg);
+            let floor = if own >= 4.5 { 4.5 } else { own * 0.92 };
+            assert!(contrast(p.fg, selected) >= floor, "{id}: text {:06x} on menu selection {selected:06x}", p.fg);
+        }
     }
 }
 

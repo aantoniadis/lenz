@@ -1,6 +1,6 @@
 //! A small cell fallback; Screens replaces it with pixel artwork in graphics terminals.
 use crossterm::event::{Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind};
-use ratatui::{Frame, layout::Rect, style::{Color, Style}, widgets::{Block, Borders, Clear}};
+use ratatui::{Frame, layout::Rect, style::{Color, Style}, widgets::Clear};
 use crate::chrome::{color, style_with};
 
 const LOGO: &[u8] = lenz::about::LOGO_TERMINAL;
@@ -36,7 +36,7 @@ impl About {
         self.rect=rect;
         let base=style_with(palette).bg(color(palette.status_bg));
         frame.render_widget(Clear,rect);
-        frame.render_widget(Block::default().borders(Borders::ALL).title(format!(" {} ",lenz::about::TITLE)).style(base),rect);
+        frame.render_widget(crate::chrome::pane(format!(" {} ",lenz::about::TITLE),palette,true).style(base),rect);
         let logo=w>=78&&h>=16;
         let x=rect.x+2+if logo{26}else{0};let width=usize::from(rect.right().saturating_sub(x+2)).max(1);
         let mut lines=Vec::new();

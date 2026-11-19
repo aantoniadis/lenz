@@ -1,6 +1,6 @@
 //! Only visible rows and columns become terminal cells. Source text is never ANSI.
 use std::ops::Range;
-use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}, widgets::{Block, Borders, Clear, Paragraph}};
+use ratatui::{buffer::Buffer, layout::Rect, style::{Modifier, Style}, widgets::{Clear, Paragraph}};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use lenz::{document::Placeholder, view::{Content, Side}};
@@ -346,7 +346,7 @@ fn popup(app: &mut App, frame: &mut ratatui::Frame, prompt: Prompt) {
     let rect = Rect::new(area.x+(area.width - w) / 2, area.y+(area.height - h) / 2, w, h);
     app.popup_rect=rect;
     frame.render_widget(Clear, rect);
-    frame.render_widget(Block::default().borders(Borders::ALL).style(base(palette)), rect);
+    frame.render_widget(crate::chrome::pane("",palette,true).style(base(palette)), rect);
     let rows=popup_rows(app,prompt);
     let heading = format!(" {}{}", if prompt == Prompt::Files { "Files: " } else { "Applied history: " }, app.input);
     label(palette,frame, Rect::new(rect.x + 1, rect.y, rect.width - 2, 1), &heading, base(palette).fg(color(palette.accent)));
@@ -358,7 +358,7 @@ fn popup(app: &mut App, frame: &mut ratatui::Frame, prompt: Prompt) {
     for (i, row) in rows.iter().enumerate().skip(start).take(count) {
         let line = Rect::new(rect.x + 1, rect.y + 1 + (i - start) as u16, rect.width - 2, 1);
         app.popup_hits.push((i,line));
-        let style = if i == app.selected && prompt != Prompt::Help { base(palette).bg(color(palette.selected_bg)) } else { base(palette) };
+        let style = if i == app.selected && prompt != Prompt::Help { base(palette).bg(color(palette.menu_selected(palette.bg))) } else { base(palette) };
         frame.render_widget(Paragraph::new(" ").style(style), line);
         label(palette,frame, line, row, style);
     }

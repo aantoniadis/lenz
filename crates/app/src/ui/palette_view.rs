@@ -194,8 +194,8 @@ impl Viewer {
         cx.notify();true
     }
 
-    /// Lines to paint: query, then (label, group and shortcut, dim, selected) per visible row, then the selected row's
-    /// disabled reason.
+    /// Lines to paint: query, then (label with the selected row's disabled reason, group, shortcut, dim, selected) per
+    /// visible row.
     pub(super) fn palette_paint(&mut self)->Option<PalettePaint>{
         let (x,y,width,rows)=self.palette_layout();
         let active=self.modal()==Some(Modal::Palette);
@@ -206,8 +206,7 @@ impl Viewer {
             let reason=row.disabled.as_deref().filter(|_|selected==Some(i)).map_or(String::new(),|why|format!(" — {why}"));
             // macOS: the palette names the Command key the bindings accept
             let key=row.entry.shortcut.map(|k|if cfg!(target_os="macos") {k.replace("ctrl-","cmd-")} else {k.to_string()});
-            let right=[Some(row.entry.group.label().to_string()),key].into_iter().flatten().collect::<Vec<_>>().join("  ");
-            (format!("{mark}{}{reason}",row.entry.label),right,row.disabled.is_some(),selected==Some(i))
+            (format!("{mark}{}{reason}",row.entry.label),row.entry.group.label().to_string(),key.unwrap_or_default(),row.disabled.is_some(),selected==Some(i))
         }).collect();
         let empty=p.is_empty();
         let columns=(width/self.char_w.max(1.0)).max(0.0) as usize;
@@ -216,7 +215,7 @@ impl Viewer {
     }
 }
 
-pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<(String,String,bool,bool)>, pub empty:bool }
+pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<(String,String,String,bool,bool)>, pub empty:bool }
 
 impl Availability for Viewer {
     fn disabled(&self,action:Action)->Option<Cow<'static,str>>{

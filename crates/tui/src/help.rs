@@ -1,5 +1,5 @@
 //! Context-specific shortcut tables, wrapped and scrolled in terminal cells.
-use ratatui::{Frame,layout::Rect,style::Modifier,widgets::{Block,Borders,Clear}};
+use ratatui::{Frame,layout::Rect,style::Modifier,widgets::Clear};
 use unicode_width::UnicodeWidthStr;
 use crate::chrome::{color,style_with};
 pub type Row=(&'static str,&'static str);
@@ -90,7 +90,7 @@ impl Message {
         self.prepare(area);let popup=Self::popup(area);if popup.width<3||popup.height<4{return;}
         let style=style_with(palette).bg(color(palette.status_bg));
         frame.render_widget(Clear,popup);
-        frame.render_widget(Block::default().borders(Borders::ALL).title(" Details ").style(style),popup);
+        frame.render_widget(crate::chrome::pane(" Details ",palette,true).style(style),popup);
         for (i,row) in self.rows.iter().skip(self.scroll).take(usize::from(popup.height.saturating_sub(3))).enumerate(){crate::visual::safe_text(frame.buffer_mut(),Rect::new(popup.x+1,popup.y+1+i as u16,popup.width-2,1),row,style);}
         crate::visual::safe_text(frame.buffer_mut(),Rect::new(popup.x+1,popup.bottom()-2,popup.width-2,1),"↑/↓ PgUp/PgDn Home/End · Esc close",style.fg(color(palette.accent)));
     }
@@ -106,7 +106,7 @@ pub fn draw(frame:&mut Frame,area:Rect,rows:&[Row],scroll:&mut usize,palette:&le
     let entries=lines(rows,w.saturating_sub(4)as usize);let visible=h.saturating_sub(4)as usize;
     *scroll=(*scroll).min(entries.len().saturating_sub(visible));
     frame.render_widget(Clear,rect);
-    frame.render_widget(Block::default().borders(Borders::ALL).title(" Keyboard shortcuts ").style(style_with(palette).bg(color(palette.status_bg))),rect);
+    frame.render_widget(crate::chrome::pane(" Keyboard shortcuts ",palette,true).style(style_with(palette).bg(color(palette.status_bg))),rect);
     for (i,(text,heading)) in entries.iter().skip(*scroll).take(visible).enumerate(){
         let row=Rect::new(rect.x+2,rect.y+1+i as u16,w.saturating_sub(4),1);
         let s=style_with(palette).bg(color(palette.status_bg)).fg(color(if *heading{palette.accent}else{palette.fg})).add_modifier(if *heading{Modifier::BOLD}else{Modifier::empty()});

@@ -157,7 +157,7 @@ impl Chooser {
         for (row, (label, index)) in rows.iter().skip(self.scroll).take(visible).enumerate() {
             let r = Rect::new(rect.x + 1, rect.y + 1 + row as u16, w - 2, 1);
             let style = if *index == Some(self.selected) {
-                base.bg(color(palette.selected_bg))
+                base.bg(color(palette.menu_selected(palette.status_bg)))
             } else if index.is_none() {
                 base.fg(color(palette.accent))
             } else {

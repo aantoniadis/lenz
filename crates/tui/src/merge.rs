@@ -1211,10 +1211,13 @@ impl Merger {
         let width=area.width.min(78);let height=area.height.min(matches.len().max(1)as u16+2);let visible=usize::from(height.saturating_sub(2));
         self.menu_first=selected.saturating_sub(visible.saturating_sub(1));
         let rect=Rect::new(area.x+(area.width-width)/2,area.y+(area.height-height)/2,width,height);self.menu_area=rect;
-        let mut lines:Vec<_>=matches.iter().skip(self.menu_first).take(visible).map(|&index|{let(label,reason)=&labels[index];Line::from(format!("{} {}{}",if index==at{">"}else{" "},label,reason.as_ref().map(|r|format!(" — {r}")).unwrap_or_default()))}).collect();
-        if lines.is_empty(){lines.push(Line::from("No matching commands"));}
+        // the chosen row is highlighted like every other menu's; a row that cannot run is dim with its reason
+        let base=crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg));
+        let row_style=|index:usize|{let s=if index==at{base.bg(crate::chrome::color(palette.menu_selected(palette.status_bg)))}else{base};if labels[index].1.is_some(){s.fg(crate::chrome::color(palette.dim))}else{s}};
+        let mut lines:Vec<_>=matches.iter().skip(self.menu_first).take(visible).map(|&index|{let(label,reason)=&labels[index];Line::styled(format!("{}{}{}",if index==at{"› "}else{"  "},label,reason.as_ref().map(|r|format!(" — {r}")).unwrap_or_default()),row_style(index))}).collect();
+        if lines.is_empty(){lines.push(Line::styled("No matching commands",base.fg(crate::chrome::color(palette.dim))));}
         let title=if rect.width<12{"› "}else if rect.width<32{"Filter: "}else if self.block_menu_target.is_some(){"Change filter: "}else if self.files_menu_target.is_some(){"File actions: "}else{"Merge commands: "};
-        frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg))).block(Block::default().borders(Borders::ALL).title(title)),rect);
+        frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines).style(base).block(crate::chrome::pane(title,palette,true)),rect);
         let offset=(title.len() as u16+1).min(rect.width);
         let field=Rect::new(rect.x+offset,rect.y,rect.width.saturating_sub(offset+1),1);
         lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&self.menu_query,cursor:self.menu_cursor,area:field,active:true},crate::chrome::style_with(palette),crate::chrome::style_with(palette).bg(crate::chrome::color(palette.selected_bg)));

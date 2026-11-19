@@ -3710,7 +3710,8 @@ impl ReaderView {
             ((r.label.clone(), r.detail.clone().unwrap_or_default(), i == c.selected(), r.unavailable.is_some()), c.matches(&r.label), r.kind, group)
         }).collect();
         let chars = rows.iter().map(|(r, _, kind, _)| r.0.chars().count() + r.1.chars().count() + kind.map_or(0, str::len) + 5).max().unwrap_or(0);
-        let w = ((chars as f32 + 2.0) * self.char_w).clamp(120.0_f32.min(self.width), self.width.clamp(1.0, 480.0));
+        // labels start two cells in, clear of the highlighted row's rounded edge
+        let w = ((chars as f32 + 3.0) * self.char_w).clamp(120.0_f32.min(self.width), self.width.clamp(1.0, 480.0));
         let h = shown as f32 * line_h() + 4.0;
         let (tx, ty) = (f32::from(g.text.origin.x), f32::from(g.text.origin.y));
         let x = (lenz_gpui::text_x(metrics(&self.font), tx, t.column() as f32 * self.char_w) + anchor_x).clamp(0.0, (self.width - w).max(0.0));
@@ -3759,7 +3760,7 @@ impl ReaderView {
             .map(|(i, a)| (format!("{}{}", if a.preferred { "★ " } else { "" }, a.title), String::new(), i == c.selected, a.unavailable.is_some())).collect();
         let reason = c.actions.get(c.selected).and_then(|a| a.unavailable.clone());
         let chars = rows.iter().map(|r| r.0.chars().count()).chain(reason.iter().map(|r| r.chars().count())).max().unwrap_or(0);
-        let w = ((chars as f32 + 2.0) * self.char_w).clamp(120.0_f32.min(self.width), self.width.clamp(1.0, 640.0));
+        let w = ((chars as f32 + 4.0) * self.char_w).clamp(120.0_f32.min(self.width), self.width.clamp(1.0, 640.0));
         let h = (shown + usize::from(reason.is_some())) as f32 * line_h() + 4.0;
         let (tx, ty) = (f32::from(g.text.origin.x), f32::from(g.text.origin.y));
         let x = (lenz_gpui::text_x(metrics(&self.font), tx, t.column() as f32 * self.char_w) + anchor_x).clamp(0.0, (self.width - w).max(0.0));
@@ -6693,10 +6694,8 @@ impl Render for ReaderView {
                             });
                         }
                         if let Some((tx, ty, tw, lines)) = &ann_tip {
-                            let (bg, border) = palette.raised();
                             let th = lines.len() as f32 * line_h() + 8.0;
-                            lenz_gpui::fill(window, x0 + tx - 1.0, y0 + ty - 1.0, tw + 2.0, th + 2.0, border);
-                            lenz_gpui::fill(window, x0 + tx, y0 + ty, *tw, th, bg);
+                            lenz_gpui::popup::surface(window, x0 + tx, y0 + ty, *tw, th, &palette);
                             for (i, l) in lines.iter().enumerate() {
                                 lenz_gpui::text(window, cx, m, x0 + tx + 8.0, y0 + ty + 4.0 + i as f32 * line_h(), l, if i == 0 { palette.accent } else { palette.fg });
                             }
@@ -6783,8 +6782,7 @@ impl Render for ReaderView {
                             let (mx, my) = (x0 + f32::from(l.bounds.origin.x), y0 + f32::from(l.bounds.origin.y));
                             let (mw, mh) = (f32::from(l.bounds.size.width), f32::from(l.bounds.size.height));
                             let (bg, border) = palette.raised();
-                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
-                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            lenz_gpui::popup::surface(window, mx, my, mw, mh, &palette);
                             let menu = Bounds { origin: gpui::point(px(mx), px(my)), size: l.bounds.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: menu }), |window| {
                                 if let Some(title) = &l.heading {
@@ -6793,8 +6791,7 @@ impl Render for ReaderView {
                                     if let Some(_query) = &l.query {
                                         let fy = my + line_h() + 20.0;
                                         let fw = (mw - 24.0).max(0.0);
-                                        lenz_gpui::fill(window, mx + 12.0, fy, fw, line_h() + 8.0, palette.accent);
-                                        lenz_gpui::fill(window, mx + 13.0, fy + 1.0, (fw - 2.0).max(0.0), line_h() + 6.0, palette.bg);
+                                        lenz_gpui::popup::field(window, mx + 12.0, fy, fw, line_h() + 8.0, palette.accent, palette.bg);
                                         let cursor=modal_field.as_ref().map_or_else(Default::default, |f|f.cursor);
                                         let query=modal_field.as_ref().map_or("",|f|f.text.as_str());
                                         lenz_gpui::field::paint(lenz_gpui::field::View{text:query,cursor,bounds:Bounds{origin:gpui::point(px(mx+20.0),px(fy+4.0)),size:gpui::size(px((fw-20.0).max(0.0)),px(line_h()))},char_w,active:true},window,cx,m,&palette);
@@ -6817,7 +6814,7 @@ impl Render for ReaderView {
                                             let edge = if disabled { border } else if destructive { palette.error } else if primary { palette.accent } else { border };
                                             let hover = clip.contains(&window.mouse_position());
                                             lenz_gpui::fill(window, x, y, f32::from(b.size.width), f32::from(b.size.height), edge);
-                                            lenz_gpui::fill(window, x + 1.0, y + 1.0, (f32::from(b.size.width) - 2.0).max(0.0), (f32::from(b.size.height) - 2.0).max(0.0), if !disabled && (primary || hover) { palette.selected_bg } else { bg });
+                                            lenz_gpui::fill(window, x + 1.0, y + 1.0, (f32::from(b.size.width) - 2.0).max(0.0), (f32::from(b.size.height) - 2.0).max(0.0), if !disabled && (primary || hover) { palette.menu_selected(bg) } else { bg });
                                             let shown = code_core::chrome::ellipsize(label, ((f32::from(b.size.width) - 16.0) / char_w).max(0.0) as usize);
                                             lenz_gpui::text(window, cx, m, x + 8.0, y + 6.0, &shown, if disabled { palette.dim } else if destructive { palette.readable_on(palette.error, bg) } else { palette.fg });
                                         });
@@ -6836,7 +6833,7 @@ impl Render for ReaderView {
                                         continue;
                                     }
                                     if !details_modal && *row != usize::MAX && *row == l.at {
-                                        lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg);
+                                        lenz_gpui::popup::row(window, mx, y, mw, line_h(), palette.menu_selected(bg));
                                     }
                                     if (n == 0 || l.lines[n - 1].0 != *row) && let Some((_, key)) = l.shortcuts.iter().find(|(r, _)| r == row) {
                                         let kx = mx + mw - 12.0 - lenz_content::wrap::width(key) as f32 * char_w;
@@ -6869,23 +6866,21 @@ impl Render for ReaderView {
                         }
                         if let Some((b, layout, top)) = &doc_frame {
                             let (bx, by, bw, bh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
-                            lenz_gpui::fill(window, bx - 1.0, by - 1.0, bw + 2.0, bh + 2.0, palette.border);
-                            lenz_gpui::fill(window, bx, by, bw, bh, palette.sidebar_bg);
+                            lenz_gpui::popup::surface_on(window, bx, by, bw, bh, &palette, palette.sidebar_bg);
                             let area = Bounds { origin: gpui::point(px(bx), px(by)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: area }), |window| layout.paint(window, cx, area, *top, None, |_, _, _| {}));
                         }
                         if let Some((b, lines)) = &signature_frame {
                             let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
-                            let (bg, border) = palette.raised();
-                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
-                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            let bg = palette.raised().0;
+                            lenz_gpui::popup::surface(window, mx, my, mw, mh, &palette);
                             let clip = Bounds { origin: gpui::point(px(mx), px(my)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                 for (i, (text, active, dim)) in lines.iter().enumerate() {
                                     let y = my + 2.0 + i as f32 * line_h();
                                     if let Some((before, param)) = active.as_ref().and_then(|r| Some((text.get(..r.start)?, text.get(r.clone())?))) {
                                         let start = before.chars().count() as f32;
-                                        lenz_gpui::fill(window, mx + (start + 1.0) * char_w, y, param.chars().count() as f32 * char_w, line_h(), palette.selected_bg);
+                                        lenz_gpui::fill(window, mx + (start + 1.0) * char_w, y, param.chars().count() as f32 * char_w, line_h(), palette.menu_selected(bg));
                                     }
                                     lenz_gpui::text(window, cx, m, mx + char_w, y, text, if *dim { palette.dim } else { palette.fg });
                                 }
@@ -6894,27 +6889,25 @@ impl Render for ReaderView {
                         if let Some((b, rows, doc)) = &completion_frame {
                             let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                             let (bg, border) = palette.raised();
-                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
-                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            lenz_gpui::popup::surface(window, mx, my, mw, mh, &palette);
                             let clip = Bounds { origin: gpui::point(px(mx), px(my)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                 for (i, ((label, detail, selected, unavailable), matches, kind, group)) in rows.iter().enumerate() {
                                     let y = my + 2.0 + i as f32 * line_h();
                                     if *group { lenz_gpui::fill(window, mx, y, mw, 1.0, border); }
-                                    if *selected {
-                                        lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg);
-                                        lenz_gpui::fill(window, mx, y, 3.0, line_h(), palette.accent);
-                                    }
+                                    if *selected { lenz_gpui::popup::row(window, mx, y, mw, line_h(), palette.menu_selected(bg)); }
                                     let colors: Vec<_> = matches.iter().cloned().map(|range| (range, palette.accent)).collect();
-                                    let label_x = mx + char_w;
-                                    let shaped = lenz_gpui::colored_text(window, cx, m, if *unavailable {palette.dim} else {palette.fg}, label_x, y, label, &colors, &[]);
-                                    let end = label_x + shaped.map_or(label.chars().count() as f32 * char_w, |line| f32::from(line.width));
+                                    let label_x = mx + 2.0 * char_w;
                                     let kind = kind.unwrap_or("");
                                     let kind_width = (kind.chars().count() as f32 + 2.0) * char_w;
+                                    let kind_x = (mx + mw - kind_width).max(mx + mw * 0.55);
+                                    // a long label stops short of the kind column rather than running under it
+                                    let label_w = if kind.is_empty() { mw } else { (kind_x - label_x).max(0.0) };
+                                    let label_clip = Bounds { origin: gpui::point(px(label_x), px(y)), size: gpui::size(px(label_w), px(line_h())) };
+                                    let shaped = window.with_content_mask(Some(gpui::ContentMask { bounds: label_clip }), |window| lenz_gpui::colored_text(window, cx, m, if *unavailable {palette.dim} else {palette.fg}, label_x, y, label, &colors, &[]));
+                                    let end = label_x + shaped.map_or(label.chars().count() as f32 * char_w, |line| f32::from(line.width));
                                     if !kind.is_empty() {
-                                        let kind_x = (mx + mw - kind_width).max(mx + mw * 0.55);
-                                        lenz_gpui::fill(window, kind_x, y, mw - (kind_x-mx), line_h(), if *selected {palette.selected_bg} else {bg});
-                                        lenz_gpui::text(window, cx, m, kind_x + char_w, y, kind, palette.accent);
+                                        lenz_gpui::text(window, cx, m, kind_x + char_w, y, kind, palette.dim);
                                     }
                                     let right = mx + mw - kind_width;
                                     if !detail.is_empty() && end + 3.0 * char_w < right {
@@ -6936,32 +6929,30 @@ impl Render for ReaderView {
                         }
                         if let Some((b, rows, reason)) = &code_actions_frame {
                             let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
-                            let (bg, border) = palette.raised();
-                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
-                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            let bg = palette.raised().0;
+                            lenz_gpui::popup::surface(window, mx, my, mw, mh, &palette);
                             let clip = Bounds { origin: gpui::point(px(mx), px(my)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                 for (i, (label, _, selected, unavailable)) in rows.iter().enumerate() {
                                     let y = my + 2.0 + i as f32 * line_h();
-                                    if *selected { lenz_gpui::fill(window, mx, y, mw, line_h(), palette.selected_bg); }
-                                    lenz_gpui::text(window, cx, m, mx + char_w, y, label, if *unavailable { palette.dim } else { palette.fg });
+                                    if *selected { lenz_gpui::popup::row(window, mx, y, mw, line_h(), palette.menu_selected(bg)); }
+                                    lenz_gpui::text(window, cx, m, mx + 2.0 * char_w, y, label, if *unavailable { palette.dim } else { palette.fg });
                                 }
-                                if let Some(reason) = reason { lenz_gpui::text(window, cx, m, mx + char_w, my + 2.0 + rows.len() as f32 * line_h(), reason, palette.dim); }
+                                if let Some(reason) = reason { lenz_gpui::text(window, cx, m, mx + 2.0 * char_w, my + 2.0 + rows.len() as f32 * line_h(), reason, palette.dim); }
                             });
                         }
                         if let Some((b, rows)) = &context {
                             let (mx, my, mw, mh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                             let (bg, border) = palette.raised();
-                            lenz_gpui::fill(window, mx - 1.0, my - 1.0, mw + 2.0, mh + 2.0, border);
-                            lenz_gpui::fill(window, mx, my, mw, mh, bg);
+                            lenz_gpui::popup::surface(window, mx, my, mw, mh, &palette);
                             let clip = Bounds { origin: gpui::point(px(mx), px(my)), size: b.size };
                             window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
                                 for (top, h, row) in rows {
                                     let y = y0 + top;
                                     match row {
-                                        None => lenz_gpui::fill(window, mx + 6.0, y + h / 2.0, mw - 12.0, 1.0, palette.border),
+                                        None => lenz_gpui::fill(window, mx + 8.0, y + h / 2.0, (mw - 16.0).max(0.0), 1.0, border),
                                         Some((label, key, enabled, highlighted)) => {
-                                            if *highlighted { lenz_gpui::fill(window, mx, y, mw, *h, palette.selected_bg); }
+                                            if *highlighted { lenz_gpui::popup::row(window, mx, y, mw, *h, palette.menu_selected(bg)); }
                                             lenz_gpui::text(window, cx, m, mx + 2.0 * char_w, y, label, if *enabled { palette.fg } else { palette.dim });
                                             if let Some(key) = key {
                                                 lenz_gpui::text(window, cx, m, mx + mw - (key.chars().count() as f32 + 2.0) * char_w, y, key, palette.dim);

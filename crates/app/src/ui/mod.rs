@@ -636,12 +636,9 @@ struct Tip(SharedString, Arc<theme::Palette>);
 
 impl Render for Tip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        div()
+        lenz_gpui::popup::dialog(div(), &self.1)
             .px_2()
             .py_1()
-            .bg(rgb(self.1.status_bg))
-            .border_1()
-            .border_color(rgb(self.1.border))
             .text_color(rgb(self.1.fg))
             .text_size(px(12.0))
             .child(self.0.clone())
@@ -3338,6 +3335,7 @@ fn paint_sidebar(palette: &theme::Palette,
     (rows, header): &(Vec<SideRow>, String),
     scroll: f32,
     tooltip: Option<&(usize, String)>,
+    char_w: f32,
 ) {
     let (x0, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let h = f32::from(bounds.size.height);
@@ -3370,8 +3368,8 @@ fn paint_sidebar(palette: &theme::Palette,
     fill(window, x0 + sidebar_w - 1.0, top, 1.0, h, palette.border);
     if let Some((row, tip)) = tooltip {
         let y = list_top + (*row as f32 + 1.0 - scroll) * line_h();
-        let tw = tip.chars().count() as f32 * 7.8 + 16.0;
-        fill(window, x0 + 24.0, y, tw, line_h(), palette.status_bg);
+        let tw = tip.chars().count() as f32 * char_w + 16.0;
+        paint_raised(window, x0 + 24.0, y, tw, line_h(), palette);
         text(window, cx, font, x0 + 32.0, y, tip, palette.fg);
     }
 }
@@ -3393,14 +3391,13 @@ fn paint_switcher(palette: &theme::Palette,
     let bw = 720.0f32.min(w - 40.0);
     let (bx, by) = (x0 + (w - bw) / 2.0, top + 60.0);
     let bh = (hits.len() as f32 + 1.0) * line_h() + 16.0;
-    fill(window, bx - 1.0, by - 1.0, bw + 2.0, bh + 2.0, palette.border);
-    fill(window, bx, by, bw, bh, palette.status_bg);
+    paint_raised(window, bx, by, bw, bh, palette);
     text(window,cx,font,bx+10.0,by+6.0,"File:",palette.dim);
     lenz_gpui::field::paint(lenz_gpui::field::View{text:query,cursor,bounds:Bounds{origin:point(px(bx+70.0),px(by+6.0)),size:size(px((bw-80.0).max(0.0)),px(line_h()))},char_w,active:true},window,cx,metrics(font),palette);
     for (i, (name, dir, color)) in hits.iter().enumerate() {
         let y = by + 8.0 + (i as f32 + 1.0) * line_h();
         if i == selected {
-            fill(window, bx, y, bw, line_h(), palette.selected_bg);
+            lenz_gpui::popup::row(window, bx, y, bw, line_h(), lenz_gpui::popup::selected(palette));
         }
         let line = format!("{name}  {dir}");
         let spans = [(0..name.len(), *color), (name.len()..line.len(), palette.dim)];
@@ -3811,8 +3808,7 @@ impl Render for Viewer {
                 .child(canvas(|_,_,_|{},move|bounds,_,window,cx|{
                     let ((x,y,w,h),visible)=help_layout(bounds.size);
                     let clip=Bounds{origin:point(px(x),px(y)),size:size(px(w),px(h))};
-                    fill(window,x,y,w,h,palette.border);
-                    fill(window,x+1.0,y+1.0,(w-2.0).max(0.0),(h-2.0).max(0.0),palette.status_bg);
+                    paint_raised(window,x+1.0,y+1.0,(w-2.0).max(0.0),(h-2.0).max(0.0),&palette);
                     window.with_content_mask(Some(ContentMask{bounds:clip}),|window|{
                         text(window,cx,&font,x+12.0,y+8.0,"Key bindings",palette.accent);
                         let content=Bounds{origin:point(px(x+12.0),px(y+36.0)),size:size(px((w-24.0).max(0.0)),px(visible as f32*line_h()))};
@@ -3820,7 +3816,7 @@ impl Render for Viewer {
                             for (i,(line,keys)) in rows.iter().skip(scroll).take(visible).enumerate(){text(window,cx,&font,x+12.0,y+36.0+i as f32*line_h(),line,if *keys{palette.accent}else{palette.fg});}
                         });
                         let close=help_close_bounds(bounds.size);let cy=f32::from(close.origin.y);
-                        fill(window,x+8.0,cy,f32::from(close.size.width),f32::from(close.size.height),palette.selected_bg);
+                        fill(window,x+8.0,cy,f32::from(close.size.width),f32::from(close.size.height),lenz_gpui::popup::selected(&palette));
                         text(window,cx,&font,x+12.0,cy,"Close · Esc / Enter",palette.accent);
                         text(window,cx,&font,x+12.0,cy-line_h(),"↑/↓ PgUp/PgDn Home/End · wheel",palette.dim);
                     });
@@ -3904,7 +3900,7 @@ impl Render for Viewer {
                         let h = f32::from(bounds.size.height);
                         let (left_edge, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                         if let Some(rows) = &sidebar {
-                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, nav_scroll, tooltip.as_ref());
+                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, nav_scroll, tooltip.as_ref(), char_w);
                         }
                         // the diff area sits right of the File Navigator
                         let x0 = left_edge + sw_w;
@@ -3982,10 +3978,9 @@ impl Render for Viewer {
                         }
                         if let Some(summary) = &summary_frame { summary.paint(&palette, &font, char_w, window, cx); }
                         if let Some(message) = &toast {
-                            let tw = message.chars().count() as f32 * 7.8 + 24.0;
+                            let tw = message.chars().count() as f32 * char_w + 24.0;
                             let (tx, ty) = (x0 + (w - tw) / 2.0, y0 + h - line_h() * 3.0);
-                            fill(window, tx - 1.0, ty - 1.0, tw + 2.0, line_h() + 10.0, palette.border);
-                            fill(window, tx, ty, tw, line_h() + 8.0, palette.status_bg);
+                            paint_raised(window, tx, ty, tw, line_h() + 8.0, &palette);
                             text(window, cx, &font, tx + 12.0, ty + 4.0, message, palette.fg);
                         }
                         if let Some(message) = &placeholder {
@@ -4017,11 +4012,10 @@ impl Render for Viewer {
                         if let Some(prompt) = &search_prompt {
                             let bw = (prompt.chars().count() as f32 * char_w + 24.0).min((w-24.0).max(0.0));
                             let (bx, by) = (x0 + (w - bw) / 2.0, top + 60.0);
-                            fill(window, bx - 1.0, by - 1.0, bw + 2.0, 2.0*line_h() + 14.0, palette.border);
-                            fill(window, bx, by, bw, 2.0*line_h() + 12.0, palette.status_bg);
+                            paint_raised(window, bx, by, bw, 2.0*line_h() + 12.0, &palette);
                             for (dx, mw, on) in &search_marks {
                                 fill(window, bx + dx, by + 2.0, *mw, line_h() + 8.0, palette.border);
-                                fill(window, bx + dx + 1.0, by + 3.0, mw - 2.0, line_h() + 6.0, if *on { palette.selected_bg } else { palette.status_bg });
+                                fill(window, bx + dx + 1.0, by + 3.0, mw - 2.0, line_h() + 6.0, if *on { lenz_gpui::popup::selected(&palette) } else { lenz_gpui::popup::colors(&palette).0 });
                             }
                             let bounds=Bounds{origin:point(px(bx),px(by)),size:size(px(bw),px(line_h()+12.0))};
                             window.with_content_mask(Some(ContentMask{bounds}),|window|text(window, cx, &font, bx + 12.0, by + 6.0, prompt, palette.fg));
@@ -4032,8 +4026,7 @@ impl Render for Viewer {
                         if let Some(prompt) = &goto {
                             let bw = (prompt.chars().count() as f32 * char_w + 24.0).min((w-24.0).max(0.0));
                             let (bx, by) = (x0 + (w - bw) / 2.0, top + 60.0);
-                            fill(window, bx - 1.0, by - 1.0, bw + 2.0, 2.0*line_h() + 14.0, palette.border);
-                            fill(window, bx, by, bw, 2.0*line_h() + 12.0, palette.status_bg);
+                            paint_raised(window, bx, by, bw, 2.0*line_h() + 12.0, &palette);
                             let bounds=Bounds{origin:point(px(bx),px(by)),size:size(px(bw),px(line_h()+12.0))};
                             window.with_content_mask(Some(ContentMask{bounds}),|window|text(window, cx, &font, bx + 12.0, by + 6.0, prompt, palette.fg));
                             if let Some(field)=&field_snapshot {
@@ -4046,7 +4039,7 @@ impl Render for Viewer {
                             for (i, label) in items.iter().enumerate() {
                                 let iy = my + 4.0 + i as f32 * line_h();
                                 if *hover == Some(i) {
-                                    fill(window, *mx, iy, *mw, line_h(), palette.selected_bg);
+                                    lenz_gpui::popup::row(window, *mx, iy, *mw, line_h(), lenz_gpui::popup::selected(&palette));
                                 }
                                 let bounds=Bounds{origin:point(px(*mx),px(iy)),size:size(px(*mw),px(line_h()))};
                                 window.with_content_mask(Some(ContentMask{bounds}),|window|text(window,cx,&font,mx+12.,iy,label,palette.fg));
@@ -4061,7 +4054,7 @@ impl Render for Viewer {
                                 text(window, cx, &font, d.x + 12.0, ry, label, palette.dim);
                                 for (choice, cx_, current, focused) in choices {
                                     let cw = (choice.chars().count() + 2) as f32 * char_w;
-                                    if *current { fill(window, *cx_, ry, cw, line_h(), palette.selected_bg); }
+                                    if *current { fill(window, *cx_, ry, cw, line_h(), lenz_gpui::popup::selected(&palette)); }
                                     if *focused { fill(window, *cx_, ry + line_h() - 2.0, cw, 2.0, palette.accent); }
                                     text(window, cx, &font, cx_ + char_w, ry, choice, palette.fg);
                                 }
@@ -4075,13 +4068,22 @@ impl Render for Viewer {
                                 lenz_gpui::field::paint(lenz_gpui::field::View{text:&cp.query,cursor:cp.cursor,
                                     bounds:Bounds{origin:point(px(cp.x+12.),px(cp.y+4.)),size:size(px((cp.width-24.).max(0.)),px(line_h()))},char_w,active:true},window,cx,
                                     lenz_gpui::Metrics{font:&font,font_size:font_size(),line_h:line_h(),num_w:0.},&palette);
-                                if cp.empty {text(window, cx, &font, cp.x + 12.0, cp.y + 4.0 + line_h(), "  No matching commands", palette.dim);}
-                                for (i, (label, right, disabled, selected)) in cp.lines.iter().enumerate() {
+                                if cp.query.is_empty() {text(window, cx, &font, cp.x + 12.0, cp.y + 4.0, "Type a command", palette.dim);}
+                                // the query and the list read as two parts of the box
+                                fill(window, cp.x, cp.y + 4.0 + line_h() - 1.0, cp.width, 1.0, lenz_gpui::popup::colors(&palette).1);
+                                if cp.empty {text(window, cx, &font, cp.x + 12.0, cp.y + 4.0 + line_h(), "No matching commands", palette.dim);}
+                                // shortcuts share one right-aligned column; the group sits left of it
+                                let key_w = cp.lines.iter().map(|l| l.2.chars().count()).max().unwrap_or(0) as f32 * char_w;
+                                for (i, (label, group, key, disabled, selected)) in cp.lines.iter().enumerate() {
                                     let iy = cp.y + 4.0 + (i + 1) as f32 * line_h();
-                                    if *selected { fill(window, cp.x, iy, cp.width, line_h(), palette.selected_bg); }
-                                    let rw = right.chars().count() as f32 * char_w;
-                                    text(window, cx, &font, cp.x + cp.width - rw - 12.0, iy, right, palette.dim);
-                                    let lb=Bounds{origin:point(px(cp.x),px(iy)),size:size(px((cp.width-rw-24.0).max(0.0)),px(line_h()))};
+                                    if *selected { lenz_gpui::popup::row(window, cp.x, iy, cp.width, line_h(), lenz_gpui::popup::selected(&palette)); }
+                                    let kw = key.chars().count() as f32 * char_w;
+                                    text(window, cx, &font, cp.x + cp.width - kw - 12.0, iy, key, palette.dim);
+                                    let gap = if key_w > 0.0 { key_w + 2.0 * char_w } else { 0.0 };
+                                    let gw = group.chars().count() as f32 * char_w;
+                                    let gx = cp.x + cp.width - 12.0 - gap - gw;
+                                    text(window, cx, &font, gx, iy, group, palette.dim);
+                                    let lb=Bounds{origin:point(px(cp.x),px(iy)),size:size(px((gx-cp.x-char_w).max(0.0)),px(line_h()))};
                                     window.with_content_mask(Some(ContentMask{bounds:lb}),|window|text(window, cx, &font, cp.x + 12.0, iy, label, if *disabled {palette.dim} else {palette.fg}));
                                 }
                             });
@@ -4089,12 +4091,11 @@ impl Render for Viewer {
                         if let Some((rows,scroll))=&popup {
                             let ((bx,by,bw,bh),buttons,visible)=popup_layout(rows.len(),popup_viewport,char_w);
                             let bounds=Bounds{origin:point(px(bx),px(by)),size:size(px(bw),px(bh))};
-                            fill(window,bx-1.,by-1.,bw+2.,bh+2.,palette.border);
-                            fill(window,bx,by,bw,bh,palette.status_bg);
+                            paint_raised(window,bx,by,bw,bh,&palette);
                             window.with_content_mask(Some(ContentMask{bounds}),|window| {
                                 for (i,(line,color)) in rows.iter().skip(*scroll).take(visible).enumerate(){text(window,cx,&font,bx+12.,by+8.+i as f32*line_h(),line,*color);}
                                 for ((key,label),(x,y,w,h)) in POPUP_BUTTONS.iter().zip(buttons){
-                                    fill(window,x,y,w,h,palette.selected_bg);text(window,cx,&font,x+8.,y,&format!("[{key}] {label}"),palette.fg);
+                                    fill(window,x,y,w,h,lenz_gpui::popup::selected(&palette));text(window,cx,&font,x+8.,y,&format!("[{key}] {label}"),palette.fg);
                                 }
                             });
                         }
@@ -4113,12 +4114,7 @@ impl Render for Viewer {
 
 /// A popup, menu or palette box: soft shadow, border, and a background lifted off what is under it.
 fn paint_raised(window: &mut Window, x: f32, y: f32, w: f32, h: f32, palette: &theme::Palette) {
-    let (bg, border) = palette.raised();
-    for (spread, alpha) in [(6.0, 0.10), (3.0, 0.16)] {
-        fill_hsla(window, x - spread + 2.0, y - spread + 4.0, w + 2.0 * spread, h + 2.0 * spread, gpui::hsla(0.0, 0.0, 0.0, alpha));
-    }
-    fill(window, x - 1.0, y - 1.0, w + 2.0, h + 2.0, border);
-    fill(window, x, y, w, h, bg);
+    lenz_gpui::popup::surface(window, x, y, w, h, palette);
 }
 
 fn fill_hsla(window: &mut Window, x: f32, y: f32, w: f32, h: f32, color: Hsla) {

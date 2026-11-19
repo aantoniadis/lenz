@@ -14,7 +14,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier},
     text::Line,
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 use std::path::PathBuf;
 
@@ -1013,7 +1013,7 @@ impl Repository {
             let body = Rect::new(inner.x, inner.y, inner.width, inner.height.saturating_sub(1));
             self.dialog_scroll = self.dialog_scroll.min((rows as u16).saturating_sub(body.height));
             frame.render_widget(Clear, popup);
-            frame.render_widget(Block::default().borders(Borders::ALL).title("Checkout").style(style), popup);
+            frame.render_widget(crate::chrome::pane("Checkout",palette,true).style(style), popup);
             let lines: Vec<Line> = text.lines().map(|l| Line::from(safe_label(l))).collect();
             frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((self.dialog_scroll, 0)).style(style), body);
             let hint = Rect::new(inner.x, inner.y + inner.height.saturating_sub(1), inner.width, inner.height.min(1));
@@ -1043,9 +1043,7 @@ impl Repository {
             frame.render_widget(Clear, popup);
             frame.render_widget(
                 Paragraph::new(lines).style(crate::chrome::style_with(palette).bg(crate::chrome::color(palette.status_bg))).block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .title("F2 details · Enter executes · Esc closes"),
+                    crate::chrome::pane("F2 details · Enter executes · Esc closes", palette, true),
                 ),
                 popup,
             );
@@ -1067,9 +1065,7 @@ impl Repository {
                     .wrap(Wrap { trim: false })
                     .scroll((self.overlay_scroll, 0))
                     .block(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .title("Esc closes · arrows scroll"),
+                        crate::chrome::pane("Esc closes · arrows scroll", palette, true),
                     ),
                 popup,
             );

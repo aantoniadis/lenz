@@ -103,18 +103,18 @@ impl Layout {
         let at = |b: &Bounds<Pixels>| (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
         let (x, y, w, h) = at(&self.bounds);
         let (bg, border) = p.raised();
-        lenz_gpui::fill(window, x - 1.0, y - 1.0, w + 2.0, h + 2.0, border);
-        lenz_gpui::fill(window, x, y, w, h, bg);
+        lenz_gpui::popup::surface(window, x, y, w, h, p);
         let clip = rect(x, y, w, h);
         window.with_content_mask(Some(gpui::ContentMask { bounds: clip }), |window| {
-            lenz_gpui::text(window, cx, m, x + PAD, y + PAD, "Search in Project", p.fg);
+            // bold, as every other dialog's title
+            let heading = gpui::Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
+            lenz_gpui::text(window, cx, Metrics { font: &heading, ..m }, x + PAD, y + PAD, "Search in Project", p.fg);
             let fields = [("Find", &self.query, "Text to search for"), ("Files", &self.files, "All files — e.g. *.rs, src/, !*.test.ts")];
             for (i, (b, (label, value, placeholder))) in self.fields.iter().zip(fields).enumerate() {
                 let (fx, fy, fw, fh) = at(b);
                 let active = self.in_files == (i == 1);
                 lenz_gpui::text(window, cx, m, x + PAD, fy + 4.0, label, if active { p.fg } else { p.dim });
-                lenz_gpui::fill(window, fx, fy, fw, fh, if active { p.accent } else { border });
-                lenz_gpui::fill(window, fx + 1.0, fy + 1.0, fw - 2.0, fh - 2.0, p.bg);
+                lenz_gpui::popup::field(window, fx, fy, fw, fh, if active { p.accent } else { border }, p.bg);
                 if value.is_empty() {
                     lenz_gpui::text(window, cx, m, fx + 8.0, fy + 4.0, placeholder, p.dim);
                 }
@@ -124,8 +124,7 @@ impl Layout {
             }
             for ((option, b), on) in self.toggles.iter().zip(self.on) {
                 let (tx, ty, tw, th) = at(b);
-                lenz_gpui::fill(window, tx, ty, tw, th, if on { p.accent } else { border });
-                lenz_gpui::fill(window, tx + 1.0, ty + 1.0, tw - 2.0, th - 2.0, if on { p.selected_bg } else { bg });
+                lenz_gpui::popup::field(window, tx, ty, tw, th, if on { p.accent } else { border }, if on { p.menu_selected(bg) } else { bg });
                 let toggle = rect(tx, ty, tw, th);
                 window.with_content_mask(Some(gpui::ContentMask { bounds: toggle }), |window| {
                     lenz_gpui::text(window, cx, m, tx + self.char_w, ty + 3.0, option.symbol(), if on { p.accent } else { p.dim });

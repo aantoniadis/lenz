@@ -713,6 +713,36 @@ fn top_bar_back_control_navigates_instead_of_opening_the_palette() {
 }
 
 #[test]
+fn context_menu_rows_keep_their_labels_on_one_line_beside_their_shortcuts() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sample.rs");
+    std::fs::write(&path, "fn main() {}\n").unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    // tall enough that the whole menu shows without scrolling
+    draw(&mut a, 120, 60);
+    let p = a.layout.panes[0].text;
+    // near the right edge, where a menu sized to its labels alone used to wrap a label under its shortcut
+    a.handle(Event::Mouse(MouseEvent { kind: MouseEventKind::Down(MouseButton::Right), column: p.x + p.width.saturating_sub(2), row: p.y, modifiers: KeyModifiers::NONE }));
+    let labels: Vec<String> = a.choices().iter().map(|c| c.label.to_string()).collect();
+    assert!(labels.iter().any(|l| l == "Go to Type Definition"), "{labels:?}");
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 60)).unwrap();
+    terminal.draw(|f| a.draw(f)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..60).map(|y| (0..120).map(|x| buffer[(x, y)].symbol()).collect()).collect();
+    for label in &labels {
+        assert!(rows.iter().any(|row| row.contains(label.as_str())), "{label} wrapped:\n{}", rows.join("\n"));
+    }
+    // and with room to spare, every shortcut shows on its label's row
+    for choice in a.choices() {
+        let ChoiceTarget::Action(id) = choice.target else { continue };
+        let Some(key) = a.session.key_hint(id) else { continue };
+        assert!(rows.iter().any(|row| row.contains(&*choice.label) && row.contains(key.as_str())), "{} lost {key}:\n{}", choice.label, rows.join("\n"));
+    }
+}
+
+#[test]
 fn context_menu_follows_the_clicked_split_and_preview_and_scrolls_in_tiny_frames() {
     let dir = tempfile::tempdir().unwrap();
     let text = dir.path().join("a.txt");

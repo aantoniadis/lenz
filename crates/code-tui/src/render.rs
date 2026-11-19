@@ -369,7 +369,7 @@ impl App {
         frame.render_widget(Clear, popup);
         for (i, r) in c.rows().enumerate().skip(first).take(shown) {
             let selected = i == c.selected();
-            let bg = if selected { p.selected_bg } else { p.status_bg };
+            let bg = if selected { p.menu_selected(p.status_bg) } else { p.status_bg };
             let at = row(popup, (i - first) as u16);
             fill(frame.buffer_mut(), at, style(p.fg, bg));
             let group = i > 0 && c.rows().nth(i-1).is_some_and(|previous|previous.kind != r.kind);
@@ -436,7 +436,7 @@ impl App {
         let popup = Rect::new(left, top, width, shown as u16);
         frame.render_widget(Clear, Rect::new(left, top, width, height));
         for (i, a) in c.actions.iter().enumerate().skip(first).take(shown) {
-            let bg = if i == c.selected { p.selected_bg } else { p.status_bg };
+            let bg = if i == c.selected { p.menu_selected(p.status_bg) } else { p.status_bg };
             let at = row(popup, (i - first) as u16);
             fill(frame.buffer_mut(), at, style(p.fg, bg));
             line(frame.buffer_mut(), at, &code_core::chrome::ellipsize(&label(a), width as usize), style(if a.unavailable.is_some() { p.dim } else { p.fg }, bg));
@@ -703,7 +703,10 @@ impl App {
             frame.render_widget(
                 Block::default()
                     .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(color(p.border)))
                     .title(" Documentation · Esc closes ")
+                    .title_style(style(p.fg, p.status_bg).add_modifier(Modifier::BOLD))
                     .style(style(p.fg, p.status_bg)),
                 popup,
             );
@@ -1397,7 +1400,7 @@ impl App {
                 &label,
                 style(
                     if selected { p.accent } else { p.dim },
-                    if selected { p.selected_bg } else { p.status_bg },
+                    if selected { p.menu_selected(p.status_bg) } else { p.status_bg },
                 )
                 .add_modifier(if selected {
                     Modifier::BOLD | Modifier::UNDERLINED
@@ -1438,7 +1441,7 @@ impl App {
                 break;
             }
             let selected = index == modal.at;
-            let bg = if selected { p.selected_bg } else { p.status_bg };
+            let bg = if selected { p.menu_selected(p.status_bg) } else { p.status_bg };
             let fg = if result.disabled.is_some() {
                 p.dim
             } else {
@@ -1578,9 +1581,9 @@ impl App {
         let action_list = context || matches!(modal.kind, Prompt::Commands | Prompt::LanguageServer);
         let themes = modal.kind == Prompt::Themes;
         let mut separators = Vec::new();
+        let hint = |c: &crate::app::Choice| match c.target { crate::app::ChoiceTarget::Action(id) => self.session.key_hint(id).map_or(0, |key| key.width() + 3), _ => 0 };
         let area = if let Prompt::Menu(_) = modal.kind {
             // A dropdown under the toolbar's button, as wide as its longest row with its shortcut.
-            let hint = |c: &crate::app::Choice| match c.target { crate::app::ChoiceTarget::Action(id) => self.session.key_hint(id).map_or(0, |key| key.width() + 3), _ => 0 };
             let width = (choices.iter().map(|c| c.label.width() + hint(c)).max().unwrap_or(0) + 6)
                 .max(34)
                 .min(frame.area().width as usize) as u16;
@@ -1588,7 +1591,11 @@ impl App {
             let height = (choices.len() as u16 + 3).min(frame.area().height.saturating_sub(2));
             Rect::new(frame.area().x, frame.area().y + 1.min(frame.area().height), width, height)
         } else if let Prompt::Context { x, y, ref entries } = modal.kind {
-            let width = (choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 4)
+            // Wide enough for each row's shortcut where the terminal leaves room around it; otherwise as wide as the
+            // longest label, and rows whose shortcut no longer fits drop it rather than wrap.
+            let labels = choices.iter().map(|c| c.label.width()).max().unwrap_or(0) + 4;
+            let hinted = choices.iter().map(|c| c.label.width() + hint(c)).max().unwrap_or(0) + 4;
+            let width = (if hinted + 4 <= frame.area().width as usize { hinted } else { labels })
                 .max(20)
                 .min(frame.area().width as usize) as u16;
             let height = (entries.len() + 3).min(frame.area().height as usize) as u16;
@@ -1767,17 +1774,13 @@ impl App {
                     .unwrap_or_default()
             };
             let shortcut = if action_list { match choice.target { crate::app::ChoiceTarget::Action(id) => self.session.key_hint(id), _ => None } } else { None };
-            let shortcut = shortcut.filter(|key| key.width() + 3 < width / 2);
+            let shortcut = shortcut.filter(|key| key.width() + 3 < width / 2 && choice.label.width() + suffix.width() + 2 + key.width() + 3 <= width);
             let label_width = shortcut.as_ref().map_or(width, |key| width.saturating_sub(key.width() + 3).max(1));
-            for (part, text) in wrap_text(
-                &format!(
-                    "{}{}{}",
-                    if i == modal.at { "› " } else { "  " },
-                    choice.label,
-                    suffix
-                ),
-                label_width,
-            ).into_iter().enumerate() {
+            // A wrapped label's continuation keeps the label's indent, clear of the selection marker.
+            for (part, text) in wrap_text(&format!("{}{}", choice.label, suffix), label_width.saturating_sub(2).max(1))
+                .into_iter()
+                .enumerate()
+                .map(|(part, text)| (part, format!("{}{text}", if part == 0 && i == modal.at { "› " } else { "  " }))) {
                 let text = match shortcut.as_ref().filter(|key| part == 0 && key.width() + 3 < width / 2) {
                     Some(key) => format!("{text}{}{key}", " ".repeat(width.saturating_sub(text.width() + key.width()))),
                     None => text,
@@ -1809,7 +1812,7 @@ impl App {
         {
             geometry.modal_items.push(*i);
             let bg = if *i == modal.at {
-                p.selected_bg
+                p.menu_selected(p.status_bg)
             } else {
                 p.status_bg
             };
