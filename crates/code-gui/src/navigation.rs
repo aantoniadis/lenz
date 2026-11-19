@@ -18,6 +18,8 @@ pub(super) struct Frame {
     cursor: lenz_content::field_edit::Cursor,
     status: String,
     rows: Vec<code_core::navigation::Row>,
+    /// Every result, of which `rows` are the ones on screen.
+    total: usize,
 }
 
 /// The caret edit a key makes in a one-line text box (Search Everywhere, Search in Project): arrows by character, Alt
@@ -185,7 +187,7 @@ impl ReaderView {
         let first = self.modal_first(at, at..at + 1, search.rows.len(), visible);
         self.navigation_drawn = Some((search.revision, first, visible));
         let snapshot = self.popup_field_snapshot(self.columns((f32::from(bounds.size.width) - 36.0 - 2.0 * self.char_w).max(0.0)))?;
-        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: snapshot.text, cursor: snapshot.cursor, status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect() })
+        Some(Frame { bounds, first, at, char_w: self.char_w, scope: search.scope, query: snapshot.text, cursor: snapshot.cursor, status: self.session.navigation_status(), rows: search.rows.iter().skip(first).take(visible).cloned().collect(), total: search.rows.len() })
     }
 
     pub(super) fn navigation_rows(&self) -> Vec<(String, Option<&'static str>)> {
@@ -248,6 +250,7 @@ impl Frame {
                     }
                 }
             }
+            lenz_gpui::popup::scrollbar(window, x, y + 4.0 + HEADER * line_h(), w, self.rows.len() as f32 * 2.0 * line_h(), lenz_gpui::popup::Scrolled { total: self.total, first: self.first, visible: self.rows.len() }, p);
         });
     }
 }

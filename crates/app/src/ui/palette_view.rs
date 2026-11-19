@@ -214,11 +214,13 @@ impl Viewer {
         let empty=p.is_empty();
         let columns=(width/self.char_w.max(1.0)).max(0.0) as usize;
         let snapshot=if active {self.field_native.snapshot(p.query(),p.input().cursor(),columns)}else{p.input().cursor().snapshot(p.query(),columns)};
-        Some(PalettePaint{x,y,width,query:snapshot.text,cursor:snapshot.cursor,lines,empty})
+        Some(PalettePaint{x,y,width,query:snapshot.text,cursor:snapshot.cursor,lines,empty,first:range.start,total:p.len()})
     }
 }
 
-pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<PaletteLine>, pub empty:bool }
+pub(super) struct PalettePaint { pub x:f32, pub y:f32, pub width:f32, pub query:String, pub cursor:crate::field_edit::Cursor, pub lines:Vec<PaletteLine>, pub empty:bool,
+    /// The first row shown and the number of matching commands, for the scrollbar.
+    pub first:usize, pub total:usize }
 /// One palette row: its label (with the selected row's disabled reason), group and shortcut, and where the typed
 /// words sit in the label and the group.
 pub(super) struct PaletteLine { pub label:String, pub group:String, pub key:String, pub disabled:bool, pub selected:bool, pub in_label:Vec<std::ops::Range<usize>>, pub in_group:Vec<std::ops::Range<usize>> }

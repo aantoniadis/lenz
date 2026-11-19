@@ -112,6 +112,7 @@ pub fn draw(frame:&mut Frame,area:Rect,rows:&[Row],scroll:&mut usize,palette:&le
         let s=style_with(palette).bg(color(palette.status_bg)).fg(color(if *heading{palette.accent}else{palette.fg})).add_modifier(if *heading{Modifier::BOLD}else{Modifier::empty()});
         crate::visual::safe_text(frame.buffer_mut(),row,text,s);
     }
+    lenz_terminal_ui::scroll_thumb(frame.buffer_mut(),rect.right()-1,rect.y+1,visible as u16,(entries.len(),*scroll,visible),ratatui::style::Style::default().fg(crate::chrome::color(palette.fg)).bg(crate::chrome::color(palette.status_bg)));
     let footer=Rect::new(rect.x+1,rect.bottom().saturating_sub(2),w.saturating_sub(2),1);
     crate::visual::safe_text(frame.buffer_mut(),footer,"↑/↓ scroll · PgUp/PgDn · Esc close",style_with(palette).bg(color(palette.status_bg)).fg(color(palette.dim)));
 }

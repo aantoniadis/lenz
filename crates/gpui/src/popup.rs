@@ -69,3 +69,37 @@ pub fn scrim() -> gpui::Hsla { gpui::hsla(0., 0., 0., 0.32) }
 pub fn shade(window: &mut Window, bounds: Bounds<Pixels>) {
     window.paint_quad(quad(bounds, px(0.), scrim(), px(0.), gpui::transparent_black(), Default::default()));
 }
+
+/// Width of a popup list's scrollbar thumb, and its distance from the box's right edge.
+pub const THUMB_W: f32 = 4.0;
+pub const THUMB_INSET: f32 = 3.0;
+/// The shortest thumb.
+pub const THUMB_MIN: f32 = 16.0;
+
+/// A scrolled popup list: `total` rows, showing `visible` of them from `first`.
+#[derive(Clone, Copy, Debug)]
+pub struct Scrolled { pub total: usize, pub first: usize, pub visible: usize }
+
+/// A popup list's scrollbar thumb, as `(x, y, height)`, painted between `y` and `y + h` at the right of a box
+/// spanning `x, w`. `None` when everything shows.
+pub fn thumb(x: f32, y: f32, w: f32, h: f32, list: Scrolled) -> Option<(f32, f32, f32)> {
+    let bar = lenz_content::scrollbar::Scrollbar { total: list.total as f64, top: list.first as f64, visible: list.visible as f64 };
+    let (start, size) = bar.thumb(h, THUMB_MIN.min(h))?;
+    Some((x + w - THUMB_INSET - THUMB_W, y + start, size))
+}
+
+/// Paint a popup list's scrollbar ([`thumb`]): no track, a rounded thumb that reads on the box and on its
+/// highlighted row.
+pub fn scrollbar(window: &mut Window, x: f32, y: f32, w: f32, h: f32, list: Scrolled, palette: &Palette) {
+    let Some((tx, ty, th)) = thumb(x, y, w, h, list) else { return };
+    let fill = lenz_content::theme::mix(colors(palette).0, palette.fg, 0.38);
+    let bounds: Bounds<Pixels> = Bounds { origin: point(px(tx), px(ty)), size: gpui::size(px(THUMB_W), px(th)) };
+    window.paint_quad(quad(bounds, px(THUMB_W / 2.), color(fill), px(0.), gpui::transparent_black(), Default::default()));
+}
+
+/// The first row a list shows when its thumb's top is dragged `offset` pixels down a track of height `h`: the
+/// inverse of [`thumb`].
+pub fn first_at(offset: f32, h: f32, list: Scrolled) -> usize {
+    let bar = lenz_content::scrollbar::Scrollbar { total: list.total as f64, top: list.first as f64, visible: list.visible as f64 };
+    bar.top_at(offset, h, THUMB_MIN.min(h)).round() as usize
+}

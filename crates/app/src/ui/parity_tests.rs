@@ -1003,6 +1003,28 @@ fn poll_list_search(cx:&mut TestAppContext,f:&Fixture) {
 }
 
 #[test]
+fn gui_files_scrollbar_drags_and_pages_the_list_without_opening_a_file() {
+    let mut cx=TestAppContext::single();let f=files_fixture(&mut cx);
+    let (x,(top,h,list),current)=f.viewer.read_with(&cx,|v,_|(v.diff_x()-6.,v.nav_bar().unwrap(),v.comparison.current));
+    assert!(list.total>list.visible&&list.first==0,"{list:?}");
+    let down=|cx:&mut TestAppContext,y:f32|f.window.update(cx,|v,w,cx|v.on_mouse_down(&MouseDownEvent{position:point(px(x),px(y)),button:MouseButton::Left,click_count:1,..Default::default()},w,cx)).unwrap();
+    let moved=|cx:&mut TestAppContext,y:f32|f.window.update(cx,|v,w,cx|v.on_mouse_move(&MouseMoveEvent{position:point(px(x),px(y)),pressed_button:Some(MouseButton::Left),modifiers:Default::default()},w,cx)).unwrap();
+    let scroll=|cx:&TestAppContext|f.viewer.read_with(cx,|v,_|v.nav_scroll);
+    // a press at the track's end brings the thumb there; dragging it to the top returns to the first row
+    down(&mut cx,top+h-2.);
+    assert_eq!(scroll(&cx),(list.total-list.visible) as f32);
+    moved(&mut cx,top+h/2.);
+    assert!(scroll(&cx)>0.&&scroll(&cx)<(list.total-list.visible) as f32);
+    moved(&mut cx,top);
+    f.window.update(&mut cx,|v,w,cx|v.on_mouse_up(&MouseUpEvent{position:point(px(x),px(top)),button:MouseButton::Left,..Default::default()},w,cx)).unwrap();
+    assert_eq!(scroll(&cx),0.);
+    // released: the pointer moves freely again, and no file was opened by the press
+    moved(&mut cx,top+h-2.);
+    assert_eq!(scroll(&cx),0.);
+    assert_eq!(f.viewer.read_with(&cx,|v,_|v.comparison.current),current);
+}
+
+#[test]
 fn gui_file_search_previews_without_loading_and_cancel_restores_scroll() {
     let mut cx=TestAppContext::single();let f=files_fixture(&mut cx);
     let before=f.viewer.update(&mut cx,|v,_| {

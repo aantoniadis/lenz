@@ -3980,8 +3980,7 @@ impl Session {
             CommandId::PersistentIndex,
             CommandId::RebuildIndex,
         ] {
-            let label = self.on(id).map_or_else(|| id.label().to_owned(), |on| format!("{}: {}", id.label(), if on { "On" } else { "Off" }));
-            rows.push((label, Some(id)));
+            rows.push((crate::chrome::toggle_text(id.label(), self.on(id)), Some(id)));
         }
         rows
     }

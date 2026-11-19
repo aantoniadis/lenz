@@ -517,6 +517,7 @@ impl App {
                 frame.buffer_mut().set_style(rect, style);
                 crate::visual::safe_text(frame.buffer_mut(), rect, &item.label, style);
             }
+            lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), area.right() - 1, inner.y, inner.height, (self.context.items.len(), self.context.first, visible), ratatui::style::Style::default().fg(crate::chrome::color(palette.fg)).bg(crate::chrome::color(palette.status_bg)));
             let reason = self
                 .context
                 .items

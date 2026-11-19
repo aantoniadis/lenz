@@ -311,6 +311,10 @@ pub struct ReaderView {
     /// Window width, from the last paint, for wrapping.
     width: f32,
     dragging: bool,
+    /// A drag selection held past the text's top or bottom: the pointer, the rows to scroll per tick (0 inside the
+    /// text), the fraction of a row carried to the next tick, and whether the tick is running.
+    drag_scroll: (f32, f32, f32, f32),
+    drag_ticking: bool,
     /// The pane whose gutter the pointer is over: its fold marks show at full strength.
     gutter_hover: Option<u8>,
     /// The pointer is over a pane's text (past its gutter) or a Markdown preview: an I-beam.
@@ -768,6 +772,8 @@ pub enum Drag {
     /// A pane's scrollbar thumb, held `grab` px below its top; pressed at window `y`, `moved` once it travelled. It
     /// ends once the pane shows another tab or file than `shown`.
     Scrollbar { pane: u8, shown: (TabId, code_core::text::BufferId), grab: f32, y: f32, moved: bool },
+    /// The explorer's scrollbar thumb, held `grab` px below its top.
+    Tree { grab: f32 },
 }
 
 /// The image a view shows.
@@ -807,7 +813,7 @@ impl ReaderView {
 
     pub fn new(session: Session, path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
         let (font, notice) = lenz_gpui::pick_mono(cx, fonts().font_family.as_deref());
-        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, branch_hits_valid: false, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_modal_icons: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
+        let mut view = Self { field_native: Default::default(), field_native_target: None, field_native_stale: false, field_native_suppress: None, field_native_notify: 0, popup_fields: Default::default(), find_fields: Default::default(), open_path_request: 0, session, focus: cx.focus_handle(), font, rows: 0, tree_rows: 0, results_focus: false, log_focus: false, log_scroll: 0, results_scroll: 0, panel_list_y: f32::MAX, panel_list_w: f32::MAX, panel_list_rows: 0, tab_hits: Vec::new(), nav_hover: None, modal_hover: None, preview_hover: None, app_menu_hover: false, commands_hover: false, icon_font: None, logos: Default::default(), logo_px: 0, logo_uploads: Default::default(), about_upload: Default::default(), make_config: std::rc::Rc::new(Config::from_env), text_bounds: None, panes: Vec::new(), layout: Layout::default(), drag: None, tab_drop: None, hover_divider: None, link: None, caret_rest: (None, None), caret_seen: None, caret_shown: true, caret_blink: None, doc_popup: None, completion_doc: None, completion_doc_building: None, completion_doc_drawn: None, completion_drawn: None, signature_drawn: None, code_actions_drawn: None, doc_rest: (None, None), doc_grace: None, height: 600.0, panel_top: f32::MAX, split_at: 0.0, char_w: font_size() * 0.6, width: 800.0, dragging: false, drag_scroll: (0.0, 0.0, 0.0, 0.0), drag_ticking: false, gutter_hover: None, text_hover: false, preview_drag: false, themes_started: false, modal: None, double_shift: Default::default(), mac_keys: cfg!(target_os = "macos"), follow_seen: 0, navigation_drawn: None, branch_hits_valid: false, modal_scroll: Default::default(), modal_wheel: Default::default(), wheel: Default::default(), wheel_tab: [None; 2], tab_scroll: Default::default(), tab_scroll_max: Default::default(), tab_scroll_seen: [None; 2], tab_scroll_manual: [false; 2], modal_seen: Default::default(), tree_sel: None, tree_scroll: 0, tree_wheel: 0.0, results_wheel: 0.0, tree_reveal: false, reveal_seen: 0, tree_focus: false, tree_shown: true, launched: Vec::new(), pending_explorer: None, sidebar_w: 0.0, image: [None, None], uploads: Default::default(), markdown: [None, None], reading: None, find_focus: None, find_replace: false, sent_size: [(0, 0); 2], source: source::Cache::default(), source_geometry: [None, None], sticky_hits: Vec::new(), start_hits: Vec::new(), marks_drawn: Vec::new(), fold_marks_drawn: Vec::new(), crumb_hits: Vec::new(), crumb_focus: None, ann_hover: None, #[cfg(feature = "test-support")] opened_windows: Vec::new(), #[cfg(feature = "test-support")] exe: None, input_state: Default::default(), csv_ui: Default::default(), terminal_ui: Default::default(), #[cfg(test)] painted_annotations: Vec::new(), #[cfg(test)] painted_badges: Vec::new(), #[cfg(feature = "test-support")] painted_markers: Vec::new(), #[cfg(feature = "test-support")] painted_inline: Vec::new(), #[cfg(feature = "test-support")] painted_modal_icons: Vec::new(), #[cfg(feature = "test-support")] painted_scrollbars: Vec::new(), #[cfg(feature = "test-support")] painted_problem_bounds: Default::default(), #[cfg(feature = "test-support")] painted_completion_doc: None };
         view.layout = view.session.state().layout();
         cx.on_app_quit(|view, cx| {
             view.remember_explorer();
@@ -4094,6 +4100,16 @@ impl ReaderView {
         if (0.0..line_h()).contains(&y) && x >= self.sidebar_w {
             return; // the toolbar row past the buttons
         }
+        // The explorer's scrollbar: the thumb is held where it was pressed; a press on the track brings its middle there.
+        if ev.button == MouseButton::Left && x < self.sidebar_w && x >= self.sidebar_w - 12.0
+            && let Some((top, h, list)) = self.tree_bar()
+            && let Some((_, thumb_y, thumb_h)) = lenz_gpui::popup::thumb(0.0, top, self.sidebar_w - 1.0, h, list)
+        {
+            let drag = Drag::Tree { grab: if (thumb_y..thumb_y + thumb_h).contains(&y) { y - thumb_y } else { thumb_h / 2.0 } };
+            self.drag = Some(drag);
+            self.drag_to(drag, x, y, cx);
+            return cx.notify();
+        }
         if x < self.sidebar_w {
             self.tree_focus = true;
             // Rows as the tree is drawn: from below its title row, whatever the panes' bars and breadcrumbs take.
@@ -4478,11 +4494,50 @@ impl ReaderView {
             self.dragging = false;
             return;
         }
-        let (Some(at), Some(s)) = (self.byte_at(window, f32::from(ev.position.x), f32::from(ev.position.y)), self.session.state().selection()) else { return };
+        let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        // Past the text's top or bottom the view keeps scrolling while the button is held, the selection with it.
+        let past = self.text_bounds.map_or(0.0, |b| {
+            let (top, bottom) = (f32::from(b.top()), f32::from(b.bottom()));
+            if y < top { y - top } else if y > bottom { y - bottom } else { 0.0 }
+        });
+        self.drag_scroll = (x, y, lenz_gpui::scroll::drag_rows(past, line_h()), if past == 0.0 { 0.0 } else { self.drag_scroll.3 });
+        if past != 0.0 {
+            if !self.drag_ticking { self.drag_ticking = true; self.drag_tick(window, cx); }
+            return;
+        }
+        let (Some(at), Some(s)) = (self.byte_at(window, x, y), self.session.state().selection()) else { return };
         self.dispatch(Command::Select(Selection { head: at, ..s }), cx);
     }
 
+    /// While a drag selection is held past the text's top or bottom: every tick, take the selection to the edge row
+    /// under the pointer's column and scroll on, until the button is released, the pointer returns, a dialog opens or
+    /// another tab shows.
+    fn drag_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.session.state().active().map(|t| t.id());
+        cx.spawn_in(window, async move |this, cx| {
+            loop {
+                cx.background_executor().timer(lenz_gpui::scroll::DRAG_TICK).await;
+                let go = this.update_in(cx, |v: &mut Self, window, cx| {
+                    let (x, _, rows, _) = v.drag_scroll;
+                    let bounds = v.text_bounds.filter(|_| v.dragging && rows != 0.0 && v.modal.is_none() && v.session.state().active().map(|t| t.id()) == tab);
+                    let Some(bounds) = bounds else { v.drag_ticking = false; v.drag_scroll.3 = 0.0; return false };
+                    // the row at the edge the pointer left through
+                    let y = if rows < 0.0 { f32::from(bounds.top()) + 1.0 } else { f32::from(bounds.bottom()) - 1.0 };
+                    if let (Some(at), Some(s)) = (v.byte_at(window, x, y), v.session.state().selection()) && at != s.head {
+                        v.dispatch(Command::Select(Selection { head: at, ..s }), cx);
+                    }
+                    let steps = lenz_gpui::scroll::steps(&mut v.drag_scroll.3, rows);
+                    if steps != 0 { v.dispatch(Command::ScrollRows(steps), cx); }
+                    true
+                }).unwrap_or(false);
+                if !go { break; }
+            }
+        }).detach();
+    }
+
     fn on_mouse_up(&mut self, ev: &gpui::MouseUpEvent, _window: &mut Window, cx: &mut Context<Self>) {
+        // A released button ends the drag selection at once, and with it the scrolling past an edge.
+        if ev.button == MouseButton::Left { self.dragging = false; }
         if self.modal.is_some() { self.drag = None; self.terminal_ui.explorer_drag = None; self.terminal_ui.mouse_capture = None; return; }
         if self.terminal_drag_end(ev, cx) { self.drag = None; self.tab_drop = None; return; }
         self.preview_drag = false;
@@ -4526,6 +4581,10 @@ impl ReaderView {
                 let max = ((f32::from(g.text.right()) - left - num_w() - 52.0) / self.char_w).floor().max(12.0) as usize;
                 let width = ((x - left - 12.0) / self.char_w).round().max(12.0) as usize;
                 self.dispatch(Command::ResizeAnnotations { width: width.min(max), commit: false }, cx);
+            }
+            Drag::Tree { grab } => {
+                let Some((top, h, list)) = self.tree_bar() else { self.drag = None; return };
+                self.tree_scroll = lenz_gpui::popup::first_at(y - top - grab, h, list);
             }
             Drag::Explorer => self.layout.explorer_width = Some(x.clamp(120.0, (self.width - 160.0).max(120.0)).round() as u32),
             Drag::Results => {
@@ -4583,7 +4642,7 @@ impl ReaderView {
                     self.dispatch(Command::MoveTab { tab: id, pane, index }, cx);
                 }
             }
-            Some(Drag::Tab { .. } | Drag::Scrollbar { .. }) | None => {}
+            Some(Drag::Tab { .. } | Drag::Scrollbar { .. } | Drag::Tree { .. }) | None => {}
             Some(Drag::Explorer | Drag::Results | Drag::Split) => self.dispatch(Command::SetLayout(self.layout), cx),
         }
         self.tab_drop = None;
@@ -4591,6 +4650,12 @@ impl ReaderView {
     }
 
     /// The tree's visible lines (from its scroll), with `selected` the highlighted row's index.
+    /// The explorer's scrollbar: its track's top and height in the window, and the rows it stands for. `None` while
+    /// the explorer is hidden.
+    fn tree_bar(&self) -> Option<(f32, f32, lenz_gpui::popup::Scrolled)> {
+        (self.sidebar_w > 0.0 && self.tree_rows > 0).then(|| (toolbar_h() + line_h(), self.tree_rows as f32 * line_h(), lenz_gpui::popup::Scrolled { total: self.tree_len(), first: self.tree_scroll, visible: self.tree_rows }))
+    }
+
     pub fn tree_lines(&self, selected: usize) -> Vec<TreeLine> {
         self.session.state().tree_rows().enumerate().skip(self.tree_scroll).take(self.tree_rows).map(|(i, r)| TreeLine {
                 depth: r.depth,
@@ -5473,7 +5538,7 @@ impl ReaderView {
 
     /// A command menu's settings: each one's row and whether it is on.
     fn modal_marks(&self) -> Vec<(usize, bool)> {
-        if !matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. })) { return Vec::new(); }
+        if !matches!(self.modal, Some(Modal::Commands { .. } | Modal::AppMenu { .. } | Modal::CommandGroup { .. } | Modal::LanguageServer { .. })) { return Vec::new(); }
         self.modal_rows().iter().enumerate().filter_map(|(row, (label, _))| code_core::chrome::toggle_split(label).1.map(|on| (row, on))).collect()
     }
 
@@ -5574,8 +5639,12 @@ impl ReaderView {
             return Some(ModalLayout { bounds, lines, first, visible, at, footer: Vec::new(), heading: None, query: None, body_top: 4.0, shortcuts: Vec::new(), marks: Vec::new() });
         }
         let heading = if matches!(self.modal, Some(Modal::LanguageServer { .. })) {
+            // Each section under its heading, a rule above it: a heading must not read as one more command.
             for (row, title) in [(8, "Indexing"), (4, "Setup")] {
-                if let Some(at) = lines.iter().position(|r| r.0 == row) { lines.insert(at, (usize::MAX, title.into(), true)); }
+                if let Some(at) = lines.iter().position(|r| r.0 == row) {
+                    lines.insert(at, (usize::MAX, title.into(), true));
+                    lines.insert(at, (usize::MAX, String::new(), true));
+                }
             }
             Some("Language Server".to_string())
         } else {
@@ -6025,6 +6094,7 @@ impl Render for ReaderView {
         }
         self.tree_scroll = self.tree_scroll.min(tree_len.saturating_sub(self.tree_rows.max(1)));
         let tree = self.tree_lines(tree_at);
+        let tree_bar = self.tree_bar();
         #[cfg(test)]
         {
             self.painted_badges.clear();
@@ -6257,10 +6327,14 @@ impl Render for ReaderView {
         let theme_chooser = matches!(self.modal, Some(Modal::Themes { .. }));
         let branch_chooser = matches!(self.modal, Some(Modal::Branches { .. }));
         let menu_modal = matches!(self.modal, Some(Modal::AppMenu { .. } | Modal::CommandGroup { .. }));
-        let commands_modal = matches!(self.modal, Some(Modal::Commands { .. }));
+        // Command lists with section headings: bold, a rule above each.
+        let commands_modal = matches!(self.modal, Some(Modal::Commands { .. } | Modal::LanguageServer { .. }));
         // The context menu: its box, and per row its top, label, key, whether it can run and is highlighted.
         let doc_frame = self.doc_frame(window);
         let completion_frame = self.completion_frame(window, cx);
+        // Each suggestion list's length and highlighted row, for its scrollbar.
+        let completion_list = self.session.state().completion().map(|c| (c.rows().len(), c.selected()));
+        let code_actions_list = self.session.state().code_actions().map(|c| (c.actions.len(), c.selected));
         #[cfg(feature = "test-support")]
         { self.painted_completion_doc = completion_frame.as_ref().and_then(|f| f.2.as_ref()).and_then(|(_, layout, _)| layout.as_ref()).map(|layout| layout.preview.doc.text.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()); }
         let signature_frame = self.signature_frame(window);
@@ -6585,6 +6659,7 @@ impl Render for ReaderView {
                                     }
                                 }
                             });
+                            if let Some((top, h, list)) = tree_bar { lenz_gpui::popup::scrollbar(window, x0, y0 + top, sidebar_w - 1.0, h, list, &palette); }
                             lenz_gpui::fill(window, x0 + sidebar_w - 1.0, y0 + toolbar_h(), 1.0, body_h + tabs_h, palette.border);
                         }
                         // Breadcrumb bars: crumbs and their `›`, the highlighted crumb on a selection box.
@@ -6834,8 +6909,7 @@ impl Render for ReaderView {
                                             let primary = index == 0 && !destructive;
                                             let edge = if disabled { border } else if destructive { palette.error } else if primary { palette.accent } else { border };
                                             let hover = clip.contains(&window.mouse_position());
-                                            lenz_gpui::fill(window, x, y, f32::from(b.size.width), f32::from(b.size.height), edge);
-                                            lenz_gpui::fill(window, x + 1.0, y + 1.0, (f32::from(b.size.width) - 2.0).max(0.0), (f32::from(b.size.height) - 2.0).max(0.0), if !disabled && (primary || hover) { palette.menu_selected(bg) } else { bg });
+                                            lenz_gpui::popup::field(window, x, y, f32::from(b.size.width), f32::from(b.size.height), edge, if !disabled && (primary || hover) { palette.menu_selected(bg) } else { bg });
                                             let shown = code_core::chrome::ellipsize(label, ((f32::from(b.size.width) - 16.0) / char_w).max(0.0) as usize);
                                             lenz_gpui::text(window, cx, m, x + 8.0, y + 6.0, &shown, if disabled { palette.dim } else if destructive { palette.readable_on(palette.error, bg) } else { palette.fg });
                                         });
@@ -6860,11 +6934,13 @@ impl Render for ReaderView {
                                         let kx = mx + mw - 12.0 - lenz_content::wrap::width(key) as f32 * char_w;
                                         if lenz_content::wrap::width(key) + 3 < ((mw - 24.0) / char_w).max(0.0) as usize / 2 { lenz_gpui::text(window, cx, m, kx, y, key, palette.dim); }
                                     }
-                                    let section = (branch_chooser || commands_modal) && *row == usize::MAX || details_modal && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
+                                    let first_line = n == 0 || l.lines[n - 1].0 != *row;
+                                    // A wrapped line keeps every character, so the space it broke at leads its next line: not drawn.
+                                    let line = if details_modal && !first_line { line.strip_prefix(' ').unwrap_or(line) } else { line.as_str() };
+                                    let section = (branch_chooser || commands_modal) && *row == usize::MAX || details_modal && first_line && line.split_once(':').is_some_and(|(label, _)| label.len() <= 40 && !label.contains('/') && !label.contains('`'));
                                     let heading = Font { weight: gpui::FontWeight::BOLD, ..m.font.clone() };
                                     // A row with a file-type icon (New Scratch File's kinds): the icon, then its text.
                                     let icon = scratch_icons.as_ref().zip(row.checked_sub(FINDER_HEADER_ROWS)).and_then(|(icons, i)| icons.get(i).copied());
-                                    let first_line = n == 0 || l.lines[n - 1].0 != *row;
                                     if let Some(icon) = icon.filter(|_| first_line) {
                                         paint_icon(window, cx, icon_font.as_ref(), &logos, Bounds { origin: gpui::point(px(mx), px(my)), size: gpui::size(px(mw), px(mh)) }, &palette, icon, mx + 12.0, y);
                                     }
@@ -6872,8 +6948,14 @@ impl Render for ReaderView {
                                     // Settings show their state as a check mark; every command sits right of that column.
                                     if first_line && l.marks.contains(&(*row, true)) { lenz_gpui::text(window, cx, m, mx + 12.0, y, "✓", palette.readable_on(palette.accent, bg)); }
                                     let mx = if l.marks.is_empty() || *row == usize::MAX { mx } else { mx + 2.0 * char_w };
+                                    // A details line's label is bold up to its colon; its value reads as text.
+                                    let (label, line) = match line.split_once(':').filter(|_| section && details_modal) { Some((label, value)) => (line.get(..label.len() + 1).unwrap_or_default(), value), None => ("", line) };
+                                    if !label.is_empty() { lenz_gpui::text(window, cx, Metrics { font: &heading, ..m }, mx + 12.0, y, label, palette.fg); }
+                                    let mx = mx + lenz_content::wrap::width(label) as f32 * char_w;
+                                    let section = section && label.is_empty();
                                     lenz_gpui::text(window, cx, if section { Metrics { font: &heading, ..m } } else { m }, mx + 12.0, y, line, if *row == usize::MAX { palette.readable_on(palette.dim, bg) } else if *disabled { palette.dim } else if theme_chooser && *row < THEME_HEADER_ROWS { palette.accent } else { palette.fg });
                                 }
+                                lenz_gpui::popup::scrollbar(window, mx, my + l.body_top, mw, l.visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: l.lines.len(), first: l.first, visible: l.visible }, &palette);
                                 if !l.footer.is_empty() {
                                     let y = my + l.body_top + l.visible as f32 * line_h() + if l.heading.is_some() { 8.0 } else { 0.0 };
                                     lenz_gpui::fill(window, mx + 8.0, y, (mw - 16.0).max(0.0), 1.0, border);
@@ -6940,6 +7022,10 @@ impl Render for ReaderView {
                                     }
                                 }
                             });
+                            if let Some((total, selected)) = completion_list.filter(|(total, _)| *total > rows.len() && !rows.is_empty()) {
+                                let first = selected.saturating_sub(rows.len() - 1).min(total - rows.len());
+                                lenz_gpui::popup::scrollbar(window, mx, my + 2.0, mw, rows.len() as f32 * line_h(), lenz_gpui::popup::Scrolled { total, first, visible: rows.len() }, &palette);
+                            }
                             if let Some((d, layout, top)) = doc {
                                 let (dx, dy, dw, dh) = (x0 + f32::from(d.origin.x), y0 + f32::from(d.origin.y), f32::from(d.size.width), f32::from(d.size.height));
                                 lenz_gpui::fill(window, dx - 1.0, dy - 1.0, dw + 2.0, dh + 2.0, border);
@@ -6961,6 +7047,10 @@ impl Render for ReaderView {
                                     let y = my + 2.0 + i as f32 * line_h();
                                     if *selected { lenz_gpui::popup::row(window, mx, y, mw, line_h(), palette.menu_selected(bg)); }
                                     lenz_gpui::text(window, cx, m, mx + 2.0 * char_w, y, label, if *unavailable { palette.dim } else { palette.fg });
+                                }
+                                if let Some((total, selected)) = code_actions_list.filter(|(total, _)| *total > rows.len() && !rows.is_empty()) {
+                                    let first = selected.saturating_sub(rows.len() - 1).min(total - rows.len());
+                                    lenz_gpui::popup::scrollbar(window, mx, my + 2.0, mw, rows.len() as f32 * line_h(), lenz_gpui::popup::Scrolled { total, first, visible: rows.len() }, &palette);
                                 }
                                 if let Some(reason) = reason { lenz_gpui::text(window, cx, m, mx + 2.0 * char_w, my + 2.0 + rows.len() as f32 * line_h(), reason, palette.dim); }
                             });

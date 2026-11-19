@@ -1218,6 +1218,7 @@ impl Merger {
         if lines.is_empty(){lines.push(Line::styled("No matching commands",base.fg(crate::chrome::color(palette.dim))));}
         let title=if rect.width<12{"› "}else if rect.width<32{"Filter: "}else if self.block_menu_target.is_some(){"Change filter: "}else if self.files_menu_target.is_some(){"File actions: "}else{"Merge commands: "};
         frame.render_widget(Clear,rect);frame.render_widget(Paragraph::new(lines).style(base).block(crate::chrome::pane(title,palette,true)),rect);
+        lenz_terminal_ui::scroll_thumb(frame.buffer_mut(),rect.right()-1,rect.y+1,visible as u16,(matches.len(),self.menu_first,visible),base);
         let offset=(title.len() as u16+1).min(rect.width);
         let field=Rect::new(rect.x+offset,rect.y,rect.width.saturating_sub(offset+1),1);
         lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:&self.menu_query,cursor:self.menu_cursor,area:field,active:true},crate::chrome::style_with(palette),crate::chrome::style_with(palette).bg(crate::chrome::color(palette.selected_bg)));

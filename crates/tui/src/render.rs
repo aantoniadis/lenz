@@ -355,6 +355,7 @@ fn popup(app: &mut App, frame: &mut ratatui::Frame, prompt: Prompt) {
     }
     let count = h.saturating_sub(2) as usize;
     let start = app.selected.saturating_sub(count.saturating_sub(1));
+    lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), rect.right() - 1, rect.y + 1, count as u16, (rows.len(), start, count), base(palette));
     for (i, row) in rows.iter().enumerate().skip(start).take(count) {
         let line = Rect::new(rect.x + 1, rect.y + 1 + (i - start) as u16, rect.width - 2, 1);
         app.popup_hits.push((i,line));

@@ -1221,7 +1221,7 @@ the local cache experiment covers the ten declaration grammars.
 The shared reader core now retains the content digest already computed for each successfully indexed file.
 After watcher overflow, existing background index reads verify which contents changed before notifying Ruby
 LSP. This adds no extra directory walk, file read or content hash, and leaves ordinary file/directory notifications
-unchanged. Both adapters use this implementation. **Reuse Saved Declaration Index: Off** also disables this
+unchanged. Both adapters use this implementation. Turning **Reuse Saved Declaration Index** off also disables this
 filter; **Rebuild Project Index** still clears local saved/current records and restarts the project's servers.
 
 Unknown, unreadable and oversized files retain notifications. A byte-budget stop releases pending reports;

@@ -223,6 +223,7 @@ impl<A:Copy> Bar<A> {
             frame.buffer_mut().set_style(rect,s);
             crate::visual::safe_text(frame.buffer_mut(),rect,&format!("{} {}",if row.active{"✓"}else{" "},row.label),s);
         }
+        lenz_terminal_ui::scroll_thumb(frame.buffer_mut(),self.popup.right()-1,self.popup.y+1,visible.min(usize::from(height.saturating_sub(2))) as u16,(rows.len(),self.menu_first,visible),Style::default().fg(color(palette.fg)).bg(color(palette.status_bg)));
         if height>=4 {let reason=rows.get(self.row).and_then(|r|r.disabled.as_deref()).unwrap_or("Enter selects · Esc closes");crate::visual::safe_text(frame.buffer_mut(),Rect::new(self.popup.x+1,self.popup.bottom()-2,width-2,1),reason,style_with(palette).bg(color(palette.status_bg)).fg(color(palette.dim)));}
     }
 }

@@ -277,6 +277,7 @@ pub(crate) fn paint(p: &mut Palette, frame: &mut ratatui::Frame, rect: Rect, pal
             if let Some(key) = entry.entry.shortcut { crate::visual::safe_text(buf, Rect::new(line.right().saturating_sub(1 + key.width() as u16), line.y, key.width() as u16, 1), key, fg(palette.dim)); }
         }
     }
+    lenz_terminal_ui::scroll_thumb(buf, rect.right() - 1, inner.y + 1, inner.height.saturating_sub(1), (p.len(), range.start, range.len()), ratatui::style::Style::default().fg(crate::chrome::color(palette.fg)).bg(crate::chrome::color(palette.status_bg)));
     let offset=10.min(inner.width);
     lenz_terminal_ui::paint(frame,lenz_terminal_ui::Field{text:p.query(),cursor:p.input().cursor(),area:Rect::new(inner.x+offset,inner.y,inner.width.saturating_sub(offset),1),active:true},base,base.bg(color(palette.selected_bg)));
 }

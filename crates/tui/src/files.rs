@@ -191,6 +191,8 @@ impl Files {
         let height=usize::from(area.height.saturating_sub(2));
         // Keep file switching visible, without snapping manually scrolled rows back every frame.
         if self.reveal_current&&!self.search.active(){self.reveal_current=false;if let Some(row)=self.cursor(){self.reveal(row);}}
+        // The list's scrollbar, on its right border.
+        if area.width>1 {lenz_terminal_ui::scroll_thumb(frame.buffer_mut(),area.right()-1,area.y+1,height as u16,(self.rows.len(),self.scroll,height),ratatui::style::Style::default().fg(color(palette.fg)).bg(color(palette.sidebar_bg)));}
         for (row,item) in self.rows.iter().enumerate().skip(self.scroll).take(height) {
             let(label,fg,selected,decoration)=match item {
                 NavRow::Group(name,count)=>(format!("{name} ({count})"),palette.fg,false,None),

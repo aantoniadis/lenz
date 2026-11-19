@@ -539,7 +539,7 @@ and restart only the affected provider/workspace. Exclusions default to On and r
 gems; toggle them Off to restore that coverage without clearing unrelated settings. Reset restores inherited settings for that provider/project. See [project settings](providers.md#project-language-server-settings)
 for JSON overrides, precedence and legacy Ruby `.index.yml` handling.
 
-The same menu offers **Reuse Saved Declaration Index: On/Off** (On by default) and **Rebuild Project Index**.
+The same menu offers **Reuse Saved Declaration Index** (marked ✓ when on, the default) and **Rebuild Project Index**.
 Rebuild discards the current project's saved declarations, refreshes open documents and restarts its language
 servers while rebuilding local symbols. Both controls also appear in F10 and Find Action. See
 [cache and rebuild controls](providers.md#saved-declarations-and-rebuilding) for settings and limits.

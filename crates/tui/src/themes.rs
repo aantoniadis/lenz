@@ -169,5 +169,6 @@ impl Chooser {
                 self.hits.push((*i, r));
             }
         }
+        lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), rect.right() - 1, rect.y + 1, visible as u16, (rows.len(), self.scroll, visible), base);
     }
 }

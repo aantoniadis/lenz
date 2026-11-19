@@ -84,6 +84,20 @@ pub fn paint(frame: &mut Frame, field: Field<'_>, style: Style, selected: Style)
     }
 }
 
+/// A popup list's scrollbar on its box's right border: the cells of column `x` from `y` down `height` rows that the
+/// thumb covers are drawn heavy in `style`, for a list of `total` rows showing `visible` of them from `first`
+/// (`list`, in that order). Nothing when everything shows.
+pub fn scroll_thumb(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, height: u16, list: (usize, usize, usize), style: Style) {
+    let (total, first, visible) = list;
+    let bar = lenz_content::scrollbar::Scrollbar { total: total as f64, top: first as f64, visible: visible as f64 };
+    let Some((start, size)) = bar.thumb(f32::from(height), 1.0) else { return };
+    let size = (size.round() as u16).clamp(1, height);
+    let start = (start.round() as u16).min(height - size);
+    for row in start..start + size {
+        if let Some(cell) = buf.cell_mut((x, y + row)) { cell.set_symbol("┃").set_style(style); }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,5 +192,22 @@ mod tests {
             cursor.execute(&mut text, Command::Copy).copy.as_deref(),
             Some("a\u{202e}\x1b[31mZ")
         );
+    }
+
+    #[test]
+    fn a_popup_lists_thumb_covers_its_share_of_the_border_and_reaches_both_ends() {
+        use ratatui::{buffer::Buffer, layout::Rect};
+        let thumb = |first| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 3, 10));
+            scroll_thumb(&mut buf, 2, 0, 10, (40, first, 10), Style::default());
+            (0..10).filter(|y| buf[(2, *y)].symbol() == "┃").collect::<Vec<u16>>()
+        };
+        assert_eq!(thumb(0), [0, 1, 2]);
+        assert_eq!(thumb(30), [7, 8, 9]);
+        // everything shows: no thumb; a zero-height list draws nothing and does not panic
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 10));
+        scroll_thumb(&mut buf, 2, 0, 10, (8, 0, 10), Style::default());
+        scroll_thumb(&mut buf, 2, 0, 0, (40, 5, 0), Style::default());
+        assert!((0..10).all(|y| buf[(2, y)].symbol() != "┃"));
     }
 }

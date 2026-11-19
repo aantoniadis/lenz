@@ -14,6 +14,15 @@ pub fn shifted(delta: Point<f32>, shift: bool) -> Point<f32> {
     if shift && delta.x == 0.0 { point(delta.y, 0.0) } else { delta }
 }
 
+/// How often a drag selection held past a pane's edge scrolls the pane.
+pub const DRAG_TICK: std::time::Duration = std::time::Duration::from_millis(30);
+
+/// Rows to scroll per [`DRAG_TICK`] while a drag selection sits `past` pixels beyond a pane's top (negative) or
+/// bottom: half a row for each row of overshoot, six at most.
+pub fn drag_rows(past: f32, line_h: f32) -> f32 {
+    (past / line_h.max(1.0) * 0.5).clamp(-6.0, 6.0)
+}
+
 /// A discrete viewport consumes whole steps and keeps the fraction for its next event.
 pub fn steps(fraction: &mut f32, delta: f32) -> isize {
     *fraction += delta;

@@ -371,6 +371,8 @@ pub struct Viewer {
     /// Drag selection: pointer x, rows and pixels to auto-scroll per tick (0 inside the pane).
     drag: (f32, f32, f32),
     drag_ticking: bool,
+    /// The Files list's scrollbar thumb while it is held: how far below its top it was pressed.
+    nav_bar_grab: Option<f32>,
     /// Horizontal scroll of both Sides' text, in pixels.
     hscroll: [f32; 2],
     /// Width of one character of the monospace font.
@@ -818,6 +820,7 @@ impl Viewer {
             search: None,
             drag: (0.0, 0.0, 0.0),
             drag_ticking: false,
+            nav_bar_grab: None,
             hscroll: [0.0; 2],
             char_w: 0.0,
             text_w: [600.0; 2],
@@ -1812,6 +1815,20 @@ impl Viewer {
         x >= self.nav_x() && x < self.diff_x()
     }
 
+    /// The Files list's scrollbar: its track's top and height in the window, and the rows it stands for (one past
+    /// the last, as the list scrolls). `None` while the list is hidden.
+    fn nav_bar(&self) -> Option<(f32, f32, lenz_gpui::popup::Scrolled)> {
+        let visible = self.comparison.view.viewport_rows().floor().max(0.0) as usize;
+        (self.sidebar_w() > 0.0 && visible > 0).then(|| (self.nav_top(), visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: self.nav.len() + 1, first: self.nav_scroll.round() as usize, visible }))
+    }
+
+    /// Hold the Files list's thumb `grab` px below its top at window `y`.
+    fn nav_bar_to(&mut self, grab: f32, y: f32, cx: &mut Context<Self>) {
+        let Some((top, h, list)) = self.nav_bar() else { self.nav_bar_grab = None; return };
+        self.nav_scroll = lenz_gpui::popup::first_at(y - top - grab, h, list) as f32;
+        cx.notify();
+    }
+
     /// Window y where the panes' rows start: below the toolbar, the log (when shown) and the header.
     fn top(&self) -> f32 {
         toolbar_h() + self.log_h() + hdr_h()
@@ -2292,6 +2309,16 @@ impl Viewer {
             cx.notify();
             return;
         }
+        // The Files list's scrollbar: the thumb is held where it was pressed; a press on the track brings its middle there.
+        if ev.button == MouseButton::Left && self.in_nav(x) && x >= self.diff_x() - 12.0
+            && let Some((top, h, list)) = self.nav_bar()
+            && let Some((_, thumb_y, thumb_h)) = lenz_gpui::popup::thumb(0.0, top, 0.0, h, list)
+        {
+            let grab = if (thumb_y..thumb_y + thumb_h).contains(&y) { y - thumb_y } else { thumb_h / 2.0 };
+            self.nav_bar_grab = Some(grab);
+            self.dragging = false;
+            return self.nav_bar_to(grab, y, cx);
+        }
         if self.in_nav(x) {
             self.nav_focused = true;
             self.panel_focused = false;
@@ -2434,7 +2461,7 @@ impl Viewer {
     fn drag_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         cx.spawn_in(window, async move |this, cx| {
             loop {
-                cx.background_executor().timer(std::time::Duration::from_millis(30)).await;
+                cx.background_executor().timer(lenz_gpui::scroll::DRAG_TICK).await;
                 let go = this
                     .update_in(cx, |v: &mut Viewer, window, cx| {
                         let (x, rows, px) = v.drag;
@@ -2470,6 +2497,7 @@ impl Viewer {
     }
 
     fn on_mouse_up(&mut self, ev: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.nav_bar_grab.take().is_some() { return; }
         self.message_release(cx);
         self.pr_dialog_release();
         self.panes.drag=None;
@@ -2595,6 +2623,10 @@ impl Viewer {
         if self.resize_blocked(){self.panes.drag=None;}
         if self.modal().is_some_and(|m|matches!(m,Modal::Question|Modal::Discard|Modal::Checkout|Modal::About|Modal::Theme|Modal::Help)){return;}
         let (x, y) = (f32::from(ev.position.x), f32::from(ev.position.y));
+        if let Some(grab) = self.nav_bar_grab {
+            if ev.pressed_button == Some(MouseButton::Left) { self.nav_bar_to(grab, y, cx); } else { self.nav_bar_grab = None; }
+            return;
+        }
         if let Some(menu) = self.menu.as_mut() {
             let hover = menu.item_at(x, y, self.char_w,self.panes.viewport);
             if hover != menu.hover {
@@ -2627,9 +2659,9 @@ impl Viewer {
             let bottom = self.content_bottom() - self.panel_h() - self.picker_v_height();
             let (start, end) = self.pane_span(window, sel.side);
             let top = self.top();
-            let rows = (if y < top { y - top } else if y > bottom { y - bottom } else { 0.0 }) / line_h();
+            let past = if y < top { y - top } else if y > bottom { y - bottom } else { 0.0 };
             let px = if x < start { x - start } else if x > end { x - end } else { 0.0 };
-            self.drag = (x, (rows * 0.5).clamp(-6.0, 6.0), (px * 0.5).clamp(-60.0, 60.0));
+            self.drag = (x, lenz_gpui::scroll::drag_rows(past, line_h()), (px * 0.5).clamp(-60.0, 60.0));
             if (self.drag.1 != 0.0 || self.drag.2 != 0.0) && !self.drag_ticking {
                 self.drag_ticking = true;
                 self.drag_tick(window, cx);
@@ -3336,6 +3368,7 @@ fn paint_sidebar(palette: &theme::Palette,
     scroll: f32,
     tooltip: Option<&(usize, String)>,
     char_w: f32,
+    bar: Option<(f32, f32, lenz_gpui::popup::Scrolled)>,
 ) {
     let (x0, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
     let h = f32::from(bounds.size.height);
@@ -3365,6 +3398,7 @@ fn paint_sidebar(palette: &theme::Palette,
             colored_text(palette, window, cx, font, x0 + 8.0 + row.indent, y, &s, &spans, &found);
         }
     });
+    if let Some((bar_top, bar_h, list)) = bar { lenz_gpui::popup::scrollbar(window, x0, bar_top, sidebar_w - 1.0, bar_h, list, palette); }
     fill(window, x0 + sidebar_w - 1.0, top, 1.0, h, palette.border);
     if let Some((row, tip)) = tooltip {
         let y = list_top + (*row as f32 + 1.0 - scroll) * line_h();
@@ -3726,7 +3760,7 @@ impl Render for Viewer {
                 .collect();
             (switcher_input.as_ref().map_or_else(||sw.query.clone(),|s|s.text.clone()), sw.selected, hits)
         });
-        let (sw_w, nav_scroll) = (self.sidebar_w(), self.nav_scroll);
+        let (sw_w, nav_scroll, nav_bar) = (self.sidebar_w(), self.nav_scroll, self.nav_bar());
         let labels = self.labels(self.comparison.current);
         let mut position = if self.set.comparisons.len() > 1 {
             format!("   file {}/{}", self.comparison.current + 1, self.set.comparisons.len())
@@ -3817,6 +3851,7 @@ impl Render for Viewer {
                         window.with_content_mask(Some(ContentMask{bounds:content}),|window|{
                             for (i,(line,keys)) in rows.iter().skip(scroll).take(visible).enumerate(){text(window,cx,&font,x+12.0,y+36.0+i as f32*line_h(),line,if *keys{palette.accent}else{palette.fg});}
                         });
+                        lenz_gpui::popup::scrollbar(window, x, y + 36.0, w, visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: rows.len(), first: scroll, visible }, &palette);
                         let close=help_close_bounds(bounds.size);let cy=f32::from(close.origin.y);
                         fill(window,x+8.0,cy,f32::from(close.size.width),f32::from(close.size.height),lenz_gpui::popup::selected(&palette));
                         text(window,cx,&font,x+12.0,cy,"Close · Esc / Enter",palette.accent);
@@ -3902,7 +3937,7 @@ impl Render for Viewer {
                         let h = f32::from(bounds.size.height);
                         let (left_edge, top) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
                         if let Some(rows) = &sidebar {
-                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, nav_scroll, tooltip.as_ref(), char_w);
+                            paint_sidebar(&palette, window, cx, &font, bounds, sw_w, rows, nav_scroll, tooltip.as_ref(), char_w, nav_bar);
                         }
                         // the diff area sits right of the File Navigator
                         let x0 = left_edge + sw_w;
@@ -4046,8 +4081,7 @@ impl Render for Viewer {
                                 let bounds=Bounds{origin:point(px(*mx),px(iy)),size:size(px(*mw),px(line_h()))};
                                 window.with_content_mask(Some(ContentMask{bounds}),|window|text(window,cx,&font,mx+12.,iy,label,if *disabled {palette.dim} else {palette.fg}));
                             }
-                            if *start>0 {text(window,cx,&font,mx+2.,my+4.,"↑",palette.dim);}
-                            if start+items.len()<*total {text(window,cx,&font,mx+2.,my+4.+items.len().saturating_sub(1) as f32*line_h(),"↓",palette.dim);}
+                            lenz_gpui::popup::scrollbar(window, *mx, my + 4.0, *mw, items.len() as f32 * line_h(), lenz_gpui::popup::Scrolled { total: *total, first: *start, visible: items.len() }, &palette);
                         }
                         if let Some(d) = &diff_options {
                             paint_raised(window, d.x, d.y, d.width, d.height, &palette);
@@ -4091,6 +4125,7 @@ impl Render for Viewer {
                                     let lb=Bounds{origin:point(px(cp.x),px(iy)),size:size(px((gx-cp.x-char_w).max(0.0)),px(line_h()))};
                                     window.with_content_mask(Some(ContentMask{bounds:lb}),|window|lenz_gpui::colored_text(window, cx, metrics(&font), if *disabled {palette.dim} else {palette.fg}, cp.x + 12.0, iy, label, &marks(in_label), &[]));
                                 }
+                                lenz_gpui::popup::scrollbar(window, cp.x, cp.y + 4.0 + line_h(), cp.width, cp.lines.len() as f32 * line_h(), lenz_gpui::popup::Scrolled { total: cp.total, first: cp.first, visible: cp.lines.len() }, &palette);
                             });
                         }
                         if let Some((rows,scroll))=&popup {
@@ -4099,6 +4134,7 @@ impl Render for Viewer {
                             paint_raised(window,bx,by,bw,bh,&palette);
                             window.with_content_mask(Some(ContentMask{bounds}),|window| {
                                 for (i,(line,color)) in rows.iter().skip(*scroll).take(visible).enumerate(){text(window,cx,&font,bx+12.,by+8.+i as f32*line_h(),line,*color);}
+                                lenz_gpui::popup::scrollbar(window, bx, by + 8.0, bw, visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: rows.len(), first: *scroll, visible }, &palette);
                                 for ((key,label),(x,y,w,h)) in POPUP_BUTTONS.iter().zip(buttons){
                                     fill(window,x,y,w,h,lenz_gpui::popup::selected(&palette));text(window,cx,&font,x+8.,y,&format!("[{key}] {label}"),palette.fg);
                                 }

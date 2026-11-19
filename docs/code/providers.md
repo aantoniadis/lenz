@@ -185,7 +185,7 @@ to `[]`. A project can override this with its own array, as above. The F2 toggle
 
 F2 and the Language Servers command group expose the same two controls in GUI and TUI:
 
-- **Reuse Saved Declaration Index: On/Off** defaults to On. It saves Lenz's local declarations outside the
+- **Reuse Saved Declaration Index** (marked ✓ when on) defaults to on. It saves Lenz's local declarations outside the
   checkout and reuses them only after checking current source contents. Turning it off stops cache reads/writes
   and rebuilds local declarations normally; it leaves the saved copy available if you turn reuse back on.
   It also disables content-based filtering of language-server notifications after watcher overflow.

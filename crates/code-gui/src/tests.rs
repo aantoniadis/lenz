@@ -1377,6 +1377,44 @@ fn source_windows_release_obsolete_reload_metadata(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn a_drag_selection_held_past_the_text_scrolls_and_takes_the_selection_along(cx: &mut TestAppContext) {
+    let source: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    let f = fixture(cx, Some(("main.rs", source.as_bytes())));
+    settle(cx, &f, |v| v.session().state().current_source().is_some());
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(800.0), px(400.0)));
+    draw(&mut v);
+    let text = f.view.read_with(&v, |v, _| v.text_bounds.unwrap());
+    let x = text.origin.x + px(num_w() + 24.0);
+    let tick = |v: &mut VisualTestContext, ticks: u32| for _ in 0..ticks { v.executor().advance_clock(lenz_gpui::scroll::DRAG_TICK); v.run_until_parked(); draw(v); };
+    let state = |v: &VisualTestContext| f.view.read_with(v, |r, _| (r.session().state().top_line(), r.session().state().selection().unwrap()));
+    // Press on the first line and hold the pointer just below the text (on the status bar): the view scrolls on
+    // its own, slowly this close to the edge.
+    v.simulate_mouse_down(point(x, text.origin.y + px(line_h() / 2.0)), MouseButton::Left, Modifiers::default());
+    v.simulate_mouse_move(point(x, text.bottom() + px(12.0)), Some(MouseButton::Left), Modifiers::default());
+    tick(&mut v, 80);
+    let (top, selection) = state(&v);
+    let visible = (f32::from(text.size.height) / line_h()) as usize;
+    assert!(top > 5, "the view scrolled: top line {top}");
+    assert!(selection.anchor < 8 && selection.head > source.lines().take(visible + 2).map(|l| l.len() + 1).sum::<usize>(), "the selection reaches past the first screen: {selection:?}");
+    // Back inside the text the scrolling stops; the selection follows the pointer again.
+    v.simulate_mouse_move(point(x, text.origin.y + px(line_h() * 2.5)), Some(MouseButton::Left), Modifiers::default());
+    let (held, _) = state(&v);
+    tick(&mut v, 10);
+    assert_eq!(state(&v).0, held);
+    // Past the top it scrolls back, and releasing the button ends it at once.
+    v.simulate_mouse_move(point(x, text.origin.y - px(12.0)), Some(MouseButton::Left), Modifiers::default());
+    tick(&mut v, 40);
+    let (up, _) = state(&v);
+    assert!(up < held, "scrolled back up: {up} from {held}");
+    v.simulate_mouse_up(point(x, text.origin.y - px(12.0)), MouseButton::Left, Modifiers::default());
+    let released = state(&v);
+    tick(&mut v, 10);
+    assert_eq!(state(&v), released, "nothing moves after the release");
+    assert_eq!(std::fs::read(f.dir.path().join("main.rs")).unwrap(), source.as_bytes());
+}
+
+#[gpui::test]
 fn reading_selecting_copying_and_scrolling_never_change_the_file(cx: &mut TestAppContext) {
     let long = "x".repeat(lenz_content::display::LONG_LINE + 5);
     let source = format!("fn café() {{}}\r\n\tlet bell = \"\x07\";\r\n{long}\r\n{}", "line\n".repeat(200));
@@ -1751,6 +1789,41 @@ fn folders_open_through_the_command_menu_recent_list_and_narrow_windows(cx: &mut
         draw(&mut v);
         v.simulate_keystrokes("escape escape");
     }
+}
+
+#[gpui::test]
+fn the_explorers_scrollbar_drags_and_pages_the_tree_without_opening_a_file(cx: &mut TestAppContext) {
+    let f = fixture(cx, None);
+    let files: Vec<String> = (0..60).map(|i| format!("f{i:02}.rs")).collect();
+    let root = project(f.dir.path(), &files.iter().map(String::as_str).collect::<Vec<_>>());
+    f.view.update(cx, |v, cx| v.open_root(root.clone(), cx));
+    settle(cx, &f, scanned);
+    let mut v = visual(cx, &f);
+    v.simulate_resize(size(px(700.0), px(300.0)));
+    draw(&mut v);
+    let (w, (top, h, list)) = f.view.read_with(&v, |v, _| (v.sidebar_w, v.tree_bar().unwrap()));
+    assert!(list.total > list.visible && list.first == 0, "{list:?}");
+    let x = px(w - 6.0);
+    let scroll = |v: &VisualTestContext| f.view.read_with(v, |r, _| r.tree_scroll);
+    // A press at the track's end brings the thumb there; dragging it to the top returns to the first row.
+    v.simulate_mouse_down(point(x, px(top + h - 2.0)), MouseButton::Left, Modifiers::default());
+    draw(&mut v);
+    assert_eq!(scroll(&v), list.total - list.visible);
+    v.simulate_mouse_move(point(x, px(top + h / 2.0)), Some(MouseButton::Left), Modifiers::default());
+    draw(&mut v);
+    let middle = scroll(&v);
+    assert!(middle > 0 && middle < list.total - list.visible, "{middle}");
+    v.simulate_mouse_move(point(x, px(top - 40.0_f32.min(top))), Some(MouseButton::Left), Modifiers::default());
+    v.simulate_mouse_up(point(x, px(top)), MouseButton::Left, Modifiers::default());
+    draw(&mut v);
+    assert_eq!(scroll(&v), 0);
+    // The press was on the scrollbar, not on a row: no file opened.
+    assert!(f.view.read_with(&v, |r, _| r.session().state().active().is_none()));
+    // Everything shows in a tall window: no thumb, and the strip is an ordinary part of the row again.
+    v.simulate_resize(size(px(700.0), px(2000.0)));
+    draw(&mut v);
+    let (_, h, list) = f.view.read_with(&v, |r, _| r.tree_bar().unwrap());
+    assert!(lenz_gpui::popup::thumb(0.0, 0.0, w, h, list).is_none());
 }
 
 #[gpui::test]

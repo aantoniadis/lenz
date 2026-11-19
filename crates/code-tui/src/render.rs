@@ -616,6 +616,9 @@ impl App {
             for y in geometry.tree.top()..geometry.tree.bottom() {
                 frame.buffer_mut()[(listing.right(), y)].set_symbol("│").set_style(style(p.border, p.bg));
             }
+            // The explorer's scrollbar, on that edge below the title row.
+            let visible = listing.height.saturating_sub(1);
+            lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), listing.right(), listing.y + 1.min(listing.height), visible, (self.session.state().tree_rows().count(), self.tree_top, usize::from(visible)), style(p.fg, p.bg));
         }
         if listing.width >= 3 && listing.height > 0 {
             let rect = Rect::new(listing.right() - 3, listing.y, 3, 1);
@@ -1435,6 +1438,7 @@ impl App {
             modal.reveal_selection = false;
         }
         geometry.modal_content_rows = search.rows.len();
+        lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), list.right(), list.y, (visible as u16 * row_height).min(list.height), (search.rows.len(), modal.top, visible), style(p.fg, p.status_bg));
         for (index, result) in search.rows.iter().enumerate().skip(modal.top).take(visible) {
             let screen = ((index - modal.top) * row_height as usize) as u16;
             if screen >= list.height {
@@ -1746,7 +1750,7 @@ impl App {
             }
         }
         let mut selected = 0..0;
-        let menu_marks = matches!(modal.kind, Prompt::Menu(_)) && choices.iter().any(|c| code_core::chrome::toggle_split(&c.label).1.is_some());
+        let menu_marks = matches!(modal.kind, Prompt::Menu(_) | Prompt::LanguageServer) && choices.iter().any(|c| code_core::chrome::toggle_split(&c.label).1.is_some());
         modal.at = modal.at.min(choices.len().saturating_sub(1));
         let mut previous_section = None;
         for (i, choice) in choices.iter().enumerate() {
@@ -1810,6 +1814,7 @@ impl App {
             }
             modal.reveal_selection = false;
         }
+        lenz_terminal_ui::scroll_thumb(frame.buffer_mut(), list.right(), list.y, list.height, (rendered.len(), modal.top, list.height as usize), style(p.fg, p.status_bg));
         for (n, (i, text, disabled)) in rendered
             .iter()
             .skip(modal.top)
@@ -1829,7 +1834,8 @@ impl App {
                 r,
                 text,
                 style(
-                    if (themes || modal.kind == Prompt::Branches) && *i == usize::MAX {
+                    // a section heading is not one more (disabled) command
+                    if (themes || matches!(modal.kind, Prompt::Branches | Prompt::LanguageServer)) && *i == usize::MAX {
                         p.accent
                     } else if *disabled {
                         p.dim

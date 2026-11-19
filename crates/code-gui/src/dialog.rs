@@ -126,12 +126,12 @@ impl FormLayout {
             for (i, (line, error)) in self.lines.iter().skip(self.first).take(self.visible).enumerate() {
                 lenz_gpui::text(window, cx, m, x + pad, y0 + self.body_y + i as f32 * line_h(), line, if *error { p.readable_on(p.error, bg) } else { p.fg });
             }
+            lenz_gpui::popup::scrollbar(window, x, y0 + self.body_y, w, self.visible as f32 * line_h(), lenz_gpui::popup::Scrolled { total: self.lines.len(), first: self.first, visible: self.visible }, p);
             for (i, (b, label)) in self.buttons.iter().zip([if self.inline_field { "Cancel" } else { "Cancel  Esc" }, self.text.submit]).enumerate() {
                 let (bx, by, bw, bh) = (x0 + f32::from(b.origin.x), y0 + f32::from(b.origin.y), f32::from(b.size.width), f32::from(b.size.height));
                 let hover = rect(bx, by, bw, bh).contains(&window.mouse_position());
                 let edge = if i == 1 { if self.text.destructive { p.error } else { p.accent } } else { border };
-                lenz_gpui::fill(window, bx, by, bw, bh, edge);
-                lenz_gpui::fill(window, bx + 1.0, by + 1.0, (bw - 2.0).max(0.0), (bh - 2.0).max(0.0), if hover || i == 1 && !self.text.destructive { p.selected_bg } else { bg });
+                lenz_gpui::popup::field(window, bx, by, bw, bh, edge, if hover || i == 1 && !self.text.destructive { p.menu_selected(bg) } else { bg });
                 let shown = code_core::chrome::ellipsize(label, ((bw - 16.0) / self.char_w).max(0.0) as usize);
                 let tx = bx + ((bw - lenz_content::wrap::width(&shown) as f32 * self.char_w) / 2.0).max(0.0);
                 window.with_content_mask(Some(gpui::ContentMask { bounds: rect(bx, by, bw, bh) }), |window| lenz_gpui::text(window, cx, m, tx, by + ((bh - line_h()) / 2.0).max(0.0), &shown, if i == 1 && self.text.destructive { p.readable_on(p.error, bg) } else { p.fg }));

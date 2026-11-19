@@ -222,6 +222,7 @@ impl Viewer {
                 chooser.scroll = at + 1 - visible;
             }
         }
+        let scrolled = lenz_gpui::popup::Scrolled { total: content.len(), first: chooser.scroll, visible: visible.min(content.len()) };
         chooser.hits.clear();
         let rows = content
             .into_iter()
@@ -291,6 +292,7 @@ impl Viewer {
                                         if *heading { palette.accent } else { palette.fg },
                                     );
                                 }
+                                lenz_gpui::popup::scrollbar(window, x, y + 4.0, w, scrolled.visible as f32 * line_h(), scrolled, &palette);
                             });
                         },
                     )

@@ -713,6 +713,34 @@ fn top_bar_back_control_navigates_instead_of_opening_the_palette() {
 }
 
 #[test]
+fn a_drag_selection_past_the_text_scrolls_and_takes_the_selection_along() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("long.txt");
+    let source: String = (0..200).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&path, &source).unwrap();
+    let mut a = app(dir.path());
+    a.dispatch(Command::Open(path.clone()));
+    settle(&mut a, |a| a.session.state().current_source().is_some());
+    draw(&mut a, 80, 20);
+    let text = a.layout.panes[0].text;
+    let mouse = |a: &mut App, kind, row| a.handle(Event::Mouse(MouseEvent { kind, column: text.x + 2, row, modifiers: KeyModifiers::NONE }));
+    mouse(&mut a, MouseEventKind::Down(MouseButton::Left), text.y);
+    // each drag event below the text scrolls on, the selection reaching the rows that came into view
+    for _ in 0..10 { mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), text.bottom()); draw(&mut a, 80, 20); }
+    let (top, selection) = (a.session.state().top_line(), a.session.state().selection().unwrap());
+    assert!(top >= 10, "scrolled to line {top}");
+    assert!(selection.anchor < 8 && selection.head > source.lines().take(text.height as usize + 5).map(|l| l.len() + 1).sum::<usize>(), "{selection:?}");
+    // above the text it scrolls back; a release ends the drag
+    for _ in 0..3 { mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), text.y.saturating_sub(1)); draw(&mut a, 80, 20); }
+    assert!(a.session.state().top_line() < top);
+    mouse(&mut a, MouseEventKind::Up(MouseButton::Left), text.y);
+    let released = (a.session.state().top_line(), a.session.state().selection());
+    mouse(&mut a, MouseEventKind::Drag(MouseButton::Left), text.bottom());
+    assert_eq!((a.session.state().top_line(), a.session.state().selection()), released);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+}
+
+#[test]
 fn context_menu_rows_keep_their_labels_on_one_line_beside_their_shortcuts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("sample.rs");

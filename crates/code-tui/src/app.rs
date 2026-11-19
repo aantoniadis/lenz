@@ -3479,6 +3479,14 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) | MouseEventKind::Drag(MouseButton::Left)
         ) {
             let drag = matches!(event.kind, MouseEventKind::Drag(_));
+            // A drag selection past its text's top or bottom scrolls it: the selection goes to the edge row first,
+            // then the text moves, so each further drag event takes in the rows that came into view.
+            let (x, y, edge) = match self.drag.and_then(|(pane, ..)| self.layout.panes.iter().find(|g| g.pane == pane)).map(|g| g.text).filter(|text| drag && text.height > 0 && text.width > 0) {
+                Some(text) if y < text.y => (x.clamp(text.x, text.right() - 1), text.y, Some(-2)),
+                Some(text) if y >= text.bottom() => (x.clamp(text.x, text.right() - 1), text.bottom() - 1, Some(2)),
+                _ => (x, y, None),
+            };
+            let point = ratatui::layout::Position::new(x, y);
             if !drag && self.layout.tree.contains(point) {
                 let row = self.tree_top + y.saturating_sub(self.layout.tree.y) as usize;
                 if row < self.session.state().tree_rows().count()
@@ -3675,6 +3683,7 @@ impl App {
                         anchor,
                         head: offset,
                     }));
+                    if let Some(rows) = edge { self.dispatch(Command::ScrollRows(rows)); }
                     self.focus = Focus::Text;
                     self.drag = Some((pane_id, id, version, anchor));
                     if !drag && event.modifiers.contains(KeyModifiers::CONTROL) {
