@@ -1,4 +1,4 @@
-# Vendored from zed v1.26.2 / c4273271092b0287f7d181f616bd5171e0a2f70c.
+# Vendored from zed v1.29.2 / 2de9e435a5d98657f35c260b5f4dd0979df659e6.
 # Workspace dependencies resolved explicitly; see UPSTREAM.md.
 [package]
 name = "gpui_linux"
@@ -26,12 +26,12 @@ accesskit = { version = "0.24.0", features = ["enumn"] }
 accesskit_unix = { version = "0.22", optional = true }
 anyhow = { version = "1.0.86" }
 bytemuck = { version = "1" }
-collections = { version = "0.1.0", git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
+collections = { version = "0.1.0", git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
 futures = { version = "0.3.34" }
-gpui = { default-features = false, git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
-gpui_util = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
-gpui_wgpu = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2", optional = true, features = ["font-kit"] }
-http_client = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
+gpui = { default-features = false, git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
+gpui_util = { git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
+gpui_wgpu = { git = "https://github.com/zed-industries/zed", tag = "v1.29.2", optional = true, features = ["font-kit"] }
+http_client = { git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
 libc = { version = "0.2" }
 log = { version = "0.4", default-features = false, features = ["std"] }
 parking_lot = { version = "0.12.1" }
@@ -48,7 +48,7 @@ ashpd = { version = "0.13", default-features = false, features = ["async-io", "i
 filedescriptor = { version = "0.8.2", optional = true }
 open = { version = "5.2.0", optional = true }
 xkbcommon = { version = "0.8", default-features = false, optional = true }
-scap = { git = "https://github.com/zed-industries/scap", rev = "4afea48c3b002197176fb19cd0f9b180dd36eaac", default-features = false, package = "zed-scap", version = "0.0.8-zed", optional = true }
+scap = { git = "https://github.com/zed-industries/scap", rev = "b5c86ec58dd4b6b7732bf6ac8be03d6b1f190a82", default-features = false, package = "zed-scap", version = "0.0.8-zed", optional = true }
 calloop-wayland-source = { version = "0.4.1", optional = true }
 wayland-backend = { version = "0.3.15", features = ["client_system", "dlopen", "log"], optional = true }
 wayland-client = { version = "0.31.11", optional = true }
@@ -61,7 +61,7 @@ x11rb = { version = "0.13.1", features = ["allow-unsafe-code", "xkb", "randr", "
 xim = { git = "https://github.com/zed-industries/xim-rs.git", rev = "16f35a2c881b815a2b6cdfd6687988e84f8447d8", features = ["x11rb-xcb", "x11rb-client"], package = "zed-xim", version = "0.4.0-zed", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dev-dependencies]
-gpui = { default-features = false, git = "https://github.com/zed-industries/zed", tag = "v1.26.2", features = ["test-support"] }
+gpui = { default-features = false, git = "https://github.com/zed-industries/zed", tag = "v1.29.2", features = ["test-support"] }
 
 [package.metadata.cargo-shear]
 ignored = ["scap"]

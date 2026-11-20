@@ -2754,3 +2754,38 @@ keeping a hash of each member's stored bytes so a large pair needs only one arch
 changed members. Not covered: frontends (both call `ChangeSet::load`), nested archives, the `dist` profile and
 native macOS. Raw samples, executables and their source commits are in ignored `perf-results/zip-compare/` and
 `perf-results/zip-threshold/`.
+
+## gpui v1.26.2 → v1.29.2 and the dependency refresh — 2026-11-20
+
+`gpui`/`gpui_platform` move to Zed v1.29.2; the async-task, calloop and khronos-egl patches keep their revs. Zed
+v1.29.2 also patches async-process, with a macOS-only addition (adopting a child by PID) that GPUI does not use, so
+it is not mirrored. The vendored `gpui_linux` takes v1.29.2's files (power-mode monitoring, Wayland changes) with
+the X11 Escape-compose patch reapplied unchanged: upstream's X11 input code did not change. The only API break was
+`Keystroke::parse` taking a `'static` string, in one test. Release builds of the dependency refresh before and after
+the upgrade, alternating on one machine, GUI on a private Xvfb display with software Vulkan:
+
+| Workload | Before | After |
+| --- | ---: | ---: |
+| Diff first paint, small / 100k-line / 4K images / 100k merge (10 runs each) | 121 / 188.5 / 193 / 272.5 ms | 124 / 188 / 193.5 / 270 ms |
+| Diff settled RSS, same cases | 202.4 / 263.6 / 560.5 / 326.8 MiB | 201.5 / 261.8 / 560.0 / 329.9 MiB |
+| Diff 100k page scroll / find scroll, first damage (4 pairs) | 16.0 / 16.0 ms | 16.0 / 16.0 ms |
+| Merge accept-ours / page scroll / next change (4 pairs) | 39.2 / 9.7 / 10.7 ms | 37.7 / 9.7 / 10.7 ms |
+| Lenz Code editing: edit / undo / save (30 cycles, 3 pairs; one collector Xvfb failure rerun) | 3.26 / 2.27 / 13.36 ms | 2.75 / 2.21 / 13.38 ms |
+| **Lenz Code launch to readable, warm (10 launches × 3 pairs)** | **162.7–167.1 ms** | **193.6–195.9 ms** |
+| Lenz Code ten tabs settled RSS | 184.8–184.9 MiB | 186.4–187.1 MiB |
+
+**Regressed in this harness, cause found: inactive-window frame pacing.** GPUI 1.26 held inactive windows to
+about 30 fps only for frames driven by animation callbacks; 1.29's `FramePacer` paces every frame with demand,
+including content invalidation, while the window is inactive. A window on a private Xvfb display with no window
+manager never becomes active, so the frame that first shows the file waits up to 33 ms after the first frame. Warm
+launches by hand: 125 → 157 ms; the same upgrade with `inactive_frame_interval: None` in Lenz Code's window
+options: 126 ms; the upgrade with the old wgpu rev: 159 ms (wgpu ruled out). On a desktop a window manager
+normally activates the new window, so users may not see this; that is unverified. Disabling the interval would
+also drop GPUI's 30 fps cap for windows in the background, so it is left to the owner. The Diff startup marker is
+the first frame and is not paced; the small-file 121 → 124 ms has overlapping ranges.
+
+The dependency refresh before it adds 644,208 bytes to the stripped `lenz` built alone (80,010,656 → 80,654,864);
+tree-sitter-c-sharp 0.24 (C# 14) is left out, as its larger parse table would add another 2,042,896 bytes. After
+the GPUI upgrade, stripped sizes with both executables built together: `lenz` 80,797,088 → 80,770,368 bytes, `lenz-code` 94,519,000 →
+94,429,304. Not covered: Wayland, hardware GPUs, a window manager on the test display, native macOS, the TUIs
+(no GPUI). Raw samples, executables and the profiles are in ignored `perf-results/gpui-1.29/`.

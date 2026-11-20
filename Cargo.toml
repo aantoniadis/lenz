@@ -22,8 +22,8 @@ lenz-content = { path = "crates/content" }
 lenz-gpui = { path = "crates/gpui" }
 gix-imara-diff = "0.3"
 # One tag for both so a bump moves every gpui reference together.
-gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
-gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.26.2" }
+gpui = { git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", tag = "v1.29.2" }
 
 # Zed's workspace patches don't propagate to dependents; mirror the ones gpui needs.
 [patch.crates-io]

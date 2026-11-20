@@ -167,27 +167,27 @@ fn option_printable_text_reaches_fields_without_stealing_reserved_find_actions(c
     settle(cx, &f, |v| v.session.state().current_source().is_some());
     let mut v = visual(cx, &f);
     v.simulate_keystrokes("ctrl-f"); draw(&mut v);
-    let option = |name: &str, text: &str| {
-        let mut keystroke = gpui::Keystroke::parse(&format!("alt-{name}")).unwrap();
+    let option = |key: &'static str, text: &str| {
+        let mut keystroke = gpui::Keystroke::parse(key).unwrap();
         keystroke.key_char = Some(text.into());
         gpui::KeyDownEvent { keystroke, is_held: false, prefer_character_input: false }
     };
-    v.simulate_event(option("2", "™"));
+    v.simulate_event(option("alt-2", "™"));
     #[cfg(target_os = "macos")]
     ime_handler(&f, &mut v).replace_text_in_range(None, "™"); // TestPlatform has no Cocoa input context.
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query().to_owned()), "™");
     let before = f.view.read_with(&v, |r, _| r.session.find_options());
-    v.simulate_event(option("c", "ç"));
-    v.simulate_event(option("w", "∑"));
-    v.simulate_event(option("r", "®"));
-    v.simulate_event(option("a", "å"));
+    v.simulate_event(option("alt-c", "ç"));
+    v.simulate_event(option("alt-w", "∑"));
+    v.simulate_event(option("alt-r", "®"));
+    v.simulate_event(option("alt-a", "å"));
     let after = f.view.read_with(&v, |r, _| r.session.find_options());
     assert_eq!((after.case, after.word, after.regex), (!before.case, !before.word, !before.regex));
     assert_eq!(f.view.read_with(&v, |r, _| r.session.state().active().unwrap().find().unwrap().query().to_owned()), "™");
     v.simulate_keystrokes("escape");
     f.view.update(&mut v, |r, _| { r.modal = Some(Modal::SaveAs { tab: r.session.state().active().unwrap().id(), dir: std::path::PathBuf::from("/"), input: String::new(), selected: false, error: None }); });
     draw(&mut v);
-    v.simulate_event(option("2", "™"));
+    v.simulate_event(option("alt-2", "™"));
     #[cfg(target_os = "macos")]
     ime_handler(&f, &mut v).replace_text_in_range(None, "™");
     assert!(f.view.read_with(&v, |r, _| matches!(&r.modal, Some(Modal::SaveAs { input, .. }) if input == "™")));

@@ -1,8 +1,8 @@
 # GPUI Linux transport patch
 
 This directory contains `crates/gpui_linux` from
-[Zed v1.26.2](https://github.com/zed-industries/zed/tree/c4273271092b0287f7d181f616bd5171e0a2f70c/crates/gpui_linux),
-commit `c4273271092b0287f7d181f616bd5171e0a2f70c`, under its Apache-2.0 license.
+[Zed v1.29.2](https://github.com/zed-industries/zed/tree/2de9e435a5d98657f35c260b5f4dd0979df659e6/crates/gpui_linux),
+commit `2de9e435a5d98657f35c260b5f4dd0979df659e6`, under its Apache-2.0 license.
 `LICENSE-APACHE` is retained here. Other GPUI crates remain pinned to that same tag.
 
 The source change is confined to the X11 compose policy and its client dispatch: when Escape cancels an
