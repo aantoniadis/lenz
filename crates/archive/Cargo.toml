@@ -14,7 +14,7 @@ zip = { version = "9.0.2", default-features = false, features = ["deflate-flate2
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 bzip2 = "0.6"
-lzma-rust2 = { version = "0.24", default-features = false, features = ["std", "xz", "optimization", "encoder"] }
+lzma-rust2 = { version = "0.25", default-features = false, features = ["std", "xz", "optimization", "encoder"] }
 ruzstd = "0.9.1"
 crc32fast = "1.5"
 

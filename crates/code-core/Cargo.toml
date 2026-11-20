@@ -34,7 +34,7 @@ globset = "0.4"
 sha2 = "0.11.1"
 
 # Offline PostgreSQL syntax/scopes and source-preserving whitespace formatting.
-sqlparser = { version = "0.63", features = ["visitor", "derive-dialect"] }
+sqlparser = { version = "0.64", features = ["visitor", "derive-dialect"] }
 sqlformat = "0.5"
 # Native PostgreSQL 18 grammar with structured Unicode cursor positions.
 pg_parse = "0.15"
