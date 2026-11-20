@@ -1625,9 +1625,8 @@ fn server_memory_counts_the_server_and_its_helpers_separately() {
     let (server, helpers) = view.memory.unwrap();
     assert!(helpers < server / 4, "the helper (a sleep) is counted apart: {server} {helpers}");
     assert!(view.summary().contains(" MiB + ") && view.summary().ends_with(" MiB helpers"), "{}", view.summary());
-    assert!(code_core::semantics::memory_notice(server + helpers).is_none(), "below the notice threshold");
+    // Memory is shown, never warned about: no notice however much the servers use.
     assert!(!f.s.state().notices().iter().any(|n| n.starts_with("Language servers use")));
-    assert_eq!(code_core::semantics::memory_notice(3 << 30).as_deref(), Some("Language servers use 3.0 GiB (above 2 GiB); disable or restart ones you do not need"));
 }
 
 /// Release timing with the fake server: usages (500 references over 50 files, all read and located by the

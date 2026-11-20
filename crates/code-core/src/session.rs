@@ -2718,7 +2718,6 @@ impl State {
         let read_only = tab.and_then(|t| self.view(t.id)).and_then(|view| view.edit_disabled().map(str::to_owned));
         let saving = tab.and_then(|t| self.view(t.id)).and_then(|v| v.save_status().message().map(str::to_owned));
         let preview = tab.and_then(|t| t.preview.as_ref()?.as_ref().err()).filter(|_| self.rendering().is_some()).map(|e| format!("Markdown preview unavailable: {e}; showing the source"));
-        let memory = semantics::memory_notice(self.semantics.memory());
         let comparison = self.comparison.as_ref().map(|c| match (c.kind(), c.failure(), c.pending()) {
             (ComparisonKind::Marked, Some(why), _) => format!("Change comparison failed: {why}"),
             (ComparisonKind::Marked, None, true) => format!("Comparing with {}…",c.baseline_label()),
@@ -2731,7 +2730,7 @@ impl State {
             (ComparisonKind::Conflict, None, false) => format!("External change comparison: {} changed blocks{}; disk and confirmed baseline are read-only", c.changes().len(), if c.line_endings_differ() { "; line endings differ" } else { "" }),
         });
         // The status line shows the last notice: a file changed under the draft outranks transient messages.
-        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(memory).chain(self.messages.iter().cloned()).chain(read_only).chain(saving).chain(conflict).collect()
+        doc.into_iter().chain(comparison).chain(gone).chain(changing).chain(approximate).chain(retrieved).chain(origin).chain(preview).chain(self.messages.iter().cloned()).chain(read_only).chain(saving).chain(conflict).collect()
     }
     pub fn palette(&self) -> &Arc<Palette> {
         &self.palette

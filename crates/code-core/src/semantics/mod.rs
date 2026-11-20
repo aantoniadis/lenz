@@ -34,8 +34,6 @@ pub type Clock = Arc<dyn Fn() -> std::time::Instant + Send + Sync>;
 
 /// How long a server with no open documents and nothing pending stays warm before it is stopped.
 pub const IDLE: std::time::Duration = std::time::Duration::from_secs(600);
-/// Combined server memory above which the reader says so (it never stops servers for it).
-pub const MEMORY_NOTICE: u64 = 2 << 30;
 /// Usages and symbols kept at most (the panel's limit).
 pub const USAGE_LIMIT: usize = crate::search::RESULT_LIMIT;
 /// Usages a type-hierarchy level reads at most (and children it shows).
@@ -2875,12 +2873,6 @@ pub fn sample_memory(groups: &[(u64, u32)]) -> Vec<(u64, u64, u64)> {
         }
     }
     groups.iter().filter_map(|&(session, pgid)| kib.get(&pgid).map(|&(s, h)| (session, s * 1024, h * 1024))).collect()
-}
-
-/// What to say about combined server memory: nothing up to [`MEMORY_NOTICE`]; above it, the total. The reader
-/// never stops servers for it.
-pub fn memory_notice(bytes: u64) -> Option<String> {
-    (bytes > MEMORY_NOTICE).then(|| format!("Language servers use {:.1} GiB (above 2 GiB); disable or restart ones you do not need", bytes as f64 / (1u64 << 30) as f64))
 }
 
 /// A document's symbols as outline rows, in source order with their nesting depth: from nested
