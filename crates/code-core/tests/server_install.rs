@@ -1,5 +1,11 @@
 use code_core::semantics::{installer, provider::{PROVIDERS, Settings}};
 
+// Tests here start processes and run in parallel threads: a child forked by one test holds every open file of the
+// test process until it execs, which keeps another test's install lock held or its fresh script busy ("Text file
+// busy"). They take this lock so no two start processes at once.
+static SPAWNING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn spawning() -> std::sync::MutexGuard<'static, ()> { SPAWNING.lock().unwrap_or_else(std::sync::PoisonError::into_inner) }
+
 #[test]
 #[ignore = "explicit live registry install into LENZ_INSTALL_PROBE_ROOT using an existing toolchain"]
 fn managed_server_live_install_probe() {
@@ -29,6 +35,7 @@ fn managed_server_live_install_probe() {
 #[cfg(unix)]
 #[test]
 fn managed_ruby_and_go_install_validate_and_persist_only_the_selected_provider() {
+    let _spawning = spawning();
     use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
     let d = tempfile::tempdir().unwrap(); let bin = d.path().join("toolchain"); std::fs::create_dir(&bin).unwrap();
     for (name, script) in [
@@ -83,6 +90,7 @@ fn server_install_recipes_are_curated_and_preserve_custom_configuration() {
 #[cfg(unix)]
 #[test]
 fn server_install_streams_bounded_output_cancels_and_preserves_settings() {
+    let _spawning = spawning();
     use std::{os::unix::fs::PermissionsExt, sync::{Arc, atomic::{AtomicBool, Ordering}}, time::{Duration, Instant}};
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
@@ -114,6 +122,7 @@ fn server_install_streams_bounded_output_cancels_and_preserves_settings() {
 #[cfg(unix)]
 #[test]
 fn server_install_uses_the_selected_node_for_npm_and_validates_before_persisting() {
+    let _spawning = spawning();
     use std::{os::unix::fs::PermissionsExt, sync::atomic::AtomicBool};
     let temp = tempfile::tempdir().unwrap();
     let bin = temp.path().join("bin");
@@ -174,6 +183,7 @@ fn server_install_uses_the_selected_node_for_npm_and_validates_before_persisting
 #[cfg(unix)]
 #[test]
 fn server_install_bounds_and_sanitizes_subprocess_output() {
+    let _spawning = spawning();
     use std::{os::unix::fs::PermissionsExt,sync::atomic::AtomicBool};
     let dir=tempfile::tempdir().unwrap();let bin=dir.path().join("bin");std::fs::create_dir(&bin).unwrap();
     for (name,script) in [("node","#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.0.0; else exec \"$@\"; fi\n"),("npm","#!/bin/sh\nprintf '\\033[31m'\n/usr/bin/head -c 131072 /dev/zero\nexit 1\n")] {
@@ -209,6 +219,7 @@ fn server_install_lock_child() {
 #[cfg(unix)]
 #[test]
 fn server_install_lock_excludes_an_independent_process_and_cancel_allows_retry() {
+    let _spawning = spawning();
     use std::{os::unix::fs::PermissionsExt,sync::atomic::{AtomicBool,Ordering},time::{Duration,Instant}};
     let dir=tempfile::tempdir().unwrap();let bin=dir.path().join("bin");std::fs::create_dir(&bin).unwrap();
     for (name,script) in [("node","#!/bin/sh\nif [ \"$1\" = --version ]; then echo v24.0.0; else exec \"$@\"; fi\n"),("npm","#!/bin/sh\necho started >> \"$3/starts\"\necho LOCK_READY\nexec /bin/sleep 30\n")] {
