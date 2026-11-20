@@ -29,6 +29,8 @@ pub(crate) const MAX_ARCHIVE: u64 = 512 << 20;
 const MAX_UNPACKED: u64 = 2 << 30;
 /// The largest member read for display.
 const MAX_MEMBER: u64 = 1 << 30;
+/// The read size when fingerprinting members.
+const BUFFER: usize = 64 << 10;
 /// Listing stops past this many members.
 const MAX_MEMBERS: usize = 100_000;
 
@@ -80,15 +82,16 @@ pub(crate) struct Fingerprint {
 }
 
 impl Fingerprint {
-    fn read(content: &mut dyn Read) -> io::Result<Self> {
+    /// `buffer` is reused across members: zeroing a new 64 KiB one per member cost more than hashing a small member.
+    fn read(content: &mut dyn Read, buffer: &mut [u8]) -> io::Result<Self> {
         use sha2::Digest;
-        let (mut hasher, mut size, mut buffer) = (sha2::Sha256::new(), 0, [0; 64 << 10]);
+        let (mut hasher, mut size) = (sha2::Sha256::new(), 0);
         loop {
-            let n = content.read(&mut buffer)?;
+            let n = content.read(buffer)?;
             if n == 0 {
                 break;
             }
-            hasher.update(&buffer[..n]);
+            hasher.update(buffer.get(..n).unwrap_or_default());
             size += n as u64;
         }
         Ok(Fingerprint { size, digest: hasher.finalize().into() })
@@ -96,7 +99,7 @@ impl Fingerprint {
 
     #[cfg(test)]
     fn of(bytes: &[u8]) -> Self {
-        Fingerprint::read(&mut &bytes[..]).unwrap()
+        Fingerprint::read(&mut &bytes[..], &mut [0; 64]).unwrap()
     }
 }
 
@@ -108,37 +111,13 @@ pub(crate) fn members(kind: Kind, bytes: &[u8]) -> Result<BTreeMap<String, Finge
     let mut out = BTreeMap::new();
     match kind {
         Kind::Zip => {
-            let error = kind.error();
-            let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| error(e.to_string()))?;
-            // extractors read local headers, and differ on a repeated name: both must agree with the central directory
-            zip.validate_header_consistency().map_err(|e| error(e.to_string()))?;
-            let mut left = MAX_UNPACKED;
-            for index in 0..zip.len() {
-                // decompressed, so the fingerprint is of the bytes extracting writes; the reader checks the CRC-32
-                let mut file = zip.by_index(index).map_err(|e| error(e.to_string()))?;
-                let raw = file.name().map_err(|e| error(e.to_string()))?.into_owned();
-                if file.is_dir() {
-                    // UnZip writes a name ending in `\` as a file, and a directory holding data is not one
-                    if file.size() != 0 || file.name_raw().ends_with(b"\\") {
-                        return Err(error(format!("member {raw:?} is a directory name holding a file")));
-                    }
-                    continue;
-                }
-                let name = normalize(&raw).ok_or_else(|| error(format!("member {raw:?} has no path inside the archive")))?;
-                let mut limited = Limit { inner: &mut file, left };
-                let fingerprint = Fingerprint::read(&mut limited).map_err(|e| error(format!("{raw}: {e}")))?;
-                left = limited.left;
-                if out.insert(name, fingerprint).is_some() {
-                    return Err(error(format!("member {raw:?} appears more than once")));
-                }
-                if out.len() > MAX_MEMBERS {
-                    return Err(format!("more than {MAX_MEMBERS} files"));
-                }
-            }
+            let (mut zip, entries) = zip_entries(bytes)?;
+            return zip_fingerprints(&mut zip, &entries, MAX_UNPACKED, |_| false);
         }
         Kind::Tar(compression) => {
+            let mut buffer = vec![0; BUFFER];
             each_tar(compression, bytes, |name, content| {
-                out.insert(name, Fingerprint::read(content)?);
+                out.insert(name, Fingerprint::read(content, &mut buffer)?);
                 if out.len() > MAX_MEMBERS {
                     return Err(io::Error::other(format!("more than {MAX_MEMBERS} files")));
                 }
@@ -146,6 +125,106 @@ pub(crate) fn members(kind: Kind, bytes: &[u8]) -> Result<BTreeMap<String, Finge
             })
             .map_err(kind.error())?;
         }
+    }
+    Ok(out)
+}
+
+/// The members of two zips as [`members`] lists them, leaving out of both each same-name pair proven identical without
+/// decompressing it: equal compression method, flags, sizes and CRC-32 and equal stored (still compressed) bytes are
+/// equal inputs to the decoder, so they extract to the same content or fail alike. The CRC-32 is never what makes them
+/// equal. Every other member is decompressed and fingerprinted, as [`members`] does; every member's headers are checked.
+pub(crate) fn changed_zip_members(left: &[u8], right: &[u8]) -> Result<[BTreeMap<String, Fingerprint>; 2], String> {
+    let ((mut left_zip, left), (mut right_zip, right)) = (zip_entries(left)?, zip_entries(right)?);
+    let same = |name: &String| left.get(name).zip(right.get(name)).is_some_and(|(l, r)| l.stored == r.stored);
+    Ok([
+        zip_fingerprints(&mut left_zip, &left, MAX_UNPACKED, same)?,
+        zip_fingerprints(&mut right_zip, &right, MAX_UNPACKED, same)?,
+    ])
+}
+
+/// A zip member as its headers describe it.
+struct ZipEntry<'a> {
+    index: usize,
+    /// Everything the decoder reads to produce the member's content.
+    stored: Stored<'a>,
+}
+
+#[derive(PartialEq, Eq)]
+struct Stored<'a> {
+    method: zip::CompressionMethod,
+    flags: u16,
+    size: u64,
+    crc32: u32,
+    raw: &'a [u8],
+}
+
+/// Every member file of a zip by normalized path, from its headers alone: refused as [`members`] describes, and when a
+/// member is encrypted or uses a compression method Lenz does not read, as decompressing it would be.
+fn zip_entries(bytes: &[u8]) -> Result<(Zip<'_>, BTreeMap<String, ZipEntry<'_>>), String> {
+    let error = Kind::Zip.error();
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(|e| error(e.to_string()))?;
+    // extractors read local headers, and differ on a repeated name: both must agree with the central directory
+    zip.validate_header_consistency().map_err(|e| error(e.to_string()))?;
+    let mut out = BTreeMap::new();
+    for index in 0..zip.len() {
+        let file = zip.by_index_raw(index).map_err(|e| error(e.to_string()))?;
+        let raw = file.name().map_err(|e| error(e.to_string()))?.into_owned();
+        if file.is_dir() {
+            // UnZip writes a name ending in `\` as a file, and a directory holding data is not one
+            if file.size() != 0 || file.name_raw().ends_with(b"\\") {
+                return Err(error(format!("member {raw:?} is a directory name holding a file")));
+            }
+            continue;
+        }
+        let name = normalize(&raw).ok_or_else(|| error(format!("member {raw:?} has no path inside the archive")))?;
+        if file.encrypted() {
+            return Err(error(format!("{raw}: {}", zip::result::ZipError::PASSWORD_REQUIRED)));
+        }
+        // the variant is what this build of the crate cannot decode, whatever its features
+        #[allow(deprecated)]
+        let unsupported = matches!(file.compression(), zip::CompressionMethod::Unsupported(_));
+        if unsupported {
+            return Err(error(format!("{raw}: compression method {} is not supported", file.compression())));
+        }
+        // the bytes the crate's raw reader yields: its data start, as far as the stored size reaches
+        let start = file.data_start().ok_or_else(|| error(format!("{raw}: no data offset")))?;
+        let raw_bytes = usize::try_from(start)
+            .ok()
+            .zip(usize::try_from(file.compressed_size()).ok())
+            .and_then(|(start, len)| bytes.get(start..start.checked_add(len)?))
+            .ok_or_else(|| error(format!("{raw}: stored data past the end of the archive")))?;
+        let stored = Stored { method: file.compression(), flags: file.flags().as_u16(), size: file.size(), crc32: file.crc32(), raw: raw_bytes };
+        if out.insert(name, ZipEntry { index, stored }).is_some() {
+            return Err(error(format!("member {raw:?} appears more than once")));
+        }
+        if out.len() > MAX_MEMBERS {
+            return Err(format!("more than {MAX_MEMBERS} files"));
+        }
+    }
+    Ok((zip, out))
+}
+
+/// The fingerprint of each of `entries` but those `skip` names, decompressed (the reader checks the CRC-32) with at most
+/// `left` bytes unpacked in all; a skipped member counts its stated size.
+fn zip_fingerprints(
+    zip: &mut Zip<'_>,
+    entries: &BTreeMap<String, ZipEntry<'_>>,
+    mut left: u64,
+    skip: impl Fn(&String) -> bool,
+) -> Result<BTreeMap<String, Fingerprint>, String> {
+    let error = Kind::Zip.error();
+    let too_large = || error(format!("larger than {} MiB unpacked", MAX_UNPACKED >> 20));
+    let (mut out, mut buffer) = (BTreeMap::new(), vec![0; BUFFER]);
+    for (name, entry) in entries {
+        if skip(name) {
+            left = left.checked_sub(entry.stored.size).ok_or_else(too_large)?;
+            continue;
+        }
+        let mut file = zip.by_index(entry.index).map_err(|e| error(format!("{name}: {e}")))?;
+        let mut limited = Limit { inner: &mut file, left };
+        let fingerprint = Fingerprint::read(&mut limited, &mut buffer).map_err(|e| error(format!("{name}: {e}")))?;
+        left = limited.left;
+        out.insert(name.clone(), fingerprint);
     }
     Ok(out)
 }
@@ -861,6 +940,119 @@ mod tests {
         encrypted[6] |= 1;
         encrypted[central + 8] |= 1;
         assert!(refused("zip", &old, &encrypted).contains("assword"));
+    }
+
+    /// A zip of `files`, each stored or deflated as given.
+    fn zip_of(files: &[(&str, &[u8], zip::CompressionMethod)]) -> Vec<u8> {
+        let mut out = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        for (path, content, method) in files {
+            out.start_file(*path, zip::write::SimpleFileOptions::default().compression_method(*method)).unwrap();
+            std::io::Write::write_all(&mut out, content).unwrap();
+        }
+        out.finish().unwrap().into_inner()
+    }
+
+    /// Applies `patch` to the general-purpose flags and method of member `name`'s local and central headers alike.
+    fn patch_member(zip: &mut [u8], name: &str, patch: impl Fn(&mut [u8; 4])) {
+        // local header: flags at 6, method at 8, name at 30; central: flags at 8, method at 10, name at 46
+        for (magic, at, name_at) in [(b"PK\x03\x04", 6, 30), (b"PK\x01\x02", 8, 46)] {
+            let header = (0..zip.len() - name_at)
+                .find(|&i| &zip[i..i + 4] == magic && zip[i + name_at..].starts_with(name.as_bytes()))
+                .unwrap();
+            let fields: &mut [u8; 4] = (&mut zip[header + at..header + at + 4]).try_into().unwrap();
+            patch(fields);
+        }
+    }
+
+    #[test]
+    fn zip_stored_bytes_are_what_the_raw_reader_reads() {
+        let zip = zip_of(&[("a.txt", &b"stored\n".repeat(50), zip::CompressionMethod::Stored),
+            ("b.txt", &b"deflated\n".repeat(50), zip::CompressionMethod::Deflated)]);
+        let (mut archive, entries) = zip_entries(&zip).unwrap();
+        assert_eq!(entries.len(), 2);
+        for entry in entries.values() {
+            let mut raw = Vec::new();
+            archive.by_index_raw(entry.index).unwrap().read_to_end(&mut raw).unwrap();
+            assert_eq!(entry.stored.raw, raw);
+        }
+    }
+
+    #[test]
+    fn identical_stored_zip_members_are_not_decompressed_and_the_rest_are() {
+        let deflated = zip::CompressionMethod::Deflated;
+        let old = zip_of(&[("same.txt", b"same\n", deflated), ("README", b"v1\n", deflated)]);
+        let new = zip_of(&[("same.txt", b"same\n", deflated), ("README", b"v2\n", deflated), ("added", b"+\n", deflated)]);
+        let [left, right] = changed_zip_members(&old, &new).unwrap();
+        assert_eq!(left.keys().collect::<Vec<_>>(), ["README"]);
+        assert_eq!(right.keys().collect::<Vec<_>>(), ["README", "added"]);
+        assert_eq!(right["README"], Fingerprint::of(b"v2\n"));
+        // the same content stored another way is decompressed and found equal
+        let repacked = zip_of(&[("same.txt", b"same\n", zip::CompressionMethod::Stored), ("README", b"v1\n", deflated)]);
+        let [left, right] = changed_zip_members(&old, &repacked).unwrap();
+        assert_eq!(left, right);
+        assert_eq!(left["same.txt"], Fingerprint::of(b"same\n"));
+        // equal stored bytes under another flag or method take no shortcut
+        let mut flagged = old.clone();
+        patch_member(&mut flagged, "README", |f| f[0] ^= 1 << 1);
+        assert!(changed_zip_members(&old, &flagged).unwrap()[0].contains_key("README"));
+        let mut method = zip_of(&[("same.txt", b"same\n", deflated), ("README", b"v1\n", zip::CompressionMethod::Stored)]);
+        let old_stored = method.clone();
+        patch_member(&mut method, "README", |f| f[2] = 12); // bzip2
+        assert!(changed_zip_members(&old_stored, &method).is_err());
+    }
+
+    #[test]
+    fn zip_members_with_equal_size_crc_and_stored_size_are_still_compared_by_content() {
+        // equal size and CRC-32, different bytes; stored, so the compressed sizes match too
+        let a = [33, 90, 232, 108, 111, 206, 0, 228];
+        let b = [252, 81, 220, 85, 53, 59, 68, 216];
+        assert_eq!(crc32fast::hash(&a), crc32fast::hash(&b));
+        let stored = zip::CompressionMethod::Stored;
+        let same = b"unchanged\n".as_slice();
+        let (_d, set) = load("zip", &zip_of(&[("lib.bin", &a, stored), ("same", same, stored)]),
+            &zip_of(&[("lib.bin", &b, stored), ("same", same, stored)]));
+        assert_eq!(listed(&set), [("lib.bin".into(), crate::changeset::Status::Modified)]);
+        let (_d, set) = load("zip", &zip_of(&[("old.bin", &a, stored), ("same", same, stored)]),
+            &zip_of(&[("new.bin", &b, stored), ("same", same, stored)]));
+        let added = (("new.bin".into(), crate::changeset::Status::Added), ("old.bin".into(), crate::changeset::Status::Deleted));
+        assert_eq!(listed(&set), [added.0, added.1]);
+    }
+
+    #[test]
+    fn zip_renames_are_found_beside_unchanged_members() {
+        let deflated = zip::CompressionMethod::Deflated;
+        let (_d, set) = load("zip", &zip_of(&[("a", b"alpha\n", deflated), ("b", b"beta\n", deflated), ("old", b"moved\n", deflated)]),
+            &zip_of(&[("a", b"alpha\n", deflated), ("b", b"beta\n", deflated), ("new", b"moved\n", deflated)]));
+        assert_eq!(listed(&set), [("new".into(), crate::changeset::Status::Renamed { similarity: 100 })]);
+    }
+
+    #[test]
+    fn zip_headers_are_checked_for_unchanged_members_too() {
+        let stored = zip::CompressionMethod::Stored;
+        let old = zip_of(&[("secret", b"key = 1\n", stored), ("README", b"v1\n", stored)]);
+        let new = zip_of(&[("secret", b"key = 1\n", stored), ("README", b"v2\n", stored)]);
+        // an encrypted member can't be read without its password, even when it is the same on both sides
+        let (mut old_encrypted, mut new_encrypted) = (old.clone(), new.clone());
+        for zip in [&mut old_encrypted, &mut new_encrypted] {
+            patch_member(zip, "secret", |f| f[0] |= 1);
+        }
+        assert!(refused("zip", &old_encrypted, &new_encrypted).contains("assword"));
+        // a method this build cannot decode
+        let (mut old_unknown, mut new_unknown) = (old.clone(), new.clone());
+        for zip in [&mut old_unknown, &mut new_unknown] {
+            patch_member(zip, "secret", |f| f[2] = 97);
+        }
+        assert!(refused("zip", &old_unknown, &new_unknown).contains("not supported"));
+        // owner decision pending: an unchanged member whose stored CRC-32 is wrong is no longer read, so it no longer
+        // refuses the archive; a changed one still does (see members_are_compared_by_content_not_size_and_crc)
+        let (mut old_bad, mut new_bad) = (old.clone(), new.clone());
+        for zip in [&mut old_bad, &mut new_bad] {
+            let at = zip.windows(8).position(|w| w == b"key = 1\n").unwrap();
+            zip[at + 6] = b'0';
+        }
+        let (_d, set) = load("zip", &old_bad, &new_bad);
+        assert_eq!(listed(&set), [("README".into(), crate::changeset::Status::Modified)]);
+        assert!(members(Kind::Zip, &new_bad).unwrap_err().contains("checksum"));
     }
 
     #[test]

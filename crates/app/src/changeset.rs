@@ -455,14 +455,22 @@ impl ChangeSet {
     /// Comparison `c`'s changed members: paired by path, and files only on one side with the same content paired as
     /// renames, as plain directories are.
     fn archive_members(&self, c: &Comparison, [left_kind, right_kind]: [Option<archive::Kind>; 2]) -> Result<Vec<Comparison>, String> {
-        let list = |content: &Content, kind: Option<archive::Kind>| -> Result<BTreeMap<String, archive::Fingerprint>, String> {
-            let Some(kind) = kind else { return Ok(BTreeMap::new()) };
+        let read = |content: &Content| -> Result<Vec<u8>, String> {
             if self.size(content)? > archive::MAX_ARCHIVE {
                 return Err(format!("larger than {} MiB", archive::MAX_ARCHIVE >> 20));
             }
-            archive::members(kind, &self.read(content)?)
+            self.read(content)
         };
-        let (left, right) = (list(&c.left, left_kind)?, list(&c.right, right_kind)?);
+        let list = |content: &Content, kind: Option<archive::Kind>| -> Result<BTreeMap<String, archive::Fingerprint>, String> {
+            let Some(kind) = kind else { return Ok(BTreeMap::new()) };
+            archive::members(kind, &read(content)?)
+        };
+        let [left, right] = match [left_kind, right_kind] {
+            // two zips, both held at once: same-name members with the same stored bytes are never decompressed
+            [Some(archive::Kind::Zip), Some(archive::Kind::Zip)] => archive::changed_zip_members(&read(&c.left)?, &read(&c.right)?)?,
+            // one archive at a time
+            _ => [list(&c.left, left_kind)?, list(&c.right, right_kind)?],
+        };
         let member = |content: &Content, kind: Option<archive::Kind>, name: &str| match kind {
             Some(kind) => Content::Archived { archive: Box::new(content.clone()), kind, member: name.to_string() },
             None => Content::Empty,
