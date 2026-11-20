@@ -5,8 +5,9 @@
 Needs a release `lenz-code` built with `--features perf-probe` (benchmark markers on stderr), Xvfb and a CPU
 Vulkan driver (Mesa lavapipe: `lvp_icd.json`). Every launch opens the file under the corpus as its root, with its own
 XDG config/state; "warm" reuses one reader cache folder across launches, "fresh" gives each launch an empty one. Mesa's
-shader cache is one warmed folder for both (it is the renderer's, not the reader's). Output: JSON samples and a
-summary.
+shader cache is one warmed folder for both (it is the renderer's, not the reader's). On Xvfb the harness focuses each
+newly mapped top-level window, as a desktop's window manager does: GPUI paces an inactive window's frames at 30 fps.
+Output (schema 2; schema 1 left windows unfocused): JSON samples and a summary.
 
   scripts/code-launch-bench.py --binary target/release/lenz-code --file <file> --corpus <dir> --out <dir>
 """
@@ -21,6 +22,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -69,6 +71,33 @@ def descendants(pid):
     return total / 1024
 
 
+def focus_mapped_windows(display):
+    """Focus each top-level window mapped on `display` from now on, as a window manager would. Runs in its own process
+    (`--focus-agent`), stopped before the display: Xlib exits the process whose connection the server closes."""
+    x = ctypes.CDLL('libX11.so.6')
+    x.XOpenDisplay.restype = ctypes.c_void_p
+    x.XOpenDisplay.argtypes = [ctypes.c_char_p]
+    x.XDefaultRootWindow.restype = ctypes.c_ulong
+    x.XDefaultRootWindow.argtypes = [ctypes.c_void_p]
+    x.XSelectInput.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_long]
+    x.XNextEvent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    x.XSetInputFocus.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
+    x.XFlush.argtypes = [ctypes.c_void_p]
+    dpy = x.XOpenDisplay(display.encode())
+    if not dpy:
+        raise SystemExit(f'cannot connect to {display} to focus windows')
+    x.XSelectInput(dpy, x.XDefaultRootWindow(dpy), 1 << 19)  # SubstructureNotifyMask
+    x.XFlush(dpy)
+    print('ready', flush=True)
+    event = (ctypes.c_long * 24)()  # XEvent is 192 bytes
+    while True:
+        x.XNextEvent(dpy, event)
+        # MapNotify (19): XMapEvent's window at byte 40, override_redirect at byte 48 (LP64)
+        if event[0] & 0xffffffff == 19 and not event[6] & 0xffffffff:
+            x.XSetInputFocus(dpy, event[5] & 0xffffffffffffffff, 2, 0)  # RevertToParent, CurrentTime
+            x.XFlush(dpy)
+
+
 def launch(binary, args, display, home, cache, extra_env=None, shaders=None):
     env = {k: v for k, v in os.environ.items() if k not in ('WAYLAND_DISPLAY', 'XDG_SESSION_TYPE')}
     env.update(XDG_CONFIG_HOME=str(home / 'config'), XDG_STATE_HOME=str(home / 'state'), XDG_CACHE_HOME=str(cache), XDG_DATA_HOME=str(home / 'data'))
@@ -114,6 +143,8 @@ def p95(samples):
 
 
 def main():
+    if sys.argv[1:2] == ['--focus-agent']:
+        return focus_mapped_windows(sys.argv[2])
     ap = argparse.ArgumentParser()
     ap.add_argument('--binary', required=True)
     ap.add_argument('--file', required=True, help='an ordinary source file to open at launch')
@@ -126,7 +157,7 @@ def main():
     a = ap.parse_args()
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    xvfb = None
+    xvfb = agent = None
     if a.native:
         a.display = None
     else:
@@ -134,8 +165,11 @@ def main():
             raise SystemExit(f'missing {ICD}: install Mesa lavapipe (vulkan-swrast)')
         xvfb = subprocess.Popen(['Xvfb', a.display, '-screen', '0', a.geometry, '-nolisten', 'tcp'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1)
+        agent = subprocess.Popen([sys.executable, __file__, '--focus-agent', a.display], stdout=subprocess.PIPE, text=True)
+        if agent.stdout.readline().strip() != 'ready':
+            raise SystemExit(f'cannot focus windows on {a.display}')
     scratch = Path(tempfile.mkdtemp(prefix='reader-launch-'))
-    results = {'binary': a.binary, 'file': a.file, 'corpus': a.corpus, 'platform': platform.platform(), 'display': a.display or 'native', 'geometry': None if a.native else a.geometry, 'icd': None if a.native else ICD, 'memory': 'macOS physical footprint (resident beside it)' if platform.system() == 'Darwin' else 'Linux VmRSS/VmHWM'}
+    results = {'schema': 2, 'window_focus': None if a.native else 'focused on map by the harness', 'binary': a.binary, 'file': a.file, 'corpus': a.corpus, 'platform': platform.platform(), 'display': a.display or 'native', 'geometry': None if a.native else a.geometry, 'icd': None if a.native else ICD, 'memory': 'macOS physical footprint (resident beside it)' if platform.system() == 'Darwin' else 'Linux VmRSS/VmHWM'}
     try:
         for kind in ('warm', 'fresh'):
             outside, inside = [], []
@@ -179,6 +213,9 @@ def main():
         results['ten-tabs'] = {'files': list(map(str, picks)), 'bytes': sum(p.stat().st_size for p in picks), 'rss_mib': samples, 'resident_mib': resident, 'settled_mib': settled, 'peak_mib': peak, 'children_mib': servers}
         print(f'ten tabs + inventory: settled {settled:.1f} MiB (≤250: {"PASS" if settled <= 250 else "FAIL"}), peak {peak:.1f} MiB (≤512: {"PASS" if peak <= 512 else "FAIL"}); language servers and helpers {max(servers):.1f} MiB, accounted separately')
     finally:
+        if agent:
+            agent.kill()
+            agent.wait()
         if xvfb:
             xvfb.terminate()
         shutil.rmtree(scratch, ignore_errors=True)

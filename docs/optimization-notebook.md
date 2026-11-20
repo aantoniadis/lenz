@@ -2771,21 +2771,33 @@ the upgrade, alternating on one machine, GUI on a private Xvfb display with soft
 | Diff 100k page scroll / find scroll, first damage (4 pairs) | 16.0 / 16.0 ms | 16.0 / 16.0 ms |
 | Merge accept-ours / page scroll / next change (4 pairs) | 39.2 / 9.7 / 10.7 ms | 37.7 / 9.7 / 10.7 ms |
 | Lenz Code editing: edit / undo / save (30 cycles, 3 pairs; one collector Xvfb failure rerun) | 3.26 / 2.27 / 13.36 ms | 2.75 / 2.21 / 13.38 ms |
-| **Lenz Code launch to readable, warm (10 launches × 3 pairs)** | **162.7–167.1 ms** | **193.6–195.9 ms** |
-| Lenz Code ten tabs settled RSS | 184.8–184.9 MiB | 186.4–187.1 MiB |
+| Lenz Code launch to readable, warm, window never focused (launch schema 1, 10 launches × 3 pairs) | 162.7–167.1 ms | 193.6–195.9 ms |
+| **Lenz Code launch to readable, warm, focused on map (schema 2, main 7e2ceee against the branch, 10 × 4 pairs)** | **165.9–166.9 ms** (pooled 166.7) | **164.8–168.8 ms** (pooled 166.9) |
+| Lenz Code launch, fresh cache, schema 2 | 164.7–166.8 ms | 164.7–166.9 ms |
+| Lenz Code ten tabs settled RSS (schema 2) | 183.4–184.0 MiB | 184.3–185.1 MiB, one run 225.6 |
+| Diff first paint small / 100k, schema-2 builds (20 runs each) | 124.5 / 189.5 ms | 123.5 / 186.5 ms |
 
-**Regressed in this harness, cause found: inactive-window frame pacing.** GPUI 1.26 held inactive windows to
+**Measured regression explained by the harness: inactive-window frame pacing.** GPUI 1.26 held inactive windows to
 about 30 fps only for frames driven by animation callbacks; 1.29's `FramePacer` paces every frame with demand,
 including content invalidation, while the window is inactive. A window on a private Xvfb display with no window
 manager never becomes active, so the frame that first shows the file waits up to 33 ms after the first frame. Warm
 launches by hand: 125 → 157 ms; the same upgrade with `inactive_frame_interval: None` in Lenz Code's window
-options: 126 ms; the upgrade with the old wgpu rev: 159 ms (wgpu ruled out). On a desktop a window manager
-normally activates the new window, so users may not see this; that is unverified. Disabling the interval would
-also drop GPUI's 30 fps cap for windows in the background, so it is left to the owner. The Diff startup marker is
-the first frame and is not paced; the small-file 121 → 124 ms has overlapping ranges.
+options: 126 ms; the upgrade with the old wgpu rev: 159 ms (wgpu ruled out). No X11 window manager is installed
+here, so `code-launch-bench.py` schema 2 focuses each newly mapped window itself, as a window manager does (see the
+benchmark guide). With that, main and the branch launch within noise of each other, so gpui 1.29 is accepted with
+no product change. The interaction probe already focused its window, which is why it showed no change. One of ten
+branch ten-tab runs settled at 225.6 MiB (RSS rose part-way and stayed); the other nine and all seven baseline runs
+settled at 183–187 MiB, so it is unexplained and not reproduced. The Diff startup marker is the first frame and is
+not paced.
 
 The dependency refresh before it adds 644,208 bytes to the stripped `lenz` built alone (80,010,656 → 80,654,864);
 tree-sitter-c-sharp 0.24 (C# 14) is left out, as its larger parse table would add another 2,042,896 bytes. After
 the GPUI upgrade, stripped sizes with both executables built together: `lenz` 80,797,088 → 80,770,368 bytes, `lenz-code` 94,519,000 →
-94,429,304. Not covered: Wayland, hardware GPUs, a window manager on the test display, native macOS, the TUIs
+94,429,304. Keeping notify-rust at 4.18 (4.19 moved to zbus 6 beside accesskit's zbus 5) then takes them to
+80,169,920 and 93,824,248 bytes.
+
+Building main's `lenz-code` here failed after the branch's sqlparser 0.64 entered the Cargo registry:
+`sqlparser_derive`'s `derive_dialect!` (0.6 and 0.7) reads the Dialect trait from the newest-named `sqlparser-*`
+directory in the registry, not from the locked version. The baseline was built with a separate Cargo home holding
+only main's locked crates. Not covered: Wayland, hardware GPUs, a window manager on the test display, native macOS, the TUIs
 (no GPUI). Raw samples, executables and the profiles are in ignored `perf-results/gpui-1.29/`.

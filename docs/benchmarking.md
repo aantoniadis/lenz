@@ -109,6 +109,12 @@ new side deflated at level 1, so no unchanged member keeps its stored bytes and 
 Set load of two ~200 MiB zips of 100 stored 2 MiB members that differ in one, five loads after a warm-up, with each
 load's time, peak RSS growth and absolute peak (`VmHWM`, Linux only).
 
+`scripts/code-launch-bench.py` schema 2 focuses each newly mapped top-level window on its private Xvfb display, as a
+desktop's window manager does, from a separate agent process stopped before the display. GPUI 1.29 paces every
+frame of an inactive window at 30 fps, and a window on a display without a window manager is never active, so schema
+1's launch-to-readable included up to 33 ms of pacing a desktop launch would not have. Do not compare schema 1 and 2
+launch samples; recollect both executables with schema 2.
+
 `scripts/code-editor-gui-bench.py` schema 2 drains preceding XDamage events before
 rearming the NonEmpty damage region. Older versions could discard a late paint
 notification after rearming, leaving the region nonempty and suppressing the
