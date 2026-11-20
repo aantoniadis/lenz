@@ -1870,6 +1870,27 @@ mod tests {
             .collect()
     }
     #[test]
+    fn merge_footer_says_when_a_panes_highlighting_stopped_at_its_time_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for (name, text) in [("base.rs", "fn a() {}\n"), ("ours.rs", "fn b() {}\n"), ("theirs.rs", "fn c() {}\n")] { std::fs::write(d.join(name), text).unwrap(); }
+        let req = lenz::cli::parse(&["merge", "base.rs", "ours.rs", "theirs.rs", "result.rs"].map(str::to_owned), d).unwrap();
+        let mut app = Merger::open(req, d.into());
+        for _ in 0..5000 { app.poll(); if !app.busy() { break; } std::thread::sleep(std::time::Duration::from_millis(1)); }
+        let wide = |app: &mut Merger| {
+            let mut terminal = Terminal::new(TestBackend::new(240, 18)).unwrap();
+            terminal.draw(|frame| app.render(frame)).unwrap();
+            terminal.backend().buffer().content.iter().map(|c| c.symbol()).collect::<String>()
+        };
+        assert!(!wide(&mut app).contains("Syntax limit"));
+        let Some(FileView::Merge(m)) = &mut app.workspace.file else { panic!("a Merge View") };
+        m.parsed[2] = Some(std::sync::Arc::new(lenz::highlight::Parsed::limited_plain("fn c() {}\n")));
+        let shown = wide(&mut app);
+        assert!(shown.contains(lenz::highlight::LIMIT_NOTE), "{shown}");
+        assert!(!d.join("result.rs").exists());
+    }
+
+    #[test]
     fn merge_render_handles_tiny_terminal_sizes() {
         let (_dir,mut app)=open_fixture([b"base\n",b"ours\n",b"theirs\n"]);
         for width in 0..9 {for height in 0..9 {

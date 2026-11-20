@@ -161,7 +161,7 @@ pub(super) fn parse(text: &str, current: &dyn Fn() -> bool, want: Want) -> Optio
             if bytes.get(i) == Some(&b';') { i += 1; spans.push((start..i, Capture::Escape)); }
         } else { i += 1; }
     }
-    let mut parsed = Parsed { offsets: Vec::with_capacity(starts.len() + 1), spans: Vec::new() };
+    let mut parsed = Parsed { offsets: Vec::with_capacity(starts.len() + 1), spans: Vec::new(), limited: false };
     let mut index = 0;
     for line in 0..starts.len() {
         if line.is_multiple_of(256) && !current() { return None; }

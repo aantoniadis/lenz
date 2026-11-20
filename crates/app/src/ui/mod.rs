@@ -1701,6 +1701,18 @@ impl Viewer {
         .detach();
     }
 
+    /// The notes in front of the status line, left to right: a Merge View's own (the 2-way Comparison underneath isn't
+    /// shown), else the Comparison's (its file's notes, last first, then its status notice).
+    pub(super) fn status_notes(&self) -> Vec<String> {
+        if let Some(notices) = self.merge_notices() { return notices; }
+        let loaded = self.loaded.get(&self.comparison.current);
+        let identical = loaded.is_some_and(|l| l.doc.content_identical());
+        let notice = self.set.comparisons.get(self.comparison.current).and_then(|c| navigator::notice(&c.status, identical));
+        let notes = loaded.map_or(Vec::new(), |l| l.doc.notes.iter().cloned()
+            .chain(Parsed::limit_note(l.parsed.iter().map(Option::as_deref)).map(str::to_owned)).collect());
+        notice.into_iter().chain(notes).rev().collect()
+    }
+
     fn parse_in_background(&mut self, index: usize, cx: &mut Context<Self>) {
         let sticky = self.sticky_on;
         let Some(loaded) = self.loaded.get_mut(&index).filter(|l| !l.parsing) else { return };
@@ -3718,17 +3730,9 @@ impl Render for Viewer {
         let (left, right) = if self.nothing.is_some() { (Vec::new(), Vec::new()) } else { (left, right) };
         let nothing = self.nothing.clone();
         let (picker_w, log_h) = (self.picker_w(), self.log_h());
-        let comparison = self.set.comparisons.get(self.comparison.current);
-        let identical = loaded.is_some_and(|l| l.doc.content_identical());
-        let notice = comparison.and_then(|comparison|navigator::notice(&comparison.status, identical));
-        // a Merge View has notices of its own; the 2-way Comparison underneath isn't shown
-        let merging = self.merge_notices();
-        let mut status = status_text(&self.comparison.options, self.comparison.view.mode(), line_endings.filter(|_| merging.is_none()));
+        let mut status = status_text(&self.comparison.options, self.comparison.view.mode(), line_endings.filter(|_| self.merge.is_none()));
         if self.comparison.markdown_loading()||self.markdown_building(){status=format!("Preparing Markdown… · {status}");}
-        let notes = loaded.map_or(Vec::new(), |l| l.doc.notes.clone());
-        // each note goes in front: the merge's in reverse, to read in order
-        let notes: Vec<String> = merging.map_or_else(|| notice.into_iter().chain(notes).collect(), |m| m.into_iter().rev().collect());
-        for n in notes {
+        for n in self.status_notes().into_iter().rev() {
             status = if status.is_empty() { n } else { format!("{n} · {status}") };
         }
         let encodings = loaded.map_or([None, None], |l| l.doc.encodings.clone());

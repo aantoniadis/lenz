@@ -299,6 +299,7 @@ pub(crate) fn status_text(app:&App)->String {
     else if !app.session.applied().is_empty(){format!("{} applied records · A history / Undo · Ctrl-Z undo · Alt-Shift-←/→ apply",app.session.applied().len())}
     else if let Some(doc) = app.session.document() {
         let mut notes = doc.notes().to_vec();
+        notes.extend(app.visual.syntax_note().map(str::to_owned));
         if let Some((l, r)) = doc.line_endings() { notes.push(format!("Line endings differ: {l:?} / {r:?}")); }
         if doc.widest() >= lenz::document::LONG_LINE { notes.push("Long lines show their first 10,000 characters".into()); }
         notes.join(" · ")

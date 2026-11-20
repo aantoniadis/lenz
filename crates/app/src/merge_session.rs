@@ -1104,6 +1104,7 @@ impl MergeSession {
     }
     pub fn notices(&self) -> Vec<String> {
         let mut out = self.notices.clone();
+        out.extend(highlight::Parsed::limit_note(self.parsed.iter().map(Option::as_deref)).map(str::to_owned));
         match self.m.edited_outside() {
             0 => {}
             n => out.push(format!(
@@ -1924,6 +1925,22 @@ pub(crate) mod tests {
             "line one\nline two\nshared\nline three\n"].map(lenz_engine::split_lines);
         let m = crate::merge::MergeResult::new(&o8, &b8, &t8, lenz_engine::merge_lines(&o8, &b8, &t8, &Default::default()));
         assert_eq!((m.unresolved(), m.lines().join("\n")), (0, "line one\nline two\nshared\nline three\nshared\n".to_string()));
+    }
+
+    #[test]
+    fn a_pane_whose_highlighting_stopped_at_its_limit_is_noted() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        for (name, text) in [("base.rs", "fn a() {}\n"), ("ours.rs", "fn b() {}\n"), ("theirs.rs", "fn c() {}\n")] { std::fs::write(d.join(name), text).unwrap(); }
+        let opened = open_files(&d.join("base.rs"), &d.join("ours.rs"), &d.join("theirs.rs"), &d.join("result.rs"), d).unwrap();
+        let mut s = MergeSession::new(opened, 40.0);
+        let mut tags = Vec::new();
+        for job in s.parse_jobs() { let (tag, parsed) = job.run(); assert!(s.finish_parse(&tag, parsed)); tags.push(tag); }
+        assert!(!tags.is_empty() && !s.notices().iter().any(|n| n == highlight::LIMIT_NOTE), "{:?}", s.notices());
+        // one pane's parse stopped at the limit, as the syntax worker reports it
+        let limited = Arc::new(highlight::Parsed::limited_plain("fn c() {}\n"));
+        assert!(s.finish_parse(tags.last().unwrap(), Some(limited)));
+        assert_eq!(s.notices().iter().filter(|n| *n == highlight::LIMIT_NOTE).count(), 1, "{:?}", s.notices());
     }
 
     #[test]

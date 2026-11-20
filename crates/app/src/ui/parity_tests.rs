@@ -3736,6 +3736,30 @@ fn gui_an_svg_that_cannot_be_drawn_shows_its_text_and_says_why(cx:&mut TestAppCo
 }
 
 #[gpui::test]
+fn gui_status_says_when_highlighting_stopped_at_its_time_limit(cx:&mut TestAppContext) {
+    use crate::highlight::{LIMIT_NOTE, Parsed};
+    let f=fixture_named(cx,"fn a() {}\n","fn b() {}\n","rs");
+    let window=f.window;
+    window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap(); // the first render starts the parse
+    cx.executor().run_until_parked();
+    assert!(f.viewer.read_with(cx,|v,_|v.loaded.get(&v.comparison.current).is_some_and(|l|l.parsed.iter().all(Option::is_some))));
+    assert!(!f.viewer.read_with(cx,|v,_|v.status_notes()).iter().any(|n|n==LIMIT_NOTE));
+    // the syntax worker's answer for a Side that stopped at the limit
+    f.viewer.update(cx,|v,_|{let current=v.comparison.current;v.loaded.get_mut(&current).unwrap().parsed[1]=Some(Arc::new(Parsed::limited_plain("fn b() {}\n")));});
+    window.update(cx,|v,w,cx|{let _=v.render(w,cx);}).unwrap();
+    assert_eq!(f.viewer.read_with(cx,|v,_|v.status_notes()).iter().filter(|n|*n==LIMIT_NOTE).count(),1);
+    // the Merge View says it for its own panes
+    for (name,text) in [("base.rs","fn a() {}\n"),("ours.rs","fn b() {}\n"),("theirs.rs","fn c() {}\n")] {std::fs::write(f.dir.path().join(name),text).unwrap();}
+    let d=f.dir.path();
+    let opened=crate::merge_session::open_files(&d.join("base.rs"),&d.join("ours.rs"),&d.join("theirs.rs"),&d.join("result.rs"),d).unwrap();
+    f.viewer.update(cx,|v,cx|v.start_merge(opened,false,cx));
+    assert!(!f.viewer.read_with(cx,|v,_|v.status_notes()).iter().any(|n|n==LIMIT_NOTE),"the merge's notes replace the comparison's");
+    f.viewer.update(cx,|v,_|v.merge.as_mut().unwrap().parsed[0]=Some(Arc::new(Parsed::limited_plain("fn b() {}\n"))));
+    assert!(f.viewer.read_with(cx,|v,_|v.status_notes()).iter().any(|n|n==LIMIT_NOTE));
+    assert!(!d.join("result.rs").exists());
+}
+
+#[gpui::test]
 fn gui_status_says_when_a_guessed_encoding_hides_ascii_bytes(cx:&mut TestAppContext) {
     let f=fixture(cx,"a\n","b\n");
     let (lp,rp)=(f.dir.path().join("old.sh"),f.dir.path().join("new.sh"));

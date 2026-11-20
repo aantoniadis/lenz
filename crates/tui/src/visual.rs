@@ -237,6 +237,15 @@ impl Visual {
             .as_deref()
             .or_else(|| self.annotations.iter().find_map(Annotations::error))
     }
+    /// A Side's highlights as the syntax worker would hand them over.
+    #[cfg(test)]
+    pub(crate) fn set_syntax_for_test(&mut self, side: Side, parsed: highlight::Parsed) {
+        self.syntax[side as usize] = Some(parsed);
+    }
+    /// The per-file note when a Side's highlighting stopped at its time limit.
+    pub fn syntax_note(&self) -> Option<&'static str> {
+        highlight::Parsed::limit_note(self.syntax.iter().map(Option::as_ref))
+    }
     pub fn syntax(&self, side: Side, line: usize) -> Vec<(Range<usize>, Capture)> {
         self.syntax[side as usize]
             .as_ref()

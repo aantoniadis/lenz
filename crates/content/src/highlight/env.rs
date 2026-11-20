@@ -118,7 +118,7 @@ impl Line<'_> {
 pub(super) fn lex(text: &str, current: &dyn Fn() -> bool) -> Option<Lexed> {
     let starts = crate::lines::line_starts(text);
     let bytes = text.as_bytes();
-    let mut parsed = Parsed { offsets: Vec::with_capacity(starts.len() + 1), spans: Vec::new() };
+    let mut parsed = Parsed { offsets: Vec::with_capacity(starts.len() + 1), spans: Vec::new(), limited: false };
     let mut folds: Vec<Fold> = Vec::new();
     let mut entries: Vec<Entry> = Vec::new();
     let mut open: Option<Open> = None;

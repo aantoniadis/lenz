@@ -168,10 +168,14 @@ pub enum Capture {
     Emphasis,
 }
 
+/// What a document stopped at [`PARSE_LIMIT`] says, the same in every view that shows it.
+pub const LIMIT_NOTE: &str = "Syntax limit: this file took too long to parse and is shown without highlighting";
+
 /// One document's highlights. No syntax tree or duplicate source text survives the background job.
 pub struct Parsed {
     offsets: Vec<usize>,
     spans: Vec<Span>,
+    limited: bool,
 }
 
 struct Span {
@@ -486,11 +490,11 @@ fn parse_within(lang: Language, text: &str, current: &dyn Fn() -> bool, want: Wa
     let deadline = Instant::now() + limit;
     match parse_bounded(lang, text, &|| current() && Instant::now() < deadline, want) {
         None if current() && Instant::now() >= deadline => Some(Syntax {
-            parsed: Parsed { offsets: vec![0; crate::lines::line_starts(text).len() + 1], spans: Vec::new() },
+            parsed: Parsed::limited_plain(text),
             folds: want.folds.then(Folds::default),
             declarations: tags(lang).filter(|_| want.declarations).map(|_| Declarations { items: Vec::new(), syntax_errors: true }),
             errors: Some(vec![SyntaxError { range: 0..0, limited: true,
-                message: "Syntax limit: this file took too long to parse and is shown without highlighting".into() }]),
+                message: LIMIT_NOTE.into() }]),
         }),
         syntax => syntax,
     }
@@ -521,7 +525,7 @@ fn parse_bounded(lang: Language, text: &str, current: &dyn Fn() -> bool, want: W
     let markdown = if lang == Language::Markdown { markdown::inline(text, &line_starts, &tree, current)? } else { Vec::new() };
     let syntax = SyntaxTree { lang, text, line_starts, tree, markdown };
     let n = syntax.line_starts.len();
-    let mut parsed = Parsed { offsets: Vec::with_capacity(n + 1), spans: Vec::new() };
+    let mut parsed = Parsed { offsets: Vec::with_capacity(n + 1), spans: Vec::new(), limited: false };
     // Bound temporary query captures and per-byte paint; a full-file query can dwarf the tree.
     for start in (0..n).step_by(HIGHLIGHT_CHUNK) {
         if !current() { return None; }
@@ -544,6 +548,21 @@ fn parse_bounded(lang: Language, text: &str, current: &dyn Fn() -> bool, want: W
 }
 
 impl Parsed {
+    /// Shown as plain text because highlighting took longer than [`PARSE_LIMIT`] ([`LIMIT_NOTE`]).
+    pub fn limited(&self) -> bool {
+        self.limited
+    }
+
+    /// `text` as plain text, its highlighting stopped at [`PARSE_LIMIT`].
+    pub fn limited_plain(text: &str) -> Parsed {
+        Parsed { offsets: vec![0; crate::lines::line_starts(text).len() + 1], spans: Vec::new(), limited: true }
+    }
+
+    /// The note a view's per-file notices carry when any of its panes' highlights stopped at the limit.
+    pub fn limit_note<'a>(panes: impl IntoIterator<Item = Option<&'a Parsed>>) -> Option<&'static str> {
+        panes.into_iter().flatten().any(Parsed::limited).then_some(LIMIT_NOTE)
+    }
+
     pub fn bytes(&self) -> usize {
         self.offsets.capacity() * size_of::<usize>() + self.spans.capacity() * size_of::<Span>()
     }
@@ -2363,7 +2382,7 @@ mod tests {
         let started = Instant::now();
         let syntax = parse_within(Language::Rust, &text, &|| true, Want { folds: true, declarations: true }, limit).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2), "stopped near the limit: {:?}", started.elapsed());
-        assert!(syntax.parsed.spans.is_empty());
+        assert!(syntax.parsed.spans.is_empty() && syntax.parsed.limited());
         assert_eq!(syntax.parsed.spans(0..9).len(), crate::lines::line_starts(&text).len(), "every line, plain");
         assert_eq!(syntax.folds, Some(Folds::default()));
         let errors = syntax.errors.unwrap();
@@ -2373,6 +2392,10 @@ mod tests {
         let normal = parse_within(Language::Rust, "fn main() { let x = 1; }\n", &|| true, Want::default(), PARSE_LIMIT).unwrap();
         assert_eq!(normal.parsed.capture_at(0, 0), Some(Capture::Keyword));
         assert_eq!(normal.errors, Some(Vec::new()));
+        assert!(!normal.parsed.limited());
+        assert_eq!(Parsed::limit_note([None, Some(&normal.parsed)]), None);
+        assert_eq!(Parsed::limit_note([Some(&normal.parsed), Some(&syntax.parsed)]), Some(LIMIT_NOTE));
+        assert_eq!(errors[0].message, LIMIT_NOTE);
     }
 
     #[test]

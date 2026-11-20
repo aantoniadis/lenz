@@ -1548,6 +1548,20 @@ fn tui_svg_source_mode_shows_a_change_its_rendering_does_not() {
 }
 
 #[test]
+fn tui_status_says_when_highlighting_stopped_at_its_time_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("old.rs"), "fn a() {}\n").unwrap();
+    std::fs::write(dir.path().join("new.rs"), "fn b() {}\n").unwrap();
+    let request = lenz::cli::parse(&["--no-index".into(), "old.rs".into(), "new.rs".into()], dir.path()).unwrap();
+    let mut app = App::new(lenz::session::Session::open(request, dir.path().into()));
+    ready(&mut app);
+    assert!(!text(&draw(&mut app, 160, 30)).contains("Syntax limit"));
+    app.visual.set_syntax_for_test(lenz::view::Side::Right, lenz::highlight::Parsed::limited_plain("fn b() {}\n"));
+    let screen = text(&draw(&mut app, 220, 30));
+    assert!(screen.contains(lenz::highlight::LIMIT_NOTE), "{screen}");
+}
+
+#[test]
 fn tui_status_says_when_a_guessed_encoding_hides_ascii_bytes() {
     let dir = tempfile::tempdir().unwrap();
     // "# 設定を表示" in Shift_JIS, then a pipe after a lead byte that the guess reads as one katakana
